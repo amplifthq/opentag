@@ -26,7 +26,7 @@
     "store",
     "dispatcher"
   ],
-  "license": "Apache-2.0",
+  "license": "MIT",
   "scripts": {
     "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
     "lint": "tsc --noEmit"

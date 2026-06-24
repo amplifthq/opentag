@@ -5,7 +5,7 @@
 [![Status](https://img.shields.io/badge/status-v0-blue)](#status)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178c6)](https://www.typescriptlang.org/)
 [![Node](https://img.shields.io/badge/Node-22.x-339933)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-green)](#license)
+[![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
 Claude Tag showed the new interface for team AI: tag an agent where work is already happening, let it use the right tools, and get the result back in the thread.
 
@@ -256,4 +256,4 @@ The architecture and product direction are documented in [docs/design.md](docs/d
 
 ## License
 
-Public OpenTag packages are licensed under Apache-2.0. Runnable apps are private workspace packages for local development and deployment composition.
+OpenTag is licensed under the MIT License. See [LICENSE](LICENSE).
