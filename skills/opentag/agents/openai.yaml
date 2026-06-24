@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenTag"
+  short_description: "Configure OpenTag agent mentions"
+  default_prompt: "Use $opentag to configure an @opentag GitHub or Slack mention workflow."
