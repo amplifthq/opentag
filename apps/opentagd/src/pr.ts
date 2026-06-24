@@ -13,6 +13,11 @@ function hasPermission(event: OpenTagEvent, scope: string): boolean {
   return event.permissions.some((permission) => permission.scope === scope);
 }
 
+function isGitHubRepositoryTarget(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
+  const repoProvider = input.event.metadata["repoProvider"];
+  return input.binding.provider === "github" && (repoProvider == null || repoProvider === "github");
+}
+
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
   event: OpenTagEvent;
@@ -21,7 +26,7 @@ export async function maybeCreatePullRequest(input: {
   options: PullRequestOptions;
 }): Promise<OpenTagRunResult> {
   if (!input.options.githubToken) return input.result;
-  if (input.event.source !== "github") return input.result;
+  if (!isGitHubRepositoryTarget({ event: input.event, binding: input.binding })) return input.result;
   if (!hasPermission(input.event, "pr:create")) return input.result;
   if (!input.result.changedFiles?.length) return input.result;
 
