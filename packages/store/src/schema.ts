@@ -6,6 +6,8 @@ export const runs = sqliteTable(
   {
     id: text("id").primaryKey(),
     eventId: text("event_id").notNull(),
+    source: text("source"),
+    sourceEventId: text("source_event_id"),
     status: text("status").notNull(),
     eventJson: text("event_json").notNull(),
     resultJson: text("result_json"),
@@ -19,7 +21,8 @@ export const runs = sqliteTable(
   },
   (table) => ({
     statusIdx: index("runs_status_idx").on(table.status),
-    runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId)
+    runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId),
+    sourceEventUniqueIdx: uniqueIndex("runs_source_event_idx").on(table.source, table.sourceEventId)
   })
 );
 
@@ -71,11 +74,35 @@ export const slackChannelBindings = sqliteTable(
   })
 );
 
+export const callbackDeliveries = sqliteTable(
+  "callback_deliveries",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    kind: text("kind").notNull(),
+    provider: text("provider").notNull(),
+    uri: text("uri").notNull(),
+    body: text("body").notNull(),
+    threadKey: text("thread_key"),
+    status: text("status").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    callbackRunIdx: index("callback_deliveries_run_idx").on(table.runId),
+    callbackStatusIdx: index("callback_deliveries_status_idx").on(table.status)
+  })
+);
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
       event_id TEXT NOT NULL,
+      source TEXT,
+      source_event_id TEXT,
       status TEXT NOT NULL,
       event_json TEXT NOT NULL,
       result_json TEXT,
@@ -89,6 +116,8 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
     CREATE INDEX IF NOT EXISTS runs_runner_idx ON runs(assigned_runner_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx
+      ON runs(source, source_event_id);
     CREATE TABLE IF NOT EXISTS run_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -125,6 +154,24 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS slack_channel_bindings_team_channel_idx
       ON slack_channel_bindings(team_id, channel_id);
+    CREATE TABLE IF NOT EXISTS callback_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      uri TEXT NOT NULL,
+      body TEXT NOT NULL,
+      thread_key TEXT,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS callback_deliveries_run_idx
+      ON callback_deliveries(run_id);
+    CREATE INDEX IF NOT EXISTS callback_deliveries_status_idx
+      ON callback_deliveries(status);
   `);
   const columns = sqlite.prepare("PRAGMA table_info(repo_bindings)").all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));
@@ -145,4 +192,11 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runColumnNames.has("heartbeat_at")) {
     sqlite.exec("ALTER TABLE runs ADD COLUMN heartbeat_at TEXT");
   }
+  if (!runColumnNames.has("source")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN source TEXT");
+  }
+  if (!runColumnNames.has("source_event_id")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN source_event_id TEXT");
+  }
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source, source_event_id)");
 }

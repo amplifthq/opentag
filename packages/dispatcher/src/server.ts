@@ -87,17 +87,59 @@ async function deliverAndAudit(input: {
   sink: CallbackSink;
   message: CallbackMessage;
 }): Promise<void> {
-  await input.sink.deliver(input.message);
-  await input.repo.appendRunEvent({
+  const delivery = await input.repo.enqueueCallbackDelivery({
     runId: input.message.runId,
-    type: `callback.${input.message.kind}.delivered`,
-    payload: input.message
+    kind: input.message.kind,
+    provider: input.message.provider,
+    uri: input.message.uri,
+    body: input.message.body,
+    ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {})
   });
+
+  try {
+    await input.sink.deliver(input.message);
+    await input.repo.markCallbackDelivered({ deliveryId: delivery.id });
+  } catch (error) {
+    await input.repo.markCallbackFailed({
+      deliveryId: delivery.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function isAuthorized(request: Request, pairingToken: string | undefined): boolean {
   if (!pairingToken) return true;
   return request.headers.get("authorization") === `Bearer ${pairingToken}`;
+}
+
+function deprecatedRunnerScopedResponse() {
+  return {
+    error: "runner_scoped_endpoint_required",
+    message: "Use /v1/runners/:runnerId/runs/:runId/running, /progress, or /complete."
+  };
+}
+
+async function callbackForStoredRun(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  sink: CallbackSink;
+  runId: string;
+  kind: "progress" | "final";
+  body: string;
+}): Promise<void> {
+  const stored = await input.repo.getRun({ runId: input.runId });
+  if (!stored) return;
+  await deliverAndAudit({
+    repo: input.repo,
+    sink: input.sink,
+    message: {
+      runId: input.runId,
+      kind: input.kind,
+      provider: stored.event.callback.provider,
+      uri: stored.event.callback.uri,
+      body: input.body,
+      ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
+    }
+  });
 }
 
 export function createDispatcherApp(input: { databasePath: string; callbackSink?: CallbackSink; pairingToken?: string }) {
@@ -175,7 +217,15 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
       return c.json({ error: "actor_not_allowed_for_write" }, 403);
     }
 
+    const existing = await repo.getRunBySourceEvent({
+      source: parsed.event.source,
+      sourceEventId: parsed.event.sourceEventId
+    });
     const run = await repo.createRun({ id: parsed.runId, event: parsed.event });
+    if (existing) {
+      return c.json({ run, duplicate: true }, 200);
+    }
+
     await deliverAndAudit({
       repo,
       sink: callbackSink,
@@ -203,60 +253,60 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     return c.json({ ok: true });
   });
 
-  app.post("/v1/runs/:runId/running", async (c) => {
+  app.post("/v1/runners/:runnerId/runs/:runId/running", async (c) => {
     const body = z.object({ executor: z.string().min(1) }).parse(await c.req.json());
-    await repo.markRunning({ runId: c.req.param("runId"), executor: body.executor });
+    const ok = await repo.markRunning({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      executor: body.executor
+    });
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
     return c.json({ ok: true });
   });
 
-  app.post("/v1/runs/:runId/progress", async (c) => {
+  app.post("/v1/runners/:runnerId/runs/:runId/progress", async (c) => {
     const runId = c.req.param("runId");
     const body = ProgressSchema.parse(await c.req.json());
-    const stored = await repo.getRun({ runId });
-    if (!stored) return c.json({ error: "run_not_found" }, 404);
-
-    await repo.recordProgress({
+    const ok = await repo.recordProgress({
       runId,
+      runnerId: c.req.param("runnerId"),
       message: body.message,
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {})
     });
-    await deliverAndAudit({
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    await callbackForStoredRun({
       repo,
       sink: callbackSink,
-      message: {
-        runId,
-        kind: "progress",
-        provider: stored.event.callback.provider,
-        uri: stored.event.callback.uri,
-        body: renderProgress({ runId, message: body.message }),
-        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
-      }
+      runId,
+      kind: "progress",
+      body: renderProgress({ runId, message: body.message })
     });
     return c.json({ ok: true });
   });
 
-  app.post("/v1/runs/:runId/complete", async (c) => {
+  app.post("/v1/runners/:runnerId/runs/:runId/complete", async (c) => {
     const runId = c.req.param("runId");
     const parsed = CompleteRunSchema.parse(await c.req.json());
-    const stored = await repo.getRun({ runId });
-    if (!stored) return c.json({ error: "run_not_found" }, 404);
-
-    await repo.completeRun({ runId, result: parsed.result });
-    await deliverAndAudit({
+    const ok = await repo.completeRun({
+      runnerId: c.req.param("runnerId"),
+      runId,
+      result: parsed.result
+    });
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    await callbackForStoredRun({
       repo,
       sink: callbackSink,
-      message: {
-        runId,
-        kind: "final",
-        provider: stored.event.callback.provider,
-        uri: stored.event.callback.uri,
-        body: renderFinalResult(parsed.result),
-        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
-      }
+      runId,
+      kind: "final",
+      body: renderFinalResult(parsed.result)
     });
     return c.json({ ok: true });
   });
+
+  app.post("/v1/runs/:runId/running", (c) => c.json(deprecatedRunnerScopedResponse(), 410));
+  app.post("/v1/runs/:runId/progress", (c) => c.json(deprecatedRunnerScopedResponse(), 410));
+  app.post("/v1/runs/:runId/complete", (c) => c.json(deprecatedRunnerScopedResponse(), 410));
 
   app.get("/v1/runs/:runId", async (c) => {
     const stored = await repo.getRun({ runId: c.req.param("runId") });

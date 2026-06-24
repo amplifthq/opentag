@@ -34,14 +34,16 @@ await client.createRun({
 
 const claimed = await client.claim({ runnerId: "runner_local" });
 if (claimed) {
-  await client.markRunning({ runId: claimed.run.id, executor: "custom" });
+  await client.markRunning({ runnerId: "runner_local", runId: claimed.run.id, executor: "custom" });
   await client.progress({
+    runnerId: "runner_local",
     runId: claimed.run.id,
     type: "executor.progress",
     message: "Working on the request",
     at: new Date().toISOString()
   });
   await client.complete({
+    runnerId: "runner_local",
     runId: claimed.run.id,
     result: { conclusion: "success", summary: "Done" }
   });

@@ -34,6 +34,11 @@ export function resolveWorkspacePath(event: OpenTagEvent, repositories: Reposito
   return resolveRepositoryBinding(event, repositories)?.checkoutPath ?? null;
 }
 
+function errorSummary(error: unknown): string {
+  const message = error instanceof Error ? error.stack || error.message : String(error);
+  return message.length > 4000 ? `${message.slice(0, 3997)}...` : message;
+}
+
 export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
@@ -108,17 +113,30 @@ export async function runOneDaemonIteration(input: {
         }
       }
     );
+  } catch (error) {
+    await input.client.complete(claimed.run.id, {
+      conclusion: "failure",
+      summary: `OpenTag executor failed: ${errorSummary(error)}`
+    });
+    return true;
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
   }
-  const result = await maybeCreatePullRequest({
-    run: claimed.run,
-    event: claimed.event,
-    binding,
-    result: executorResult,
-    options: input.pullRequestOptions ?? {}
-  });
-  await input.client.complete(claimed.run.id, result);
+  try {
+    const result = await maybeCreatePullRequest({
+      run: claimed.run,
+      event: claimed.event,
+      binding,
+      result: executorResult,
+      options: input.pullRequestOptions ?? {}
+    });
+    await input.client.complete(claimed.run.id, result);
+  } catch (error) {
+    await input.client.complete(claimed.run.id, {
+      conclusion: "failure",
+      summary: `OpenTag failed after executor completion: ${errorSummary(error)}`
+    });
+  }
   return true;
 }
 

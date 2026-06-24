@@ -62,6 +62,7 @@ const readiness = await executor.canRun({
 
 if (!readiness.ready) {
   await client.complete({
+    runnerId,
     runId: claimed.run.id,
     result: {
       conclusion: "needs_human",
@@ -71,7 +72,7 @@ if (!readiness.ready) {
   process.exit(0);
 }
 
-await client.markRunning({ runId: claimed.run.id, executor: executor.id });
+await client.markRunning({ runnerId, runId: claimed.run.id, executor: executor.id });
 
 const result = await executor.run(
   {
@@ -83,6 +84,7 @@ const result = await executor.run(
   {
     emit: (event) =>
       client.progress({
+        runnerId,
         runId: claimed.run.id,
         type: event.type,
         message: event.message,
@@ -91,6 +93,6 @@ const result = await executor.run(
   }
 );
 
-await client.complete({ runId: claimed.run.id, result });
+await client.complete({ runnerId, runId: claimed.run.id, result });
 
 console.log(`Completed OpenTag run ${claimed.run.id} with ${executor.id}.`);

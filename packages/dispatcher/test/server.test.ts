@@ -107,12 +107,18 @@ describe("dispatcher API", () => {
       body: JSON.stringify({ runId: "run_2", event: { ...validEvent, id: "evt_2", sourceEventId: "comment_2" } })
     });
     expect(createResponse.status).toBe(201);
-    await app.request("/v1/runs/run_2/progress", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_2/running", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ executor: "echo" })
+    });
+    await app.request("/v1/runners/runner_1/runs/run_2/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "executor.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z" })
     });
-    const completeResponse = await app.request("/v1/runs/run_2/complete", {
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_2/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })
@@ -133,12 +139,83 @@ describe("dispatcher API", () => {
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toEqual([
       "run.created",
+      "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "run.claimed",
+      "run.running",
       "run.progress",
+      "callback.progress.queued",
       "callback.progress.delivered",
       "run.completed",
+      "callback.final.queued",
       "callback.final.delivered"
     ]);
+  });
+
+  it("records callback delivery failures without failing run creation", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver() {
+          throw new Error("provider unavailable");
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_callback_fail", event: { ...validEvent, id: "evt_callback_fail", sourceEventId: "comment_callback_fail" } })
+    });
+
+    expect(createResponse.status).toBe(201);
+    const eventsResponse = await app.request("/v1/runs/run_callback_fail/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "run.created",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.failed"
+    ]);
+  });
+
+  it("returns existing runs for duplicate source events without duplicate acknowledgement", async () => {
+    const delivered: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push(message.runId);
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+
+    const first = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_duplicate_first", event: { ...validEvent, id: "evt_duplicate_first", sourceEventId: "comment_duplicate" } })
+    });
+    const second = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_duplicate_second", event: { ...validEvent, id: "evt_duplicate_second", sourceEventId: "comment_duplicate" } })
+    });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(200);
+    await expect(second.json()).resolves.toMatchObject({ duplicate: true, run: { id: "run_duplicate_first" } });
+    expect(delivered).toEqual(["run_duplicate_first"]);
   });
 
   it("rejects runs for repositories without an explicit binding", async () => {
@@ -214,6 +291,36 @@ describe("dispatcher API", () => {
     const eventsResponse = await app.request("/v1/runs/run_heartbeat/events");
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("run.heartbeat");
+  });
+
+  it("rejects status updates from runners that did not claim the run", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+    await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_scoped", event: { ...validEvent, id: "evt_scoped", sourceEventId: "comment_scoped" } })
+    });
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const wrongRunner = await app.request("/v1/runners/runner_2/runs/run_scoped/running", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ executor: "echo" })
+    });
+    expect(wrongRunner.status).toBe(404);
+
+    const oldEndpoint = await app.request("/v1/runs/run_scoped/running", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ executor: "echo" })
+    });
+    expect(oldEndpoint.status).toBe(410);
   });
 
   it("stores and returns Slack channel bindings", async () => {

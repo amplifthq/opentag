@@ -85,7 +85,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
 
 async function createDispatcherRun(input: { event: OpenTagEvent; log: { warn(data: unknown, message: string): void } }): Promise<{ runId: string }> {
   const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
-  const runId = `run_${Date.now()}`;
+  const runId = `run_${input.event.source}_${input.event.sourceEventId}`.replace(/[^a-zA-Z0-9._-]/g, "_");
   if (!dispatcherUrl) {
     input.log.warn({ runId, event: input.event }, "OPENTAG_DISPATCHER_URL is not set; run was not dispatched");
     return { runId };

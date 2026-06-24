@@ -90,6 +90,27 @@ describe("@opentag/client", () => {
     expect(claimed?.event.id).toBe("evt_1");
   });
 
+  it("sends runner-scoped status updates", async () => {
+    const requests: string[] = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url) => {
+        requests.push(String(url));
+        return jsonResponse({ ok: true });
+      }
+    });
+
+    await client.markRunning({ runnerId: "runner_1", runId: "run_1", executor: "echo" });
+    await client.progress({ runnerId: "runner_1", runId: "run_1", message: "working" });
+    await client.complete({ runnerId: "runner_1", runId: "run_1", result: { conclusion: "success", summary: "done" } });
+
+    expect(requests).toEqual([
+      "http://dispatcher.test/v1/runners/runner_1/runs/run_1/running",
+      "http://dispatcher.test/v1/runners/runner_1/runs/run_1/progress",
+      "http://dispatcher.test/v1/runners/runner_1/runs/run_1/complete"
+    ]);
+  });
+
   it("includes dispatcher error bodies in thrown errors", async () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",

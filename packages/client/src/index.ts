@@ -69,9 +69,9 @@ export type OpenTagClient = {
   createRun(input: CreateRunInput): Promise<{ run: OpenTagRun }>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string }): Promise<void>;
-  markRunning(input: { runId: string; executor: string }): Promise<void>;
-  progress(input: { runId: string } & RunProgressInput): Promise<void>;
-  complete(input: { runId: string; result: OpenTagRunResult }): Promise<void>;
+  markRunning(input: { runnerId: string; runId: string; executor: string }): Promise<void>;
+  progress(input: { runnerId: string; runId: string } & RunProgressInput): Promise<void>;
+  complete(input: { runnerId: string; runId: string; result: OpenTagRunResult }): Promise<void>;
   getRun(input: { runId: string }): Promise<ClaimedOpenTagRun>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
 };
@@ -189,7 +189,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async markRunning(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/running`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/running`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({ executor: input.executor })
@@ -198,7 +198,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async progress(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/progress`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/progress`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
@@ -212,7 +212,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
 
     async complete(input) {
       const result = OpenTagRunResultSchema.parse(input.result);
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/complete`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/complete`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({ result })
@@ -242,10 +242,10 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
   const client = createOpenTagClient(options);
   return {
     claim: () => client.claim({ runnerId: options.runnerId }),
-    markRunning: (runId, executor) => client.markRunning({ runId, executor }),
+    markRunning: (runId, executor) => client.markRunning({ runnerId: options.runnerId, runId, executor }),
     heartbeat: (runId) => client.heartbeat({ runnerId: options.runnerId, runId }),
-    progress: (runId, input) => client.progress({ runId, ...input }),
-    complete: (runId, result) => client.complete({ runId, result })
+    progress: (runId, input) => client.progress({ runnerId: options.runnerId, runId, ...input }),
+    complete: (runId, result) => client.complete({ runnerId: options.runnerId, runId, result })
   };
 }
 

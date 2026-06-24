@@ -3,12 +3,16 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": "22.x",
+    "pnpm": "9.x"
+  },
   "license": "MIT",
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest run",
     "typecheck": "tsc -b",
-    "lint": "pnpm -r lint"
+    "lint": "pnpm build && pnpm -r lint"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

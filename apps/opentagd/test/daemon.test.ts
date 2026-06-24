@@ -187,6 +187,50 @@ describe("opentagd", () => {
     expect(calls).toEqual(["running:run_1:echo", "complete:run_1:success"]);
   });
 
+  it("marks the run failed when an executor throws", async () => {
+    const calls: string[] = [];
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run() {
+            throw new Error("boom");
+          },
+          async cancel() {
+            return;
+          }
+        }
+      },
+      client: {
+        async claim() {
+          return { run, event };
+        },
+        async markRunning(runId, executor) {
+          calls.push(`running:${runId}:${executor}`);
+        },
+        async heartbeat() {
+          return;
+        },
+        async progress() {
+          return;
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(calls[0]).toBe("running:run_1:echo");
+    expect(calls[1]).toContain("complete:run_1:failure:OpenTag executor failed:");
+    expect(calls[1]).toContain("boom");
+  });
+
   it("sends heartbeats while a long-running executor is active", async () => {
     const calls: string[] = [];
     await runOneDaemonIteration({

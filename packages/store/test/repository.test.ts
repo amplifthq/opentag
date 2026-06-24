@@ -4,6 +4,20 @@ import { describe, expect, it } from "vitest";
 import { createOpenTagRepository } from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
+const baseEvent = {
+  id: "evt_1",
+  source: "github" as const,
+  sourceEventId: "comment_1",
+  receivedAt: "2026-06-24T00:00:00.000Z",
+  actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+  target: { mention: "@opentag", agentId: "opentag" },
+  command: { rawText: "fix this", intent: "fix" as const, args: {} },
+  context: [{ kind: "github.issue" as const, uri: "https://github.com/acme/demo/issues/1", visibility: "public" as const }],
+  permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+  callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+  metadata: { owner: "acme", repo: "demo" }
+};
+
 describe("OpenTag repository", () => {
   it("creates and claims a run once", async () => {
     const sqlite = new Database(":memory:");
@@ -125,6 +139,48 @@ describe("OpenTag repository", () => {
     expect(heartbeatEvent?.payload).toMatchObject({ runnerId: "runner_1" });
   });
 
+  it("returns the existing run for duplicate source events", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const first = await repo.createRun({ id: "run_first", event: baseEvent });
+    const second = await repo.createRun({
+      id: "run_second",
+      event: { ...baseEvent, id: "evt_duplicate_same_source" }
+    });
+
+    expect(first.id).toBe("run_first");
+    expect(second.id).toBe("run_first");
+    const events = await repo.listRunEvents({ runId: "run_first" });
+    expect(events.map((event) => event.type)).toEqual(["run.created", "run.duplicate_ignored"]);
+  });
+
+  it("requires the assigned runner for status updates", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_scoped", event: { ...baseEvent, id: "evt_scoped", sourceEventId: "comment_scoped" } });
+    await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
+    await expect(repo.markRunning({ runId: "run_scoped", runnerId: "runner_2", executor: "echo" })).resolves.toBe(false);
+    await expect(repo.markRunning({ runId: "run_scoped", runnerId: "runner_1", executor: "echo" })).resolves.toBe(true);
+    await expect(
+      repo.recordProgress({ runId: "run_scoped", runnerId: "runner_2", message: "wrong runner" })
+    ).resolves.toBe(false);
+    await expect(repo.recordProgress({ runId: "run_scoped", runnerId: "runner_1", message: "ok" })).resolves.toBe(true);
+    await expect(
+      repo.completeRun({ runId: "run_scoped", runnerId: "runner_2", result: { conclusion: "success", summary: "done" } })
+    ).resolves.toBe(false);
+    await expect(
+      repo.completeRun({ runId: "run_scoped", runnerId: "runner_1", result: { conclusion: "success", summary: "done" } })
+    ).resolves.toBe(true);
+  });
+
   it("requeues runs whose lease has expired", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -197,12 +253,16 @@ describe("OpenTag repository", () => {
         context: [],
         permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
         callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-        metadata: {}
+        metadata: { owner: "acme", repo: "demo" }
       }
     });
 
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
     await repo.completeRun({
       runId: "run_2",
+      runnerId: "runner_1",
       result: {
         conclusion: "success",
         summary: "done"
@@ -214,6 +274,6 @@ describe("OpenTag repository", () => {
     expect(stored?.run.result?.summary).toBe("done");
 
     const events = await repo.listRunEvents({ runId: "run_2" });
-    expect(events.map((event) => event.type)).toEqual(["run.created", "run.completed"]);
+    expect(events.map((event) => event.type)).toEqual(["run.created", "run.claimed", "run.completed"]);
   });
 });

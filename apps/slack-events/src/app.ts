@@ -44,12 +44,21 @@ export function verifySlackSignature(input: {
   return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
 }
 
+export function verifySlackTimestamp(input: { timestamp: string; nowMs: number; toleranceSeconds?: number }): boolean {
+  const timestampSeconds = Number(input.timestamp);
+  if (!Number.isFinite(timestampSeconds)) return false;
+  const toleranceSeconds = input.toleranceSeconds ?? 300;
+  const ageSeconds = Math.abs(Math.floor(input.nowMs / 1000) - timestampSeconds);
+  return ageSeconds <= toleranceSeconds;
+}
+
 export function createSlackEventsApp(input: {
   signingSecret: string;
   resolveChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   now(): string;
   callbackUri?: string;
+  clock?: () => number;
 }) {
   const app = new Hono();
 
@@ -59,6 +68,9 @@ export function createSlackEventsApp(input: {
     const signature = c.req.header("x-slack-signature");
     if (!timestamp || !signature) {
       return c.json({ error: "missing_signature_headers" }, 401);
+    }
+    if (!verifySlackTimestamp({ timestamp, nowMs: input.clock?.() ?? Date.now() })) {
+      return c.json({ error: "stale_signature_timestamp" }, 401);
     }
     if (
       !verifySlackSignature({

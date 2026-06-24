@@ -13,7 +13,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => "2026-06-24T00:00:00.000Z",
+      clock: () => 1710000000 * 1000
     });
 
     const response = await app.request("/slack/events", {
@@ -59,6 +60,7 @@ describe("Slack events app", () => {
       },
       createRun,
       now: () => "2026-06-24T00:00:00.000Z",
+      clock: () => 1710000000 * 1000,
       callbackUri: "http://127.0.0.1:3102/github-comment"
     });
 
@@ -89,7 +91,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => "2026-06-24T00:00:00.000Z",
+      clock: () => 1710000000 * 1000
     });
 
     const response = await app.request("/slack/events", {
@@ -103,5 +106,38 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects stale signed Slack requests", async () => {
+    const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
+    const timestamp = "1710000000";
+    const app = createSlackEventsApp({
+      signingSecret: "secret",
+      async resolveChannelBinding() {
+        return null;
+      },
+      async createRun() {
+        return { runId: "run_1" };
+      },
+      now: () => "2026-06-24T00:00:00.000Z",
+      clock: () => (1710000000 + 301) * 1000
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "stale_signature_timestamp" });
   });
 });

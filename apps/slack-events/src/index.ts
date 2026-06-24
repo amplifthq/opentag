@@ -30,7 +30,7 @@ serve({
       }
     },
     async createRun(event) {
-      const runId = `run_${Date.now()}`;
+      const runId = `run_${event.source}_${event.sourceEventId}`.replace(/[^a-zA-Z0-9._-]/g, "_");
       await dispatcherClient.createRun({ runId, event });
       return { runId };
     },
