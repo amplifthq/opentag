@@ -1,7 +1,7 @@
 {
-  "name": "@opentag/core",
+  "name": "@opentag/dispatcher",
   "version": "0.0.0",
-  "description": "Core OpenTag protocol schemas, types, JSON Schema, and mention parsing.",
+  "description": "Embeddable OpenTag dispatcher Hono app and callback sinks.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,10 +21,10 @@
   },
   "keywords": [
     "opentag",
-    "protocol",
-    "schemas",
+    "dispatcher",
+    "hono",
     "agents",
-    "mentions"
+    "webhooks"
   ],
   "license": "Apache-2.0",
   "scripts": {
@@ -32,10 +32,17 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "zod-to-json-schema": "^3.25.2",
+    "@opentag/core": "workspace:*",
+    "@opentag/github": "workspace:*",
+    "@opentag/slack": "workspace:*",
+    "@opentag/store": "workspace:*",
+    "better-sqlite3": "^11.7.0",
+    "drizzle-orm": "^0.38.3",
+    "hono": "^4.6.15",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createCodexExecutor, createEchoExecutor } from "@opentag/runner";
+import { createDispatcherAdminClient, createDispatcherClient } from "@opentag/client";
 import { Command } from "commander";
-import { createDispatcherAdminClient, createDispatcherClient } from "./client.js";
 import { loadConfigFromEnv } from "./config.js";
 import { runOneDaemonIteration, serveDaemon } from "./daemon.js";
 

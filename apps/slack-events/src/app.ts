@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import type { OpenTagEvent } from "@opentag/core";
 import { normalizeSlackAppMention, type SlackChannelBinding } from "@opentag/slack";
 import { Hono } from "hono";
 
@@ -46,7 +47,7 @@ export function verifySlackSignature(input: {
 export function createSlackEventsApp(input: {
   signingSecret: string;
   resolveChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null>;
-  createRun(event: unknown): Promise<{ runId: string }>;
+  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   now(): string;
   callbackUri?: string;
 }) {

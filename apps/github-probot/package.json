@@ -10,6 +10,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@opentag/client": "workspace:*",
+    "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
     "probot": "^14.3.2"
   },

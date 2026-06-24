@@ -18,7 +18,7 @@ This demo proves the OpenTag v0 loop without needing a real coding agent.
 1. Start the dispatcher:
 
 ```bash
-OPENTAG_DATABASE_PATH=opentag.db pnpm --filter @opentag/dispatcher dev
+OPENTAG_DATABASE_PATH=opentag.db pnpm --filter @opentag/dispatcher-app dev
 ```
 
 Set `OPENTAG_GITHUB_TOKEN` when you want the dispatcher to post callbacks to GitHub. For local smoke tests without a real GitHub thread, leave it unset and inspect `/events` instead.

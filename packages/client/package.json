@@ -1,7 +1,7 @@
 {
-  "name": "@opentag/core",
+  "name": "@opentag/client",
   "version": "0.0.0",
-  "description": "Core OpenTag protocol schemas, types, JSON Schema, and mention parsing.",
+  "description": "HTTP client SDK for creating, claiming, and updating OpenTag dispatcher runs.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,10 +21,10 @@
   },
   "keywords": [
     "opentag",
-    "protocol",
-    "schemas",
-    "agents",
-    "mentions"
+    "sdk",
+    "client",
+    "dispatcher",
+    "agents"
   ],
   "license": "Apache-2.0",
   "scripts": {
@@ -32,8 +32,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "zod-to-json-schema": "^3.25.2",
-    "zod": "^3.24.1"
+    "@opentag/core": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.3.5",

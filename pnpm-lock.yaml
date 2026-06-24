@@ -26,30 +26,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.7
         version: 1.19.14(hono@4.12.27)
-      '@opentag/core':
+      '@opentag/dispatcher':
         specifier: workspace:*
-        version: link:../../packages/core
-      '@opentag/github':
-        specifier: workspace:*
-        version: link:../../packages/github
-      '@opentag/slack':
-        specifier: workspace:*
-        version: link:../../packages/slack
-      '@opentag/store':
-        specifier: workspace:*
-        version: link:../../packages/store
-      better-sqlite3:
-        specifier: ^11.7.0
-        version: 11.10.0
-      drizzle-orm:
-        specifier: ^0.38.3
-        version: 0.38.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)
-      hono:
-        specifier: ^4.6.15
-        version: 4.12.27
-      zod:
-        specifier: ^3.24.1
-        version: 3.25.76
+        version: link:../../packages/dispatcher
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.12
@@ -66,6 +45,12 @@ importers:
 
   apps/github-probot:
     dependencies:
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opentag/github':
         specifier: workspace:*
         version: link:../../packages/github
@@ -82,6 +67,9 @@ importers:
 
   apps/opentagd:
     dependencies:
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@opentag/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -110,6 +98,12 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.7
         version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@opentag/slack':
         specifier: workspace:*
         version: link:../../packages/slack
@@ -127,6 +121,60 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  examples/custom-runner:
+    dependencies:
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@opentag/runner':
+        specifier: workspace:*
+        version: link:../../packages/runner
+    devDependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  examples/embedded-dispatcher:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@opentag/dispatcher':
+        specifier: workspace:*
+        version: link:../../packages/dispatcher
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
+    devDependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/client:
+    dependencies:
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/core:
     dependencies:
       zod:
@@ -136,6 +184,43 @@ importers:
         specifier: ^3.25.2
         version: 3.25.2(zod@3.25.76)
     devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/dispatcher:
+    dependencies:
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opentag/github':
+        specifier: workspace:*
+        version: link:../github
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../slack
+      '@opentag/store':
+        specifier: workspace:*
+        version: link:../store
+      better-sqlite3:
+        specifier: ^11.7.0
+        version: 11.10.0
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(@types/better-sqlite3@7.6.13)(better-sqlite3@11.10.0)
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.12
+        version: 7.6.13
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)

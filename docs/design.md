@@ -115,6 +115,8 @@ Suggested repository layout:
 
 ```text
 packages/opentag-core
+packages/opentag-client
+packages/opentag-dispatcher
 packages/opentag-github
 packages/opentag-slack
 packages/opentag-runner
@@ -141,6 +143,32 @@ Responsibilities:
 - callback route model.
 - run status vocabulary.
 - serialization and validation.
+
+### `packages/opentag-client`
+
+Owns the HTTP client contract for systems that create, claim, or update runs through a dispatcher.
+
+Responsibilities:
+
+- create dispatcher runs from normalized `OpenTagEvent` objects.
+- register runners and bind repositories or Slack channels.
+- claim runs for local or hosted runners.
+- report runner heartbeat, progress, running status, and final results.
+- validate dispatcher responses at the package boundary.
+
+### `packages/opentag-dispatcher`
+
+Owns the embeddable dispatcher application and provider callback sinks.
+
+Responsibilities:
+
+- expose the Hono app factory for services that want to host OpenTag themselves.
+- accept normalized OpenTag events from ingress apps.
+- persist runs and audit events through `packages/opentag-store`.
+- expose runner pairing and polling endpoints.
+- implement lease-based run claiming.
+- receive runner status updates.
+- coordinate callback delivery through provider adapters.
 
 ### `packages/opentag-github`
 
@@ -190,16 +218,13 @@ Responsibilities:
 
 ### `apps/dispatcher`
 
-Owns the extremely thin hosted control plane.
+Owns the runnable Node process for the extremely thin hosted control plane.
 
 Responsibilities:
 
-- accept normalized OpenTag events from ingress apps.
-- persist runs and audit events.
-- expose runner pairing and polling endpoints.
-- implement lease-based run claiming.
-- receive runner status updates.
-- coordinate callback delivery through provider adapters.
+- read deployment configuration from environment variables.
+- compose callback sinks.
+- start the `packages/opentag-dispatcher` Hono app with `@hono/node-server`.
 
 The dispatcher should stay boring. It is not an agent runtime, workflow engine, hosted IDE, or chat product. Its job is to bridge public workspace events to private/local runners without requiring the user's machine to expose an inbound port.
 

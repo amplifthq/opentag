@@ -2,6 +2,8 @@
   "files": [],
   "references": [
     { "path": "packages/core" },
+    { "path": "packages/client" },
+    { "path": "packages/dispatcher" },
     { "path": "packages/github" },
     { "path": "packages/slack" },
     { "path": "packages/runner" },
@@ -9,6 +11,8 @@
     { "path": "apps/dispatcher" },
     { "path": "apps/github-probot" },
     { "path": "apps/slack-events" },
-    { "path": "apps/opentagd" }
+    { "path": "apps/opentagd" },
+    { "path": "examples/custom-runner" },
+    { "path": "examples/embedded-dispatcher" }
   ]
 }

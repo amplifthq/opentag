@@ -1,6 +1,7 @@
 {
   "name": "@opentag/runner",
   "version": "0.0.0",
+  "description": "Executor contracts and built-in runner adapters for OpenTag.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,6 +12,21 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "runner",
+    "executor",
+    "codex",
+    "agents"
+  ],
+  "license": "Apache-2.0",
   "scripts": {
     "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
     "lint": "tsc --noEmit"

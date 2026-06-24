@@ -27,14 +27,64 @@ Slack ingress currently handles `url_verification` and `app_mention` events for 
 ## Packages
 
 - `packages/core`: protocol schemas and mention parsing.
+- `packages/client`: dispatcher HTTP client for ingress apps, local runners, and admin setup.
+- `packages/dispatcher`: embeddable dispatcher Hono app and callback sinks.
 - `packages/github`: GitHub event normalization and callback rendering.
 - `packages/slack`: Slack event normalization, thread keys, and callback helpers.
 - `packages/store`: SQLite/Drizzle persistence and lease primitives.
 - `packages/runner`: executor contracts and the echo executor.
-- `apps/dispatcher`: hosted dispatcher API.
+- `apps/dispatcher`: runnable hosted dispatcher process.
 - `apps/opentagd`: local runner daemon.
 - `apps/github-probot`: GitHub App ingress.
 - `apps/slack-events`: Slack Events API ingress.
+
+## SDK Usage
+
+OpenTag can be embedded as packages in another system. Use `@opentag/core` for the stable protocol, provider packages such as `@opentag/github` and `@opentag/slack` to normalize workspace events, `@opentag/client` to talk to a dispatcher over HTTP, and `@opentag/dispatcher` when you want to host the dispatcher inside your own service.
+
+Normalize a GitHub event and enqueue it through the dispatcher client:
+
+```ts
+import { createOpenTagClient } from "@opentag/client";
+import { normalizeGitHubIssueComment } from "@opentag/github";
+
+const event = normalizeGitHubIssueComment({
+  id: String(payload.comment.id),
+  commentBody: payload.comment.body,
+  commentUrl: payload.comment.html_url,
+  apiCommentsUrl: payload.issue.comments_url,
+  issueUrl: payload.issue.html_url,
+  issueNumber: payload.issue.number,
+  owner: payload.repository.owner.login,
+  repo: payload.repository.name,
+  actorId: payload.sender.id,
+  actorLogin: payload.sender.login,
+  private: payload.repository.private,
+  receivedAt: new Date().toISOString()
+});
+
+if (event) {
+  const client = createOpenTagClient({
+    dispatcherUrl: process.env.OPENTAG_DISPATCHER_URL!,
+    pairingToken: process.env.OPENTAG_DISPATCHER_TOKEN
+  });
+  await client.createRun({ runId: `run_${Date.now()}`, event });
+}
+```
+
+Embed the dispatcher in another Hono-compatible service:
+
+```ts
+import { createDispatcherApp, createGitHubCallbackSink } from "@opentag/dispatcher";
+
+export const dispatcher = createDispatcherApp({
+  databasePath: "opentag.db",
+  pairingToken: process.env.OPENTAG_PAIRING_TOKEN,
+  callbackSink: createGitHubCallbackSink({
+    token: process.env.OPENTAG_GITHUB_TOKEN
+  })
+});
+```
 
 ## Commands
 
@@ -44,6 +94,16 @@ pnpm test
 pnpm build
 pnpm typecheck
 ```
+
+## Publishing
+
+Public packages include `publishConfig.access=public` and publish only `dist` plus their package README. Versioning rules and the release checklist live in [docs/versioning.md](docs/versioning.md).
+
+## Examples
+
+- [examples/github-to-echo](examples/github-to-echo/README.md): manual end-to-end GitHub-to-local-runner smoke test.
+- [examples/embedded-dispatcher](examples/embedded-dispatcher/README.md): embed `@opentag/dispatcher` inside another Node service.
+- [examples/custom-runner](examples/custom-runner/README.md): build a third-party runner with `@opentag/client` and `@opentag/runner`.
 
 ## Dispatcher Callback Delivery
 

@@ -12,6 +12,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
     "@opentag/runner": "workspace:*",

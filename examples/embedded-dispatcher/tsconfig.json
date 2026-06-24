@@ -5,5 +5,9 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/client" }, { "path": "../../packages/core" }, { "path": "../../packages/github" }]
+  "references": [
+    { "path": "../../packages/client" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/dispatcher" }
+  ]
 }

@@ -1,6 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createCompositeCallbackSink, createGitHubCallbackSink, createSlackCallbackSink } from "./callbacks.js";
-import { createDispatcherApp } from "./server.js";
+import { createCompositeCallbackSink, createDispatcherApp, createGitHubCallbackSink, createSlackCallbackSink } from "@opentag/dispatcher";
 
 const port = Number(process.env.PORT ?? "3030");
 const databasePath = process.env.OPENTAG_DATABASE_PATH ?? "opentag.db";

@@ -1,24 +1,23 @@
 {
-  "name": "@opentag/slack-events",
+  "name": "@opentag/example-embedded-dispatcher",
   "version": "0.0.0",
-  "type": "module",
   "private": true,
-  "main": "./dist/index.js",
+  "type": "module",
+  "main": "./src/index.ts",
   "scripts": {
-    "build": "tsup",
     "dev": "tsx src/index.ts",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
-    "@opentag/slack": "workspace:*",
+    "@opentag/dispatcher": "workspace:*",
     "hono": "^4.6.15"
   },
   "devDependencies": {
     "tsx": "^4.19.2",
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.7.2"
   }
 }

@@ -1,3 +1,5 @@
+import { createOpenTagClient } from "@opentag/client";
+import type { OpenTagEvent } from "@opentag/core";
 import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, renderAcknowledgement } from "@opentag/github";
 import type { Probot } from "probot";
 
@@ -19,7 +21,7 @@ type PullRequestReviewCommentPayload = {
 
 export async function handleIssueCommentCreated(input: {
   payload: IssueCommentPayload;
-  createRun(event: unknown): Promise<{ runId: string }>;
+  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   postComment(body: string): Promise<void>;
   now(): string;
   dispatcherOwnsCallbacks?: boolean;
@@ -50,7 +52,7 @@ export async function handleIssueCommentCreated(input: {
 
 export async function handlePullRequestReviewCommentCreated(input: {
   payload: PullRequestReviewCommentPayload;
-  createRun(event: unknown): Promise<{ runId: string }>;
+  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   postComment(body: string): Promise<void>;
   now(): string;
   dispatcherOwnsCallbacks?: boolean;
@@ -81,24 +83,21 @@ export async function handlePullRequestReviewCommentCreated(input: {
   }
 }
 
-async function createDispatcherRun(input: { event: unknown; log: { warn(data: unknown, message: string): void } }): Promise<{ runId: string }> {
+async function createDispatcherRun(input: { event: OpenTagEvent; log: { warn(data: unknown, message: string): void } }): Promise<{ runId: string }> {
   const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
   const runId = `run_${Date.now()}`;
   if (!dispatcherUrl) {
     input.log.warn({ runId, event: input.event }, "OPENTAG_DISPATCHER_URL is not set; run was not dispatched");
     return { runId };
   }
-  const response = await fetch(`${dispatcherUrl.replace(/\/$/, "")}/v1/runs`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(process.env.OPENTAG_DISPATCHER_TOKEN ? { authorization: `Bearer ${process.env.OPENTAG_DISPATCHER_TOKEN}` } : {})
-    },
-    body: JSON.stringify({ runId, event: input.event })
+
+  await createOpenTagClient({
+    dispatcherUrl,
+    ...(process.env.OPENTAG_DISPATCHER_TOKEN ? { pairingToken: process.env.OPENTAG_DISPATCHER_TOKEN } : {})
+  }).createRun({
+    runId,
+    event: input.event
   });
-  if (!response.ok) {
-    throw new Error(`dispatcher create run failed: ${response.status}`);
-  }
   return { runId };
 }
 

@@ -1,6 +1,7 @@
 {
   "name": "@opentag/slack",
   "version": "0.0.0",
+  "description": "Slack app mention normalization and callback helpers for OpenTag.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,6 +12,21 @@
       "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "slack",
+    "events",
+    "agents",
+    "webhooks"
+  ],
+  "license": "Apache-2.0",
   "scripts": {
     "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
     "lint": "tsc --noEmit"
