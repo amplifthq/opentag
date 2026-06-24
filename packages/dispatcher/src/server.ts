@@ -70,6 +70,7 @@ export type CallbackMessage = {
   provider: "github" | "slack" | "lark" | "webhook";
   uri: string;
   body: string;
+  agentId?: string;
   threadKey?: string;
   statusMessageKey?: string;
   blocks?: SlackBlock[];
@@ -189,6 +190,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         provider: parsed.event.callback.provider,
         uri: parsed.event.callback.uri,
         body: presentation.acknowledgement({ provider: parsed.event.callback.provider, runId: run.id }),
+        ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {}),
         ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
       }
     });
@@ -235,6 +237,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
           provider: stored.event.callback.provider,
           uri: stored.event.callback.uri,
           body: presentation.progress({ provider: stored.event.callback.provider, runId, message: body.message }),
+          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
           statusMessageKey: `${runId}:status`
         }
@@ -260,6 +263,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         provider: stored.event.callback.provider,
         uri: stored.event.callback.uri,
         body: finalPresentation.body,
+        ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
         ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
         ...(finalPresentation.blocks?.length ? { blocks: finalPresentation.blocks } : {})
       }

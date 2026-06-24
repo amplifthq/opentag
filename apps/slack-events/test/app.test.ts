@@ -6,7 +6,7 @@ describe("Slack events app", () => {
     const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
     const timestamp = "1710000000";
     const app = createSlackEventsApp({
-      signingSecret: "secret",
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
       async resolveChannelBinding() {
         return null;
       },
@@ -39,6 +39,7 @@ describe("Slack events app", () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const rawBody = JSON.stringify({
       type: "event_callback",
+      api_app_id: "A_GEMINI",
       team_id: "T123",
       event_id: "Ev123",
       event_time: 1710000000,
@@ -53,7 +54,7 @@ describe("Slack events app", () => {
     });
     const timestamp = "1710000000";
     const app = createSlackEventsApp({
-      signingSecret: "secret",
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
       async resolveChannelBinding() {
         return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
       },
@@ -78,11 +79,130 @@ describe("Slack events app", () => {
 
     expect(response.status).toBe(200);
     expect(createRun).toHaveBeenCalledOnce();
+    const [event] = createRun.mock.calls[0] ?? [];
+    expect(event.target.agentId).toBe("gemini");
+  });
+
+  it("supports multiple Slack apps with different secrets and agent ids", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_2" }));
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_DEEPSEEK",
+      team_id: "T123",
+      event_id: "Ev456",
+      event_time: 1710000100,
+      authorizations: [{ user_id: "U_DEEP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_DEEP> explain this",
+        ts: "1710000100.000100",
+        channel: "C123"
+      }
+    });
+    const timestamp = "1710000100";
+    const app = createSlackEventsApp({
+      slackApps: [
+        { appId: "A_GEMINI", signingSecret: "secret_1", agentId: "gemini" },
+        { appId: "A_DEEPSEEK", signingSecret: "secret_2", agentId: "deepseek" }
+      ],
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret_2",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun).toHaveBeenCalledOnce();
+    const [event] = createRun.mock.calls[0] ?? [];
+    expect(event.target.agentId).toBe("deepseek");
+  });
+
+  it("handles url_verification for one of multiple Slack apps without api_app_id", async () => {
+    const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
+    const timestamp = "1710000000";
+    const app = createSlackEventsApp({
+      slackApps: [
+        { appId: "A_GEMINI", signingSecret: "secret_1", agentId: "gemini" },
+        { appId: "A_DEEPSEEK", signingSecret: "secret_2", agentId: "deepseek" }
+      ],
+      async resolveChannelBinding() {
+        return null;
+      },
+      async createRun() {
+        return { runId: "run_1" };
+      },
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret_2",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("abc123");
+  });
+
+  it("returns 400 for malformed JSON payloads", async () => {
+    const rawBody = "{not-json";
+    const timestamp = "1710000000";
+    const app = createSlackEventsApp({
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      async createRun() {
+        return { runId: "run_1" };
+      },
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_json" });
   });
 
   it("rejects invalid Slack signatures", async () => {
     const app = createSlackEventsApp({
-      signingSecret: "secret",
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
       async resolveChannelBinding() {
         return null;
       },

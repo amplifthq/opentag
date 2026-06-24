@@ -229,6 +229,7 @@ describe("dispatcher API", () => {
         ]
       }
     ]);
+    expect(delivered.every((message) => (message as { agentId?: string }).agentId === undefined)).toBe(true);
     expect(delivered.at(-1)?.body).not.toContain("**success**");
 
     const eventsResponse = await app.request("/v1/runs/run_slack_1/events");
@@ -469,5 +470,64 @@ describe("dispatcher API", () => {
     });
 
     expect(response.status).toBe(201);
+  });
+
+  it("passes the target agent id through Slack callbacks", async () => {
+    const delivered: Array<{ kind: string; agentId?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            ...(message.agentId ? { agentId: message.agentId } : {})
+          });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    });
+
+    const slackEvent = {
+      ...validEvent,
+      id: "evt_slack_agent",
+      source: "slack",
+      sourceEventId: "EvAgent",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      target: { mention: "<@U_DEEP>", agentId: "deepseek" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100"
+      }
+    };
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_slack_agent", event: slackEvent })
+    });
+    expect(createResponse.status).toBe(201);
+
+    const completeResponse = await app.request("/v1/runs/run_slack_agent/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })
+    });
+    expect(completeResponse.status).toBe(200);
+
+    expect(delivered).toEqual([
+      { kind: "acknowledgement", agentId: "deepseek" },
+      { kind: "final", agentId: "deepseek" }
+    ]);
   });
 });
