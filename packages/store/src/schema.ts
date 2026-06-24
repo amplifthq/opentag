@@ -49,6 +49,7 @@ export const repoBindings = sqliteTable(
     workspacePath: text("workspace_path"),
     defaultExecutor: text("default_executor"),
     allowedActorsJson: text("allowed_actors_json"),
+    securityPolicyJson: text("security_policy_json"),
     createdAt: text("created_at").notNull()
   },
   (table) => ({
@@ -111,6 +112,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       workspace_path TEXT,
       default_executor TEXT,
       allowed_actors_json TEXT,
+      security_policy_json TEXT,
       created_at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS repo_bindings_provider_owner_repo_idx
@@ -136,6 +138,9 @@ export function migrateSchema(sqlite: Database.Database): void {
   }
   if (!columnNames.has("allowed_actors_json")) {
     sqlite.exec("ALTER TABLE repo_bindings ADD COLUMN allowed_actors_json TEXT");
+  }
+  if (!columnNames.has("security_policy_json")) {
+    sqlite.exec("ALTER TABLE repo_bindings ADD COLUMN security_policy_json TEXT");
   }
   const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
   const runColumnNames = new Set(runColumns.map((column) => column.name));

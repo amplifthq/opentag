@@ -45,6 +45,7 @@ The goal is simple: make "tag an agent into work" a protocol, not a closed surfa
 - **Slack app mentions** - bound Slack channels can route `app_mention` events to the same dispatcher and local daemon path.
 - **Auditable dispatch** - every run is stored with event metadata, status transitions, progress, result, and callback delivery events.
 - **Explicit runner binding** - a runner only claims runs for repositories it is bound to.
+- **Repository security policies** - bindings can require read/write actor allowlists, block specific actors, constrain runner IDs, and hold sensitive scopes for approval.
 - **Local-first execution** - `opentagd` resolves a configured local checkout before executing anything.
 - **Executor adapters** - `echo` is available for smoke tests, and `codex` can run a real Codex CLI task on an isolated branch.
 - **Embeddable SDK packages** - use the protocol, client, dispatcher, GitHub, Slack, runner, and store packages independently.
@@ -135,7 +136,7 @@ curl http://localhost:3030/v1/runs/run_demo_1/events
 ## How It Works
 
 1. **Ingress normalizes platform events.** GitHub and Slack adapters translate comments or app mentions into one `OpenTagEvent` schema.
-2. **The dispatcher validates scope.** Runs must include repository metadata, and the repository must be explicitly bound to a runner.
+2. **The dispatcher validates scope.** Runs must include repository metadata, and the repository must be explicitly bound to a runner. Optional repository security policy can deny actors, constrain runners, or hold scoped work for approval.
 3. **The local daemon claims only mapped work.** `opentagd` checks its local repository config before running an executor.
 4. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated `opentag/<runId>` branch and runs `codex exec`.
 5. **Callbacks and audit events close the loop.** Progress and final results can be posted back to GitHub or Slack, and every step stays queryable through the dispatcher.

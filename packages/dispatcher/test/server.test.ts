@@ -133,6 +133,7 @@ describe("dispatcher API", () => {
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toEqual([
       "run.created",
+      "policy.evaluated",
       "callback.acknowledgement.delivered",
       "run.progress",
       "callback.progress.delivered",
@@ -185,7 +186,133 @@ describe("dispatcher API", () => {
     });
 
     expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({ error: "actor_not_allowed_for_write" });
+    await expect(response.json()).resolves.toMatchObject({
+      error: "actor_not_allowed_for_write",
+      policyDecision: { outcome: "deny", reason: "actor_not_allowed_for_write" }
+    });
+  });
+
+  it("rejects blocked actors through repository security policy", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        securityPolicy: { blockedActors: ["github:octocat"] }
+      })
+    });
+
+    const response = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_blocked", event: validEvent })
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "actor_blocked_by_policy",
+      policyDecision: { outcome: "deny", matched: ["github:octocat"] }
+    });
+  });
+
+  it("enforces read and runner security policy before creating runs", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        securityPolicy: {
+          readAllowedActors: ["github:someone-else"],
+          allowedRunnerIds: ["runner_1"]
+        }
+      })
+    });
+
+    const response = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runId: "run_read_denied",
+        event: { ...validEvent, command: { rawText: "investigate this", intent: "investigate", args: {} } }
+      })
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "actor_not_allowed_for_read",
+      policyDecision: { outcome: "deny" }
+    });
+  });
+
+  it("creates needs_approval runs for approval-gated permission scopes", async () => {
+    const delivered: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push(message.kind);
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        securityPolicy: {
+          writeAllowedActors: ["github:octocat"],
+          approvalRequiredScopes: ["pr:create"]
+        }
+      })
+    });
+
+    const response = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runId: "run_needs_approval",
+        event: {
+          ...validEvent,
+          permissions: [
+            ...validEvent.permissions,
+            { scope: "repo:write", reason: "write branch" },
+            { scope: "pr:create", reason: "open pull request" }
+          ]
+        }
+      })
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      run: { id: "run_needs_approval", status: "needs_approval" },
+      policyDecision: { outcome: "needs_approval", matched: ["pr:create"] }
+    });
+    expect(delivered).toEqual([]);
+
+    const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(claimResponse.status).toBe(204);
+
+    const eventsResponse = await app.request("/v1/runs/run_needs_approval/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "run.created",
+      "policy.evaluated",
+      "run.needs_approval"
+    ]);
   });
 
   it("accepts runner heartbeat for claimed runs", async () => {

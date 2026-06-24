@@ -34,9 +34,17 @@ await repo.createRepoBinding({
   provider: "github",
   owner: "acme",
   repo: "demo",
-  runnerId: "runner_local"
+  runnerId: "runner_local",
+  securityPolicy: {
+    writeAllowedActors: ["github:octocat"],
+    approvalRequiredScopes: ["pr:create"]
+  }
 });
 ```
+
+## Security Policy V1
+
+Repo bindings can store a `securityPolicy` JSON object with `readAllowedActors`, `writeAllowedActors`, `blockedActors`, `allowedRunnerIds`, and `approvalRequiredScopes`. The dispatcher evaluates this policy before creating executable work and records `policy.evaluated` audit events for accepted or approval-gated runs.
 
 ## Stability
 

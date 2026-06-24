@@ -1,6 +1,6 @@
 import { OpenTagEventSchema, OpenTagRunResultSchema } from "@opentag/core";
 import { renderAcknowledgement, renderFinalResult, renderProgress } from "@opentag/github";
-import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import { createOpenTagRepository, migrateSchema, type RepoBinding, type RepoSecurityPolicy } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
@@ -18,8 +18,38 @@ const CreateRepoBindingSchema = z.object({
   runnerId: z.string().min(1),
   workspacePath: z.string().min(1).optional(),
   defaultExecutor: z.string().min(1).optional(),
-  allowedActors: z.array(z.string().min(1)).optional()
+  allowedActors: z.array(z.string().min(1)).optional(),
+  securityPolicy: z
+    .object({
+      readAllowedActors: z.array(z.string().min(1)).optional(),
+      writeAllowedActors: z.array(z.string().min(1)).optional(),
+      blockedActors: z.array(z.string().min(1)).optional(),
+      allowedRunnerIds: z.array(z.string().min(1)).optional(),
+      approvalRequiredScopes: z.array(z.string().min(1)).optional()
+    })
+    .optional()
 });
+
+function definedStringArray(values: string[] | undefined): string[] | undefined {
+  return values?.length ? values : undefined;
+}
+
+function repoSecurityPolicyFromParsed(parsed: z.infer<typeof CreateRepoBindingSchema>): RepoBinding["securityPolicy"] | undefined {
+  const policy = parsed.securityPolicy;
+  if (!policy) return undefined;
+  const normalized: RepoSecurityPolicy = {};
+  const readAllowedActors = definedStringArray(policy.readAllowedActors);
+  const writeAllowedActors = definedStringArray(policy.writeAllowedActors);
+  const blockedActors = definedStringArray(policy.blockedActors);
+  const allowedRunnerIds = definedStringArray(policy.allowedRunnerIds);
+  const approvalRequiredScopes = definedStringArray(policy.approvalRequiredScopes);
+  if (readAllowedActors) normalized.readAllowedActors = readAllowedActors;
+  if (writeAllowedActors) normalized.writeAllowedActors = writeAllowedActors;
+  if (blockedActors) normalized.blockedActors = blockedActors;
+  if (allowedRunnerIds) normalized.allowedRunnerIds = allowedRunnerIds;
+  if (approvalRequiredScopes) normalized.approvalRequiredScopes = approvalRequiredScopes;
+  return Object.keys(normalized).length ? normalized : undefined;
+}
 
 const CreateSlackChannelBindingSchema = z.object({
   teamId: z.string().min(1),
@@ -61,6 +91,67 @@ function isWriteCapable(event: z.infer<typeof OpenTagEventSchema>): boolean {
 function actorIsAllowed(event: z.infer<typeof OpenTagEventSchema>, allowedActors: string[] | undefined): boolean {
   if (!allowedActors?.length) return true;
   return allowedActors.includes(event.actor.handle ?? "") || allowedActors.includes(event.actor.providerUserId);
+}
+
+type PolicyDecision = {
+  outcome: "allow" | "deny" | "needs_approval";
+  reason: string;
+  matched?: string[];
+};
+
+function actorKeys(event: z.infer<typeof OpenTagEventSchema>): string[] {
+  return [
+    event.actor.providerUserId,
+    ...(event.actor.handle ? [event.actor.handle] : []),
+    `${event.actor.provider}:${event.actor.providerUserId}`,
+    ...(event.actor.handle ? [`${event.actor.provider}:${event.actor.handle}`] : []),
+    ...(event.actor.organizationId ? [`org:${event.actor.organizationId}`] : [])
+  ];
+}
+
+function matchingValues(values: string[] | undefined, candidates: string[]): string[] {
+  if (!values?.length) return [];
+  return values.filter((value) => candidates.includes(value));
+}
+
+function permissionScopes(event: z.infer<typeof OpenTagEventSchema>): string[] {
+  return event.permissions.map((permission) => permission.scope);
+}
+
+function evaluatePolicy(input: {
+  event: z.infer<typeof OpenTagEventSchema>;
+  binding: RepoBinding;
+}): PolicyDecision {
+  const policy = input.binding.securityPolicy;
+  const actor = actorKeys(input.event);
+  const blockedActorMatches = matchingValues(policy?.blockedActors, actor);
+  if (blockedActorMatches.length > 0) {
+    return { outcome: "deny", reason: "actor_blocked_by_policy", matched: blockedActorMatches };
+  }
+
+  const allowedRunnerMatches = matchingValues(policy?.allowedRunnerIds, [input.binding.runnerId]);
+  if (policy?.allowedRunnerIds?.length && allowedRunnerMatches.length === 0) {
+    return { outcome: "deny", reason: "runner_not_allowed_by_policy", matched: [input.binding.runnerId] };
+  }
+
+  const requiredApprovalScopes = matchingValues(policy?.approvalRequiredScopes, permissionScopes(input.event));
+  if (requiredApprovalScopes.length > 0) {
+    return { outcome: "needs_approval", reason: "permission_scope_requires_approval", matched: requiredApprovalScopes };
+  }
+
+  if (isWriteCapable(input.event)) {
+    const writeMatches = matchingValues(policy?.writeAllowedActors ?? input.binding.allowedActors, actor);
+    if ((policy?.writeAllowedActors?.length || input.binding.allowedActors?.length) && writeMatches.length === 0) {
+      return { outcome: "deny", reason: "actor_not_allowed_for_write", matched: actor };
+    }
+    return { outcome: "allow", reason: "write_allowed_by_policy", matched: writeMatches };
+  }
+
+  const readMatches = matchingValues(policy?.readAllowedActors, actor);
+  if (policy?.readAllowedActors?.length && readMatches.length === 0) {
+    return { outcome: "deny", reason: "actor_not_allowed_for_read", matched: actor };
+  }
+  return { outcome: "allow", reason: "read_allowed_by_policy", matched: readMatches };
 }
 
 export type CallbackMessage = {
@@ -124,6 +215,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
 
   app.post("/v1/repo-bindings", async (c) => {
     const parsed = CreateRepoBindingSchema.parse(await c.req.json());
+    const securityPolicy = repoSecurityPolicyFromParsed(parsed);
     await repo.createRepoBinding({
       provider: parsed.provider,
       owner: parsed.owner,
@@ -131,7 +223,8 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
       runnerId: parsed.runnerId,
       ...(parsed.workspacePath ? { workspacePath: parsed.workspacePath } : {}),
       ...(parsed.defaultExecutor ? { defaultExecutor: parsed.defaultExecutor } : {}),
-      ...(parsed.allowedActors?.length ? { allowedActors: parsed.allowedActors } : {})
+      ...(parsed.allowedActors?.length ? { allowedActors: parsed.allowedActors } : {}),
+      ...(securityPolicy ? { securityPolicy } : {})
     });
     return c.json({ ok: true }, 201);
   });
@@ -171,11 +264,25 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     if (!binding) {
       return c.json({ error: "repo_not_bound" }, 403);
     }
-    if (isWriteCapable(parsed.event) && !actorIsAllowed(parsed.event, binding.allowedActors)) {
-      return c.json({ error: "actor_not_allowed_for_write" }, 403);
+    const decision = evaluatePolicy({ event: parsed.event, binding });
+    if (decision.outcome === "deny") {
+      return c.json({ error: decision.reason, policyDecision: decision }, 403);
     }
 
     const run = await repo.createRun({ id: parsed.runId, event: parsed.event });
+    await repo.appendRunEvent({
+      runId: run.id,
+      type: "policy.evaluated",
+      payload: decision
+    });
+    if (decision.outcome === "needs_approval") {
+      await repo.markNeedsApproval({
+        runId: run.id,
+        reason: decision.reason,
+        policy: decision
+      });
+      return c.json({ run: { ...run, status: "needs_approval" }, policyDecision: decision }, 202);
+    }
     await deliverAndAudit({
       repo,
       sink: callbackSink,

@@ -92,6 +92,38 @@ describe("OpenTag repository", () => {
     });
   });
 
+  it("stores repository security policy with repo bindings", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      securityPolicy: {
+        readAllowedActors: ["github:octocat"],
+        writeAllowedActors: ["github:maintainer"],
+        blockedActors: ["github:blocked"],
+        allowedRunnerIds: ["runner_1"],
+        approvalRequiredScopes: ["pr:create"]
+      }
+    });
+
+    await expect(repo.getRepoBinding({ provider: "github", owner: "acme", repo: "demo" })).resolves.toMatchObject({
+      runnerId: "runner_1",
+      securityPolicy: {
+        readAllowedActors: ["github:octocat"],
+        writeAllowedActors: ["github:maintainer"],
+        blockedActors: ["github:blocked"],
+        allowedRunnerIds: ["runner_1"],
+        approvalRequiredScopes: ["pr:create"]
+      }
+    });
+  });
+
   it("records runner heartbeats for claimed runs", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

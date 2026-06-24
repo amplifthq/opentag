@@ -24,6 +24,15 @@ export type RepoBinding = {
   workspacePath?: string;
   defaultExecutor?: string;
   allowedActors?: string[];
+  securityPolicy?: RepoSecurityPolicy;
+};
+
+export type RepoSecurityPolicy = {
+  readAllowedActors?: string[];
+  writeAllowedActors?: string[];
+  blockedActors?: string[];
+  allowedRunnerIds?: string[];
+  approvalRequiredScopes?: string[];
 };
 
 export type SlackChannelBinding = {
@@ -93,6 +102,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       workspacePath?: string;
       defaultExecutor?: string;
       allowedActors?: string[];
+      securityPolicy?: RepoSecurityPolicy;
     }): Promise<void> {
       await db
         .insert(repoBindings)
@@ -101,6 +111,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           workspacePath: input.workspacePath ?? null,
           defaultExecutor: input.defaultExecutor ?? null,
           allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null,
+          securityPolicyJson: input.securityPolicy ? JSON.stringify(input.securityPolicy) : null,
           createdAt: nowIso()
         })
         .onConflictDoUpdate({
@@ -109,7 +120,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             runnerId: input.runnerId,
             workspacePath: input.workspacePath ?? null,
             defaultExecutor: input.defaultExecutor ?? null,
-            allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null
+            allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null,
+            securityPolicyJson: input.securityPolicy ? JSON.stringify(input.securityPolicy) : null
           }
         });
     },
@@ -258,7 +270,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         runnerId: row.runnerId,
         ...(row.workspacePath ? { workspacePath: row.workspacePath } : {}),
         ...(row.defaultExecutor ? { defaultExecutor: row.defaultExecutor } : {}),
-        ...(row.allowedActorsJson ? { allowedActors: JSON.parse(row.allowedActorsJson) as string[] } : {})
+        ...(row.allowedActorsJson ? { allowedActors: JSON.parse(row.allowedActorsJson) as string[] } : {}),
+        ...(row.securityPolicyJson ? { securityPolicy: JSON.parse(row.securityPolicyJson) as RepoSecurityPolicy } : {})
       };
     },
 
@@ -322,6 +335,20 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         runId: input.runId,
         type: "run.completed",
         payload: result,
+        createdAt: updatedAt
+      });
+    },
+
+    async markNeedsApproval(input: { runId: string; reason: string; policy?: unknown }): Promise<void> {
+      const updatedAt = nowIso();
+      await db.update(runs).set({ status: "needs_approval", updatedAt }).where(eq(runs.id, input.runId));
+      await appendRunEvent({
+        runId: input.runId,
+        type: "run.needs_approval",
+        payload: {
+          reason: input.reason,
+          ...(input.policy ? { policy: input.policy } : {})
+        },
         createdAt: updatedAt
       });
     },

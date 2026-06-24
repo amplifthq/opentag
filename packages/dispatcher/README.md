@@ -48,6 +48,10 @@ When `pairingToken` is set, every `/v1/*` endpoint requires:
 Authorization: Bearer <pairingToken>
 ```
 
+## Security Policy V1
+
+Repository bindings can include an optional `securityPolicy` with read/write actor allowlists, blocked actors, allowed runner IDs, and permission scopes that should create a `needs_approval` run instead of immediately dispatching. This is a lightweight v0 policy layer, not a replacement for organization SSO, OIDC, tenant isolation, or a full approval workflow.
+
 ## Stability
 
 The Hono app factory and callback sink interfaces are public API. Individual HTTP endpoint semantics should remain backward compatible within a major version.

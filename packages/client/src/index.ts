@@ -20,6 +20,15 @@ export type RepoBindingInput = {
   workspacePath?: string;
   defaultExecutor?: string;
   allowedActors?: string[];
+  securityPolicy?: RepoSecurityPolicy;
+};
+
+export type RepoSecurityPolicy = {
+  readAllowedActors?: string[];
+  writeAllowedActors?: string[];
+  blockedActors?: string[];
+  allowedRunnerIds?: string[];
+  approvalRequiredScopes?: string[];
 };
 
 export type RepositoryBindingConfig = {
