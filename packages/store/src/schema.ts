@@ -168,8 +168,6 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
     CREATE INDEX IF NOT EXISTS runs_runner_idx ON runs(assigned_runner_id);
-    CREATE INDEX IF NOT EXISTS runs_repo_idx ON runs(repo_provider, repo_owner, repo_name);
-    CREATE INDEX IF NOT EXISTS runs_work_thread_idx ON runs(work_thread_id);
     CREATE TABLE IF NOT EXISTS run_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
