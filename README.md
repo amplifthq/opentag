@@ -2,7 +2,7 @@
 
 OpenTag is the open mention layer for agents.
 
-Tag Codex, Claude Code, Pi, or your own local runner from GitHub, Slack, or Lark. OpenTag turns the mention into an auditable run, dispatches it to an approved local or hosted executor, and reports the result back to the original workspace.
+Tag Claude Code, Codex, Hermes, OpenClaw, or your own local runner from GitHub or Slack. OpenTag turns the mention into an auditable run, dispatches it to an approved local or hosted executor, and reports the result back to the original workspace.
 
 ## Why
 

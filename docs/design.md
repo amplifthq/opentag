@@ -27,7 +27,7 @@ OpenTag should let a person write something like:
 @opentag fix this flaky test
 ```
 
-from GitHub, Slack, Lark, or a similar workspace surface, then have OpenTag:
+from GitHub, Slack, or a similar workspace surface, then have OpenTag:
 
 1. Recognize the tagged agent request.
 2. Normalize the workspace event into a stable OpenTag event.
@@ -44,14 +44,14 @@ The first release combines a fast open-source launch with one real MVP:
 - A GitHub App MVP powered by Probot at the edge.
 - An extremely thin hosted dispatcher for public webhook ingress, run persistence, runner lease claiming, and callback coordination.
 - A local runner daemon that can receive or poll for OpenTag runs.
-- At least one executor adapter for a coding agent, initially Codex, Claude Code, or oh-my-pi.
+- At least one executor adapter for a coding agent, initially Claude Code, Codex, Hermes, or OpenClaw.
 - A callback adapter that posts status and final results back to GitHub.
 
 The first release should not attempt to support every workspace, every agent, every permission model, or every deployment shape.
 
 ## Non-Goals For V0
 
-- No Lark app in the first implementation milestone.
+- No additional workspace apps in the first implementation milestone.
 - No custom hosted IDE or chat UI.
 - No general-purpose agent framework.
 - No dependency on a single executor framework.
@@ -62,11 +62,11 @@ The first release should not attempt to support every workspace, every agent, ev
 ## Core Product Principles
 
 - Open core, closed surfaces optional: the protocol and local runner path should be usable without depending on a hosted SaaS.
-- Protocol at the center: GitHub, Slack, Lark, and future surfaces are adapters, not the architecture.
+- Protocol at the center: GitHub, Slack, and future surfaces are adapters, not the architecture.
 - Local-first execution: the runner can live on the user's machine so repo access, credentials, build tools, and private context stay local.
 - Auditable by default: every run records who asked, what context was provided, what permissions were granted, which executor ran, and where the result was posted.
 - Small reversible permissions: each tagged run receives a narrow grant instead of inheriting broad ambient authority.
-- Adapter neutrality: Codex, Claude Code, oh-my-pi, Mastra workflows, and custom agents should all be possible executors.
+- Adapter neutrality: Claude Code, Codex, Hermes, OpenClaw, Mastra workflows, and custom agents should all be possible executors.
 
 ## System Shape
 
@@ -101,7 +101,7 @@ OpenTag Local Daemon
         |
         v
 Executor
-  Codex / Claude Code / oh-my-pi / custom
+  Claude Code / Codex / Hermes / OpenClaw / custom
         |
         v
 Callback Adapter
@@ -132,7 +132,7 @@ docs/
 
 ### `packages/opentag-core`
 
-Owns the stable OpenTag domain model. It must not import Probot, Octokit, Slack SDKs, Lark SDKs, or executor-specific packages.
+Owns the stable OpenTag domain model. It must not import Probot, Octokit, Slack SDKs, workspace SDKs, or executor-specific packages.
 
 Responsibilities:
 
@@ -308,7 +308,7 @@ type ActorIdentity = {
 type AgentTarget = {
   mention: string;
   agentId: string;
-  executorHint?: "codex" | "claude-code" | "oh-my-pi" | "custom";
+  executorHint?: "claude-code" | "codex" | "hermes" | "openclaw" | "custom";
   workspaceHint?: string;
 };
 ```
@@ -558,7 +558,7 @@ Use TypeScript across the v0 repository: Probot app, dispatcher, protocol schema
 
 Reasons:
 
-- GitHub, Slack, Lark, Probot, Octokit, and most agent SDK ecosystems are already TypeScript-friendly.
+- GitHub, Slack, Probot, Octokit, and most agent SDK ecosystems are already TypeScript-friendly.
 - One type system can cover the protocol, adapters, dispatcher, and daemon.
 - Zod or a similar schema library can validate runtime payloads and export public JSON Schema.
 - A TypeScript daemon is easier to iterate while the runner contract is still changing.
@@ -604,9 +604,9 @@ Do not make Agent Native a required dependency for v0.
 
 Vercel Eve could accelerate a Slack-flavored cloud demo, especially for teams already on Vercel. It should be treated as an optional adapter path, not the core.
 
-### oh-my-pi As Executor Adapter
+### Executor Adapters
 
-oh-my-pi is best treated as an executor target. OpenTag can route a run to oh-my-pi, but OpenTag should not become an oh-my-pi remote-control wrapper.
+Claude Code, Codex, Hermes, and OpenClaw are best treated as executor targets. OpenTag can route a run to one of these executors, but OpenTag should not become a remote-control wrapper for any single agent runtime.
 
 ## Permissions And Trust
 
@@ -701,7 +701,7 @@ Good copy:
 
 ```text
 OpenTag is the open mention layer for agents.
-Tag Codex, Claude Code, Pi, or your own local runner from GitHub, Slack, or Lark.
+Tag Claude Code, Codex, Hermes, OpenClaw, or your own local runner from GitHub or Slack.
 ```
 
 ```text
@@ -766,7 +766,7 @@ Success:
 
 Deliverables:
 
-- Codex, Claude Code, or oh-my-pi adapter.
+- Claude Code, Codex, Hermes, or OpenClaw adapter.
 - worktree or branch isolation.
 - final summary capture.
 - changed-file detection.

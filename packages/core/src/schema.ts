@@ -14,7 +14,7 @@ export const ActorIdentitySchema = z.object({
 export const AgentTargetSchema = z.object({
   mention: z.string().min(1),
   agentId: z.string().min(1),
-  executorHint: z.enum(["codex", "claude-code", "oh-my-pi", "custom"]).optional(),
+  executorHint: z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]).optional(),
   workspaceHint: z.string().min(1).optional()
 });
 
