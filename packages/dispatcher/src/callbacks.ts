@@ -7,6 +7,17 @@ function slackUpdateUriFrom(postMessageUri: string): string {
   return postMessageUri.replace(/\/chat\.postMessage$/, "/chat.update");
 }
 
+function slackBotTokenFor(input: {
+  botToken?: string;
+  botTokensByAgentId?: Record<string, string>;
+  agentId?: string;
+}): string | undefined {
+  if (input.agentId && input.botTokensByAgentId?.[input.agentId]) {
+    return input.botTokensByAgentId[input.agentId];
+  }
+  return input.botToken;
+}
+
 export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
 
@@ -33,21 +44,30 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
   };
 }
 
-export function createSlackCallbackSink(input: { botToken?: string; fetchImpl?: FetchLike }): CallbackSink {
+export function createSlackCallbackSink(input: {
+  botToken?: string;
+  botTokensByAgentId?: Record<string, string>;
+  fetchImpl?: FetchLike;
+}): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
   const statusMessageTsByKey = new Map<string, string>();
 
   return {
     async deliver(message: CallbackMessage): Promise<void> {
       if (message.provider !== "slack") return;
-      if (!input.botToken) return;
+      const botToken = slackBotTokenFor({
+        ...(input.botToken ? { botToken: input.botToken } : {}),
+        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
+        ...(message.agentId ? { agentId: message.agentId } : {})
+      });
+      if (!botToken) return;
 
       const thread = parseSlackThreadKey(message.threadKey ?? "");
       const existingStatusTs = message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined;
       const response = await fetchImpl(existingStatusTs ? slackUpdateUriFrom(message.uri) : message.uri, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${input.botToken}`,
+          authorization: `Bearer ${botToken}`,
           "content-type": "application/json"
         },
         body: JSON.stringify(

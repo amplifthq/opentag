@@ -45,13 +45,40 @@ export function verifySlackSignature(input: {
 }
 
 export function createSlackEventsApp(input: {
-  signingSecret: string;
+  slackApps: Array<{
+    signingSecret: string;
+    agentId: string;
+    appId?: string;
+    callbackUri?: string;
+  }>;
   resolveChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   now(): string;
-  callbackUri?: string;
 }) {
   const app = new Hono();
+
+  function resolveSlackApp(inputValue: {
+    apiAppId?: string;
+    rawBody: string;
+    signature: string;
+    timestamp: string;
+  }) {
+    const candidates = inputValue.apiAppId
+      ? input.slackApps.filter((candidate) => candidate.appId === inputValue.apiAppId)
+      : input.slackApps;
+    if (candidates.length === 0) {
+      return { error: "unknown_slack_app" as const };
+    }
+    const slackApp = candidates.find((candidate) =>
+      verifySlackSignature({
+        signingSecret: candidate.signingSecret,
+        timestamp: inputValue.timestamp,
+        rawBody: inputValue.rawBody,
+        signature: inputValue.signature
+      })
+    );
+    return slackApp ? { slackApp } : { error: "invalid_signature" as const };
+  }
 
   app.post("/slack/events", async (c) => {
     const rawBody = await c.req.text();
@@ -60,18 +87,17 @@ export function createSlackEventsApp(input: {
     if (!timestamp || !signature) {
       return c.json({ error: "missing_signature_headers" }, 401);
     }
-    if (
-      !verifySlackSignature({
-        signingSecret: input.signingSecret,
-        timestamp,
-        rawBody,
-        signature
-      })
-    ) {
-      return c.json({ error: "invalid_signature" }, 401);
-    }
-
     const payload = JSON.parse(rawBody) as SlackEventEnvelope;
+    const resolvedSlackApp = resolveSlackApp({
+      ...(payload.api_app_id ? { apiAppId: payload.api_app_id } : {}),
+      rawBody,
+      signature,
+      timestamp
+    });
+    if ("error" in resolvedSlackApp) {
+      return c.json({ error: resolvedSlackApp.error }, 401);
+    }
+    const { slackApp } = resolvedSlackApp;
     if (payload.type === "url_verification") {
       return c.text(payload.challenge ?? "");
     }
@@ -98,9 +124,11 @@ export function createSlackEventsApp(input: {
       ts: payload.event.ts,
       eventId: payload.event_id,
       eventTime: payload.event_time ?? Math.floor(Date.parse(input.now()) / 1000),
+      ...(payload.api_app_id ? { appId: payload.api_app_id } : {}),
+      agentId: slackApp.agentId,
       ...(payload.event.thread_ts ? { threadTs: payload.event.thread_ts } : {}),
       ...(payload.authorizations?.[0]?.user_id ? { botUserId: payload.authorizations[0].user_id } : {}),
-      ...(input.callbackUri ? { callbackUri: input.callbackUri } : {}),
+      ...(slackApp.callbackUri ? { callbackUri: slackApp.callbackUri } : {}),
       binding
     });
     if (!event) {

@@ -88,6 +88,40 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("selects Slack bot tokens by agent id when provided", async () => {
+    const requests: { url: string; authorization: string | null }[] = [];
+    const sink = createSlackCallbackSink({
+      botTokensByAgentId: {
+        gemini: "xoxb-gemini",
+        deepseek: "xoxb-deepseek"
+      },
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return Response.json({ ok: true, ts: "1720000000.000100" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      agentId: "deepseek",
+      body: "done"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://slack.com/api/chat.postMessage",
+        authorization: "Bearer xoxb-deepseek"
+      }
+    ]);
+  });
+
   it("edits an existing Slack status message when statusMessageKey repeats", async () => {
     const requests: { url: string; body: unknown; authorization: string | null }[] = [];
     const sink = createSlackCallbackSink({

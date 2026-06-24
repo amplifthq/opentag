@@ -4,8 +4,8 @@ import { createSlackEventsApp } from "./app.js";
 
 const signingSecret = process.env.SLACK_SIGNING_SECRET;
 const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
-if (!signingSecret || !dispatcherUrl) {
-  throw new Error("SLACK_SIGNING_SECRET and OPENTAG_DISPATCHER_URL are required");
+if (!dispatcherUrl) {
+  throw new Error("OPENTAG_DISPATCHER_URL is required");
 }
 
 const dispatcherToken = process.env.OPENTAG_DISPATCHER_TOKEN;
@@ -15,9 +15,42 @@ const dispatcherClient = createOpenTagClient({
   ...(dispatcherToken ? { pairingToken: dispatcherToken } : {})
 });
 
+type SlackAppConfig = {
+  signingSecret: string;
+  agentId: string;
+  appId?: string;
+  callbackUri?: string;
+};
+
+function slackAppsFromEnv(): SlackAppConfig[] {
+  const appsJson = process.env.OPENTAG_SLACK_APPS_JSON;
+  if (appsJson) {
+    const parsed = JSON.parse(appsJson) as SlackAppConfig[];
+    return parsed.filter((candidate) => candidate.signingSecret && candidate.agentId);
+  }
+
+  if (!signingSecret) {
+    return [];
+  }
+
+  return [
+    {
+      signingSecret,
+      agentId: process.env.OPENTAG_SLACK_AGENT_ID ?? "opentag",
+      ...(process.env.OPENTAG_SLACK_APP_ID ? { appId: process.env.OPENTAG_SLACK_APP_ID } : {}),
+      ...(process.env.OPENTAG_SLACK_POST_MESSAGE_URL ? { callbackUri: process.env.OPENTAG_SLACK_POST_MESSAGE_URL } : {})
+    }
+  ];
+}
+
+const slackApps = slackAppsFromEnv();
+if (slackApps.length === 0) {
+  throw new Error("Configure SLACK_SIGNING_SECRET or OPENTAG_SLACK_APPS_JSON");
+}
+
 serve({
   fetch: createSlackEventsApp({
-    signingSecret,
+    slackApps,
     async resolveChannelBinding(input) {
       try {
         const { binding } = await dispatcherClient.getSlackChannelBinding(input);
@@ -34,8 +67,7 @@ serve({
       await dispatcherClient.createRun({ runId, event });
       return { runId };
     },
-    now: () => new Date().toISOString(),
-    ...(process.env.OPENTAG_SLACK_POST_MESSAGE_URL ? { callbackUri: process.env.OPENTAG_SLACK_POST_MESSAGE_URL } : {})
+    now: () => new Date().toISOString()
   }).fetch,
   port
 });
