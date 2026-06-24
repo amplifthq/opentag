@@ -71,6 +71,9 @@ export async function runOneDaemonIteration(input: {
   const readiness = await executor.canRun({
     runId: claimed.run.id,
     workspacePath: binding.checkoutPath,
+    ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+    ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+    ...(binding.keepWorktree ? { keepWorktree: binding.keepWorktree } : {}),
     command: claimed.event.command,
     context: claimed.event.context
   });
@@ -99,6 +102,9 @@ export async function runOneDaemonIteration(input: {
       {
         runId: claimed.run.id,
         workspacePath: binding.checkoutPath,
+        ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+        ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+        ...(binding.keepWorktree ? { keepWorktree: binding.keepWorktree } : {}),
         command: claimed.event.command,
         context: claimed.event.context
       },

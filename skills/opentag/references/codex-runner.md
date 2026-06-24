@@ -4,10 +4,12 @@ Use this path when the user wants OpenTag to run real coding work and optionally
 
 ## Required Values
 
-- A local repository checkout with no unrelated dirty changes
+- A local repository checkout
 - `defaultExecutor`: `codex`
 - `baseBranch`, usually `main`
 - `pushRemote`, usually `origin`
+- Optional `worktreeRoot`, defaulting to `.worktrees/opentag/<runId>` under the checkout
+- Optional `keepWorktree`: `always`, `on_failure`, or `never`
 - GitHub token in `githubToken` when PR creation is desired
 - A working Codex CLI available to the daemon process
 
@@ -28,7 +30,9 @@ Set the repository executor to `codex`:
       "checkoutPath": "/Users/example/repos/demo",
       "defaultExecutor": "codex",
       "baseBranch": "main",
-      "pushRemote": "origin"
+      "pushRemote": "origin",
+      "worktreeRoot": "/Users/example/repos/demo/.worktrees/opentag",
+      "keepWorktree": "on_failure"
     }
   ]
 }
@@ -38,9 +42,10 @@ Set the repository executor to `codex`:
 
 The Codex executor:
 
-- Refuses dirty workspaces.
-- Creates an isolated branch named `opentag/<runId>`.
-- Runs `codex exec` with the normalized command text.
+- Leaves the user's current checkout and branch alone.
+- Creates an isolated worktree and branch named `opentag/<runId>`.
+- Runs `codex exec` with the normalized command text inside the worktree.
+- Cleans internal agent artifacts and commits changed files to the run branch.
 - Reports changed files and verification details.
 - Pushes the branch and opens a PR when the run intent and credentials allow it.
 
@@ -49,8 +54,8 @@ The Codex executor:
 Before a live run:
 
 ```bash
-git -C /Users/example/repos/demo status --short
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-repos
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- doctor
 ```
 
 Then create a run through GitHub, Slack, or `POST /v1/runs`, and execute:
@@ -63,5 +68,6 @@ OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- ru
 
 - The daemon claims the run for the mapped repository.
 - A branch named `opentag/<runId>` exists locally.
+- A per-run worktree exists when `keepWorktree` says to retain it.
 - The final result lists changed files or explains why no change was needed.
 - If PR creation is enabled, the result includes the PR URL.

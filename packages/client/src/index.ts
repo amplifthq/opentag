@@ -22,6 +22,13 @@ export type RepoBindingInput = {
   allowedActors?: string[];
 };
 
+export type RunnerRegistration = {
+  runnerId: string;
+  name: string;
+  createdAt: string;
+  heartbeatAt?: string;
+};
+
 export type RepositoryBindingConfig = {
   provider: string;
   owner: string;
@@ -30,6 +37,8 @@ export type RepositoryBindingConfig = {
   defaultExecutor?: string;
   baseBranch?: string;
   pushRemote?: string;
+  worktreeRoot?: string;
+  keepWorktree?: "always" | "on_failure" | "never";
 };
 
 export type SlackChannelBindingInput = {
@@ -62,6 +71,7 @@ export type CreateRunInput = {
 
 export type OpenTagClient = {
   registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
+  getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   bindRepository(input: RepoBindingInput): Promise<void>;
   getRepositoryBinding(input: { provider: string; owner: string; repo: string }): Promise<{ binding: RepoBindingInput }>;
   bindSlackChannel(input: SlackChannelBindingInput): Promise<void>;
@@ -122,6 +132,14 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ runnerId: input.runnerId, name: input.name ?? input.runnerId })
       });
       await assertOk(response, "registerRunner");
+    },
+
+    async getRunner(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getRunner");
+      return (await response.json()) as { runner: RunnerRegistration };
     },
 
     async bindRepository(input) {

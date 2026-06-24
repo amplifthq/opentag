@@ -16,6 +16,7 @@ pnpm add @opentag/dispatcher
 - `createGitHubCallbackSink`: posts callback messages to GitHub issue or PR comments.
 - `createSlackCallbackSink`: posts callback messages to Slack threads through `chat.postMessage`.
 - `createCompositeCallbackSink`: fans callback delivery out to multiple sinks.
+- `processPendingCallbacks`: retries queued or failed callback deliveries.
 - `CallbackMessage`, `CallbackSink`: callback delivery contracts.
 
 ## Example
@@ -31,6 +32,7 @@ import {
 export const dispatcher = createDispatcherApp({
   databasePath: "opentag.db",
   pairingToken: process.env.OPENTAG_PAIRING_TOKEN,
+  callbackWorkerIntervalMs: 10_000,
   callbackSink: createCompositeCallbackSink([
     createGitHubCallbackSink({ token: process.env.OPENTAG_GITHUB_TOKEN }),
     createSlackCallbackSink({ botToken: process.env.OPENTAG_SLACK_BOT_TOKEN })
@@ -41,6 +43,8 @@ export const dispatcher = createDispatcherApp({
 ## API Shape
 
 The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, repository bindings, Slack channel bindings, runs, progress, heartbeats, completion, and audit event lookup.
+
+Callback delivery attempts are persisted. Failed deliveries can be retried by calling `POST /v1/callback-deliveries/process`, or automatically by setting `callbackWorkerIntervalMs` in `createDispatcherApp` / `OPENTAG_CALLBACK_WORKER_INTERVAL_MS` in the dispatcher app.
 
 When `pairingToken` is set, every `/v1/*` endpoint requires:
 

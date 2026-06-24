@@ -234,6 +234,70 @@ describe("OpenTag repository", () => {
     });
   });
 
+  it("returns registered runners", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+
+    await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
+      runnerId: "runner_1",
+      name: "Runner One"
+    });
+    await expect(repo.getRunner({ runnerId: "missing" })).resolves.toBeNull();
+  });
+
+  it("schedules failed callback deliveries for retry", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({ id: "run_callback", event: { ...baseEvent, id: "evt_callback", sourceEventId: "comment_callback" } });
+    const delivery = await repo.enqueueCallbackDelivery({
+      runId: "run_callback",
+      kind: "final",
+      provider: "github",
+      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      body: "done"
+    });
+    await repo.markCallbackFailed({
+      deliveryId: delivery.id,
+      error: "provider unavailable",
+      nextAttemptAt: "2026-06-24T00:00:10.000Z"
+    });
+
+    await expect(
+      repo.listPendingCallbackDeliveries({
+        limit: 10,
+        now: new Date("2026-06-24T00:00:05.000Z")
+      })
+    ).resolves.toEqual([]);
+    await expect(
+      repo.listPendingCallbackDeliveries({
+        limit: 10,
+        now: new Date("2026-06-24T00:00:10.000Z")
+      })
+    ).resolves.toMatchObject([
+      {
+        id: delivery.id,
+        status: "failed",
+        attempts: 1,
+        lastError: "provider unavailable",
+        nextAttemptAt: "2026-06-24T00:00:10.000Z"
+      }
+    ]);
+
+    await repo.markCallbackDelivered({ deliveryId: delivery.id });
+    await expect(
+      repo.listCallbackDeliveries({
+        runId: "run_callback"
+      })
+    ).resolves.toMatchObject([{ id: delivery.id, status: "delivered", attempts: 2 }]);
+  });
+
   it("records a completed result", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

@@ -28,26 +28,12 @@ Set `OPENTAG_PAIRING_TOKEN=dev_pairing_token` on the dispatcher if you want to e
 2. Create a local daemon config:
 
 ```bash
-cat > opentag.local.json <<'JSON'
-{
-  "runnerId": "runner_local",
-  "dispatcherUrl": "http://localhost:3030",
-  "pairingToken": "dev_pairing_token",
-  "pollIntervalMs": 5000,
-  "heartbeatIntervalMs": 15000,
-  "repositories": [
-    {
-      "provider": "github",
-      "owner": "acme",
-      "repo": "demo",
-      "checkoutPath": "/Users/example/repos/demo",
-      "defaultExecutor": "echo",
-      "baseBranch": "main",
-      "pushRemote": "origin"
-    }
-  ]
-}
-JSON
+pnpm --filter @opentag/opentagd dev -- init \
+  --owner acme \
+  --repo demo \
+  --checkout /Users/example/repos/demo \
+  --pairing-token dev_pairing_token \
+  --executor echo
 ```
 
 3. Register the runner and bind its repository:
@@ -55,6 +41,7 @@ JSON
 ```bash
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- register-runner
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-repos
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- doctor
 ```
 
 4. Create a run with a normalized event payload:
@@ -126,13 +113,15 @@ Switch the config to `"defaultExecutor": "codex"` to run a real Codex CLI execut
       "checkoutPath": "/Users/example/repos/demo",
       "defaultExecutor": "codex",
       "baseBranch": "main",
-      "pushRemote": "origin"
+      "pushRemote": "origin",
+      "worktreeRoot": "/Users/example/repos/demo/.worktrees/opentag",
+      "keepWorktree": "on_failure"
     }
   ]
 }
 ```
 
-When a `fix` command changes files, OpenTag creates an `opentag/<runId>` branch, pushes it, and opens a PR against `baseBranch`.
+When a `fix` command changes files, OpenTag creates a per-run worktree, commits to an `opentag/<runId>` branch, pushes it, and opens a PR against `baseBranch`. `keepWorktree` can be `always`, `on_failure`, or `never`.
 
 ## Slack Path
 

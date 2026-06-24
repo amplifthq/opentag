@@ -46,7 +46,7 @@ The goal is simple: make "tag an agent into work" a protocol, not a closed surfa
 - **Auditable dispatch** - every run is stored with event metadata, status transitions, progress, result, and callback delivery events.
 - **Explicit runner binding** - a runner only claims runs for repositories it is bound to.
 - **Local-first execution** - `opentagd` resolves a configured local checkout before executing anything.
-- **Executor adapters** - `echo` is available for smoke tests, and `codex` can run a real Codex CLI task on an isolated branch.
+- **Executor adapters** - `echo` is available for smoke tests, and `codex` can run a real Codex CLI task in an isolated worktree.
 - **Embeddable SDK packages** - use the protocol, client, dispatcher, GitHub, Slack, runner, and store packages independently.
 - **Published npm packages** - the public `@opentag/*` package family is available on npm at version `0.1.0`.
 
@@ -88,24 +88,12 @@ OPENTAG_DATABASE_PATH=opentag.db pnpm --filter @opentag/dispatcher-app dev
 
 Create `opentag.local.json`:
 
-```json
-{
-  "runnerId": "runner_local",
-  "dispatcherUrl": "http://localhost:3030",
-  "pollIntervalMs": 5000,
-  "heartbeatIntervalMs": 15000,
-  "repositories": [
-    {
-      "provider": "github",
-      "owner": "acme",
-      "repo": "demo",
-      "checkoutPath": "/Users/example/repos/demo",
-      "defaultExecutor": "echo",
-      "baseBranch": "main",
-      "pushRemote": "origin"
-    }
-  ]
-}
+```bash
+pnpm --filter @opentag/opentagd dev -- init \
+  --owner acme \
+  --repo demo \
+  --checkout /Users/example/repos/demo \
+  --executor echo
 ```
 
 Register and bind the local runner:
@@ -113,6 +101,7 @@ Register and bind the local runner:
 ```bash
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- register-runner
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-repos
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- doctor
 ```
 
 Create a run and execute once:
@@ -137,7 +126,7 @@ curl http://localhost:3030/v1/runs/run_demo_1/events
 1. **Ingress normalizes platform events.** GitHub and Slack adapters translate comments or app mentions into one `OpenTagEvent` schema.
 2. **The dispatcher validates scope.** Runs must include repository metadata, and the repository must be explicitly bound to a runner.
 3. **The local daemon claims only mapped work.** `opentagd` checks its local repository config before running an executor.
-4. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated `opentag/<runId>` branch and runs `codex exec`.
+4. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated worktree and `opentag/<runId>` branch, then runs `codex exec`.
 5. **Callbacks and audit events close the loop.** Progress and final results can be posted back to GitHub or Slack, and every step stays queryable through the dispatcher.
 
 ## Packages
@@ -232,7 +221,7 @@ It returns:
 - verification results
 - optional artifacts such as a branch or pull request
 
-The built-in Codex executor refuses dirty workspaces, creates an isolated branch, runs `codex exec`, filters internal artifacts, and reports changed files. Third-party runners can implement the same `ExecutorAdapter` contract from `@opentag/runner`.
+The built-in Codex executor leaves the user's current checkout alone. It creates a per-run git worktree, checks out an `opentag/<runId>` branch, runs `codex exec`, filters internal artifacts, commits changed files to the run branch, and reports changed files. Third-party runners can implement the same `ExecutorAdapter` contract from `@opentag/runner`.
 
 ## Dispatcher Callback Delivery
 
@@ -243,6 +232,8 @@ When dispatcher callbacks are enabled, set `OPENTAG_DISPATCHER_OWNS_CALLBACKS=tr
 Set `OPENTAG_SLACK_BOT_TOKEN` on the dispatcher to post acknowledgement, progress, and final callback messages to Slack threads through `chat.postMessage`.
 
 Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token for `/v1/*` endpoints. Use the same value as `pairingToken` in `opentagd` config, and set `OPENTAG_DISPATCHER_TOKEN` on ingress apps that create runs through the dispatcher.
+
+Set `OPENTAG_CALLBACK_WORKER_INTERVAL_MS` on the dispatcher to retry failed callback deliveries in the background. Failed deliveries are stored with exponential backoff and can also be processed manually through `POST /v1/callback-deliveries/process`.
 
 ## Examples
 

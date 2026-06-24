@@ -67,6 +67,32 @@ describe("@opentag/client", () => {
     await expect(client.claim({ runnerId: "runner_1" })).resolves.toBeNull();
   });
 
+  it("gets runner registrations", async () => {
+    const requests: string[] = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url) => {
+        requests.push(String(url));
+        return jsonResponse({
+          runner: {
+            runnerId: "runner_1",
+            name: "Local Runner",
+            createdAt: "2026-06-24T00:00:00.000Z"
+          }
+        });
+      }
+    });
+
+    await expect(client.getRunner({ runnerId: "runner_1" })).resolves.toEqual({
+      runner: {
+        runnerId: "runner_1",
+        name: "Local Runner",
+        createdAt: "2026-06-24T00:00:00.000Z"
+      }
+    });
+    expect(requests).toEqual(["http://dispatcher.test/v1/runners/runner_1"]);
+  });
+
   it("parses claimed run responses", async () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",

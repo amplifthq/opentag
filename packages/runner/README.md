@@ -14,8 +14,8 @@ pnpm add @opentag/runner
 
 - `ExecutorAdapter`: interface every executor implements.
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
-- `createCodexExecutor`: executor that runs `codex exec` in a mapped local checkout.
-- Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
+- `createCodexExecutor`: executor that runs `codex exec` in an isolated per-run worktree.
+- Git helpers such as `createRunWorktree`, `changedFiles`, `commitRunChanges`, `worktreePathForRun`, and `branchNameForRun`.
 - Command helpers such as `nodeCommandRunner` and `assertCommandSucceeded`.
 
 ## Example
@@ -49,7 +49,7 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-`createCodexExecutor` refuses to run when the target checkout has uncommitted changes. It creates an isolated `opentag/<runId>` branch before running Codex.
+`createCodexExecutor` does not switch the user's current checkout. It creates a per-run worktree, checks out an `opentag/<runId>` branch, runs Codex there, cleans internal agent artifacts, commits changed files, and then removes or keeps the worktree according to `keepWorktree`.
 
 ## Stability
 

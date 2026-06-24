@@ -12,7 +12,7 @@ pnpm add @opentag/client
 
 ## Exports
 
-- `createOpenTagClient`: full dispatcher client for run creation, claiming, progress, completion, and binding management.
+- `createOpenTagClient`: full dispatcher client for run creation, claiming, progress, completion, runner lookup, and binding management.
 - `createDispatcherClient`: runner-focused compatibility wrapper used by `opentagd`.
 - `createDispatcherAdminClient`: admin-focused compatibility wrapper for runner registration and bindings.
 - `OpenTagClient`, `ClaimedOpenTagRun`, `RepoBindingInput`, `RunProgressInput`: public TypeScript contracts.
@@ -31,6 +31,8 @@ await client.createRun({
   runId: `run_${Date.now()}`,
   event
 });
+
+const { runner } = await client.getRunner({ runnerId: "runner_local" });
 
 const claimed = await client.claim({ runnerId: "runner_local" });
 if (claimed) {

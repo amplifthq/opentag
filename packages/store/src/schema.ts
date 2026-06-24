@@ -87,6 +87,7 @@ export const callbackDeliveries = sqliteTable(
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
+    nextAttemptAt: text("next_attempt_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
@@ -165,6 +166,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       status TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
+      next_attempt_at TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -199,4 +201,10 @@ export function migrateSchema(sqlite: Database.Database): void {
     sqlite.exec("ALTER TABLE runs ADD COLUMN source_event_id TEXT");
   }
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_idx ON runs(source, source_event_id)");
+
+  const callbackColumns = sqlite.prepare("PRAGMA table_info(callback_deliveries)").all() as { name: string }[];
+  const callbackColumnNames = new Set(callbackColumns.map((column) => column.name));
+  if (!callbackColumnNames.has("next_attempt_at")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN next_attempt_at TEXT");
+  }
 }

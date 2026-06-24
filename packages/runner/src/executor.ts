@@ -13,6 +13,9 @@ export type ExecutorEventSink = {
 export type ExecutorRunInput = {
   runId: string;
   workspacePath: string;
+  baseBranch?: string;
+  worktreeRoot?: string;
+  keepWorktree?: "always" | "on_failure" | "never";
   command: OpenTagCommand;
   context: ContextPointer[];
 };

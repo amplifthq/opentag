@@ -75,6 +75,12 @@ describe("dispatcher API", () => {
     const bindingGetResponse = await app.request("/v1/repo-bindings/github/acme/demo");
     const binding = await bindingGetResponse.json();
     expect(binding.binding).toMatchObject({ runnerId: "runner_1", workspacePath: "/Users/test/demo" });
+
+    const runnerGetResponse = await app.request("/v1/runners/runner_1");
+    expect(runnerGetResponse.status).toBe(200);
+    await expect(runnerGetResponse.json()).resolves.toMatchObject({
+      runner: { runnerId: "runner_1", name: "Local Runner" }
+    });
   });
 
   it("delivers acknowledgement, progress, and final callback messages with audit events", async () => {
@@ -181,6 +187,57 @@ describe("dispatcher API", () => {
       "run.created",
       "callback.acknowledgement.queued",
       "callback.acknowledgement.failed"
+    ]);
+  });
+
+  it("retries failed callback deliveries when processed later", async () => {
+    let attempts = 0;
+    const delivered: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackRetry: {
+        baseDelayMs: 0,
+        now: new Date("2026-06-24T00:00:00.000Z")
+      },
+      callbackSink: {
+        async deliver(message) {
+          attempts += 1;
+          if (attempts === 1) {
+            throw new Error("provider unavailable");
+          }
+          delivered.push(message.body);
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_callback_retry", event: { ...validEvent, id: "evt_callback_retry", sourceEventId: "comment_callback_retry" } })
+    });
+    expect(createResponse.status).toBe(201);
+
+    const processResponse = await app.request("/v1/callback-deliveries/process", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ limit: 10 })
+    });
+    await expect(processResponse.json()).resolves.toEqual({ processed: 1, delivered: 1, failed: 0 });
+    expect(delivered).toEqual(["OpenTag picked this up. Run: `run_callback_retry`"]);
+
+    const eventsResponse = await app.request("/v1/runs/run_callback_retry/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "run.created",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.failed",
+      "callback.acknowledgement.delivered"
     ]);
   });
 
