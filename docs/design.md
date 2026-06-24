@@ -713,13 +713,13 @@ Success:
 
 - a tagged GitHub issue can result in a linked PR.
 
-## Open Questions
+## Resolved V0 Decisions
 
-- Which executor should be first: Codex, Claude Code, or oh-my-pi?
-- Should the first public demo use a real GitHub App installation or a CLI replay of webhook payloads?
-- What is the minimum approval model before allowing write operations?
-- Should the protocol use JSON Schema from day one?
-- Should the project use Mastra immediately or wait until the workflow needs justify it?
+- First real executor: Codex, with echo retained as the smoke-test executor.
+- First public demo: local CLI/HTTP replay, while the Probot GitHub App path remains implemented for real installations.
+- Minimum write approval model: write-capable work is constrained to an isolated branch plus pull request; direct writes to the target branch are not part of v0.
+- Protocol schema: TypeScript/Zod schemas are the source of truth and `@opentag/core` exports public JSON Schema definitions for `OpenTagEvent`, `OpenTagRun`, and `OpenTagRunResult`.
+- Orchestration framework: no Mastra dependency in v0; use lightweight TypeScript primitives until workflows justify a dedicated framework.
 
 ## Recommended First Implementation Decision
 

@@ -74,3 +74,5 @@ Set `OPENTAG_GITHUB_TOKEN` on the dispatcher to let it post acknowledgement, pro
 ## Design
 
 See [docs/design.md](docs/design.md).
+
+The core package also exports JSON Schema definitions as `OpenTagJsonSchemas` for `OpenTagEvent`, `OpenTagRun`, and `OpenTagRunResult`.
