@@ -46,6 +46,8 @@ if (event) {
 
 `fix` and `run` commands receive write-capable permissions such as `repo:write` and `pr:create`. Review, explain, and investigate-style commands stay read/comment oriented.
 
+Command Parser V1 hints are also projected into GitHub events. For example, `--file`, `--path`, and `--range` add command-scoped context pointers; `--scope repo:read` and `--network restricted` add requested permission grants; `--executor codex` sets `target.executorHint`; and `--approval required` is preserved in command metadata for dispatcher or policy layers to enforce.
+
 ## Stability
 
 Normalizer input shapes are intentionally small and provider-specific. Prefer adding optional fields over changing existing fields.

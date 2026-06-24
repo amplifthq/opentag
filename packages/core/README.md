@@ -15,7 +15,7 @@ pnpm add @opentag/core
 - `OpenTagEventSchema`, `OpenTagRunSchema`, `OpenTagRunResultSchema`: Zod schemas for protocol objects.
 - `OpenTagEvent`, `OpenTagRun`, `OpenTagRunResult`: TypeScript types inferred from the schemas.
 - `parseOpenTagMention`: extracts an `@opentag` command from workspace text.
-- `commandFromRawText`: maps raw command text to a normalized intent.
+- `commandFromRawText`: maps raw command text to a normalized intent and V1 command parse.
 - `OpenTagJsonSchemas`: JSON Schema definitions for systems that do not use TypeScript or Zod.
 
 ## Example
@@ -42,6 +42,24 @@ const event = OpenTagEventSchema.parse({
   metadata: { owner: "acme", repo: "demo" }
 });
 ```
+
+## Command Parser V1
+
+`parseOpenTagMention` keeps the simple launch syntax:
+
+```text
+@opentag fix this flaky test
+```
+
+It also accepts a lightweight V1 command DSL for protocol hints:
+
+```text
+@opentag review auth changes --file packages/auth/src/index.ts --range 12-30 --approval required --executor codex
+```
+
+The first word still maps to `fix`, `review`, `investigate`, `explain`, `run`, or `unknown`. Remaining free text becomes `command.args.prompt` and `command.parsed.prompt`. Supported flags include `--file`, `--path`, `--line`, `--range`, `--scope`, `--network restricted`, `--approval required|auto|never`, `--executor`, `--runner`, `--label`, `--timeout`, and `--url`.
+
+The parser is intentionally additive. Existing consumers can keep using `command.rawText`, `command.intent`, and `command.args`; newer adapters can read `command.parsed` for references, requested scopes, approval hints, executor hints, network policy hints, and parser diagnostics.
 
 ## Stability
 

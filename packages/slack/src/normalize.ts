@@ -1,4 +1,4 @@
-import { commandFromRawText, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
+import { commandFromRawText, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -48,7 +48,7 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
   return { teamId, channelId, threadTs };
 }
 
-function permissionsForIntent(intent: ReturnType<typeof commandFromRawText>["intent"]): PermissionGrant[] {
+function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     {
       scope: "chat:postMessage",
@@ -80,6 +80,70 @@ function permissionsForIntent(intent: ReturnType<typeof commandFromRawText>["int
   return permissions;
 }
 
+function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
+  const permissions = permissionsForIntent(command.intent);
+  for (const scope of command.parsed?.requestedScopes ?? []) {
+    addPermission(permissions, {
+      scope,
+      reason: `requested by OpenTag command flag --scope ${scope}`
+    });
+  }
+  return permissions;
+}
+
+function addPermission(permissions: PermissionGrant[], permission: PermissionGrant): void {
+  if (!permissions.some((candidate) => candidate.scope === permission.scope)) {
+    permissions.push(permission);
+  }
+}
+
+function contextPointersForCommand(command: OpenTagCommand): ContextPointer[] {
+  const context: ContextPointer[] = [];
+
+  for (const reference of command.parsed?.references ?? []) {
+    if (reference.kind === "url") {
+      context.push({
+        kind: "url",
+        uri: reference.uri,
+        visibility: "organization",
+        title: reference.title ?? "Command URL reference"
+      });
+      continue;
+    }
+
+    if (reference.kind === "file" || reference.kind === "path") {
+      context.push({
+        kind: "file",
+        uri: uriWithLineFragment(reference.uri, reference.startLine, reference.endLine, reference.line),
+        visibility: "organization",
+        title: reference.title ?? "Command file reference"
+      });
+    }
+  }
+
+  return context;
+}
+
+function uriWithLineFragment(uri: string, startLine?: number, endLine?: number, line?: number): string {
+  if (startLine && endLine) {
+    return `${uri}#L${startLine}-L${endLine}`;
+  }
+  if (line) {
+    return `${uri}#L${line}`;
+  }
+  return uri;
+}
+
+function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
+  if (!command.parsed) return {};
+  return {
+    commandParser: command.parsed.version,
+    commandDiagnostics: command.parsed.diagnostics,
+    ...(command.parsed.approval ? { approval: command.parsed.approval } : {}),
+    ...(command.parsed.network ? { network: command.parsed.network } : {})
+  };
+}
+
 export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEvent | null {
   const rawText = stripSlackAppMention(input.text, input.botUserId);
   if (!rawText) return null;
@@ -100,7 +164,8 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
     },
     target: {
       mention: input.botUserId ? `<@${input.botUserId}>` : "<@app>",
-      agentId: "opentag"
+      agentId: "opentag",
+      ...(command.parsed?.executorHint ? { executorHint: command.parsed.executorHint } : {})
     },
     command,
     context: [
@@ -115,9 +180,10 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
         uri: input.text,
         visibility: "organization",
         title: "Slack message text"
-      }
+      },
+      ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForIntent(command.intent),
+    permissions: permissionsForCommand(command),
     callback: {
       provider: "slack",
       uri: input.callbackUri ?? "https://slack.com/api/chat.postMessage",
@@ -133,7 +199,8 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       messageTs: input.ts,
       repoProvider: "github",
       owner: input.binding.owner,
-      repo: input.binding.repo
+      repo: input.binding.repo,
+      ...commandMetadata(command)
     }
   };
 }

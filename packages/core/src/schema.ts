@@ -2,6 +2,47 @@ import { z } from "zod";
 
 export const SourceSchema = z.enum(["github", "slack", "lark", "cli", "webhook"]);
 export const ProviderSchema = z.enum(["github", "slack", "lark"]);
+export const ExecutorHintSchema = z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]);
+export const PermissionScopeSchema = z.enum([
+  "repo:read",
+  "repo:write",
+  "issue:comment",
+  "chat:postMessage",
+  "pr:create",
+  "pr:update",
+  "runner:local",
+  "network:restricted"
+]);
+export const CommandArgValueSchema = z.union([z.string(), z.boolean(), z.number()]);
+export const CommandFlagValueSchema = z.union([CommandArgValueSchema, z.array(CommandArgValueSchema)]);
+
+export const CommandReferenceSchema = z.object({
+  kind: z.enum(["file", "path", "line", "range", "url", "text"]),
+  uri: z.string().min(1),
+  line: z.number().int().positive().optional(),
+  startLine: z.number().int().positive().optional(),
+  endLine: z.number().int().positive().optional(),
+  title: z.string().min(1).optional()
+});
+
+export const CommandParseDiagnosticSchema = z.object({
+  level: z.enum(["warning", "error"]),
+  code: z.string().min(1),
+  message: z.string().min(1),
+  token: z.string().min(1).optional()
+});
+
+export const ParsedOpenTagCommandSchema = z.object({
+  version: z.literal("v1"),
+  prompt: z.string(),
+  flags: z.record(CommandFlagValueSchema),
+  references: z.array(CommandReferenceSchema),
+  requestedScopes: z.array(PermissionScopeSchema),
+  approval: z.enum(["auto", "required", "never"]).optional(),
+  network: z.enum(["restricted"]).optional(),
+  executorHint: ExecutorHintSchema.optional(),
+  diagnostics: z.array(CommandParseDiagnosticSchema)
+});
 
 export const ActorIdentitySchema = z.object({
   provider: ProviderSchema,
@@ -14,14 +55,15 @@ export const ActorIdentitySchema = z.object({
 export const AgentTargetSchema = z.object({
   mention: z.string().min(1),
   agentId: z.string().min(1),
-  executorHint: z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]).optional(),
+  executorHint: ExecutorHintSchema.optional(),
   workspaceHint: z.string().min(1).optional()
 });
 
 export const OpenTagCommandSchema = z.object({
   rawText: z.string(),
   intent: z.enum(["fix", "review", "investigate", "explain", "run", "unknown"]),
-  args: z.record(z.union([z.string(), z.boolean(), z.number()]))
+  args: z.record(CommandArgValueSchema),
+  parsed: ParsedOpenTagCommandSchema.optional()
 });
 
 export const ContextPointerSchema = z.object({
@@ -41,16 +83,7 @@ export const ContextPointerSchema = z.object({
 });
 
 export const PermissionGrantSchema = z.object({
-  scope: z.enum([
-    "repo:read",
-    "repo:write",
-    "issue:comment",
-    "chat:postMessage",
-    "pr:create",
-    "pr:update",
-    "runner:local",
-    "network:restricted"
-  ]),
+  scope: PermissionScopeSchema,
   reason: z.string().min(1),
   expiresAt: z.string().datetime().optional()
 });
@@ -107,6 +140,9 @@ export const OpenTagRunSchema = z.object({
 export type ActorIdentity = z.infer<typeof ActorIdentitySchema>;
 export type AgentTarget = z.infer<typeof AgentTargetSchema>;
 export type OpenTagCommand = z.infer<typeof OpenTagCommandSchema>;
+export type ParsedOpenTagCommand = z.infer<typeof ParsedOpenTagCommandSchema>;
+export type CommandParseDiagnostic = z.infer<typeof CommandParseDiagnosticSchema>;
+export type CommandReference = z.infer<typeof CommandReferenceSchema>;
 export type ContextPointer = z.infer<typeof ContextPointerSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
 export type CallbackRoute = z.infer<typeof CallbackRouteSchema>;

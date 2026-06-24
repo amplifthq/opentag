@@ -320,8 +320,28 @@ type OpenTagCommand = {
   rawText: string;
   intent: "fix" | "review" | "investigate" | "explain" | "run" | "unknown";
   args: Record<string, string | boolean | number>;
+  parsed?: {
+    version: "v1";
+    prompt: string;
+    flags: Record<string, string | boolean | number | Array<string | boolean | number>>;
+    references: Array<{
+      kind: "file" | "path" | "line" | "range" | "url" | "text";
+      uri: string;
+      line?: number;
+      startLine?: number;
+      endLine?: number;
+      title?: string;
+    }>;
+    requestedScopes: PermissionGrant["scope"][];
+    approval?: "auto" | "required" | "never";
+    network?: "restricted";
+    executorHint?: AgentTarget["executorHint"];
+    diagnostics: Array<{ level: "warning" | "error"; code: string; message: string; token?: string }>;
+  };
 };
 ```
+
+Command Parser V1 keeps the casual mention syntax while making protocol hints explicit. A request such as `@opentag review auth changes --file packages/auth/src/index.ts --range 12-30 --approval required --executor codex` still has a natural-language prompt, but adapters can now preserve file references, requested permission scopes, executor hints, network hints, approval intent, and diagnostics in the normalized event. V1 parsing is not itself an authorization layer; dispatcher policy, runner sandboxing, and human approval still decide whether a hinted capability can be used.
 
 ### Context Pointer
 
