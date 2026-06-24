@@ -2,6 +2,7 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  createAdapterMutationCompilerRegistry,
   type OpenTagEvent,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -11,9 +12,10 @@ import {
 } from "@opentag/core";
 import {
   applyGitHubIssueMutationOperation,
-  compileGitHubIssueMutationIntents,
+  createGitHubIssueMutationCompiler,
   type FetchLike as GitHubFetchLike
 } from "@opentag/github";
+import type { GitHubIssueMutationOperation } from "@opentag/github";
 import type { SlackBlock } from "@opentag/slack";
 import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import Database from "better-sqlite3";
@@ -285,6 +287,22 @@ export function createDispatcherApp(input: {
     return c.json({ mappings });
   });
 
+  app.get("/v1/repo-bindings/:provider/:owner/:repo/metrics", async (c) => {
+    const metrics = await repo.getRepoMetrics({
+      provider: c.req.param("provider"),
+      owner: c.req.param("owner"),
+      repo: c.req.param("repo")
+    });
+    return c.json({ metrics });
+  });
+
+  app.get("/v1/work-thread-metrics", async (c) => {
+    const threadId = c.req.query("threadId");
+    if (!threadId) return c.json({ error: "thread_id_required" }, 422);
+    const metrics = await repo.getWorkThreadMetrics({ threadId });
+    return c.json({ metrics });
+  });
+
   app.post("/v1/slack-channel-bindings", async (c) => {
     const parsed = CreateSlackChannelBindingSchema.parse(await c.req.json());
     await repo.createSlackChannelBinding(parsed);
@@ -487,9 +505,10 @@ export function createDispatcherApp(input: {
         issueNumber
       };
       const executedOutcomes = [];
-      for (const compilation of compileGitHubIssueMutationIntents(executableIntents, {
-        mappings: mappingsFromAdapterPlan(plan.adapterPlan)
-      })) {
+      const compilerRegistry = createAdapterMutationCompilerRegistry([
+        createGitHubIssueMutationCompiler({ mappings: mappingsFromAdapterPlan(plan.adapterPlan) })
+      ]);
+      for (const compilation of compilerRegistry.compile("github", executableIntents)) {
         if (!compilation.ok) {
           executedOutcomes.push(compilation.outcome);
           continue;
@@ -497,7 +516,7 @@ export function createDispatcherApp(input: {
         executedOutcomes.push(
           await applyGitHubIssueMutationOperation({
             target,
-            operation: compilation.operation,
+            operation: compilation.operation as GitHubIssueMutationOperation,
             ...(input.githubApply.fetchImpl ? { fetchImpl: input.githubApply.fetchImpl } : {})
           })
         );

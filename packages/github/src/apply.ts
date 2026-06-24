@@ -1,4 +1,4 @@
-import type { AdapterMutationMapping, ApplyIntentOutcome, MutationIntent } from "@opentag/core";
+import type { AdapterMutationCompiler, AdapterMutationMapping, ApplyIntentOutcome, MutationIntent } from "@opentag/core";
 import type { FetchLike } from "./pull-request.js";
 
 export type GitHubIssueMutationTarget = {
@@ -226,6 +226,30 @@ export function compileGitHubIssueMutationIntents(
   options: { mappings?: AdapterMutationMapping[] } = {}
 ): GitHubIssueMutationCompilation[] {
   return intents.map((intent) => compileGitHubIssueMutationIntent(intent, options));
+}
+
+export function createGitHubIssueMutationCompiler(options: {
+  mappings?: AdapterMutationMapping[];
+} = {}): AdapterMutationCompiler<GitHubIssueMutationOperation> {
+  return {
+    adapter: "github",
+    compile(intent) {
+      const compilation = compileGitHubIssueMutationIntent(intent, options);
+      if (!compilation.ok) {
+        return {
+          ok: false,
+          adapter: "github",
+          outcome: compilation.outcome
+        };
+      }
+      return {
+        ok: true,
+        adapter: "github",
+        intentId: compilation.intentId,
+        operation: compilation.operation
+      };
+    }
+  };
 }
 
 export async function applyGitHubIssueMutationOperation(input: {

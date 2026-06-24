@@ -437,6 +437,29 @@ describe("dispatcher API", () => {
         applyOutcomeCounts: { skipped: 1 }
       }
     });
+    const repoMetricsResponse = await app.request("/v1/repo-bindings/github/acme/demo/metrics");
+    expect(repoMetricsResponse.status).toBe(200);
+    await expect(repoMetricsResponse.json()).resolves.toMatchObject({
+      metrics: {
+        scope: "repo",
+        scopeId: "github:acme/demo",
+        runCount: 1,
+        suggestedChangesCount: 1
+      }
+    });
+    const proposalAgainResponse = await app.request("/v1/proposals/proposal_protocol");
+    const proposalAgain = await proposalAgainResponse.json();
+    const threadId = proposalAgain.snapshot.workThread.id;
+    const threadMetricsResponse = await app.request(`/v1/work-thread-metrics?threadId=${encodeURIComponent(threadId)}`);
+    expect(threadMetricsResponse.status).toBe(200);
+    await expect(threadMetricsResponse.json()).resolves.toMatchObject({
+      metrics: {
+        scope: "work_thread",
+        scopeId: threadId,
+        runCount: 1,
+        suggestedChangesCount: 1
+      }
+    });
   });
 
   it("creates child runs from next action hints with lineage fields", async () => {

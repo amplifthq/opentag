@@ -300,4 +300,44 @@ describe("@opentag/client", () => {
       }
     ]);
   });
+
+  it("calls aggregate metrics endpoints", async () => {
+    const requests: string[] = [];
+    const metrics = {
+      scope: "repo",
+      scopeId: "github:acme/demo",
+      runCount: 2,
+      totalEventCount: 10,
+      humanEventCount: 2,
+      auditEventCount: 8,
+      debugEventCount: 0,
+      humanCallbackCount: 2,
+      threadNoiseRatio: 0.25,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 1,
+      applyPlanCount: 1,
+      childRunCount: 1,
+      applyOutcomeCounts: { applied: 0, skipped: 1, failed: 0, stale: 0, unsupported: 0 },
+      staleIntentCount: 0
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url) => {
+        requests.push(String(url));
+        return jsonResponse({ metrics });
+      }
+    });
+
+    await expect(client.getRepoMetrics({ provider: "github", owner: "acme", repo: "demo" })).resolves.toMatchObject({
+      metrics: { scope: "repo", runCount: 2 }
+    });
+    await expect(client.getWorkThreadMetrics({ threadId: "thread/github/acme/demo#1" })).resolves.toMatchObject({
+      metrics: { runCount: 2 }
+    });
+
+    expect(requests).toEqual([
+      "http://dispatcher.test/v1/repo-bindings/github/acme/demo/metrics",
+      "http://dispatcher.test/v1/work-thread-metrics?threadId=thread%2Fgithub%2Facme%2Fdemo%231"
+    ]);
+  });
 });

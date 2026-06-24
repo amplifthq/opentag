@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assembleContextPacketFromEvent,
   contextPacketFromEvent,
+  createAdapterMutationCompilerRegistry,
   preflightMutationIntent,
   protocolRunFieldsFromEvent,
   workThreadFromEvent
@@ -101,6 +102,57 @@ describe("protocol helpers", () => {
     expect(packet.sourcePointers).toHaveLength(1);
     expect(packet.assembly?.budgetTokens).toBe(500);
     expect(packet.assembly?.stages).toContain("budget");
+  });
+
+  it("allows context packet assembly hooks to customize stages", () => {
+    const packet = assembleContextPacketFromEvent(githubEvent, "2026-06-24T00:00:00.000Z", {
+      hooks: {
+        collect({ pointers }) {
+          return pointers.slice(0, 1);
+        },
+        summarize({ summary }) {
+          return `Hooked: ${summary}`;
+        },
+        preserve({ facts }) {
+          return [...facts, { text: "hook-added fact" }];
+        }
+      }
+    });
+
+    expect(packet.summary).toBe("Hooked: fix the flaky test");
+    expect(packet.sourcePointers).toHaveLength(1);
+    expect(packet.facts?.map((fact) => fact.text)).toContain("hook-added fact");
+  });
+
+  it("compiles mutation intents through adapter compiler registry", () => {
+    const registry = createAdapterMutationCompilerRegistry([
+      {
+        adapter: "test",
+        compile(intent) {
+          return {
+            ok: true,
+            adapter: "test",
+            intentId: intent.intentId,
+            operation: { action: intent.action }
+          };
+        }
+      }
+    ]);
+
+    expect(
+      registry.compile("test", [{ intentId: "intent_1", domain: "labels", action: "add_label", summary: "Add label." }])
+    ).toEqual([{ ok: true, adapter: "test", intentId: "intent_1", operation: { action: "add_label" } }]);
+    expect(registry.compile("missing", [{ intentId: "intent_2", domain: "labels", action: "add_label", summary: "Add label." }])).toEqual([
+      {
+        ok: false,
+        adapter: "missing",
+        outcome: {
+          intentId: "intent_2",
+          outcome: "unsupported",
+          message: "No adapter mutation compiler is registered for missing."
+        }
+      }
+    ]);
   });
 
   it("preflights mutation intents through platform permission and OpenTag policy", () => {

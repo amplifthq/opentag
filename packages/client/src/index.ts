@@ -120,6 +120,12 @@ export type RunMetrics = {
   staleIntentCount: number;
 };
 
+export type AggregateMetrics = Omit<RunMetrics, "runId"> & {
+  scope: "repo" | "work_thread";
+  scopeId: string;
+  runCount: number;
+};
+
 export type OpenTagClient = {
   registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
   bindRepository(input: RepoBindingInput): Promise<void>;
@@ -144,6 +150,8 @@ export type OpenTagClient = {
   getRun(input: { runId: string }): Promise<ClaimedOpenTagRun>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
+  getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<{ metrics: AggregateMetrics }>;
+  getWorkThreadMetrics(input: { threadId: string }): Promise<{ metrics: AggregateMetrics }>;
   getProposal(input: { proposalId: string }): Promise<{ runId: string; snapshot: SuggestedChangesSnapshot }>;
   getProposalLineage(input: { proposalId: string }): Promise<{ lineage: ProposalLineage }>;
   listCurrentMutationIntents(input: { proposalId: string }): Promise<{ intents: MutationIntentActionability[] }>;
@@ -358,6 +366,22 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "getRunMetrics");
       return (await response.json()) as { metrics: RunMetrics };
+    },
+
+    async getRepoMetrics(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/repo-bindings/${input.provider}/${input.owner}/${input.repo}/metrics`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getRepoMetrics");
+      return (await response.json()) as { metrics: AggregateMetrics };
+    },
+
+    async getWorkThreadMetrics(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/work-thread-metrics?threadId=${encodeURIComponent(input.threadId)}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getWorkThreadMetrics");
+      return (await response.json()) as { metrics: AggregateMetrics };
     },
 
     async getProposal(input) {

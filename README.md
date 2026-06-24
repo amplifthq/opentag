@@ -1,6 +1,6 @@
 # OpenTag
 
-**Open-source agent mentions for every workspace.**
+**Open agent mentions for every workspace.**
 
 [![Status](https://img.shields.io/badge/status-v0-blue)](#status)
 [![npm](https://img.shields.io/npm/v/@opentag/core?label=npm)](https://www.npmjs.com/org/opentag)
@@ -10,7 +10,9 @@
 
 Claude Tag showed the new interface for team AI: tag an agent where work is already happening, let it use the right tools, and get the result back in the thread.
 
-OpenTag makes that pattern open. Bring `@opentag` to GitHub, Slack, or your own workspace surface; route the request through an auditable dispatcher; and run Claude Code, Codex, Hermes, OpenClaw, or a custom local runner without locking the whole workflow to one vendor.
+Tag agents from GitHub, Slack, or your own workspace surface. OpenTag adds bounded context, explicit permissions, auditable execution, and local-first runners when you need them.
+
+OpenTag is not another AI workspace. It is the protocol layer that brings agents to the work item thread you already use.
 
 > OpenTag is not affiliated with Anthropic. It is an open implementation of the agent-mention workflow that Claude Tag made obvious.
 
@@ -20,8 +22,13 @@ flowchart LR
   B --> C["Hosted or embedded dispatcher"]
   C --> D["Bound local daemon"]
   D --> E["Claude Code, Codex, or custom runner"]
-  E --> F["Reply, audit log, or pull request"]
+  E --> F["Proposal, PR, callback, metrics"]
 ```
+
+Real smoke tests have validated:
+
+- GitHub issue -> OpenTag -> local Claude Code -> commit branch -> pull request -> GitHub callback
+- Slack thread -> OpenTag -> local Claude Code -> Slack final callback with audit-only progress
 
 ## Why OpenTag
 
@@ -41,14 +48,21 @@ The goal is simple: make "tag an agent into work" a protocol, not a closed surfa
 
 ## What Works Today
 
-- **GitHub mentions** - `issue_comment.created` and `pull_request_review_comment.created` become normalized OpenTag events.
-- **Slack app mentions** - bound Slack channels can route `app_mention` events to the same dispatcher and local daemon path.
-- **Auditable dispatch** - every run is stored with event metadata, status transitions, progress, result, and callback delivery events.
-- **Explicit runner binding** - a runner only claims runs for repositories it is bound to.
-- **Local-first execution** - `opentagd` resolves a configured local checkout before executing anything.
-- **Executor adapters** - `echo` is available for smoke tests, and `codex` can run a real Codex CLI task on an isolated branch.
-- **Embeddable SDK packages** - use the protocol, client, dispatcher, GitHub, Slack, runner, and store packages independently.
-- **Published npm packages** - the public `@opentag/*` package family is available on npm at version `0.1.0`.
+### Core Loop
+
+- **GitHub and Slack ingress** - issue comments, PR review comments, and Slack app mentions normalize into one `OpenTagEvent`.
+- **Local-first execution** - `opentagd` claims only explicitly bound repositories and runs in your local checkout.
+- **Built-in local executors** - `echo` for smoke tests, `claude-code` for `claude --print`, and `codex` for `codex exec`.
+- **Quiet callbacks** - Slack progress stays audit-only by default; GitHub updates one run comment in place.
+
+### Protocol Runtime
+
+- **Work-thread model** - runs attach to `WorkItemReference + ConversationAnchor`, not an internal shadow task.
+- **Context packets** - execution input is assembled through collect, classify, filter, preserve, summarize, budget, and emit stages.
+- **Suggested changes** - agents can return immutable `SuggestedChangesSnapshot` objects with semantic mutation intents.
+- **Approval and apply** - approvals create separate decision objects; apply plans produce per-intent outcomes.
+- **Policy and mappings** - repo-scoped policy rules and mutation mappings compile semantic intents into adapter operations.
+- **Metrics** - run, repo, and work-thread metrics expose thread noise, proposal counts, approvals, child runs, and apply outcomes.
 
 ## Quick Start
 
@@ -65,10 +79,54 @@ Or work from this repository:
 ```bash
 pnpm install
 pnpm test
+pnpm smoke:protocol
+pnpm smoke:slack-protocol
 pnpm build
 ```
 
-For the full local GitHub-to-runner smoke test, follow [examples/github-to-echo](examples/github-to-echo/README.md). It starts the dispatcher, binds a local runner, creates a sample GitHub-shaped run, executes it with the echo executor, and lets you inspect the audit log.
+For no-secret protocol smoke tests, run `pnpm smoke:protocol` and `pnpm smoke:slack-protocol`. They start an in-process dispatcher with a temporary SQLite database and exercise the protocol chain through the client SDK.
+
+For a full local GitHub-to-runner smoke test, follow [examples/github-to-echo](examples/github-to-echo/README.md). It starts the dispatcher, binds a local runner, creates a sample GitHub-shaped run, executes it with the echo executor, and lets you inspect the audit log.
+
+## Run Claude Code Locally
+
+Set a repository binding to use the built-in Claude Code executor:
+
+```json
+{
+  "runnerId": "runner_local",
+  "dispatcherUrl": "http://localhost:3031",
+  "pairingToken": "dev_pairing_token",
+  "repositories": [
+    {
+      "provider": "github",
+      "owner": "acme",
+      "repo": "demo",
+      "checkoutPath": "/Users/example/repos/demo",
+      "defaultExecutor": "claude-code",
+      "baseBranch": "main",
+      "pushRemote": "origin"
+    }
+  ]
+}
+```
+
+Then register, bind, and run the daemon:
+
+```bash
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- register-runner
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-repos
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- serve
+```
+
+For real local smoke tests:
+
+```bash
+scripts/dev/run-gh-claude-local-test.sh
+scripts/dev/run-slack-claude-local-test.sh
+```
+
+Both scripts use real platform callbacks while keeping execution local.
 
 ## Agent Skill
 
@@ -137,8 +195,9 @@ curl http://localhost:3030/v1/runs/run_demo_1/events
 1. **Ingress normalizes platform events.** GitHub and Slack adapters translate comments or app mentions into one `OpenTagEvent` schema.
 2. **The dispatcher validates scope.** Runs must include repository metadata, and the repository must be explicitly bound to a runner.
 3. **The local daemon claims only mapped work.** `opentagd` checks its local repository config before running an executor.
-4. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated `opentag/<runId>` branch and runs `codex exec`.
-5. **Callbacks and audit events close the loop.** Progress and final results can be posted back to GitHub or Slack, and every step stays queryable through the dispatcher.
+4. **The executor does the work.** The echo executor proves the loop; Claude Code and Codex create isolated `opentag/<runId>` branches and run the local CLI.
+5. **Protocol artifacts capture the outcome.** Results can include suggested changes, next-action hints, proposal lineage, approval decisions, apply plans, and per-intent apply outcomes.
+6. **Callbacks and audit events close the loop.** Human threads get quiet ack/final callbacks, while detailed progress and metrics stay queryable through the dispatcher.
 
 ## Packages
 
@@ -146,13 +205,13 @@ Current public release: `0.1.0`.
 
 | Package | Purpose |
 | --- | --- |
-| [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | Zod schemas, TypeScript types, mention parsing, and JSON Schema exports |
-| [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | HTTP client for ingress apps, local runners, and admin setup |
+| [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | Zod schemas, TypeScript types, protocol helpers, mention parsing, and JSON Schema exports |
+| [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | HTTP client for ingress apps, local runners, admin setup, proposals, approvals, apply plans, policy, mappings, and metrics |
 | [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | Embeddable Hono dispatcher and callback sinks |
-| [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub event normalization, comment rendering, and PR helpers |
+| [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub event normalization, comment rendering, PR helpers, and issue mutation compilation/apply helpers |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack event normalization, thread keys, and callback helpers |
-| [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite/Drizzle persistence and lease primitives |
-| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus echo and Codex executor adapters |
+| [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite/Drizzle persistence for runs, audit events, proposals, approvals, apply plans, policy, mappings, leases, and metrics |
+| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus echo, Claude Code, and Codex executor adapters |
 
 Runnable apps:
 
@@ -232,15 +291,32 @@ It returns:
 - verification results
 - optional artifacts such as a branch or pull request
 
-The built-in Codex and Claude Code executors refuse dirty workspaces, create an isolated branch, run the local CLI (`codex exec` or `claude --print`), filter internal artifacts, and report changed files. Third-party runners can implement the same `ExecutorAdapter` contract from `@opentag/runner`.
+The built-in Codex and Claude Code executors refuse dirty workspaces, create an isolated branch, run the local CLI (`codex exec` or `claude --print`), filter internal artifacts, report changed files, and return structured `OpenTagRunResult` objects. When PR creation is allowed, `opentagd` commits executor-produced file changes before pushing the run branch and opening a pull request. Third-party runners can implement the same `ExecutorAdapter` contract from `@opentag/runner`.
+
+## Protocol Runtime
+
+OpenTag's runtime is centered on engineering work item threads, not chat transcripts. The core protocol surface includes:
+
+- `WorkItemReference`, `ConversationAnchor`, and `WorkThread` for durable work context.
+- `ContextPacket` assembly with collect, classify, filter, preserve, summarize, budget, and emit stages.
+- `RunEvent` visibility and importance for quiet callbacks and audit/debug timelines.
+- `SuggestedChangesSnapshot` and semantic `MutationIntent` objects.
+- `ApprovalDecision` and `ApplyPlan` objects with per-intent outcomes.
+- `ActionHint` values that can create child runs with lineage back to parent runs, proposals, and apply plans.
+- Repo-scoped policy rules and mutation mappings for adapter compilation.
+- Run, repo, and work-thread metrics including thread noise ratio, proposal counts, approval counts, child runs, and apply outcome counts.
+
+GitHub issue mutations currently support labels and assignees directly. Status and priority are available through explicit repo mutation mappings, for example `priority: P1 -> label: priority/P1`.
 
 ## Dispatcher Callback Delivery
 
 Set `OPENTAG_GITHUB_TOKEN` on the dispatcher to post acknowledgement, progress, and final callback messages to GitHub comments.
 
+GitHub callbacks update one comment per run in place. The first callback creates the run comment, and later progress/final callbacks patch that same comment instead of flooding the issue thread.
+
 When dispatcher callbacks are enabled, set `OPENTAG_DISPATCHER_OWNS_CALLBACKS=true` on the Probot app to avoid duplicate acknowledgement comments.
 
-Set `OPENTAG_SLACK_BOT_TOKEN` on the dispatcher to post acknowledgement, progress, and final callback messages to Slack threads through `chat.postMessage`.
+Set `OPENTAG_SLACK_BOT_TOKEN` on the dispatcher to post acknowledgement and final callback messages to Slack threads through `chat.postMessage`. Routine Slack progress remains audit-only by default.
 
 Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token for `/v1/*` endpoints. Use the same value as `pairingToken` in `opentagd` config, and set `OPENTAG_DISPATCHER_TOKEN` on ingress apps that create runs through the dispatcher.
 
@@ -249,12 +325,17 @@ Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token f
 - [GitHub to echo](examples/github-to-echo/README.md) - manual end-to-end GitHub-shaped smoke test.
 - [Embedded dispatcher](examples/embedded-dispatcher/README.md) - host the dispatcher inside another Node service.
 - [Custom runner](examples/custom-runner/README.md) - build a third-party runner with `@opentag/client` and `@opentag/runner`.
+- `scripts/test/protocol-runtime-smoke.ts` - in-process GitHub-shaped protocol runtime smoke test.
+- `scripts/test/slack-protocol-runtime-smoke.ts` - in-process Slack-shaped protocol runtime smoke test.
+- `scripts/dev/run-gh-claude-local-test.sh` - GitHub CLI-assisted real local Claude Code smoke test.
+- `scripts/dev/run-slack-claude-local-test.sh` - Slack API-assisted real local Claude Code smoke test.
 
 ## Real Integration Guides
 
 - [Real integration smoke test](docs/real-integration-smoke-test.md) - real GitHub and Slack setup, trigger, and debugging order based on an actual end-to-end validation pass.
 - `scripts/dev/start-github-test.sh` - starts the dispatcher, local daemon, and GitHub Probot ingress for a real GitHub smoke test.
 - `scripts/dev/start-slack-test.sh` - starts the dispatcher, local daemon, and Slack Events ingress for a real Slack smoke test.
+- `scripts/dev/start-github-slack-claude-test.sh` - starts GitHub ingress, Slack ingress, dispatcher, and a local Claude Code daemon for combined real testing.
 
 ## Status
 
@@ -262,18 +343,18 @@ OpenTag is a young v0 project. The current codebase proves the core loop:
 
 - GitHub and Slack ingress
 - normalized protocol schemas
-- dispatcher persistence and leases
+- dispatcher persistence, leases, proposals, approvals, apply plans, policy, mappings, lineage, and metrics
 - local daemon polling and heartbeats
-- echo and Codex executors
-- GitHub and Slack callbacks
+- echo, Claude Code, and Codex executors
+- GitHub and Slack callbacks with quiet defaults
 - package-level SDK usage
 
 Next areas of work:
 
 - richer hosted setup flow
-- stronger callback delivery observability
-- more executor adapters
-- more workspace adapters
+- GitHub Project field mapping for status and priority
+- more workspace adapter compilers
+- adapter-specific context packet redaction and classification hooks
 - production hardening for multi-tenant dispatcher deployments
 
 ## Design

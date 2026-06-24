@@ -333,6 +333,25 @@ describe("OpenTag repository", () => {
       },
       staleIntentCount: 0
     });
+    await expect(repo.getRepoMetrics({ provider: "github", owner: "acme", repo: "demo" })).resolves.toMatchObject({
+      scope: "repo",
+      scopeId: "github:acme/demo",
+      runCount: 1,
+      suggestedChangesCount: 1,
+      approvalDecisionCount: 1,
+      applyPlanCount: 1
+    });
+    const storedRun = await repo.getRun({ runId: "run_protocol" });
+    const threadId = storedRun?.run.thread?.id;
+    expect(threadId).toBeTruthy();
+    await expect(repo.getWorkThreadMetrics({ threadId: threadId! })).resolves.toMatchObject({
+      scope: "work_thread",
+      scopeId: threadId,
+      runCount: 1,
+      suggestedChangesCount: 1,
+      approvalDecisionCount: 1,
+      applyPlanCount: 1
+    });
   });
 
   it("uses repo policy rules during apply preflight", async () => {

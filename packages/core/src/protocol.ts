@@ -36,7 +36,73 @@ export type ContextPacketAssemblyOptions = {
   risks?: string[];
   exclusions?: string[];
   redactions?: Array<{ reason: string; sourceUri?: string }>;
+  hooks?: ContextPacketAssemblyHooks;
 };
+
+export type ContextPacketAssemblyHooks = {
+  collect?(input: { event: OpenTagEvent; pointers: ContextPointer[] }): ContextPointer[];
+  classify?(input: { event: OpenTagEvent; classified: ClassifiedContextPointer[] }): ClassifiedContextPointer[];
+  filter?(input: { event: OpenTagEvent; classified: ClassifiedContextPointer[] }): ClassifiedContextPointer[];
+  preserve?(input: { event: OpenTagEvent; facts: Array<{ text: string; sourceUri?: string }> }): Array<{ text: string; sourceUri?: string }>;
+  summarize?(input: { event: OpenTagEvent; summary: string }): string;
+  budget?(input: {
+    event: OpenTagEvent;
+    classified: ClassifiedContextPointer[];
+    budgetTokens?: number;
+  }): ClassifiedContextPointer[];
+  emit?(input: { event: OpenTagEvent; packet: ContextPacket }): ContextPacket;
+};
+
+export type AdapterMutationCompilation<TOperation = unknown> =
+  | {
+      ok: true;
+      adapter: string;
+      intentId: string;
+      operation: TOperation;
+    }
+  | {
+      ok: false;
+      adapter: string;
+      outcome: ApplyIntentOutcome;
+    };
+
+export type AdapterMutationCompiler<TOperation = unknown> = {
+  adapter: string;
+  compile(intent: MutationIntent): AdapterMutationCompilation<TOperation>;
+};
+
+export type AdapterMutationCompilerRegistry = {
+  register<TOperation>(compiler: AdapterMutationCompiler<TOperation>): void;
+  get(adapter: string): AdapterMutationCompiler | undefined;
+  compile(adapter: string, intents: MutationIntent[]): AdapterMutationCompilation[];
+};
+
+export function createAdapterMutationCompilerRegistry(compilers: AdapterMutationCompiler[] = []): AdapterMutationCompilerRegistry {
+  const byAdapter = new Map(compilers.map((compiler) => [compiler.adapter, compiler]));
+  return {
+    register(compiler) {
+      byAdapter.set(compiler.adapter, compiler);
+    },
+    get(adapter) {
+      return byAdapter.get(adapter);
+    },
+    compile(adapter, intents) {
+      const compiler = byAdapter.get(adapter);
+      if (!compiler) {
+        return intents.map((intent) => ({
+          ok: false,
+          adapter,
+          outcome: {
+            intentId: intent.intentId,
+            outcome: "unsupported",
+            message: `No adapter mutation compiler is registered for ${adapter}.`
+          }
+        }));
+      }
+      return intents.map((intent) => compiler.compile(intent));
+    }
+  };
+}
 
 function classifyContextPointer(pointer: ContextPointer): ClassifiedContextPointer {
   if (pointer.kind === "text") {
@@ -92,18 +158,27 @@ export function assembleContextPacketFromEvent(
   emittedAt = event.receivedAt,
   options: ContextPacketAssemblyOptions = {}
 ): ContextPacket {
-  const collected = collectContextPointers(event);
-  const classified = classifyContextPointers(collected);
-  const filtered = filterClassifiedContextPointers(classified);
-  const budgeted = budgetContextPointers(filtered, options.budgetTokens);
+  const collected = options.hooks?.collect?.({ event, pointers: collectContextPointers(event) }) ?? collectContextPointers(event);
+  const classified = options.hooks?.classify?.({ event, classified: classifyContextPointers(collected) }) ?? classifyContextPointers(collected);
+  const filtered =
+    options.hooks?.filter?.({ event, classified: filterClassifiedContextPointers(classified) }) ??
+    filterClassifiedContextPointers(classified);
+  const budgeted =
+    options.hooks?.budget?.({
+      event,
+      classified: budgetContextPointers(filtered, options.budgetTokens),
+      ...(options.budgetTokens ? { budgetTokens: options.budgetTokens } : {})
+    }) ??
+    budgetContextPointers(filtered, options.budgetTokens);
   const writeScopes = event.permissions
     .map((permission) => permission.scope)
     .filter((scope) => scope === "repo:write" || scope === "pr:create" || scope === "pr:update");
-  const summary = summarizeContextPacket(event);
-  return {
+  const summary = options.hooks?.summarize?.({ event, summary: summarizeContextPacket(event) }) ?? summarizeContextPacket(event);
+  const facts = options.hooks?.preserve?.({ event, facts: preserveContextFacts(event, budgeted) }) ?? preserveContextFacts(event, budgeted);
+  const packet = {
     summary,
     sourcePointers: budgeted.map((entry) => entry.pointer),
-    facts: preserveContextFacts(event, budgeted),
+    facts,
     risks:
       options.risks ??
       (writeScopes.length > 0
@@ -118,6 +193,7 @@ export function assembleContextPacketFromEvent(
       emittedAt
     }
   };
+  return options.hooks?.emit?.({ event, packet }) ?? packet;
 }
 
 export const DefaultCapabilityContracts = [

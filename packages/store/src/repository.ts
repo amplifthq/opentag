@@ -105,6 +105,24 @@ export type OpenTagRunMetrics = {
   staleIntentCount: number;
 };
 
+export type OpenTagAggregateMetrics = {
+  scope: "repo" | "work_thread";
+  scopeId: string;
+  runCount: number;
+  totalEventCount: number;
+  humanEventCount: number;
+  auditEventCount: number;
+  debugEventCount: number;
+  humanCallbackCount: number;
+  threadNoiseRatio: number;
+  suggestedChangesCount: number;
+  approvalDecisionCount: number;
+  applyPlanCount: number;
+  childRunCount: number;
+  applyOutcomeCounts: ApplyOutcomeCounts;
+  staleIntentCount: number;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -295,6 +313,40 @@ function metricsFromEvents(runId: string, events: OpenTagAuditEvent[]): OpenTagR
     childRunCount: events.filter((event) => event.type === "run.child_created").length,
     applyOutcomeCounts,
     staleIntentCount: applyOutcomeCounts.stale
+  };
+}
+
+function aggregateMetrics(input: {
+  scope: OpenTagAggregateMetrics["scope"];
+  scopeId: string;
+  runs: OpenTagRunMetrics[];
+}): OpenTagAggregateMetrics {
+  const applyOutcomeCounts = emptyApplyOutcomeCounts();
+  for (const run of input.runs) {
+    applyOutcomeCounts.applied += run.applyOutcomeCounts.applied;
+    applyOutcomeCounts.skipped += run.applyOutcomeCounts.skipped;
+    applyOutcomeCounts.failed += run.applyOutcomeCounts.failed;
+    applyOutcomeCounts.stale += run.applyOutcomeCounts.stale;
+    applyOutcomeCounts.unsupported += run.applyOutcomeCounts.unsupported;
+  }
+  const auditEventCount = input.runs.reduce((sum, run) => sum + run.auditEventCount, 0);
+  const humanCallbackCount = input.runs.reduce((sum, run) => sum + run.humanCallbackCount, 0);
+  return {
+    scope: input.scope,
+    scopeId: input.scopeId,
+    runCount: input.runs.length,
+    totalEventCount: input.runs.reduce((sum, run) => sum + run.totalEventCount, 0),
+    humanEventCount: input.runs.reduce((sum, run) => sum + run.humanEventCount, 0),
+    auditEventCount,
+    debugEventCount: input.runs.reduce((sum, run) => sum + run.debugEventCount, 0),
+    humanCallbackCount,
+    threadNoiseRatio: auditEventCount === 0 ? humanCallbackCount : humanCallbackCount / auditEventCount,
+    suggestedChangesCount: input.runs.reduce((sum, run) => sum + run.suggestedChangesCount, 0),
+    approvalDecisionCount: input.runs.reduce((sum, run) => sum + run.approvalDecisionCount, 0),
+    applyPlanCount: input.runs.reduce((sum, run) => sum + run.applyPlanCount, 0),
+    childRunCount: input.runs.reduce((sum, run) => sum + run.childRunCount, 0),
+    applyOutcomeCounts,
+    staleIntentCount: input.runs.reduce((sum, run) => sum + run.staleIntentCount, 0)
   };
 }
 
@@ -1102,6 +1154,75 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt: row.createdAt
       }));
       return metricsFromEvents(input.runId, events);
+    },
+
+    async getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<OpenTagAggregateMetrics> {
+      const runRows = await db.select().from(runs).orderBy(asc(runs.createdAt));
+      const matchingRunIds = runRows
+        .filter((row) => {
+          const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
+          const key = repoKeyFromEvent(event);
+          return key?.provider === input.provider && key.owner === input.owner && key.repo === input.repo;
+        })
+        .map((row) => row.id);
+      const runMetrics = [];
+      for (const runId of matchingRunIds) {
+        const rows = await db.select().from(runEvents).where(eq(runEvents.runId, runId)).orderBy(asc(runEvents.id));
+        runMetrics.push(
+          metricsFromEvents(
+            runId,
+            rows.map((row) => ({
+              id: row.id,
+              runId: row.runId,
+              type: row.type,
+              visibility: RunEventVisibilitySchema.parse(row.visibility),
+              importance: RunEventImportanceSchema.parse(row.importance),
+              ...(row.message ? { message: row.message } : {}),
+              payload: JSON.parse(row.payloadJson) as unknown,
+              createdAt: row.createdAt
+            }))
+          )
+        );
+      }
+      return aggregateMetrics({
+        scope: "repo",
+        scopeId: `${input.provider}:${input.owner}/${input.repo}`,
+        runs: runMetrics
+      });
+    },
+
+    async getWorkThreadMetrics(input: { threadId: string }): Promise<OpenTagAggregateMetrics> {
+      const runRows = await db.select().from(runs).orderBy(asc(runs.createdAt));
+      const matchingRunIds = runRows
+        .filter((row) => {
+          const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
+          return protocolRunFieldsFromEvent(event, row.createdAt).thread?.id === input.threadId;
+        })
+        .map((row) => row.id);
+      const runMetrics = [];
+      for (const runId of matchingRunIds) {
+        const rows = await db.select().from(runEvents).where(eq(runEvents.runId, runId)).orderBy(asc(runEvents.id));
+        runMetrics.push(
+          metricsFromEvents(
+            runId,
+            rows.map((row) => ({
+              id: row.id,
+              runId: row.runId,
+              type: row.type,
+              visibility: RunEventVisibilitySchema.parse(row.visibility),
+              importance: RunEventImportanceSchema.parse(row.importance),
+              ...(row.message ? { message: row.message } : {}),
+              payload: JSON.parse(row.payloadJson) as unknown,
+              createdAt: row.createdAt
+            }))
+          )
+        );
+      }
+      return aggregateMetrics({
+        scope: "work_thread",
+        scopeId: input.threadId,
+        runs: runMetrics
+      });
     }
   };
 }
