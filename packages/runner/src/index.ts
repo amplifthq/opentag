@@ -3,3 +3,4 @@ export * from "./command.js";
 export * from "./echo.js";
 export * from "./executor.js";
 export * from "./git.js";
+export * from "./security.js";

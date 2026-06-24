@@ -26,6 +26,12 @@ export type OpenTagDaemonConfig = {
   pairingToken?: string;
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
+  security?: {
+    mode?: "enforce" | "audit" | "off";
+    allowedWorkspaceRoot?: string;
+    allowUnsafePrompts?: boolean;
+    extraSafeEnv?: string[];
+  };
 };
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
@@ -71,7 +77,24 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
     ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: Number(process.env.OPENTAG_POLL_INTERVAL_MS) } : {}),
-    ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS ? { heartbeatIntervalMs: Number(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS) } : {})
+    ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS ? { heartbeatIntervalMs: Number(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS) } : {}),
+    ...(process.env.OPENTAG_SECURITY_MODE ||
+    process.env.OPENTAG_ALLOWED_WORKSPACE_ROOT ||
+    process.env.OPENTAG_ALLOW_UNSAFE_PROMPTS
+      ? {
+          security: {
+            ...(process.env.OPENTAG_SECURITY_MODE
+              ? { mode: process.env.OPENTAG_SECURITY_MODE as "enforce" | "audit" | "off" }
+              : {}),
+            ...(process.env.OPENTAG_ALLOWED_WORKSPACE_ROOT
+              ? { allowedWorkspaceRoot: process.env.OPENTAG_ALLOWED_WORKSPACE_ROOT }
+              : {}),
+            ...(process.env.OPENTAG_ALLOW_UNSAFE_PROMPTS
+              ? { allowUnsafePrompts: process.env.OPENTAG_ALLOW_UNSAFE_PROMPTS === "true" }
+              : {})
+          }
+        }
+      : {})
   };
   return config;
 }

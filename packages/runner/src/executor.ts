@@ -1,4 +1,5 @@
-import type { ContextPointer, OpenTagCommand, OpenTagRunResult } from "@opentag/core";
+import type { ContextPointer, OpenTagCommand, OpenTagRunResult, PermissionGrant } from "@opentag/core";
+import type { RunnerSecurityPolicy } from "./security.js";
 
 export type ExecutorEvent = {
   type: "executor.started" | "executor.progress" | "executor.completed" | "executor.failed";
@@ -15,6 +16,8 @@ export type ExecutorRunInput = {
   workspacePath: string;
   command: OpenTagCommand;
   context: ContextPointer[];
+  permissions?: PermissionGrant[];
+  security?: RunnerSecurityPolicy;
 };
 
 export type ExecutorReadiness = {

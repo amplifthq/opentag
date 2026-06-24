@@ -72,8 +72,9 @@ program
       repositories: config.repositories,
       executors: {
         echo: createEchoExecutor(),
-        codex: createCodexExecutor()
+        codex: createCodexExecutor({ ...(config.security ? { security: config.security } : {}) })
       },
+      ...(config.security ? { security: config.security } : {}),
       pullRequestOptions: {
         ...(config.githubToken ? { githubToken: config.githubToken } : {})
       },
@@ -97,8 +98,9 @@ program
       repositories: config.repositories,
       executors: {
         echo: createEchoExecutor(),
-        codex: createCodexExecutor()
+        codex: createCodexExecutor({ ...(config.security ? { security: config.security } : {}) })
       },
+      ...(config.security ? { security: config.security } : {}),
       ...(config.githubToken ? { pullRequestOptions: { githubToken: config.githubToken } } : {}),
       ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
       ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),

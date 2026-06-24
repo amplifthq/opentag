@@ -45,6 +45,7 @@ The goal is simple: make "tag an agent into work" a protocol, not a closed surfa
 - **Auditable dispatch** - every run is stored with event metadata, status transitions, progress, result, and callback delivery events.
 - **Explicit runner binding** - a runner only claims runs for repositories it is bound to.
 - **Local-first execution** - `opentagd` resolves a configured local checkout before executing anything.
+- **Runner safety guardrails** - local agent runs enforce explicit write grants, reject obvious prompt-injection and secret-exfiltration requests, keep file context inside the mapped workspace, and start Codex with a scrubbed environment.
 - **Executor adapters** - `echo` is available for smoke tests, and `codex` can run a real Codex CLI task on an isolated branch.
 - **Embeddable SDK packages** - use the protocol, client, dispatcher, GitHub, Slack, runner, and store packages independently.
 
@@ -127,8 +128,9 @@ curl http://localhost:3030/v1/runs/run_demo_1/events
 1. **Ingress normalizes platform events.** GitHub and Slack adapters translate comments or app mentions into one `OpenTagEvent` schema.
 2. **The dispatcher validates scope.** Runs must include repository metadata, and the repository must be explicitly bound to a runner.
 3. **The local daemon claims only mapped work.** `opentagd` checks its local repository config before running an executor.
-4. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated `opentag/<runId>` branch and runs `codex exec`.
-5. **Callbacks and audit events close the loop.** Progress and final results can be posted back to GitHub or Slack, and every step stays queryable through the dispatcher.
+4. **Runner guardrails run before execution.** OpenTag checks explicit write grants, obvious prompt-injection and secret-exfiltration patterns, local file context boundaries, and sensitive environment variables before spawning Codex.
+5. **The executor does the work.** The echo executor proves the loop; the Codex executor creates an isolated `opentag/<runId>` branch and runs `codex exec`.
+6. **Callbacks and audit events close the loop.** Progress and final results can be posted back to GitHub or Slack, and every step stays queryable through the dispatcher.
 
 ## Packages
 

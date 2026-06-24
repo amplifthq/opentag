@@ -2,11 +2,13 @@ import type { ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
 import type { ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
+import { assessRunnerSecurity, formatSecurityAssessment, scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
 
 export type CodexExecutorOptions = {
   runner?: CommandRunner;
   codexCommand?: string;
   model?: string;
+  security?: RunnerSecurityPolicy;
 };
 
 function contextLines(context: ContextPointer[]): string {
@@ -55,6 +57,30 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       return { ready: true };
     },
     async run(input, sink) {
+      const security = input.security ?? options.security;
+      const assessment = assessRunnerSecurity({
+        executorId: "codex",
+        workspacePath: input.workspacePath,
+        command: input.command,
+        context: input.context,
+        ...(input.permissions ? { permissions: input.permissions } : {}),
+        ...(security ? { policy: security } : {})
+      });
+      if (assessment.findings.length > 0) {
+        await sink.emit({
+          type: assessment.allowed ? "executor.progress" : "executor.failed",
+          message: formatSecurityAssessment(assessment),
+          at: new Date().toISOString()
+        });
+      }
+      if (!assessment.allowed) {
+        return {
+          conclusion: "needs_human",
+          summary: formatSecurityAssessment(assessment),
+          nextAction: "Review the request and rerun with a narrower prompt or an explicit local policy override if appropriate."
+        };
+      }
+
       const branchName = branchNameForRun(input.runId);
       await sink.emit({
         type: "executor.started",
@@ -80,6 +106,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       ];
       const codexResult = await runner.run(codexCommand, args, {
         cwd: input.workspacePath,
+        env: scrubEnvironment(undefined, security),
         input: buildPrompt({
           runId: input.runId,
           rawText: input.command.rawText,
