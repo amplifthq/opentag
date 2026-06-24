@@ -62,16 +62,10 @@ For the full local GitHub-to-runner smoke test, follow [examples/github-to-echo]
 
 ## Agent Skill
 
-Install the OpenTag agent skill so Codex can help configure the dispatcher, local daemon, GitHub mentions, Slack mentions, and executor setup:
+Install the OpenTag skill for any supported agent:
 
 ```bash
-npx skills add https://github.com/amplifthq/opentag --skill opentag -a codex
-```
-
-Install it globally if you want the skill available outside a single project:
-
-```bash
-npx skills add https://github.com/amplifthq/opentag --skill opentag -g -a codex
+npx skills add https://github.com/amplifthq/opentag --skill opentag --agent '*'
 ```
 
 ## Try The Local Echo Loop
