@@ -1,10 +1,11 @@
 import { OpenTagEventSchema, OpenTagRunResultSchema } from "@opentag/core";
-import { renderAcknowledgement, renderFinalResult, renderProgress } from "@opentag/github";
+import type { SlackBlock } from "@opentag/slack";
 import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
 import { z } from "zod";
+import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
 
 const CreateRunnerSchema = z.object({
   runnerId: z.string().min(1),
@@ -70,6 +71,8 @@ export type CallbackMessage = {
   uri: string;
   body: string;
   threadKey?: string;
+  statusMessageKey?: string;
+  blocks?: SlackBlock[];
 };
 
 export type CallbackSink = {
@@ -100,12 +103,13 @@ function isAuthorized(request: Request, pairingToken: string | undefined): boole
   return request.headers.get("authorization") === `Bearer ${pairingToken}`;
 }
 
-export function createDispatcherApp(input: { databasePath: string; callbackSink?: CallbackSink; pairingToken?: string }) {
+export function createDispatcherApp(input: { databasePath: string; callbackSink?: CallbackSink; pairingToken?: string; presentation?: CallbackPresentation }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
   const callbackSink = input.callbackSink ?? noopCallbackSink;
+  const presentation = input.presentation ?? createDefaultCallbackPresentation();
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -184,7 +188,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         kind: "acknowledgement",
         provider: parsed.event.callback.provider,
         uri: parsed.event.callback.uri,
-        body: renderAcknowledgement(run.id),
+        body: presentation.acknowledgement({ provider: parsed.event.callback.provider, runId: run.id }),
         ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
       }
     });
@@ -221,18 +225,21 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {})
     });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      message: {
-        runId,
-        kind: "progress",
-        provider: stored.event.callback.provider,
-        uri: stored.event.callback.uri,
-        body: renderProgress({ runId, message: body.message }),
-        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
-      }
-    });
+    if (presentation.shouldDeliverProgress(stored.event.callback.provider)) {
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        message: {
+          runId,
+          kind: "progress",
+          provider: stored.event.callback.provider,
+          uri: stored.event.callback.uri,
+          body: presentation.progress({ provider: stored.event.callback.provider, runId, message: body.message }),
+          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+          statusMessageKey: `${runId}:status`
+        }
+      });
+    }
     return c.json({ ok: true });
   });
 
@@ -243,6 +250,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     if (!stored) return c.json({ error: "run_not_found" }, 404);
 
     await repo.completeRun({ runId, result: parsed.result });
+    const finalPresentation = presentation.final({ provider: stored.event.callback.provider, result: parsed.result });
     await deliverAndAudit({
       repo,
       sink: callbackSink,
@@ -251,8 +259,9 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         kind: "final",
         provider: stored.event.callback.provider,
         uri: stored.event.callback.uri,
-        body: renderFinalResult(parsed.result),
-        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
+        body: finalPresentation.body,
+        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+        ...(finalPresentation.blocks?.length ? { blocks: finalPresentation.blocks } : {})
       }
     });
     return c.json({ ok: true });

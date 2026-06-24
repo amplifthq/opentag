@@ -1,7 +1,11 @@
-import { parseSlackThreadKey } from "@opentag/slack";
+import { createSlackPostMessagePayload, createSlackUpdateMessagePayload, parseSlackThreadKey } from "@opentag/slack";
 import type { CallbackMessage, CallbackSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
+
+function slackUpdateUriFrom(postMessageUri: string): string {
+  return postMessageUri.replace(/\/chat\.postMessage$/, "/chat.update");
+}
 
 export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
@@ -31,6 +35,7 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
 
 export function createSlackCallbackSink(input: { botToken?: string; fetchImpl?: FetchLike }): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
+  const statusMessageTsByKey = new Map<string, string>();
 
   return {
     async deliver(message: CallbackMessage): Promise<void> {
@@ -38,25 +43,46 @@ export function createSlackCallbackSink(input: { botToken?: string; fetchImpl?: 
       if (!input.botToken) return;
 
       const thread = parseSlackThreadKey(message.threadKey ?? "");
-      const response = await fetchImpl(message.uri, {
+      const existingStatusTs = message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined;
+      const response = await fetchImpl(existingStatusTs ? slackUpdateUriFrom(message.uri) : message.uri, {
         method: "POST",
         headers: {
           authorization: `Bearer ${input.botToken}`,
           "content-type": "application/json"
         },
-        body: JSON.stringify({
-          channel: thread.channelId,
-          text: message.body,
-          thread_ts: thread.threadTs
-        })
+        body: JSON.stringify(
+          existingStatusTs
+            ? createSlackUpdateMessagePayload({
+                channelId: thread.channelId,
+                text: message.body,
+                messageTs: existingStatusTs,
+                ...(message.blocks?.length ? { blocks: message.blocks } : {})
+              })
+            : createSlackPostMessagePayload({
+                channelId: thread.channelId,
+                text: message.body,
+                threadTs: thread.threadTs,
+                ...(message.blocks?.length ? { blocks: message.blocks } : {})
+              })
+        )
       });
 
       if (!response.ok) {
         throw new Error(`deliver Slack callback failed: ${response.status} ${await response.text()}`);
       }
-      const body = (await response.json()) as { ok?: boolean; error?: string };
+      const body = (await response.json()) as { ok?: boolean; error?: string; ts?: string };
       if (body.ok === false) {
         throw new Error(`deliver Slack callback failed: ${body.error ?? "unknown_error"}`);
+      }
+      if (message.statusMessageKey && !existingStatusTs && body.ts) {
+        statusMessageTsByKey.set(message.statusMessageKey, body.ts);
+      }
+      if (message.kind === "final") {
+        for (const key of statusMessageTsByKey.keys()) {
+          if (key.startsWith(`${message.runId}:`)) {
+            statusMessageTsByKey.delete(key);
+          }
+        }
       }
     }
   };
