@@ -1,7 +1,7 @@
 import { OpenTagEventSchema, OpenTagRunResultSchema, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult } from "@opentag/core";
 import { and, asc, eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { repoBindings, runEvents, runners, runs } from "./schema.js";
+import { repoBindings, runEvents, runners, runs, slackChannelBindings } from "./schema.js";
 
 export type ClaimedOpenTagRun = {
   run: OpenTagRun;
@@ -24,6 +24,13 @@ export type RepoBinding = {
   workspacePath?: string;
   defaultExecutor?: string;
   allowedActors?: string[];
+};
+
+export type SlackChannelBinding = {
+  teamId: string;
+  channelId: string;
+  owner: string;
+  repo: string;
 };
 
 function nowIso(): string {
@@ -54,7 +61,7 @@ function repoKeyFromEvent(event: OpenTagEvent): { provider: string; owner: strin
   const repo = event.metadata["repo"];
   if (typeof owner !== "string" || typeof repo !== "string") return null;
   return {
-    provider: event.source,
+    provider: typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github",
     owner,
     repo
   };
@@ -103,6 +110,25 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             workspacePath: input.workspacePath ?? null,
             defaultExecutor: input.defaultExecutor ?? null,
             allowedActorsJson: input.allowedActors ? JSON.stringify(input.allowedActors) : null
+          }
+        });
+    },
+
+    async createSlackChannelBinding(input: SlackChannelBinding): Promise<void> {
+      await db
+        .insert(slackChannelBindings)
+        .values({
+          teamId: input.teamId,
+          channelId: input.channelId,
+          owner: input.owner,
+          repo: input.repo,
+          createdAt: nowIso()
+        })
+        .onConflictDoUpdate({
+          target: [slackChannelBindings.teamId, slackChannelBindings.channelId],
+          set: {
+            owner: input.owner,
+            repo: input.repo
           }
         });
     },
@@ -233,6 +259,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         ...(row.workspacePath ? { workspacePath: row.workspacePath } : {}),
         ...(row.defaultExecutor ? { defaultExecutor: row.defaultExecutor } : {}),
         ...(row.allowedActorsJson ? { allowedActors: JSON.parse(row.allowedActorsJson) as string[] } : {})
+      };
+    },
+
+    async getSlackChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null> {
+      const row = await db
+        .select()
+        .from(slackChannelBindings)
+        .where(and(eq(slackChannelBindings.teamId, input.teamId), eq(slackChannelBindings.channelId, input.channelId)))
+        .limit(1)
+        .get();
+      if (!row) return null;
+      return {
+        teamId: row.teamId,
+        channelId: row.channelId,
+        owner: row.owner,
+        repo: row.repo
       };
     },
 

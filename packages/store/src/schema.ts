@@ -56,6 +56,21 @@ export const repoBindings = sqliteTable(
   })
 );
 
+export const slackChannelBindings = sqliteTable(
+  "slack_channel_bindings",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    teamId: text("team_id").notNull(),
+    channelId: text("channel_id").notNull(),
+    owner: text("owner").notNull(),
+    repo: text("repo").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    slackChannelUniqueIdx: uniqueIndex("slack_channel_bindings_team_channel_idx").on(table.teamId, table.channelId)
+  })
+);
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -100,6 +115,16 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS repo_bindings_provider_owner_repo_idx
       ON repo_bindings(provider, owner, repo);
+    CREATE TABLE IF NOT EXISTS slack_channel_bindings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      team_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS slack_channel_bindings_team_channel_idx
+      ON slack_channel_bindings(team_id, channel_id);
   `);
   const columns = sqlite.prepare("PRAGMA table_info(repo_bindings)").all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));

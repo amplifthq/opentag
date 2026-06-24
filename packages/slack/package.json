@@ -1,0 +1,25 @@
+{
+  "name": "@opentag/slack",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentag/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}

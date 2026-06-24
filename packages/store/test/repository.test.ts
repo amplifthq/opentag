@@ -157,6 +157,27 @@ describe("OpenTag repository", () => {
     expect(events.map((event) => event.type)).toContain("run.lease_expired");
   });
 
+  it("stores Slack channel to repo bindings", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createSlackChannelBinding({
+      teamId: "T123",
+      channelId: "C123",
+      owner: "acme",
+      repo: "demo"
+    });
+
+    await expect(repo.getSlackChannelBinding({ teamId: "T123", channelId: "C123" })).resolves.toEqual({
+      teamId: "T123",
+      channelId: "C123",
+      owner: "acme",
+      repo: "demo"
+    });
+  });
+
   it("records a completed result", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

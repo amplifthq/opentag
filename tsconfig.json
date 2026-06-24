@@ -3,10 +3,12 @@
   "references": [
     { "path": "packages/core" },
     { "path": "packages/github" },
+    { "path": "packages/slack" },
     { "path": "packages/runner" },
     { "path": "packages/store" },
     { "path": "apps/dispatcher" },
     { "path": "apps/github-probot" },
+    { "path": "apps/slack-events" },
     { "path": "apps/opentagd" }
   ]
 }

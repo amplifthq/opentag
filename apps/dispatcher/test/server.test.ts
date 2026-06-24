@@ -215,4 +215,82 @@ describe("dispatcher API", () => {
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("run.heartbeat");
   });
+
+  it("stores and returns Slack channel bindings", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const create = await app.request("/v1/slack-channel-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      })
+    });
+    expect(create.status).toBe(201);
+
+    const get = await app.request("/v1/slack-channel-bindings/T123/C123");
+    expect(get.status).toBe(200);
+    const body = await get.json();
+    expect(body.binding).toEqual({
+      teamId: "T123",
+      channelId: "C123",
+      owner: "acme",
+      repo: "demo"
+    });
+  });
+
+  it("accepts a Slack event when its repo metadata matches a bound GitHub repo", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    });
+
+    const response = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runId: "run_slack_bound",
+        event: {
+          id: "evt_slack_bound",
+          source: "slack",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "slack", providerUserId: "U456", handle: "U456", organizationId: "T123" },
+          target: { mention: "<@U_APP>", agentId: "opentag" },
+          command: { rawText: "investigate this", intent: "investigate", args: {} },
+          context: [],
+          permissions: [
+            { scope: "chat:postMessage", reason: "reply in thread" },
+            { scope: "runner:local", reason: "execute locally" }
+          ],
+          callback: {
+            provider: "slack",
+            uri: "https://slack.com/api/chat.postMessage",
+            threadKey: "T123|C123|1710000000.000100"
+          },
+          metadata: {
+            teamId: "T123",
+            channelId: "C123",
+            messageTs: "1710000000.000100",
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          }
+        }
+      })
+    });
+
+    expect(response.status).toBe(201);
+  });
 });

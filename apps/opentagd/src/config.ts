@@ -10,10 +10,18 @@ export type RepositoryBindingConfig = {
   pushRemote?: string;
 };
 
+export type SlackChannelBindingConfig = {
+  teamId: string;
+  channelId: string;
+  owner: string;
+  repo: string;
+};
+
 export type OpenTagDaemonConfig = {
   runnerId: string;
   dispatcherUrl: string;
   repositories: RepositoryBindingConfig[];
+  slackChannels?: SlackChannelBindingConfig[];
   githubToken?: string;
   pairingToken?: string;
   pollIntervalMs?: number;
@@ -48,6 +56,18 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     runnerId: process.env.OPENTAG_RUNNER_ID ?? "runner_local",
     dispatcherUrl: process.env.OPENTAG_DISPATCHER_URL ?? "http://localhost:3030",
     repositories,
+    ...(process.env.OPENTAG_SLACK_TEAM_ID && process.env.OPENTAG_SLACK_CHANNEL_ID && owner && repo
+      ? {
+          slackChannels: [
+            {
+              teamId: process.env.OPENTAG_SLACK_TEAM_ID,
+              channelId: process.env.OPENTAG_SLACK_CHANNEL_ID,
+              owner,
+              repo
+            }
+          ]
+        }
+      : {}),
     ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
     ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: Number(process.env.OPENTAG_POLL_INTERVAL_MS) } : {}),

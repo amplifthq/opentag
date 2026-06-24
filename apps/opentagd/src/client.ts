@@ -1,5 +1,5 @@
 import { OpenTagEventSchema, OpenTagRunSchema, type OpenTagEvent, type OpenTagRun } from "@opentag/core";
-import type { RepositoryBindingConfig } from "./config.js";
+import type { RepositoryBindingConfig, SlackChannelBindingConfig } from "./config.js";
 import type { ClaimedRun, DaemonClient } from "./daemon.js";
 
 function assertOk(response: Response, action: string): void {
@@ -94,6 +94,15 @@ export function createDispatcherAdminClient(input: { dispatcherUrl: string; runn
         })
       });
       assertOk(response, "bindRepository");
+    },
+
+    async bindSlackChannel(binding: SlackChannelBindingConfig): Promise<void> {
+      const response = await fetch(`${baseUrl}/v1/slack-channel-bindings`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeaders(input.pairingToken) },
+        body: JSON.stringify(binding)
+      });
+      assertOk(response, "bindSlackChannel");
     }
   };
 }

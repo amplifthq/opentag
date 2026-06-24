@@ -26,6 +26,15 @@ const event: OpenTagEvent = {
   metadata: { owner: "acme", repo: "demo" }
 };
 
+const slackEvent: OpenTagEvent = {
+  ...event,
+  id: "evt_slack_1",
+  source: "slack",
+  actor: { provider: "slack", providerUserId: "U456", handle: "U456", organizationId: "T123" },
+  callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage", threadKey: "T123|C123|1710000000.000100" },
+  metadata: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }
+};
+
 describe("opentagd", () => {
   it("claims a run and completes it with echo executor", async () => {
     const calls: string[] = [];
@@ -148,6 +157,34 @@ describe("opentagd", () => {
 
     expect(didWork).toBe(true);
     expect(calls).toEqual(["complete:run_1:needs_human:No local executor is configured for 'codex'."]);
+  });
+
+  it("resolves Slack events against the mapped repository provider", async () => {
+    const calls: string[] = [];
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: { echo: createEchoExecutor() },
+      client: {
+        async claim() {
+          return { run, event: slackEvent };
+        },
+        async markRunning(runId, executor) {
+          calls.push(`running:${runId}:${executor}`);
+        },
+        async heartbeat() {
+          return;
+        },
+        async progress() {
+          return;
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}`);
+        }
+      }
+    });
+
+    expect(calls).toEqual(["running:run_1:echo", "complete:run_1:success"]);
   });
 
   it("sends heartbeats while a long-running executor is active", async () => {

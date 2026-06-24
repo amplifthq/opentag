@@ -51,7 +51,7 @@ The first release should not attempt to support every workspace, every agent, ev
 
 ## Non-Goals For V0
 
-- No full Slack or Lark app in the first implementation milestone.
+- No Lark app in the first implementation milestone.
 - No custom hosted IDE or chat UI.
 - No general-purpose agent framework.
 - No dependency on a single executor framework.
@@ -73,10 +73,13 @@ The first release should not attempt to support every workspace, every agent, ev
 ```text
 Workspace Surface
   GitHub issue comment / PR comment
+  Slack app mention
         |
         v
 GitHub Ingress App
   Probot webhook handler
+Slack Ingress App
+  Events API webhook handler
         |
         v
 OpenTag Core
@@ -103,6 +106,7 @@ Executor
         v
 Callback Adapter
   GitHub status comment / PR / summary
+  Slack thread reply
 ```
 
 ## Package Boundaries
@@ -112,9 +116,11 @@ Suggested repository layout:
 ```text
 packages/opentag-core
 packages/opentag-github
+packages/opentag-slack
 packages/opentag-runner
 packages/opentag-store
 apps/github-probot
+apps/slack-events
 apps/dispatcher
 apps/opentagd
 examples/github-to-codex
@@ -147,6 +153,16 @@ Responsibilities:
 - post status comments.
 - optionally open branches or PRs in later milestones.
 
+### `packages/opentag-slack`
+
+Owns Slack-specific translation and callback behavior.
+
+Responsibilities:
+
+- convert Slack `app_mention` payloads into `OpenTagEvent`.
+- encode and decode Slack thread keys for callback routing.
+- map bound channels to repository context.
+
 ### `apps/github-probot`
 
 Owns the Probot GitHub App edge.
@@ -160,6 +176,17 @@ Responsibilities:
 - enqueue a run for the dispatcher.
 
 Probot is intentionally an edge dependency only. If future deployment requires Octokit directly, Cloudflare Workers, or a different webhook server, this app can be replaced without changing the core protocol.
+
+### `apps/slack-events`
+
+Owns the Slack Events API edge.
+
+Responsibilities:
+
+- verify Slack request signatures.
+- answer `url_verification`.
+- normalize `app_mention` events from bound channels.
+- create dispatcher runs using the same control-plane contract as GitHub ingress.
 
 ### `apps/dispatcher`
 
@@ -389,16 +416,17 @@ Start with four tables:
 
 This is enough for a real demo without introducing a workflow platform.
 
-## GitHub MVP Flow
+## GitHub And Slack MVP Flow
 
 ### Trigger
 
-The v0 trigger is an issue or pull request comment:
+The v0 trigger is an issue comment, pull request review comment, or Slack app mention:
 
 ```text
 @opentag fix this
 @opentag review this PR
 @opentag investigate the failing test
+<@opentag> fix this
 ```
 
 ### Ingress
@@ -410,6 +438,13 @@ The v0 trigger is an issue or pull request comment:
 
 The handler ignores events without a configured OpenTag mention.
 
+`apps/slack-events` listens for:
+
+- `url_verification`
+- `event_callback` where `event.type === "app_mention"`
+
+The Slack handler ignores mentions from unbound channels and rejects invalid signatures.
+
 ### Normalization
 
 The GitHub adapter extracts:
@@ -420,6 +455,15 @@ The GitHub adapter extracts:
 - actor login and ID.
 - installation ID.
 - callback location.
+
+It creates an `OpenTagEvent` and stores or enqueues it.
+
+The Slack adapter extracts:
+
+- team ID and channel ID.
+- source user ID and thread timestamp.
+- bound repository owner/name from the channel mapping.
+- callback route via `chat.postMessage`.
 
 It creates an `OpenTagEvent` and stores or enqueues it.
 
@@ -450,6 +494,13 @@ The GitHub callback adapter posts:
 - progress checkpoints for long runs.
 - final success/failure summary.
 - optional PR link when the executor creates a change.
+
+The Slack callback adapter posts:
+
+- initial acknowledgement in the source thread.
+- progress checkpoints in the same thread.
+- final success/failure summary.
+- optional PR link when one is created.
 
 ## Executor Adapter Contract
 

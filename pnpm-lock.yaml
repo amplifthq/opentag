@@ -32,6 +32,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
       '@opentag/store':
         specifier: workspace:*
         version: link:../../packages/store
@@ -102,6 +105,28 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  apps/slack-events:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/core:
     dependencies:
       zod:
@@ -142,6 +167,19 @@ importers:
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.7.2
+        version: 5.9.3
+
+  packages/slack:
+    dependencies:
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.9.3
         version: 5.9.3
 
   packages/store:

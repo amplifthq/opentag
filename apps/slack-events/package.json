@@ -1,5 +1,5 @@
 {
-  "name": "@opentag/dispatcher",
+  "name": "@opentag/slack-events",
   "version": "0.0.0",
   "type": "module",
   "private": true,
@@ -11,19 +11,12 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@opentag/core": "workspace:*",
-    "@opentag/github": "workspace:*",
     "@opentag/slack": "workspace:*",
-    "@opentag/store": "workspace:*",
-    "better-sqlite3": "^11.7.0",
-    "drizzle-orm": "^0.38.3",
-    "hono": "^4.6.15",
-    "zod": "^3.24.1"
+    "hono": "^4.6.15"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "tsx": "^4.19.2",
-    "tsup": "^8.3.5",
-    "typescript": "^5.7.2"
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
   }
 }

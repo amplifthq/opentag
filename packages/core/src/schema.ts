@@ -45,6 +45,7 @@ export const PermissionGrantSchema = z.object({
     "repo:read",
     "repo:write",
     "issue:comment",
+    "chat:postMessage",
     "pr:create",
     "pr:update",
     "runner:local",

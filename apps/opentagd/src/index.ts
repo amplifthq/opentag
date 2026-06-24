@@ -44,6 +44,25 @@ program
   });
 
 program
+  .command("bind-slack-channels")
+  .description("Sync configured Slack channel bindings to the dispatcher")
+  .action(async () => {
+    const config = loadConfigFromEnv();
+    const client = createDispatcherAdminClient({
+      dispatcherUrl: config.dispatcherUrl,
+      runnerId: config.runnerId,
+      ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
+    });
+    for (const binding of config.slackChannels ?? []) {
+      await client.bindSlackChannel(binding);
+      console.log(`Bound Slack ${binding.teamId}/${binding.channelId} to ${binding.owner}/${binding.repo}`);
+    }
+    if (!(config.slackChannels?.length ?? 0)) {
+      console.log("No Slack channels configured.");
+    }
+  });
+
+program
   .command("run-once")
   .description("Claim and execute one run if available")
   .action(async () => {

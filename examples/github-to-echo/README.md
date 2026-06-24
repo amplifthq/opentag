@@ -133,3 +133,32 @@ Switch the config to `"defaultExecutor": "codex"` to run a real Codex CLI execut
 ```
 
 When a `fix` command changes files, OpenTag creates an `opentag/<runId>` branch, pushes it, and opens a PR against `baseBranch`.
+
+## Slack Path
+
+Slack reuses the same dispatcher and local daemon:
+
+1. Start `apps/slack-events` with `SLACK_SIGNING_SECRET`, `OPENTAG_DISPATCHER_URL`, and `OPENTAG_DISPATCHER_TOKEN` when needed.
+2. Add Slack channel bindings by putting `slackChannels` into the daemon config and running:
+
+```bash
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-slack-channels
+```
+
+Example config fragment:
+
+```json
+{
+  "slackChannels": [
+    {
+      "teamId": "T123",
+      "channelId": "C123",
+      "owner": "acme",
+      "repo": "demo"
+    }
+  ]
+}
+```
+
+3. Point Slack Events API to `/slack/events` on `apps/slack-events`.
+4. Send an `app_mention` in the bound channel. OpenTag will acknowledge, stream progress, and post the final summary back to that Slack thread.

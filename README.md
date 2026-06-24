@@ -22,16 +22,19 @@ The first implementation focuses on a narrow GitHub-to-local-runner loop:
 The dispatcher only leases a run to a runner that is explicitly bound to the source repository, and the local daemon only executes runs whose repository is mapped to a configured local checkout.
 
 GitHub ingress currently handles both `issue_comment.created` and `pull_request_review_comment.created`.
+Slack ingress currently handles `url_verification` and `app_mention` events for bound channels.
 
 ## Packages
 
 - `packages/core`: protocol schemas and mention parsing.
 - `packages/github`: GitHub event normalization and callback rendering.
+- `packages/slack`: Slack event normalization, thread keys, and callback helpers.
 - `packages/store`: SQLite/Drizzle persistence and lease primitives.
 - `packages/runner`: executor contracts and the echo executor.
 - `apps/dispatcher`: hosted dispatcher API.
 - `apps/opentagd`: local runner daemon.
 - `apps/github-probot`: GitHub App ingress.
+- `apps/slack-events`: Slack Events API ingress.
 
 ## Commands
 
@@ -45,6 +48,8 @@ pnpm typecheck
 ## Dispatcher Callback Delivery
 
 Set `OPENTAG_GITHUB_TOKEN` on the dispatcher to let it post acknowledgement, progress, and final callback messages to GitHub comments. When dispatcher callbacks are enabled, set `OPENTAG_DISPATCHER_OWNS_CALLBACKS=true` on the Probot app to avoid duplicate acknowledgement comments.
+
+Set `OPENTAG_SLACK_BOT_TOKEN` on the dispatcher to let it post acknowledgement, progress, and final callback messages to Slack threads via `chat.postMessage`.
 
 Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token for `/v1/*` endpoints. Use the same value as `pairingToken` in `opentagd` config, and set `OPENTAG_DISPATCHER_TOKEN` on the Probot app when it creates runs through the dispatcher.
 
@@ -77,6 +82,16 @@ Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token f
 `defaultExecutor` can be `echo` for smoke tests or `codex` for a real local Codex CLI run. If `githubToken` is present and the normalized event grants `pr:create`, `opentagd` pushes the `opentag/<runId>` branch and creates a GitHub pull request after the executor reports changed files.
 
 Use `opentagd serve` for the long-running daemon mode. It continuously polls for runs and emits periodic lease heartbeats while an executor is active.
+
+## Slack Setup
+
+Slack uses a small ingress service alongside the dispatcher:
+
+- `apps/slack-events` expects `SLACK_SIGNING_SECRET` and `OPENTAG_DISPATCHER_URL`.
+- Set `OPENTAG_DISPATCHER_TOKEN` on `apps/slack-events` when dispatcher pairing-token auth is enabled.
+- Bind a Slack channel to a repo with `opentagd bind-slack-channels` or `POST /v1/slack-channel-bindings`.
+
+After that, an `app_mention` in the bound channel is normalized into an `OpenTagEvent`, routed through the same dispatcher/local-daemon path, and replied to in the same Slack thread.
 
 ## Design
 

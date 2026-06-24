@@ -21,6 +21,13 @@ const CreateRepoBindingSchema = z.object({
   allowedActors: z.array(z.string().min(1)).optional()
 });
 
+const CreateSlackChannelBindingSchema = z.object({
+  teamId: z.string().min(1),
+  channelId: z.string().min(1),
+  owner: z.string().min(1),
+  repo: z.string().min(1)
+});
+
 const CreateRunSchema = z.object({
   runId: z.string().min(1),
   event: OpenTagEventSchema
@@ -40,7 +47,11 @@ function repoKeyFromEvent(event: z.infer<typeof OpenTagEventSchema>): { provider
   const owner = event.metadata["owner"];
   const repo = event.metadata["repo"];
   if (typeof owner !== "string" || typeof repo !== "string") return null;
-  return { provider: event.source, owner, repo };
+  return {
+    provider: typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github",
+    owner,
+    repo
+  };
 }
 
 function isWriteCapable(event: z.infer<typeof OpenTagEventSchema>): boolean {
@@ -58,6 +69,7 @@ export type CallbackMessage = {
   provider: "github" | "slack" | "lark" | "webhook";
   uri: string;
   body: string;
+  threadKey?: string;
 };
 
 export type CallbackSink = {
@@ -134,6 +146,21 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     return c.json({ binding });
   });
 
+  app.post("/v1/slack-channel-bindings", async (c) => {
+    const parsed = CreateSlackChannelBindingSchema.parse(await c.req.json());
+    await repo.createSlackChannelBinding(parsed);
+    return c.json({ ok: true }, 201);
+  });
+
+  app.get("/v1/slack-channel-bindings/:teamId/:channelId", async (c) => {
+    const binding = await repo.getSlackChannelBinding({
+      teamId: c.req.param("teamId"),
+      channelId: c.req.param("channelId")
+    });
+    if (!binding) return c.json({ error: "slack_channel_binding_not_found" }, 404);
+    return c.json({ binding });
+  });
+
   app.post("/v1/runs", async (c) => {
     const parsed = CreateRunSchema.parse(await c.req.json());
     const repoKey = repoKeyFromEvent(parsed.event);
@@ -157,7 +184,8 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         kind: "acknowledgement",
         provider: parsed.event.callback.provider,
         uri: parsed.event.callback.uri,
-        body: renderAcknowledgement(run.id)
+        body: renderAcknowledgement(run.id),
+        ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
       }
     });
     return c.json({ run }, 201);
@@ -201,7 +229,8 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         kind: "progress",
         provider: stored.event.callback.provider,
         uri: stored.event.callback.uri,
-        body: renderProgress({ runId, message: body.message })
+        body: renderProgress({ runId, message: body.message }),
+        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
       }
     });
     return c.json({ ok: true });
@@ -222,7 +251,8 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
         kind: "final",
         provider: stored.event.callback.provider,
         uri: stored.event.callback.uri,
-        body: renderFinalResult(parsed.result)
+        body: renderFinalResult(parsed.result),
+        ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {})
       }
     });
     return c.json({ ok: true });

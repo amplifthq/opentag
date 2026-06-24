@@ -19,11 +19,13 @@ export type DaemonClient = {
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
   const owner = event.metadata["owner"];
   const repo = event.metadata["repo"];
+  const repoProvider =
+    typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github";
   if (typeof owner !== "string" || typeof repo !== "string") return null;
 
   return (
     repositories.find(
-      (candidate) => candidate.provider === event.source && candidate.owner === owner && candidate.repo === repo
+      (candidate) => candidate.provider === repoProvider && candidate.owner === owner && candidate.repo === repo
     ) ?? null
   );
 }
