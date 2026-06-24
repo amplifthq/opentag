@@ -54,11 +54,16 @@ pnpm typecheck
       "owner": "acme",
       "repo": "demo",
       "checkoutPath": "/Users/example/repos/demo",
-      "defaultExecutor": "echo"
+      "defaultExecutor": "codex",
+      "baseBranch": "main",
+      "pushRemote": "origin"
     }
-  ]
+  ],
+  "githubToken": "ghs_optional_token_for_pr_creation"
 }
 ```
+
+`defaultExecutor` can be `echo` for smoke tests or `codex` for a real local Codex CLI run. If `githubToken` is present and the normalized event grants `pr:create`, `opentagd` pushes the `opentag/<runId>` branch and creates a GitHub pull request after the executor reports changed files.
 
 ## Design
 

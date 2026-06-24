@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@opentag/core": "workspace:*",
+    "@opentag/github": "workspace:*",
     "@opentag/runner": "workspace:*",
     "commander": "^12.1.0"
   },

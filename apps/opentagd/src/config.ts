@@ -6,12 +6,15 @@ export type RepositoryBindingConfig = {
   repo: string;
   checkoutPath: string;
   defaultExecutor?: string;
+  baseBranch?: string;
+  pushRemote?: string;
 };
 
 export type OpenTagDaemonConfig = {
   runnerId: string;
   dispatcherUrl: string;
   repositories: RepositoryBindingConfig[];
+  githubToken?: string;
 };
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
@@ -30,15 +33,19 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
             provider: "github",
             owner,
             repo,
-            checkoutPath,
-            defaultExecutor: process.env.OPENTAG_DEFAULT_EXECUTOR ?? "echo"
+          checkoutPath,
+            defaultExecutor: process.env.OPENTAG_DEFAULT_EXECUTOR ?? "echo",
+            baseBranch: process.env.OPENTAG_BASE_BRANCH ?? "main",
+            pushRemote: process.env.OPENTAG_PUSH_REMOTE ?? "origin"
           }
         ]
       : [];
 
-  return {
+  const config: OpenTagDaemonConfig = {
     runnerId: process.env.OPENTAG_RUNNER_ID ?? "runner_local",
     dispatcherUrl: process.env.OPENTAG_DISPATCHER_URL ?? "http://localhost:3030",
-    repositories
+    repositories,
+    ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {})
   };
+  return config;
 }

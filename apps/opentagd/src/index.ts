@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createEchoExecutor } from "@opentag/runner";
+import { createCodexExecutor, createEchoExecutor } from "@opentag/runner";
 import { Command } from "commander";
 import { createDispatcherAdminClient, createDispatcherClient } from "./client.js";
 import { loadConfigFromEnv } from "./config.js";
@@ -49,7 +49,13 @@ program
     const didWork = await runOneDaemonIteration({
       runnerId: config.runnerId,
       repositories: config.repositories,
-      executor: createEchoExecutor(),
+      executors: {
+        echo: createEchoExecutor(),
+        codex: createCodexExecutor()
+      },
+      pullRequestOptions: {
+        ...(config.githubToken ? { githubToken: config.githubToken } : {})
+      },
       client: createDispatcherClient({
         dispatcherUrl: config.dispatcherUrl,
         runnerId: config.runnerId

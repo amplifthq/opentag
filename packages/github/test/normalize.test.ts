@@ -19,6 +19,7 @@ describe("normalizeGitHubIssueComment", () => {
 
     expect(event?.source).toBe("github");
     expect(event?.command.intent).toBe("fix");
+    expect(event?.permissions.map((permission) => permission.scope)).toContain("pr:create");
     expect(event?.metadata).toMatchObject({ owner: "acme", repo: "demo" });
   });
 });

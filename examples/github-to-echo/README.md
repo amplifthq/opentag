@@ -34,7 +34,9 @@ cat > opentag.local.json <<'JSON'
       "owner": "acme",
       "repo": "demo",
       "checkoutPath": "/Users/example/repos/demo",
-      "defaultExecutor": "echo"
+      "defaultExecutor": "echo",
+      "baseBranch": "main",
+      "pushRemote": "origin"
     }
   ]
 }
@@ -90,3 +92,28 @@ OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- ru
 curl http://localhost:3030/v1/runs/run_demo_1
 curl http://localhost:3030/v1/runs/run_demo_1/events
 ```
+
+## Codex And PR Path
+
+Switch the config to `"defaultExecutor": "codex"` to run a real Codex CLI execution in the mapped checkout. To let OpenTag create pull requests, add a GitHub token:
+
+```json
+{
+  "runnerId": "runner_local",
+  "dispatcherUrl": "http://localhost:3030",
+  "githubToken": "ghs_optional_token_for_pr_creation",
+  "repositories": [
+    {
+      "provider": "github",
+      "owner": "acme",
+      "repo": "demo",
+      "checkoutPath": "/Users/example/repos/demo",
+      "defaultExecutor": "codex",
+      "baseBranch": "main",
+      "pushRemote": "origin"
+    }
+  ]
+}
+```
+
+When a `fix` command changes files, OpenTag creates an `opentag/<runId>` branch, pushes it, and opens a PR against `baseBranch`.

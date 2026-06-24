@@ -33,7 +33,7 @@ describe("opentagd", () => {
     await runOneDaemonIteration({
       runnerId: "runner_1",
       repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
-      executor: createEchoExecutor(),
+      executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
           calls.push("claim");
@@ -64,7 +64,7 @@ describe("opentagd", () => {
     const didWork = await runOneDaemonIteration({
       runnerId: "runner_1",
       repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
-      executor: createEchoExecutor(),
+      executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
           return null;
@@ -89,7 +89,7 @@ describe("opentagd", () => {
     const didWork = await runOneDaemonIteration({
       runnerId: "runner_1",
       repositories: [],
-      executor: createEchoExecutor(),
+      executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
           return { run, event };
@@ -110,5 +110,31 @@ describe("opentagd", () => {
     expect(calls).toEqual([
       "complete:run_1:needs_human:No local workspace mapping is configured for this run's repository."
     ]);
+  });
+
+  it("refuses to execute when the configured executor is unavailable locally", async () => {
+    const calls: string[] = [];
+    const didWork = await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo", defaultExecutor: "codex" }],
+      executors: { echo: createEchoExecutor() },
+      client: {
+        async claim() {
+          return { run, event };
+        },
+        async markRunning() {
+          throw new Error("should not run");
+        },
+        async progress() {
+          throw new Error("should not run");
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(didWork).toBe(true);
+    expect(calls).toEqual(["complete:run_1:needs_human:No local executor is configured for 'codex'."]);
   });
 });
