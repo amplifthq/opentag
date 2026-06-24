@@ -15,10 +15,20 @@ describe("Codex executor", () => {
         if (command === "git" && args.join(" ") === "status --porcelain") {
           return calls.length < 4
             ? { exitCode: 0, stdout: "", stderr: "" }
-            : { exitCode: 0, stdout: " M src/demo.ts\n?? test/demo.test.ts\n", stderr: "" };
+            : {
+                exitCode: 0,
+                stdout:
+                  calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .omx")
+                    ? " M src/demo.ts\n?? test/demo.test.ts\n"
+                    : "?? .omx/\n M src/demo.ts\n?? test/demo.test.ts\n",
+                stderr: ""
+              };
         }
         if (command === "git" && args[0] === "checkout") {
           return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "clean -fd -- .omx") {
+          return { exitCode: 0, stdout: "Removing .omx/\n", stderr: "" };
         }
         if (command === "codex" && args[0] === "exec") {
           return { exitCode: 0, stdout: "Implemented the requested fix.", stderr: "" };
@@ -54,8 +64,11 @@ describe("Codex executor", () => {
 
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "checkout -B opentag/run_1")).toBe(true);
     expect(calls.some((call) => call.command === "codex" && call.args[0] === "exec")).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .omx")).toBe(true);
+    expect(calls.find((call) => call.command === "codex" && call.args[0] === "exec")?.args).toContain("--full-auto");
+    expect(calls.find((call) => call.command === "codex" && call.args[0] === "exec")?.args).toContain("--ephemeral");
     expect(calls.find((call) => call.command === "codex" && call.args[0] === "exec")?.input).toContain("fix this");
-    expect(events).toEqual(["executor.started", "executor.progress", "executor.completed"]);
+    expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.completed"]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested fix.");
   });
@@ -85,8 +98,8 @@ describe("Codex executor", () => {
 });
 
 describe("git helpers", () => {
-  it("parses porcelain changed files", () => {
-    expect(parseChangedFiles(" M src/demo.ts\n?? test/demo.test.ts\n")).toEqual(["src/demo.ts", "test/demo.test.ts"]);
+  it("parses porcelain changed files and filters internal artifacts", () => {
+    expect(parseChangedFiles("?? .omx/\n M src/demo.ts\n?? test/demo.test.ts\n")).toEqual(["src/demo.ts", "test/demo.test.ts"]);
   });
 
   it("sanitizes branch names", () => {

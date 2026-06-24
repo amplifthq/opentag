@@ -42,6 +42,9 @@ describe("opentagd", () => {
         async markRunning(runId, executor) {
           calls.push(`running:${runId}:${executor}`);
         },
+        async heartbeat(runId) {
+          calls.push(`heartbeat:${runId}`);
+        },
         async progress(runId, input) {
           calls.push(`progress:${runId}:${input.type}:${input.message}`);
         },
@@ -72,6 +75,9 @@ describe("opentagd", () => {
         async markRunning() {
           throw new Error("should not run");
         },
+        async heartbeat() {
+          throw new Error("should not run");
+        },
         async progress() {
           throw new Error("should not run");
         },
@@ -95,6 +101,9 @@ describe("opentagd", () => {
           return { run, event };
         },
         async markRunning() {
+          throw new Error("should not run");
+        },
+        async heartbeat() {
           throw new Error("should not run");
         },
         async progress() {
@@ -125,6 +134,9 @@ describe("opentagd", () => {
         async markRunning() {
           throw new Error("should not run");
         },
+        async heartbeat() {
+          throw new Error("should not run");
+        },
         async progress() {
           throw new Error("should not run");
         },
@@ -136,5 +148,55 @@ describe("opentagd", () => {
 
     expect(didWork).toBe(true);
     expect(calls).toEqual(["complete:run_1:needs_human:No local executor is configured for 'codex'."]);
+  });
+
+  it("sends heartbeats while a long-running executor is active", async () => {
+    const calls: string[] = [];
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run(_input, sink) {
+            await sink.emit({
+              type: "executor.started",
+              message: "long task",
+              at: "2026-06-24T00:00:00.000Z"
+            });
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return { conclusion: "success", summary: "done" };
+          },
+          async cancel() {
+            return;
+          }
+        }
+      },
+      heartbeatIntervalMs: 5,
+      client: {
+        async claim() {
+          return { run, event };
+        },
+        async markRunning(runId, executor) {
+          calls.push(`running:${runId}:${executor}`);
+        },
+        async heartbeat(runId) {
+          calls.push(`heartbeat:${runId}`);
+        },
+        async progress(runId, input) {
+          calls.push(`progress:${runId}:${input.type}:${input.message}`);
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(calls.some((call) => call === "heartbeat:run_1")).toBe(true);
+    expect(calls.at(-1)).toBe("complete:run_1:success:done");
   });
 });

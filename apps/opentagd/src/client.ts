@@ -39,6 +39,14 @@ export function createDispatcherClient(input: { dispatcherUrl: string; runnerId:
       assertOk(response, "markRunning");
     },
 
+    async heartbeat(runId) {
+      const response = await fetch(`${baseUrl}/v1/runners/${input.runnerId}/runs/${runId}/heartbeat`, {
+        method: "POST",
+        headers: authHeaders(input.pairingToken)
+      });
+      assertOk(response, "heartbeat");
+    },
+
     async progress(runId, progressInput) {
       const response = await fetch(`${baseUrl}/v1/runs/${runId}/progress`, {
         method: "POST",

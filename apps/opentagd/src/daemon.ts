@@ -11,6 +11,7 @@ export type ClaimedRun = {
 export type DaemonClient = {
   claim(): Promise<ClaimedRun | null>;
   markRunning(runId: string, executor: string): Promise<void>;
+  heartbeat(runId: string): Promise<void>;
   progress(runId: string, input: { type: string; message: string; at: string }): Promise<void>;
   complete(runId: string, result: OpenTagRunResult): Promise<void>;
 };
@@ -36,6 +37,7 @@ export async function runOneDaemonIteration(input: {
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
   pullRequestOptions?: PullRequestOptions;
+  heartbeatIntervalMs?: number;
   client: DaemonClient;
 }): Promise<boolean> {
   const claimed = await input.client.claim();
@@ -74,24 +76,39 @@ export async function runOneDaemonIteration(input: {
   }
 
   await input.client.markRunning(claimed.run.id, executor.id);
-  const executorResult = await executor.run(
-    {
-      runId: claimed.run.id,
-      workspacePath: binding.checkoutPath,
-      command: claimed.event.command,
-      context: claimed.event.context
-    },
-    {
-      emit: async (event) => {
-        console.log(`[${event.type}] ${event.message}`);
-        await input.client.progress(claimed.run.id, {
-          type: event.type,
-          message: event.message,
-          at: event.at
-        });
+  const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
+  let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
+  if (heartbeatIntervalMs > 0) {
+    heartbeatHandle = setInterval(() => {
+      void input.client.heartbeat(claimed.run.id).catch((error: unknown) => {
+        console.warn(`OpenTag heartbeat failed for ${claimed.run.id}:`, error);
+      });
+    }, heartbeatIntervalMs);
+  }
+
+  let executorResult: OpenTagRunResult;
+  try {
+    executorResult = await executor.run(
+      {
+        runId: claimed.run.id,
+        workspacePath: binding.checkoutPath,
+        command: claimed.event.command,
+        context: claimed.event.context
+      },
+      {
+        emit: async (event) => {
+          console.log(`[${event.type}] ${event.message}`);
+          await input.client.progress(claimed.run.id, {
+            type: event.type,
+            message: event.message,
+            at: event.at
+          });
+        }
       }
-    }
-  );
+    );
+  } finally {
+    if (heartbeatHandle) clearInterval(heartbeatHandle);
+  }
   const result = await maybeCreatePullRequest({
     run: claimed.run,
     event: claimed.event,
@@ -101,4 +118,33 @@ export async function runOneDaemonIteration(input: {
   });
   await input.client.complete(claimed.run.id, result);
   return true;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function serveDaemon(input: {
+  runnerId: string;
+  repositories: RepositoryBindingConfig[];
+  executors: Record<string, ExecutorAdapter>;
+  pullRequestOptions?: PullRequestOptions;
+  heartbeatIntervalMs?: number;
+  pollIntervalMs?: number;
+  client: DaemonClient;
+}): Promise<never> {
+  const pollIntervalMs = input.pollIntervalMs ?? 5_000;
+  for (;;) {
+    const didWork = await runOneDaemonIteration({
+      runnerId: input.runnerId,
+      repositories: input.repositories,
+      executors: input.executors,
+      ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
+      ...(input.heartbeatIntervalMs ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
+      client: input.client
+    });
+    if (!didWork) {
+      await sleep(pollIntervalMs);
+    }
+  }
 }

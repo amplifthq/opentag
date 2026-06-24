@@ -210,5 +210,9 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/runners/runner_1/runs/run_heartbeat/heartbeat", { method: "POST" });
     expect(response.status).toBe(200);
+
+    const eventsResponse = await app.request("/v1/runs/run_heartbeat/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toContain("run.heartbeat");
   });
 });

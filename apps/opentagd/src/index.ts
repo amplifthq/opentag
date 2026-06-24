@@ -3,7 +3,7 @@ import { createCodexExecutor, createEchoExecutor } from "@opentag/runner";
 import { Command } from "commander";
 import { createDispatcherAdminClient, createDispatcherClient } from "./client.js";
 import { loadConfigFromEnv } from "./config.js";
-import { runOneDaemonIteration } from "./daemon.js";
+import { runOneDaemonIteration, serveDaemon } from "./daemon.js";
 
 const program = new Command();
 
@@ -58,6 +58,7 @@ program
       pullRequestOptions: {
         ...(config.githubToken ? { githubToken: config.githubToken } : {})
       },
+      ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
       client: createDispatcherClient({
         dispatcherUrl: config.dispatcherUrl,
         runnerId: config.runnerId,
@@ -65,6 +66,29 @@ program
       })
     });
     console.log(didWork ? "OpenTag run completed" : "No OpenTag run available");
+  });
+
+program
+  .command("serve")
+  .description("Continuously poll for and execute OpenTag runs")
+  .action(async () => {
+    const config = loadConfigFromEnv();
+    await serveDaemon({
+      runnerId: config.runnerId,
+      repositories: config.repositories,
+      executors: {
+        echo: createEchoExecutor(),
+        codex: createCodexExecutor()
+      },
+      ...(config.githubToken ? { pullRequestOptions: { githubToken: config.githubToken } } : {}),
+      ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
+      ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
+      client: createDispatcherClient({
+        dispatcherUrl: config.dispatcherUrl,
+        runnerId: config.runnerId,
+        ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
+      })
+    });
   });
 
 await program.parseAsync(process.argv);

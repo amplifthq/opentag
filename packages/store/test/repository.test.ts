@@ -121,6 +121,40 @@ describe("OpenTag repository", () => {
     await expect(repo.heartbeat({ runId: "run_heartbeat", runnerId: "runner_1" })).resolves.toBe(true);
     const events = await repo.listRunEvents({ runId: "run_heartbeat" });
     expect(events.map((event) => event.type)).toContain("run.heartbeat");
+    const heartbeatEvent = events.find((event) => event.type === "run.heartbeat");
+    expect(heartbeatEvent?.payload).toMatchObject({ runnerId: "runner_1" });
+  });
+
+  it("requeues runs whose lease has expired", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({
+      id: "run_expire",
+      event: {
+        id: "evt_expire",
+        source: "github",
+        sourceEventId: "comment_expire",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: [],
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+    await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 0 });
+    const requeued = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    expect(requeued?.run.id).toBe("run_expire");
+
+    const events = await repo.listRunEvents({ runId: "run_expire" });
+    expect(events.map((event) => event.type)).toContain("run.lease_expired");
   });
 
   it("records a completed result", async () => {

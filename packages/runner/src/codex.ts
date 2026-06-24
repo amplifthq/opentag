@@ -1,7 +1,7 @@
 import type { ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
 import type { ExecutorAdapter } from "./executor.js";
-import { branchNameForRun, changedFiles, createRunBranch } from "./git.js";
+import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 
 export type CodexExecutorOptions = {
   runner?: CommandRunner;
@@ -73,10 +73,8 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         "exec",
         "--cd",
         input.workspacePath,
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "never",
+        "--full-auto",
+        "--ephemeral",
         ...(options.model ? ["--model", options.model] : []),
         "-"
       ];
@@ -89,6 +87,15 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         })
       });
       await assertCommandSucceeded(codexResult, "codex exec");
+
+      const cleanedArtifacts = await cleanupInternalArtifacts({ runner, workspacePath: input.workspacePath });
+      if (cleanedArtifacts.length > 0) {
+        await sink.emit({
+          type: "executor.progress",
+          message: `Cleaned internal artifacts: ${cleanedArtifacts.join(", ")}`,
+          at: new Date().toISOString()
+        });
+      }
 
       const files = await changedFiles({ runner, workspacePath: input.workspacePath });
       await sink.emit({

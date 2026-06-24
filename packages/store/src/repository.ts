@@ -30,6 +30,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function isIsoExpired(iso: string | null, now: Date): boolean {
+  if (!iso) return false;
+  return new Date(iso).getTime() <= now.getTime();
+}
+
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
   return {
@@ -129,6 +134,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     },
 
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
+      const now = new Date();
+      const activeRows = await db.select().from(runs).where(and(eq(runs.status, "assigned"))).orderBy(asc(runs.createdAt));
+      for (const activeRow of activeRows) {
+        if (!isIsoExpired(activeRow.leaseExpiresAt, now)) continue;
+        const updatedAt = nowIso();
+        await db
+          .update(runs)
+          .set({
+            status: "queued",
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            updatedAt
+          })
+          .where(eq(runs.id, activeRow.id));
+        await appendRunEvent({
+          runId: activeRow.id,
+          type: "run.lease_expired",
+          payload: { previousRunnerId: activeRow.assignedRunnerId, previousLeaseExpiresAt: activeRow.leaseExpiresAt },
+          createdAt: updatedAt
+        });
+      }
+
       const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
       const row = queuedRows.find((candidate) => {
         const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
@@ -207,7 +236,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
-    async heartbeat(input: { runId: string; runnerId: string }): Promise<boolean> {
+    async heartbeat(input: { runId: string; runnerId: string; leaseSeconds?: number }): Promise<boolean> {
       const updatedAt = nowIso();
       const row = await db
         .select()
@@ -216,11 +245,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!row) return false;
-      await db.update(runs).set({ heartbeatAt: updatedAt, updatedAt }).where(eq(runs.id, input.runId));
+      const leaseSeconds = input.leaseSeconds ?? 60;
+      const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+      await db
+        .update(runs)
+        .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
+        .where(eq(runs.id, input.runId));
       await appendRunEvent({
         runId: input.runId,
         type: "run.heartbeat",
-        payload: { runnerId: input.runnerId, heartbeatAt: updatedAt },
+        payload: { runnerId: input.runnerId, heartbeatAt: updatedAt, leaseExpiresAt },
         createdAt: updatedAt
       });
       return true;

@@ -1,18 +1,38 @@
 import type { CommandRunner } from "./command.js";
 import { assertCommandSucceeded } from "./command.js";
 
+export type GitStatusEntry = {
+  status: string;
+  path: string;
+};
+
+const INTERNAL_ARTIFACT_ROOTS = [".omx", ".codex", ".claude"];
+
 export function branchNameForRun(runId: string): string {
   const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, "-");
   return `opentag/${safeRunId}`;
 }
 
-export function parseChangedFiles(statusOutput: string): string[] {
+export function parseStatusEntries(statusOutput: string): GitStatusEntry[] {
   return statusOutput
     .split("\n")
-    .map((line) => line.trimEnd())
+    .map((line) => line.replace(/\r$/, ""))
     .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .filter(Boolean);
+    .map((line) => ({
+      status: line.slice(0, 2),
+      path: line.slice(3).trim()
+    }))
+    .filter((entry) => entry.path.length > 0);
+}
+
+export function isInternalArtifactPath(path: string): boolean {
+  return INTERNAL_ARTIFACT_ROOTS.some((root) => path === root || path.startsWith(`${root}/`));
+}
+
+export function parseChangedFiles(statusOutput: string): string[] {
+  return parseStatusEntries(statusOutput)
+    .map((entry) => entry.path)
+    .filter((path) => !isInternalArtifactPath(path));
 }
 
 export async function createRunBranch(input: {
@@ -28,6 +48,25 @@ export async function changedFiles(input: { runner: CommandRunner; workspacePath
   const result = await input.runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
   await assertCommandSucceeded(result, "read changed files");
   return parseChangedFiles(result.stdout);
+}
+
+export async function cleanupInternalArtifacts(input: { runner: CommandRunner; workspacePath: string }): Promise<string[]> {
+  const statusResult = await input.runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
+  await assertCommandSucceeded(statusResult, "scan internal artifacts");
+  const untrackedRoots = Array.from(
+    new Set(
+      parseStatusEntries(statusResult.stdout)
+        .filter((entry) => entry.status === "??" && isInternalArtifactPath(entry.path))
+        .map((entry) => entry.path.split("/", 1)[0] ?? entry.path)
+    )
+  );
+  if (untrackedRoots.length === 0) return [];
+
+  const cleanResult = await input.runner.run("git", ["clean", "-fd", "--", ...untrackedRoots], {
+    cwd: input.workspacePath
+  });
+  await assertCommandSucceeded(cleanResult, "clean internal artifacts");
+  return untrackedRoots;
 }
 
 export async function pushBranch(input: {

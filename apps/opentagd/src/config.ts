@@ -16,6 +16,8 @@ export type OpenTagDaemonConfig = {
   repositories: RepositoryBindingConfig[];
   githubToken?: string;
   pairingToken?: string;
+  pollIntervalMs?: number;
+  heartbeatIntervalMs?: number;
 };
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
@@ -47,7 +49,9 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     dispatcherUrl: process.env.OPENTAG_DISPATCHER_URL ?? "http://localhost:3030",
     repositories,
     ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {}),
-    ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {})
+    ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
+    ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: Number(process.env.OPENTAG_POLL_INTERVAL_MS) } : {}),
+    ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS ? { heartbeatIntervalMs: Number(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS) } : {})
   };
   return config;
 }

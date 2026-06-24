@@ -57,6 +57,8 @@ Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token f
   "runnerId": "runner_local",
   "dispatcherUrl": "http://localhost:3030",
   "pairingToken": "shared_pairing_token",
+  "pollIntervalMs": 5000,
+  "heartbeatIntervalMs": 15000,
   "repositories": [
     {
       "provider": "github",
@@ -73,6 +75,8 @@ Set `OPENTAG_PAIRING_TOKEN` on the dispatcher to require a shared Bearer token f
 ```
 
 `defaultExecutor` can be `echo` for smoke tests or `codex` for a real local Codex CLI run. If `githubToken` is present and the normalized event grants `pr:create`, `opentagd` pushes the `opentag/<runId>` branch and creates a GitHub pull request after the executor reports changed files.
+
+Use `opentagd serve` for the long-running daemon mode. It continuously polls for runs and emits periodic lease heartbeats while an executor is active.
 
 ## Design
 

@@ -33,6 +33,8 @@ cat > opentag.local.json <<'JSON'
   "runnerId": "runner_local",
   "dispatcherUrl": "http://localhost:3030",
   "pairingToken": "dev_pairing_token",
+  "pollIntervalMs": 5000,
+  "heartbeatIntervalMs": 15000,
   "repositories": [
     {
       "provider": "github",
@@ -91,6 +93,12 @@ curl -X POST http://localhost:3030/v1/runs \
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- run-once
 ```
 
+Or keep it polling continuously:
+
+```bash
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- serve
+```
+
 6. Inspect the stored run and audit events:
 
 ```bash
@@ -108,6 +116,8 @@ Switch the config to `"defaultExecutor": "codex"` to run a real Codex CLI execut
   "dispatcherUrl": "http://localhost:3030",
   "pairingToken": "dev_pairing_token",
   "githubToken": "ghs_optional_token_for_pr_creation",
+  "pollIntervalMs": 5000,
+  "heartbeatIntervalMs": 15000,
   "repositories": [
     {
       "provider": "github",
