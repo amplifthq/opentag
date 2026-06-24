@@ -31,7 +31,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ challenge: "abc123" });
+    await expect(response.text()).resolves.toBe("abc123");
+    expect(response.headers.get("content-type")).toContain("text/plain");
   });
 
   it("creates a run for a signed app_mention in a bound channel", async () => {

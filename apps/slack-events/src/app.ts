@@ -73,7 +73,7 @@ export function createSlackEventsApp(input: {
 
     const payload = JSON.parse(rawBody) as SlackEventEnvelope;
     if (payload.type === "url_verification") {
-      return c.json({ challenge: payload.challenge ?? "" });
+      return c.text(payload.challenge ?? "");
     }
     if (payload.type !== "event_callback" || payload.event?.type !== "app_mention") {
       return c.json({ ok: true });
