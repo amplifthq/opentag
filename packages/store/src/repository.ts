@@ -16,6 +16,11 @@ export type OpenTagAuditEvent = {
   createdAt: string;
 };
 
+export type CreateRunResult = {
+  run: OpenTagRun;
+  created: boolean;
+};
+
 export type RepoBinding = {
   provider: string;
   owner: string;
@@ -53,6 +58,13 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...(result ? { result } : {})
+  };
+}
+
+function claimedRunFromRow(row: typeof runs.$inferSelect): ClaimedOpenTagRun {
+  return {
+    run: runFromRow(row),
+    event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
   };
 }
 
@@ -133,17 +145,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
     },
 
-    async createRun(input: { id: string; event: OpenTagEvent }): Promise<OpenTagRun> {
+    async createRun(input: { id: string; event: OpenTagEvent }): Promise<CreateRunResult> {
       const event = OpenTagEventSchema.parse(input.event);
       const createdAt = nowIso();
-      await db.insert(runs).values({
+      const insertResult = await db.insert(runs).values({
         id: input.id,
         eventId: event.id,
         status: "queued",
         eventJson: JSON.stringify(event),
         createdAt,
         updatedAt: createdAt
-      });
+      }).onConflictDoNothing({ target: runs.eventId });
+
+      if (insertResult.changes === 0) {
+        const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+        if (!existingBySourceEvent) {
+          throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
+        }
+        await appendRunEvent({
+          runId: existingBySourceEvent.id,
+          type: "run.create_idempotent_replay",
+          payload: { requestedRunId: input.id, eventId: event.id }
+        });
+        return { run: runFromRow(existingBySourceEvent), created: false };
+      }
+
       await appendRunEvent({
         runId: input.id,
         type: "run.created",
@@ -151,11 +177,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt
       });
       return {
-        id: input.id,
-        eventId: event.id,
-        status: "queued",
-        createdAt,
-        updatedAt: createdAt
+        run: {
+          id: input.id,
+          eventId: event.id,
+          status: "queued",
+          createdAt,
+          updatedAt: createdAt
+        },
+        created: true
       };
     },
 
@@ -209,7 +238,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const updatedAt = nowIso();
       const leasedAt = updatedAt;
       const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
-      await db
+      const updateResult = await db
         .update(runs)
         .set({
           status: "assigned",
@@ -219,7 +248,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           heartbeatAt: leasedAt,
           updatedAt
         })
-        .where(eq(runs.id, row.id));
+        .where(and(eq(runs.id, row.id), eq(runs.status, "queued")));
+      if (updateResult.changes === 0) {
+        return null;
+      }
       await appendRunEvent({
         runId: row.id,
         type: "run.claimed",
@@ -227,18 +259,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         createdAt: updatedAt
       });
 
-      return {
-        run: {
-          id: row.id,
-          eventId: row.eventId,
-          status: "assigned",
-          assignedRunnerId: input.runnerId,
-          executor: row.executor ?? undefined,
-          createdAt: row.createdAt,
-          updatedAt
-        },
-        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
-      };
+      const claimedRow = await db.select().from(runs).where(eq(runs.id, row.id)).limit(1).get();
+      if (!claimedRow) return null;
+      return claimedRunFromRow(claimedRow);
     },
 
     async getRepoBinding(input: { provider: string; owner: string; repo: string }): Promise<RepoBinding | null> {
@@ -341,10 +364,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async getRun(input: { runId: string }): Promise<ClaimedOpenTagRun | null> {
       const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!row) return null;
-      return {
-        run: runFromRow(row),
-        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
-      };
+      return claimedRunFromRow(row);
     },
 
     async listRunEvents(input: { runId: string }): Promise<OpenTagAuditEvent[]> {
@@ -356,6 +376,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         payload: JSON.parse(row.payloadJson) as unknown,
         createdAt: row.createdAt
       }));
+    },
+
+    async listCallbackDeadLetters(input: { runId: string }): Promise<OpenTagAuditEvent[]> {
+      const rows = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(asc(runEvents.id));
+      return rows
+        .filter((row) => row.type.startsWith("callback.") && row.type.endsWith(".dead_lettered"))
+        .map((row) => ({
+          id: row.id,
+          runId: row.runId,
+          type: row.type,
+          payload: JSON.parse(row.payloadJson) as unknown,
+          createdAt: row.createdAt
+        }));
     }
   };
 }

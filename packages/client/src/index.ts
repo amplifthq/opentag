@@ -60,13 +60,18 @@ export type CreateRunInput = {
   event: OpenTagEvent;
 };
 
+export type CreateRunResult = {
+  run: OpenTagRun;
+  idempotentReplay?: boolean;
+};
+
 export type OpenTagClient = {
   registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
   bindRepository(input: RepoBindingInput): Promise<void>;
   getRepositoryBinding(input: { provider: string; owner: string; repo: string }): Promise<{ binding: RepoBindingInput }>;
   bindSlackChannel(input: SlackChannelBindingInput): Promise<void>;
   getSlackChannelBinding(input: { teamId: string; channelId: string }): Promise<{ binding: SlackChannelBindingInput }>;
-  createRun(input: CreateRunInput): Promise<{ run: OpenTagRun }>;
+  createRun(input: CreateRunInput): Promise<CreateRunResult>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string }): Promise<void>;
   markRunning(input: { runId: string; executor: string }): Promise<void>;
@@ -166,8 +171,11 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ runId: input.runId, event })
       });
       await assertOk(response, "createRun");
-      const body = (await response.json()) as { run: unknown };
-      return { run: OpenTagRunSchema.parse(body.run) };
+      const body = (await response.json()) as { run: unknown; idempotentReplay?: unknown };
+      return {
+        run: OpenTagRunSchema.parse(body.run),
+        ...(body.idempotentReplay === true ? { idempotentReplay: true } : {})
+      };
     },
 
     async claim(input) {

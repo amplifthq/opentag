@@ -19,7 +19,8 @@ export const runs = sqliteTable(
   },
   (table) => ({
     statusIdx: index("runs_status_idx").on(table.status),
-    runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId)
+    runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId),
+    sourceEventIdx: uniqueIndex("runs_source_event_id_idx").on(table.eventId)
   })
 );
 
@@ -125,6 +126,22 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS slack_channel_bindings_team_channel_idx
       ON slack_channel_bindings(team_id, channel_id);
+  `);
+  sqlite.exec(`
+    UPDATE runs
+    SET event_id = event_id || '#duplicate:' || id
+    WHERE rowid NOT IN (
+      SELECT MIN(rowid)
+      FROM runs
+      GROUP BY event_id
+    )
+    AND event_id IN (
+      SELECT event_id
+      FROM runs
+      GROUP BY event_id
+      HAVING COUNT(*) > 1
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS runs_source_event_id_idx ON runs(event_id);
   `);
   const columns = sqlite.prepare("PRAGMA table_info(repo_bindings)").all() as { name: string }[];
   const columnNames = new Set(columns.map((column) => column.name));

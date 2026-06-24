@@ -1,8 +1,9 @@
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { createOpenTagRepository } from "../src/repository.js";
-import { migrateSchema } from "../src/schema.js";
+import { migrateSchema, runs } from "../src/schema.js";
 
 describe("OpenTag repository", () => {
   it("creates and claims a run once", async () => {
@@ -215,5 +216,63 @@ describe("OpenTag repository", () => {
 
     const events = await repo.listRunEvents({ runId: "run_2" });
     expect(events.map((event) => event.type)).toEqual(["run.created", "run.completed"]);
+  });
+
+  it("returns the existing run when a source event is replayed", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const event = {
+      id: "evt_replay",
+      source: "github" as const,
+      sourceEventId: "comment_replay",
+      receivedAt: "2026-06-24T00:00:00.000Z",
+      actor: { provider: "github" as const, providerUserId: "42" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: { owner: "acme", repo: "demo" }
+    };
+
+    const first = await repo.createRun({ id: "run_original", event });
+    const replay = await repo.createRun({ id: "run_duplicate", event });
+
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    expect(replay.run.id).toBe("run_original");
+    const events = await repo.listRunEvents({ runId: "run_original" });
+    expect(events.map((entry) => entry.type)).toEqual(["run.created", "run.create_idempotent_replay"]);
+  });
+
+  it("does not claim a run if a competing worker assigned it first", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({
+      id: "run_race",
+      event: {
+        id: "evt_race",
+        source: "github",
+        sourceEventId: "comment_race",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: [],
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+    await db.update(runs).set({ status: "assigned", assignedRunnerId: "runner_other" }).where(eq(runs.id, "run_race"));
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toBeNull();
   });
 });

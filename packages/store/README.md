@@ -38,6 +38,10 @@ await repo.createRepoBinding({
 });
 ```
 
+## Reliability Notes
+
+`createRun` uses a unique source event index plus `ON CONFLICT DO NOTHING` so webhook replays can return the original run instead of creating duplicate work. `claimNextRun` uses a conditional status update before returning a claimed run, which keeps concurrent runners from claiming the same queued row. Callback dead letters are stored as run audit events and can be listed through `listCallbackDeadLetters`.
+
 ## Stability
 
 The repository methods are public API for embedded control planes. The raw Drizzle table definitions are lower-level and may evolve with migrations.

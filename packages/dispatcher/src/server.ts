@@ -76,23 +76,65 @@ export type CallbackSink = {
   deliver(message: CallbackMessage): Promise<void>;
 };
 
+export type CallbackRetryPolicy = {
+  maxAttempts?: number;
+  initialDelayMs?: number;
+};
+
 const noopCallbackSink: CallbackSink = {
   async deliver() {
     return;
   }
 };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorPayload(error: unknown): { message: string; name?: string } {
+  if (error instanceof Error) {
+    return {
+      message: error.message,
+      ...(error.name ? { name: error.name } : {})
+    };
+  }
+  return { message: String(error) };
+}
+
 async function deliverAndAudit(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   sink: CallbackSink;
   message: CallbackMessage;
+  retryPolicy?: CallbackRetryPolicy;
 }): Promise<void> {
-  await input.sink.deliver(input.message);
-  await input.repo.appendRunEvent({
-    runId: input.message.runId,
-    type: `callback.${input.message.kind}.delivered`,
-    payload: input.message
-  });
+  const maxAttempts = Math.max(1, input.retryPolicy?.maxAttempts ?? 3);
+  const initialDelayMs = Math.max(0, input.retryPolicy?.initialDelayMs ?? 100);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await input.sink.deliver(input.message);
+      await input.repo.appendRunEvent({
+        runId: input.message.runId,
+        type: `callback.${input.message.kind}.delivered`,
+        payload: { ...input.message, attempt }
+      });
+      return;
+    } catch (error) {
+      const payload = {
+        ...input.message,
+        attempt,
+        maxAttempts,
+        error: errorPayload(error)
+      };
+      await input.repo.appendRunEvent({
+        runId: input.message.runId,
+        type: attempt >= maxAttempts ? `callback.${input.message.kind}.dead_lettered` : `callback.${input.message.kind}.attempt_failed`,
+        payload
+      });
+      if (attempt < maxAttempts && initialDelayMs > 0) {
+        await sleep(initialDelayMs * 2 ** (attempt - 1));
+      }
+    }
+  }
 }
 
 function isAuthorized(request: Request, pairingToken: string | undefined): boolean {
@@ -100,7 +142,12 @@ function isAuthorized(request: Request, pairingToken: string | undefined): boole
   return request.headers.get("authorization") === `Bearer ${pairingToken}`;
 }
 
-export function createDispatcherApp(input: { databasePath: string; callbackSink?: CallbackSink; pairingToken?: string }) {
+export function createDispatcherApp(input: {
+  databasePath: string;
+  callbackSink?: CallbackSink;
+  pairingToken?: string;
+  callbackRetryPolicy?: CallbackRetryPolicy;
+}) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
@@ -175,20 +222,23 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
       return c.json({ error: "actor_not_allowed_for_write" }, 403);
     }
 
-    const run = await repo.createRun({ id: parsed.runId, event: parsed.event });
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      message: {
-        runId: run.id,
-        kind: "acknowledgement",
-        provider: parsed.event.callback.provider,
-        uri: parsed.event.callback.uri,
-        body: renderAcknowledgement(run.id),
-        ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
-      }
-    });
-    return c.json({ run }, 201);
+    const { run, created } = await repo.createRun({ id: parsed.runId, event: parsed.event });
+    if (created) {
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        ...(input.callbackRetryPolicy ? { retryPolicy: input.callbackRetryPolicy } : {}),
+        message: {
+          runId: run.id,
+          kind: "acknowledgement",
+          provider: parsed.event.callback.provider,
+          uri: parsed.event.callback.uri,
+          body: renderAcknowledgement(run.id),
+          ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
+        }
+      });
+    }
+    return c.json({ run, idempotentReplay: !created }, created ? 201 : 200);
   });
 
   app.post("/v1/runners/:runnerId/claim", async (c) => {
@@ -224,6 +274,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     await deliverAndAudit({
       repo,
       sink: callbackSink,
+      ...(input.callbackRetryPolicy ? { retryPolicy: input.callbackRetryPolicy } : {}),
       message: {
         runId,
         kind: "progress",
@@ -246,6 +297,7 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
     await deliverAndAudit({
       repo,
       sink: callbackSink,
+      ...(input.callbackRetryPolicy ? { retryPolicy: input.callbackRetryPolicy } : {}),
       message: {
         runId,
         kind: "final",
@@ -266,6 +318,11 @@ export function createDispatcherApp(input: { databasePath: string; callbackSink?
 
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
+    return c.json({ events });
+  });
+
+  app.get("/v1/runs/:runId/callback-dead-letters", async (c) => {
+    const events = await repo.listCallbackDeadLetters({ runId: c.req.param("runId") });
     return c.json({ events });
   });
 

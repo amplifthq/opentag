@@ -141,6 +141,94 @@ describe("dispatcher API", () => {
     ]);
   });
 
+  it("handles replayed source events idempotently without duplicating acknowledgement callbacks", async () => {
+    const delivered: { kind: string; body: string }[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+
+    const first = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_original", event: validEvent })
+    });
+    const replay = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_replay", event: validEvent })
+    });
+
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      idempotentReplay: true,
+      run: { id: "run_original" }
+    });
+    expect(delivered).toEqual([{ kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_original`" }]);
+
+    const eventsResponse = await app.request("/v1/runs/run_original/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "run.created",
+      "callback.acknowledgement.delivered",
+      "run.create_idempotent_replay"
+    ]);
+  });
+
+  it("records callback retries and dead letters without failing the run API", async () => {
+    let attempts = 0;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackRetryPolicy: { maxAttempts: 2, initialDelayMs: 0 },
+      callbackSink: {
+        async deliver() {
+          attempts += 1;
+          throw new Error("provider unavailable");
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    });
+
+    const response = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_dead_letter", event: { ...validEvent, id: "evt_dead_letter" } })
+    });
+
+    expect(response.status).toBe(201);
+    expect(attempts).toBe(2);
+
+    const eventsResponse = await app.request("/v1/runs/run_dead_letter/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "run.created",
+      "callback.acknowledgement.attempt_failed",
+      "callback.acknowledgement.dead_lettered"
+    ]);
+    expect(events.at(-1).payload.error.message).toBe("provider unavailable");
+
+    const deadLettersResponse = await app.request("/v1/runs/run_dead_letter/callback-dead-letters");
+    const deadLetters = await deadLettersResponse.json();
+    expect(deadLetters.events).toHaveLength(1);
+    expect(deadLetters.events[0].type).toBe("callback.acknowledgement.dead_lettered");
+  });
+
   it("rejects runs for repositories without an explicit binding", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

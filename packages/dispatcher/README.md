@@ -48,6 +48,17 @@ When `pairingToken` is set, every `/v1/*` endpoint requires:
 Authorization: Bearer <pairingToken>
 ```
 
+## Reliability Notes
+
+The v0 dispatcher includes lightweight reliability guardrails without adding a queue service:
+
+- `POST /v1/runs` is idempotent per normalized source event ID. Replayed GitHub or Slack events return the existing run with `idempotentReplay: true`.
+- runner claim uses a conditional SQLite update so a queued run can only move to `assigned` once.
+- callback delivery is retried before being written as `callback.<kind>.dead_lettered` in the run audit log.
+- `GET /v1/runs/:runId/callback-dead-letters` returns exhausted callback delivery failures for operator follow-up.
+
+This is intentionally still a SQLite-first v0 control plane. Multi-instance deployments should continue toward stronger database transactions, callback workers, metrics, and external dead-letter handling.
+
 ## Stability
 
 The Hono app factory and callback sink interfaces are public API. Individual HTTP endpoint semantics should remain backward compatible within a major version.

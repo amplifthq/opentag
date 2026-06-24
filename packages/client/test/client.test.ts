@@ -32,6 +32,7 @@ describe("@opentag/client", () => {
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse({
+          idempotentReplay: true,
           run: {
             id: "run_1",
             eventId: "evt_1",
@@ -43,9 +44,10 @@ describe("@opentag/client", () => {
       }
     });
 
-    const { run } = await client.createRun({ runId: "run_1", event });
+    const { run, idempotentReplay } = await client.createRun({ runId: "run_1", event });
 
     expect(run.id).toBe("run_1");
+    expect(idempotentReplay).toBe(true);
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runs");
     expect(requests[0]?.init?.headers).toMatchObject({
