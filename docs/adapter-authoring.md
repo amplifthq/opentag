@@ -15,9 +15,9 @@ OpenTag currently uses three adapter shapes:
 
 | Adapter type | Purpose | Current examples |
 | --- | --- | --- |
-| Ingress normalizer | Converts a platform event into `OpenTagEvent` | `@opentag/github`, `@opentag/slack` |
-| Ingress app | Receives signed webhooks/events and calls the dispatcher | `apps/github-probot`, `apps/slack-events` |
-| Callback sink | Posts acknowledgement, progress, and final messages back to the source thread | `createGitHubCallbackSink`, `createSlackCallbackSink` |
+| Ingress normalizer | Converts a platform event into `OpenTagEvent` | `@opentag/github`, `@opentag/slack`, `@opentag/telegram` |
+| Ingress app | Receives signed webhooks/events and calls the dispatcher | `apps/github-probot`, `apps/slack-events`, `apps/telegram-events` |
+| Callback sink | Posts acknowledgement, progress, and final messages back to the source thread | `createGitHubCallbackSink`, `createSlackCallbackSink`, `createTelegramCallbackSink` |
 
 Future app support should arrive through these adapters, not by adding a new
 execution architecture. The dispatcher and runner contracts should stay shared.
@@ -39,12 +39,12 @@ execution architecture. The dispatcher and runner contracts should stay shared.
 
 Before writing code, check whether `@opentag/core` already supports the provider:
 
-- `SourceSchema` currently includes `github`, `slack`, `lark`, `cli`, and
+- `SourceSchema` currently includes `github`, `slack`, `telegram`, `lark`, `cli`, and
   `webhook`.
-- `ProviderSchema` currently includes `github`, `slack`, and `lark`.
-- `CallbackRouteSchema` currently includes `github`, `slack`, `lark`, and
+- `ProviderSchema` currently includes `github`, `slack`, `telegram`, and `lark`.
+- `CallbackRouteSchema` currently includes `github`, `slack`, `telegram`, `lark`, and
   `webhook`.
-- `ContextPointerSchema` includes GitHub, Slack, Lark, file, URL, and text
+- `ContextPointerSchema` includes GitHub, Slack, Telegram, Lark, file, URL, and text
   pointers.
 
 If the new app needs a new provider such as Linear, Jira, Teams, or Discord,

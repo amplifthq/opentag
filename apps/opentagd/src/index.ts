@@ -173,6 +173,35 @@ program
   });
 
 program
+  .command("bind-channels")
+  .description("Sync configured generic channel bindings to the dispatcher")
+  .action(async () => {
+    const config = loadConfigOrExit();
+    const client = createDispatcherAdminClient({
+      dispatcherUrl: config.dispatcherUrl,
+      runnerId: config.runnerId,
+      ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
+    });
+    for (const binding of config.channelBindings ?? []) {
+      await client.bindChannel({
+        provider: binding.provider,
+        accountId: binding.accountId,
+        conversationId: binding.conversationId,
+        repoProvider: binding.repoProvider,
+        owner: binding.owner,
+        repo: binding.repo,
+        ...(binding.metadata ? { metadata: binding.metadata } : {})
+      });
+      console.log(
+        `Bound ${binding.provider}:${binding.accountId}/${binding.conversationId} to ${binding.repoProvider}:${binding.owner}/${binding.repo}`
+      );
+    }
+    if (!(config.channelBindings?.length ?? 0)) {
+      console.log("No generic channel bindings configured.");
+    }
+  });
+
+program
   .command("doctor")
   .description("Check dispatcher, bindings, checkouts, and executors")
   .action(async () => {

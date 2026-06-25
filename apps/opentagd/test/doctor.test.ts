@@ -41,6 +41,16 @@ describe("opentagd doctor", () => {
             keepWorktree: "on_failure"
           }
         ],
+        channelBindings: [
+          {
+            provider: "telegram",
+            accountId: "bot_123",
+            conversationId: "456",
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          }
+        ],
         slackChannels: [{ teamId: "T123", channelId: "C123", repoProvider: "gitlab", owner: "acme", repo: "demo" }],
         githubToken: "ghs_test",
         pollIntervalMs: 5000,
@@ -77,6 +87,18 @@ describe("opentagd doctor", () => {
               accountId: "T123",
               conversationId: "C123",
               repoProvider: "gitlab",
+              owner: "acme",
+              repo: "demo"
+            }
+          });
+        }
+        if (stringUrl.endsWith("/v1/channel-bindings/telegram/bot_123/456")) {
+          return Response.json({
+            binding: {
+              provider: "telegram",
+              accountId: "bot_123",
+              conversationId: "456",
+              repoProvider: "github",
               owner: "acme",
               repo: "demo"
             }

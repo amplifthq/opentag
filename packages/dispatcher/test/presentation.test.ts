@@ -6,6 +6,7 @@ describe("default callback presentation", () => {
     const presentation = createDefaultCallbackPresentation();
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
+    expect(presentation.shouldDeliverProgress("telegram")).toBe(true);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
   });
 
@@ -19,6 +20,7 @@ describe("default callback presentation", () => {
 
     expect(presentation.acknowledgement({ provider: "github", runId: "run_1" })).toBe("OpenTag picked this up. Run: `run_1`");
     expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe("I picked this up: `run_1`");
+    expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe("I picked this up: run_1");
     expect(presentation.final({ provider: "github", result })).toEqual({
       body: "OpenTag finished with **success**.\n\ndone\n\nVerification:\n- `echo`: passed"
     });
@@ -42,6 +44,24 @@ describe("default callback presentation", () => {
         }
       ]
     });
+    expect(presentation.final({ provider: "telegram", result })).toEqual({
+      body: "Finished with success.\n\ndone\n\nVerification:\n- echo: passed"
+    });
+  });
+
+  it("renders Telegram progress as concise conversational states", () => {
+    const presentation = createDefaultCallbackPresentation();
+
+    expect(presentation.progress({ provider: "telegram", runId: "run_1", message: "Starting claude --print" })).toBe(
+      "Thinking..."
+    );
+    expect(
+      presentation.progress({
+        provider: "telegram",
+        runId: "run_1",
+        message: "Creating isolated branch opentag/run_1"
+      })
+    ).toBe("Working...");
   });
 
   it("renders structured next actions by summary", () => {

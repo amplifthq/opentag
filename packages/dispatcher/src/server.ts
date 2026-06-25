@@ -165,7 +165,7 @@ function mappingsFromAdapterPlan(adapterPlan: unknown) {
 export type CallbackMessage = {
   runId: string;
   kind: "acknowledgement" | "progress" | "final";
-  provider: "github" | "slack" | "lark" | "webhook";
+  provider: "github" | "slack" | "telegram" | "lark" | "webhook";
   uri: string;
   body: string;
   agentId?: string;

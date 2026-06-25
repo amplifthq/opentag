@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const SourceSchema = z.enum(["github", "slack", "lark", "cli", "webhook"]);
-export const ProviderSchema = z.enum(["github", "slack", "lark"]);
+export const SourceSchema = z.enum(["github", "slack", "telegram", "lark", "cli", "webhook"]);
+export const ProviderSchema = z.enum(["github", "slack", "telegram", "lark"]);
 export const ExecutorHintSchema = z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]);
 export const PermissionScopeSchema = z.enum([
   "repo:read",
@@ -76,6 +76,9 @@ export const ContextPointerSchema = z.object({
     "slack.channel",
     "slack.thread",
     "slack.message",
+    "telegram.chat",
+    "telegram.thread",
+    "telegram.message",
     "lark.chat",
     "lark.thread",
     "lark.message",
@@ -192,7 +195,7 @@ export const SuccessMetricNameSchema = z.enum([
 ]);
 
 export const CallbackRouteSchema = z.object({
-  provider: z.enum(["github", "slack", "lark", "webhook"]),
+  provider: z.enum(["github", "slack", "telegram", "lark", "webhook"]),
   uri: z.string().min(1),
   threadKey: z.string().min(1).optional()
 });
@@ -214,7 +217,7 @@ export const WorkItemReferenceSchema = z.object({
 });
 
 export const ConversationAnchorSchema = z.object({
-  provider: z.enum(["github", "slack", "lark", "webhook"]),
+  provider: z.enum(["github", "slack", "telegram", "lark", "webhook"]),
   kind: z.string().min(1),
   externalId: z.string().min(1),
   uri: z.string().min(1),

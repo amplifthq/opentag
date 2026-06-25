@@ -108,7 +108,15 @@ function classifyContextPointer(pointer: ContextPointer): ClassifiedContextPoint
   if (pointer.kind === "text") {
     return { pointer, classification: "primary_evidence", reason: "Original user-authored text is primary evidence." };
   }
-  if (pointer.kind === "github.issue" || pointer.kind === "github.pull_request" || pointer.kind === "github.comment" || pointer.kind === "slack.thread" || pointer.kind === "slack.message") {
+  if (
+    pointer.kind === "github.issue" ||
+    pointer.kind === "github.pull_request" ||
+    pointer.kind === "github.comment" ||
+    pointer.kind === "slack.thread" ||
+    pointer.kind === "slack.message" ||
+    pointer.kind === "telegram.thread" ||
+    pointer.kind === "telegram.message"
+  ) {
     return { pointer, classification: "primary_evidence", reason: `${pointer.kind} is directly attached to the invocation.` };
   }
   if (pointer.kind === "github.repo" || pointer.kind === "file" || pointer.kind === "url") {
@@ -203,7 +211,7 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "lark", "webhook"],
+    adapterTargets: ["github", "slack", "telegram", "lark", "webhook"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   },
   {
@@ -212,7 +220,7 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "lark", "webhook"],
+    adapterTargets: ["github", "slack", "telegram", "lark", "webhook"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   },
   {
@@ -267,7 +275,7 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "lark"],
+    adapterTargets: ["github", "slack", "telegram", "lark"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   }
 ] satisfies CapabilityContract[];
@@ -325,10 +333,11 @@ export function workItemReferenceFromEvent(event: OpenTagEvent): WorkItemReferen
 }
 
 export function primaryConversationAnchorFromEvent(event: OpenTagEvent): ConversationAnchor {
-  const slackThreadKey = event.callback.provider === "slack" ? event.callback.threadKey : undefined;
+  const structuredThreadKey =
+    event.callback.provider === "slack" || event.callback.provider === "telegram" ? event.callback.threadKey : undefined;
   return {
     provider: event.callback.provider,
-    kind: event.callback.provider === "slack" ? "thread" : `${event.callback.provider}_thread`,
+    kind: event.callback.provider === "slack" || event.callback.provider === "telegram" ? "thread" : `${event.callback.provider}_thread`,
     externalId: event.callback.threadKey ?? event.callback.uri,
     uri:
       firstContextUri(event, "github.comment") ??
@@ -336,7 +345,7 @@ export function primaryConversationAnchorFromEvent(event: OpenTagEvent): Convers
       event.callback.uri,
     controlPlane: true,
     canApprove: true,
-    ...(slackThreadKey ? { threadKey: slackThreadKey } : {})
+    ...(structuredThreadKey ? { threadKey: structuredThreadKey } : {})
   };
 }
 

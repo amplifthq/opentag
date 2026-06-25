@@ -115,6 +115,34 @@ describe("opentagd config", () => {
     });
   });
 
+  it("parses generic channel bindings through the validated schema", () => {
+    const parsed = parseDaemonConfig({
+      dispatcherUrl: "http://localhost:3030",
+      repositories: [],
+      channelBindings: [
+        {
+          provider: "telegram",
+          accountId: "bot_123",
+          conversationId: "456",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          metadata: { topic: "ops" }
+        }
+      ]
+    });
+
+    expect(parsed.channelBindings?.[0]).toMatchObject({
+      provider: "telegram",
+      accountId: "bot_123",
+      conversationId: "456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo",
+      metadata: { topic: "ops" }
+    });
+  });
+
   it("formats zod config errors into a readable message", () => {
     const error = (() => {
       try {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createCompositeCallbackSink, createGitHubCallbackSink, createSlackCallbackSink } from "../src/callbacks.js";
+import { createCompositeCallbackSink, createGitHubCallbackSink, createSlackCallbackSink, createTelegramCallbackSink } from "../src/callbacks.js";
 
 describe("createGitHubCallbackSink", () => {
   it("posts GitHub callback messages to the callback URI", async () => {
@@ -210,6 +210,96 @@ describe("createGitHubCallbackSink", () => {
           channel: "C123",
           text: "done",
           thread_ts: "1710000000.000100"
+        }
+      }
+    ]);
+  });
+
+  it("posts Telegram callback messages to sendMessage", async () => {
+    const requests: { url: string; body: unknown }[] = [];
+    const sink = createTelegramCallbackSink({
+      botToken: "telegram-token",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: JSON.parse(String(init?.body))
+        });
+        return Response.json({ ok: true, result: { message_id: 999 } });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "telegram",
+      uri: "https://api.telegram.org/sendMessage",
+      threadKey: "bot_123|-1001|789|42",
+      body: "done"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.telegram.org/bottelegram-token/sendMessage",
+        body: {
+          chat_id: "-1001",
+          text: "done",
+          reply_to_message_id: 789,
+          message_thread_id: 42,
+          allow_sending_without_reply: true
+        }
+      }
+    ]);
+  });
+
+  it("streams Telegram progress messages through sendMessageDraft with a stable draft id", async () => {
+    const requests: { url: string; body: unknown }[] = [];
+    const sink = createTelegramCallbackSink({
+      botToken: "telegram-token",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: JSON.parse(String(init?.body))
+        });
+        return Response.json({ ok: true });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "telegram",
+      uri: "https://api.telegram.org/sendMessage",
+      threadKey: "bot_123|-1001|789|42",
+      statusMessageKey: "run_1:status",
+      body: "step 1"
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "telegram",
+      uri: "https://api.telegram.org/sendMessage",
+      threadKey: "bot_123|-1001|789|42",
+      statusMessageKey: "run_1:status",
+      body: "step 2"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.telegram.org/bottelegram-token/sendMessageDraft",
+        body: {
+          chat_id: "-1001",
+          text: "step 1",
+          draft_id: 1,
+          message_thread_id: 42
+        }
+      },
+      {
+        url: "https://api.telegram.org/bottelegram-token/sendMessageDraft",
+        body: {
+          chat_id: "-1001",
+          text: "step 2",
+          draft_id: 1,
+          message_thread_id: 42
         }
       }
     ]);

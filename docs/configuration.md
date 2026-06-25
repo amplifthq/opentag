@@ -9,7 +9,7 @@ configuration map, then jump to the runnable examples for end-to-end commands:
 
 ## Configuration Layers
 
-OpenTag has four runtime surfaces today:
+OpenTag has five runtime surfaces today:
 
 | Surface | Process | Owns |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ OpenTag has four runtime surfaces today:
 | Local daemon | `apps/opentagd` | Runner identity, repository bindings, workspace paths, executor settings |
 | GitHub ingress | `apps/github-probot` | GitHub App webhooks and GitHub event normalization |
 | Slack ingress | `apps/slack-events` | Slack Events API verification and Slack event normalization |
+| Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
 events and create runs. The dispatcher should coordinate runs and callbacks. The
@@ -68,6 +69,30 @@ Add Slack channel bindings when a chat surface should route work to a repository
 }
 ```
 
+Add generic channel bindings when a non-Slack chat surface should route work to
+a repository:
+
+```json
+{
+  "channelBindings": [
+    {
+      "provider": "telegram",
+      "accountId": "bot_123",
+      "conversationId": "456",
+      "repoProvider": "github",
+      "owner": "acme",
+      "repo": "demo"
+    }
+  ]
+}
+```
+
+Sync these generic bindings with:
+
+```bash
+OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-channels
+```
+
 Add Claude Code settings when using the built-in `claude-code` executor:
 
 ```json
@@ -101,6 +126,7 @@ Use daemon security settings to keep executor runs constrained:
 | `dispatcherUrl` | `http://localhost:3030` | Dispatcher base URL |
 | `pairingToken` | none | Shared Bearer token for dispatcher `/v1/*` calls |
 | `repositories` | `[]` | Repository bindings this daemon is allowed to claim |
+| `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> repo` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
 | `security` | none | Runner security policy |
@@ -168,6 +194,8 @@ for repeatable setups.
 | `OPENTAG_GITHUB_TOKEN` | none | Enables GitHub callback posting and GitHub apply helpers |
 | `OPENTAG_SLACK_BOT_TOKEN` | none | Single Slack bot token for callback posting |
 | `OPENTAG_SLACK_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Slack bot token |
+| `OPENTAG_TELEGRAM_BOT_TOKEN` | none | Single Telegram bot token for callback posting |
+| `OPENTAG_TELEGRAM_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Telegram bot token |
 
 If `OPENTAG_PAIRING_TOKEN` is set on the dispatcher, use the same value as:
 
@@ -223,6 +251,40 @@ on the dispatcher. That avoids duplicate acknowledgement comments.
 Set `OPENTAG_SLACK_BOT_TOKEN` or `OPENTAG_SLACK_BOT_TOKENS_JSON` on the
 dispatcher, not on the Slack ingress, when you want final replies posted back to
 Slack threads.
+
+## Telegram Ingress Environment
+
+`apps/telegram-events` receives Telegram webhook updates and creates OpenTag runs.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `OPENTAG_DISPATCHER_URL` | yes | Dispatcher URL |
+| `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |
+| `PORT` | no | Defaults to `3050` |
+| `OPENTAG_TELEGRAM_BOT_ID` | yes unless using JSON config | Bot id used in the webhook path and channel binding lookup |
+| `OPENTAG_TELEGRAM_AGENT_ID` | no | Agent id for single-bot mode. Defaults to `opentag` |
+| `OPENTAG_TELEGRAM_BOT_USERNAME` | no | Used to strip mentions in group chats |
+| `OPENTAG_TELEGRAM_SECRET_TOKEN` | no | Expected `x-telegram-bot-api-secret-token` header value |
+| `OPENTAG_TELEGRAM_CALLBACK_URI` | no | Callback URI override. Defaults to `https://api.telegram.org/sendMessage` |
+| `OPENTAG_TELEGRAM_BOTS_JSON` | no | JSON array for multi-bot ingress |
+
+`OPENTAG_TELEGRAM_BOTS_JSON` shape:
+
+```json
+[
+  {
+    "botId": "bot_123",
+    "agentId": "opentag",
+    "botUsername": "opentag_bot",
+    "secretToken": "telegram-secret",
+    "callbackUri": "https://api.telegram.org/sendMessage"
+  }
+]
+```
+
+Set `OPENTAG_TELEGRAM_BOT_TOKEN` or `OPENTAG_TELEGRAM_BOT_TOKENS_JSON` on the
+dispatcher, not on the Telegram ingress, when you want final replies posted
+back to Telegram chats.
 
 ## Secret Handling
 

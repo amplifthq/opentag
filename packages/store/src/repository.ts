@@ -61,7 +61,7 @@ export type OpenTagAuditEvent = {
 };
 
 export type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
-export type CallbackDeliveryProvider = "github" | "slack" | "lark" | "webhook";
+export type CallbackDeliveryProvider = "github" | "slack" | "telegram" | "lark" | "webhook";
 export type CallbackDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
 
 export type CallbackDelivery = {

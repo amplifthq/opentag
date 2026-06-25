@@ -1,4 +1,5 @@
 import { createSlackPostMessagePayload, createSlackUpdateMessagePayload, parseSlackThreadKey } from "@opentag/slack";
+import { createTelegramSendMessageDraftPayload, createTelegramSendMessagePayload, parseTelegramThreadKey } from "@opentag/telegram";
 import type { CallbackMessage, CallbackSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
@@ -139,6 +140,69 @@ export function createSlackCallbackSink(input: {
             statusMessageTsByKey.delete(key);
           }
         }
+      }
+    }
+  };
+}
+
+export function createTelegramCallbackSink(input: {
+  botToken?: string;
+  botTokensByAgentId?: Record<string, string>;
+  fetchImpl?: FetchLike;
+}): CallbackSink {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const draftIdByKey = new Map<string, number>();
+  let nextDraftId = 1;
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "telegram") return;
+      const botToken = slackBotTokenFor({
+        ...(input.botToken ? { botToken: input.botToken } : {}),
+        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
+        ...(message.agentId ? { agentId: message.agentId } : {})
+      });
+      if (!botToken) return;
+
+      const thread = parseTelegramThreadKey(message.threadKey ?? "");
+      const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
+      const isDraft = message.kind === "progress";
+      const draftId = isDraft ? (draftIdByKey.get(statusKey) ?? nextDraftId++) : undefined;
+      if (isDraft && draftId && !draftIdByKey.has(statusKey)) {
+        draftIdByKey.set(statusKey, draftId);
+      }
+
+      const response = await fetchImpl(`https://api.telegram.org/bot${botToken}/${isDraft ? "sendMessageDraft" : "sendMessage"}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(
+          isDraft
+            ? createTelegramSendMessageDraftPayload({
+                chatId: thread.chatId,
+                text: message.body,
+                draftId: draftId!,
+                ...(thread.messageThreadId ? { messageThreadId: thread.messageThreadId } : {})
+              })
+            : createTelegramSendMessagePayload({
+                chatId: thread.chatId,
+                text: message.body,
+                replyToMessageId: thread.replyToMessageId,
+                ...(thread.messageThreadId ? { messageThreadId: thread.messageThreadId } : {})
+              })
+        )
+      });
+
+      if (!response.ok) {
+        throw new Error(`deliver Telegram callback failed: ${response.status} ${await response.text()}`);
+      }
+      const body = (await response.json()) as { ok?: boolean; description?: string };
+      if (body.ok === false) {
+        throw new Error(`deliver Telegram callback failed: ${body.description ?? "unknown_error"}`);
+      }
+      if (message.kind === "final") {
+        draftIdByKey.delete(statusKey);
       }
     }
   };

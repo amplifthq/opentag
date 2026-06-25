@@ -58,6 +58,51 @@ describe("OpenTagEventSchema", () => {
     expect(parsed.source).toBe("github");
   });
 
+  it("accepts a valid Telegram event", () => {
+    const parsed = OpenTagEventSchema.parse({
+      id: "evt_tg_1",
+      source: "telegram",
+      sourceEventId: "update_123",
+      receivedAt: "2026-06-25T00:00:00.000Z",
+      actor: {
+        provider: "telegram",
+        providerUserId: "456",
+        handle: "alice"
+      },
+      target: {
+        mention: "@opentag_bot",
+        agentId: "opentag"
+      },
+      command: {
+        rawText: "fix this",
+        intent: "fix",
+        args: {}
+      },
+      context: [
+        {
+          kind: "telegram.message",
+          uri: "telegram://bot/123/chat/456/message/789",
+          visibility: "organization"
+        }
+      ],
+      permissions: [
+        {
+          scope: "chat:postMessage",
+          reason: "reply to source thread"
+        }
+      ],
+      callback: {
+        provider: "telegram",
+        uri: "https://api.telegram.org/sendMessage",
+        threadKey: "123|456|789|"
+      },
+      metadata: {}
+    });
+
+    expect(parsed.source).toBe("telegram");
+    expect(parsed.callback.provider).toBe("telegram");
+  });
+
   it("accepts the current public executor hints", () => {
     for (const executorHint of ["claude-code", "codex", "hermes", "openclaw", "custom"]) {
       expect(

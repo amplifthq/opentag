@@ -15,6 +15,7 @@ pnpm add @opentag/dispatcher
 - `createDispatcherApp`: creates the Hono app that exposes the OpenTag dispatcher API.
 - `createGitHubCallbackSink`: posts callback messages to GitHub issue or PR comments.
 - `createSlackCallbackSink`: posts callback messages to Slack threads through `chat.postMessage`.
+- `createTelegramCallbackSink`: posts callback messages to Telegram chats through the Bot API `sendMessage` method.
 - `createCompositeCallbackSink`: fans callback delivery out to multiple sinks.
 - `CallbackMessage`, `CallbackSink`: callback delivery contracts.
 
@@ -25,7 +26,8 @@ import {
   createCompositeCallbackSink,
   createDispatcherApp,
   createGitHubCallbackSink,
-  createSlackCallbackSink
+  createSlackCallbackSink,
+  createTelegramCallbackSink
 } from "@opentag/dispatcher";
 
 export const dispatcher = createDispatcherApp({
@@ -33,14 +35,15 @@ export const dispatcher = createDispatcherApp({
   pairingToken: process.env.OPENTAG_PAIRING_TOKEN,
   callbackSink: createCompositeCallbackSink([
     createGitHubCallbackSink({ token: process.env.OPENTAG_GITHUB_TOKEN }),
-    createSlackCallbackSink({ botToken: process.env.OPENTAG_SLACK_BOT_TOKEN })
+    createSlackCallbackSink({ botToken: process.env.OPENTAG_SLACK_BOT_TOKEN }),
+    createTelegramCallbackSink({ botToken: process.env.OPENTAG_TELEGRAM_BOT_TOKEN })
   ])
 });
 ```
 
 ## API Shape
 
-The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, repository bindings, Slack channel bindings, runs, progress, heartbeats, completion, and audit event lookup.
+The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, repository bindings, generic channel bindings, Slack compatibility bindings, runs, progress, heartbeats, completion, and audit event lookup.
 
 When `pairingToken` is set, every `/v1/*` endpoint requires:
 
