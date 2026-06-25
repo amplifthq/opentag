@@ -207,4 +207,39 @@ describe("maybeCreatePullRequest", () => {
 
     expect(commands).toEqual(["git push -u origin opentag/run_1"]);
   });
+
+  it("skips push and PR creation when event metadata owner/repo does not match binding", async () => {
+    const commands: string[] = [];
+    const mismatchEvent: OpenTagEvent = {
+      ...event,
+      metadata: { owner: "other-org", repo: "other-repo" }
+    };
+    const updated = await maybeCreatePullRequest({
+      run,
+      event: mismatchEvent,
+      binding: {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/demo",
+        baseBranch: "main",
+        pushRemote: "origin"
+      },
+      result,
+      options: {
+        githubToken: "ghs_test",
+        allowAutoCreatePullRequest: true,
+        commandRunner: {
+          async run(command, args) {
+            commands.push(`${command} ${args.join(" ")}`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        },
+        fetchImpl: (async () => Response.json({})) as typeof fetch
+      }
+    });
+
+    expect(commands).toEqual([]);
+    expect(updated.createdPullRequestUrl).toBeUndefined();
+  });
 });

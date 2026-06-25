@@ -673,7 +673,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
       const now = new Date();
-      const activeRows = await db.select().from(runs).where(and(eq(runs.status, "assigned"))).orderBy(asc(runs.createdAt));
+      const activeRows = await db
+        .select()
+        .from(runs)
+        .where(inArray(runs.status, ["assigned", "running"]))
+        .orderBy(asc(runs.createdAt));
       for (const activeRow of activeRows) {
         if (!isIsoExpired(activeRow.leaseExpiresAt, now)) continue;
         const updatedAt = nowIso();
@@ -883,7 +887,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           heartbeatAt: null,
           updatedAt
         })
-        .where(eq(runs.id, input.runId));
+        .where(input.runnerId ? and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)) : eq(runs.id, input.runId));
       for (const snapshot of result.suggestedChanges ?? []) {
         const parsedSnapshot = SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
@@ -1403,13 +1407,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .slice(0, input.limit);
     },
 
-    async claimPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number }): Promise<CallbackDelivery[]> {
+    async claimPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number; staleDeliveryThresholdMs?: number }): Promise<CallbackDelivery[]> {
       const now = input.now ?? new Date();
       const maxAttempts = input.maxAttempts ?? Number.POSITIVE_INFINITY;
+      const staleThresholdMs = input.staleDeliveryThresholdMs ?? 60_000;
+      const staleDeliveryCutoff = new Date(now.getTime() - staleThresholdMs).toISOString();
+
       const rows = await db
         .select()
         .from(callbackDeliveries)
-        .where(inArray(callbackDeliveries.status, ["pending", "failed"]))
+        .where(inArray(callbackDeliveries.status, ["pending", "failed", "delivering"]))
         .orderBy(asc(callbackDeliveries.id));
 
       const claimed: CallbackDelivery[] = [];
@@ -1417,12 +1424,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const delivery = callbackDeliveryFromRow(row);
         if (delivery.attempts >= maxAttempts) continue;
         if (delivery.nextAttemptAt && new Date(delivery.nextAttemptAt).getTime() > now.getTime()) continue;
+        if (row.status === "delivering" && row.updatedAt > staleDeliveryCutoff) continue;
 
-        const updatedAt = nowIso();
-        const claimResult = await db
-          .update(callbackDeliveries)
-          .set({ status: "delivering", updatedAt })
-          .where(and(eq(callbackDeliveries.id, row.id), inArray(callbackDeliveries.status, ["pending", "failed"])));
+        const updatedAt = input.now ? input.now.toISOString() : nowIso();
+        const claimWhere =
+          row.status === "delivering"
+            ? and(eq(callbackDeliveries.id, row.id), eq(callbackDeliveries.status, "delivering"), eq(callbackDeliveries.updatedAt, row.updatedAt))
+            : and(eq(callbackDeliveries.id, row.id), inArray(callbackDeliveries.status, ["pending", "failed"]));
+        const claimResult = await db.update(callbackDeliveries).set({ status: "delivering", updatedAt }).where(claimWhere);
         if (claimResult.changes === 0) continue;
 
         claimed.push({

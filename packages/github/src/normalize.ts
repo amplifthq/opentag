@@ -78,7 +78,7 @@ function contextPointersForCommand(command: OpenTagCommand, privateRepo: boolean
       continue;
     }
 
-    if (reference.kind === "file" || reference.kind === "path") {
+    if (reference.kind === "file" || reference.kind === "path" || reference.kind === "line" || reference.kind === "range") {
       context.push({
         kind: "file",
         uri: reference.uri,
