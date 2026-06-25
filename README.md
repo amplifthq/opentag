@@ -34,6 +34,8 @@ pnpm smoke:slack-protocol
 pnpm build
 ```
 
+For local app and runner configuration, copy `.env.example` to `.env` and replace the placeholder values.
+
 The smoke tests start an in-process dispatcher with a temporary SQLite database and exercise the protocol chain through the client SDK. For a full local runner loop, start with [examples/github-to-echo](examples/github-to-echo/README.md).
 
 ## Why OpenTag
