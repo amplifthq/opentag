@@ -1,4 +1,5 @@
 import type { OpenTagEvent } from "@opentag/core";
+import type { LarkChannelBinding } from "@opentag/lark";
 import { describe, expect, it, vi } from "vitest";
 import { createLarkMessageHandler, type LarkInboundMessageEvent } from "../src/app.js";
 
@@ -36,17 +37,27 @@ function messageEvent(overrides?: {
   };
 }
 
-const binding = { tenantKey: "tk_123", chatId: "oc_chat", owner: "acme", repo: "app" };
+const binding: LarkChannelBinding = { tenantKey: "tk_123", chatId: "oc_chat", owner: "acme", repo: "app" };
 
-function makeHandler(opts?: { withBotOpenId?: boolean; createRun?: ReturnType<typeof vi.fn> }) {
+function makeHandler(opts?: {
+  withBotOpenId?: boolean;
+  binding?: LarkChannelBinding | null;
+  createRun?: ReturnType<typeof vi.fn>;
+  bindChannel?: ReturnType<typeof vi.fn>;
+  reply?: ReturnType<typeof vi.fn>;
+}) {
   const createRun = opts?.createRun ?? vi.fn(async (_event: OpenTagEvent) => ({ runId: "run_1" }));
+  const bindChannel = opts?.bindChannel ?? vi.fn(async () => {});
+  const reply = opts?.reply ?? vi.fn(async () => {});
   const handler = createLarkMessageHandler({
     agentId: "opentag",
     ...(opts?.withBotOpenId === false ? {} : { botOpenId: "ou_bot" }),
-    resolveChannelBinding: async () => binding,
-    createRun
+    resolveChannelBinding: async () => (opts && "binding" in opts ? (opts.binding ?? null) : binding),
+    createRun,
+    bindChannel,
+    reply
   });
-  return { handler, createRun };
+  return { handler, createRun, bindChannel, reply };
 }
 
 describe("createLarkMessageHandler", () => {
@@ -84,18 +95,44 @@ describe("createLarkMessageHandler", () => {
     expect((await handler(messageEvent({ messageType: "image" }))).status).toBe("ignored_non_text");
   });
 
-  it("ignores messages from unbound chats and surfaces the ids", async () => {
-    const createRun = vi.fn(async () => ({ runId: "run_x" }));
-    const handler = createLarkMessageHandler({
-      agentId: "opentag",
-      botOpenId: "ou_bot",
-      resolveChannelBinding: async () => null,
-      createRun
+  it("binds the chat via /bind owner/repo and confirms in-thread", async () => {
+    const { handler, bindChannel, reply, createRun } = makeHandler();
+    const outcome = await handler(messageEvent({ text: "@_user_1 /bind amplifthq/opentag" }));
+    expect(outcome.status).toBe("bound");
+    expect(bindChannel).toHaveBeenCalledWith({
+      tenantKey: "tk_123",
+      chatId: "oc_chat",
+      repoProvider: "github",
+      owner: "amplifthq",
+      repo: "opentag"
     });
+    expect(reply).toHaveBeenCalledTimes(1);
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("accepts an explicit provider prefix in /bind", async () => {
+    const { handler, bindChannel } = makeHandler();
+    await handler(messageEvent({ text: "@_user_1 /bind github:acme/web-app" }));
+    expect(bindChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ repoProvider: "github", owner: "acme", repo: "web-app" })
+    );
+  });
+
+  it("replies with usage on a malformed /bind and does not bind", async () => {
+    const { handler, bindChannel, reply } = makeHandler();
+    const outcome = await handler(messageEvent({ text: "@_user_1 /bind not-a-repo" }));
+    expect(outcome.status).toBe("ignored_bind_usage");
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledTimes(1);
+  });
+
+  it("replies with an onboarding hint when the chat is unbound", async () => {
+    const { handler, reply, createRun } = makeHandler({ binding: null });
     const outcome = await handler(messageEvent());
     expect(outcome.status).toBe("ignored_unbound_chat");
     expect(outcome.tenantKey).toBe("tk_123");
     expect(outcome.chatId).toBe("oc_chat");
+    expect(reply).toHaveBeenCalledTimes(1);
     expect(createRun).not.toHaveBeenCalled();
   });
 

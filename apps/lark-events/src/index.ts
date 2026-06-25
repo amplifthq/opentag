@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createOpenTagClient } from "@opentag/client";
+import { createLarkReplyClient, replyLarkMessage } from "@opentag/lark";
 import { createLarkMessageHandler, type LarkInboundMessageEvent, type LarkMessageHandlerOutcome } from "./app.js";
 
 const appId = process.env.LARK_APP_ID;
@@ -13,12 +14,13 @@ if (!dispatcherUrl) {
   throw new Error("OPENTAG_DISPATCHER_URL is required");
 }
 
-const domain = process.env.LARK_DOMAIN === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark;
+const larkDomain = process.env.LARK_DOMAIN === "feishu" ? "feishu" : "lark";
 const dispatcherToken = process.env.OPENTAG_DISPATCHER_TOKEN;
 const dispatcherClient = createOpenTagClient({
   dispatcherUrl,
   ...(dispatcherToken ? { pairingToken: dispatcherToken } : {})
 });
+const replyClient = createLarkReplyClient({ appId, appSecret, domain: larkDomain });
 
 const handler = createLarkMessageHandler({
   agentId: process.env.OPENTAG_LARK_AGENT_ID ?? "opentag",
@@ -44,6 +46,19 @@ const handler = createLarkMessageHandler({
       throw error;
     }
   },
+  async bindChannel(input) {
+    await dispatcherClient.bindChannel({
+      provider: "lark",
+      accountId: input.tenantKey,
+      conversationId: input.chatId,
+      repoProvider: input.repoProvider,
+      owner: input.owner,
+      repo: input.repo
+    });
+  },
+  async reply(input) {
+    await replyLarkMessage(replyClient, input);
+  },
   async createRun(event) {
     const runId = `run_${randomUUID()}`;
     await dispatcherClient.createRun({ runId, event });
@@ -52,10 +67,10 @@ const handler = createLarkMessageHandler({
 });
 
 function logIgnored(outcome: LarkMessageHandlerOutcome): void {
-  if (outcome.status === "created") return;
+  if (outcome.status === "created" || outcome.status === "bound") return;
   if (outcome.status === "ignored_unbound_chat") {
     console.log(
-      `[lark] ignored unbound chat — bind it: provider=lark accountId(tenant_key)=${outcome.tenantKey} conversationId(chat_id)=${outcome.chatId} (opentagd bind-lark-channels or POST /v1/channel-bindings)`
+      `[lark] ignored unbound chat — bind it: provider=lark accountId(tenant_key)=${outcome.tenantKey} conversationId(chat_id)=${outcome.chatId} (reply '/bind owner/repo' in the chat, or POST /v1/channel-bindings)`
     );
     return;
   }
@@ -68,7 +83,11 @@ const eventDispatcher = new lark.EventDispatcher({}).register({
   }
 });
 
-const wsClient = new lark.WSClient({ appId, appSecret, domain });
+const wsClient = new lark.WSClient({
+  appId,
+  appSecret,
+  domain: larkDomain === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark
+});
 wsClient.start({ eventDispatcher }).catch((error: unknown) => {
   console.error("[lark] failed to start long-connection client:", error);
   process.exit(1);

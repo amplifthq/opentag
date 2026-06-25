@@ -265,6 +265,13 @@ Set `LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_DOMAIN` on the dispatcher too, so
 the Lark callback sink can post replies. Bind a chat to a repo with
 `opentagd bind-lark-channels` (using `larkChannels`) or `POST /v1/channel-bindings`.
 
+Each chat is bound independently (one `tenantKey/chatId` → one repo), so one bot
+can serve several chats that each target a different repo. Users can also bind a
+chat from inside Lark without the CLI: @-mention the bot with `/bind <owner>/<repo>`
+(e.g. `/bind amplifthq/opentag`, or `/bind github:amplifthq/opentag`). The bot
+confirms in-thread, and an @-mention in an unbound chat replies with the same
+hint. The target repo must already be registered on a runner (`opentagd bind-repos`).
+
 ## Secret Handling
 
 - Do not commit config files that contain real tokens, signing secrets, or private keys.
