@@ -1,3 +1,5 @@
+import * as lark from "@larksuiteoapi/node-sdk";
+import { createLarkTextMessageContent, parseLarkThreadKey } from "@opentag/lark";
 import { createSlackPostMessagePayload, createSlackUpdateMessagePayload, parseSlackThreadKey } from "@opentag/slack";
 import type { CallbackMessage, CallbackSink } from "./server.js";
 
@@ -140,6 +142,51 @@ export function createSlackCallbackSink(input: {
           }
         }
       }
+    }
+  };
+}
+
+export type LarkReplyClient = {
+  im: {
+    message: {
+      reply(payload: {
+        path: { message_id: string };
+        data: { content: string; msg_type: string; reply_in_thread?: boolean; uuid?: string };
+      }): Promise<unknown>;
+    };
+  };
+};
+
+export function createLarkCallbackSink(input: {
+  appId?: string;
+  appSecret?: string;
+  domain?: "lark" | "feishu";
+  client?: LarkReplyClient;
+}): CallbackSink {
+  const client: LarkReplyClient | undefined =
+    input.client ??
+    (input.appId && input.appSecret
+      ? new lark.Client({
+          appId: input.appId,
+          appSecret: input.appSecret,
+          domain: input.domain === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark
+        })
+      : undefined);
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "lark") return;
+      if (!client) return;
+
+      const { messageId } = parseLarkThreadKey(message.threadKey ?? "");
+      await client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          content: createLarkTextMessageContent(message.body),
+          msg_type: "text",
+          reply_in_thread: true
+        }
+      });
     }
   };
 }

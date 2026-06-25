@@ -1,0 +1,23 @@
+{
+  "name": "@opentag/lark-events",
+  "version": "0.0.0",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.68.0",
+    "@opentag/client": "workspace:*",
+    "@opentag/core": "workspace:*",
+    "@opentag/lark": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

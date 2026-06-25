@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createCompositeCallbackSink, createDispatcherApp, createGitHubCallbackSink, createSlackCallbackSink } from "@opentag/dispatcher";
+import { createCompositeCallbackSink, createDispatcherApp, createGitHubCallbackSink, createLarkCallbackSink, createSlackCallbackSink } from "@opentag/dispatcher";
 
 const port = Number(process.env.PORT ?? "3030");
 const databasePath = process.env.OPENTAG_DATABASE_PATH ?? "opentag.db";
@@ -34,6 +34,11 @@ serve({
       createSlackCallbackSink({
         ...(process.env.OPENTAG_SLACK_BOT_TOKEN ? { botToken: process.env.OPENTAG_SLACK_BOT_TOKEN } : {}),
         ...(slackBotTokensByAgentId ? { botTokensByAgentId: slackBotTokensByAgentId } : {})
+      }),
+      createLarkCallbackSink({
+        ...(process.env.LARK_APP_ID ? { appId: process.env.LARK_APP_ID } : {}),
+        ...(process.env.LARK_APP_SECRET ? { appSecret: process.env.LARK_APP_SECRET } : {}),
+        ...(process.env.LARK_DOMAIN === "feishu" ? { domain: "feishu" as const } : {})
       })
     ])
   }).fetch,

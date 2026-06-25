@@ -32,8 +32,10 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.68.0",
     "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/lark": "workspace:*",
     "@opentag/slack": "workspace:*",
     "@opentag/store": "workspace:*",
     "better-sqlite3": "^11.7.0",
