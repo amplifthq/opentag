@@ -6,8 +6,10 @@ export type CommandResult = {
   stderr: string;
 };
 
+export type CommandEnvironment = Record<string, string | undefined>;
+
 export type CommandRunner = {
-  run(command: string, args: string[], options?: { cwd?: string; input?: string }): Promise<CommandResult>;
+  run(command: string, args: string[], options?: { cwd?: string; input?: string; env?: CommandEnvironment }): Promise<CommandResult>;
 };
 
 export const nodeCommandRunner: CommandRunner = {
@@ -15,6 +17,7 @@ export const nodeCommandRunner: CommandRunner = {
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         cwd: options.cwd,
+        env: options.env,
         stdio: ["pipe", "pipe", "pipe"]
       });
       const stdout: Buffer[] = [];

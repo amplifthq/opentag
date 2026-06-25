@@ -47,4 +47,35 @@ describe("Slack normalization", () => {
       threadTs: "1710000000.000100"
     });
   });
+
+  it("captures parser hints without converting requested scopes into extra granted permissions", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_APP> fix auth --scope repo:write --executor codex --file src/auth.ts --line 12",
+      ts: "1710000000.000100",
+      eventId: "Ev789",
+      eventTime: 1710000000,
+      agentId: "gemini",
+      botUserId: "U_APP",
+      binding: {
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+
+    expect(event?.target).toMatchObject({ agentId: "gemini", executorHint: "codex" });
+    expect(event?.command.parsed?.requestedScopes).toEqual(["repo:write"]);
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(
+      expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
+    );
+    expect(event?.context).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "file", uri: "src/auth.ts#L12" })
+      ])
+    );
+  });
 });

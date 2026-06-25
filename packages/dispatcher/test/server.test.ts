@@ -77,6 +77,41 @@ describe("dispatcher API", () => {
     expect(binding.binding).toMatchObject({ runnerId: "runner_1", workspacePath: "/Users/test/demo" });
   });
 
+  it("returns the existing run for a replayed source event", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+
+    const firstResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_duplicate_1", event: validEvent })
+    });
+    expect(firstResponse.status).toBe(201);
+
+    const secondResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_duplicate_2", event: validEvent })
+    });
+    expect(secondResponse.status).toBe(200);
+    await expect(secondResponse.json()).resolves.toMatchObject({
+      run: { id: "run_duplicate_1" },
+      idempotentReplay: true
+    });
+  });
+
   it("stores and returns repo policy rules", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     const response = await app.request("/v1/repo-bindings/github/acme/demo/policy-rules", {
@@ -157,12 +192,13 @@ describe("dispatcher API", () => {
       body: JSON.stringify({ runId: "run_2", event: { ...validEvent, id: "evt_2", sourceEventId: "comment_2" } })
     });
     expect(createResponse.status).toBe(201);
-    await app.request("/v1/runs/run_2/progress", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_2/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "executor.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z" })
     });
-    const completeResponse = await app.request("/v1/runs/run_2/complete", {
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_2/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })
@@ -184,10 +220,14 @@ describe("dispatcher API", () => {
     expect(events.map((event: { type: string }) => event.type)).toEqual([
       "run.created",
       "context_packet.generated",
+      "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "run.claimed",
       "run.progress",
+      "callback.progress.queued",
       "callback.progress.delivered",
       "run.completed",
+      "callback.final.queued",
       "callback.final.delivered"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
@@ -203,6 +243,47 @@ describe("dispatcher API", () => {
       visibility: "human",
       importance: "high"
     });
+  });
+
+  it("requires runner-scoped progress and completion after claim", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/runners", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runnerId: "runner_1", name: "Runner One" })
+    });
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+    await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_scoped_1", event: { ...validEvent, id: "evt_scoped_1", sourceEventId: "comment_scoped_1" } })
+    });
+
+    const deprecatedProgress = await app.request("/v1/runs/run_scoped_1/progress", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "executor.progress", message: "running tests" })
+    });
+    expect(deprecatedProgress.status).toBe(410);
+
+    const deprecatedComplete = await app.request("/v1/runs/run_scoped_1/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })
+    });
+    expect(deprecatedComplete.status).toBe(410);
   });
 
   it("renders Slack callbacks with Slack mrkdwn and keeps progress audit-only", async () => {
@@ -250,13 +331,14 @@ describe("dispatcher API", () => {
     });
     expect(createResponse.status).toBe(201);
 
-    const progressResponse = await app.request("/v1/runs/run_slack_1/progress", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const progressResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "executor.progress", message: "Echo executor started", at: "2026-06-24T00:00:01.000Z" })
     });
     expect(progressResponse.status).toBe(200);
-    const completeResponse = await app.request("/v1/runs/run_slack_1/complete", {
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -301,9 +383,12 @@ describe("dispatcher API", () => {
     expect(events.map((event: { type: string }) => event.type)).toEqual([
       "run.created",
       "context_packet.generated",
+      "callback.acknowledgement.queued",
       "callback.acknowledgement.delivered",
+      "run.claimed",
       "run.progress",
       "run.completed",
+      "callback.final.queued",
       "callback.final.delivered"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
@@ -344,7 +429,8 @@ describe("dispatcher API", () => {
     });
     expect(createResponse.status).toBe(201);
 
-    await app.request("/v1/runs/run_protocol/complete", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_protocol/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -571,7 +657,8 @@ describe("dispatcher API", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ runId: "run_execute", event })
     });
-    await app.request("/v1/runs/run_execute/complete", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_execute/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -694,7 +781,8 @@ describe("dispatcher API", () => {
         }
       })
     });
-    await app.request("/v1/runs/run_apply_prevalidation/complete", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_apply_prevalidation/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -806,7 +894,8 @@ describe("dispatcher API", () => {
         }
       })
     });
-    await app.request("/v1/runs/run_status_mapping/complete", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_status_mapping/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -933,7 +1022,8 @@ describe("dispatcher API", () => {
     });
     expect(response.status).toBe(201);
 
-    const progressResponse = await app.request("/v1/runs/run_status_key/progress", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const progressResponse = await app.request("/v1/runners/runner_1/runs/run_status_key/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "executor.progress", message: "working", at: "2026-06-24T00:00:01.000Z" })
@@ -1145,7 +1235,8 @@ describe("dispatcher API", () => {
     });
     expect(createResponse.status).toBe(201);
 
-    const completeResponse = await app.request("/v1/runs/run_slack_agent/complete", {
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_slack_agent/complete", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ result: { conclusion: "success", summary: "done" } })

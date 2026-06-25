@@ -41,6 +41,8 @@ export type RepositoryBindingConfig = {
   defaultExecutor?: string;
   baseBranch?: string;
   pushRemote?: string;
+  worktreeRoot?: string;
+  keepWorktree?: "always" | "on_failure" | "never";
 };
 
 export type SlackChannelBindingInput = {
@@ -48,6 +50,13 @@ export type SlackChannelBindingInput = {
   channelId: string;
   owner: string;
   repo: string;
+};
+
+export type RunnerRegistration = {
+  runnerId: string;
+  name: string;
+  createdAt: string;
+  heartbeatAt?: string;
 };
 
 export type OpenTagClientOptions = {
@@ -71,6 +80,11 @@ export type RunProgressInput = {
 export type CreateRunInput = {
   runId: string;
   event: OpenTagEvent;
+};
+
+export type CreateRunResult = {
+  run: OpenTagRun;
+  idempotentReplay?: boolean;
 };
 
 export type ApprovalDecisionInput = {
@@ -128,6 +142,7 @@ export type AggregateMetrics = Omit<RunMetrics, "runId"> & {
 
 export type OpenTagClient = {
   registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
+  getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   bindRepository(input: RepoBindingInput): Promise<void>;
   getRepositoryBinding(input: { provider: string; owner: string; repo: string }): Promise<{ binding: RepoBindingInput }>;
   upsertRepoPolicyRule(input: { provider: string; owner: string; repo: string; rule: PolicyRule }): Promise<{ rule: PolicyRule }>;
@@ -141,12 +156,12 @@ export type OpenTagClient = {
   listRepoMutationMappings(input: { provider: string; owner: string; repo: string }): Promise<{ mappings: AdapterMutationMapping[] }>;
   bindSlackChannel(input: SlackChannelBindingInput): Promise<void>;
   getSlackChannelBinding(input: { teamId: string; channelId: string }): Promise<{ binding: SlackChannelBindingInput }>;
-  createRun(input: CreateRunInput): Promise<{ run: OpenTagRun }>;
+  createRun(input: CreateRunInput): Promise<CreateRunResult>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string }): Promise<void>;
-  markRunning(input: { runId: string; executor: string }): Promise<void>;
-  progress(input: { runId: string } & RunProgressInput): Promise<void>;
-  complete(input: { runId: string; result: OpenTagRunResult }): Promise<void>;
+  markRunning(input: { runnerId: string; runId: string; executor: string }): Promise<void>;
+  progress(input: { runnerId: string; runId: string } & RunProgressInput): Promise<void>;
+  complete(input: { runnerId: string; runId: string; result: OpenTagRunResult }): Promise<void>;
   getRun(input: { runId: string }): Promise<ClaimedOpenTagRun>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
@@ -208,6 +223,14 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ runnerId: input.runnerId, name: input.name ?? input.runnerId })
       });
       await assertOk(response, "registerRunner");
+    },
+
+    async getRunner(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getRunner");
+      return (await response.json()) as { runner: RunnerRegistration };
     },
 
     async bindRepository(input) {
@@ -288,8 +311,11 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify({ runId: input.runId, event })
       });
       await assertOk(response, "createRun");
-      const body = (await response.json()) as { run: unknown };
-      return { run: OpenTagRunSchema.parse(body.run) };
+      const body = (await response.json()) as { run: unknown; idempotentReplay?: unknown };
+      return {
+        run: OpenTagRunSchema.parse(body.run),
+        ...(body.idempotentReplay === true ? { idempotentReplay: true } : {})
+      };
     },
 
     async claim(input) {
@@ -311,7 +337,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async markRunning(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/running`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/running`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({ executor: input.executor })
@@ -320,7 +346,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
     },
 
     async progress(input) {
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/progress`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/progress`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
@@ -336,7 +362,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
 
     async complete(input) {
       const result = OpenTagRunResultSchema.parse(input.result);
-      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/complete`, {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/complete`, {
         method: "POST",
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({ result })
@@ -480,10 +506,10 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
   const client = createOpenTagClient(options);
   return {
     claim: () => client.claim({ runnerId: options.runnerId }),
-    markRunning: (runId, executor) => client.markRunning({ runId, executor }),
+    markRunning: (runId, executor) => client.markRunning({ runnerId: options.runnerId, runId, executor }),
     heartbeat: (runId) => client.heartbeat({ runnerId: options.runnerId, runId }),
-    progress: (runId, input) => client.progress({ runId, ...input }),
-    complete: (runId, result) => client.complete({ runId, result })
+    progress: (runId, input) => client.progress({ runnerId: options.runnerId, runId, ...input }),
+    complete: (runId, result) => client.complete({ runnerId: options.runnerId, runId, result })
   };
 }
 

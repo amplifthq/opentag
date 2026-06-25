@@ -47,4 +47,30 @@ describe("normalizeGitHubIssueComment", () => {
     expect(event?.callback.threadKey).toBe("acme/demo#2");
     expect(event?.metadata).toMatchObject({ pullRequestNumber: 2, installationId: 77 });
   });
+
+  it("keeps requested scopes in parsed command metadata instead of elevating them into granted permissions", () => {
+    const event = normalizeGitHubIssueComment({
+      id: "789",
+      commentBody: "@opentag fix auth --scope repo:write --executor codex --file src/auth.ts --line 12",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-789",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(event?.target.executorHint).toBe("codex");
+    expect(event?.command.parsed?.requestedScopes).toEqual(["repo:write"]);
+    expect(event?.permissions.filter((permission) => permission.scope === "repo:write")).toHaveLength(1);
+    expect(event?.context).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "file", uri: "src/auth.ts#L12" })
+      ])
+    );
+  });
 });

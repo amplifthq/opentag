@@ -1,56 +1,124 @@
 import { readFileSync } from "node:fs";
+import { z } from "zod";
 
-export type RepositoryBindingConfig = {
-  provider: string;
+const ExecutorSchema = z.enum(["echo", "codex", "claude-code"]);
+const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
+const PositiveIntegerSchema = z.number().int().positive();
+
+const ClaudeCodeExecutorConfigSchema = z.object({
+  command: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  permissionMode: z.enum(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]).optional(),
+  dangerouslySkipPermissions: z.boolean().optional()
+});
+
+export const RepositoryBindingConfigSchema = z.object({
+  provider: z.string().min(1).default("github"),
+  owner: z.string().min(1),
+  repo: z.string().min(1),
+  checkoutPath: z.string().min(1),
+  defaultExecutor: ExecutorSchema.default("echo"),
+  baseBranch: z.string().min(1).default("main"),
+  pushRemote: z.string().min(1).default("origin"),
+  worktreeRoot: z.string().min(1).optional(),
+  keepWorktree: KeepWorktreeSchema.default("on_failure")
+});
+
+export const SlackChannelBindingConfigSchema = z.object({
+  teamId: z.string().min(1),
+  channelId: z.string().min(1),
+  owner: z.string().min(1),
+  repo: z.string().min(1)
+});
+
+export const OpenTagDaemonConfigSchema = z.object({
+  runnerId: z.string().min(1).default("runner_local"),
+  dispatcherUrl: z.string().url().default("http://localhost:3030"),
+  repositories: z.array(RepositoryBindingConfigSchema).default([]),
+  slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
+  claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
+  githubToken: z.string().min(1).optional(),
+  allowAutoCreatePullRequest: z.boolean().optional(),
+  pairingToken: z.string().min(1).optional(),
+  pollIntervalMs: PositiveIntegerSchema.default(5000),
+  heartbeatIntervalMs: PositiveIntegerSchema.default(15000)
+});
+
+export type RepositoryBindingConfig = z.infer<typeof RepositoryBindingConfigSchema>;
+export type SlackChannelBindingConfig = z.infer<typeof SlackChannelBindingConfigSchema>;
+export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
+
+export type InitConfigInput = {
+  runnerId?: string;
+  dispatcherUrl?: string;
+  pairingToken?: string;
   owner: string;
   repo: string;
   checkoutPath: string;
-  defaultExecutor?: string;
+  executor?: string;
   baseBranch?: string;
   pushRemote?: string;
+  worktreeRoot?: string;
+  keepWorktree?: string;
 };
 
-export type ClaudeCodeExecutorConfig = {
-  command?: string;
-  model?: string;
-  permissionMode?: "acceptEdits" | "auto" | "bypassPermissions" | "default" | "plan";
-  dangerouslySkipPermissions?: boolean;
-};
+function parseNumberFromEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
 
-export type SlackChannelBindingConfig = {
-  teamId: string;
-  channelId: string;
-  owner: string;
-  repo: string;
-};
+function formatPath(path: Array<string | number>): string {
+  return path.length ? path.join(".") : "config";
+}
 
-export type OpenTagDaemonConfig = {
-  runnerId: string;
-  dispatcherUrl: string;
-  repositories: RepositoryBindingConfig[];
-  slackChannels?: SlackChannelBindingConfig[];
-  claudeCode?: ClaudeCodeExecutorConfig;
-  githubToken?: string;
-  allowAutoCreatePullRequest?: boolean;
-  pairingToken?: string;
-  pollIntervalMs?: number;
-  heartbeatIntervalMs?: number;
-};
+export function formatConfigError(error: unknown): string {
+  if (!(error instanceof z.ZodError)) {
+    return error instanceof Error ? error.message : String(error);
+  }
 
-const CLAUDE_PERMISSION_MODES = new Set(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]);
+  return error.issues.map((issue) => `${formatPath(issue.path)}: ${issue.message}`).join("\n");
+}
 
-function claudePermissionModeFromEnv(value: string | undefined): ClaudeCodeExecutorConfig["permissionMode"] | undefined {
+export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
+  return OpenTagDaemonConfigSchema.parse(value);
+}
+
+export function createInitialConfig(input: InitConfigInput): OpenTagDaemonConfig {
+  return parseDaemonConfig({
+    runnerId: input.runnerId ?? "runner_local",
+    dispatcherUrl: input.dispatcherUrl ?? "http://localhost:3030",
+    ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
+    repositories: [
+      {
+        provider: "github",
+        owner: input.owner,
+        repo: input.repo,
+        checkoutPath: input.checkoutPath,
+        defaultExecutor: input.executor ?? "echo",
+        baseBranch: input.baseBranch ?? "main",
+        pushRemote: input.pushRemote ?? "origin",
+        ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {}),
+        keepWorktree: input.keepWorktree ?? "on_failure"
+      }
+    ]
+  });
+}
+
+function claudePermissionModeFromEnv(value: string | undefined) {
   if (!value) return undefined;
-  if (!CLAUDE_PERMISSION_MODES.has(value)) {
+  const parsed = ClaudeCodeExecutorConfigSchema.shape.permissionMode.safeParse(value);
+  if (!parsed.success) {
     throw new Error(`Invalid OPENTAG_CLAUDE_PERMISSION_MODE: ${value}`);
   }
-  return value as NonNullable<ClaudeCodeExecutorConfig["permissionMode"]>;
+  return parsed.data;
 }
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
   const configPath = process.env.OPENTAG_CONFIG_PATH;
   if (configPath) {
-    return JSON.parse(readFileSync(configPath, "utf8")) as OpenTagDaemonConfig;
+    return parseDaemonConfig(JSON.parse(readFileSync(configPath, "utf8")));
   }
 
   const owner = process.env.OPENTAG_REPO_OWNER;
@@ -64,15 +132,17 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
             provider: "github",
             owner,
             repo,
-          checkoutPath,
+            checkoutPath,
             defaultExecutor: process.env.OPENTAG_DEFAULT_EXECUTOR ?? "echo",
             baseBranch: process.env.OPENTAG_BASE_BRANCH ?? "main",
-            pushRemote: process.env.OPENTAG_PUSH_REMOTE ?? "origin"
+            pushRemote: process.env.OPENTAG_PUSH_REMOTE ?? "origin",
+            ...(process.env.OPENTAG_WORKTREE_ROOT ? { worktreeRoot: process.env.OPENTAG_WORKTREE_ROOT } : {}),
+            keepWorktree: process.env.OPENTAG_KEEP_WORKTREE ?? "on_failure"
           }
         ]
       : [];
 
-  const config: OpenTagDaemonConfig = {
+  const config = {
     runnerId: process.env.OPENTAG_RUNNER_ID ?? "runner_local",
     dispatcherUrl: process.env.OPENTAG_DISPATCHER_URL ?? "http://localhost:3030",
     repositories,
@@ -106,8 +176,10 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(process.env.OPENTAG_ALLOW_AUTO_CREATE_PR ? { allowAutoCreatePullRequest: process.env.OPENTAG_ALLOW_AUTO_CREATE_PR === "true" } : {}),
     ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
-    ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: Number(process.env.OPENTAG_POLL_INTERVAL_MS) } : {}),
-    ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS ? { heartbeatIntervalMs: Number(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS) } : {})
+    ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: parseNumberFromEnv("OPENTAG_POLL_INTERVAL_MS") } : {}),
+    ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS
+      ? { heartbeatIntervalMs: parseNumberFromEnv("OPENTAG_HEARTBEAT_INTERVAL_MS") }
+      : {})
   };
-  return config;
+  return parseDaemonConfig(config);
 }

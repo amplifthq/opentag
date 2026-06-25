@@ -167,6 +167,13 @@ export type CallbackSink = {
   deliver(message: CallbackMessage): Promise<void>;
 };
 
+export type CallbackRetryOptions = {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+  now?: Date;
+};
+
 export type GitHubApplyOptions = {
   token: string;
   fetchImpl?: GitHubFetchLike;
@@ -178,19 +185,100 @@ const noopCallbackSink: CallbackSink = {
   }
 };
 
+function nextCallbackAttemptAt(input: { attempts: number } & CallbackRetryOptions): string | undefined {
+  const maxAttempts = input.maxAttempts ?? 5;
+  const nextAttempt = input.attempts + 1;
+  if (nextAttempt >= maxAttempts) return undefined;
+
+  const baseDelayMs = input.baseDelayMs ?? 5_000;
+  const maxDelayMs = input.maxDelayMs ?? 300_000;
+  const delayMs = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, input.attempts));
+  return new Date((input.now ?? new Date()).getTime() + delayMs).toISOString();
+}
+
+async function deliverCallbackDelivery(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  sink: CallbackSink;
+  delivery: import("@opentag/store").CallbackDelivery;
+  retry?: CallbackRetryOptions;
+}): Promise<boolean> {
+  try {
+    await input.sink.deliver({
+      runId: input.delivery.runId,
+      kind: input.delivery.kind,
+      provider: input.delivery.provider,
+      uri: input.delivery.uri,
+      body: input.delivery.body,
+      ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+      ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
+      ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
+      ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {})
+    });
+    await input.repo.markCallbackDelivered({ deliveryId: input.delivery.id });
+    return true;
+  } catch (error) {
+    const nextAttemptAt = nextCallbackAttemptAt({ attempts: input.delivery.attempts, ...(input.retry ?? {}) });
+    await input.repo.markCallbackFailed({
+      deliveryId: input.delivery.id,
+      error: error instanceof Error ? error.message : String(error),
+      ...(nextAttemptAt ? { nextAttemptAt } : {})
+    });
+    return false;
+  }
+}
+
+export async function processPendingCallbacks(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  sink: CallbackSink;
+  limit?: number;
+  retry?: CallbackRetryOptions;
+}): Promise<{ processed: number; delivered: number; failed: number }> {
+  const maxAttempts = input.retry?.maxAttempts ?? 5;
+  const deliveries = await input.repo.listPendingCallbackDeliveries({
+    limit: input.limit ?? 20,
+    ...(input.retry?.now ? { now: input.retry.now } : {}),
+    maxAttempts
+  });
+  const result = { processed: 0, delivered: 0, failed: 0 };
+  for (const delivery of deliveries) {
+    result.processed += 1;
+    const delivered = await deliverCallbackDelivery({
+      repo: input.repo,
+      sink: input.sink,
+      delivery,
+      ...(input.retry ? { retry: input.retry } : {})
+    });
+    if (delivered) {
+      result.delivered += 1;
+    } else {
+      result.failed += 1;
+    }
+  }
+  return result;
+}
+
 async function deliverAndAudit(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   sink: CallbackSink;
   message: CallbackMessage;
+  retry?: CallbackRetryOptions;
 }): Promise<void> {
-  await input.sink.deliver(input.message);
-  await input.repo.appendRunEvent({
+  const delivery = await input.repo.enqueueCallbackDelivery({
     runId: input.message.runId,
-    type: `callback.${input.message.kind}.delivered`,
-    payload: input.message,
-    visibility: "human",
-    importance: input.message.kind === "final" ? "high" : "normal",
-    message: input.message.body
+    kind: input.message.kind,
+    provider: input.message.provider,
+    uri: input.message.uri,
+    body: input.message.body,
+    ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
+    ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
+    ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
+    ...(input.message.blocks ? { blocks: input.message.blocks } : {})
+  });
+  await deliverCallbackDelivery({
+    repo: input.repo,
+    sink: input.sink,
+    delivery,
+    ...(input.retry ? { retry: input.retry } : {})
   });
 }
 
@@ -205,6 +293,7 @@ export function createDispatcherApp(input: {
   pairingToken?: string;
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
+  callbackRetry?: CallbackRetryOptions;
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
@@ -212,6 +301,7 @@ export function createDispatcherApp(input: {
   const app = new Hono();
   const callbackSink = input.callbackSink ?? noopCallbackSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
+  const callbackRetry = input.callbackRetry ?? {};
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
@@ -226,6 +316,12 @@ export function createDispatcherApp(input: {
     const parsed = CreateRunnerSchema.parse(await c.req.json());
     await repo.registerRunner(parsed);
     return c.json({ ok: true }, 201);
+  });
+
+  app.get("/v1/runners/:runnerId", async (c) => {
+    const runner = await repo.getRunner({ runnerId: c.req.param("runnerId") });
+    if (!runner) return c.json({ error: "runner_not_found" }, 404);
+    return c.json({ runner });
   });
 
   app.post("/v1/repo-bindings", async (c) => {
@@ -338,9 +434,14 @@ export function createDispatcherApp(input: {
     }
 
     const run = await repo.createRun({ id: parsed.runId, event: parsed.event });
+    const idempotentReplay = run.id !== parsed.runId;
+    if (idempotentReplay) {
+      return c.json({ run, idempotentReplay: true }, 200);
+    }
     await deliverAndAudit({
       repo,
       sink: callbackSink,
+      retry: callbackRetry,
       message: {
         runId: run.id,
         kind: "acknowledgement",
@@ -367,29 +468,50 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runs/:runId/running", async (c) => {
+    return c.json({
+      error: "runner_scoped_endpoint_required",
+      message: "Use /v1/runners/:runnerId/runs/:runId/running, /progress, or /complete."
+    }, 410);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/running", async (c) => {
     const body = z.object({ executor: z.string().min(1) }).parse(await c.req.json());
-    await repo.markRunning({ runId: c.req.param("runId"), executor: body.executor });
+    const ok = await repo.markRunning({
+      runId: c.req.param("runId"),
+      runnerId: c.req.param("runnerId"),
+      executor: body.executor
+    });
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
     return c.json({ ok: true });
   });
 
-  app.post("/v1/runs/:runId/progress", async (c) => {
+  app.post("/v1/runs/:runId/progress", async () => {
+    return new Response(JSON.stringify({
+      error: "runner_scoped_endpoint_required",
+      message: "Use /v1/runners/:runnerId/runs/:runId/running, /progress, or /complete."
+    }), { status: 410, headers: { "content-type": "application/json" } });
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/progress", async (c) => {
     const runId = c.req.param("runId");
     const body = ProgressSchema.parse(await c.req.json());
-    const stored = await repo.getRun({ runId });
-    if (!stored) return c.json({ error: "run_not_found" }, 404);
-
-    await repo.recordProgress({
+    const ok = await repo.recordProgress({
       runId,
+      runnerId: c.req.param("runnerId"),
       message: body.message,
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {}),
       ...(body.visibility ? { visibility: body.visibility } : {}),
       ...(body.importance ? { importance: body.importance } : {})
     });
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    const stored = await repo.getRun({ runId });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
     if (presentation.shouldDeliverProgress(stored.event.callback.provider)) {
       await deliverAndAudit({
         repo,
         sink: callbackSink,
+        retry: callbackRetry,
         message: {
           runId,
           kind: "progress",
@@ -405,17 +527,25 @@ export function createDispatcherApp(input: {
     return c.json({ ok: true });
   });
 
-  app.post("/v1/runs/:runId/complete", async (c) => {
+  app.post("/v1/runs/:runId/complete", async () => {
+    return new Response(JSON.stringify({
+      error: "runner_scoped_endpoint_required",
+      message: "Use /v1/runners/:runnerId/runs/:runId/running, /progress, or /complete."
+    }), { status: 410, headers: { "content-type": "application/json" } });
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/complete", async (c) => {
     const runId = c.req.param("runId");
     const parsed = CompleteRunSchema.parse(await c.req.json());
+    const ok = await repo.completeRun({ runId, runnerId: c.req.param("runnerId"), result: parsed.result });
+    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-
-    await repo.completeRun({ runId, result: parsed.result });
     const finalPresentation = presentation.final({ provider: stored.event.callback.provider, result: parsed.result });
     await deliverAndAudit({
       repo,
       sink: callbackSink,
+      retry: callbackRetry,
       message: {
         runId,
         kind: "final",

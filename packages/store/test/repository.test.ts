@@ -181,6 +181,36 @@ describe("OpenTag repository", () => {
     });
   });
 
+  it("replays createRun idempotently for the same source event", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const githubEvent = {
+      id: "evt_duplicate",
+      source: "github" as const,
+      sourceEventId: "comment_duplicate",
+      receivedAt: "2026-06-24T00:00:00.000Z",
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: { owner: "acme", repo: "demo" }
+    };
+
+    const first = await repo.createRun({ id: "run_duplicate_1", event: githubEvent });
+    const second = await repo.createRun({ id: "run_duplicate_2", event: githubEvent });
+
+    expect(first.id).toBe("run_duplicate_1");
+    expect(second.id).toBe("run_duplicate_1");
+
+    const events = await repo.listRunEvents({ runId: "run_duplicate_1" });
+    expect(events.map((event) => event.type)).toContain("run.create_idempotent_replay");
+  });
+
   it("records a completed result", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

@@ -28,7 +28,7 @@ import {
   type RunEventVisibility,
   type SuggestedChangesSnapshot
 } from "@opentag/core";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
@@ -36,6 +36,7 @@ import {
   repoBindings,
   repoMutationMappings,
   repoPolicyRules,
+  callbackDeliveries,
   runEvents,
   runners,
   runs,
@@ -59,6 +60,29 @@ export type OpenTagAuditEvent = {
   createdAt: string;
 };
 
+export type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
+export type CallbackDeliveryProvider = "github" | "slack" | "lark" | "webhook";
+export type CallbackDeliveryStatus = "pending" | "delivered" | "failed";
+
+export type CallbackDelivery = {
+  id: number;
+  runId: string;
+  kind: CallbackDeliveryKind;
+  provider: CallbackDeliveryProvider;
+  uri: string;
+  body: string;
+  threadKey?: string;
+  agentId?: string;
+  statusMessageKey?: string;
+  blocks?: unknown[];
+  status: CallbackDeliveryStatus;
+  attempts: number;
+  lastError?: string;
+  nextAttemptAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type RepoBinding = {
   provider: string;
   owner: string;
@@ -74,6 +98,13 @@ export type SlackChannelBinding = {
   channelId: string;
   owner: string;
   repo: string;
+};
+
+export type RunnerRegistration = {
+  runnerId: string;
+  name: string;
+  createdAt: string;
+  heartbeatAt?: string;
 };
 
 export type StoredSuggestedChangesSnapshot = {
@@ -165,6 +196,40 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...(result ? { result } : {})
+  };
+}
+
+function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): CallbackDelivery {
+  const metadata =
+    row.metadataJson && typeof row.metadataJson === "string"
+      ? (JSON.parse(row.metadataJson) as { agentId?: string; statusMessageKey?: string; blocks?: unknown[] })
+      : undefined;
+  return {
+    id: row.id,
+    runId: row.runId,
+    kind: row.kind as CallbackDeliveryKind,
+    provider: row.provider as CallbackDeliveryProvider,
+    uri: row.uri,
+    body: row.body,
+    ...(row.threadKey ? { threadKey: row.threadKey } : {}),
+    ...(metadata?.agentId ? { agentId: metadata.agentId } : {}),
+    ...(metadata?.statusMessageKey ? { statusMessageKey: metadata.statusMessageKey } : {}),
+    ...(metadata?.blocks ? { blocks: metadata.blocks } : {}),
+    status: row.status as CallbackDeliveryStatus,
+    attempts: row.attempts,
+    ...(row.lastError ? { lastError: row.lastError } : {}),
+    ...(row.nextAttemptAt ? { nextAttemptAt: row.nextAttemptAt } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function runnerFromRow(row: typeof runners.$inferSelect): RunnerRegistration {
+  return {
+    runnerId: row.runnerId,
+    name: row.name,
+    createdAt: row.createdAt,
+    ...(row.heartbeatAt ? { heartbeatAt: row.heartbeatAt } : {})
   };
 }
 
@@ -379,6 +444,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await db.insert(runners).values({ runnerId: input.runnerId, name: input.name, createdAt }).onConflictDoNothing();
     },
 
+    async getRunner(input: { runnerId: string }): Promise<RunnerRegistration | null> {
+      const row = await db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get();
+      return row ? runnerFromRow(row) : null;
+    },
+
     async createRepoBinding(input: {
       provider: string;
       owner: string;
@@ -509,7 +579,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const createdAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
       const repoKey = repoKeyFromEvent(event);
-      await db.insert(runs).values({
+      const insertResult = await db
+        .insert(runs)
+        .values({
         id: input.id,
         eventId: event.id,
         status: "queued",
@@ -524,7 +596,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         workThreadId: protocolFields.thread?.id ?? null,
         createdAt,
         updatedAt: createdAt
-      });
+        })
+        .onConflictDoNothing({ target: runs.eventId });
+      if (insertResult.changes === 0) {
+        const existingBySourceEvent = await db.select().from(runs).where(eq(runs.eventId, event.id)).limit(1).get();
+        if (!existingBySourceEvent) {
+          throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
+        }
+        await appendRunEvent({
+          runId: existingBySourceEvent.id,
+          type: "run.create_idempotent_replay",
+          payload: { requestedRunId: input.id, eventId: event.id },
+          visibility: "audit",
+          importance: "low",
+          createdAt
+        });
+        return runFromRow(existingBySourceEvent);
+      }
       await appendRunEvent({
         runId: input.id,
         type: "run.created",
@@ -627,7 +715,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const updatedAt = nowIso();
       const leasedAt = updatedAt;
       const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
-      await db
+      const updateResult = await db
         .update(runs)
         .set({
           status: "assigned",
@@ -637,7 +725,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           heartbeatAt: leasedAt,
           updatedAt
         })
-        .where(eq(runs.id, row.id));
+        .where(and(eq(runs.id, row.id), eq(runs.status, "queued")));
+      if (updateResult.changes === 0) {
+        return null;
+      }
       await appendRunEvent({
         runId: row.id,
         type: "run.claimed",
@@ -729,20 +820,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return true;
     },
 
-    async markRunning(input: { runId: string; executor: string }): Promise<void> {
+    async markRunning(input: { runId: string; executor: string; runnerId?: string }): Promise<boolean> {
       const updatedAt = nowIso();
+      if (input.runnerId) {
+        const row = await db
+          .select()
+          .from(runs)
+          .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
+          .limit(1)
+          .get();
+        if (!row) return false;
+      }
       await db.update(runs).set({ status: "running", executor: input.executor, updatedAt }).where(eq(runs.id, input.runId));
       await appendRunEvent({
         runId: input.runId,
         type: "run.running",
-        payload: { executor: input.executor },
+        payload: input.runnerId ? { runnerId: input.runnerId, executor: input.executor } : { executor: input.executor },
         visibility: "audit",
         importance: "normal",
         createdAt: updatedAt
       });
+      return true;
     },
 
-    async completeRun(input: { runId: string; result: OpenTagRunResult }): Promise<void> {
+    async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string }): Promise<boolean> {
       const result = OpenTagRunResultSchema.parse(input.result);
       const updatedAt = nowIso();
       const status =
@@ -757,8 +858,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!runRow) {
         throw new Error(`Run not found: ${input.runId}`);
       }
+      if (input.runnerId && runRow.assignedRunnerId !== input.runnerId) {
+        return false;
+      }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
-      await db.update(runs).set({ status, resultJson: JSON.stringify(result), updatedAt }).where(eq(runs.id, input.runId));
+      await db
+        .update(runs)
+        .set({ status, resultJson: JSON.stringify(result), leaseExpiresAt: null, heartbeatAt: null, updatedAt })
+        .where(eq(runs.id, input.runId));
       for (const snapshot of result.suggestedChanges ?? []) {
         const parsedSnapshot = SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
@@ -814,6 +921,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           createdAt: updatedAt
         });
       }
+      return true;
     },
 
     async getSuggestedChanges(input: { proposalId: string }): Promise<StoredSuggestedChangesSnapshot | null> {
@@ -1113,11 +1221,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       at?: string;
       visibility?: RunEventVisibility;
       importance?: RunEventImportance;
-    }): Promise<void> {
+      runnerId?: string;
+    }): Promise<boolean> {
+      if (input.runnerId) {
+        const row = await db
+          .select()
+          .from(runs)
+          .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
+          .limit(1)
+          .get();
+        if (!row) return false;
+      }
       await appendRunEvent({
         runId: input.runId,
         type: "run.progress",
         payload: {
+          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
           type: input.type ?? "progress",
           message: input.message,
           at: input.at ?? nowIso()
@@ -1127,6 +1246,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         message: input.message,
         createdAt: input.at ?? nowIso()
       });
+      return true;
     },
 
     async getRun(input: { runId: string }): Promise<ClaimedOpenTagRun | null> {
@@ -1150,6 +1270,119 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         payload: JSON.parse(row.payloadJson) as unknown,
         createdAt: row.createdAt
       }));
+    },
+
+    async enqueueCallbackDelivery(input: {
+      runId: string;
+      kind: CallbackDeliveryKind;
+      provider: CallbackDeliveryProvider;
+      uri: string;
+      body: string;
+      threadKey?: string;
+      agentId?: string;
+      statusMessageKey?: string;
+      blocks?: unknown[];
+    }): Promise<CallbackDelivery> {
+      const createdAt = nowIso();
+      const rows = await db
+        .insert(callbackDeliveries)
+        .values({
+          runId: input.runId,
+          kind: input.kind,
+          provider: input.provider,
+          uri: input.uri,
+          body: input.body,
+          threadKey: input.threadKey ?? null,
+          metadataJson: JSON.stringify({
+            ...(input.agentId ? { agentId: input.agentId } : {}),
+            ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
+            ...(input.blocks ? { blocks: input.blocks } : {})
+          }),
+          status: "pending",
+          createdAt,
+          updatedAt: createdAt
+        })
+        .returning();
+      const row = rows[0];
+      if (!row) throw new Error("callback delivery was not created");
+      await appendRunEvent({
+        runId: input.runId,
+        type: `callback.${input.kind}.queued`,
+        payload: callbackDeliveryFromRow(row),
+        visibility: "audit",
+        importance: "normal",
+        createdAt
+      });
+      return callbackDeliveryFromRow(row);
+    },
+
+    async markCallbackDelivered(input: { deliveryId: number }): Promise<void> {
+      const updatedAt = nowIso();
+      const row = await db
+        .select()
+        .from(callbackDeliveries)
+        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .limit(1)
+        .get();
+      if (!row) return;
+      await db
+        .update(callbackDeliveries)
+        .set({ status: "delivered", attempts: row.attempts + 1, lastError: null, nextAttemptAt: null, updatedAt })
+        .where(eq(callbackDeliveries.id, input.deliveryId));
+      await appendRunEvent({
+        runId: row.runId,
+        type: `callback.${row.kind}.delivered`,
+        payload: { ...callbackDeliveryFromRow(row), status: "delivered", attempts: row.attempts + 1, updatedAt },
+        visibility: "human",
+        importance: row.kind === "final" ? "high" : "normal",
+        message: row.body,
+        createdAt: updatedAt
+      });
+    },
+
+    async markCallbackFailed(input: { deliveryId: number; error: string; nextAttemptAt?: string }): Promise<void> {
+      const updatedAt = nowIso();
+      const row = await db
+        .select()
+        .from(callbackDeliveries)
+        .where(eq(callbackDeliveries.id, input.deliveryId))
+        .limit(1)
+        .get();
+      if (!row) return;
+      await db
+        .update(callbackDeliveries)
+        .set({ status: "failed", attempts: row.attempts + 1, lastError: input.error, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
+        .where(eq(callbackDeliveries.id, input.deliveryId));
+      await appendRunEvent({
+        runId: row.runId,
+        type: `callback.${row.kind}.failed`,
+        payload: {
+          ...callbackDeliveryFromRow(row),
+          status: "failed",
+          attempts: row.attempts + 1,
+          lastError: input.error,
+          ...(input.nextAttemptAt ? { nextAttemptAt: input.nextAttemptAt } : {}),
+          updatedAt
+        },
+        visibility: "audit",
+        importance: "normal",
+        createdAt: updatedAt
+      });
+    },
+
+    async listPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number }): Promise<CallbackDelivery[]> {
+      const now = input.now ?? new Date();
+      const maxAttempts = input.maxAttempts ?? Number.POSITIVE_INFINITY;
+      const rows = await db
+        .select()
+        .from(callbackDeliveries)
+        .where(inArray(callbackDeliveries.status, ["pending", "failed"]))
+        .orderBy(asc(callbackDeliveries.id));
+      return rows
+        .map(callbackDeliveryFromRow)
+        .filter((delivery) => delivery.attempts < maxAttempts)
+        .filter((delivery) => !delivery.nextAttemptAt || new Date(delivery.nextAttemptAt).getTime() <= now.getTime())
+        .slice(0, input.limit);
     },
 
     async getRunMetrics(input: { runId: string }): Promise<OpenTagRunMetrics> {

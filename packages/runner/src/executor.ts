@@ -1,4 +1,4 @@
-import type { ContextPointer, OpenTagCommand, OpenTagRunResult } from "@opentag/core";
+import type { ContextPointer, OpenTagCommand, OpenTagRunResult, PermissionGrant } from "@opentag/core";
 
 export type ExecutorEvent = {
   type: "executor.started" | "executor.progress" | "executor.completed" | "executor.failed";
@@ -15,7 +15,10 @@ export type ExecutorRunInput = {
   workspacePath: string;
   command: OpenTagCommand;
   context: ContextPointer[];
+  permissions?: PermissionGrant[];
   baseBranch?: string;
+  worktreeRoot?: string;
+  keepWorktree?: "always" | "on_failure" | "never";
 };
 
 export type ExecutorReadiness = {

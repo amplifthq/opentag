@@ -14,9 +14,11 @@
   "dependencies": {
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
+    "@opentag/dispatcher": "workspace:*",
     "@opentag/github": "workspace:*",
     "@opentag/runner": "workspace:*",
-    "commander": "^12.1.0"
+    "commander": "^12.1.0",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

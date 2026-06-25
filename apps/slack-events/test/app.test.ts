@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { computeSlackSignature, createSlackEventsApp } from "../src/app.js";
+import { computeSlackSignature, createSlackEventsApp, verifySlackTimestamp } from "../src/app.js";
 
 describe("Slack events app", () => {
+  const now = "2024-06-24T00:00:00.000Z";
+  const currentTimestamp = "1719187200";
+  const currentClock = () => Number(currentTimestamp) * 1000;
+
   it("handles Slack url_verification", async () => {
     const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
-    const timestamp = "1710000000";
+    const timestamp = currentTimestamp;
     const app = createSlackEventsApp({
       slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
       async resolveChannelBinding() {
@@ -13,7 +17,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => now,
+      clock: currentClock
     });
 
     const response = await app.request("/slack/events", {
@@ -42,24 +47,25 @@ describe("Slack events app", () => {
       api_app_id: "A_GEMINI",
       team_id: "T123",
       event_id: "Ev123",
-      event_time: 1710000000,
+      event_time: Number(currentTimestamp),
       authorizations: [{ user_id: "U_APP" }],
       event: {
         type: "app_mention",
         user: "U456",
         text: "<@U_APP> fix this",
-        ts: "1710000000.000100",
+        ts: `${currentTimestamp}.000100`,
         channel: "C123"
       }
     });
-    const timestamp = "1710000000";
+    const timestamp = currentTimestamp;
     const app = createSlackEventsApp({
       slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
       async resolveChannelBinding() {
         return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
       },
       createRun,
-      now: () => "2026-06-24T00:00:00.000Z",
+      now: () => now,
+      clock: currentClock,
       callbackUri: "http://127.0.0.1:3102/github-comment"
     });
 
@@ -90,17 +96,17 @@ describe("Slack events app", () => {
       api_app_id: "A_DEEPSEEK",
       team_id: "T123",
       event_id: "Ev456",
-      event_time: 1710000100,
+      event_time: Number(currentTimestamp) + 100,
       authorizations: [{ user_id: "U_DEEP" }],
       event: {
         type: "app_mention",
         user: "U456",
         text: "<@U_DEEP> explain this",
-        ts: "1710000100.000100",
+        ts: `${Number(currentTimestamp) + 100}.000100`,
         channel: "C123"
       }
     });
-    const timestamp = "1710000100";
+    const timestamp = String(Number(currentTimestamp) + 100);
     const app = createSlackEventsApp({
       slackApps: [
         { appId: "A_GEMINI", signingSecret: "secret_1", agentId: "gemini" },
@@ -110,7 +116,8 @@ describe("Slack events app", () => {
         return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
       },
       createRun,
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => now,
+      clock: () => (Number(currentTimestamp) + 100) * 1000
     });
 
     const response = await app.request("/slack/events", {
@@ -135,7 +142,7 @@ describe("Slack events app", () => {
 
   it("handles url_verification for one of multiple Slack apps without api_app_id", async () => {
     const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
-    const timestamp = "1710000000";
+    const timestamp = currentTimestamp;
     const app = createSlackEventsApp({
       slackApps: [
         { appId: "A_GEMINI", signingSecret: "secret_1", agentId: "gemini" },
@@ -147,7 +154,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => now,
+      clock: currentClock
     });
 
     const response = await app.request("/slack/events", {
@@ -170,7 +178,7 @@ describe("Slack events app", () => {
 
   it("returns 400 for malformed JSON payloads", async () => {
     const rawBody = "{not-json";
-    const timestamp = "1710000000";
+    const timestamp = currentTimestamp;
     const app = createSlackEventsApp({
       slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
       async resolveChannelBinding() {
@@ -179,7 +187,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => now,
+      clock: currentClock
     });
 
     const response = await app.request("/slack/events", {
@@ -209,7 +218,8 @@ describe("Slack events app", () => {
       async createRun() {
         return { runId: "run_1" };
       },
-      now: () => "2026-06-24T00:00:00.000Z"
+      now: () => now,
+      clock: currentClock
     });
 
     const response = await app.request("/slack/events", {
@@ -223,5 +233,58 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(401);
+  });
+
+  it("rejects stale Slack timestamps", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "Ev123",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> fix this",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      now: () => now,
+      clock: () => (Number(currentTimestamp) + 301) * 1000
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "stale_signature_timestamp" });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("validates timestamp age with a five minute default tolerance", () => {
+    expect(verifySlackTimestamp({ timestamp: "1710000000", nowMs: 1710000000 * 1000 })).toBe(true);
+    expect(verifySlackTimestamp({ timestamp: "1710000000", nowMs: (1710000000 + 300) * 1000 })).toBe(true);
+    expect(verifySlackTimestamp({ timestamp: "1710000000", nowMs: (1710000000 + 301) * 1000 })).toBe(false);
   });
 });
