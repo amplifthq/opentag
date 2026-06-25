@@ -3,31 +3,27 @@ import { type LarkChannelBinding, normalizeLarkMessage } from "@opentag/lark";
 
 export type LarkMention = { key?: string; id?: { open_id?: string }; name?: string };
 
-// Subset of the `im.message.receive_v1` payload OpenTag needs; all optional (external input).
+// Flattened `im.message.receive_v1` payload as delivered by the SDK EventDispatcher (header fields + message/sender on the top level). All optional (external input).
 export type LarkInboundMessageEvent = {
-  header?: {
-    event_id?: string;
-    event_type?: string;
-    create_time?: string;
+  event_id?: string;
+  event_type?: string;
+  create_time?: string;
+  tenant_key?: string;
+  app_id?: string;
+  sender?: {
+    sender_id?: { open_id?: string; user_id?: string; union_id?: string };
+    sender_type?: string;
     tenant_key?: string;
-    app_id?: string;
   };
-  event?: {
-    sender?: {
-      sender_id?: { open_id?: string; user_id?: string; union_id?: string };
-      sender_type?: string;
-      tenant_key?: string;
-    };
-    message?: {
-      message_id?: string;
-      root_id?: string;
-      parent_id?: string;
-      chat_id?: string;
-      chat_type?: string;
-      message_type?: string;
-      content?: string;
-      mentions?: LarkMention[];
-    };
+  message?: {
+    message_id?: string;
+    root_id?: string;
+    parent_id?: string;
+    chat_id?: string;
+    chat_type?: string;
+    message_type?: string;
+    content?: string;
+    mentions?: LarkMention[];
   };
 };
 
@@ -71,17 +67,16 @@ function mentionsBot(mentions: LarkMention[] | undefined, botOpenId: string): bo
 // Handle one inbound Lark message: group messages must @-mention the bot, then resolve binding, normalize, create a run.
 export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
   return async function handleLarkMessage(data: LarkInboundMessageEvent): Promise<LarkMessageHandlerOutcome> {
-    const message = data.event?.message;
-    const header = data.header;
+    const message = data.message;
     if (!message || message.message_type !== "text") {
       return { status: "ignored_non_text" };
     }
 
-    const tenantKey = header?.tenant_key ?? data.event?.sender?.tenant_key;
+    const tenantKey = data.tenant_key ?? data.sender?.tenant_key;
     const chatId = message.chat_id;
     const messageId = message.message_id;
-    const eventId = header?.event_id;
-    const senderOpenId = data.event?.sender?.sender_id?.open_id;
+    const eventId = data.event_id;
+    const senderOpenId = data.sender?.sender_id?.open_id;
     if (!tenantKey || !chatId || !messageId || !eventId || !senderOpenId) {
       return { status: "ignored_invalid_payload" };
     }
@@ -102,7 +97,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "ignored_unbound_chat", tenantKey, chatId };
     }
 
-    const parsedTime = header?.create_time ? Number(header.create_time) : Number.NaN;
+    const parsedTime = data.create_time ? Number(data.create_time) : Number.NaN;
     const eventTimeMs = Number.isFinite(parsedTime) ? parsedTime : (config.now?.() ?? Date.now());
 
     const event = normalizeLarkMessage({

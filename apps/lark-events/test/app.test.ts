@@ -2,6 +2,7 @@ import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it, vi } from "vitest";
 import { createLarkMessageHandler, type LarkInboundMessageEvent } from "../src/app.js";
 
+// Mirrors the flattened im.message.receive_v1 payload the SDK delivers.
 function messageEvent(overrides?: {
   text?: string;
   messageType?: string;
@@ -15,26 +16,22 @@ function messageEvent(overrides?: {
 }): LarkInboundMessageEvent {
   const mentionBot = overrides?.mentionBot ?? true;
   return {
-    header: {
-      event_id: overrides?.eventId ?? "evt_1",
-      event_type: "im.message.receive_v1",
-      create_time: "1700000000000",
+    event_id: overrides?.eventId ?? "evt_1",
+    event_type: "im.message.receive_v1",
+    create_time: "1700000000000",
+    tenant_key: overrides?.tenantKey ?? "tk_123",
+    sender: {
+      sender_id: { open_id: overrides?.openId ?? "ou_user" },
+      sender_type: "user",
       tenant_key: overrides?.tenantKey ?? "tk_123"
     },
-    event: {
-      sender: {
-        sender_id: { open_id: overrides?.openId ?? "ou_user" },
-        sender_type: "user",
-        tenant_key: overrides?.tenantKey ?? "tk_123"
-      },
-      message: {
-        message_id: overrides?.messageId ?? "om_msg",
-        chat_id: overrides?.chatId ?? "oc_chat",
-        chat_type: overrides?.chatType ?? "group",
-        message_type: overrides?.messageType ?? "text",
-        content: JSON.stringify({ text: overrides?.text ?? "@_user_1 fix the bug" }),
-        mentions: mentionBot ? [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "OpenTag" }] : []
-      }
+    message: {
+      message_id: overrides?.messageId ?? "om_msg",
+      chat_id: overrides?.chatId ?? "oc_chat",
+      chat_type: overrides?.chatType ?? "group",
+      message_type: overrides?.messageType ?? "text",
+      content: JSON.stringify({ text: overrides?.text ?? "@_user_1 fix the bug" }),
+      mentions: mentionBot ? [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "OpenTag" }] : []
     }
   };
 }
@@ -112,7 +109,7 @@ describe("createLarkMessageHandler", () => {
       now: () => 1_700_000_000_000
     });
     const evt = messageEvent();
-    evt.header!.create_time = "not-a-number";
+    evt.create_time = "not-a-number";
     const outcome = await handler(evt);
     expect(outcome.status).toBe("created");
     const event = createRun.mock.calls[0]?.[0];
@@ -123,7 +120,7 @@ describe("createLarkMessageHandler", () => {
   it("ignores payloads missing required ids", async () => {
     const { handler } = makeHandler();
     const broken = messageEvent();
-    broken.event!.message!.chat_id = undefined;
+    broken.message!.chat_id = undefined;
     expect((await handler(broken)).status).toBe("ignored_invalid_payload");
   });
 
