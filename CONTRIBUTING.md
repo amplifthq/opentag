@@ -1,0 +1,45 @@
+# Contributing to OpenTag
+
+Thanks for helping improve OpenTag. This project is still young, so small, focused pull requests are easiest to review and merge.
+
+## Development setup
+
+OpenTag uses Node.js and pnpm.
+
+- Node.js 22.x
+- pnpm 9.x
+
+Install dependencies from the repository root:
+
+```bash
+pnpm install
+```
+
+## Local checks
+
+Before opening a pull request, run the checks that match your change. For code changes, the full local check sequence is:
+
+```bash
+pnpm build
+pnpm lint
+pnpm typecheck
+pnpm test
+```
+
+For documentation-only changes, run:
+
+```bash
+git diff --check
+```
+
+## Pull request guidelines
+
+- Keep PRs small and focused on one change.
+- Include a clear summary and the validation you ran.
+- Prefer adding or updating tests when behavior changes.
+- Do not commit generated local state such as SQLite databases, temporary worktrees, or `.tsbuildinfo` files.
+- Do not commit secrets. Keep `.env`, Slack tokens, GitHub tokens, private keys, and webhook secrets out of git.
+
+## Configuration
+
+Use `docs/configuration.md` as the reference for local environment variables and daemon configuration. If you are configuring a repeatable local daemon setup, prefer an explicit `OPENTAG_CONFIG_PATH` JSON file over ad-hoc environment variables.
