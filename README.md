@@ -95,6 +95,8 @@ Runnable apps live in `apps/dispatcher`, `apps/opentagd`, `apps/github-probot`, 
 - [GitHub to echo](examples/github-to-echo/README.md) - manual end-to-end GitHub-shaped local runner loop.
 - [Embedded dispatcher](examples/embedded-dispatcher/README.md) - host OpenTag inside another Node service.
 - [Custom runner](examples/custom-runner/README.md) - build a third-party runner with `@opentag/client` and `@opentag/runner`.
+- [Configuration](docs/configuration.md) - map dispatcher, daemon, ingress, callback, and runner settings.
+- [Adapter authoring](docs/adapter-authoring.md) - add new work app adapters without changing the execution model.
 - [Real integration smoke test](docs/real-integration-smoke-test.md) - real GitHub and Slack setup, trigger, and debugging order.
 - [Design](docs/design.md) - product direction, system shape, package boundaries, and v0 scope.
 - [Agent Work Protocol](docs/agent-work-protocol.md) - context packets, quiet callbacks, approvals, lineage, and governance semantics.
