@@ -249,7 +249,20 @@ function runnerFromRow(row: typeof runners.$inferSelect): RunnerRegistration {
   };
 }
 
+function recordFromJson(value: string | null): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function channelBindingFromRow(row: typeof channelBindings.$inferSelect): ChannelBinding {
+  const metadata = recordFromJson(row.metadataJson);
   return {
     provider: row.provider,
     accountId: row.accountId,
@@ -257,7 +270,7 @@ function channelBindingFromRow(row: typeof channelBindings.$inferSelect): Channe
     repoProvider: row.repoProvider,
     owner: row.owner,
     repo: row.repo,
-    ...(row.metadataJson ? { metadata: JSON.parse(row.metadataJson) as Record<string, unknown> } : {})
+    ...(metadata ? { metadata } : {})
   };
 }
 
@@ -618,8 +631,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           set: {
             repoProvider,
             owner: input.owner,
-            repo: input.repo,
-            metadataJson: null
+            repo: input.repo
           }
         });
     },
