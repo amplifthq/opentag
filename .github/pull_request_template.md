@@ -4,7 +4,7 @@
 
 ## Validation
 
-<!-- List the checks you ran, for example: pnpm build, pnpm lint, pnpm typecheck, pnpm test, git diff --check. -->
+<!-- List the checks you ran, for example: pnpm build, pnpm lint, pnpm typecheck, pnpm test, git diff origin/main...HEAD --check. -->
 
 ## Notes
 

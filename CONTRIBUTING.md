@@ -29,7 +29,7 @@ pnpm test
 For documentation-only changes, run:
 
 ```bash
-git diff --check
+git diff origin/main...HEAD --check
 ```
 
 ## Pull request guidelines
