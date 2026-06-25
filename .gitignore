@@ -13,3 +13,5 @@ dist/
 coverage/
 .worktrees/
 *.tsbuildinfo
+.agents/
+skills-lock.json
