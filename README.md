@@ -1,6 +1,6 @@
 # OpenTag
 
-**Open-source agent mentions for GitHub, Slack, and local runners.**
+**Open-source agent mentions for the apps where work happens.**
 
 [![Status](https://img.shields.io/badge/status-v0-blue)](#status)
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
@@ -9,9 +9,9 @@
 [![Node](https://img.shields.io/badge/Node-22.x-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-![OpenTag workflow: workspace mentions routed to local runners](./assets/readme-hero.png)
+![OpenTag workflow: work app mentions routed to approved runners](./assets/readme-hero.png)
 
-Claude Tag made the interface obvious: mention an agent where work already happens and get the result back in the thread. OpenTag is the open version: GitHub and Slack adapters, a thin dispatcher, and local runners that execute Claude Code, Codex, or your own agent with explicit bindings and audit trails.
+Claude Tag made the interface obvious: mention an agent where work already happens and get the result back in the thread. OpenTag is the open version: GitHub and Slack adapters today, a shared adapter model for more work apps, a thin dispatcher, and local or hosted runners that execute Claude Code, Codex, or your own agent with explicit bindings and audit trails.
 
 OpenTag is not another AI workspace. It brings agents to the work item thread you already use.
 
@@ -38,8 +38,8 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 
 ## Why OpenTag
 
-- **Bring agents to work threads** - mention an approved agent from GitHub, Slack, or another adapter instead of copying context into a separate AI chat workspace.
-- **Keep execution local when it matters** - `opentagd` claims only explicitly bound repositories and runs in your local checkout.
+- **Bring agents to work threads** - mention an approved agent from GitHub, Slack, or future work app adapters instead of copying context into a separate AI chat workspace.
+- **Control where execution happens** - keep coding work local with `opentagd`, or use hosted/custom runners that implement the same claim and callback contracts.
 - **Use any approved executor** - built-in adapters cover `echo`, `claude-code`, and `codex`; custom runners can implement the same contracts.
 - **Stay quiet by default** - human threads get useful acknowledgements and final results, while detailed progress stays in audit events and metrics.
 - **Make control explicit** - repository bindings, leases, context packets, policies, approvals, and apply plans are first-class protocol objects.
@@ -48,9 +48,9 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 
 ```mermaid
 flowchart LR
-    A["GitHub or Slack mention"] --> B["OpenTag event"]
+    A["Work app mention<br/>GitHub, Slack, future adapters"] --> B["OpenTag event"]
     B --> C["Thin dispatcher<br/>leases, audit, callbacks"]
-    C --> D["Local opentagd<br/>explicit repo binding"]
+    C --> D["Approved runner<br/>local or hosted"]
     D --> E["Executor<br/>Claude Code, Codex, custom"]
     E --> F["Source thread<br/>comment, PR, metrics"]
 ```
@@ -110,13 +110,13 @@ npx skills add https://github.com/amplifthq/opentag --skill opentag --agent '*'
 
 ## Status
 
-OpenTag is a young v0 project for local evaluation, integration experiments, and early SDK feedback. The current codebase proves the GitHub/Slack -> dispatcher -> local runner -> callback loop, including package-level SDK usage and real local smoke tests.
+OpenTag is a young v0 project for local evaluation, integration experiments, and early SDK feedback. The current codebase proves the first GitHub and Slack adapter loops: ingress -> dispatcher -> runner -> callback, including package-level SDK usage and real local smoke tests.
 
 Next areas of work:
 
 - richer hosted setup flow
 - GitHub Project field mapping for status and priority
-- more workspace adapter compilers
+- more workspace adapters and adapter compilers
 - adapter-specific context packet redaction and classification hooks
 - production hardening for multi-tenant dispatcher deployments
 
