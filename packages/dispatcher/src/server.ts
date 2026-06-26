@@ -1,8 +1,19 @@
+import { createHash } from "node:crypto";
 import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  parseThreadActionCommand,
+  projectTargetRefFromEvent,
+  suggestedActionCandidatesFromSnapshots,
+  type ActorIdentity,
+  type ApplyIntentOutcome,
+  type ApplyPlan,
   type OpenTagEvent,
+  type OpenTagRun,
+  type SuggestedChangesSnapshot,
+  type SuggestedActionCandidate,
+  type ThreadActionCommand,
   createAdapterMutationCompilerRegistry,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
@@ -85,7 +96,9 @@ const ApprovalDecisionInputSchema = z.object({
   rejectedIntentIds: z.array(z.string().min(1)).optional(),
   approvedBy: ActorIdentitySchema,
   approvedAt: z.string().datetime().optional(),
-  scope: z.enum(["manual", "policy"]).default("manual")
+  scope: z.enum(["manual", "policy"]).default("manual"),
+  reason: z.string().min(1).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional()
 }).refine((value) => {
   const rejected = new Set(value.rejectedIntentIds ?? []);
   return value.approvedIntentIds.every((intentId) => !rejected.has(intentId));
@@ -99,6 +112,18 @@ const ApplyPlanInputSchema = z.object({
   selectedIntentIds: z.array(z.string().min(1)).optional(),
   adapter: z.string().min(1).optional(),
   execute: z.boolean().optional()
+});
+
+const ThreadActionInputSchema = z.object({
+  id: z.string().min(1).optional(),
+  rawText: z.string().min(1),
+  actor: ActorIdentitySchema,
+  callback: z.object({
+    provider: z.string().min(1),
+    uri: z.string().min(1),
+    threadKey: z.string().min(1).optional()
+  }),
+  metadata: z.record(z.string(), z.unknown()).optional()
 });
 
 const ChildRunInputSchema = z.object({
@@ -123,12 +148,15 @@ function childEventFromParent(input: {
   commandText?: string;
   actionKind: string;
   receivedAt: string;
+  extraContext?: OpenTagEvent["context"];
+  metadata?: Record<string, unknown>;
 }): OpenTagEvent {
   return {
     ...input.parentEvent,
     id: `evt_${input.childRunId}`,
     sourceEventId: `${input.parentEvent.sourceEventId}:${input.childRunId}`,
     receivedAt: input.receivedAt,
+    context: [...input.parentEvent.context, ...(input.extraContext ?? [])],
     command: {
       rawText: input.commandText ?? `Execute next action: ${input.actionKind}`,
       intent: "run",
@@ -136,6 +164,10 @@ function childEventFromParent(input: {
         parentSourceEventId: input.parentEvent.sourceEventId,
         actionKind: input.actionKind
       }
+    },
+    metadata: {
+      ...input.parentEvent.metadata,
+      ...(input.metadata ?? {})
     }
   };
 }
@@ -145,6 +177,365 @@ function mappingsFromAdapterPlan(adapterPlan: unknown) {
   const mappings = (adapterPlan as { mappings?: unknown }).mappings;
   if (!Array.isArray(mappings)) return [];
   return mappings.map((mapping) => AdapterMutationMappingSchema.parse(mapping));
+}
+
+function conversationKeyFromCallback(input: { provider: string; uri: string; threadKey?: string | undefined }): string {
+  return `${input.provider}:${input.threadKey ?? input.uri}`;
+}
+
+function stableHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function stableId(prefix: string, parts: unknown[]): string {
+  return `${prefix}_${stableHash(JSON.stringify(parts))}`;
+}
+
+function actorKeys(actor: ActorIdentity): string[] {
+  return [
+    actor.providerUserId,
+    actor.handle,
+    `${actor.provider}:${actor.providerUserId}`,
+    actor.handle ? `${actor.provider}:${actor.handle}` : undefined
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+}
+
+function actorAllowedByList(actor: ActorIdentity, allowedActors: string[] | undefined): boolean {
+  if (!allowedActors?.length) return true;
+  const keys = new Set(actorKeys(actor));
+  return allowedActors.some((allowedActor) => keys.has(allowedActor));
+}
+
+type ActionProposal = {
+  runId: string;
+  run: OpenTagRun;
+  event: OpenTagEvent;
+  snapshot: SuggestedChangesSnapshot;
+};
+
+type ResolvedThreadAction = {
+  proposal: ActionProposal;
+  selectedIntentIds: string[];
+  selectedCandidates: Array<SuggestedActionCandidate & { proposal: ActionProposal }>;
+};
+
+type ResolveThreadActionResult =
+  | { ok: true; resolved: ResolvedThreadAction }
+  | { ok: false; reason: "no_proposal" | "no_match" | "ambiguous"; message: string; runId?: string | undefined };
+
+function actionCandidatesFor(proposals: ActionProposal[]): Array<SuggestedActionCandidate & { proposal: ActionProposal }> {
+  const candidates: Array<SuggestedActionCandidate & { proposal: ActionProposal }> = [];
+  let startIndex = 1;
+  for (const proposal of proposals) {
+    const proposalCandidates = suggestedActionCandidatesFromSnapshots([proposal.snapshot], startIndex).map((candidate) => ({
+      ...candidate,
+      proposal
+    }));
+    candidates.push(...proposalCandidates);
+    startIndex += proposalCandidates.length;
+  }
+  return candidates;
+}
+
+function resolveCandidateSelection(input: {
+  command: ThreadActionCommand;
+  proposals: ActionProposal[];
+}): ResolveThreadActionResult {
+  const candidates = actionCandidatesFor(input.proposals);
+  if (candidates.length === 0) {
+    return { ok: false, reason: "no_proposal", message: "I could not find any suggested actions for this thread." };
+  }
+
+  let selected: Array<SuggestedActionCandidate & { proposal: ActionProposal }> = [];
+  const selection = input.command.selection;
+  if (selection.kind === "all") {
+    selected = candidates;
+  } else if (selection.kind === "index") {
+    selected = candidates.filter((candidate) => candidate.index === selection.index);
+  } else if (selection.kind === "proposal") {
+    selected = candidates.filter((candidate) => candidate.proposalId === selection.proposalId);
+  } else if (selection.kind === "intent") {
+    selected = candidates.filter((candidate) => candidate.intent.intentId === selection.intentId);
+  } else if (selection.kind === "domain") {
+    selected = candidates.filter((candidate) => candidate.intent.domain === selection.domain);
+  } else if (candidates.length === 1) {
+    selected = candidates;
+  } else {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      runId: candidates[0]?.proposal.runId,
+      message: `I found ${candidates.length} suggested actions. Please reply with ${candidates
+        .map((candidate) => `\`${input.command.verb} ${candidate.index}\``)
+        .join(", ")} or \`${input.command.verb} all\`.`
+    };
+  }
+
+  if (selected.length === 0) {
+    return {
+      ok: false,
+      reason: "no_match",
+      runId: candidates[0]?.proposal.runId,
+      message: "I could not match that reply to a suggested action. Please use an action number like `apply 1`."
+    };
+  }
+
+  const proposalIds = new Set(selected.map((candidate) => candidate.proposalId));
+  if (proposalIds.size !== 1) {
+    return {
+      ok: false,
+      reason: "ambiguous",
+      runId: selected[0]?.proposal.runId,
+      message: "That selection spans multiple proposals. Please apply or approve one proposal at a time using its action number."
+    };
+  }
+
+  return {
+    ok: true,
+    resolved: {
+      proposal: selected[0]!.proposal,
+      selectedIntentIds: selected.map((candidate) => candidate.intent.intentId),
+      selectedCandidates: selected
+    }
+  };
+}
+
+async function resolveThreadAction(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  command: ThreadActionCommand;
+  callback: { provider: string; uri: string; threadKey?: string | undefined };
+}): Promise<ResolveThreadActionResult> {
+  if (input.command.selection.kind === "proposal") {
+    const stored = await input.repo.getSuggestedChanges({ proposalId: input.command.selection.proposalId });
+    if (!stored) {
+      return { ok: false, reason: "no_proposal", message: `I could not find proposal \`${input.command.selection.proposalId}\`.` };
+    }
+    const claimed = await input.repo.getRun({ runId: stored.runId });
+    if (!claimed) {
+      return { ok: false, reason: "no_proposal", message: `I found the proposal but not its source run.` };
+    }
+    const expectedConversationKey = conversationKeyFromCallback(input.callback);
+    if (conversationKeyFromCallback(claimed.event.callback) !== expectedConversationKey) {
+      return { ok: false, reason: "no_match", runId: stored.runId, message: "That proposal does not belong to this source thread." };
+    }
+    return resolveCandidateSelection({
+      command: input.command,
+      proposals: [{ runId: stored.runId, run: claimed.run, event: claimed.event, snapshot: stored.snapshot }]
+    });
+  }
+
+  const proposals = await input.repo.listLatestSuggestedChangesForConversation({
+    conversationKey: conversationKeyFromCallback(input.callback)
+  });
+  return resolveCandidateSelection({ command: input.command, proposals });
+}
+
+function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string }): string {
+  return typeof input.event.metadata["owner"] === "string" &&
+    typeof input.event.metadata["repo"] === "string" &&
+    (typeof input.event.metadata["issueNumber"] === "number" || typeof input.event.metadata["pullRequestNumber"] === "number")
+    ? "github"
+    : input.callbackProvider;
+}
+
+async function authorizeThreadAction(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  resolved: ResolvedThreadAction;
+  actor: ActorIdentity;
+}): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
+  const repoKey = projectTargetRefFromEvent(input.resolved.proposal.event);
+  if (!repoKey) {
+    return { ok: false, reason: "repo_context_missing", message: "The proposal does not resolve to a repository binding." };
+  }
+
+  const binding = await input.repo.getRepoBinding(repoKey);
+  if (!binding) {
+    return { ok: false, reason: "repo_binding_not_found", message: "No repository binding is configured for this proposal." };
+  }
+
+  if (!actorAllowedByList(input.actor, binding.allowedActors)) {
+    return {
+      ok: false,
+      reason: "actor_not_allowed",
+      message: "This actor is not allowed to approve or apply actions for the bound repository."
+    };
+  }
+
+  if (input.resolved.proposal.event.source === "slack") {
+    const teamId = input.resolved.proposal.event.metadata["teamId"];
+    const channelId = input.resolved.proposal.event.metadata["channelId"];
+    if (typeof teamId === "string" && typeof channelId === "string") {
+      const channelBinding = await input.repo.getChannelBinding({
+        provider: "slack",
+        accountId: teamId,
+        conversationId: channelId
+      });
+      if (
+        channelBinding &&
+        (channelBinding.repoProvider !== repoKey.provider || channelBinding.owner !== repoKey.owner || channelBinding.repo !== repoKey.repo)
+      ) {
+        return {
+          ok: false,
+          reason: "channel_binding_mismatch",
+          message: "The source channel binding no longer points at the proposal repository."
+        };
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+function stableApprovalId(input: {
+  providedId?: string;
+  command: ThreadActionCommand;
+  resolved: ResolvedThreadAction;
+  actor: ActorIdentity;
+}): string {
+  return input.providedId ?? stableId("approval", [
+    input.resolved.proposal.snapshot.proposalId,
+    input.command.verb,
+    [...input.resolved.selectedIntentIds].sort(),
+    actorKeys(input.actor).sort()
+  ]);
+}
+
+function stableApplyPlanId(input: { resolved: ResolvedThreadAction; adapter: string }): string {
+  return stableId("apply", [
+    input.resolved.proposal.snapshot.proposalId,
+    input.adapter,
+    [...input.resolved.selectedIntentIds].sort()
+  ]);
+}
+
+function stableChildRunId(input: {
+  command: ThreadActionCommand;
+  resolved: ResolvedThreadAction;
+  sourceApplyPlanId?: string;
+  fallbackReason?: string;
+}): string {
+  return stableId("run_child", [
+    input.resolved.proposal.runId,
+    input.resolved.proposal.snapshot.proposalId,
+    input.command.verb,
+    [...input.resolved.selectedIntentIds].sort(),
+    input.sourceApplyPlanId ?? "",
+    input.fallbackReason ?? ""
+  ]);
+}
+
+function selectedIntentsAlreadyApplied(input: { plan: ApplyPlan; selectedIntentIds: string[] }): boolean {
+  return input.selectedIntentIds.every((intentId) =>
+    input.plan.outcomes?.some((outcome) => outcome.intentId === intentId && outcome.outcome === "applied")
+  );
+}
+
+function githubTargetFromEvent(event: OpenTagEvent):
+  | {
+      owner: string;
+      repoName: string;
+      issueNumber: number;
+      pullRequestNumber?: number;
+      targetKind: "issue" | "pull_request";
+    }
+  | null {
+  const owner = event.metadata["owner"];
+  const repoName = event.metadata["repo"];
+  const issueNumber = event.metadata["issueNumber"];
+  const pullRequestNumber = event.metadata["pullRequestNumber"];
+  if (typeof owner !== "string" || typeof repoName !== "string") return null;
+  if (typeof pullRequestNumber === "number") {
+    return { owner, repoName, issueNumber: pullRequestNumber, pullRequestNumber, targetKind: "pull_request" };
+  }
+  if (typeof issueNumber === "number") {
+    return { owner, repoName, issueNumber, targetKind: "issue" };
+  }
+  return null;
+}
+
+function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandidates"]): string {
+  return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
+}
+
+function actionContextPointer(input: {
+  command: ThreadActionCommand;
+  resolved: ResolvedThreadAction;
+  applyPlanId?: string;
+  fallbackReason?: string;
+}): OpenTagEvent["context"][number] {
+  const lines = [
+    "OpenTag thread action continuation.",
+    `User reply: ${input.command.rawText}`,
+    `Action: ${input.command.verb}`,
+    `Proposal: ${input.resolved.proposal.snapshot.proposalId}`,
+    `Selected intents: ${input.resolved.selectedIntentIds.join(", ")}`,
+    `Previous run: ${input.resolved.proposal.runId}`,
+    `Previous summary: ${input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary}`
+  ];
+  if (input.applyPlanId) lines.push(`Apply plan: ${input.applyPlanId}`);
+  if (input.fallbackReason) lines.push(`Fallback reason: ${input.fallbackReason}`);
+  return {
+    kind: "text",
+    uri: lines.join("\n"),
+    visibility: input.resolved.proposal.event.source === "github" ? "public" : "organization",
+    title: "OpenTag approved action context"
+  };
+}
+
+async function createChildRunForThreadAction(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  command: ThreadActionCommand;
+  resolved: ResolvedThreadAction;
+  runId?: string;
+  sourceApplyPlanId?: string;
+  fallbackReason?: string;
+}): Promise<OpenTagRun> {
+  const runId = input.runId ?? stableChildRunId(input);
+  const action = ActionHintSchema.parse({
+    kind: "apply_suggested_changes",
+    targetId: input.resolved.proposal.snapshot.proposalId,
+    selectedIntentIds: input.resolved.selectedIntentIds,
+    metadata: {
+      threadActionVerb: input.command.verb,
+      rawText: input.command.rawText,
+      ...(input.command.reason ? { reason: input.command.reason } : {}),
+      ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
+    }
+  });
+  const commandText =
+    input.command.verb === "continue"
+      ? `Continue approved OpenTag action: ${selectedActionSummary(input.resolved.selectedCandidates)}`
+      : `Continue because OpenTag could not directly apply approved action: ${selectedActionSummary(input.resolved.selectedCandidates)}`;
+  const { run } = await input.repo.createRun({
+    id: runId,
+    event: childEventFromParent({
+      parentEvent: input.resolved.proposal.event,
+      childRunId: runId,
+      actionKind: action.kind,
+      commandText,
+      receivedAt: new Date().toISOString(),
+      extraContext: [
+        actionContextPointer({
+          command: input.command,
+          resolved: input.resolved,
+          ...(input.sourceApplyPlanId ? { applyPlanId: input.sourceApplyPlanId } : {}),
+          ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
+        })
+      ],
+      metadata: {
+        parentRunId: input.resolved.proposal.runId,
+        sourceProposalId: input.resolved.proposal.snapshot.proposalId,
+        selectedIntentIds: input.resolved.selectedIntentIds,
+        threadActionVerb: input.command.verb,
+        ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
+      }
+    }),
+    parentRunId: input.resolved.proposal.runId,
+    triggeredByAction: action,
+    sourceProposalId: input.resolved.proposal.snapshot.proposalId,
+    ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
+  });
+  return run;
 }
 
 export type CallbackMessage = {
@@ -174,6 +565,76 @@ export type GitHubApplyOptions = {
   token: string;
   fetchImpl?: GitHubFetchLike;
 };
+
+async function executeGitHubApplyPlan(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  plan: ApplyPlan;
+  resolved: ResolvedThreadAction;
+  githubApply?: GitHubApplyOptions;
+}): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
+  if (input.plan.adapter !== "github") {
+    return { plan: input.plan, executed: false, fallbackReason: `Adapter ${input.plan.adapter ?? "unknown"} is not directly executable yet.` };
+  }
+  if (!input.githubApply) {
+    return { plan: input.plan, executed: false, fallbackReason: "GitHub apply is not configured on this dispatcher." };
+  }
+
+  const target = githubTargetFromEvent(input.resolved.proposal.event);
+  if (!target) {
+    return { plan: input.plan, executed: false, fallbackReason: "The source run does not include a GitHub issue or pull request target." };
+  }
+
+  const preflightOutcomeByIntentId = new Map((input.plan.outcomes ?? []).map((outcome) => [outcome.intentId, outcome]));
+  const executableIntents = input.resolved.proposal.snapshot.intents.filter((intent) => {
+    if (!input.resolved.selectedIntentIds.includes(intent.intentId)) return false;
+    const outcome = preflightOutcomeByIntentId.get(intent.intentId);
+    return outcome?.outcome === "skipped" && outcome.message?.startsWith("Preflight passed");
+  });
+  if (executableIntents.length === 0) {
+    return { plan: input.plan, executed: false, fallbackReason: "No selected intent has a direct adapter execution path." };
+  }
+
+  const executedOutcomes: ApplyIntentOutcome[] = [];
+  const compilerRegistry = createAdapterMutationCompilerRegistry([
+    createGitHubIssueMutationCompiler({ mappings: mappingsFromAdapterPlan(input.plan.adapterPlan), targetKind: target.targetKind })
+  ]);
+  for (const compilation of compilerRegistry.compile("github", executableIntents)) {
+    if (!compilation.ok) {
+      executedOutcomes.push(compilation.outcome);
+      continue;
+    }
+    executedOutcomes.push(
+      await applyGitHubIssueMutationOperation({
+        target: {
+          token: input.githubApply.token,
+          owner: target.owner,
+          repo: target.repoName,
+          issueNumber: target.issueNumber,
+          ...(target.pullRequestNumber ? { pullRequestNumber: target.pullRequestNumber } : {})
+        },
+        operation: compilation.operation as GitHubIssueMutationOperation,
+        ...(input.githubApply.fetchImpl ? { fetchImpl: input.githubApply.fetchImpl } : {})
+      })
+    );
+  }
+
+  const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+  const mergedOutcomes = (input.plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
+  const updated = await input.repo.updateApplyPlanOutcomes({
+    id: input.plan.id,
+    outcomes: mergedOutcomes,
+    externalWritesExecuted: true
+  });
+  const plan = updated ?? input.plan;
+  const allSelectedApplied = input.resolved.selectedIntentIds.every((intentId) =>
+    plan.outcomes?.some((outcome) => outcome.intentId === intentId && outcome.outcome === "applied")
+  );
+  return {
+    plan,
+    executed: allSelectedApplied,
+    ...(allSelectedApplied ? {} : { fallbackReason: "Some selected intents were not directly applied." })
+  };
+}
 
 const noopCallbackSink: CallbackSink = {
   async deliver() {
@@ -512,6 +973,248 @@ export function createDispatcherApp(input: {
     return c.json({ decision: admitted.decision, run }, 201);
   });
 
+  app.post("/v1/thread-actions", async (c) => {
+    const parsed = ThreadActionInputSchema.parse(await c.req.json());
+    const command = parseThreadActionCommand(parsed.rawText);
+    if (!command) {
+      return c.json({ outcome: "ignored", reason: "not_action_command" }, 202);
+    }
+
+    const resolved = await resolveThreadAction({
+      repo,
+      command,
+      callback: parsed.callback
+    });
+    if (!resolved.ok) {
+      if (resolved.runId) {
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: resolved.runId,
+            kind: "final",
+            provider: parsed.callback.provider,
+            uri: parsed.callback.uri,
+            body: resolved.message,
+            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+          }
+        });
+      }
+      return c.json({ outcome: resolved.reason, message: resolved.message }, resolved.reason === "no_proposal" ? 404 : 409);
+    }
+
+    const authorization = await authorizeThreadAction({
+      repo,
+      resolved: resolved.resolved,
+      actor: parsed.actor
+    });
+    if (!authorization.ok) {
+      return c.json({ outcome: "unauthorized", reason: authorization.reason, message: authorization.message }, 403);
+    }
+
+    const selectionText = selectedActionSummary(resolved.resolved.selectedCandidates);
+    const adapter = adapterForAction({ event: resolved.resolved.proposal.event, callbackProvider: parsed.callback.provider });
+    const applyPlanId = stableApplyPlanId({ resolved: resolved.resolved, adapter });
+    if (command.verb === "apply") {
+      const existingPlan = await repo.getApplyPlan({ id: applyPlanId });
+      if (existingPlan) {
+        const existingDecision = await repo.getApprovalDecision({ id: existingPlan.approvalDecisionId });
+        if (selectedIntentsAlreadyApplied({ plan: existingPlan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
+          return c.json({ outcome: "already_applied", decision: existingDecision, plan: existingPlan }, 200);
+        }
+        const fallbackReason = "An apply plan already exists for this selected action; OpenTag will not execute it again from a repeated thread reply.";
+        const childRun = await createChildRunForThreadAction({
+          repo,
+          command,
+          resolved: resolved.resolved,
+          runId: stableChildRunId({
+            command,
+            resolved: resolved.resolved,
+            sourceApplyPlanId: existingPlan.id,
+            fallbackReason
+          }),
+          sourceApplyPlanId: existingPlan.id,
+          fallbackReason
+        });
+        return c.json({ outcome: "already_planned", decision: existingDecision, plan: existingPlan, run: childRun }, 200);
+      }
+    }
+
+    const approvalId = stableApprovalId({
+      command,
+      resolved: resolved.resolved,
+      actor: parsed.actor,
+      ...(parsed.id ? { providedId: parsed.id } : {})
+    });
+    const existingDecision = await repo.getApprovalDecision({ id: approvalId });
+    const decision = existingDecision ?? await repo.recordApprovalDecision({
+      id: approvalId,
+      proposalId: resolved.resolved.proposal.snapshot.proposalId,
+      approvedIntentIds: command.verb === "reject" ? [] : resolved.resolved.selectedIntentIds,
+      ...(command.verb === "reject" ? { rejectedIntentIds: resolved.resolved.selectedIntentIds } : {}),
+      approvedBy: parsed.actor,
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      ...(command.reason ? { reason: command.reason } : {}),
+      metadata: {
+        source: "thread_action",
+        rawText: command.rawText,
+        verb: command.verb,
+        selection: command.selection,
+        callback: parsed.callback,
+        ...(parsed.metadata ? { ingressMetadata: parsed.metadata } : {})
+      }
+    });
+    if (!decision) {
+      return c.json({ error: "proposal_not_found" }, 404);
+    }
+
+    if (command.verb === "reject") {
+      if (existingDecision) {
+        return c.json({ outcome: "already_rejected", decision }, 200);
+      }
+      const body = `Rejected ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.`;
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body,
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
+      });
+      return c.json({ outcome: "rejected", decision }, 201);
+    }
+
+    if (command.verb === "approve") {
+      if (existingDecision) {
+        return c.json({ outcome: "already_approved", decision }, 200);
+      }
+      const body = `Approved ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.\n\nReply with \`apply ${resolved.resolved.selectedCandidates[0]?.index ?? 1}\` to apply it, or \`continue ${resolved.resolved.selectedCandidates[0]?.index ?? 1}\` to continue with a follow-up run.`;
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body,
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
+      });
+      return c.json({ outcome: "approved", decision }, 201);
+    }
+
+    if (command.verb === "continue") {
+      const childRun = await createChildRunForThreadAction({
+        repo,
+        command,
+        resolved: resolved.resolved,
+        runId: stableChildRunId({ command, resolved: resolved.resolved })
+      });
+      const body = `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.\n\nRun: \`${childRun.id}\``;
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body,
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
+      });
+      return c.json({ outcome: "child_run_created", decision, run: childRun }, 201);
+    }
+
+    const plan = await repo.createApplyPlan({
+      id: applyPlanId,
+      proposalId: resolved.resolved.proposal.snapshot.proposalId,
+      approvalDecisionId: decision.id,
+      selectedIntentIds: resolved.resolved.selectedIntentIds,
+      adapter
+    });
+    if (!plan) {
+      return c.json({ error: "proposal_or_approval_not_found" }, 404);
+    }
+
+    const execution = await executeGitHubApplyPlan({
+      repo,
+      plan,
+      resolved: resolved.resolved,
+      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+    });
+    if (execution.executed) {
+      const outcomes = execution.plan.outcomes ?? [];
+      const body = [
+        `Applied ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
+        "",
+        "Result:",
+        ...outcomes
+          .filter((outcome) => resolved.resolved.selectedIntentIds.includes(outcome.intentId))
+          .map((outcome) => `- \`${outcome.intentId}\`: ${outcome.outcome}${outcome.externalUri ? ` (${outcome.externalUri})` : ""}`)
+      ].join("\n");
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body,
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
+      });
+      return c.json({ outcome: "applied", decision, plan: execution.plan }, 201);
+    }
+
+    const childRun = await createChildRunForThreadAction({
+      repo,
+      command,
+      resolved: resolved.resolved,
+      runId: stableChildRunId({
+        command,
+        resolved: resolved.resolved,
+        sourceApplyPlanId: execution.plan.id,
+        fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
+      }),
+      sourceApplyPlanId: execution.plan.id,
+      fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
+    });
+    const body = [
+      `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
+      "",
+      execution.fallbackReason ?? "The adapter could not execute the selected intent.",
+      "",
+      `I created a follow-up run so the model can continue with the approved context: \`${childRun.id}\`.`
+    ].join("\n");
+    await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: {
+        runId: resolved.resolved.proposal.runId,
+        kind: "final",
+        provider: parsed.callback.provider,
+        uri: parsed.callback.uri,
+        body,
+        ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+      }
+    });
+    return c.json({ outcome: "child_run_created", decision, plan: execution.plan, run: childRun }, 201);
+  });
+
   app.get("/v1/follow-up-requests/:id", async (c) => {
     const followUpRequest = await repo.getFollowUpRequest({ id: c.req.param("id") });
     if (!followUpRequest) return c.json({ error: "follow_up_request_not_found" }, 404);
@@ -710,9 +1413,7 @@ export function createDispatcherApp(input: {
     let executableTarget:
       | {
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
-          owner: string;
-          repoName: string;
-          issueNumber: number;
+          target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
         }
       | undefined;
 
@@ -727,13 +1428,11 @@ export function createDispatcherApp(input: {
       if (!proposal) return c.json({ error: "proposal_not_found" }, 404);
       const stored = await repo.getRun({ runId: proposal.runId });
       if (!stored) return c.json({ error: "run_not_found" }, 404);
-      const owner = stored.event.metadata["owner"];
-      const repoName = stored.event.metadata["repo"];
-      const issueNumber = stored.event.metadata["issueNumber"];
-      if (typeof owner !== "string" || typeof repoName !== "string" || typeof issueNumber !== "number") {
-        return c.json({ error: "github_issue_target_missing" }, 422);
+      const target = githubTargetFromEvent(stored.event);
+      if (!target) {
+        return c.json({ error: "github_target_missing" }, 422);
       }
-      executableTarget = { proposal, owner, repoName, issueNumber };
+      executableTarget = { proposal, target };
     }
 
     const plan = await repo.createApplyPlan({
@@ -756,13 +1455,17 @@ export function createDispatcherApp(input: {
       });
       const target = {
         token: githubApply.token,
-        owner: executableTarget.owner,
-        repo: executableTarget.repoName,
-        issueNumber: executableTarget.issueNumber
+        owner: executableTarget.target.owner,
+        repo: executableTarget.target.repoName,
+        issueNumber: executableTarget.target.issueNumber,
+        ...(executableTarget.target.pullRequestNumber ? { pullRequestNumber: executableTarget.target.pullRequestNumber } : {})
       };
       const executedOutcomes = [];
       const compilerRegistry = createAdapterMutationCompilerRegistry([
-        createGitHubIssueMutationCompiler({ mappings: mappingsFromAdapterPlan(plan.adapterPlan) })
+        createGitHubIssueMutationCompiler({
+          mappings: mappingsFromAdapterPlan(plan.adapterPlan),
+          targetKind: executableTarget.target.targetKind
+        })
       ]);
       for (const compilation of compilerRegistry.compile("github", executableIntents)) {
         if (!compilation.ok) {

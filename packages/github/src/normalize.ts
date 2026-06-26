@@ -242,7 +242,13 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       number: input.pullRequestNumber,
       uri: input.pullRequestUrl
     }),
-    permissions: permissionsForIntent(mention.intent),
+    permissions: [
+      ...permissionsForIntent(mention.intent),
+      {
+        scope: "pr:update",
+        reason: "request reviewers on the source pull request after explicit approval"
+      }
+    ],
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,

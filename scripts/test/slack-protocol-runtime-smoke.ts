@@ -136,37 +136,20 @@ try {
   const lineage = await client.getProposalLineage({ proposalId: "proposal_slack_smoke_1" });
   assert(lineage.lineage.entries[0]?.status === "current", "Slack proposal intent should be current");
 
-  const approval = await client.approveProposal({
-    proposalId: "proposal_slack_smoke_1",
+  const threadAction = await client.submitThreadAction({
     id: "approval_slack_smoke_1",
-    approvedIntentIds: ["intent_slack_review"],
-    approvedBy: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
-    approvedAt: "2026-06-24T00:00:03.000Z"
+    rawText: "apply 1",
+    actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+    callback: event.callback,
+    metadata: { source: "smoke", teamId: "T123", channelId: "C123" }
   });
-  assert(approval.decision.id === "approval_slack_smoke_1", "Slack approval should be recorded");
-
-  const applyPlan = await client.createApplyPlan({
-    proposalId: "proposal_slack_smoke_1",
-    id: "apply_slack_smoke_1",
-    approvalDecisionId: "approval_slack_smoke_1",
-    adapter: "slack"
-  });
-  assert(applyPlan.plan.outcomes?.[0]?.outcome === "skipped", "Slack request_review should pass preflight but remain unexecuted");
-
-  const childRun = await client.createChildRun({
-    parentRunId: "run_slack_smoke_1",
-    runId: "run_slack_smoke_child_1",
-    action: {
-      kind: "request_review",
-      targetId: "proposal_slack_smoke_1",
-      selectedIntentIds: ["intent_slack_review"]
-    },
-    sourceApplyPlanId: "apply_slack_smoke_1",
-    commandText: "Request review for Slack smoke proposal"
-  });
-  assert(childRun.run.parentRunId === "run_slack_smoke_1", "Slack child run should reference parent");
-  assert(childRun.run.sourceProposalId === "proposal_slack_smoke_1", "Slack child run should reference proposal");
-  assert(childRun.run.triggeredByAction?.kind === "request_review", "Slack child run should carry request_review action");
+  assert(threadAction.outcome === "child_run_created", "Slack apply should fall back to a child run when no direct adapter compiler exists");
+  assert(threadAction.decision?.id === "approval_slack_smoke_1", "Slack thread action should record approval");
+  assert(threadAction.plan?.outcomes?.[0]?.outcome === "unsupported", "Slack request_review should not direct-apply without a PR update capability");
+  assert(threadAction.run?.parentRunId === "run_slack_smoke_1", "Slack child run should reference parent");
+  assert(threadAction.run?.sourceProposalId === "proposal_slack_smoke_1", "Slack child run should reference proposal");
+  assert(threadAction.run?.sourceApplyPlanId === threadAction.plan?.id, "Slack child run should reference apply plan");
+  assert(threadAction.run?.triggeredByAction?.kind === "apply_suggested_changes", "Slack child run should carry apply action");
 
   const events = await client.listRunEvents({ runId: "run_slack_smoke_1" });
   const eventTypes = events.events.map((event) => (event as { type: string }).type);
@@ -186,14 +169,14 @@ try {
   }
 
   const metrics = await client.getRunMetrics({ runId: "run_slack_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === 2, "Slack smoke should only deliver ack and final callbacks");
+  assert(metrics.metrics.humanCallbackCount === 3, "Slack smoke should deliver ack, final, and thread-action fallback callbacks");
   assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "Slack audit events should exceed human callbacks");
   assert(metrics.metrics.threadNoiseRatio < 1, "Slack thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "Slack metrics should count suggested changes");
   assert(metrics.metrics.approvalDecisionCount === 1, "Slack metrics should count approvals");
   assert(metrics.metrics.applyPlanCount === 1, "Slack metrics should count apply plans");
   assert(metrics.metrics.childRunCount === 1, "Slack metrics should count child runs");
-  assert(metrics.metrics.applyOutcomeCounts.skipped === 1, "Slack metrics should count skipped preflight outcomes");
+  assert(metrics.metrics.applyOutcomeCounts.unsupported === 1, "Slack metrics should count unsupported direct-apply outcomes");
 
   console.log("slack-protocol-runtime-smoke: ok");
 } finally {

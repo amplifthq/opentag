@@ -263,6 +263,75 @@ describe("GitHub apply helpers", () => {
     });
   });
 
+  it("compiles review requests only for pull request targets", () => {
+    const intent = {
+      intentId: "intent_review",
+      domain: "review",
+      action: "request_review",
+      summary: "Request review.",
+      params: { reviewer: "alice" }
+    };
+
+    expect(compileGitHubIssueMutationIntent(intent)).toEqual({
+      ok: false,
+      outcome: {
+        intentId: "intent_review",
+        outcome: "unsupported",
+        message: "GitHub review requests require a pull request target."
+      }
+    });
+    expect(compileGitHubIssueMutationIntent(intent, { targetKind: "pull_request" })).toEqual({
+      ok: true,
+      intentId: "intent_review",
+      operation: {
+        kind: "request_review",
+        intentId: "intent_review",
+        reviewers: ["alice"]
+      }
+    });
+  });
+
+  it("applies review request intents through GitHub pull request APIs", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown; authorization: string | null }> = [];
+    const fetchImpl = (async (url, init) => {
+      requests.push({
+        url: String(url),
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+        authorization: new Headers(init?.headers).get("authorization")
+      });
+      return Response.json({});
+    }) as typeof fetch;
+
+    await expect(
+      applyGitHubIssueMutationIntent({
+        target: { token: "ghs_test", owner: "acme", repo: "demo", issueNumber: 11, pullRequestNumber: 11 },
+        targetKind: "pull_request",
+        fetchImpl,
+        intent: {
+          intentId: "intent_review",
+          domain: "review",
+          action: "request_review",
+          summary: "Request review.",
+          params: { reviewers: ["alice", "bob"], teamReviewers: ["core"] }
+        }
+      })
+    ).resolves.toEqual({
+      intentId: "intent_review",
+      outcome: "applied",
+      externalUri: "https://github.com/acme/demo/pull/11"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls/11/requested_reviewers",
+        method: "POST",
+        authorization: "Bearer ghs_test",
+        body: { reviewers: ["alice", "bob"], team_reviewers: ["core"] }
+      }
+    ]);
+  });
+
   it("applies assignee mutation intents through GitHub issue APIs", async () => {
     const requests: Array<{ url: string; method: string; body?: unknown; authorization: string | null }> = [];
     const fetchImpl = (async (url, init) => {

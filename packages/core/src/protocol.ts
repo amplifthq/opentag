@@ -307,10 +307,11 @@ export const DefaultCapabilityContracts = [
   {
     id: "request_review",
     semanticAction: "request_review",
-    capabilityClass: "callback",
-    requiresExplicitIntent: false,
+    capabilityClass: "external_write",
+    requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
+    adapterTargets: ["github"],
+    requiredPermissionScopes: ["pr:update"]
   }
 ] satisfies CapabilityContract[];
 

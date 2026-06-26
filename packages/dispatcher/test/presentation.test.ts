@@ -109,4 +109,47 @@ describe("default callback presentation", () => {
     ]);
     expect(presentation.final({ provider: "github", result }).body).not.toContain("[object Object]");
   });
+
+  it("renders suggested changes as thread-native actions", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const result = {
+      conclusion: "needs_human" as const,
+      summary: "Prepared a proposal.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Move issue forward.",
+          intents: [
+            {
+              intentId: "intent_label_1",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ],
+          preconditions: ["The issue is still open."]
+        }
+      ]
+    };
+
+    const github = presentation.final({ provider: "github", result }).body;
+    expect(github).toContain("Suggested actions:");
+    expect(github).toContain("1. **Add the bug label.**");
+    expect(github).toContain("Proposal: `proposal_1`");
+    expect(github).toContain("Intent ID: `intent_label_1`");
+    expect(github).toContain("`apply 1`");
+
+    const slack = presentation.final({ provider: "slack", result });
+    expect(slack.body).toContain("*Suggested actions*");
+    expect(slack.body).toContain("1. *Add the bug label.*");
+    expect(slack.body).toContain("`continue 1`");
+    expect(slack.blocks?.at(-1)).toMatchObject({
+      type: "section",
+      text: {
+        type: "mrkdwn"
+      }
+    });
+  });
 });

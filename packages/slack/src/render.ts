@@ -1,4 +1,4 @@
-import type { OpenTagRunResult } from "@opentag/core";
+import { suggestedActionCandidatesFromResult, type OpenTagRunResult } from "@opentag/core";
 
 export type SlackTextBlock = {
   type: "section";
@@ -49,6 +49,38 @@ function nextActionSummary(result: OpenTagRunResult): string | undefined {
   return result.nextAction.summary;
 }
 
+function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
+  const candidates = suggestedActionCandidatesFromResult(result);
+  if (candidates.length === 0) return [];
+
+  const lines = ["*Suggested actions*"];
+  for (const candidate of candidates) {
+    lines.push(
+      "",
+      `${candidate.index}. *${markdownToSlackMrkdwn(candidate.intent.summary)}*`,
+      `   Intent: \`${candidate.intent.action}\` (\`${candidate.intent.domain}\`)`,
+      `   Proposal: \`${candidate.proposalId}\``,
+      `   Intent ID: \`${candidate.intent.intentId}\``
+    );
+    if (candidate.proposalPreconditions?.length) {
+      lines.push("   Preconditions:");
+      for (const precondition of candidate.proposalPreconditions) {
+        lines.push(`   - ${markdownToSlackMrkdwn(precondition)}`);
+      }
+    }
+  }
+
+  lines.push(
+    "",
+    "Reply with:",
+    "- `approve 1` to record approval",
+    "- `apply 1` or `apply all` to apply supported actions",
+    "- `continue 1` to continue with a follow-up run",
+    "- `reject 1` to reject an action"
+  );
+  return lines;
+}
+
 export function renderSlackFinalResult(result: OpenTagRunResult): string {
   const lines = [`Finished with *${result.conclusion}*.`, "", markdownToSlackMrkdwn(result.summary)];
 
@@ -62,6 +94,11 @@ export function renderSlackFinalResult(result: OpenTagRunResult): string {
   const nextAction = nextActionSummary(result);
   if (nextAction) {
     lines.push("", `*Next action*: ${markdownToSlackMrkdwn(nextAction)}`);
+  }
+
+  const suggestedActions = renderSuggestedActionsMarkdown(result);
+  if (suggestedActions.length > 0) {
+    lines.push("", ...suggestedActions);
   }
 
   return lines.join("\n");
@@ -96,6 +133,18 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
       text: {
         type: "mrkdwn",
         text: `*Next action*: ${markdownToSlackMrkdwn(nextAction)}`
+      }
+    });
+  }
+
+  const suggestedActions = renderSuggestedActionsMarkdown(result);
+  if (suggestedActions.length > 0) {
+    blocks.push({ type: "divider" });
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: suggestedActions.join("\n")
       }
     });
   }

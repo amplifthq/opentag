@@ -34,6 +34,7 @@ Real smoke tests have validated:
 
 - GitHub issue -> OpenTag -> local Claude Code -> commit branch -> pull request -> GitHub callback
 - Slack thread -> OpenTag -> local Claude Code -> Slack final callback with audit-only progress
+- model-suggested actions -> source-thread `apply 1` reply -> approval decision -> apply plan or child run fallback
 
 ## Quick Start
 
@@ -57,6 +58,7 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 - **Control where execution happens** - keep coding work local with `opentagd`, or use hosted/custom runners that implement the same claim and callback contracts.
 - **Use any approved executor** - built-in adapters cover `echo`, `claude-code`, and `codex`; custom runners can implement the same contract.
 - **Return outcomes, not noise** - human threads get useful acknowledgements and final results while detailed progress stays in audit events and metrics.
+- **Turn model suggestions into safe actions** - final callbacks can render suggested next steps such as labels, review requests, follow-up runs, or PR work; users approve, apply, reject, or continue from the same source thread.
 - **Govern external writes** - Project Target bindings, permission scopes, context packets, and audit trails make agent authority explicit.
 
 ## How It Works
@@ -75,6 +77,7 @@ flowchart LR
 3. A local or hosted runner claims only work it is explicitly bound to handle.
 4. The executor does the work in the mapped checkout and returns structured results.
 5. Callback adapters update the source thread without flooding it.
+6. If the model returns suggested actions, the thread can reply with commands such as `approve 1`, `apply label`, `continue 1`, or `reject 1`; OpenTag records the approval, creates an apply plan, executes supported adapter writes, or creates a child run with the prior context when the action needs more model work.
 
 ## Why Teams Can Trust the Loop
 
@@ -94,11 +97,13 @@ flowchart LR
 | Slack | Works today | App mentions, channel-to-Project Target bindings, thread callbacks, and audit-only routine progress |
 | Local daemon | Works today | Polling, heartbeats, lease-based claiming, Project Target bindings, and dirty-worktree protection |
 | Executors | Works today | `echo`, Claude Code (`claude --print`), Codex (`codex exec`), and custom executor contracts |
-| Protocol runtime | Works today | Work Threads, Context Packets, Audit Trails, run admission, quiet callbacks, and metrics |
+| Protocol runtime | Works today | Work Threads, Context Packets, Audit Trails, run admission, quiet callbacks, suggested actions, thread-native approvals, apply plans, child-run fallback, and metrics |
 | Telegram and Lark | Experimental adapters | Normalizers, ingress apps, and callback helpers are present; treat them as adapter-expansion surfaces rather than the main v0 golden path |
 | Hosted multi-tenant control plane | Future hardening | The dispatcher is intentionally thin today; production multi-tenant hosting needs more operational hardening |
 
-For teams building governed workflows, the deeper protocol vocabulary lives in [Agent Work Protocol](docs/agent-work-protocol.md): capability contracts, policy resolution, suggested changes, approvals, apply plans, and lineage.
+OpenTag's protocol layer is intentionally thin: strong models can suggest richer next actions, while OpenTag limits side effects by turning those suggestions into auditable, approvable, replayable intents. The longer-term vocabulary lives in [Agent Work Protocol](docs/agent-work-protocol.md): capability contracts, policy resolution, suggested changes, approvals, apply plans, adapter compilers, and lineage.
+
+For v0 product integrations, prefer the thread-native path: render suggested actions in the source thread and submit replies with `@opentag/client`'s `submitThreadAction`. The lower-level proposal, approval, apply-plan, policy-rule, and mutation-mapping HTTP routes remain experimental protocol APIs for adapter authors and runtime tests; they are not the primary product surface.
 
 ## Packages
 

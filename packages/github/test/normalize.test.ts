@@ -48,6 +48,7 @@ describe("normalizeGitHubIssueComment", () => {
     expect(event?.context[0]).toMatchObject({ provider: "github", kind: "pull_request" });
     expect(event?.workItem).toMatchObject({ provider: "github", kind: "pull_request", externalId: "acme/demo#2" });
     expect(event?.callback.threadKey).toBe("acme/demo#2");
+    expect(event?.permissions.map((permission) => permission.scope)).toContain("pr:update");
     expect(event?.metadata).toMatchObject({ pullRequestNumber: 2, installationId: 77 });
   });
 

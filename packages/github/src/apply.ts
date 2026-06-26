@@ -6,6 +6,7 @@ export type GitHubIssueMutationTarget = {
   owner: string;
   repo: string;
   issueNumber: number;
+  pullRequestNumber?: number;
 };
 
 export type GitHubIssueMutationOperation =
@@ -44,6 +45,12 @@ export type GitHubIssueMutationOperation =
       kind: "remove_assignee";
       intentId: string;
       assignee: string;
+    }
+  | {
+      kind: "request_review";
+      intentId: string;
+      reviewers: string[];
+      teamReviewers?: string[];
     };
 
 export type GitHubIssueMutationCompilation =
@@ -79,6 +86,26 @@ function assigneesFromIntent(intent: MutationIntent): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const assignees = value.filter((assignee): assignee is string => typeof assignee === "string" && assignee.length > 0);
   return assignees.length > 0 ? assignees : undefined;
+}
+
+function reviewersFromIntent(intent: MutationIntent): string[] | undefined {
+  const reviewer = intent.params?.["reviewer"];
+  const reviewers = intent.params?.["reviewers"];
+  const values = [
+    ...(typeof reviewer === "string" ? [reviewer] : []),
+    ...(Array.isArray(reviewers) ? reviewers : [])
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return values.length > 0 ? [...new Set(values)] : undefined;
+}
+
+function teamReviewersFromIntent(intent: MutationIntent): string[] | undefined {
+  const reviewer = intent.params?.["teamReviewer"];
+  const reviewers = intent.params?.["teamReviewers"] ?? intent.params?.["team_reviewers"];
+  const values = [
+    ...(typeof reviewer === "string" ? [reviewer] : []),
+    ...(Array.isArray(reviewers) ? reviewers : [])
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return values.length > 0 ? [...new Set(values)] : undefined;
 }
 
 function mappedValueFromIntent(intent: MutationIntent): string | undefined {
@@ -128,8 +155,43 @@ async function githubJson(input: {
 
 export function compileGitHubIssueMutationIntent(
   intent: MutationIntent,
-  options: { mappings?: AdapterMutationMapping[] } = {}
+  options: { mappings?: AdapterMutationMapping[]; targetKind?: "issue" | "pull_request" } = {}
 ): GitHubIssueMutationCompilation {
+  if (intent.action === "request_review" || intent.domain === "review") {
+    if (options.targetKind !== "pull_request") {
+      return {
+        ok: false,
+        outcome: {
+          intentId: intent.intentId,
+          outcome: "unsupported",
+          message: "GitHub review requests require a pull request target."
+        }
+      };
+    }
+    const reviewers = reviewersFromIntent(intent);
+    const teamReviewers = teamReviewersFromIntent(intent);
+    if (!reviewers?.length && !teamReviewers?.length) {
+      return {
+        ok: false,
+        outcome: {
+          intentId: intent.intentId,
+          outcome: "failed",
+          message: "request_review requires params.reviewer, params.reviewers, or params.teamReviewers."
+        }
+      };
+    }
+    return {
+      ok: true,
+      intentId: intent.intentId,
+      operation: {
+        kind: "request_review",
+        intentId: intent.intentId,
+        reviewers: reviewers ?? [],
+        ...(teamReviewers?.length ? { teamReviewers } : {})
+      }
+    };
+  }
+
   if (intent.domain === "status") {
     const mapped = labelMappingForIntent({ intent, mappings: options.mappings ?? [] });
     if (mapped) {
@@ -235,13 +297,14 @@ export function compileGitHubIssueMutationIntent(
 
 export function compileGitHubIssueMutationIntents(
   intents: MutationIntent[],
-  options: { mappings?: AdapterMutationMapping[] } = {}
+  options: { mappings?: AdapterMutationMapping[]; targetKind?: "issue" | "pull_request" } = {}
 ): GitHubIssueMutationCompilation[] {
   return intents.map((intent) => compileGitHubIssueMutationIntent(intent, options));
 }
 
 export function createGitHubIssueMutationCompiler(options: {
   mappings?: AdapterMutationMapping[];
+  targetKind?: "issue" | "pull_request";
 } = {}): AdapterMutationCompiler<GitHubIssueMutationOperation> {
   return {
     adapter: "github",
@@ -271,6 +334,32 @@ export async function applyGitHubIssueMutationOperation(input: {
 }): Promise<ApplyIntentOutcome> {
   const fetchImpl = input.fetchImpl ?? fetch;
   try {
+    if (input.operation.kind === "request_review") {
+      const pullRequestNumber = input.target.pullRequestNumber;
+      if (typeof pullRequestNumber !== "number") {
+        return {
+          intentId: input.operation.intentId,
+          outcome: "failed",
+          message: "request_review requires target.pullRequestNumber."
+        };
+      }
+      await githubJson({
+        target: input.target,
+        fetchImpl,
+        method: "POST",
+        path: `/pulls/${pullRequestNumber}/requested_reviewers`,
+        body: {
+          reviewers: input.operation.reviewers,
+          ...(input.operation.teamReviewers?.length ? { team_reviewers: input.operation.teamReviewers } : {})
+        }
+      });
+      return {
+        intentId: input.operation.intentId,
+        outcome: "applied",
+        externalUri: `https://github.com/${input.target.owner}/${input.target.repo}/pull/${pullRequestNumber}`
+      };
+    }
+
     if (input.operation.kind === "set_assignees") {
       const externalUri = await githubJson({
         target: input.target,
@@ -366,10 +455,12 @@ export async function applyGitHubIssueMutationIntent(input: {
   target: GitHubIssueMutationTarget;
   intent: MutationIntent;
   mappings?: AdapterMutationMapping[];
+  targetKind?: "issue" | "pull_request";
   fetchImpl?: FetchLike;
 }): Promise<ApplyIntentOutcome> {
   const compiled = compileGitHubIssueMutationIntent(input.intent, {
-    ...(input.mappings ? { mappings: input.mappings } : {})
+    ...(input.mappings ? { mappings: input.mappings } : {}),
+    ...(input.targetKind ? { targetKind: input.targetKind } : {})
   });
   if (!compiled.ok) return compiled.outcome;
   return applyGitHubIssueMutationOperation({
@@ -383,6 +474,7 @@ export async function applyGitHubIssueMutationIntents(input: {
   target: GitHubIssueMutationTarget;
   intents: MutationIntent[];
   mappings?: AdapterMutationMapping[];
+  targetKind?: "issue" | "pull_request";
   fetchImpl?: FetchLike;
 }): Promise<ApplyIntentOutcome[]> {
   const outcomes: ApplyIntentOutcome[] = [];
@@ -392,6 +484,7 @@ export async function applyGitHubIssueMutationIntents(input: {
         target: input.target,
         intent,
         ...(input.mappings ? { mappings: input.mappings } : {}),
+        ...(input.targetKind ? { targetKind: input.targetKind } : {}),
         ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
       })
     );

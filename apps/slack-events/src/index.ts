@@ -92,6 +92,9 @@ serve({
       await dispatcherClient.createRun({ runId, event });
       return { runId };
     },
+    async submitThreadAction(action) {
+      await dispatcherClient.submitThreadAction(action);
+    },
     now: () => new Date().toISOString()
   }).fetch,
   port

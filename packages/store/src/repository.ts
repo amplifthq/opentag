@@ -130,6 +130,11 @@ export type StoredSuggestedChangesSnapshot = {
   snapshot: SuggestedChangesSnapshot;
 };
 
+export type StoredSuggestedChangesInConversation = StoredSuggestedChangesSnapshot & {
+  run: OpenTagRun;
+  event: OpenTagEvent;
+};
+
 export type ApplyOutcomeCounts = {
   applied: number;
   skipped: number;
@@ -1230,6 +1235,33 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async listSuggestedChangesForRun(input: { runId: string }): Promise<SuggestedChangesSnapshot[]> {
       const rows = await db.select().from(suggestedChanges).where(eq(suggestedChanges.runId, input.runId)).orderBy(asc(suggestedChanges.createdAt));
       return rows.map((row) => SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson)));
+    },
+
+    async listLatestSuggestedChangesForConversation(input: {
+      conversationKey: string;
+    }): Promise<StoredSuggestedChangesInConversation[]> {
+      const runRows = await db
+        .select()
+        .from(runs)
+        .where(eq(runs.conversationKey, input.conversationKey))
+        .orderBy(asc(runs.createdAt));
+      for (const runRow of [...runRows].reverse()) {
+        const proposalRows = await db
+          .select()
+          .from(suggestedChanges)
+          .where(eq(suggestedChanges.runId, runRow.id))
+          .orderBy(asc(suggestedChanges.createdAt));
+        if (proposalRows.length === 0) continue;
+        const run = runFromRow(runRow);
+        const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
+        return proposalRows.map((row) => ({
+          runId: row.runId,
+          run,
+          event,
+          snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson))
+        }));
+      }
+      return [];
     },
 
     async getProposalLineage(input: { proposalId: string }): Promise<ProposalLineage | null> {
