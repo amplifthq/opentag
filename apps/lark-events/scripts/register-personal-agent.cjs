@@ -29,8 +29,10 @@ function sdkDomainFor(domain) {
   return domain === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark;
 }
 
-function registrationDomainFromUserInfo(initialDomain, userInfo) {
-  return userInfo?.tenant_brand === "lark" ? "lark" : initialDomain;
+function registrationDomainFromUserInfo(requestedDomain, userInfo) {
+  if (userInfo?.tenant_brand === "lark") return "lark";
+  if (userInfo?.tenant_brand === "feishu") return "feishu";
+  return requestedDomain;
 }
 
 function printQrCode(info) {
@@ -84,10 +86,11 @@ async function fetchBotIdentity(input) {
 }
 
 async function main() {
-  const initialDomain = parseDomain(process.argv[2] || process.env.LARK_DOMAIN || "lark");
+  const requestedDomain = parseDomain(process.argv[2] || process.env.LARK_DOMAIN || "lark");
 
   const registration = await lark.registerApp({
-    domain: accountDomainFor(initialDomain),
+    // The Personal Agent registration flow starts on Feishu and switches to Lark after scan when needed.
+    domain: accountDomainFor("feishu"),
     larkDomain: accountDomainFor("lark"),
     source: REGISTRATION_SOURCE,
     createOnly: true,
@@ -115,7 +118,7 @@ async function main() {
     }
   });
 
-  const domain = registrationDomainFromUserInfo(initialDomain, registration.user_info);
+  const domain = registrationDomainFromUserInfo(requestedDomain, registration.user_info);
   const botIdentity = await fetchBotIdentity({
     appId: registration.client_id,
     appSecret: registration.client_secret,
