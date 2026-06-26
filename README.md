@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="./assets/opentag-mark.png" alt="OpenTag logo" width="160" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/readme-logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="./assets/readme-logo-light.png">
+    <img src="./assets/readme-logo-light.png" alt="OpenTag logo" width="112" />
+  </picture>
 </p>
 
 # OpenTag
