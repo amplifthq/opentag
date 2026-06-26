@@ -61,11 +61,7 @@ async function bindConfiguredProjectTargets(): Promise<void> {
       owner: repository.owner,
       repo: repository.repo,
       checkoutPath: repository.checkoutPath,
-      defaultExecutor: repository.defaultExecutor,
-      baseBranch: repository.baseBranch,
-      pushRemote: repository.pushRemote,
-      ...(repository.worktreeRoot ? { worktreeRoot: repository.worktreeRoot } : {}),
-      ...(repository.keepWorktree ? { keepWorktree: repository.keepWorktree } : {})
+      defaultExecutor: repository.defaultExecutor
     });
     console.log(`Bound Project Target ${repository.provider}:${repository.owner}/${repository.repo} to ${repository.checkoutPath}`);
   }
