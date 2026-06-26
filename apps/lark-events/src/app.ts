@@ -31,6 +31,7 @@ export type LarkMessageHandlerConfig = {
   agentId: string;
   botOpenId?: string;
   callbackUri?: string;
+  defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   // Self-service binding from within Lark (`/bind owner/repo`); optional so tests can omit it.
@@ -135,10 +136,27 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "bound", tenantKey, chatId };
     }
 
-    const binding = await config.resolveChannelBinding({ tenantKey, chatId });
+    let binding = await config.resolveChannelBinding({ tenantKey, chatId });
     if (!binding) {
-      await config.reply?.({ messageId, text: UNBOUND_HINT });
-      return { status: "ignored_unbound_chat", tenantKey, chatId };
+      if (config.defaultRepoBinding && config.bindChannel) {
+        await config.bindChannel({
+          tenantKey,
+          chatId,
+          repoProvider: config.defaultRepoBinding.repoProvider,
+          owner: config.defaultRepoBinding.owner,
+          repo: config.defaultRepoBinding.repo
+        });
+        binding = {
+          tenantKey,
+          chatId,
+          repoProvider: config.defaultRepoBinding.repoProvider,
+          owner: config.defaultRepoBinding.owner,
+          repo: config.defaultRepoBinding.repo
+        };
+      } else {
+        await config.reply?.({ messageId, text: UNBOUND_HINT });
+        return { status: "ignored_unbound_chat", tenantKey, chatId };
+      }
     }
 
     const parsedTime = data.create_time ? Number(data.create_time) : Number.NaN;

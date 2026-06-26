@@ -22,9 +22,25 @@ const dispatcherClient = createOpenTagClient({
 });
 const replyClient = createLarkReplyClient({ appId, appSecret, domain: larkDomain });
 
+function defaultRepoBindingFromEnv(value: string | undefined) {
+  if (!value) return undefined;
+  const match = value.match(/^(?:([\w-]+):)?([\w.-]+)\/([\w.-]+)$/);
+  if (!match) {
+    throw new Error("OPENTAG_LARK_DEFAULT_REPO must be formatted as owner/repo or provider:owner/repo");
+  }
+  return {
+    repoProvider: match[1] ?? "github",
+    owner: match[2] as string,
+    repo: match[3] as string
+  };
+}
+
+const defaultRepoBinding = defaultRepoBindingFromEnv(process.env.OPENTAG_LARK_DEFAULT_REPO);
+
 const handler = createLarkMessageHandler({
   agentId: process.env.OPENTAG_LARK_AGENT_ID ?? "opentag",
   ...(process.env.LARK_BOT_OPEN_ID ? { botOpenId: process.env.LARK_BOT_OPEN_ID } : {}),
+  ...(defaultRepoBinding ? { defaultRepoBinding } : {}),
   async resolveChannelBinding(input) {
     try {
       const { binding } = await dispatcherClient.getChannelBinding({

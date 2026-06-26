@@ -288,6 +288,7 @@ tunnel) and creates OpenTag runs from `im.message.receive_v1` events.
 | `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |
 | `LARK_BOT_OPEN_ID` | for group chats | Bot open id; group messages must @-mention it. Direct p2p chats do not need it |
 | `OPENTAG_LARK_AGENT_ID` | no | Agent id for the ingress. Defaults to `opentag` |
+| `OPENTAG_LARK_DEFAULT_REPO` | no | Optional default repo formatted as `owner/repo` or `provider:owner/repo`; unbound chats auto-connect to it before creating the first run |
 
 Set `LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_DOMAIN` on the dispatcher too, so
 the Lark callback sink can post replies. Bind a chat to a repo with
@@ -298,7 +299,9 @@ can serve several chats that each target a different repo. Users can also bind a
 chat from inside Lark without the CLI: @-mention the bot with `/bind <owner>/<repo>`
 (e.g. `/bind amplifthq/opentag`, or `/bind github:amplifthq/opentag`). The bot
 confirms in-thread, and an @-mention in an unbound chat replies with the same
-hint. The target repo must already be registered on a runner (`opentagd bind-repos`).
+hint. For the shortest local start path, set `OPENTAG_LARK_DEFAULT_REPO` so the
+first message from an unbound chat auto-connects to the selected repo. The target
+repo must already be registered on a runner (`opentagd bind-repos`).
 
 ## Telegram Ingress Environment
 

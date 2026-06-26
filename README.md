@@ -118,7 +118,7 @@ pnpm add @opentag/core @opentag/client @opentag/dispatcher @opentag/github @open
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite/Drizzle persistence for runs, audit events, leases, policy, and metrics |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus echo, Claude Code, and Codex adapters |
 
-Runnable apps live in `apps/dispatcher`, `apps/opentagd`, `apps/github-probot`, and `apps/slack-events`.
+Runnable apps live in `apps/dispatcher`, `apps/opentagd`, `apps/github-probot`, `apps/slack-events`, `apps/lark-events`, and `apps/telegram-events`.
 
 ## Examples and Guides
 
@@ -126,6 +126,7 @@ Runnable apps live in `apps/dispatcher`, `apps/opentagd`, `apps/github-probot`, 
 - [GitHub to PR](examples/github-to-pr/README.md) - product demo path from GitHub issue mention to local execution, pull request, callback, and audit evidence.
 - [Embedded dispatcher](examples/embedded-dispatcher/README.md) - host OpenTag inside another Node service.
 - [Custom runner](examples/custom-runner/README.md) - build a third-party runner with `@opentag/client` and `@opentag/runner`.
+- [Start OpenTag for Lark locally](docs/lark-local-start.md) - one-command local MVP path for Lark or Feishu long-connection testing.
 - [Configuration](docs/configuration.md) - map dispatcher, daemon, ingress, callback, and runner settings.
 - [Adapter authoring](docs/adapter-authoring.md) - add new work app adapters without changing the execution model.
 - [Real integration smoke test](docs/real-integration-smoke-test.md) - real GitHub and Slack setup, trigger, and debugging order.

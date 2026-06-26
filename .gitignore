@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .omx/
+.opentag/
 .env
 .env.*
 !.env.example
