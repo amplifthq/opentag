@@ -33,6 +33,13 @@ require_command() {
   fi
 }
 
+workspace_dependencies_installed() {
+  [[ -x "$ROOT_DIR/apps/dispatcher/node_modules/.bin/tsx" ]] &&
+    [[ -x "$ROOT_DIR/apps/opentagd/node_modules/.bin/tsx" ]] &&
+    [[ -x "$ROOT_DIR/apps/lark-events/node_modules/.bin/tsx" ]] &&
+    [[ -d "$ROOT_DIR/apps/lark-events/node_modules/qrcode-terminal" ]]
+}
+
 read_with_default() {
   local prompt="$1"
   local default_value="$2"
@@ -152,6 +159,36 @@ validate_executor() {
   esac
 }
 
+assert_executor_available() {
+  case "$1" in
+    codex)
+      require_command codex
+      ;;
+    claude-code)
+      require_command claude
+      ;;
+    echo)
+      ;;
+  esac
+}
+
+json_field() {
+  local field="$1"
+  FIELD="$field" node -e '
+const fs = require("node:fs");
+const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const value = data[process.env.FIELD];
+if (typeof value === "string") process.stdout.write(value);
+' <<< "$REGISTRATION_JSON"
+}
+
+register_lark_personal_agent() {
+  (
+    cd "$ROOT_DIR/apps/lark-events"
+    node scripts/register-personal-agent.cjs "$LARK_DOMAIN"
+  )
+}
+
 write_config() {
   mkdir -p "$STATE_DIR" "$STATE_DIR/worktrees"
   CONFIG_PATH="$CONFIG_PATH" \
@@ -222,7 +259,7 @@ log
 log "This starts a local OpenTag stack that lets Lark wake an agent on this computer."
 log
 
-if [[ ! -x "$ROOT_DIR/node_modules/.bin/tsx" ]]; then
+if ! workspace_dependencies_installed; then
   log "Installing workspace dependencies with corepack pnpm install..."
   (cd "$ROOT_DIR" && corepack pnpm install)
 fi
@@ -239,7 +276,8 @@ if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
   REPO_OWNER="$OPENTAG_REPO_OWNER"
   REPO_NAME="$OPENTAG_REPO_NAME"
 elif [[ -n "$INFERRED_SLUG" && "$INFERRED_SLUG" == */* ]]; then
-  REPO_SLUG="$(read_with_default "GitHub repo for this checkout" "$INFERRED_SLUG")"
+  REPO_SLUG="$INFERRED_SLUG"
+  log "Using repo from git origin: $REPO_SLUG"
   REPO_OWNER="${REPO_SLUG%%/*}"
   REPO_NAME="${REPO_SLUG#*/}"
 else
@@ -255,8 +293,9 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 
 DETECTED_EXECUTOR="$(detect_executor)"
-EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, echo)" "$DETECTED_EXECUTOR")"
+EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, echo; choose codex for a real local agent)" "$DETECTED_EXECUTOR")"
 validate_executor "$EXECUTOR"
+assert_executor_available "$EXECUTOR"
 
 LARK_DOMAIN="$(read_with_default "Lark domain (lark or feishu)" "${LARK_DOMAIN:-lark}")"
 case "$LARK_DOMAIN" in
@@ -267,27 +306,52 @@ case "$LARK_DOMAIN" in
     ;;
 esac
 
-LARK_APP_ID="$(read_with_default "LARK_APP_ID" "${LARK_APP_ID:-}")"
-[[ -n "$LARK_APP_ID" ]] || fail "LARK_APP_ID is required."
+if [[ -n "${LARK_APP_ID:-}" && -n "${LARK_APP_SECRET:-}" ]]; then
+  log "Using LARK_APP_ID and LARK_APP_SECRET from the environment."
+else
+  LARK_SETUP_MODE="$(read_with_default "Lark app setup (scan or manual)" "${OPENTAG_LARK_APP_SETUP:-scan}")"
+  case "$LARK_SETUP_MODE" in
+    scan)
+      REGISTRATION_JSON="$(register_lark_personal_agent)"
+      LARK_APP_ID="$(json_field appId)"
+      LARK_APP_SECRET="$(json_field appSecret)"
+      DETECTED_LARK_DOMAIN="$(json_field domain)"
+      DETECTED_LARK_BOT_OPEN_ID="$(json_field botOpenId)"
+      if [[ -n "$DETECTED_LARK_DOMAIN" ]]; then
+        LARK_DOMAIN="$DETECTED_LARK_DOMAIN"
+      fi
+      if [[ -n "$DETECTED_LARK_BOT_OPEN_ID" && -z "${LARK_BOT_OPEN_ID:-}" ]]; then
+        LARK_BOT_OPEN_ID="$DETECTED_LARK_BOT_OPEN_ID"
+      fi
+      ;;
+    manual)
+      LARK_APP_ID="$(read_with_default "LARK_APP_ID" "${LARK_APP_ID:-}")"
+      LARK_APP_SECRET="$(read_secret_with_default "LARK_APP_SECRET" "${LARK_APP_SECRET:-}")"
+      ;;
+    *)
+      fail "Lark app setup must be scan or manual."
+      ;;
+  esac
+fi
 
-LARK_APP_SECRET="$(read_secret_with_default "LARK_APP_SECRET" "${LARK_APP_SECRET:-}")"
+[[ -n "$LARK_APP_ID" ]] || fail "LARK_APP_ID is required."
 [[ -n "$LARK_APP_SECRET" ]] || fail "LARK_APP_SECRET is required."
 
-USE_GROUP="$(read_with_default "Will you test in a Lark group chat? (y/N)" "${OPENTAG_LARK_GROUP_CHAT:-N}")"
 LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-}"
-case "$USE_GROUP" in
-  y|Y|yes|YES)
-    LARK_BOT_OPEN_ID="$(read_with_default "LARK_BOT_OPEN_ID for group @mentions" "$LARK_BOT_OPEN_ID")"
-    [[ -n "$LARK_BOT_OPEN_ID" ]] || fail "LARK_BOT_OPEN_ID is required for group chat triggers."
-    ;;
-  *)
-    if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
-      log "Using LARK_BOT_OPEN_ID from the environment for group messages."
-    else
+if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
+  log "Using LARK_BOT_OPEN_ID for group @mentions."
+else
+  USE_GROUP="$(read_with_default "Will you test in a Lark group chat? (y/N)" "${OPENTAG_LARK_GROUP_CHAT:-N}")"
+  case "$USE_GROUP" in
+    y|Y|yes|YES)
+      LARK_BOT_OPEN_ID="$(read_with_default "LARK_BOT_OPEN_ID for group @mentions" "$LARK_BOT_OPEN_ID")"
+      [[ -n "$LARK_BOT_OPEN_ID" ]] || fail "LARK_BOT_OPEN_ID is required for group chat triggers."
+      ;;
+    *)
       log "Direct Lark messages can run without LARK_BOT_OPEN_ID. Group messages require it."
-    fi
-    ;;
-esac
+      ;;
+  esac
+fi
 
 PAIRING_TOKEN="${OPENTAG_PAIRING_TOKEN:-dev_pairing_token}"
 RUNNER_ID="${OPENTAG_RUNNER_ID:-runner_lark_local}"
@@ -357,9 +421,14 @@ log
 log "Try this in a direct chat with the bot:"
 log "  say hello from my local computer"
 log
-log "Try this in a group chat:"
-log "  @OpenTag say hello from my local computer"
-log
+if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
+  log "Try this in a group chat:"
+  log "  @OpenTag say hello from my local computer"
+  log
+else
+  log "Group chat needs LARK_BOT_OPEN_ID. Direct chat is ready now."
+  log
+fi
 log "This script auto-connects the first Lark chat that messages the bot to $DEFAULT_REPO."
 log "To point a chat at another repo later, send:"
 log "  @OpenTag /bind owner/repo"

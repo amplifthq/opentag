@@ -6,21 +6,20 @@ Use this guide when you want the shortest local loop:
 Lark message -> OpenTag dispatcher -> opentagd on this computer -> executor -> Lark reply
 ```
 
-This is the current MVP setup path. It still uses a Lark app that you create in
-Lark/Feishu, but it avoids manually starting the dispatcher, daemon, and Lark
-ingress in separate terminals.
+This is the current MVP setup path. It shows a Lark/Feishu Personal Agent QR
+code, stores the created app credentials locally, and avoids manually starting
+the dispatcher, daemon, and Lark ingress in separate terminals.
 
 ## What You Need
 
 - Node 22.x
 - Git
 - A Lark or Feishu account
-- A Lark/Feishu app with `LARK_APP_ID` and `LARK_APP_SECRET`
 - A local git checkout for the project the agent should run in
-- Optional: Codex CLI or Claude Code CLI for real local agent execution
+- Codex CLI for a real local agent run
 
-If Codex and Claude Code are not installed, the script can still use the `echo`
-executor to prove the Lark callback loop.
+The `echo` executor is still available for plumbing checks, but the real demo
+path should choose `codex`.
 
 ## Start
 
@@ -35,19 +34,30 @@ The script prompts for:
 - local project path
 - executor: `codex`, `claude-code`, or `echo`
 - Lark domain: `lark` or `feishu`
-- `LARK_APP_ID`
-- `LARK_APP_SECRET`
-- `LARK_BOT_OPEN_ID` when you want to test in a group chat
+- Lark app setup: `scan` or `manual`
+- a QR scan when using `scan`
+- `LARK_APP_ID` and `LARK_APP_SECRET` only when using `manual`
+- `LARK_BOT_OPEN_ID` only when group chat support cannot be detected automatically
 
 It then:
 
 1. Installs workspace dependencies if needed.
-2. Generates `.opentag/lark/opentag.local.json`.
-3. Starts the dispatcher.
-4. Registers the local runner.
-5. Binds the selected local checkout.
-6. Starts `opentagd`.
-7. Starts the Lark long-connection ingress.
+2. Creates a Lark/Feishu Personal Agent from the QR scan, unless manual app
+   credentials are provided.
+3. Generates `.opentag/lark/opentag.local.json`.
+4. Starts the dispatcher.
+5. Registers the local runner.
+6. Binds the selected local checkout.
+7. Starts `opentagd`.
+8. Starts the Lark long-connection ingress.
+
+## Project Target
+
+OpenTag runs are currently repository-scoped. The script asks for a local project
+path, then infers the GitHub `owner/repo` from that checkout's `origin` remote
+when it can. That repo name is not a Lark requirement; it is how the local runner
+knows which registered checkout should execute the task. If the repo cannot be
+inferred, the script asks for `owner/repo`.
 
 ## First Message
 
@@ -79,8 +89,10 @@ repository later, send:
 
 ## Current Limits
 
-- The script does not create a Lark app for you yet.
-- Group chat triggers require `LARK_BOT_OPEN_ID`.
+- The QR flow creates a Personal Agent app, but the user still finishes the app
+  creation page opened by Lark/Feishu after scanning.
+- Group chat triggers require the bot open id. The script tries to detect it
+  automatically; if detection fails, direct chat still works.
 - Code tasks still need a git checkout because the current runner model is
   repository-scoped.
 - The future package CLI should replace this repo-local script with

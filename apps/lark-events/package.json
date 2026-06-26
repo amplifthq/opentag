@@ -13,7 +13,8 @@
     "@larksuiteoapi/node-sdk": "^1.68.0",
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
-    "@opentag/lark": "workspace:*"
+    "@opentag/lark": "workspace:*",
+    "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
     "tsup": "^8.5.1",

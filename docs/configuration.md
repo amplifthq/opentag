@@ -279,6 +279,11 @@ Slack threads.
 `apps/lark-events` opens a Lark/Feishu WebSocket long connection (no public
 tunnel) and creates OpenTag runs from `im.message.receive_v1` events.
 
+For the shortest local setup, run `scripts/dev/start-lark.sh` and choose the QR
+scan path. It creates a Personal Agent app and exports these values for the
+local dispatcher and Lark ingress. Use the environment variables below for
+manual or hosted setups.
+
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `LARK_APP_ID` | yes | Lark app id used for the long connection |
