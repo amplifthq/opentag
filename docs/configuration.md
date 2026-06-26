@@ -141,7 +141,7 @@ Use daemon security settings to keep executor runs constrained:
 | `runnerId` | `runner_local` | Stable identity used by the dispatcher lease and binding tables |
 | `dispatcherUrl` | `http://localhost:3030` | Dispatcher base URL |
 | `pairingToken` | none | Shared Bearer token for dispatcher `/v1/*` calls |
-| `repositories` | `[]` | Legacy physical Project Target bindings this daemon is allowed to claim |
+| `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
@@ -157,7 +157,7 @@ Project Target binding fields:
 | Field | Default | Notes |
 | --- | --- | --- |
 | `provider` | `github` | Project Target provider. GitHub-backed targets use `github`; local-only targets use `local` |
-| `owner` | required | Repository owner for GitHub targets, or the stable local path identity for local-only targets |
+| `owner` | required | Repository owner for GitHub targets, or the stable canonical-path identity for local-only targets |
 | `repo` | required | Repository name or readable local Project Target name |
 | `checkoutPath` | required | Absolute local path attached to this Project Target |
 | `defaultExecutor` | `echo` | `echo`, `codex`, or `claude-code` |
@@ -173,22 +173,22 @@ for repeatable setups.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `OPENTAG_CONFIG_PATH` | none | Path to daemon JSON config. Takes precedence over repo env fallback |
+| `OPENTAG_CONFIG_PATH` | none | Path to daemon JSON config. Takes precedence over Project Target env fallback |
 | `OPENTAG_RUNNER_ID` | `runner_local` | Runner identity |
 | `OPENTAG_DISPATCHER_URL` | `http://localhost:3030` | Dispatcher URL |
-| `OPENTAG_REPO_OWNER` | none | Required for env-derived repository binding |
-| `OPENTAG_REPO_NAME` | none | Required for env-derived repository binding |
-| `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived repository binding |
+| `OPENTAG_REPO_OWNER` | none | Required for env-derived Project Target binding |
+| `OPENTAG_REPO_NAME` | none | Required for env-derived Project Target binding |
+| `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived Project Target binding |
 | `OPENTAG_DEFAULT_EXECUTOR` | `echo` | `echo`, `codex`, or `claude-code` |
 | `OPENTAG_BASE_BRANCH` | `main` | PR target branch |
 | `OPENTAG_PUSH_REMOTE` | `origin` | Git remote for run branches |
 | `OPENTAG_WORKTREE_ROOT` | none | Optional worktree root |
 | `OPENTAG_KEEP_WORKTREE` | `on_failure` | `always`, `on_failure`, or `never` |
-| `OPENTAG_SLACK_TEAM_ID` | none | Creates one env-derived Slack channel binding when paired with repo env |
-| `OPENTAG_SLACK_CHANNEL_ID` | none | Creates one env-derived Slack channel binding when paired with repo env |
-| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Repo provider used for the env-derived Slack channel binding |
-| `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with repo env |
-| `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with repo env |
+| `OPENTAG_SLACK_TEAM_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
+| `OPENTAG_SLACK_CHANNEL_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
+| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Project Target provider used for the env-derived Slack channel binding |
+| `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
+| `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_CLAUDE_COMMAND` | `claude` in executor default | Claude Code CLI command |
 | `OPENTAG_CLAUDE_MODEL` | none | Optional Claude model |
 | `OPENTAG_CLAUDE_PERMISSION_MODE` | none | `acceptEdits`, `auto`, `bypassPermissions`, `default`, or `plan` |
@@ -280,8 +280,8 @@ Slack threads.
 tunnel) and creates OpenTag runs from `im.message.receive_v1` events.
 
 For the shortest local setup, run `scripts/dev/start-lark.sh` and choose the QR
-scan path. It creates a Personal Agent app, connects the chat to a local project
-target, saves the Personal Agent credentials to `.opentag/lark/lark.local.json`,
+scan path. It creates a Personal Agent app, connects the chat to a Project
+Target, saves the Personal Agent credentials to `.opentag/lark/lark.local.json`,
 and exports these values for the local dispatcher and Lark ingress. Rerunning
 the script reuses that saved app unless `OPENTAG_LARK_APP_SETUP=scan` or
 `OPENTAG_LARK_APP_SETUP=manual` is set explicitly. Use the environment variables
@@ -302,12 +302,13 @@ Set `LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_DOMAIN` on the dispatcher too, so
 the Lark callback sink can post replies. Bind a chat to a Project Target with
 `opentagd bind-lark-channels` (using `larkChannels`) or `POST /v1/channel-bindings`.
 
-Each chat is bound independently (one `tenantKey/chatId` to one project target),
-so one bot can serve several chats that each target a different local project.
+Each chat is bound independently (one `tenantKey/chatId` to one Project Target),
+so one bot can serve several chats that each target a different local Project
+Target.
 Manual and hosted setups can still bind a chat from inside Lark with
 `/bind <owner>/<repo>` or `/bind <provider>:<owner>/<repo>`. Treat that as an
 advanced route; the local start script auto-connects the first chat to the
-selected local project. The target must already be registered on a runner
+selected Project Target. The target must already be registered on a runner
 (`opentagd bind-repos`).
 
 ## Telegram Ingress Environment

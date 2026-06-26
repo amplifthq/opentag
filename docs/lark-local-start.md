@@ -31,7 +31,7 @@ From the OpenTag repository:
 
 The script prompts for:
 
-- Project Target path, which is the local project this agent should work on
+- Project Target path, which is the local codebase this agent should work on
 - executor: `codex`, `claude-code`, or `echo`
 - Lark domain: `lark` or `feishu`, only when no saved app exists
 - Lark app setup: `scan` or `manual`, only when no saved app exists
@@ -66,10 +66,15 @@ new QR code. To create a new Personal Agent app intentionally, set
 
 ## Project Target
 
-The Lark MVP path is Project Target first. A Project Target is the local project
-this agent works on. The script asks for the local path for this Project Target
+The Lark MVP path is Project Target first. A Project Target is the local
+codebase this agent works on. The script asks for the local path for this Project Target
 and connects the first Lark chat to it. The first-run path does not require a
 GitHub repo.
+
+For local-only Project Targets, OpenTag derives the internal `local:path_...`
+identity from the canonical local path used during setup. That keeps symlinked
+and real paths pointed at the same checkout on the same computer aligned without
+asking users to understand the internal ref.
 
 ## First Message
 

@@ -91,37 +91,17 @@ absolute_path() {
   node -e 'const path = require("node:path"); console.log(path.resolve(process.argv[1]));' "$raw"
 }
 
-local_project_name() {
-  local checkout_path="$1"
-  node -e '
-const path = require("node:path");
-const rawName = path.basename(process.argv[1]).trim() || "project";
-const safeName = rawName.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-process.stdout.write(safeName);
-' "$checkout_path"
+canonical_path() {
+  node -e 'const fs = require("node:fs"); console.log(fs.realpathSync.native(process.argv[1]));' "$1"
 }
 
-local_project_owner() {
+local_project_ref() {
   local checkout_path="$1"
-  node -e '
-function normalizeLocalPath(value) {
-  const normalized = value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
-  return normalized || "/";
-}
-function stableHash(value) {
-  let first = 0xdeadbeef ^ value.length;
-  let second = 0x41c6ce57 ^ value.length;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    first = Math.imul(first ^ code, 2654435761);
-    second = Math.imul(second ^ code, 1597334677);
-  }
-  first = Math.imul(first ^ (first >>> 16), 2246822507) ^ Math.imul(second ^ (second >>> 13), 3266489909);
-  second = Math.imul(second ^ (second >>> 16), 2246822507) ^ Math.imul(first ^ (first >>> 13), 3266489909);
-  process.stdout.write(`path_${`${(second >>> 0).toString(36)}${(first >>> 0).toString(36)}`.slice(0, 12)}`);
-}
-stableHash(normalizeLocalPath(process.argv[1]));
-' "$checkout_path"
+  (
+    cd "$ROOT_DIR/apps/lark-events"
+    NODE_OPTIONS='--conditions=development' node_modules/.bin/tsx \
+      ../../scripts/dev/print-local-project-target-ref.ts "$checkout_path"
+  )
 }
 
 port_is_in_use() {
@@ -381,6 +361,7 @@ CHECKOUT_PATH="$(absolute_path "$CHECKOUT_INPUT")"
 
 [[ -d "$CHECKOUT_PATH" ]] || fail "Project Target path does not exist: $CHECKOUT_PATH"
 git -C "$CHECKOUT_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Project Target path must be a git checkout: $CHECKOUT_PATH"
+CHECKOUT_PATH="$(canonical_path "$CHECKOUT_PATH")"
 
 if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
   REPO_PROVIDER="${OPENTAG_REPO_PROVIDER:-github}"
@@ -388,9 +369,11 @@ if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
   REPO_NAME="$OPENTAG_REPO_NAME"
   log "Advanced repository target enabled for PR-capable workflows."
 else
-  REPO_PROVIDER="local"
-  REPO_OWNER="$(local_project_owner "$CHECKOUT_PATH")"
-  REPO_NAME="$(local_project_name "$CHECKOUT_PATH")"
+  PROJECT_TARGET_REF="$(local_project_ref "$CHECKOUT_PATH")"
+  REPO_PROVIDER="${PROJECT_TARGET_REF%%:*}"
+  PROJECT_TARGET_PATH="${PROJECT_TARGET_REF#*:}"
+  REPO_OWNER="${PROJECT_TARGET_PATH%%/*}"
+  REPO_NAME="${PROJECT_TARGET_PATH#*/}"
 fi
 
 BASE_BRANCH="${OPENTAG_BASE_BRANCH:-$(git -C "$CHECKOUT_PATH" branch --show-current 2>/dev/null || true)}"
@@ -585,7 +568,7 @@ else
   log "Group chat needs LARK_BOT_OPEN_ID. Direct chat is ready now."
   log
 fi
-log "This script auto-connects the first Lark chat that messages the bot to this local project."
+log "This script auto-connects the first Lark chat that messages the bot to this Project Target."
 log
 log "Expected AHA moment:"
 log "1. This terminal shows the local daemon running the executor."

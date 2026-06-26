@@ -62,6 +62,31 @@ const BIND_USAGE =
 const UNBOUND_HINT =
   "This chat isn't connected to a Project Target yet. @-mention me with `/bind <owner>/<repo>` to connect it — e.g. /bind amplifthq/opentag.";
 
+type DefaultRepoBinding = NonNullable<LarkMessageHandlerConfig["defaultRepoBinding"]>;
+
+function bindingFromDefault(input: { tenantKey: string; chatId: string; binding: DefaultRepoBinding }): LarkChannelBinding {
+  return {
+    tenantKey: input.tenantKey,
+    chatId: input.chatId,
+    repoProvider: input.binding.repoProvider,
+    owner: input.binding.owner,
+    repo: input.binding.repo
+  };
+}
+
+function shouldMigrateLegacyLocalBinding(input: {
+  existing: LarkChannelBinding;
+  defaultBinding: DefaultRepoBinding;
+}): boolean {
+  return (
+    input.defaultBinding.repoProvider === "local" &&
+    input.defaultBinding.owner.startsWith("path_") &&
+    input.existing.repoProvider === "local" &&
+    input.existing.owner === "local" &&
+    input.existing.repo === input.defaultBinding.repo
+  );
+}
+
 function extractText(content: string | undefined): string {
   if (!content) return "";
   try {
@@ -147,6 +172,18 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
     }
 
     let binding = await config.resolveChannelBinding({ tenantKey, chatId });
+    if (binding && config.defaultRepoBinding && config.bindChannel) {
+      if (shouldMigrateLegacyLocalBinding({ existing: binding, defaultBinding: config.defaultRepoBinding })) {
+        await config.bindChannel({
+          tenantKey,
+          chatId,
+          repoProvider: config.defaultRepoBinding.repoProvider,
+          owner: config.defaultRepoBinding.owner,
+          repo: config.defaultRepoBinding.repo
+        });
+        binding = bindingFromDefault({ tenantKey, chatId, binding: config.defaultRepoBinding });
+      }
+    }
     if (!binding) {
       if (config.defaultRepoBinding && config.bindChannel) {
         await config.bindChannel({
@@ -156,13 +193,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
           owner: config.defaultRepoBinding.owner,
           repo: config.defaultRepoBinding.repo
         });
-        binding = {
-          tenantKey,
-          chatId,
-          repoProvider: config.defaultRepoBinding.repoProvider,
-          owner: config.defaultRepoBinding.owner,
-          repo: config.defaultRepoBinding.repo
-        };
+        binding = bindingFromDefault({ tenantKey, chatId, binding: config.defaultRepoBinding });
       } else {
         await config.reply?.({ messageId, text: UNBOUND_HINT });
         return { status: "ignored_unbound_chat", tenantKey, chatId };

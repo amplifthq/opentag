@@ -157,6 +157,32 @@ describe("createLarkMessageHandler", () => {
     expect(event?.metadata).toMatchObject({ repoProvider: "github", owner: "amplifthq", repo: "opentag" });
   });
 
+  it("migrates an existing legacy local binding to the default local Project Target before creating a run", async () => {
+    const { handler, bindChannel, createRun } = makeHandler({
+      binding: {
+        tenantKey: "tk_123",
+        chatId: "oc_chat",
+        repoProvider: "local",
+        owner: "local",
+        repo: "opentag"
+      },
+      defaultRepoBinding: { repoProvider: "local", owner: "path_abc123", repo: "opentag" }
+    });
+
+    const outcome = await handler(messageEvent({ text: "@_user_1 investigate this setup" }));
+
+    expect(outcome.status).toBe("created");
+    expect(bindChannel).toHaveBeenCalledWith({
+      tenantKey: "tk_123",
+      chatId: "oc_chat",
+      repoProvider: "local",
+      owner: "path_abc123",
+      repo: "opentag"
+    });
+    const event = createRun.mock.calls[0]?.[0];
+    expect(event?.metadata).toMatchObject({ repoProvider: "local", owner: "path_abc123", repo: "opentag" });
+  });
+
   it("does not auto-bind an empty @mention", async () => {
     const { handler, bindChannel, reply, createRun } = makeHandler({
       binding: null,

@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   formatProjectTargetRef,
@@ -50,5 +54,27 @@ describe("ProjectTargetRef", () => {
     expect(projectTargetRefFromLocalPath("/Users/alice/work/app")).toEqual(
       projectTargetRefFromLocalPath("/Users/alice/work/app/")
     );
+  });
+
+  it("keeps the local Project Target script helper consistent with the core helper", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "opentag-project-target-"));
+    const symlinkPath = `${workspace}-link`;
+    try {
+      symlinkSync(workspace, symlinkPath);
+      const appDir = join(process.cwd(), "apps/lark-events");
+      const script = "../../scripts/dev/print-local-project-target-ref.ts";
+      const tsx = join(appDir, "node_modules/.bin/tsx");
+      const env = { ...process.env, NODE_OPTIONS: "--conditions=development" };
+
+      const fromRealPath = execFileSync(tsx, [script, workspace], { cwd: appDir, env, encoding: "utf8" });
+      const fromSymlinkPath = execFileSync(tsx, [script, symlinkPath], { cwd: appDir, env, encoding: "utf8" });
+      const fromCore = formatProjectTargetRef(projectTargetRefFromLocalPath(realpathSync.native(workspace)));
+
+      expect(fromRealPath).toBe(fromCore);
+      expect(fromSymlinkPath).toBe(fromCore);
+    } finally {
+      rmSync(symlinkPath, { force: true });
+      rmSync(workspace, { force: true, recursive: true });
+    }
   });
 });
