@@ -142,7 +142,8 @@ Callback sinks should:
 ## Binding Model
 
 Do not create a second execution model for chat surfaces. Chat adapters should
-resolve to the same repository and runner bindings used by GitHub-shaped runs.
+resolve to the same Project Target and runner bindings used by GitHub-shaped
+runs.
 
 Current Slack behavior is the model:
 
@@ -155,18 +156,18 @@ Current Slack behavior is the model:
 }
 ```
 
-That binding lets a Slack thread create a run against `acme/demo`, then the
-daemon claims it only if its repository binding allows that repo.
+That binding lets a Slack thread create a run against the `acme/demo` Project
+Target, then the daemon claims it only if its Project Target binding allows it.
 
 For a new app, define the smallest binding that maps the app container to the
 work context owner. Examples:
 
 | App surface | Likely binding |
 | --- | --- |
-| Lark chat | `chatId -> owner/repo` |
-| Linear project | `teamId/projectId -> owner/repo` |
-| Jira project | `siteId/projectKey -> owner/repo` |
-| Microsoft Teams channel | `tenantId/teamId/channelId -> owner/repo` |
+| Lark chat | `chatId -> Project Target ref` |
+| Linear project | `teamId/projectId -> Project Target ref` |
+| Jira project | `siteId/projectKey -> Project Target ref` |
+| Microsoft Teams channel | `tenantId/teamId/channelId -> Project Target ref` |
 
 ## Package Layout
 

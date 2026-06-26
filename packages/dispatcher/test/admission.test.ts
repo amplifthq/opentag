@@ -1,3 +1,4 @@
+import { projectTargetRefFromLocalPath } from "@opentag/core";
 import { describe, expect, it, vi } from "vitest";
 import { createAdmissionRuntime } from "../src/admission.js";
 
@@ -104,5 +105,41 @@ describe("Admission Runtime", () => {
       decision: { action: "queue_follow_up" }
     });
     expect(appendRunEvent).not.toHaveBeenCalled();
+  });
+
+  it("admits local Project Target events through the shared project target ref", async () => {
+    const localProject = projectTargetRefFromLocalPath("/Users/test/work/app");
+    const getRepoBinding = vi.fn(async () => ({
+      ...localProject,
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/work/app"
+    }));
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding,
+        findActiveRunForConversation: async () => null,
+        createFollowUpRequest: async () => {
+          throw new Error("should not queue follow-up");
+        },
+        appendRunEvent: async () => undefined
+      } as never
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_local",
+      event: {
+        ...event,
+        id: "evt_local",
+        source: "lark",
+        sourceEventId: "message_local",
+        actor: { provider: "lark", providerUserId: "ou_user" },
+        callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tk|oc|om" },
+        metadata: { repoProvider: localProject.provider, owner: localProject.owner, repo: localProject.repo }
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "start", binding: { runnerId: "runner_1" } });
+    expect(getRepoBinding).toHaveBeenCalledWith(localProject);
   });
 });

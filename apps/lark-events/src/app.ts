@@ -1,4 +1,4 @@
-import type { OpenTagEvent } from "@opentag/core";
+import { parseProjectTargetRef, type OpenTagEvent } from "@opentag/core";
 import { type LarkChannelBinding, normalizeLarkMessage, stripLarkMention } from "@opentag/lark";
 
 export type LarkMention = { key?: string; id?: { open_id?: string }; name?: string };
@@ -57,9 +57,10 @@ export type LarkMessageHandlerOutcome = {
   chatId?: string;
 };
 
-const BIND_USAGE = "Usage: /bind <owner>/<repo> — e.g. /bind amplifthq/opentag (or /bind github:amplifthq/opentag).";
+const BIND_USAGE =
+  "Usage: /bind <owner>/<repo> — e.g. /bind amplifthq/opentag (or /bind github:amplifthq/opentag).";
 const UNBOUND_HINT =
-  "👋 This chat isn't connected to a repo yet. @-mention me with `/bind <owner>/<repo>` to connect it — e.g. /bind amplifthq/opentag.";
+  "This chat isn't connected to a Project Target yet. @-mention me with `/bind <owner>/<repo>` to connect it — e.g. /bind amplifthq/opentag.";
 
 function extractText(content: string | undefined): string {
   if (!content) return "";
@@ -80,9 +81,14 @@ function parseBindCommand(
   command: string
 ): { ok: true; repoProvider: string; owner: string; repo: string } | { ok: false } | null {
   if (!/^\/bind(\s|$)/.test(command)) return null;
-  const match = command.match(/^\/bind\s+(?:([\w-]+):)?([\w.-]+)\/([\w.-]+)\s*$/);
+  const match = command.match(/^\/bind\s+(\S+)\s*$/);
   if (!match) return { ok: false };
-  return { ok: true, repoProvider: match[1] ?? "github", owner: match[2] as string, repo: match[3] as string };
+  try {
+    const ref = parseProjectTargetRef(match[1] as string);
+    return { ok: true, repoProvider: ref.provider, owner: ref.owner, repo: ref.repo };
+  } catch {
+    return { ok: false };
+  }
 }
 
 // Handle one inbound Lark message: group messages must @-mention the bot, then handle /bind, resolve binding, normalize, create a run.
@@ -115,7 +121,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
 
     const command = stripLarkMention(extractText(message.content));
 
-    // Self-service binding: connect this chat to a repo without leaving Lark.
+    // Self-service binding: connect this chat to a Project Target without leaving Lark.
     const bindRequest = parseBindCommand(command);
     if (bindRequest && config.bindChannel) {
       if (!bindRequest.ok) {
@@ -131,7 +137,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       });
       await config.reply?.({
         messageId,
-        text: `✅ Connected this chat to ${bindRequest.repoProvider}:${bindRequest.owner}/${bindRequest.repo}. @-mention me with a task to start a run.`
+        text: `Connected this chat to Project Target ${bindRequest.repoProvider}:${bindRequest.owner}/${bindRequest.repo}. @-mention me with a task to start a run.`
       });
       return { status: "bound", tenantKey, chatId };
     }

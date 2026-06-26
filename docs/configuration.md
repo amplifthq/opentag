@@ -14,20 +14,20 @@ OpenTag has five runtime surfaces today:
 | Surface | Process | Owns |
 | --- | --- | --- |
 | Dispatcher | `apps/dispatcher` | Run storage, leases, callbacks, pairing token checks |
-| Local daemon | `apps/opentagd` | Runner identity, repository bindings, workspace paths, executor settings |
+| Local daemon | `apps/opentagd` | Runner identity, Project Target bindings, local checkout paths, executor settings |
 | GitHub ingress | `apps/github-probot` | GitHub App webhooks and GitHub event normalization |
 | Slack ingress | `apps/slack-events` | Slack Events API verification and Slack event normalization |
 | Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
 events and create runs. The dispatcher should coordinate runs and callbacks. The
-daemon should decide whether it can claim and execute work for a bound checkout.
+daemon should decide whether it can claim and execute work for a bound Project Target.
 
 ## Local Daemon Config
 
 `opentagd` prefers a JSON config file. Point to it with `OPENTAG_CONFIG_PATH`.
 When `OPENTAG_CONFIG_PATH` is set, the daemon reads that file and does not build
-repository bindings from the environment fallback variables.
+Project Target bindings from the environment fallback variables.
 
 Minimal local config:
 
@@ -53,7 +53,7 @@ Minimal local config:
 }
 ```
 
-Add Slack channel bindings when a chat surface should route work to a repository:
+Add Slack channel bindings when a chat surface should route work to a Project Target:
 
 ```json
 {
@@ -70,7 +70,7 @@ Add Slack channel bindings when a chat surface should route work to a repository
 ```
 
 Add generic channel bindings when a non-Slack chat surface should route work to
-a repository:
+a Project Target:
 
 ```json
 {
@@ -141,8 +141,8 @@ Use daemon security settings to keep executor runs constrained:
 | `runnerId` | `runner_local` | Stable identity used by the dispatcher lease and binding tables |
 | `dispatcherUrl` | `http://localhost:3030` | Dispatcher base URL |
 | `pairingToken` | none | Shared Bearer token for dispatcher `/v1/*` calls |
-| `repositories` | `[]` | Repository bindings this daemon is allowed to claim |
-| `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> repo` |
+| `repositories` | `[]` | Legacy physical Project Target bindings this daemon is allowed to claim |
+| `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
@@ -152,14 +152,14 @@ Use daemon security settings to keep executor runs constrained:
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 
-Repository binding fields:
+Project Target binding fields:
 
 | Field | Default | Notes |
 | --- | --- | --- |
-| `provider` | `github` | Repo provider for the binding |
-| `owner` | required | Repository owner or organization |
-| `repo` | required | Repository name |
-| `checkoutPath` | required | Absolute path to the local checkout |
+| `provider` | `github` | Project Target provider. GitHub-backed targets use `github`; local-only targets use `local` |
+| `owner` | required | Repository owner for GitHub targets, or the stable local path identity for local-only targets |
+| `repo` | required | Repository name or readable local Project Target name |
+| `checkoutPath` | required | Absolute local path attached to this Project Target |
 | `defaultExecutor` | `echo` | `echo`, `codex`, or `claude-code` |
 | `baseBranch` | `main` | PR target branch |
 | `pushRemote` | `origin` | Remote used for PR branches |
@@ -296,10 +296,10 @@ below for manual or hosted setups.
 | `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |
 | `LARK_BOT_OPEN_ID` | for group chats | Bot open id; group messages must @-mention it. Direct p2p chats do not need it |
 | `OPENTAG_LARK_AGENT_ID` | no | Agent id for the ingress. Defaults to `opentag` |
-| `OPENTAG_LARK_DEFAULT_REPO` | no | Optional internal project target formatted as `owner/repo` or `provider:owner/repo`; unbound chats auto-connect to it before creating the first run |
+| `OPENTAG_LARK_DEFAULT_REPO` | no | Optional Project Target ref formatted as `owner/repo` or `provider:owner/repo`; unbound chats auto-connect to it before creating the first run |
 
 Set `LARK_APP_ID` / `LARK_APP_SECRET` / `LARK_DOMAIN` on the dispatcher too, so
-the Lark callback sink can post replies. Bind a chat to a repo with
+the Lark callback sink can post replies. Bind a chat to a Project Target with
 `opentagd bind-lark-channels` (using `larkChannels`) or `POST /v1/channel-bindings`.
 
 Each chat is bound independently (one `tenantKey/chatId` to one project target),

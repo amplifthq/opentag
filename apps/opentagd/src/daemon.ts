@@ -1,4 +1,4 @@
-import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
+import { projectTargetRefFromEvent, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult } from "@opentag/core";
 import {
   assessRunnerSecurity,
   formatSecurityAssessment,
@@ -23,15 +23,15 @@ export type DaemonClient = {
 };
 
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
-  const owner = event.metadata["owner"];
-  const repo = event.metadata["repo"];
-  const repoProvider =
-    typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github";
-  if (typeof owner !== "string" || typeof repo !== "string") return null;
+  const projectTargetRef = projectTargetRefFromEvent(event);
+  if (!projectTargetRef) return null;
 
   return (
     repositories.find(
-      (candidate) => candidate.provider === repoProvider && candidate.owner === owner && candidate.repo === repo
+      (candidate) =>
+        candidate.provider === projectTargetRef.provider &&
+        candidate.owner === projectTargetRef.owner &&
+        candidate.repo === projectTargetRef.repo
     ) ?? null
   );
 }

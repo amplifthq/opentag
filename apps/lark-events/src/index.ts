@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { createOpenTagClient } from "@opentag/client";
+import { parseProjectTargetRef } from "@opentag/core";
 import { createLarkReplyClient, replyLarkMessage } from "@opentag/lark";
 import { createLarkMessageHandler, type LarkInboundMessageEvent, type LarkMessageHandlerOutcome } from "./app.js";
 
@@ -24,15 +25,16 @@ const replyClient = createLarkReplyClient({ appId, appSecret, domain: larkDomain
 
 function defaultRepoBindingFromEnv(value: string | undefined) {
   if (!value) return undefined;
-  const match = value.match(/^(?:([\w-]+):)?([\w.-]+)\/([\w.-]+)$/);
-  if (!match) {
+  try {
+    const ref = parseProjectTargetRef(value);
+    return {
+      repoProvider: ref.provider,
+      owner: ref.owner,
+      repo: ref.repo
+    };
+  } catch {
     throw new Error("OPENTAG_LARK_DEFAULT_REPO must be formatted as owner/repo or provider:owner/repo");
   }
-  return {
-    repoProvider: match[1] ?? "github",
-    owner: match[2] as string,
-    repo: match[3] as string
-  };
 }
 
 const defaultRepoBinding = defaultRepoBindingFromEnv(process.env.OPENTAG_LARK_DEFAULT_REPO);
@@ -86,7 +88,7 @@ function logIgnored(outcome: LarkMessageHandlerOutcome): void {
   if (outcome.status === "created" || outcome.status === "bound") return;
   if (outcome.status === "ignored_unbound_chat") {
     console.log(
-      `[lark] ignored unbound chat — bind it: provider=lark accountId(tenant_key)=${outcome.tenantKey} conversationId(chat_id)=${outcome.chatId} (reply '/bind owner/repo' in the chat, or POST /v1/channel-bindings)`
+      `[lark] ignored unbound chat — bind it: provider=lark accountId(tenant_key)=${outcome.tenantKey} conversationId(chat_id)=${outcome.chatId} (reply '/bind owner/repo' with a Project Target ref, or POST /v1/channel-bindings)`
     );
     return;
   }

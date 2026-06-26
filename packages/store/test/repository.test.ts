@@ -1,3 +1,4 @@
+import { projectTargetRefFromLocalPath } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
@@ -91,6 +92,76 @@ describe("OpenTag repository", () => {
       workspacePath: "/Users/test/demo",
       defaultExecutor: "echo",
       allowedActors: ["octocat"]
+    });
+  });
+
+  it("keeps same-name local Project Targets distinct by local path identity", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const firstProject = projectTargetRefFromLocalPath("/Users/test/work/app");
+    const secondProject = projectTargetRefFromLocalPath("/Users/test/archive/app");
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.registerRunner({ runnerId: "runner_2", name: "Runner Two" });
+    await repo.createRepoBinding({
+      ...firstProject,
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/work/app",
+      defaultExecutor: "echo"
+    });
+    await repo.createRepoBinding({
+      ...secondProject,
+      runnerId: "runner_2",
+      workspacePath: "/Users/test/archive/app",
+      defaultExecutor: "echo"
+    });
+
+    await repo.createRun({
+      id: "run_first_local",
+      event: {
+        id: "evt_first_local",
+        source: "lark",
+        sourceEventId: "message_first_local",
+        receivedAt: "2026-06-26T00:00:00.000Z",
+        actor: { provider: "lark", providerUserId: "ou_user" },
+        target: { mention: "@app", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: [],
+        permissions: [{ scope: "runner:local", reason: "execute locally" }],
+        callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tk|oc|om_1" },
+        metadata: { repoProvider: firstProject.provider, owner: firstProject.owner, repo: firstProject.repo }
+      }
+    });
+    await repo.createRun({
+      id: "run_second_local",
+      event: {
+        id: "evt_second_local",
+        source: "lark",
+        sourceEventId: "message_second_local",
+        receivedAt: "2026-06-26T00:00:00.000Z",
+        actor: { provider: "lark", providerUserId: "ou_user" },
+        target: { mention: "@app", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: [],
+        permissions: [{ scope: "runner:local", reason: "execute locally" }],
+        callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tk|oc|om_2" },
+        metadata: { repoProvider: secondProject.provider, owner: secondProject.owner, repo: secondProject.repo }
+      }
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_first_local" }
+    });
+    await expect(repo.claimNextRun({ runnerId: "runner_2", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_second_local" }
+    });
+    await expect(repo.getRepoBinding(firstProject)).resolves.toMatchObject({
+      workspacePath: "/Users/test/work/app"
+    });
+    await expect(repo.getRepoBinding(secondProject)).resolves.toMatchObject({
+      workspacePath: "/Users/test/archive/app"
     });
   });
 

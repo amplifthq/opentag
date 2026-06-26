@@ -101,6 +101,29 @@ process.stdout.write(safeName);
 ' "$checkout_path"
 }
 
+local_project_owner() {
+  local checkout_path="$1"
+  node -e '
+function normalizeLocalPath(value) {
+  const normalized = value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalized || "/";
+}
+function stableHash(value) {
+  let first = 0xdeadbeef ^ value.length;
+  let second = 0x41c6ce57 ^ value.length;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 2654435761);
+    second = Math.imul(second ^ code, 1597334677);
+  }
+  first = Math.imul(first ^ (first >>> 16), 2246822507) ^ Math.imul(second ^ (second >>> 13), 3266489909);
+  second = Math.imul(second ^ (second >>> 16), 2246822507) ^ Math.imul(first ^ (first >>> 13), 3266489909);
+  process.stdout.write(`path_${`${(second >>> 0).toString(36)}${(first >>> 0).toString(36)}`.slice(0, 12)}`);
+}
+stableHash(normalizeLocalPath(process.argv[1]));
+' "$checkout_path"
+}
+
 port_is_in_use() {
   local port="$1"
   if command -v lsof >/dev/null 2>&1; then
@@ -353,11 +376,11 @@ if ! workspace_dependencies_installed; then
 fi
 
 DEFAULT_CHECKOUT="$(git -C "$ROOT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$ROOT_DIR")"
-CHECKOUT_INPUT="${OPENTAG_WORKSPACE_PATH:-$(read_with_default "Local project path for this agent" "$DEFAULT_CHECKOUT")}"
+CHECKOUT_INPUT="${OPENTAG_WORKSPACE_PATH:-$(read_with_default "Local path for this Project Target" "$DEFAULT_CHECKOUT")}"
 CHECKOUT_PATH="$(absolute_path "$CHECKOUT_INPUT")"
 
-[[ -d "$CHECKOUT_PATH" ]] || fail "Project path does not exist: $CHECKOUT_PATH"
-git -C "$CHECKOUT_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Project path must be a git checkout: $CHECKOUT_PATH"
+[[ -d "$CHECKOUT_PATH" ]] || fail "Project Target path does not exist: $CHECKOUT_PATH"
+git -C "$CHECKOUT_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Project Target path must be a git checkout: $CHECKOUT_PATH"
 
 if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
   REPO_PROVIDER="${OPENTAG_REPO_PROVIDER:-github}"
@@ -366,7 +389,7 @@ if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
   log "Advanced repository target enabled for PR-capable workflows."
 else
   REPO_PROVIDER="local"
-  REPO_OWNER="local"
+  REPO_OWNER="$(local_project_owner "$CHECKOUT_PATH")"
   REPO_NAME="$(local_project_name "$CHECKOUT_PATH")"
 fi
 
@@ -492,8 +515,8 @@ write_config
 
 log
 log "Starting OpenTag for Lark"
-log "- Project: $REPO_NAME"
-log "- Path: $CHECKOUT_PATH"
+log "- Project Target: $REPO_NAME"
+log "- Project Target path: $CHECKOUT_PATH"
 log "- Executor: $EXECUTOR"
 log "- Dispatcher: $DISPATCHER_URL"
 log "- Config: $CONFIG_PATH"

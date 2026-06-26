@@ -1,5 +1,6 @@
 import {
   conversationKeyFromEvent,
+  projectTargetRefFromEvent,
   RunAdmissionDecisionSchema,
   type OpenTagEvent,
   type OpenTagRun,
@@ -51,17 +52,6 @@ export type AdmitRunResult =
       outcome: "needs_human_decision";
       decision: RunAdmissionDecision;
     };
-
-function repoKeyFromEvent(event: OpenTagEvent): { provider: string; owner: string; repo: string } | null {
-  const owner = event.metadata["owner"];
-  const repo = event.metadata["repo"];
-  if (typeof owner !== "string" || typeof repo !== "string") return null;
-  return {
-    provider: typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github",
-    owner,
-    repo
-  };
-}
 
 function isWriteCapable(event: OpenTagEvent): boolean {
   return event.permissions.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope));
@@ -117,7 +107,7 @@ export function createAdmissionRuntime(input: {
         };
       }
 
-      const repoKey = repoKeyFromEvent(request.event);
+      const repoKey = projectTargetRefFromEvent(request.event);
       if (!repoKey) {
         return {
           outcome: "needs_human_decision",

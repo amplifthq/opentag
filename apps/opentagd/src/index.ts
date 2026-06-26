@@ -119,7 +119,7 @@ program
 
 program
   .command("bind-repos")
-  .description("Sync configured repository bindings to the dispatcher")
+  .description("Sync configured Project Target bindings to the dispatcher")
   .action(async () => {
     const config = loadConfigOrExit();
     const client = createDispatcherAdminClient({
@@ -139,10 +139,10 @@ program
         ...(repository.worktreeRoot ? { worktreeRoot: repository.worktreeRoot } : {}),
         ...(repository.keepWorktree ? { keepWorktree: repository.keepWorktree } : {})
       });
-      console.log(`Bound ${repository.provider}:${repository.owner}/${repository.repo} to ${repository.checkoutPath}`);
+      console.log(`Bound Project Target ${repository.provider}:${repository.owner}/${repository.repo} to ${repository.checkoutPath}`);
     }
     if (config.repositories.length === 0) {
-      console.log("No repositories configured. Set OPENTAG_CONFIG_PATH or OPENTAG_REPO_OWNER/OPENTAG_REPO_NAME/OPENTAG_WORKSPACE_PATH.");
+      console.log("No Project Targets configured. Set OPENTAG_CONFIG_PATH or OPENTAG_REPO_OWNER/OPENTAG_REPO_NAME/OPENTAG_WORKSPACE_PATH.");
     }
   });
 

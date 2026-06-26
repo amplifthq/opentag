@@ -31,7 +31,7 @@ From the OpenTag repository:
 
 The script prompts for:
 
-- local project path
+- Project Target path, which is the local project this agent should work on
 - executor: `codex`, `claude-code`, or `echo`
 - Lark domain: `lark` or `feishu`, only when no saved app exists
 - Lark app setup: `scan` or `manual`, only when no saved app exists
@@ -66,10 +66,10 @@ new QR code. To create a new Personal Agent app intentionally, set
 
 ## Project Target
 
-The Lark MVP path is local-project first. The script asks for the folder where
-the agent should run and connects the first Lark chat to that local project.
-OpenTag still creates an internal project target so the dispatcher and local
-daemon can route the run, but the first-run path does not require a GitHub repo.
+The Lark MVP path is Project Target first. A Project Target is the local project
+this agent works on. The script asks for the local path for this Project Target
+and connects the first Lark chat to it. The first-run path does not require a
+GitHub repo.
 
 ## First Message
 
@@ -86,14 +86,14 @@ In a group chat, send:
 ```
 
 The first chat that messages the bot is automatically connected to the selected
-project path. This keeps the first-run path short.
+Project Target. This keeps the first-run path short.
 
 ## Advanced GitHub Target
 
 GitHub repository settings are optional for the Lark local loop. Use them later
 when you want GitHub-specific behavior such as repository policy, branch push, or
 pull request creation. Set `OPENTAG_REPO_OWNER` and `OPENTAG_REPO_NAME` before
-starting the script to use a GitHub-style project target.
+starting the script to attach a GitHub repository identity to the Project Target.
 
 ## Expected Result
 

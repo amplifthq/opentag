@@ -43,7 +43,7 @@ export const dispatcher = createDispatcherApp({
 
 ## API Shape
 
-The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, repository bindings, generic channel bindings, Slack compatibility bindings, runs, progress, heartbeats, completion, and audit event lookup.
+The app exposes `/healthz` and `/v1/*` dispatcher endpoints for runners, Project Target bindings, generic channel bindings, Slack compatibility bindings, runs, progress, heartbeats, completion, and audit event lookup.
 
 When `pairingToken` is set, every `/v1/*` endpoint requires:
 

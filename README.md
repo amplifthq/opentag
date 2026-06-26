@@ -57,7 +57,7 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 - **Control where execution happens** - keep coding work local with `opentagd`, or use hosted/custom runners that implement the same claim and callback contracts.
 - **Use any approved executor** - built-in adapters cover `echo`, `claude-code`, and `codex`; custom runners can implement the same contract.
 - **Return outcomes, not noise** - human threads get useful acknowledgements and final results while detailed progress stays in audit events and metrics.
-- **Govern external writes** - repository bindings, permission scopes, context packets, and audit trails make agent authority explicit.
+- **Govern external writes** - Project Target bindings, permission scopes, context packets, and audit trails make agent authority explicit.
 
 ## How It Works
 
@@ -78,7 +78,7 @@ flowchart LR
 
 ## Why Teams Can Trust the Loop
 
-- **Bounded claims** - runners claim only repositories or channels explicitly bound to them.
+- **Bounded claims** - runners claim only Project Targets or channels explicitly bound to them.
 - **Local-first execution** - repo access, build tools, credentials, and private context can stay in the user's own checkout.
 - **Branch isolation** - coding executors work on an `opentag/<runId>` branch or worktree instead of writing directly to the target branch.
 - **Dirty-worktree protection** - Codex and Claude Code executors refuse to run against unsafe local checkout state.
@@ -91,8 +91,8 @@ flowchart LR
 | Area | Status | Notes |
 | --- | --- | --- |
 | GitHub | Works today | Issue comments, PR review comments, callbacks, and pull request creation from local daemon runs when configured |
-| Slack | Works today | App mentions, channel-to-repo bindings, thread callbacks, and audit-only routine progress |
-| Local daemon | Works today | Polling, heartbeats, lease-based claiming, repository bindings, and dirty-worktree protection |
+| Slack | Works today | App mentions, channel-to-Project Target bindings, thread callbacks, and audit-only routine progress |
+| Local daemon | Works today | Polling, heartbeats, lease-based claiming, Project Target bindings, and dirty-worktree protection |
 | Executors | Works today | `echo`, Claude Code (`claude --print`), Codex (`codex exec`), and custom executor contracts |
 | Protocol runtime | Works today | Work Threads, Context Packets, Audit Trails, run admission, quiet callbacks, and metrics |
 | Telegram and Lark | Experimental adapters | Normalizers, ingress apps, and callback helpers are present; treat them as adapter-expansion surfaces rather than the main v0 golden path |

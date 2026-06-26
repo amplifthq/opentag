@@ -12,6 +12,7 @@ import {
   PolicyRuleSchema,
   ProposalLineageSchema,
   preflightMutationIntent,
+  projectTargetRefFromEvent,
   protocolRunFieldsFromEvent,
   RunAdmissionDecisionSchema,
   RunEventImportanceSchema,
@@ -295,17 +296,6 @@ function channelBindingFromRow(row: typeof channelBindings.$inferSelect): Channe
     owner: row.owner,
     repo: row.repo,
     ...(metadata ? { metadata } : {})
-  };
-}
-
-function repoKeyFromEvent(event: OpenTagEvent): { provider: string; owner: string; repo: string } | null {
-  const owner = event.metadata["owner"];
-  const repo = event.metadata["repo"];
-  if (typeof owner !== "string" || typeof repo !== "string") return null;
-  return {
-    provider: typeof event.metadata["repoProvider"] === "string" ? (event.metadata["repoProvider"] as string) : "github",
-    owner,
-    repo
   };
 }
 
@@ -804,7 +794,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const triggeredByAction = input.triggeredByAction ? ActionHintSchema.parse(input.triggeredByAction) : undefined;
       const createdAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
-      const repoKey = repoKeyFromEvent(event);
+      const repoKey = projectTargetRefFromEvent(event);
       const insertResult = await db
         .insert(runs)
         .values({
@@ -962,7 +952,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
       const row = queuedRows.find((candidate) => {
         const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
-        const repoKey = repoKeyFromEvent(event);
+        const repoKey = projectTargetRefFromEvent(event);
         if (!repoKey) return false;
         const binding = db
           .select()
@@ -1359,7 +1349,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const runRow = await db.select().from(runs).where(eq(runs.id, storedProposal.runId)).limit(1).get();
       if (!runRow) return null;
       const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
-      const repoKey = repoKeyFromEvent(event);
+      const repoKey = projectTargetRefFromEvent(event);
       const storedPolicyRuleRows = repoKey
         ? await db
             .select()
