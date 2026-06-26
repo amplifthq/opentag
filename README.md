@@ -17,8 +17,6 @@
 [![Node](https://img.shields.io/badge/Node-22.x-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-![OpenTag workflow: work app mentions routed to approved runners](./assets/readme-hero.png)
-
 Claude Tag made the interface obvious: mention an agent where work already happens and get the result back in the thread. OpenTag is the open version: a work thread mention becomes a scoped run, an approved local or hosted runner executes Claude Code, Codex, or your own agent, and the result returns to the source thread with an audit trail.
 
 OpenTag is not another AI workspace. It brings agents to the work item thread you already use.
