@@ -48,6 +48,32 @@ function executorsFromConfig(config: ReturnType<typeof loadConfigFromEnv>) {
   };
 }
 
+async function bindConfiguredProjectTargets(): Promise<void> {
+  const config = loadConfigOrExit();
+  const client = createDispatcherAdminClient({
+    dispatcherUrl: config.dispatcherUrl,
+    runnerId: config.runnerId,
+    ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
+  });
+  for (const repository of config.repositories) {
+    await client.bindRepository({
+      provider: repository.provider,
+      owner: repository.owner,
+      repo: repository.repo,
+      checkoutPath: repository.checkoutPath,
+      defaultExecutor: repository.defaultExecutor,
+      baseBranch: repository.baseBranch,
+      pushRemote: repository.pushRemote,
+      ...(repository.worktreeRoot ? { worktreeRoot: repository.worktreeRoot } : {}),
+      ...(repository.keepWorktree ? { keepWorktree: repository.keepWorktree } : {})
+    });
+    console.log(`Bound Project Target ${repository.provider}:${repository.owner}/${repository.repo} to ${repository.checkoutPath}`);
+  }
+  if (config.repositories.length === 0) {
+    console.log("No Project Targets configured. Set OPENTAG_CONFIG_PATH or OPENTAG_REPO_OWNER/OPENTAG_REPO_NAME/OPENTAG_WORKSPACE_PATH.");
+  }
+}
+
 program
   .name("opentagd")
   .description("OpenTag local daemon");
@@ -118,33 +144,14 @@ program
   });
 
 program
-  .command("bind-repos")
+  .command("bind-project-targets")
   .description("Sync configured Project Target bindings to the dispatcher")
-  .action(async () => {
-    const config = loadConfigOrExit();
-    const client = createDispatcherAdminClient({
-      dispatcherUrl: config.dispatcherUrl,
-      runnerId: config.runnerId,
-      ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
-    });
-    for (const repository of config.repositories) {
-      await client.bindRepository({
-        provider: repository.provider,
-        owner: repository.owner,
-        repo: repository.repo,
-        checkoutPath: repository.checkoutPath,
-        defaultExecutor: repository.defaultExecutor,
-        baseBranch: repository.baseBranch,
-        pushRemote: repository.pushRemote,
-        ...(repository.worktreeRoot ? { worktreeRoot: repository.worktreeRoot } : {}),
-        ...(repository.keepWorktree ? { keepWorktree: repository.keepWorktree } : {})
-      });
-      console.log(`Bound Project Target ${repository.provider}:${repository.owner}/${repository.repo} to ${repository.checkoutPath}`);
-    }
-    if (config.repositories.length === 0) {
-      console.log("No Project Targets configured. Set OPENTAG_CONFIG_PATH or OPENTAG_REPO_OWNER/OPENTAG_REPO_NAME/OPENTAG_WORKSPACE_PATH.");
-    }
-  });
+  .action(bindConfiguredProjectTargets);
+
+program
+  .command("bind-repos", { hidden: true })
+  .description("Compatibility alias for bind-project-targets")
+  .action(bindConfiguredProjectTargets);
 
 program
   .command("bind-slack-channels")

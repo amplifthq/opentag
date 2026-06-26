@@ -309,7 +309,7 @@ Manual and hosted setups can still bind a chat from inside Lark with
 `/bind <owner>/<repo>` or `/bind <provider>:<owner>/<repo>`. Treat that as an
 advanced route; the local start script auto-connects the first chat to the
 selected Project Target. The target must already be registered on a runner
-(`opentagd bind-repos`).
+(`opentagd bind-project-targets`; `bind-repos` remains available as a compatibility alias).
 
 ## Telegram Ingress Environment
 

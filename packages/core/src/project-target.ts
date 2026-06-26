@@ -5,7 +5,7 @@ export type ProjectTargetRef = {
 };
 
 export type EventMetadataWithProjectTarget = {
-  metadata: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 };
 
 const PROJECT_TARGET_REF_PATTERN = /^(?:([\w-]+):)?([\w.-]+)\/([\w.-]+)$/;
@@ -60,13 +60,26 @@ export function parseProjectTargetRef(value: string): ProjectTargetRef {
   };
 }
 
-export function projectTargetRefFromEvent(input: EventMetadataWithProjectTarget): ProjectTargetRef | null {
-  const owner = input.metadata["owner"];
-  const repo = input.metadata["repo"];
-  if (typeof owner !== "string" || typeof repo !== "string") return null;
+function nonBlankMetadataString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function projectTargetRefFromEvent(input: EventMetadataWithProjectTarget | null | undefined): ProjectTargetRef | null {
+  const metadata = input?.metadata;
+  if (!metadata) return null;
+
+  const owner = nonBlankMetadataString(metadata["owner"]);
+  const repo = nonBlankMetadataString(metadata["repo"]);
+  if (!owner || !repo) return null;
+
+  const rawProvider = metadata["repoProvider"];
+  const provider = rawProvider === undefined ? "github" : nonBlankMetadataString(rawProvider);
+  if (!provider) return null;
 
   return {
-    provider: typeof input.metadata["repoProvider"] === "string" ? input.metadata["repoProvider"] : "github",
+    provider,
     owner,
     repo
   };

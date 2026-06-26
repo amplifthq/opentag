@@ -523,7 +523,7 @@ wait_for_dispatcher "$DISPATCHER_URL"
 
 log "Registering local runner and binding the selected project..."
 run_opentagd register-runner
-run_opentagd bind-repos
+run_opentagd bind-project-targets
 
 log "Starting local daemon..."
 (
