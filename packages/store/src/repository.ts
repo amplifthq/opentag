@@ -130,6 +130,11 @@ export type StoredSuggestedChangesSnapshot = {
   snapshot: SuggestedChangesSnapshot;
 };
 
+export type StoredSuggestedChangesInConversation = StoredSuggestedChangesSnapshot & {
+  run: OpenTagRun;
+  event: OpenTagEvent;
+};
+
 export type ApplyOutcomeCounts = {
   applied: number;
   skipped: number;
@@ -489,6 +494,142 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       payloadJson: JSON.stringify(input.payload),
       createdAt: input.createdAt ?? nowIso()
     });
+  }
+
+  type CreateApplyPlanInput = {
+    id: string;
+    proposalId: string;
+    approvalDecisionId: string;
+    selectedIntentIds?: string[];
+    adapter?: string;
+    policyRules?: PolicyRule[];
+  };
+
+  async function buildApplyPlan(input: CreateApplyPlanInput): Promise<{ plan: ApplyPlan; runId: string; createdAt: string } | null> {
+    const storedProposalRow = await db
+      .select()
+      .from(suggestedChanges)
+      .where(eq(suggestedChanges.proposalId, input.proposalId))
+      .limit(1)
+      .get();
+    const decisionRow = await db
+      .select()
+      .from(approvalDecisions)
+      .where(eq(approvalDecisions.id, input.approvalDecisionId))
+      .limit(1)
+      .get();
+    const decision = decisionRow ? ApprovalDecisionSchema.parse(JSON.parse(decisionRow.decisionJson)) : null;
+    if (!storedProposalRow || !decision || decision.proposalId !== input.proposalId) return null;
+    const storedProposal = {
+      runId: storedProposalRow.runId,
+      snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(storedProposalRow.snapshotJson))
+    };
+
+    const runRow = await db.select().from(runs).where(eq(runs.id, storedProposal.runId)).limit(1).get();
+    if (!runRow) return null;
+    const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
+    const repoKey = projectTargetRefFromEvent(event);
+    const storedPolicyRuleRows = repoKey
+      ? await db
+          .select()
+          .from(repoPolicyRules)
+          .where(and(eq(repoPolicyRules.provider, repoKey.provider), eq(repoPolicyRules.owner, repoKey.owner), eq(repoPolicyRules.repo, repoKey.repo)))
+          .orderBy(asc(repoPolicyRules.createdAt))
+      : [];
+    const storedPolicyRules = storedPolicyRuleRows.map((row) => PolicyRuleSchema.parse(JSON.parse(row.ruleJson)));
+    const storedMappingRows = repoKey
+      ? await db
+          .select()
+          .from(repoMutationMappings)
+          .where(
+            and(
+              eq(repoMutationMappings.provider, repoKey.provider),
+              eq(repoMutationMappings.owner, repoKey.owner),
+              eq(repoMutationMappings.repo, repoKey.repo)
+            )
+          )
+          .orderBy(asc(repoMutationMappings.createdAt))
+      : [];
+    const storedMappings = storedMappingRows.map((row) => AdapterMutationMappingSchema.parse(JSON.parse(row.mappingJson)));
+    const selectedIntentIds = input.selectedIntentIds ?? decision.approvedIntentIds;
+    const approvedIntentIds = new Set(decision.approvedIntentIds);
+    const proposalIntents = new Map(storedProposal.snapshot.intents.map((intent) => [intent.intentId, intent]));
+    const lineageRows = await db.select().from(suggestedChanges).orderBy(asc(suggestedChanges.createdAt));
+    const lineage = computeProposalLineage(
+      lineageRows.map((row) => ({
+        runId: row.runId,
+        snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson))
+      })),
+      lineageScopeKey(storedProposal)
+    );
+    const actionabilityByIntentId = new Map(lineage.entries.map((entry) => [entry.intentId, entry]));
+    const policyRules = [...storedPolicyRules, ...(input.policyRules ?? []), ...syntheticManualApprovalPolicyRules(decision)];
+
+    const outcomes = selectedIntentIds.map((intentId) => {
+      if (!approvedIntentIds.has(intentId)) {
+        return {
+          intentId,
+          outcome: "skipped" as const,
+          message: "Intent was not approved by the approval decision."
+        };
+      }
+      const intent = proposalIntents.get(intentId);
+      if (!intent) {
+        return {
+          intentId,
+          outcome: "failed" as const,
+          message: "Intent does not exist on the referenced proposal."
+        };
+      }
+      const actionability = actionabilityByIntentId.get(intentId);
+      if (actionability?.status !== "current") {
+        return {
+          intentId,
+          outcome: "stale" as const,
+          message: actionability?.reason ?? "Intent is no longer current for its mutation domain."
+        };
+      }
+      return preflightMutationIntent({
+        intent,
+        permissions: event.permissions,
+        policyRules,
+        ...(input.adapter ? { adapter: input.adapter } : {})
+      }).outcome;
+    });
+
+    return {
+      runId: storedProposal.runId,
+      createdAt: nowIso(),
+      plan: ApplyPlanSchema.parse({
+        id: input.id,
+        proposalId: input.proposalId,
+        approvalDecisionId: input.approvalDecisionId,
+        selectedIntentIds,
+        ...(input.adapter ? { adapter: input.adapter } : {}),
+        adapterPlan: {
+          semantics: "preflight first, then per-intent outcome",
+          externalWritesExecuted: false,
+          mappings: storedMappings
+        },
+        outcomes
+      })
+    };
+  }
+
+  function applyPlanCreatedEventRow(input: { runId: string; plan: ApplyPlan; createdAt: string }): typeof runEvents.$inferInsert {
+    return {
+      runId: input.runId,
+      type: "apply_plan.created",
+      visibility: "audit",
+      importance: "high",
+      message: `Created apply plan for ${input.plan.selectedIntentIds.length} intent(s).`,
+      payloadJson: JSON.stringify(input.plan),
+      createdAt: input.createdAt
+    };
+  }
+
+  async function appendApplyPlanCreatedEvent(input: { runId: string; plan: ApplyPlan; createdAt: string }): Promise<void> {
+    await db.insert(runEvents).values(applyPlanCreatedEventRow(input));
   }
 
   return {
@@ -1232,6 +1373,33 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return rows.map((row) => SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson)));
     },
 
+    async listLatestSuggestedChangesForConversation(input: {
+      conversationKey: string;
+    }): Promise<StoredSuggestedChangesInConversation[]> {
+      const runRows = await db
+        .select()
+        .from(runs)
+        .where(eq(runs.conversationKey, input.conversationKey))
+        .orderBy(asc(runs.createdAt));
+      for (const runRow of [...runRows].reverse()) {
+        const proposalRows = await db
+          .select()
+          .from(suggestedChanges)
+          .where(eq(suggestedChanges.runId, runRow.id))
+          .orderBy(asc(suggestedChanges.createdAt));
+        if (proposalRows.length === 0) continue;
+        const run = runFromRow(runRow);
+        const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
+        return proposalRows.map((row) => ({
+          runId: row.runId,
+          run,
+          event,
+          snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson))
+        }));
+      }
+      return [];
+    },
+
     async getProposalLineage(input: { proposalId: string }): Promise<ProposalLineage | null> {
       const targetRow = await db.select().from(suggestedChanges).where(eq(suggestedChanges.proposalId, input.proposalId)).limit(1).get();
       if (!targetRow) return null;
@@ -1327,139 +1495,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       adapter?: string;
       policyRules?: PolicyRule[];
     }): Promise<ApplyPlan | null> {
-      const storedProposalRow = await db
-        .select()
-        .from(suggestedChanges)
-        .where(eq(suggestedChanges.proposalId, input.proposalId))
-        .limit(1)
-        .get();
-      const decisionRow = await db
-        .select()
-        .from(approvalDecisions)
-        .where(eq(approvalDecisions.id, input.approvalDecisionId))
-        .limit(1)
-        .get();
-      const decision = decisionRow ? ApprovalDecisionSchema.parse(JSON.parse(decisionRow.decisionJson)) : null;
-      if (!storedProposalRow || !decision || decision.proposalId !== input.proposalId) return null;
-      const storedProposal = {
-        runId: storedProposalRow.runId,
-        snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(storedProposalRow.snapshotJson))
-      };
-
-      const runRow = await db.select().from(runs).where(eq(runs.id, storedProposal.runId)).limit(1).get();
-      if (!runRow) return null;
-      const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
-      const repoKey = projectTargetRefFromEvent(event);
-      const storedPolicyRuleRows = repoKey
-        ? await db
-            .select()
-            .from(repoPolicyRules)
-            .where(and(eq(repoPolicyRules.provider, repoKey.provider), eq(repoPolicyRules.owner, repoKey.owner), eq(repoPolicyRules.repo, repoKey.repo)))
-            .orderBy(asc(repoPolicyRules.createdAt))
-        : [];
-      const storedPolicyRules = storedPolicyRuleRows.map((row) => PolicyRuleSchema.parse(JSON.parse(row.ruleJson)));
-      const storedMappingRows = repoKey
-        ? await db
-            .select()
-            .from(repoMutationMappings)
-            .where(
-              and(
-                eq(repoMutationMappings.provider, repoKey.provider),
-                eq(repoMutationMappings.owner, repoKey.owner),
-                eq(repoMutationMappings.repo, repoKey.repo)
-              )
-            )
-            .orderBy(asc(repoMutationMappings.createdAt))
-        : [];
-      const storedMappings = storedMappingRows.map((row) => AdapterMutationMappingSchema.parse(JSON.parse(row.mappingJson)));
-      const selectedIntentIds = input.selectedIntentIds ?? decision.approvedIntentIds;
-      const approvedIntentIds = new Set(decision.approvedIntentIds);
-      const proposalIntents = new Map(storedProposal.snapshot.intents.map((intent) => [intent.intentId, intent]));
-      const lineageRows = await db.select().from(suggestedChanges).orderBy(asc(suggestedChanges.createdAt));
-      const lineage = computeProposalLineage(
-        lineageRows.map((row) => ({
-          runId: row.runId,
-          snapshot: SuggestedChangesSnapshotSchema.parse(JSON.parse(row.snapshotJson))
-        })),
-        lineageScopeKey(storedProposal)
-      );
-      const actionabilityByIntentId = new Map(lineage.entries.map((entry) => [entry.intentId, entry]));
-      const policyRules = [...storedPolicyRules, ...(input.policyRules ?? []), ...syntheticManualApprovalPolicyRules(decision)];
-
-      const outcomes = selectedIntentIds.map((intentId) => {
-        if (!approvedIntentIds.has(intentId)) {
-          return {
-            intentId,
-            outcome: "skipped" as const,
-            message: "Intent was not approved by the approval decision."
-          };
-        }
-        const intent = proposalIntents.get(intentId);
-        if (!intent) {
-          return {
-            intentId,
-            outcome: "failed" as const,
-            message: "Intent does not exist on the referenced proposal."
-          };
-        }
-        const actionability = actionabilityByIntentId.get(intentId);
-        if (actionability?.status !== "current") {
-          return {
-            intentId,
-            outcome: "stale" as const,
-            message: actionability?.reason ?? "Intent is no longer current for its mutation domain."
-          };
-        }
-        return preflightMutationIntent({
-          intent,
-          permissions: event.permissions,
-          policyRules,
-          ...(input.adapter ? { adapter: input.adapter } : {})
-        }).outcome;
-      });
-
-      const plan = ApplyPlanSchema.parse({
-        id: input.id,
-        proposalId: input.proposalId,
-        approvalDecisionId: input.approvalDecisionId,
-        selectedIntentIds,
-        ...(input.adapter ? { adapter: input.adapter } : {}),
-        adapterPlan: {
-          semantics: "preflight first, then per-intent outcome",
-          externalWritesExecuted: false,
-          mappings: storedMappings
-        },
-        outcomes
-      });
-      const createdAt = nowIso();
+      const built = await buildApplyPlan(input);
+      if (!built) return null;
       await db
         .insert(applyPlans)
         .values({
-          id: plan.id,
-          proposalId: plan.proposalId,
-          approvalDecisionId: plan.approvalDecisionId,
-          planJson: JSON.stringify(plan),
-          createdAt
+          id: built.plan.id,
+          proposalId: built.plan.proposalId,
+          approvalDecisionId: built.plan.approvalDecisionId,
+          planJson: JSON.stringify(built.plan),
+          createdAt: built.createdAt
         })
         .onConflictDoUpdate({
           target: applyPlans.id,
           set: {
-            proposalId: plan.proposalId,
-            approvalDecisionId: plan.approvalDecisionId,
-            planJson: JSON.stringify(plan),
-            createdAt
+            proposalId: built.plan.proposalId,
+            approvalDecisionId: built.plan.approvalDecisionId,
+            planJson: JSON.stringify(built.plan),
+            createdAt: built.createdAt
           }
         });
-      await appendRunEvent({
-        runId: storedProposal.runId,
-        type: "apply_plan.created",
-        payload: plan,
-        visibility: "audit",
-        importance: "high",
-        message: `Created apply plan for ${selectedIntentIds.length} intent(s).`,
-        createdAt
+      await appendApplyPlanCreatedEvent(built);
+      return built.plan;
+    },
+
+    async createApplyPlanOnce(input: {
+      id: string;
+      proposalId: string;
+      approvalDecisionId: string;
+      selectedIntentIds?: string[];
+      adapter?: string;
+      policyRules?: PolicyRule[];
+    }): Promise<{ plan: ApplyPlan; created: boolean } | null> {
+      const built = await buildApplyPlan(input);
+      if (!built) return null;
+      const result = db.transaction((tx) => {
+        const insertResult = tx
+          .insert(applyPlans)
+          .values({
+            id: built.plan.id,
+            proposalId: built.plan.proposalId,
+            approvalDecisionId: built.plan.approvalDecisionId,
+            planJson: JSON.stringify(built.plan),
+            createdAt: built.createdAt
+          })
+          .onConflictDoNothing({ target: applyPlans.id })
+          .run();
+        if (insertResult.changes === 0) {
+          return { created: false as const };
+        }
+        tx.insert(runEvents).values(applyPlanCreatedEventRow(built)).run();
+        return { created: true as const };
       });
-      return plan;
+      if (!result.created) {
+        const existing = await db.select().from(applyPlans).where(eq(applyPlans.id, input.id)).limit(1).get();
+        if (!existing) {
+          throw new Error(`Apply plan ${input.id} already exists but could not be loaded`);
+        }
+        return { plan: ApplyPlanSchema.parse(JSON.parse(existing.planJson)), created: false };
+      }
+      return { plan: built.plan, created: true };
     },
 
     async getApplyPlan(input: { id: string }): Promise<ApplyPlan | null> {

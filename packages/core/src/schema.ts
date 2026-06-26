@@ -328,7 +328,7 @@ export const CanonicalMutationDomainSchema = z.enum(["status", "assignee", "prio
 
 export const MutationIntentSchema = z.object({
   intentId: z.string().min(1),
-  domain: CanonicalMutationDomainSchema,
+  domain: z.union([CanonicalMutationDomainSchema, z.string().min(1)]),
   action: z.string().min(1),
   summary: z.string().min(1),
   params: z.record(z.unknown()).optional(),
@@ -351,7 +351,7 @@ export const SuggestedChangesSnapshotSchema = z.object({
 export const MutationIntentActionabilitySchema = z.object({
   proposalId: z.string().min(1),
   intentId: z.string().min(1),
-  domain: CanonicalMutationDomainSchema,
+  domain: z.union([CanonicalMutationDomainSchema, z.string().min(1)]),
   status: z.enum(["current", "superseded", "stale", "conflicted"]),
   supersededByProposalId: z.string().min(1).optional(),
   supersededByIntentId: z.string().min(1).optional(),
@@ -370,7 +370,9 @@ export const ApprovalDecisionSchema = z.object({
   rejectedIntentIds: z.array(z.string().min(1)).optional(),
   approvedBy: ActorIdentitySchema,
   approvedAt: z.string().datetime(),
-  scope: z.enum(["manual", "policy"])
+  scope: z.enum(["manual", "policy"]),
+  reason: z.string().min(1).optional(),
+  metadata: z.record(z.unknown()).optional()
 });
 
 export const ApplyIntentOutcomeSchema = z.object({

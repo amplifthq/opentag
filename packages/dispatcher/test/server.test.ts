@@ -26,6 +26,91 @@ const validEvent = {
   metadata: { owner: "acme", repo: "demo" }
 };
 
+function jsonRequest(body: unknown) {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  };
+}
+
+function githubIssueEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    sourceEventId: input.sourceEventId,
+    permissions: [
+      { scope: "issue:comment", reason: "reply to source thread" },
+      { scope: "repo:write", reason: "apply approved issue metadata" }
+    ],
+    callback: {
+      provider: "github",
+      uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      ...(input.threadKey ? { threadKey: input.threadKey } : {})
+    },
+    metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+  };
+}
+
+function githubPullRequestEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    sourceEventId: input.sourceEventId,
+    context: [{ provider: "github", kind: "pull_request", uri: "https://github.com/acme/demo/pull/2", visibility: "public" }],
+    workItem: {
+      provider: "github",
+      kind: "pull_request",
+      externalId: "acme/demo#2",
+      uri: "https://github.com/acme/demo/pull/2",
+      ownerContainer: {
+        provider: "github",
+        id: "acme/demo",
+        uri: "https://github.com/acme/demo"
+      }
+    },
+    permissions: [
+      { scope: "issue:comment", reason: "reply to source thread" },
+      { scope: "pr:update", reason: "request reviewers after explicit approval" }
+    ],
+    callback: {
+      provider: "github",
+      uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
+      ...(input.threadKey ? { threadKey: input.threadKey } : {})
+    },
+    metadata: { owner: "acme", repo: "demo", pullRequestNumber: 2 }
+  };
+}
+
+async function seedCompletedProposal(input: {
+  app: ReturnType<typeof createDispatcherApp>;
+  runId: string;
+  event: unknown;
+  suggestedChanges: unknown[];
+  allowedActors?: string[];
+}) {
+  await input.app.request("/v1/repo-bindings", jsonRequest({
+    provider: "github",
+    owner: "acme",
+    repo: "demo",
+    runnerId: "runner_1",
+    workspacePath: "/Users/test/demo",
+    defaultExecutor: "echo",
+    ...(input.allowedActors ? { allowedActors: input.allowedActors } : {})
+  }));
+  const createResponse = await input.app.request("/v1/runs", jsonRequest({ runId: input.runId, event: input.event }));
+  expect(createResponse.status).toBe(201);
+  await input.app.request("/v1/runners/runner_1/claim", { method: "POST" });
+  const completeResponse = await input.app.request(`/v1/runners/runner_1/runs/${input.runId}/complete`, jsonRequest({
+    result: {
+      conclusion: "needs_human",
+      summary: "Prepared suggested actions.",
+      suggestedChanges: input.suggestedChanges
+    }
+  }));
+  expect(completeResponse.status).toBe(200);
+}
+
 describe("dispatcher API", () => {
   it("requires a bearer token when pairing token auth is configured", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
@@ -779,10 +864,18 @@ describe("dispatcher API", () => {
         id: "approval_protocol",
         approvedIntentIds: ["intent_label_bug"],
         approvedBy: { provider: "github", providerUserId: "42", handle: "octocat" },
-        approvedAt: "2026-06-24T00:00:02.000Z"
+        approvedAt: "2026-06-24T00:00:02.000Z",
+        reason: "Maintainer approved label mutation.",
+        metadata: { source: "manual_protocol_test" }
       })
     });
     expect(approvalResponse.status).toBe(201);
+    await expect(approvalResponse.json()).resolves.toMatchObject({
+      decision: {
+        reason: "Maintainer approved label mutation.",
+        metadata: { source: "manual_protocol_test" }
+      }
+    });
 
     const applyResponse = await app.request("/v1/proposals/proposal_protocol/apply-plans", {
       method: "POST",
@@ -1676,5 +1769,625 @@ describe("dispatcher API", () => {
       { kind: "acknowledgement", agentId: "deepseek" },
       { kind: "final", agentId: "deepseek" }
     ]);
+  });
+
+  it("applies a model-suggested GitHub label action from a source-thread reply", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_apply",
+      event: githubIssueEvent({ id: "evt_thread_apply", sourceEventId: "comment_thread_apply", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_apply",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "applied",
+      decision: { proposalId: "proposal_thread_apply", approvedIntentIds: ["intent_label_bug"] },
+      plan: {
+        proposalId: "proposal_thread_apply",
+        selectedIntentIds: ["intent_label_bug"],
+        outcomes: [{ intentId: "intent_label_bug", outcome: "applied" }]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/issues/1/labels",
+        method: "POST",
+        body: { labels: ["bug"] },
+        authorization: "Bearer gh_test"
+      }
+    ]);
+    expect(delivered.some((message) => message.body.includes("Suggested actions:"))).toBe(true);
+    expect(delivered.at(-1)?.body).toContain("Applied 1. Add the bug label.");
+
+    const deliveredCountAfterFirstApply = delivered.length;
+    const replayResponse = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(replayResponse.status).toBe(200);
+    await expect(replayResponse.json()).resolves.toMatchObject({
+      outcome: "already_applied",
+      plan: {
+        proposalId: "proposal_thread_apply",
+        outcomes: [{ intentId: "intent_label_bug", outcome: "applied" }]
+      }
+    });
+    expect(githubRequests).toHaveLength(1);
+    expect(delivered).toHaveLength(deliveredCountAfterFirstApply);
+  });
+
+  it("does not execute the adapter twice for concurrent duplicate apply replies", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_apply_race",
+      event: githubIssueEvent({ id: "evt_thread_apply_race", sourceEventId: "comment_thread_apply_race", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_apply_race",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug_race",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const action = {
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    };
+    const responses = await Promise.all([
+      app.request("/v1/thread-actions", jsonRequest(action)),
+      app.request("/v1/thread-actions", jsonRequest(action))
+    ]);
+    const bodies = await Promise.all(responses.map((response) => response.json()));
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
+    expect(bodies.map((body) => body.outcome).sort()).toEqual(["already_planned", "applied"]);
+    expect(githubRequests).toHaveLength(1);
+  });
+
+  it("rejects unauthorized source-thread action actors before approval or adapter execution", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_unauthorized",
+      event: githubIssueEvent({ id: "evt_thread_unauthorized", sourceEventId: "comment_thread_unauthorized", threadKey: "acme/demo" }),
+      allowedActors: ["octocat"],
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_unauthorized",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "99", handle: "mallory" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "actor_not_allowed"
+    });
+    expect(githubRequests).toHaveLength(0);
+
+    const eventsResponse = await app.request("/v1/runs/run_thread_unauthorized/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+  });
+
+  it("rejects Slack thread actions when the source channel binding is missing", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_slack_missing_binding",
+      event: {
+        ...validEvent,
+        id: "evt_thread_slack_missing_binding",
+        source: "slack",
+        sourceEventId: "slack_thread_missing_binding",
+        actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+        callback: {
+          provider: "slack",
+          uri: "https://slack.com/api/chat.postMessage",
+          threadKey: "T123|C123|1719187200.000100"
+        },
+        metadata: { repoProvider: "github", owner: "acme", repo: "demo", teamId: "T123", channelId: "C123" }
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_slack_missing_binding",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Continue the work.",
+          intents: [
+            {
+              intentId: "intent_continue_slack_missing_binding",
+              domain: "follow_up",
+              action: "continue_run",
+              summary: "Continue in a child run.",
+              params: {}
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "continue 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1719187200.000100"
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "channel_binding_mismatch"
+    });
+  });
+
+  it("does not reuse a provided approval id for a different selected action", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_approval_id_conflict",
+      event: githubIssueEvent({ id: "evt_thread_approval_id_conflict", sourceEventId: "comment_thread_approval_id_conflict", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_approval_id_conflict",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the issue.",
+          intents: [
+            {
+              intentId: "intent_label_bug_conflict",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add bug label.",
+              params: { label: "bug" }
+            },
+            {
+              intentId: "intent_label_help_conflict",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add help wanted label.",
+              params: { label: "help wanted" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const first = await app.request("/v1/thread-actions", jsonRequest({
+      id: "approval_ingress_retry_id",
+      rawText: "approve 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(first.status).toBe(201);
+    await expect(first.json()).resolves.toMatchObject({
+      decision: { id: "approval_ingress_retry_id", approvedIntentIds: ["intent_label_bug_conflict"] }
+    });
+
+    const second = await app.request("/v1/thread-actions", jsonRequest({
+      id: "approval_ingress_retry_id",
+      rawText: "approve 2",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(second.status).toBe(201);
+    const secondBody = await second.json();
+    expect(secondBody.decision).toMatchObject({ approvedIntentIds: ["intent_label_help_conflict"] });
+    expect(secondBody.decision.id).not.toBe("approval_ingress_retry_id");
+  });
+
+  it("rejects explicit proposal action replies from the wrong source thread", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_cross",
+      event: githubIssueEvent({ id: "evt_thread_cross", sourceEventId: "comment_thread_cross", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_cross",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply proposal_thread_cross",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/99/comments",
+        threadKey: "acme/demo#wrong"
+      }
+    }));
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "no_match"
+    });
+  });
+
+  it("applies a model-suggested GitHub PR review request from a source-thread reply", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_review",
+      event: githubPullRequestEvent({ id: "evt_thread_review", sourceEventId: "comment_thread_review", threadKey: "acme/demo#2" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_review",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Request PR review.",
+          intents: [
+            {
+              intentId: "intent_review_alice",
+              domain: "review",
+              action: "request_review",
+              summary: "Request Alice's review.",
+              params: { reviewer: "alice" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
+        threadKey: "acme/demo#2"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        proposalId: "proposal_thread_review",
+        outcomes: [
+          {
+            intentId: "intent_review_alice",
+            outcome: "applied",
+            externalUri: "https://github.com/acme/demo/pull/2"
+          }
+        ]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls/2/requested_reviewers",
+        method: "GET",
+        authorization: "Bearer gh_test"
+      },
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls/2/requested_reviewers",
+        method: "POST",
+        body: { reviewers: ["alice"] },
+        authorization: "Bearer gh_test"
+      }
+    ]);
+  });
+
+  it("falls back to a child run when a PR review request lacks reviewer params", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_review_missing_reviewer",
+      event: githubPullRequestEvent({
+        id: "evt_thread_review_missing_reviewer",
+        sourceEventId: "comment_thread_review_missing_reviewer",
+        threadKey: "acme/demo#2"
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_review_missing_reviewer",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Request PR review.",
+          intents: [
+            {
+              intentId: "intent_review_missing_reviewer",
+              domain: "review",
+              action: "request_review",
+              summary: "Request review.",
+              params: {}
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
+        threadKey: "acme/demo#2"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        proposalId: "proposal_thread_review_missing_reviewer",
+        outcomes: [{ intentId: "intent_review_missing_reviewer", outcome: "failed" }]
+      },
+      run: {
+        parentRunId: "run_thread_review_missing_reviewer",
+        sourceProposalId: "proposal_thread_review_missing_reviewer"
+      }
+    });
+    expect(githubRequests).toHaveLength(0);
+  });
+
+  it("creates a child run with proposal context when the user replies continue", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_continue",
+      event: githubIssueEvent({ id: "evt_thread_continue", sourceEventId: "comment_thread_continue", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_continue",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Continue the investigation.",
+          intents: [
+            {
+              intentId: "intent_continue_tests",
+              domain: "follow_up",
+              action: "continue_run",
+              summary: "Continue fixing the failing test.",
+              params: { focus: "failing test" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "continue 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      run: {
+        parentRunId: "run_thread_continue",
+        sourceProposalId: "proposal_thread_continue"
+      }
+    });
+
+    const runResponse = await app.request(`/v1/runs/${body.run.id}`);
+    expect(runResponse.status).toBe(200);
+    const stored = await runResponse.json();
+    expect(stored.event.command.rawText).toContain("Continue approved OpenTag action");
+    expect(stored.event.metadata).toMatchObject({
+      parentRunId: "run_thread_continue",
+      sourceProposalId: "proposal_thread_continue",
+      threadActionVerb: "continue"
+    });
+    expect(stored.event.context.some((pointer: { uri?: string }) => pointer.uri?.includes("OpenTag thread action continuation."))).toBe(true);
+  });
+
+  it("falls back to a child run when an approved action has no direct adapter operation", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async () => {
+          throw new Error("unsupported actions should not call GitHub");
+        }
+      }
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_fallback",
+      event: githubIssueEvent({ id: "evt_thread_fallback", sourceEventId: "comment_thread_fallback", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_fallback",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Ask for review.",
+          intents: [
+            {
+              intentId: "intent_request_review",
+              domain: "review",
+              action: "request_review",
+              summary: "Request a reviewer.",
+              params: { reviewer: "maintainer" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        proposalId: "proposal_thread_fallback",
+        outcomes: [{ intentId: "intent_request_review", outcome: "unsupported" }]
+      },
+      run: {
+        parentRunId: "run_thread_fallback",
+        sourceProposalId: "proposal_thread_fallback"
+      }
+    });
+    expect(body.run.sourceApplyPlanId).toBe(body.plan.id);
   });
 });

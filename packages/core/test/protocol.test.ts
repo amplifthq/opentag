@@ -228,4 +228,38 @@ describe("protocol helpers", () => {
       outcome: "skipped"
     });
   });
+
+  it("treats request_review as an explicit external write capability", () => {
+    const intent = {
+      intentId: "intent_review_1",
+      domain: "review" as const,
+      action: "request_review",
+      summary: "Request Alice's review.",
+      params: { reviewer: "alice" }
+    };
+
+    expect(
+      preflightMutationIntent({
+        intent,
+        adapter: "github",
+        permissions: githubEvent.permissions,
+        policyRules: [{ id: "manual", scope: "primary_anchor_override", effect: "allow", capabilityId: "request_review", reason: "Approved." }]
+      }).outcome
+    ).toMatchObject({
+      intentId: "intent_review_1",
+      outcome: "unsupported"
+    });
+
+    const allowed = preflightMutationIntent({
+      intent,
+      adapter: "github",
+      permissions: [...githubEvent.permissions, { scope: "pr:update", reason: "request PR reviewers" }],
+      policyRules: [{ id: "manual", scope: "primary_anchor_override", effect: "allow", capabilityId: "request_review", reason: "Approved." }]
+    });
+    expect(allowed.capability?.capabilityClass).toBe("external_write");
+    expect(allowed.outcome).toMatchObject({
+      intentId: "intent_review_1",
+      outcome: "skipped"
+    });
+  });
 });

@@ -13,6 +13,33 @@ an auditable Agent Work Protocol. It is intentionally a design document, not an
 implementation checklist. The goal is to capture product boundaries before we
 turn internal Chat-OPS lessons into public APIs.
 
+## Current Runtime Surface
+
+The current v0 runtime should be read as a **thread-native model action layer**,
+not as a full governance product.
+
+The primary product path is:
+
+```text
+mention -> run -> executor -> final callback with suggested actions
+       -> source-thread reply such as apply 1
+       -> ApprovalDecision -> ApplyPlan or ChildRun fallback
+```
+
+Ingress apps and product integrations should prefer
+`@opentag/client.submitThreadAction(...)` for source-thread replies. That path
+preserves the user's thread context, applies actor authorization against the
+existing Project Target binding, uses stable approval/apply identifiers for
+webhook retry safety, and falls back to a child run when an adapter cannot apply
+the model's intent directly.
+
+The lower-level proposal, approval, apply-plan, policy-rule, and
+adapter-mapping HTTP routes are **experimental protocol APIs**. They are useful
+for adapter authors, smoke tests, and runtime diagnostics, but they should not
+be presented as the default v0 product surface. Keeping the vocabulary in the
+protocol is intentional; selling the product as an enterprise approval dashboard
+before the thread-native action loop proves demand is not.
+
 ## Summary
 
 OpenTag should not become a generic project management system, a Lark Base

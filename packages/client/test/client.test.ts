@@ -321,6 +321,62 @@ describe("@opentag/client", () => {
     ]);
   });
 
+  it("submits thread-native action replies to the dispatcher", async () => {
+    const requests: Array<{ url: string; body?: unknown; authorization: string | null }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return jsonResponse({
+          outcome: "applied",
+          decision: {
+            id: "approval_1",
+            proposalId: "proposal_1",
+            approvedIntentIds: ["intent_1"],
+            approvedBy: { provider: "github", providerUserId: "42" },
+            approvedAt: "2026-06-24T00:00:00.000Z",
+            scope: "manual"
+          }
+        }, 201);
+      }
+    });
+
+    await expect(
+      client.submitThreadAction({
+        rawText: "apply 1",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        callback: {
+          provider: "github",
+          uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+          threadKey: "acme/demo"
+        },
+        metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+      })
+    ).resolves.toMatchObject({ outcome: "applied", decision: { id: "approval_1" } });
+
+    expect(requests).toEqual([
+      {
+        url: "http://dispatcher.test/v1/thread-actions",
+        authorization: "Bearer pair_1",
+        body: {
+          rawText: "apply 1",
+          actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+          callback: {
+            provider: "github",
+            uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+            threadKey: "acme/demo"
+          },
+          metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+        }
+      }
+    ]);
+  });
+
   it("calls repo policy rule endpoints", async () => {
     const requests: Array<{ url: string; method: string; body?: unknown }> = [];
     const client = createOpenTagClient({

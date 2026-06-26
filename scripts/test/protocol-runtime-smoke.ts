@@ -150,39 +150,21 @@ try {
   const currentIntents = await client.listCurrentMutationIntents({ proposalId: "proposal_smoke_1" });
   assert(currentIntents.intents.some((intent) => intent.intentId === "intent_smoke_label_bug"), "current intent should be listed");
 
-  const approval = await client.approveProposal({
-    proposalId: "proposal_smoke_1",
+  const threadAction = await client.submitThreadAction({
     id: "approval_smoke_1",
-    approvedIntentIds: ["intent_smoke_label_bug"],
-    approvedBy: { provider: "github", providerUserId: "42", handle: "octocat" },
-    approvedAt: "2026-06-24T00:00:02.000Z"
+    rawText: "apply 1",
+    actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+    callback: event.callback,
+    metadata: { source: "smoke", owner: "acme", repo: "demo", issueNumber: 9 }
   });
-  assert(approval.decision.id === "approval_smoke_1", "approval decision should be recorded");
-
-  const applyPlan = await client.createApplyPlan({
-    proposalId: "proposal_smoke_1",
-    id: "apply_smoke_1",
-    approvalDecisionId: "approval_smoke_1",
-    adapter: "github"
-  });
-  assert(applyPlan.plan.mode === "preflight_then_per_intent", "apply plan should use protocol default mode");
-  assert(applyPlan.plan.outcomes?.[0]?.outcome === "skipped", "preflight-passed intent should remain unexecuted without execute=true");
-
-  const childRun = await client.createChildRun({
-    parentRunId: "run_smoke_1",
-    runId: "run_smoke_child_1",
-    action: {
-      kind: "apply_suggested_changes",
-      targetId: "proposal_smoke_1",
-      selectedIntentIds: ["intent_smoke_label_bug"]
-    },
-    sourceApplyPlanId: "apply_smoke_1",
-    commandText: "Apply approved smoke proposal"
-  });
-  assert(childRun.run.parentRunId === "run_smoke_1", "child run should reference parent run");
-  assert(childRun.run.sourceProposalId === "proposal_smoke_1", "child run should reference source proposal");
-  assert(childRun.run.sourceApplyPlanId === "apply_smoke_1", "child run should reference source apply plan");
-  assert(childRun.run.triggeredByAction?.kind === "apply_suggested_changes", "child run should carry triggering action");
+  assert(threadAction.outcome === "child_run_created", "unconfigured GitHub apply should fall back to a child run");
+  assert(threadAction.decision?.id === "approval_smoke_1", "thread action should record an approval decision");
+  assert(threadAction.plan?.mode === "preflight_then_per_intent", "thread action should create a protocol apply plan");
+  assert(threadAction.plan?.outcomes?.[0]?.outcome === "skipped", "preflight-passed intent should remain unexecuted without GitHub apply config");
+  assert(threadAction.run?.parentRunId === "run_smoke_1", "child run should reference parent run");
+  assert(threadAction.run?.sourceProposalId === "proposal_smoke_1", "child run should reference source proposal");
+  assert(threadAction.run?.sourceApplyPlanId === threadAction.plan?.id, "child run should reference source apply plan");
+  assert(threadAction.run?.triggeredByAction?.kind === "apply_suggested_changes", "child run should carry triggering action");
 
   const events = await client.listRunEvents({ runId: "run_smoke_1" });
   const eventTypes = events.events.map((event) => (event as { type: string }).type);
@@ -201,7 +183,7 @@ try {
   }
 
   const metrics = await client.getRunMetrics({ runId: "run_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === 2, "GitHub-shaped smoke should have ack and final human callbacks");
+  assert(metrics.metrics.humanCallbackCount === 3, "GitHub-shaped smoke should deliver ack, final, and thread-action fallback callbacks");
   assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "audit events should exceed human callbacks");
   assert(metrics.metrics.threadNoiseRatio < 1, "thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "metrics should count suggested changes");

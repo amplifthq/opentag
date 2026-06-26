@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { OpenTagEvent } from "@opentag/core";
-import { normalizeSlackAppMention, type SlackChannelBinding } from "@opentag/slack";
+import type { ThreadActionInput } from "@opentag/client";
+import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
+import { encodeSlackThreadKey, normalizeSlackAppMention, stripSlackAppMention, type SlackChannelBinding } from "@opentag/slack";
 import { Hono } from "hono";
 
 export type SlackEventEnvelope = {
@@ -16,6 +17,8 @@ export type SlackEventEnvelope = {
     ts?: string;
     thread_ts?: string;
     channel?: string;
+    subtype?: string;
+    bot_id?: string;
   };
   event_id?: string;
   event_time?: number;
@@ -61,6 +64,7 @@ export function createSlackEventsApp(input: {
   }>;
   resolveChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<{ runId: string }>;
+  submitThreadAction?(action: ThreadActionInput): Promise<unknown>;
   now(): string;
   clock?: () => number;
 }) {
@@ -124,11 +128,22 @@ export function createSlackEventsApp(input: {
     if (payload.type === "url_verification") {
       return c.text(payload.challenge ?? "");
     }
-    if (payload.type !== "event_callback" || payload.event?.type !== "app_mention") {
+    if (payload.type !== "event_callback" || !payload.event || !["app_mention", "message"].includes(payload.event.type)) {
       return c.json({ ok: true });
     }
     if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
       return c.json({ error: "invalid_event_payload" }, 400);
+    }
+    if (payload.event.type === "message" && (payload.event.subtype || payload.event.bot_id)) {
+      return c.json({ ok: true });
+    }
+
+    const rawThreadActionText =
+      payload.event.type === "app_mention"
+        ? stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id)
+        : payload.event.text.trim();
+    if (payload.event.type === "message" && (!rawThreadActionText || !parseThreadActionCommand(rawThreadActionText))) {
+      return c.json({ ok: true });
     }
 
     const binding = await input.resolveChannelBinding({
@@ -137,6 +152,43 @@ export function createSlackEventsApp(input: {
     });
     if (!binding) {
       return c.json({ ok: true, ignored: "unbound_channel" });
+    }
+
+    if (rawThreadActionText && parseThreadActionCommand(rawThreadActionText) && input.submitThreadAction) {
+      await input.submitThreadAction({
+        id: `approval_slack_${payload.event_id}`,
+        rawText: rawThreadActionText,
+        actor: {
+          provider: "slack",
+          providerUserId: payload.event.user,
+          handle: payload.event.user,
+          organizationId: payload.team_id
+        },
+        callback: {
+          provider: "slack",
+          uri: slackApp.callbackUri ?? "https://slack.com/api/chat.postMessage",
+          threadKey: encodeSlackThreadKey({
+            teamId: payload.team_id,
+            channelId: payload.event.channel,
+            threadTs: payload.event.thread_ts ?? payload.event.ts
+          })
+        },
+        metadata: {
+          teamId: payload.team_id,
+          channelId: payload.event.channel,
+          messageTs: payload.event.ts,
+          ...(payload.api_app_id ? { slackAppId: payload.api_app_id } : {}),
+          ...(payload.authorizations?.[0]?.user_id ? { slackBotUserId: payload.authorizations[0].user_id } : {}),
+          repoProvider: binding.repoProvider ?? "github",
+          owner: binding.owner,
+          repo: binding.repo
+        }
+      });
+      return c.json({ ok: true });
+    }
+
+    if (payload.event.type !== "app_mention") {
+      return c.json({ ok: true });
     }
 
     const event = normalizeSlackAppMention({

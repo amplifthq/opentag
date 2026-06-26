@@ -119,6 +119,8 @@ export type ApprovalDecisionInput = {
   approvedBy: ActorIdentity;
   approvedAt?: string;
   scope?: "manual" | "policy";
+  reason?: string;
+  metadata?: Record<string, unknown>;
 };
 
 export type ApplyPlanInput = {
@@ -135,6 +137,26 @@ export type ChildRunInput = {
   commandText?: string;
   sourceProposalId?: string;
   sourceApplyPlanId?: string;
+};
+
+export type ThreadActionInput = {
+  id?: string;
+  rawText: string;
+  actor: ActorIdentity;
+  callback: {
+    provider: string;
+    uri: string;
+    threadKey?: string;
+  };
+  metadata?: Record<string, unknown>;
+};
+
+export type ThreadActionResult = {
+  outcome: string;
+  message?: string;
+  decision?: ApprovalDecision;
+  plan?: ApplyPlan;
+  run?: OpenTagRun;
 };
 
 export type RunMetrics = {
@@ -204,6 +226,7 @@ export type OpenTagClient = {
   createApplyPlan(input: { proposalId: string } & ApplyPlanInput): Promise<{ plan: ApplyPlan }>;
   getApplyPlan(input: { applyPlanId: string }): Promise<{ plan: ApplyPlan }>;
   createChildRun(input: { parentRunId: string } & ChildRunInput): Promise<{ run: OpenTagRun }>;
+  submitThreadAction(input: ThreadActionInput): Promise<ThreadActionResult>;
 };
 
 export type DispatcherRunnerClient = {
@@ -537,7 +560,9 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
           ...(input.rejectedIntentIds?.length ? { rejectedIntentIds: input.rejectedIntentIds } : {}),
           approvedBy: input.approvedBy,
           ...(input.approvedAt ? { approvedAt: input.approvedAt } : {}),
-          ...(input.scope ? { scope: input.scope } : {})
+          ...(input.scope ? { scope: input.scope } : {}),
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.metadata ? { metadata: input.metadata } : {})
         })
       });
       await assertOk(response, "approveProposal");
@@ -591,6 +616,26 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       await assertOk(response, "createChildRun");
       const body = (await response.json()) as { run: unknown };
       return { run: OpenTagRunSchema.parse(body.run) };
+    },
+
+    async submitThreadAction(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/thread-actions`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({
+          ...(input.id ? { id: input.id } : {}),
+          rawText: input.rawText,
+          actor: input.actor,
+          callback: {
+            provider: input.callback.provider,
+            uri: input.callback.uri,
+            ...(input.callback.threadKey ? { threadKey: input.callback.threadKey } : {})
+          },
+          ...(input.metadata ? { metadata: input.metadata } : {})
+        })
+      });
+      await assertOk(response, "submitThreadAction");
+      return (await response.json()) as ThreadActionResult;
     }
   };
 }
