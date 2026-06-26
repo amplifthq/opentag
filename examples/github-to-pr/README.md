@@ -49,7 +49,7 @@ This path does not touch GitHub. It starts an in-process dispatcher with a tempo
 
 ## GitHub CLI-Assisted Callback Demo
 
-This path uses the active `gh` CLI login to create a GitHub-shaped run directly in the dispatcher. It does not require a GitHub App webhook or public tunnel.
+This path uses the active `gh` CLI login to create a GitHub-shaped run directly in the dispatcher. It does not require a GitHub App webhook or public tunnel. Run these commands from the repository root.
 
 Prerequisites:
 
