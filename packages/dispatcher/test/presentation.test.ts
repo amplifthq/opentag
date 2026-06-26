@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 
 describe("default callback presentation", () => {
+  it("keeps Lark acknowledgements silent while preserving other provider acknowledgements", () => {
+    const presentation = createDefaultCallbackPresentation();
+
+    expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
+    expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("telegram")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("github")).toBe(true);
+  });
+
   it("keeps chat progress audit-only while allowing GitHub and Telegram progress delivery", () => {
     const presentation = createDefaultCallbackPresentation();
 

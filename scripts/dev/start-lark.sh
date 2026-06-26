@@ -509,9 +509,8 @@ fi
 log "This script auto-connects the first Lark chat that messages the bot to this local project."
 log
 log "Expected AHA moment:"
-log "1. Lark replies with an acknowledgement."
-log "2. This terminal shows the local daemon running the executor."
-log "3. Lark replies with the final result."
+log "1. This terminal shows the local daemon running the executor."
+log "2. Lark replies with the agent's final result."
 log
 log "Press Ctrl-C to stop OpenTag."
 wait

@@ -493,20 +493,22 @@ export function createDispatcherApp(input: {
       );
     }
     const { run } = createdRun;
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: run.id,
-        kind: "acknowledgement",
-        provider: parsed.event.callback.provider,
-        uri: parsed.event.callback.uri,
-        body: presentation.acknowledgement({ provider: parsed.event.callback.provider, runId: run.id }),
-        ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {}),
-        ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
-      }
-    });
+    if (presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider)) {
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: run.id,
+          kind: "acknowledgement",
+          provider: parsed.event.callback.provider,
+          uri: parsed.event.callback.uri,
+          body: presentation.acknowledgement({ provider: parsed.event.callback.provider, runId: run.id }),
+          ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {}),
+          ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
+        }
+      });
+    }
     return c.json({ decision: admitted.decision, run }, 201);
   });
 
@@ -536,20 +538,22 @@ export function createDispatcherApp(input: {
     }
     const followUpRequest = promoted.followUpRequest;
     const event = followUpRequest.event;
-    await deliverAndAudit({
-      repo,
-      sink: callbackSink,
-      retry: callbackRetry,
-      message: {
-        runId: promoted.run.id,
-        kind: "acknowledgement",
-        provider: event.callback.provider,
-        uri: event.callback.uri,
-        body: presentation.acknowledgement({ provider: event.callback.provider, runId: promoted.run.id }),
-        ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
-        ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {})
-      }
-    });
+    if (presentation.shouldDeliverAcknowledgement(event.callback.provider)) {
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: promoted.run.id,
+          kind: "acknowledgement",
+          provider: event.callback.provider,
+          uri: event.callback.uri,
+          body: presentation.acknowledgement({ provider: event.callback.provider, runId: promoted.run.id }),
+          ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
+          ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {})
+        }
+      });
+    }
     return c.json({ followUpRequest, run: promoted.run }, 201);
   });
 

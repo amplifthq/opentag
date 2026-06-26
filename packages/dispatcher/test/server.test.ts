@@ -590,7 +590,7 @@ describe("dispatcher API", () => {
     });
   });
 
-  it("renders Lark callbacks as plain text and keeps progress audit-only", async () => {
+  it("renders Lark final callbacks as plain text while keeping acknowledgement and progress audit-only", async () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -657,7 +657,6 @@ describe("dispatcher API", () => {
     expect(completeResponse.status).toBe(200);
 
     expect(delivered).toEqual([
-      { kind: "acknowledgement", body: "I picked this up: run_lark_1" },
       {
         kind: "final",
         body: "Finished with success.\n\nEchoed OpenTag command: introduce yourself\n\nVerification\n- echo: passed"
@@ -670,8 +669,6 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
       "run.claimed",
       "run.progress",
       "run.completed",
@@ -1251,6 +1248,9 @@ describe("dispatcher API", () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",
       presentation: {
+        shouldDeliverAcknowledgement() {
+          return true;
+        },
         shouldDeliverProgress(provider) {
           return provider === "slack";
         },

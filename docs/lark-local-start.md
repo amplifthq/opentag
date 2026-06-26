@@ -97,9 +97,8 @@ starting the script to use a GitHub-style project target.
 
 ## Expected Result
 
-1. Lark replies with an acknowledgement.
-2. The terminal shows the local daemon claiming and running the task.
-3. Lark replies with the final result.
+1. The terminal shows the local daemon claiming and running the task.
+2. Lark replies with the agent's final result.
 
 ## Current Limits
 
