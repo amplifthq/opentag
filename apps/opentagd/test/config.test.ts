@@ -214,6 +214,33 @@ describe("opentagd config", () => {
     );
   });
 
+  it("does not collide channel binding identities when values contain delimiters", () => {
+    const parsed = parseDaemonConfig({
+      dispatcherUrl: "http://localhost:3030",
+      repositories: [],
+      channelBindings: [
+        {
+          provider: "a",
+          accountId: "b:c",
+          conversationId: "d",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "first"
+        },
+        {
+          provider: "a:b",
+          accountId: "c",
+          conversationId: "d",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "second"
+        }
+      ]
+    });
+
+    expect(normalizeChannelBindings(parsed)).toHaveLength(2);
+  });
+
   it("formats zod config errors into a readable message", () => {
     const error = (() => {
       try {

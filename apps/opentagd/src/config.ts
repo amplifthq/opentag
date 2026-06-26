@@ -80,6 +80,10 @@ export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSc
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
 
 function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
+  return JSON.stringify([binding.provider, binding.accountId, binding.conversationId]);
+}
+
+function formatChannelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
   return `${binding.provider}:${binding.accountId}/${binding.conversationId}`;
 }
 
@@ -118,7 +122,7 @@ export function normalizeChannelBindings(config: OpenTagDaemonConfig): ChannelBi
     const existing = normalized.get(key);
     if (existing && !sameChannelBindingTarget(existing, binding)) {
       throw new Error(
-        `Conflicting channel binding for ${key}: ${existing.repoProvider}:${existing.owner}/${existing.repo} and ${binding.repoProvider}:${binding.owner}/${binding.repo}`
+        `Conflicting channel binding for ${formatChannelBindingIdentity(binding)}: ${existing.repoProvider}:${existing.owner}/${existing.repo} and ${binding.repoProvider}:${binding.owner}/${binding.repo}`
       );
     }
     if (!existing) {

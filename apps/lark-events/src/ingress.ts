@@ -47,6 +47,14 @@ function defaultRepoBindingFromEnv(value: string | undefined): LarkIngressConfig
   }
 }
 
+function domainFromEnv(value: string | undefined): LarkIngressConfig["domain"] {
+  const domain = value ?? "lark";
+  if (domain !== "lark" && domain !== "feishu") {
+    throw new Error("LARK_DOMAIN must be either lark or feishu");
+  }
+  return domain;
+}
+
 export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressConfig {
   const appId = env.LARK_APP_ID;
   const appSecret = env.LARK_APP_SECRET;
@@ -64,7 +72,7 @@ export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressCon
     appId,
     appSecret,
     dispatcherUrl,
-    domain: env.LARK_DOMAIN === "feishu" ? "feishu" : "lark",
+    domain: domainFromEnv(env.LARK_DOMAIN),
     agentId: env.OPENTAG_LARK_AGENT_ID ?? DEFAULT_AGENT_ID,
     ...(env.OPENTAG_DISPATCHER_TOKEN ? { dispatcherToken: env.OPENTAG_DISPATCHER_TOKEN } : {}),
     ...(env.LARK_BOT_OPEN_ID ? { botOpenId: env.LARK_BOT_OPEN_ID } : {}),
@@ -156,7 +164,11 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
   });
 
   const eventDispatcher = (dependencies.createEventDispatcher ?? createDefaultEventDispatcher)(async (data) => {
-    (dependencies.logIgnored ?? logIgnored)(await handler(data));
+    try {
+      (dependencies.logIgnored ?? logIgnored)(await handler(data));
+    } catch (error) {
+      console.error("[lark] failed to handle inbound message:", error);
+    }
   });
   const wsClient = (dependencies.createWsClient ?? createDefaultWsClient)(config);
 

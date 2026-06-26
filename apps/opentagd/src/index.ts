@@ -12,7 +12,9 @@ const program = new Command();
 
 function loadConfigOrExit() {
   try {
-    return loadConfigFromEnv();
+    const config = loadConfigFromEnv();
+    normalizeChannelBindings(config);
+    return config;
   } catch (error) {
     console.error(`Invalid OpenTag daemon config:\n${formatConfigError(error)}`);
     process.exit(1);
