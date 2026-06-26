@@ -3,6 +3,7 @@ import {
   createInitialConfig,
   formatConfigError,
   loadConfigFromEnv,
+  normalizeChannelBindings,
   parseDaemonConfig,
   type OpenTagDaemonConfig
 } from "../src/config.js";
@@ -141,6 +142,76 @@ describe("opentagd config", () => {
       repo: "demo",
       metadata: { topic: "ops" }
     });
+  });
+
+  it("normalizes generic, Slack, and Lark channel binding aliases into the canonical shape", () => {
+    const parsed = parseDaemonConfig({
+      dispatcherUrl: "http://localhost:3030",
+      repositories: [],
+      channelBindings: [
+        {
+          provider: "telegram",
+          accountId: "bot_123",
+          conversationId: "456",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          metadata: { topic: "ops" }
+        }
+      ],
+      slackChannels: [{ teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" }],
+      larkChannels: [{ tenantKey: "tenant_123", chatId: "chat_123", repoProvider: "local", owner: "path_abc", repo: "app" }]
+    });
+
+    expect(normalizeChannelBindings(parsed)).toEqual([
+      {
+        provider: "telegram",
+        accountId: "bot_123",
+        conversationId: "456",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata: { topic: "ops" }
+      },
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      },
+      {
+        provider: "lark",
+        accountId: "tenant_123",
+        conversationId: "chat_123",
+        repoProvider: "local",
+        owner: "path_abc",
+        repo: "app"
+      }
+    ]);
+  });
+
+  it("rejects conflicting channel binding aliases for the same conversation", () => {
+    const parsed = parseDaemonConfig({
+      dispatcherUrl: "http://localhost:3030",
+      repositories: [],
+      channelBindings: [
+        {
+          provider: "slack",
+          accountId: "T123",
+          conversationId: "C123",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        }
+      ],
+      slackChannels: [{ teamId: "T123", channelId: "C123", repoProvider: "github", owner: "other", repo: "demo" }]
+    });
+
+    expect(() => normalizeChannelBindings(parsed)).toThrow(
+      "Conflicting channel binding for slack:T123/C123: github:acme/demo and github:other/demo"
+    );
   });
 
   it("formats zod config errors into a readable message", () => {

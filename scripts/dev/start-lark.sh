@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Dev smoke helper only. Do not extend this into the product setup path; the
+# OpenTag CLI will replace this script after the runtime boundaries are ready.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_DIR="$ROOT_DIR/.opentag/lark"
 CONFIG_PATH="$STATE_DIR/opentag.local.json"

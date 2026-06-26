@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 import { chmodSync } from "node:fs";
-import { createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, type RunnerSecurityPolicy } from "@opentag/runner";
-import { createDispatcherAdminClient, createDispatcherClient } from "@opentag/client";
+import { createDispatcherAdminClient } from "@opentag/client";
 import { Command } from "commander";
-import { createInitialConfig, formatConfigError, loadConfigFromEnv } from "./config.js";
+import { createInitialConfig, formatConfigError, loadConfigFromEnv, normalizeChannelBindings } from "./config.js";
 import { runOneDaemonIteration, serveDaemon } from "./daemon.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "./doctor.js";
+import { createDaemonRuntimeInput, executorsFromConfig } from "./runtime.js";
 
 const program = new Command();
 
@@ -17,35 +17,6 @@ function loadConfigOrExit() {
     console.error(`Invalid OpenTag daemon config:\n${formatConfigError(error)}`);
     process.exit(1);
   }
-}
-
-function securityFromConfig(config: ReturnType<typeof loadConfigFromEnv>): RunnerSecurityPolicy | undefined {
-  const security = config.security;
-  if (!security) return undefined;
-  const normalized: RunnerSecurityPolicy = {};
-  if (security.mode !== undefined) normalized.mode = security.mode;
-  if (security.allowedWorkspaceRoot !== undefined) normalized.allowedWorkspaceRoot = security.allowedWorkspaceRoot;
-  if (security.allowUnsafePrompts !== undefined) normalized.allowUnsafePrompts = security.allowUnsafePrompts;
-  if (security.extraSafeEnv !== undefined) normalized.extraSafeEnv = security.extraSafeEnv;
-  return Object.keys(normalized).length > 0 ? normalized : undefined;
-}
-
-function executorsFromConfig(config: ReturnType<typeof loadConfigFromEnv>) {
-  const security = securityFromConfig(config);
-  return {
-    echo: createEchoExecutor(),
-    codex: createCodexExecutor({
-      ...(security ? { security } : {})
-    }),
-    "claude-code": createClaudeCodeExecutor({
-      ...(config.claudeCode?.command ? { claudeCommand: config.claudeCode.command } : {}),
-      ...(config.claudeCode?.model ? { model: config.claudeCode.model } : {}),
-      ...(config.claudeCode?.permissionMode ? { permissionMode: config.claudeCode.permissionMode } : {}),
-      ...(config.claudeCode?.dangerouslySkipPermissions !== undefined
-        ? { dangerouslySkipPermissions: config.claudeCode.dangerouslySkipPermissions }
-        : {})
-    })
-  };
 }
 
 async function bindConfiguredProjectTargets(): Promise<void> {
@@ -185,7 +156,8 @@ program
       runnerId: config.runnerId,
       ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
     });
-    for (const binding of config.channelBindings ?? []) {
+    const bindings = normalizeChannelBindings(config);
+    for (const binding of bindings) {
       await client.bindChannel({
         provider: binding.provider,
         accountId: binding.accountId,
@@ -199,8 +171,8 @@ program
         `Bound ${binding.provider}:${binding.accountId}/${binding.conversationId} to ${binding.repoProvider}:${binding.owner}/${binding.repo}`
       );
     }
-    if (!(config.channelBindings?.length ?? 0)) {
-      console.log("No generic channel bindings configured.");
+    if (!bindings.length) {
+      console.log("No channel bindings configured.");
     }
   });
 
@@ -250,23 +222,7 @@ program
   .description("Claim and execute one run if available")
   .action(async () => {
     const config = loadConfigOrExit();
-    const security = securityFromConfig(config);
-    const didWork = await runOneDaemonIteration({
-      runnerId: config.runnerId,
-      repositories: config.repositories,
-      executors: executorsFromConfig(config),
-      ...(security ? { security } : {}),
-      pullRequestOptions: {
-        ...(config.githubToken ? { githubToken: config.githubToken } : {}),
-        ...(config.allowAutoCreatePullRequest !== undefined ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest } : {})
-      },
-      ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
-      client: createDispatcherClient({
-        dispatcherUrl: config.dispatcherUrl,
-        runnerId: config.runnerId,
-        ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
-      })
-    });
+    const didWork = await runOneDaemonIteration(createDaemonRuntimeInput(config));
     console.log(didWork ? "OpenTag run completed" : "No OpenTag run available");
   });
 
@@ -275,30 +231,7 @@ program
   .description("Continuously poll for and execute OpenTag runs")
   .action(async () => {
     const config = loadConfigOrExit();
-    const security = securityFromConfig(config);
-    await serveDaemon({
-      runnerId: config.runnerId,
-      repositories: config.repositories,
-      executors: executorsFromConfig(config),
-      ...(security ? { security } : {}),
-      ...(config.githubToken
-        ? {
-            pullRequestOptions: {
-              githubToken: config.githubToken,
-              ...(config.allowAutoCreatePullRequest !== undefined
-                ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest }
-                : {})
-            }
-          }
-        : {}),
-      ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
-      ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
-      client: createDispatcherClient({
-        dispatcherUrl: config.dispatcherUrl,
-        runnerId: config.runnerId,
-        ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
-      })
-    });
+    await serveDaemon(createDaemonRuntimeInput(config));
   });
 
 await program.parseAsync(process.argv);

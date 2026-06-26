@@ -79,6 +79,56 @@ export type SlackChannelBindingConfig = z.infer<typeof SlackChannelBindingConfig
 export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSchema>;
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
 
+function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
+  return `${binding.provider}:${binding.accountId}/${binding.conversationId}`;
+}
+
+function sameChannelBindingTarget(left: ChannelBindingConfig, right: ChannelBindingConfig): boolean {
+  return left.repoProvider === right.repoProvider && left.owner === right.owner && left.repo === right.repo;
+}
+
+export function normalizeChannelBindings(config: OpenTagDaemonConfig): ChannelBindingConfig[] {
+  const bindings: ChannelBindingConfig[] = [...(config.channelBindings ?? [])];
+
+  for (const binding of config.slackChannels ?? []) {
+    bindings.push({
+      provider: "slack",
+      accountId: binding.teamId,
+      conversationId: binding.channelId,
+      repoProvider: binding.repoProvider,
+      owner: binding.owner,
+      repo: binding.repo
+    });
+  }
+
+  for (const binding of config.larkChannels ?? []) {
+    bindings.push({
+      provider: "lark",
+      accountId: binding.tenantKey,
+      conversationId: binding.chatId,
+      repoProvider: binding.repoProvider,
+      owner: binding.owner,
+      repo: binding.repo
+    });
+  }
+
+  const normalized = new Map<string, ChannelBindingConfig>();
+  for (const binding of bindings) {
+    const key = channelBindingIdentity(binding);
+    const existing = normalized.get(key);
+    if (existing && !sameChannelBindingTarget(existing, binding)) {
+      throw new Error(
+        `Conflicting channel binding for ${key}: ${existing.repoProvider}:${existing.owner}/${existing.repo} and ${binding.repoProvider}:${binding.owner}/${binding.repo}`
+      );
+    }
+    if (!existing) {
+      normalized.set(key, binding);
+    }
+  }
+
+  return [...normalized.values()];
+}
+
 export type InitConfigInput = {
   runnerId?: string;
   dispatcherUrl?: string;

@@ -11,6 +11,7 @@
     { "path": "packages/store" },
     { "path": "apps/dispatcher" },
     { "path": "apps/github-probot" },
+    { "path": "apps/lark-events" },
     { "path": "apps/slack-events" },
     { "path": "apps/telegram-events" },
     { "path": "apps/opentagd" },
