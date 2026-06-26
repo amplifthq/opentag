@@ -114,9 +114,10 @@ describe("GitHub Probot handler", () => {
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
-        threadKey: "acme/demo"
+        threadKey: "acme/demo#1"
       },
       metadata: {
+        repoProvider: "github",
         owner: "acme",
         repo: "demo",
         issueNumber: 1,
@@ -274,6 +275,7 @@ describe("GitHub Probot handler", () => {
         threadKey: "acme/demo#2"
       },
       metadata: {
+        repoProvider: "github",
         owner: "acme",
         repo: "demo",
         pullRequestNumber: 2,

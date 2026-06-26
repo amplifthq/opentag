@@ -756,6 +756,17 @@ describe("OpenTag repository", () => {
 
     await expect(repo.getApprovalDecision({ id: "approval_protocol" })).resolves.toMatchObject({ id: "approval_protocol" });
     await expect(repo.getApplyPlan({ id: "apply_protocol" })).resolves.toMatchObject({ id: "apply_protocol" });
+    await expect(
+      repo.createApplyPlanOnce({
+        id: "apply_protocol",
+        proposalId: "proposal_protocol",
+        approvalDecisionId: "approval_protocol",
+        adapter: "github"
+      })
+    ).resolves.toMatchObject({
+      created: false,
+      plan: { id: "apply_protocol" }
+    });
 
     const events = await repo.listRunEvents({ runId: "run_protocol" });
     expect(events.map((event) => event.type)).toContain("proposal.snapshot.created");

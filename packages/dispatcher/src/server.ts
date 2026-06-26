@@ -331,7 +331,10 @@ async function resolveThreadAction(input: {
 }
 
 function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string }): string {
-  return typeof input.event.metadata["owner"] === "string" &&
+  const repoProvider = input.event.metadata["repoProvider"];
+  const isGitHubRepo = repoProvider === "github" || (input.event.source === "github" && repoProvider === undefined);
+  return isGitHubRepo &&
+    typeof input.event.metadata["owner"] === "string" &&
     typeof input.event.metadata["repo"] === "string" &&
     (typeof input.event.metadata["issueNumber"] === "number" || typeof input.event.metadata["pullRequestNumber"] === "number")
     ? "github"
@@ -371,13 +374,15 @@ async function authorizeThreadAction(input: {
         conversationId: channelId
       });
       if (
-        channelBinding &&
-        (channelBinding.repoProvider !== repoKey.provider || channelBinding.owner !== repoKey.owner || channelBinding.repo !== repoKey.repo)
+        !channelBinding ||
+        channelBinding.repoProvider !== repoKey.provider ||
+        channelBinding.owner !== repoKey.owner ||
+        channelBinding.repo !== repoKey.repo
       ) {
         return {
           ok: false,
           reason: "channel_binding_mismatch",
-          message: "The source channel binding no longer points at the proposal repository."
+          message: "The source channel binding is missing or no longer points at the proposal repository."
         };
       }
     }
@@ -398,6 +403,38 @@ function stableApprovalId(input: {
     [...input.resolved.selectedIntentIds].sort(),
     actorKeys(input.actor).sort()
   ]);
+}
+
+function sortedValues(values: string[] | undefined): string[] {
+  return [...(values ?? [])].sort();
+}
+
+function sameStringSet(left: string[] | undefined, right: string[] | undefined): boolean {
+  return JSON.stringify(sortedValues(left)) === JSON.stringify(sortedValues(right));
+}
+
+function sameActor(left: ActorIdentity, right: ActorIdentity): boolean {
+  return left.provider === right.provider &&
+    left.providerUserId === right.providerUserId &&
+    (left.handle ?? "") === (right.handle ?? "") &&
+    (left.organizationId ?? "") === (right.organizationId ?? "");
+}
+
+function approvalDecisionMatchesThreadAction(input: {
+  decision: NonNullable<Awaited<ReturnType<ReturnType<typeof createOpenTagRepository>["getApprovalDecision"]>>>;
+  command: ThreadActionCommand;
+  resolved: ResolvedThreadAction;
+  actor: ActorIdentity;
+}): boolean {
+  const approvedIntentIds = input.command.verb === "reject" ? [] : input.resolved.selectedIntentIds;
+  const rejectedIntentIds = input.command.verb === "reject" ? input.resolved.selectedIntentIds : [];
+  const metadata = input.decision.metadata;
+  const verb = metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata["verb"] : undefined;
+  return input.decision.proposalId === input.resolved.proposal.snapshot.proposalId &&
+    sameStringSet(input.decision.approvedIntentIds, approvedIntentIds) &&
+    sameStringSet(input.decision.rejectedIntentIds, rejectedIntentIds) &&
+    sameActor(input.decision.approvedBy, input.actor) &&
+    verb === input.command.verb;
 }
 
 function stableApplyPlanId(input: { resolved: ResolvedThreadAction; adapter: string }): string {
@@ -443,6 +480,9 @@ function githubTargetFromEvent(event: OpenTagEvent):
   const repoName = event.metadata["repo"];
   const issueNumber = event.metadata["issueNumber"];
   const pullRequestNumber = event.metadata["pullRequestNumber"];
+  const repoProvider = event.metadata["repoProvider"];
+  const isGitHubRepo = repoProvider === "github" || (event.source === "github" && repoProvider === undefined);
+  if (!isGitHubRepo) return null;
   if (typeof owner !== "string" || typeof repoName !== "string") return null;
   if (typeof pullRequestNumber === "number") {
     return { owner, repoName, issueNumber: pullRequestNumber, pullRequestNumber, targetKind: "pull_request" };
@@ -1041,13 +1081,25 @@ export function createDispatcherApp(input: {
       }
     }
 
-    const approvalId = stableApprovalId({
-      command,
-      resolved: resolved.resolved,
-      actor: parsed.actor,
-      ...(parsed.id ? { providedId: parsed.id } : {})
-    });
-    const existingDecision = await repo.getApprovalDecision({ id: approvalId });
+    const providedDecision = parsed.id ? await repo.getApprovalDecision({ id: parsed.id }) : null;
+    const canReuseProvidedDecision = providedDecision
+      ? approvalDecisionMatchesThreadAction({
+          decision: providedDecision,
+          command,
+          resolved: resolved.resolved,
+          actor: parsed.actor
+        })
+      : false;
+    const approvalId = parsed.id && (!providedDecision || canReuseProvidedDecision)
+      ? parsed.id
+      : stableApprovalId({
+          command,
+          resolved: resolved.resolved,
+          actor: parsed.actor
+        });
+    const existingDecision = canReuseProvidedDecision
+      ? providedDecision
+      : await repo.getApprovalDecision({ id: approvalId });
     const decision = existingDecision ?? await repo.recordApprovalDecision({
       id: approvalId,
       proposalId: resolved.resolved.proposal.snapshot.proposalId,
@@ -1136,16 +1188,37 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "child_run_created", decision, run: childRun }, 201);
     }
 
-    const plan = await repo.createApplyPlan({
+    const planResult = await repo.createApplyPlanOnce({
       id: applyPlanId,
       proposalId: resolved.resolved.proposal.snapshot.proposalId,
       approvalDecisionId: decision.id,
       selectedIntentIds: resolved.resolved.selectedIntentIds,
       adapter
     });
-    if (!plan) {
+    if (!planResult) {
       return c.json({ error: "proposal_or_approval_not_found" }, 404);
     }
+    if (!planResult.created) {
+      if (selectedIntentsAlreadyApplied({ plan: planResult.plan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
+        return c.json({ outcome: "already_applied", decision, plan: planResult.plan }, 200);
+      }
+      const fallbackReason = "An apply plan already exists for this selected action; OpenTag will not execute it again from a repeated thread reply.";
+      const childRun = await createChildRunForThreadAction({
+        repo,
+        command,
+        resolved: resolved.resolved,
+        runId: stableChildRunId({
+          command,
+          resolved: resolved.resolved,
+          sourceApplyPlanId: planResult.plan.id,
+          fallbackReason
+        }),
+        sourceApplyPlanId: planResult.plan.id,
+        fallbackReason
+      });
+      return c.json({ outcome: "already_planned", decision, plan: planResult.plan, run: childRun }, 200);
+    }
+    const plan = planResult.plan;
 
     const execution = await executeGitHubApplyPlan({
       repo,
@@ -1395,7 +1468,9 @@ export function createDispatcherApp(input: {
       ...(body.rejectedIntentIds?.length ? { rejectedIntentIds: body.rejectedIntentIds } : {}),
       approvedBy: body.approvedBy,
       approvedAt: body.approvedAt ?? new Date().toISOString(),
-      scope: body.scope
+      scope: body.scope,
+      ...(body.reason ? { reason: body.reason } : {}),
+      ...(body.metadata ? { metadata: body.metadata } : {})
     });
     if (!decision) return c.json({ error: "proposal_not_found" }, 404);
     return c.json({ decision }, 201);
@@ -1435,14 +1510,26 @@ export function createDispatcherApp(input: {
       executableTarget = { proposal, target };
     }
 
-    const plan = await repo.createApplyPlan({
+    const applyPlanInput = {
       id: body.id ?? `apply_${proposalId}_${Date.now()}`,
       proposalId,
       approvalDecisionId: body.approvalDecisionId,
       ...(body.selectedIntentIds !== undefined ? { selectedIntentIds: body.selectedIntentIds } : {}),
       ...(body.adapter ? { adapter: body.adapter } : {})
-    });
-    if (!plan) return c.json({ error: "proposal_or_approval_not_found" }, 404);
+    };
+    let plan: ApplyPlan;
+    if (body.execute) {
+      const planResult = await repo.createApplyPlanOnce(applyPlanInput);
+      if (!planResult) return c.json({ error: "proposal_or_approval_not_found" }, 404);
+      plan = planResult.plan;
+      if (!planResult.created) {
+        return c.json({ plan, alreadyPlanned: true }, 200);
+      }
+    } else {
+      const planResult = await repo.createApplyPlan(applyPlanInput);
+      if (!planResult) return c.json({ error: "proposal_or_approval_not_found" }, 404);
+      plan = planResult;
+    }
     if (body.execute && executableTarget) {
       const githubApply = input.githubApply;
       if (!githubApply) {

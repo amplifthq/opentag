@@ -39,9 +39,10 @@ export async function handleIssueCommentCreated(input: {
       callback: {
         provider: "github",
         uri: input.payload.issue.comments_url,
-        threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}`
+        threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
       },
       metadata: {
+        repoProvider: "github",
         owner: input.payload.repository.owner.login,
         repo: input.payload.repository.name,
         issueNumber: input.payload.issue.number,
@@ -100,6 +101,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
         threadKey: `${owner}/${repo}#${input.payload.pull_request.number}`
       },
       metadata: {
+        repoProvider: "github",
         owner,
         repo,
         pullRequestNumber: input.payload.pull_request.number,

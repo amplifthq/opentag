@@ -26,6 +26,15 @@ describe("thread action commands", () => {
     });
   });
 
+  it("does not treat regex-special selection tokens as parser syntax", () => {
+    expect(parseThreadActionCommand("continue proposal_[x because tests passed")).toEqual({
+      verb: "continue",
+      selection: { kind: "proposal", proposalId: "proposal_[x" },
+      rawText: "continue proposal_[x because tests passed",
+      reason: "because tests passed"
+    });
+  });
+
   it("parses concise Chinese action replies", () => {
     expect(parseThreadActionCommand("批准 1")).toEqual({
       verb: "approve",

@@ -325,9 +325,55 @@ describe("GitHub apply helpers", () => {
     expect(requests).toEqual([
       {
         url: "https://api.github.com/repos/acme/demo/pulls/11/requested_reviewers",
+        method: "GET",
+        authorization: "Bearer ghs_test"
+      },
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls/11/requested_reviewers",
         method: "POST",
         authorization: "Bearer ghs_test",
         body: { reviewers: ["alice", "bob"], team_reviewers: ["core"] }
+      }
+    ]);
+  });
+
+  it("does not re-request reviewers that GitHub already lists as requested", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const fetchImpl = (async (url, init) => {
+      requests.push({
+        url: String(url),
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+      });
+      return Response.json({
+        users: [{ login: "alice" }],
+        teams: [{ slug: "core" }]
+      });
+    }) as typeof fetch;
+
+    await expect(
+      applyGitHubIssueMutationIntent({
+        target: { token: "ghs_test", owner: "acme", repo: "demo", issueNumber: 11, pullRequestNumber: 11 },
+        targetKind: "pull_request",
+        fetchImpl,
+        intent: {
+          intentId: "intent_review",
+          domain: "review",
+          action: "request_review",
+          summary: "Request review.",
+          params: { reviewers: ["alice"], teamReviewers: ["core"] }
+        }
+      })
+    ).resolves.toMatchObject({
+      intentId: "intent_review",
+      outcome: "applied",
+      message: "Requested reviewers were already present; skipped GitHub notification retry."
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls/11/requested_reviewers",
+        method: "GET"
       }
     ]);
   });

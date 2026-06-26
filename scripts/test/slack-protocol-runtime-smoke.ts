@@ -46,6 +46,12 @@ try {
     defaultExecutor: "echo",
     allowedActors: ["U123"]
   });
+  await client.bindSlackChannel({
+    teamId: "T123",
+    channelId: "C123",
+    owner: "acme",
+    repo: "demo"
+  });
 
   const event = normalizeSlackAppMention({
     teamId: "T123",

@@ -131,7 +131,7 @@ function labelMappingForIntent(input: { intent: MutationIntent; mappings: Adapte
 async function githubJson(input: {
   target: GitHubIssueMutationTarget;
   fetchImpl: FetchLike;
-  method: "POST" | "PUT" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
   okStatuses?: number[];
@@ -151,6 +151,46 @@ async function githubJson(input: {
     throw new Error(`${input.method} ${input.path} failed: ${response.status} ${await response.text()}`);
   }
   return `https://github.com/${input.target.owner}/${input.target.repo}/issues/${input.target.issueNumber}`;
+}
+
+async function githubJsonBody<T>(input: {
+  target: GitHubIssueMutationTarget;
+  fetchImpl: FetchLike;
+  method: "GET";
+  path: string;
+  okStatuses?: number[];
+}): Promise<T> {
+  const response = await input.fetchImpl(`https://api.github.com/repos/${input.target.owner}/${input.target.repo}${input.path}`, {
+    method: input.method,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${input.target.token}`,
+      "content-type": "application/json",
+      "x-github-api-version": "2022-11-28"
+    }
+  });
+
+  if (!response.ok && !(input.okStatuses ?? []).includes(response.status)) {
+    throw new Error(`${input.method} ${input.path} failed: ${response.status} ${await response.text()}`);
+  }
+  return await response.json() as T;
+}
+
+type RequestedReviewersResponse = {
+  users?: Array<{ login?: unknown }>;
+  teams?: Array<{ slug?: unknown; name?: unknown }>;
+};
+
+function requestedReviewerLogins(response: RequestedReviewersResponse): Set<string> {
+  return new Set((response.users ?? []).map((user) => user.login).filter((login): login is string => typeof login === "string"));
+}
+
+function requestedTeamReviewerNames(response: RequestedReviewersResponse): Set<string> {
+  return new Set(
+    (response.teams ?? [])
+      .flatMap((team) => [team.slug, team.name])
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+  );
 }
 
 export function compileGitHubIssueMutationIntent(
@@ -343,14 +383,32 @@ export async function applyGitHubIssueMutationOperation(input: {
           message: "request_review requires target.pullRequestNumber."
         };
       }
+      const requested = await githubJsonBody<RequestedReviewersResponse>({
+        target: input.target,
+        fetchImpl,
+        method: "GET",
+        path: `/pulls/${pullRequestNumber}/requested_reviewers`
+      });
+      const existingReviewers = requestedReviewerLogins(requested);
+      const existingTeamReviewers = requestedTeamReviewerNames(requested);
+      const reviewers = input.operation.reviewers.filter((reviewer) => !existingReviewers.has(reviewer));
+      const teamReviewers = input.operation.teamReviewers?.filter((reviewer) => !existingTeamReviewers.has(reviewer));
+      if (reviewers.length === 0 && (!teamReviewers || teamReviewers.length === 0)) {
+        return {
+          intentId: input.operation.intentId,
+          outcome: "applied",
+          externalUri: `https://github.com/${input.target.owner}/${input.target.repo}/pull/${pullRequestNumber}`,
+          message: "Requested reviewers were already present; skipped GitHub notification retry."
+        };
+      }
       await githubJson({
         target: input.target,
         fetchImpl,
         method: "POST",
         path: `/pulls/${pullRequestNumber}/requested_reviewers`,
         body: {
-          reviewers: input.operation.reviewers,
-          ...(input.operation.teamReviewers?.length ? { team_reviewers: input.operation.teamReviewers } : {})
+          ...(reviewers.length ? { reviewers } : {}),
+          ...(teamReviewers?.length ? { team_reviewers: teamReviewers } : {})
         }
       });
       return {

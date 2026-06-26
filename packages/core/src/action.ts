@@ -63,6 +63,10 @@ function normalizeToken(token: string): string {
   return token.trim().replace(/[.,;:!?，。；：！？]+$/u, "");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function parseSelection(tokens: string[]): ThreadActionSelection {
   const normalized = tokens.map(normalizeToken).filter(Boolean);
   const first = normalized[0];
@@ -92,10 +96,10 @@ function reasonAfterSelection(rest: string, selection: ThreadActionSelection): s
     selection.kind === "index"
       ? String(selection.index)
       : selection.kind === "proposal"
-        ? selection.proposalId
-          : selection.kind === "intent"
-            ? selection.intentId
-            : Object.keys(DOMAIN_ALIASES).join("|");
+        ? escapeRegExp(selection.proposalId)
+        : selection.kind === "intent"
+          ? escapeRegExp(selection.intentId)
+          : Object.keys(DOMAIN_ALIASES).join("|");
   const pattern = new RegExp(`^\\s*(?:${selectionText})\\b\\s*`, "i");
   const stripped = rest.replace(pattern, "").trim();
   return stripped.length > 0 ? stripped : undefined;

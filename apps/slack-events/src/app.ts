@@ -138,6 +138,14 @@ export function createSlackEventsApp(input: {
       return c.json({ ok: true });
     }
 
+    const rawThreadActionText =
+      payload.event.type === "app_mention"
+        ? stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id)
+        : payload.event.text.trim();
+    if (payload.event.type === "message" && (!rawThreadActionText || !parseThreadActionCommand(rawThreadActionText))) {
+      return c.json({ ok: true });
+    }
+
     const binding = await input.resolveChannelBinding({
       teamId: payload.team_id,
       channelId: payload.event.channel
@@ -146,10 +154,6 @@ export function createSlackEventsApp(input: {
       return c.json({ ok: true, ignored: "unbound_channel" });
     }
 
-    const rawThreadActionText =
-      payload.event.type === "app_mention"
-        ? stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id)
-        : payload.event.text.trim();
     if (rawThreadActionText && parseThreadActionCommand(rawThreadActionText) && input.submitThreadAction) {
       await input.submitThreadAction({
         id: `approval_slack_${payload.event_id}`,

@@ -49,7 +49,27 @@ describe("normalizeGitHubIssueComment", () => {
     expect(event?.workItem).toMatchObject({ provider: "github", kind: "pull_request", externalId: "acme/demo#2" });
     expect(event?.callback.threadKey).toBe("acme/demo#2");
     expect(event?.permissions.map((permission) => permission.scope)).toContain("pr:update");
-    expect(event?.metadata).toMatchObject({ pullRequestNumber: 2, installationId: 77 });
+    expect(event?.metadata).toMatchObject({ repoProvider: "github", pullRequestNumber: 2, installationId: 77 });
+  });
+
+  it("does not grant pull request update permission for read-only review-comment intents", () => {
+    const event = normalizeGitHubPullRequestReviewComment({
+      id: "457",
+      commentBody: "@opentag explain this change",
+      commentUrl: "https://github.com/acme/demo/pull/2#discussion_r457",
+      pullRequestUrl: "https://github.com/acme/demo/pull/2",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/2/comments",
+      owner: "acme",
+      repo: "demo",
+      pullRequestNumber: 2,
+      actorId: 42,
+      actorLogin: "octocat",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(event?.command.intent).toBe("explain");
+    expect(event?.permissions.map((permission) => permission.scope)).not.toContain("pr:update");
   });
 
   it("keeps requested scopes in parsed command metadata instead of elevating them into granted permissions", () => {

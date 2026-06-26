@@ -63,6 +63,17 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
   return permissions;
 }
 
+function permissionsForPullRequestReviewCommentIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+  const permissions = permissionsForIntent(intent);
+  if (intent === "review") {
+    permissions.push({
+      scope: "pr:update",
+      reason: "request reviewers on the source pull request after explicit approval"
+    });
+  }
+  return permissions;
+}
+
 function contextPointersForCommand(command: OpenTagCommand, privateRepo: boolean): ContextPointer[] {
   const visibility = privateRepo ? "private" : "public";
   const context: ContextPointer[] = [];
@@ -184,6 +195,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       threadKey: `${input.owner}/${input.repo}`
     },
     metadata: {
+      repoProvider: "github",
       owner: input.owner,
       repo: input.repo,
       issueNumber: input.issueNumber,
@@ -242,19 +254,14 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       number: input.pullRequestNumber,
       uri: input.pullRequestUrl
     }),
-    permissions: [
-      ...permissionsForIntent(mention.intent),
-      {
-        scope: "pr:update",
-        reason: "request reviewers on the source pull request after explicit approval"
-      }
-    ],
+    permissions: permissionsForPullRequestReviewCommentIntent(mention.intent),
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,
       threadKey: `${input.owner}/${input.repo}#${input.pullRequestNumber}`
     },
     metadata: {
+      repoProvider: "github",
       owner: input.owner,
       repo: input.repo,
       pullRequestNumber: input.pullRequestNumber,
