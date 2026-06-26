@@ -9,15 +9,27 @@ LARK_CONFIG_PATH="$STATE_DIR/lark.local.json"
 DISPATCHER_PID=""
 DAEMON_PID=""
 LARK_PID=""
+CLEANING_UP=""
 
 cleanup() {
+  if [[ -n "$CLEANING_UP" ]]; then
+    return
+  fi
+  CLEANING_UP=1
   for pid in "$LARK_PID" "$DAEMON_PID" "$DISPATCHER_PID"; do
     if [[ -n "$pid" ]]; then
       kill "$pid" 2>/dev/null || true
     fi
   done
+  for pid in "$LARK_PID" "$DAEMON_PID" "$DISPATCHER_PID"; do
+    if [[ -n "$pid" ]]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 log() {
   printf '%s\n' "$*"
@@ -92,8 +104,10 @@ process.stdout.write(safeName);
 port_is_in_use() {
   local port="$1"
   if command -v lsof >/dev/null 2>&1; then
-    lsof -ti "tcp:${port}" >/dev/null 2>&1
-    return
+    if lsof -ti "tcp:${port}" >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
   fi
   nc -z 127.0.0.1 "$port" >/dev/null 2>&1
 }
@@ -118,12 +132,42 @@ choose_dispatcher_port() {
 wait_for_dispatcher() {
   local url="$1"
   for _ in $(seq 1 60); do
-    if node -e 'fetch(process.argv[1]).then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1));' "$url/healthz"; then
+    if node -e '
+const ctrl = new AbortController();
+setTimeout(() => ctrl.abort(), 5000).unref();
+fetch(process.argv[1], { signal: ctrl.signal })
+  .then((r) => process.exit(r.ok ? 0 : 1))
+  .catch(() => process.exit(1));
+' "$url/healthz"; then
       return
     fi
     sleep 0.5
   done
   fail "Dispatcher did not become healthy at $url."
+}
+
+ensure_process_started() {
+  local pid="$1"
+  local name="$2"
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    fail "$name exited before OpenTag finished starting."
+  fi
+}
+
+wait_for_stack_exit() {
+  while true; do
+    for name_and_pid in "Dispatcher:$DISPATCHER_PID" "Local daemon:$DAEMON_PID" "Lark ingress:$LARK_PID"; do
+      local name="${name_and_pid%%:*}"
+      local pid="${name_and_pid#*:}"
+      if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        fail "$name exited. Check the log above for the underlying error."
+      fi
+    done
+    sleep 1
+  done
 }
 
 detect_executor() {
@@ -155,7 +199,7 @@ assert_executor_available() {
       require_command codex
       ;;
     claude-code)
-      require_command claude
+      require_command "${OPENTAG_CLAUDE_COMMAND:-claude}"
       ;;
     echo)
       ;;
@@ -215,7 +259,7 @@ write_lark_config() {
   LARK_DOMAIN="$LARK_DOMAIN" \
   LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-}" \
   node <<'NODE'
-const { chmodSync, writeFileSync } = require("node:fs");
+const { closeSync, chmodSync, openSync, writeFileSync } = require("node:fs");
 
 const config = {
   appId: process.env.LARK_APP_ID,
@@ -225,8 +269,9 @@ const config = {
   savedAt: new Date().toISOString()
 };
 
-writeFileSync(process.env.LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+closeSync(openSync(process.env.LARK_CONFIG_PATH, "a", 0o600));
 chmodSync(process.env.LARK_CONFIG_PATH, 0o600);
+writeFileSync(process.env.LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 NODE
 }
 
@@ -245,7 +290,7 @@ write_config() {
   PUSH_REMOTE="$PUSH_REMOTE" \
   WORKTREE_ROOT="$STATE_DIR/worktrees" \
   node <<'NODE'
-const { writeFileSync, chmodSync } = require("node:fs");
+const { closeSync, chmodSync, openSync, writeFileSync } = require("node:fs");
 
 const config = {
   runnerId: process.env.RUNNER_ID,
@@ -275,14 +320,16 @@ if (process.env.EXECUTOR === "claude-code") {
   };
 }
 
-writeFileSync(process.env.CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+closeSync(openSync(process.env.CONFIG_PATH, "a", 0o600));
 chmodSync(process.env.CONFIG_PATH, 0o600);
+writeFileSync(process.env.CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 NODE
 }
 
 run_opentagd() {
-  local command_name="$1"
-  shift || true
+  local command_name="${1:-}"
+  [[ -n "$command_name" ]] || fail "run_opentagd requires a command name."
+  shift
   (
     cd "$ROOT_DIR"
     OPENTAG_CONFIG_PATH="$CONFIG_PATH" \
@@ -340,7 +387,7 @@ EXPLICIT_LARK_SETUP="${OPENTAG_LARK_APP_SETUP:-}"
 LARK_CONFIG_SOURCE=""
 
 if [[ -n "${LARK_APP_ID:-}" && -n "${LARK_APP_SECRET:-}" ]]; then
-  LARK_DOMAIN="${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}"
+  LARK_DOMAIN="${LARK_DOMAIN:-lark}"
   log "Using LARK_APP_ID and LARK_APP_SECRET from the environment."
   LARK_CONFIG_SOURCE="environment"
 elif [[ -n "$SAVED_LARK_APP_ID" || -n "$SAVED_LARK_APP_SECRET" ]]; then
@@ -409,7 +456,11 @@ fi
 [[ -n "$LARK_APP_ID" ]] || fail "LARK_APP_ID is required."
 [[ -n "$LARK_APP_SECRET" ]] || fail "LARK_APP_SECRET is required."
 
-LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-$SAVED_LARK_BOT_OPEN_ID}"
+if [[ "$LARK_CONFIG_SOURCE" == "saved" ]]; then
+  LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-$SAVED_LARK_BOT_OPEN_ID}"
+else
+  LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-}"
+fi
 if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
   log "Using LARK_BOT_OPEN_ID for group @mentions."
 else
@@ -430,7 +481,7 @@ if [[ "$LARK_CONFIG_SOURCE" != "environment" ]]; then
   log "Saved Lark app credentials to $LARK_CONFIG_PATH."
 fi
 
-PAIRING_TOKEN="${OPENTAG_PAIRING_TOKEN:-dev_pairing_token}"
+PAIRING_TOKEN="${OPENTAG_PAIRING_TOKEN:-$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')}"
 RUNNER_ID="${OPENTAG_RUNNER_ID:-runner_lark_local}"
 DISPATCHER_PORT="$(choose_dispatcher_port)"
 DISPATCHER_URL="http://localhost:$DISPATCHER_PORT"
@@ -456,10 +507,12 @@ log
   export LARK_APP_ID
   export LARK_APP_SECRET
   export LARK_DOMAIN
-  NODE_OPTIONS='--conditions=development' corepack pnpm --filter @opentag/dispatcher-app dev
+  export NODE_OPTIONS='--conditions=development'
+  exec corepack pnpm --filter @opentag/dispatcher-app dev
 ) &
 DISPATCHER_PID=$!
 
+ensure_process_started "$DISPATCHER_PID" "Dispatcher"
 wait_for_dispatcher "$DISPATCHER_URL"
 
 log "Registering local runner and binding the selected project..."
@@ -469,11 +522,12 @@ run_opentagd bind-repos
 log "Starting local daemon..."
 (
   cd "$ROOT_DIR"
-  OPENTAG_CONFIG_PATH="$CONFIG_PATH" \
-  NODE_OPTIONS='--conditions=development' \
-  corepack pnpm --filter @opentag/opentagd dev -- serve
+  export OPENTAG_CONFIG_PATH="$CONFIG_PATH"
+  export NODE_OPTIONS='--conditions=development'
+  exec corepack pnpm --filter @opentag/opentagd dev -- serve
 ) &
 DAEMON_PID=$!
+ensure_process_started "$DAEMON_PID" "Local daemon"
 
 log "Starting Lark long-connection ingress..."
 (
@@ -488,9 +542,11 @@ log "Starting Lark long-connection ingress..."
   if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
     export LARK_BOT_OPEN_ID
   fi
-  NODE_OPTIONS='--conditions=development' corepack pnpm --filter @opentag/lark-events dev
+  export NODE_OPTIONS='--conditions=development'
+  exec corepack pnpm --filter @opentag/lark-events dev
 ) &
 LARK_PID=$!
+ensure_process_started "$LARK_PID" "Lark ingress"
 
 log
 log "OpenTag for Lark is running."
@@ -513,4 +569,4 @@ log "1. This terminal shows the local daemon running the executor."
 log "2. Lark replies with the agent's final result."
 log
 log "Press Ctrl-C to stop OpenTag."
-wait
+wait_for_stack_exit

@@ -136,6 +136,10 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "bound", tenantKey, chatId };
     }
 
+    if (command.trim().length === 0) {
+      return { status: "ignored_empty_command", tenantKey, chatId };
+    }
+
     let binding = await config.resolveChannelBinding({ tenantKey, chatId });
     if (!binding) {
       if (config.defaultRepoBinding && config.bindChannel) {

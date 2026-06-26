@@ -87,6 +87,7 @@ async function fetchBotIdentity(input) {
 
 async function main() {
   const requestedDomain = parseDomain(process.argv[2] || process.env.LARK_DOMAIN || "lark");
+  let detectedDomain;
 
   const registration = await lark.registerApp({
     // The Personal Agent registration flow starts on Feishu and switches to Lark after scan when needed.
@@ -113,12 +114,13 @@ async function main() {
       if (info.status === "slow_down") {
         log(`Lark asked OpenTag to poll more slowly. Next check in ${info.interval ?? "a few"} seconds.`);
       } else if (info.status === "domain_switched") {
+        detectedDomain = "lark";
         log("Detected a Lark tenant. Continuing registration on larksuite.com.");
       }
     }
   });
 
-  const domain = registrationDomainFromUserInfo(requestedDomain, registration.user_info);
+  const domain = detectedDomain ?? registrationDomainFromUserInfo(requestedDomain, registration.user_info);
   const botIdentity = await fetchBotIdentity({
     appId: registration.client_id,
     appSecret: registration.client_secret,

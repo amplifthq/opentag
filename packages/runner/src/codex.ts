@@ -215,7 +215,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
           } catch (error) {
             await sink.emit({
               type: "executor.progress",
-              message: `Could not remove run worktree ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`,
+              message: `Could not clean up run worktree or branch for ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`,
               at: new Date().toISOString()
             });
           }

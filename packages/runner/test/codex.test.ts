@@ -1,21 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCodexExecutor } from "../src/codex.js";
 import type { CommandRunner } from "../src/command.js";
 import { branchNameForRun, commitRunChanges, parseChangedFiles, worktreePathForRun } from "../src/git.js";
 
-const ORIGINAL_OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-
 afterEach(() => {
-  if (ORIGINAL_OPENAI_API_KEY === undefined) {
-    delete process.env.OPENAI_API_KEY;
-  } else {
-    process.env.OPENAI_API_KEY = ORIGINAL_OPENAI_API_KEY;
-  }
+  vi.unstubAllEnvs();
 });
 
 describe("Codex executor", () => {
   it("creates an isolated worktree, runs codex exec, and reports changed files", async () => {
-    process.env.OPENAI_API_KEY = "sk-secret";
+    vi.stubEnv("OPENAI_API_KEY", "sk-secret");
     const calls: { command: string; args: string[]; input?: string; cwd?: string; env?: Record<string, string | undefined> }[] = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
@@ -129,7 +123,7 @@ describe("Codex executor", () => {
   });
 
   it("removes the empty run branch when codex completes without changes", async () => {
-    process.env.OPENAI_API_KEY = "sk-secret";
+    vi.stubEnv("OPENAI_API_KEY", "sk-secret");
     const calls: { command: string; args: string[]; cwd?: string }[] = [];
     const runner: CommandRunner = {
       async run(command, args, options) {

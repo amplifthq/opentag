@@ -157,6 +157,18 @@ describe("createLarkMessageHandler", () => {
     expect(event?.metadata).toMatchObject({ repoProvider: "github", owner: "amplifthq", repo: "opentag" });
   });
 
+  it("does not auto-bind an empty @mention", async () => {
+    const { handler, bindChannel, reply, createRun } = makeHandler({
+      binding: null,
+      defaultRepoBinding: { repoProvider: "github", owner: "amplifthq", repo: "opentag" }
+    });
+    const outcome = await handler(messageEvent({ text: "@_user_1   " }));
+    expect(outcome.status).toBe("ignored_empty_command");
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
   it("falls back to now() when create_time is malformed", async () => {
     const createRun = vi.fn(async (_event: OpenTagEvent) => ({ runId: "run_1" }));
     const handler = createLarkMessageHandler({
