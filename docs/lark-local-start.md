@@ -33,9 +33,9 @@ The script prompts for:
 
 - local project path
 - executor: `codex`, `claude-code`, or `echo`
-- Lark domain: `lark` or `feishu`
-- Lark app setup: `scan` or `manual`
-- a QR scan when using `scan`
+- Lark domain: `lark` or `feishu`, only when no saved app exists
+- Lark app setup: `scan` or `manual`, only when no saved app exists
+- a QR scan when using `scan` for the first time
 - `LARK_APP_ID` and `LARK_APP_SECRET` only when using `manual`
 - `LARK_BOT_OPEN_ID` only when group chat support cannot be detected automatically
 
@@ -43,13 +43,26 @@ It then:
 
 1. Installs workspace dependencies if needed.
 2. Creates a Lark/Feishu Personal Agent from the QR scan, unless manual app
-   credentials are provided.
-3. Generates `.opentag/lark/opentag.local.json`.
-4. Starts the dispatcher.
-5. Registers the local runner.
-6. Binds the selected local checkout.
-7. Starts `opentagd`.
-8. Starts the Lark long-connection ingress.
+   credentials or saved local credentials are available.
+3. Saves Personal Agent credentials to `.opentag/lark/lark.local.json`.
+4. Generates `.opentag/lark/opentag.local.json`.
+5. Starts the dispatcher.
+6. Registers the local runner.
+7. Binds the selected local checkout.
+8. Starts `opentagd`.
+9. Starts the Lark long-connection ingress.
+
+## Restarting
+
+After the first successful QR or manual setup, rerun the same command:
+
+```bash
+./scripts/dev/start-lark.sh
+```
+
+The script reuses `.opentag/lark/lark.local.json`, so you do not need to scan a
+new QR code. To create a new Personal Agent app intentionally, set
+`OPENTAG_LARK_APP_SETUP=scan` or `OPENTAG_LARK_APP_SETUP=manual`.
 
 ## Project Target
 

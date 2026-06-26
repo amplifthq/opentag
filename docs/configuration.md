@@ -281,8 +281,11 @@ tunnel) and creates OpenTag runs from `im.message.receive_v1` events.
 
 For the shortest local setup, run `scripts/dev/start-lark.sh` and choose the QR
 scan path. It creates a Personal Agent app, connects the chat to a local project
-target, and exports these values for the local dispatcher and Lark ingress. Use
-the environment variables below for manual or hosted setups.
+target, saves the Personal Agent credentials to `.opentag/lark/lark.local.json`,
+and exports these values for the local dispatcher and Lark ingress. Rerunning
+the script reuses that saved app unless `OPENTAG_LARK_APP_SETUP=scan` or
+`OPENTAG_LARK_APP_SETUP=manual` is set explicitly. Use the environment variables
+below for manual or hosted setups.
 
 | Variable | Required | Notes |
 | --- | --- | --- |

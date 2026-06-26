@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 STATE_DIR="$ROOT_DIR/.opentag/lark"
 CONFIG_PATH="$STATE_DIR/opentag.local.json"
+LARK_CONFIG_PATH="$STATE_DIR/lark.local.json"
 
 DISPATCHER_PID=""
 DAEMON_PID=""
@@ -180,11 +181,53 @@ if (typeof value === "string") process.stdout.write(value);
 ' <<< "$REGISTRATION_JSON"
 }
 
+saved_lark_field() {
+  local field="$1"
+  if [[ ! -f "$LARK_CONFIG_PATH" ]]; then
+    return
+  fi
+  FIELD="$field" LARK_CONFIG_PATH="$LARK_CONFIG_PATH" node -e '
+const { readFileSync } = require("node:fs");
+let data;
+try {
+  data = JSON.parse(readFileSync(process.env.LARK_CONFIG_PATH, "utf8"));
+} catch (error) {
+  console.error(`Invalid saved Lark config at ${process.env.LARK_CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
+const value = data[process.env.FIELD];
+if (typeof value === "string") process.stdout.write(value);
+'
+}
+
 register_lark_personal_agent() {
   (
     cd "$ROOT_DIR/apps/lark-events"
     node scripts/register-personal-agent.cjs "$LARK_DOMAIN"
   )
+}
+
+write_lark_config() {
+  mkdir -p "$STATE_DIR"
+  LARK_CONFIG_PATH="$LARK_CONFIG_PATH" \
+  LARK_APP_ID="$LARK_APP_ID" \
+  LARK_APP_SECRET="$LARK_APP_SECRET" \
+  LARK_DOMAIN="$LARK_DOMAIN" \
+  LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-}" \
+  node <<'NODE'
+const { chmodSync, writeFileSync } = require("node:fs");
+
+const config = {
+  appId: process.env.LARK_APP_ID,
+  appSecret: process.env.LARK_APP_SECRET,
+  domain: process.env.LARK_DOMAIN,
+  ...(process.env.LARK_BOT_OPEN_ID ? { botOpenId: process.env.LARK_BOT_OPEN_ID } : {}),
+  savedAt: new Date().toISOString()
+};
+
+writeFileSync(process.env.LARK_CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`);
+chmodSync(process.env.LARK_CONFIG_PATH, 0o600);
+NODE
 }
 
 write_config() {
@@ -289,7 +332,43 @@ EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, echo
 validate_executor "$EXECUTOR"
 assert_executor_available "$EXECUTOR"
 
-LARK_DOMAIN="$(read_with_default "Lark domain (lark or feishu)" "${LARK_DOMAIN:-lark}")"
+SAVED_LARK_APP_ID="$(saved_lark_field appId)"
+SAVED_LARK_APP_SECRET="$(saved_lark_field appSecret)"
+SAVED_LARK_DOMAIN="$(saved_lark_field domain)"
+SAVED_LARK_BOT_OPEN_ID="$(saved_lark_field botOpenId)"
+EXPLICIT_LARK_SETUP="${OPENTAG_LARK_APP_SETUP:-}"
+LARK_CONFIG_SOURCE=""
+
+if [[ -n "${LARK_APP_ID:-}" && -n "${LARK_APP_SECRET:-}" ]]; then
+  LARK_DOMAIN="${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}"
+  log "Using LARK_APP_ID and LARK_APP_SECRET from the environment."
+  LARK_CONFIG_SOURCE="environment"
+elif [[ -n "$SAVED_LARK_APP_ID" || -n "$SAVED_LARK_APP_SECRET" ]]; then
+  if [[ -z "$SAVED_LARK_APP_ID" || -z "$SAVED_LARK_APP_SECRET" ]]; then
+    if [[ -z "$EXPLICIT_LARK_SETUP" ]]; then
+      fail "Saved Lark config at $LARK_CONFIG_PATH is incomplete. Delete it or set OPENTAG_LARK_APP_SETUP=scan or manual."
+    fi
+  elif [[ -z "$EXPLICIT_LARK_SETUP" ]]; then
+    LARK_APP_ID="$SAVED_LARK_APP_ID"
+    LARK_APP_SECRET="$SAVED_LARK_APP_SECRET"
+    LARK_DOMAIN="${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}"
+    LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-$SAVED_LARK_BOT_OPEN_ID}"
+    log "Using saved Lark app credentials from $LARK_CONFIG_PATH."
+    LARK_CONFIG_SOURCE="saved"
+  fi
+fi
+
+if [[ -z "$LARK_CONFIG_SOURCE" ]]; then
+  LARK_DOMAIN="$(read_with_default "Lark domain (lark or feishu)" "${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}")"
+  case "$LARK_DOMAIN" in
+    lark|feishu)
+      ;;
+    *)
+      fail "Lark domain must be lark or feishu."
+      ;;
+  esac
+fi
+
 case "$LARK_DOMAIN" in
   lark|feishu)
     ;;
@@ -298,10 +377,10 @@ case "$LARK_DOMAIN" in
     ;;
 esac
 
-if [[ -n "${LARK_APP_ID:-}" && -n "${LARK_APP_SECRET:-}" ]]; then
-  log "Using LARK_APP_ID and LARK_APP_SECRET from the environment."
+if [[ -n "$LARK_CONFIG_SOURCE" ]]; then
+  :
 else
-  LARK_SETUP_MODE="$(read_with_default "Lark app setup (scan or manual)" "${OPENTAG_LARK_APP_SETUP:-scan}")"
+  LARK_SETUP_MODE="$(read_with_default "Lark app setup (scan or manual)" "${EXPLICIT_LARK_SETUP:-scan}")"
   case "$LARK_SETUP_MODE" in
     scan)
       REGISTRATION_JSON="$(register_lark_personal_agent)"
@@ -324,12 +403,13 @@ else
       fail "Lark app setup must be scan or manual."
       ;;
   esac
+  LARK_CONFIG_SOURCE="setup"
 fi
 
 [[ -n "$LARK_APP_ID" ]] || fail "LARK_APP_ID is required."
 [[ -n "$LARK_APP_SECRET" ]] || fail "LARK_APP_SECRET is required."
 
-LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-}"
+LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-$SAVED_LARK_BOT_OPEN_ID}"
 if [[ -n "$LARK_BOT_OPEN_ID" ]]; then
   log "Using LARK_BOT_OPEN_ID for group @mentions."
 else
@@ -343,6 +423,11 @@ else
       log "Direct Lark messages can run without LARK_BOT_OPEN_ID. Group messages require it."
       ;;
   esac
+fi
+
+if [[ "$LARK_CONFIG_SOURCE" != "environment" ]]; then
+  write_lark_config
+  log "Saved Lark app credentials to $LARK_CONFIG_PATH."
 fi
 
 PAIRING_TOKEN="${OPENTAG_PAIRING_TOKEN:-dev_pairing_token}"
