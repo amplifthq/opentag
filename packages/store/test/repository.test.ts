@@ -740,12 +740,14 @@ describe("OpenTag repository", () => {
     });
     expect(decision?.approvedIntentIds).toEqual(["intent_label_bug"]);
 
-    const plan = await repo.createApplyPlan({
+    const planResult = await repo.createApplyPlanOnce({
       id: "apply_protocol",
       proposalId: "proposal_protocol",
       approvalDecisionId: "approval_protocol",
       adapter: "github"
     });
+    expect(planResult?.created).toBe(true);
+    const plan = planResult?.plan;
     expect(plan).toMatchObject({
       id: "apply_protocol",
       proposalId: "proposal_protocol",
@@ -772,6 +774,7 @@ describe("OpenTag repository", () => {
     expect(events.map((event) => event.type)).toContain("proposal.snapshot.created");
     expect(events.map((event) => event.type)).toContain("approval.decision.recorded");
     expect(events.map((event) => event.type)).toContain("apply_plan.created");
+    expect(events.filter((event) => event.type === "apply_plan.created")).toHaveLength(1);
     expect(events.filter((event) => event.type === "success_metric.observed").map((event) => event.payload)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ metric: "time_to_first_useful_artifact" }),

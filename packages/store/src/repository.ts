@@ -616,16 +616,20 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     };
   }
 
-  async function appendApplyPlanCreatedEvent(input: { runId: string; plan: ApplyPlan; createdAt: string }): Promise<void> {
-    await appendRunEvent({
+  function applyPlanCreatedEventRow(input: { runId: string; plan: ApplyPlan; createdAt: string }): typeof runEvents.$inferInsert {
+    return {
       runId: input.runId,
       type: "apply_plan.created",
-      payload: input.plan,
       visibility: "audit",
       importance: "high",
       message: `Created apply plan for ${input.plan.selectedIntentIds.length} intent(s).`,
+      payloadJson: JSON.stringify(input.plan),
       createdAt: input.createdAt
-    });
+    };
+  }
+
+  async function appendApplyPlanCreatedEvent(input: { runId: string; plan: ApplyPlan; createdAt: string }): Promise<void> {
+    await db.insert(runEvents).values(applyPlanCreatedEventRow(input));
   }
 
   return {
@@ -1525,24 +1529,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     }): Promise<{ plan: ApplyPlan; created: boolean } | null> {
       const built = await buildApplyPlan(input);
       if (!built) return null;
-      const insertResult = await db
-        .insert(applyPlans)
-        .values({
-          id: built.plan.id,
-          proposalId: built.plan.proposalId,
-          approvalDecisionId: built.plan.approvalDecisionId,
-          planJson: JSON.stringify(built.plan),
-          createdAt: built.createdAt
-        })
-        .onConflictDoNothing({ target: applyPlans.id });
-      if (insertResult.changes === 0) {
+      const result = db.transaction((tx) => {
+        const insertResult = tx
+          .insert(applyPlans)
+          .values({
+            id: built.plan.id,
+            proposalId: built.plan.proposalId,
+            approvalDecisionId: built.plan.approvalDecisionId,
+            planJson: JSON.stringify(built.plan),
+            createdAt: built.createdAt
+          })
+          .onConflictDoNothing({ target: applyPlans.id })
+          .run();
+        if (insertResult.changes === 0) {
+          return { created: false as const };
+        }
+        tx.insert(runEvents).values(applyPlanCreatedEventRow(built)).run();
+        return { created: true as const };
+      });
+      if (!result.created) {
         const existing = await db.select().from(applyPlans).where(eq(applyPlans.id, input.id)).limit(1).get();
         if (!existing) {
           throw new Error(`Apply plan ${input.id} already exists but could not be loaded`);
         }
         return { plan: ApplyPlanSchema.parse(JSON.parse(existing.planJson)), created: false };
       }
-      await appendApplyPlanCreatedEvent(built);
       return { plan: built.plan, created: true };
     },
 
