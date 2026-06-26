@@ -53,11 +53,10 @@ It then:
 
 ## Project Target
 
-OpenTag runs are currently repository-scoped. The script asks for a local project
-path, then infers the GitHub `owner/repo` from that checkout's `origin` remote
-when it can. That repo name is not a Lark requirement; it is how the local runner
-knows which registered checkout should execute the task. If the repo cannot be
-inferred, the script asks for `owner/repo`.
+The Lark MVP path is local-project first. The script asks for the folder where
+the agent should run and connects the first Lark chat to that local project.
+OpenTag still creates an internal project target so the dispatcher and local
+daemon can route the run, but the first-run path does not require a GitHub repo.
 
 ## First Message
 
@@ -74,12 +73,14 @@ In a group chat, send:
 ```
 
 The first chat that messages the bot is automatically connected to the selected
-project path. This keeps the first-run path short. To point a chat at another
-repository later, send:
+project path. This keeps the first-run path short.
 
-```text
-@OpenTag /bind owner/repo
-```
+## Advanced GitHub Target
+
+GitHub repository settings are optional for the Lark local loop. Use them later
+when you want GitHub-specific behavior such as repository policy, branch push, or
+pull request creation. Set `OPENTAG_REPO_OWNER` and `OPENTAG_REPO_NAME` before
+starting the script to use a GitHub-style project target.
 
 ## Expected Result
 
@@ -93,7 +94,7 @@ repository later, send:
   creation page opened by Lark/Feishu after scanning.
 - Group chat triggers require the bot open id. The script tries to detect it
   automatically; if detection fails, direct chat still works.
-- Code tasks still need a git checkout because the current runner model is
-  repository-scoped.
+- Code tasks still need a local git checkout because the Codex executor creates
+  isolated worktrees for runs.
 - The future package CLI should replace this repo-local script with
   `npx opentag lark`.

@@ -78,25 +78,14 @@ absolute_path() {
   node -e 'const path = require("node:path"); console.log(path.resolve(process.argv[1]));' "$raw"
 }
 
-infer_github_slug() {
+local_project_name() {
   local checkout_path="$1"
-  local remote_url
-  remote_url="$(git -C "$checkout_path" remote get-url origin 2>/dev/null || true)"
-  remote_url="${remote_url%.git}"
-  case "$remote_url" in
-    https://github.com/*)
-      printf '%s' "${remote_url#https://github.com/}"
-      ;;
-    git@github.com:*)
-      printf '%s' "${remote_url#git@github.com:}"
-      ;;
-    ssh://git@github.com/*)
-      printf '%s' "${remote_url#ssh://git@github.com/}"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  node -e '
+const path = require("node:path");
+const rawName = path.basename(process.argv[1]).trim() || "project";
+const safeName = rawName.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+process.stdout.write(safeName);
+' "$checkout_path"
 }
 
 port_is_in_use() {
@@ -271,23 +260,17 @@ CHECKOUT_PATH="$(absolute_path "$CHECKOUT_INPUT")"
 [[ -d "$CHECKOUT_PATH" ]] || fail "Project path does not exist: $CHECKOUT_PATH"
 git -C "$CHECKOUT_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Project path must be a git checkout: $CHECKOUT_PATH"
 
-INFERRED_SLUG="$(infer_github_slug "$CHECKOUT_PATH" || true)"
 if [[ -n "${OPENTAG_REPO_OWNER:-}" && -n "${OPENTAG_REPO_NAME:-}" ]]; then
+  REPO_PROVIDER="${OPENTAG_REPO_PROVIDER:-github}"
   REPO_OWNER="$OPENTAG_REPO_OWNER"
   REPO_NAME="$OPENTAG_REPO_NAME"
-elif [[ -n "$INFERRED_SLUG" && "$INFERRED_SLUG" == */* ]]; then
-  REPO_SLUG="$INFERRED_SLUG"
-  log "Using repo from git origin: $REPO_SLUG"
-  REPO_OWNER="${REPO_SLUG%%/*}"
-  REPO_NAME="${REPO_SLUG#*/}"
+  log "Advanced repository target enabled for PR-capable workflows."
 else
-  REPO_SLUG="$(read_with_default "GitHub repo for this checkout (owner/repo)" "")"
-  [[ "$REPO_SLUG" == */* ]] || fail "Repo must be formatted as owner/repo."
-  REPO_OWNER="${REPO_SLUG%%/*}"
-  REPO_NAME="${REPO_SLUG#*/}"
+  REPO_PROVIDER="local"
+  REPO_OWNER="local"
+  REPO_NAME="$(local_project_name "$CHECKOUT_PATH")"
 fi
 
-REPO_PROVIDER="${OPENTAG_REPO_PROVIDER:-github}"
 BASE_BRANCH="${OPENTAG_BASE_BRANCH:-$(git -C "$CHECKOUT_PATH" branch --show-current 2>/dev/null || true)}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
@@ -364,7 +347,7 @@ write_config
 
 log
 log "Starting OpenTag for Lark"
-log "- Project: $REPO_OWNER/$REPO_NAME"
+log "- Project: $REPO_NAME"
 log "- Path: $CHECKOUT_PATH"
 log "- Executor: $EXECUTOR"
 log "- Dispatcher: $DISPATCHER_URL"
@@ -429,9 +412,7 @@ else
   log "Group chat needs LARK_BOT_OPEN_ID. Direct chat is ready now."
   log
 fi
-log "This script auto-connects the first Lark chat that messages the bot to $DEFAULT_REPO."
-log "To point a chat at another repo later, send:"
-log "  @OpenTag /bind owner/repo"
+log "This script auto-connects the first Lark chat that messages the bot to this local project."
 log
 log "Expected AHA moment:"
 log "1. Lark replies with an acknowledgement."
