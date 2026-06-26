@@ -84,6 +84,13 @@ export async function removeRunWorktree(input: {
   await assertCommandSucceeded(result, "remove run worktree");
 }
 
+export async function deleteRunBranch(input: { runner: CommandRunner; workspacePath: string; branchName: string }): Promise<void> {
+  const result = await input.runner.run("git", ["branch", "-D", input.branchName], {
+    cwd: input.workspacePath
+  });
+  await assertCommandSucceeded(result, "delete empty run branch");
+}
+
 export async function changedFiles(input: { runner: CommandRunner; workspacePath: string }): Promise<string[]> {
   const result = await input.runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
   await assertCommandSucceeded(result, "read changed files");

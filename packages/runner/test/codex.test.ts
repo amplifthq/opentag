@@ -111,6 +111,7 @@ describe("Codex executor", () => {
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "add -- src/demo.ts test/demo.test.ts")).toBe(true);
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "commit -m OpenTag run run_1")).toBe(true);
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `worktree remove --force ${worktreePath}`)).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "branch -D opentag/run_1")).toBe(false);
     const codexExecCall = calls.find((call) => call.command === "codex" && call.args[0] === "exec");
     expect(codexExecCall?.args).toContain("--full-auto");
     expect(codexExecCall?.args).toContain("--ephemeral");
@@ -125,6 +126,61 @@ describe("Codex executor", () => {
     expect(result.summary).toContain("Implemented the requested fix.");
     expect(result.artifacts?.[0]).toMatchObject({ title: "Run branch", uri: "opentag/run_1" });
     expect(result.nextAction).toBe("Review the local branch or pull request.");
+  });
+
+  it("removes the empty run branch when codex completes without changes", async () => {
+    process.env.OPENAI_API_KEY = "sk-secret";
+    const calls: { command: string; args: string[]; cwd?: string }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options?.cwd });
+        if (command === "codex" && args.includes("--version")) {
+          return { exitCode: 0, stdout: "codex 1.0.0", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+          return { exitCode: 0, stdout: "/tmp/demo\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse --verify main^{commit}") {
+          return { exitCode: 0, stdout: "abc123\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "remove") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "branch -D opentag/run_no_change") {
+          return { exitCode: 0, stdout: "Deleted branch opentag/run_no_change\n", stderr: "" };
+        }
+        if (command === "codex" && args[0] === "exec") {
+          return { exitCode: 0, stdout: "Nothing to change.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    const result = await createCodexExecutor({ runner }).run(
+      {
+        runId: "run_no_change",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "hi", intent: "unknown", args: {} },
+        context: [],
+        permissions: [{ scope: "repo:write", reason: "write branch" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    const worktreePath = worktreePathForRun({ workspacePath: "/tmp/demo", runId: "run_no_change" });
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `worktree remove --force ${worktreePath}`)).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "branch -D opentag/run_no_change")).toBe(true);
+    expect(result.changedFiles).toEqual([]);
+    expect(result.artifacts).toEqual([]);
+    expect(result.nextAction).toBe("No file changes were detected.");
   });
 
   it("refuses to run when the workspace has uncommitted changes", async () => {

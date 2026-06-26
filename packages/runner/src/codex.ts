@@ -7,6 +7,7 @@ import {
   cleanupInternalArtifacts,
   commitRunChanges,
   createRunWorktree,
+  deleteRunBranch,
   removeRunWorktree,
   worktreePathForRun
 } from "./git.js";
@@ -106,6 +107,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       const baseBranch = input.baseBranch ?? "main";
       const keepWorktree = input.keepWorktree ?? "on_failure";
       let completed = false;
+      let changedFileCount: number | undefined;
 
       await sink.emit({
         type: "executor.started",
@@ -158,6 +160,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         }
 
         const files = await changedFiles({ runner, workspacePath: worktreePath });
+        changedFileCount = files.length;
         if (files.length > 0) {
           await sink.emit({
             type: "executor.progress",
@@ -184,7 +187,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
           summary: output.slice(-4000),
           changedFiles: files,
           artifacts: [
-            { title: "Run branch", uri: branchName },
+            ...(files.length > 0 ? [{ title: "Run branch", uri: branchName }] : []),
             ...(keepWorktree === "always" ? [{ title: "Run worktree", uri: worktreePath }] : [])
           ],
           verification: [
@@ -206,6 +209,9 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         if (shouldRemove) {
           try {
             await removeRunWorktree({ runner, workspacePath: input.workspacePath, worktreePath });
+            if (completed && changedFileCount === 0) {
+              await deleteRunBranch({ runner, workspacePath: input.workspacePath, branchName });
+            }
           } catch (error) {
             await sink.emit({
               type: "executor.progress",
