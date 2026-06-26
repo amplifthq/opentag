@@ -19,9 +19,20 @@ const githubEvent: OpenTagEvent = {
   target: { mention: "@opentag", agentId: "opentag" },
   command: { rawText: "fix the flaky test", intent: "fix", args: {} },
   context: [
-    { kind: "github.issue", uri: "https://github.com/acme/demo/issues/7", visibility: "public" },
-    { kind: "github.comment", uri: "https://github.com/acme/demo/issues/7#issuecomment-1", visibility: "public" }
+    { provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/7", visibility: "public" },
+    { provider: "github", kind: "comment", uri: "https://github.com/acme/demo/issues/7#issuecomment-1", visibility: "public" }
   ],
+  workItem: {
+    provider: "github",
+    kind: "issue",
+    externalId: "acme/demo#7",
+    uri: "https://github.com/acme/demo/issues/7",
+    ownerContainer: {
+      provider: "github",
+      id: "acme/demo",
+      uri: "https://github.com/acme/demo"
+    }
+  },
   permissions: [
     { scope: "issue:comment", reason: "reply to source thread" },
     { scope: "repo:write", reason: "commit on isolated branch" },
@@ -50,14 +61,15 @@ describe("protocol helpers", () => {
   });
 
   it("does not invent a canonical work item when only a Slack thread is known", () => {
+    const { workItem: _githubWorkItem, ...githubEventWithoutWorkItem } = githubEvent;
     const slackEvent: OpenTagEvent = {
-      ...githubEvent,
+      ...githubEventWithoutWorkItem,
       id: "evt_slack_1",
       source: "slack",
       sourceEventId: "Ev123",
       actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
       context: [
-        { kind: "url", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" },
+        { provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" },
         { kind: "text", uri: "<@U999> fix this", visibility: "organization" }
       ],
       permissions: [{ scope: "chat:postMessage", reason: "reply in Slack thread" }],
@@ -98,7 +110,7 @@ describe("protocol helpers", () => {
         ...githubEvent,
         context: [
           ...githubEvent.context,
-          { kind: "github.repo", uri: "https://github.com/acme/demo", visibility: "public" },
+          { provider: "github", kind: "repo", uri: "https://github.com/acme/demo", visibility: "public" },
           { kind: "url", uri: "https://example.com/background", visibility: "public" }
         ]
       },

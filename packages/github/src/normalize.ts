@@ -1,5 +1,5 @@
 import { parseOpenTagMention, type OpenTagEvent } from "@opentag/core";
-import type { ContextPointer, OpenTagCommand, PermissionGrant } from "@opentag/core";
+import type { ContextPointer, OpenTagCommand, PermissionGrant, WorkItemReference } from "@opentag/core";
 
 export type GitHubIssueCommentInput = {
   id: string;
@@ -98,6 +98,26 @@ function referenceTitle(reference: NonNullable<OpenTagCommand["parsed"]>["refere
   return reference.title ?? "Command file reference";
 }
 
+function githubWorkItem(input: {
+  owner: string;
+  repo: string;
+  kind: "issue" | "pull_request";
+  number: number;
+  uri: string;
+}): WorkItemReference {
+  return {
+    provider: "github",
+    kind: input.kind,
+    externalId: `${input.owner}/${input.repo}#${input.number}`,
+    uri: input.uri,
+    ownerContainer: {
+      provider: "github",
+      id: `${input.owner}/${input.repo}`,
+      uri: `https://github.com/${input.owner}/${input.repo}`
+    }
+  };
+}
+
 function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
   if (!command.parsed) return {};
   return {
@@ -137,17 +157,26 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     command,
     context: [
       {
-        kind: "github.issue",
+        provider: "github",
+        kind: "issue",
         uri: input.issueUrl,
         visibility: input.private ? "private" : "public"
       },
       {
-        kind: "github.comment",
+        provider: "github",
+        kind: "comment",
         uri: input.commentUrl,
         visibility: input.private ? "private" : "public"
       },
       ...contextPointersForCommand(command, input.private)
     ],
+    workItem: githubWorkItem({
+      owner: input.owner,
+      repo: input.repo,
+      kind: "issue",
+      number: input.issueNumber,
+      uri: input.issueUrl
+    }),
     permissions: permissionsForIntent(mention.intent),
     callback: {
       provider: "github",
@@ -193,17 +222,26 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
     command,
     context: [
       {
-        kind: "github.pull_request",
+        provider: "github",
+        kind: "pull_request",
         uri: input.pullRequestUrl,
         visibility: input.private ? "private" : "public"
       },
       {
-        kind: "github.comment",
+        provider: "github",
+        kind: "comment",
         uri: input.commentUrl,
         visibility: input.private ? "private" : "public"
       },
       ...contextPointersForCommand(command, input.private)
     ],
+    workItem: githubWorkItem({
+      owner: input.owner,
+      repo: input.repo,
+      kind: "pull_request",
+      number: input.pullRequestNumber,
+      uri: input.pullRequestUrl
+    }),
     permissions: permissionsForIntent(mention.intent),
     callback: {
       provider: "github",

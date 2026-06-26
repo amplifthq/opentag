@@ -37,22 +37,25 @@ execution architecture. The dispatcher and runner contracts should stay shared.
 
 ## Core Schema Check
 
-Before writing code, check whether `@opentag/core` already supports the provider:
+`@opentag/core` does not whitelist product providers. Adapters may introduce
+provider ids such as `github`, `slack`, `linear`, `jira`, `teams`, or `discord`
+without changing core schema.
 
-- `SourceSchema` currently includes `github`, `slack`, `telegram`, `lark`, `cli`, and
-  `webhook`.
-- `ProviderSchema` currently includes `github`, `slack`, `telegram`, and `lark`.
-- `CallbackRouteSchema` currently includes `github`, `slack`, `telegram`, `lark`, and
-  `webhook`.
-- `ContextPointerSchema` includes GitHub, Slack, Telegram, Lark, file, URL, and text
-  pointers.
+Keep platform vocabulary at the adapter boundary:
 
-If the new app needs a new provider such as Linear, Jira, Teams, or Discord,
-extend the core enums first. Do not emit strings that fail `OpenTagEventSchema`.
+- use `source`, `actor.provider`, and `callback.provider` for the external
+  system that emitted or receives the event;
+- use context pointers shaped as `{ provider?: string, kind: string, uri: string }`;
+- use generic pointer kinds when the object is protocol-native, for example
+  `file`, `url`, or `text`;
+- use provider-scoped pointer kinds for platform objects, for example
+  `{ provider: "github", kind: "issue" }` or
+  `{ provider: "lark", kind: "message" }`;
+- populate `workItem` when the event is attached to a canonical external unit of
+  work such as an issue, pull request, task, ticket, or document.
 
-For prototypes that do not need a first-class provider yet, use an existing
-supported provider only when it is semantically true. Avoid pretending a Jira
-actor is a GitHub actor just to pass validation.
+Do not pretend a Jira actor is a GitHub actor just to reuse an existing adapter.
+The provider string is intentionally open; adapters should be honest and stable.
 
 ## Normalizer Checklist
 
@@ -77,6 +80,7 @@ Populate these fields carefully:
 | `target` | Mention text, `agentId`, and optional executor hint |
 | `command` | Use `parseOpenTagMention` for literal `@opentag`; use `commandFromRawText` after stripping platform mentions |
 | `context` | Durable pointers to the issue, thread, message, file, URL, or text |
+| `workItem` | Canonical external work item when one exists; omit for pure chat mentions that only point to a conversation |
 | `permissions` | Smallest permissions implied by the command |
 | `callback` | Provider, callback URI, and stable `threadKey` when callbacks target a thread |
 | `metadata` | Provider-specific ids needed for binding, routing, or debugging |
@@ -234,7 +238,8 @@ export function normalizeLarkMessageMention(input: LarkMessageMentionInput): Ope
     command,
     context: [
       {
-        kind: "lark.message",
+        provider: "lark",
+        kind: "message",
         uri: `lark://chat/${input.chatId}/message/${input.messageId}`,
         visibility: "organization",
         title: "Lark message"

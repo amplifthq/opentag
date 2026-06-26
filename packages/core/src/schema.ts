@@ -1,18 +1,12 @@
 import { z } from "zod";
 
-export const SourceSchema = z.enum(["github", "slack", "telegram", "lark", "cli", "webhook"]);
-export const ProviderSchema = z.enum(["github", "slack", "telegram", "lark"]);
+export const ProviderSchema = z.string().min(1);
+export const SourceSchema = ProviderSchema;
+export const ContextPointerKindSchema = z.string().min(1).refine((kind) => !kind.includes("."), {
+  message: "Context pointer kind must not include a provider prefix; use the provider field instead."
+});
 export const ExecutorHintSchema = z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]);
-export const PermissionScopeSchema = z.enum([
-  "repo:read",
-  "repo:write",
-  "issue:comment",
-  "chat:postMessage",
-  "pr:create",
-  "pr:update",
-  "runner:local",
-  "network:restricted"
-]);
+export const PermissionScopeSchema = z.string().min(1);
 export const CommandArgValueSchema = z.union([z.string(), z.boolean(), z.number()]);
 export const CommandFlagValueSchema = z.union([CommandArgValueSchema, z.array(CommandArgValueSchema)]);
 
@@ -67,28 +61,8 @@ export const OpenTagCommandSchema = z.object({
 });
 
 export const ContextPointerSchema = z.object({
-  kind: z.enum([
-    "github.repo",
-    "github.issue",
-    "github.pull_request",
-    "github.comment",
-    "github.commit",
-    "slack.channel",
-    "slack.thread",
-    "slack.message",
-    "telegram.chat",
-    "telegram.thread",
-    "telegram.message",
-    "lark.chat",
-    "lark.thread",
-    "lark.message",
-    "lark.doc",
-    "lark.base",
-    "lark.base_record",
-    "file",
-    "url",
-    "text"
-  ]),
+  provider: ProviderSchema.optional(),
+  kind: ContextPointerKindSchema,
   uri: z.string().min(1),
   line: z.number().int().positive().optional(),
   startLine: z.number().int().positive().optional(),
@@ -165,7 +139,7 @@ export const CapabilityContractSchema = z.object({
   capabilityClass: CapabilityClassSchema,
   requiresExplicitIntent: z.boolean(),
   mayAutoApplyByPolicy: z.boolean(),
-  adapterTargets: z.array(z.string().min(1)),
+  adapterTargets: z.array(z.string().min(1)).optional(),
   requiredPermissionScopes: z.array(PermissionGrantSchema.shape.scope),
   requiredExecutorConditions: z.array(z.string().min(1)).optional()
 });
@@ -200,8 +174,8 @@ export const PolicyResolutionSchema = z.object({
 export const AdapterMutationMappingSchema = z.object({
   id: z.string().min(1),
   adapter: z.string().min(1),
-  domain: z.enum(["status", "priority"]),
-  strategy: z.enum(["label"]),
+  domain: z.string().min(1),
+  strategy: z.string().min(1),
   values: z.record(z.string().min(1)),
   description: z.string().min(1).optional()
 });
@@ -216,7 +190,7 @@ export const SuccessMetricNameSchema = z.enum([
 ]);
 
 export const CallbackRouteSchema = z.object({
-  provider: z.enum(["github", "slack", "telegram", "lark", "webhook"]),
+  provider: ProviderSchema,
   uri: z.string().min(1),
   threadKey: z.string().min(1).optional()
 });
@@ -238,7 +212,7 @@ export const WorkItemReferenceSchema = z.object({
 });
 
 export const ConversationAnchorSchema = z.object({
-  provider: z.enum(["github", "slack", "telegram", "lark", "webhook"]),
+  provider: ProviderSchema,
   kind: z.string().min(1),
   externalId: z.string().min(1),
   uri: z.string().min(1),
@@ -427,6 +401,7 @@ export const OpenTagEventSchema = z.object({
   target: AgentTargetSchema,
   command: OpenTagCommandSchema,
   context: z.array(ContextPointerSchema),
+  workItem: WorkItemReferenceSchema.optional(),
   permissions: z.array(PermissionGrantSchema),
   callback: CallbackRouteSchema,
   metadata: z.record(z.unknown())

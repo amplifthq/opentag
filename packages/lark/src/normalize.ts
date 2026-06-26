@@ -146,7 +146,8 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
     command,
     context: [
       {
-        kind: "lark.message",
+        provider: "lark",
+        kind: "message",
         uri: `lark://tenant/${input.tenantKey}/chat/${input.chatId}/message/${input.messageId}`,
         visibility: "organization",
         title: "Lark message"

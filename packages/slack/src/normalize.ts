@@ -154,7 +154,8 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
     command,
     context: [
       {
-        kind: "url",
+        provider: "slack",
+        kind: "message",
         uri: `slack://team/${input.teamId}/channel/${input.channelId}/message/${input.ts}`,
         visibility: "organization",
         title: "Slack message"

@@ -188,7 +188,8 @@ export function normalizeTelegramMessage(input: TelegramMessageInput): OpenTagEv
     command,
     context: [
       {
-        kind: "telegram.message",
+        provider: "telegram",
+        kind: "message",
         uri: `telegram://bot/${input.botId}/chat/${input.chatId}/message/${input.messageId}`,
         visibility: "organization",
         title: "Telegram message"

@@ -687,27 +687,18 @@ Represents the normalized source event:
 Points to source material without implying the whole source should be copied
 into the executor.
 
-Future kinds should include platform-specific sources without making core depend
-on platform SDKs:
+Platform-specific sources should be expressed with an open `provider` plus a
+stable adapter-owned `kind`, without making core depend on platform SDKs or
+platform enum churn:
 
-```text
-github.repo
-github.issue
-github.pull_request
-github.comment
-github.commit
-slack.channel
-slack.thread
-slack.message
-lark.chat
-lark.thread
-lark.message
-lark.doc
-lark.base
-lark.base_record
-file
-url
-text
+```ts
+{ provider: "github", kind: "repo", uri: "https://github.com/acme/demo" }
+{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1" }
+{ provider: "slack", kind: "message", uri: "slack://team/T/channel/C/message/123" }
+{ provider: "lark", kind: "message", uri: "lark://tenant/T/chat/C/message/M" }
+{ kind: "file", uri: "src/index.ts" }
+{ kind: "url", uri: "https://example.com/background" }
+{ kind: "text", uri: "original user-authored text" }
 ```
 
 Adding the kinds does not mean every adapter must implement them immediately.

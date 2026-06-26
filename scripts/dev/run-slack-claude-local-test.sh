@@ -146,6 +146,7 @@ export RUN_ID THREAD_TS
 
 python3 - <<'PY'
 import json, os, urllib.request
+from datetime import datetime, timezone
 
 run_id = os.environ["RUN_ID"]
 thread_ts = os.environ["THREAD_TS"]
@@ -155,7 +156,7 @@ body = {
         "id": f"evt_{run_id}",
         "source": "slack",
         "sourceEventId": f"slack_real_{thread_ts}",
-        "receivedAt": "2026-06-24T21:55:00.000Z",
+        "receivedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "actor": {"provider": "slack", "providerUserId": "U_LOCAL", "handle": "U_LOCAL", "organizationId": os.environ["TEAM_ID"]},
         "target": {"mention": "<@opentag>", "agentId": "opentag", "executorHint": "claude-code"},
         "command": {
@@ -167,7 +168,7 @@ body = {
             "args": {},
         },
         "context": [
-            {"kind": "url", "uri": f"slack://team/{os.environ['TEAM_ID']}/channel/{os.environ['CHANNEL_ID']}/message/{thread_ts}", "visibility": "organization"},
+            {"provider": "slack", "kind": "message", "uri": f"slack://team/{os.environ['TEAM_ID']}/channel/{os.environ['CHANNEL_ID']}/message/{thread_ts}", "visibility": "organization"},
             {"kind": "text", "uri": "OpenTag Slack + Claude Code E2E test: validate real callback and metrics.", "visibility": "organization"},
         ],
         "permissions": [

@@ -64,16 +64,29 @@ try {
     command: { rawText: "triage this issue", intent: "run", args: {} },
     context: [
       {
-        kind: "github.issue",
+        provider: "github",
+        kind: "issue",
         uri: "https://github.com/acme/demo/issues/9",
         visibility: "public"
       },
       {
-        kind: "github.comment",
+        provider: "github",
+        kind: "comment",
         uri: "https://github.com/acme/demo/issues/9#issuecomment-1",
         visibility: "public"
       }
     ],
+    workItem: {
+      provider: "github",
+      kind: "issue",
+      externalId: "acme/demo#9",
+      uri: "https://github.com/acme/demo/issues/9",
+      ownerContainer: {
+        provider: "github",
+        id: "acme/demo",
+        uri: "https://github.com/acme/demo"
+      }
+    },
     permissions: [
       { scope: "issue:comment", reason: "reply to source thread" },
       { scope: "repo:write", reason: "apply approved issue metadata changes" },

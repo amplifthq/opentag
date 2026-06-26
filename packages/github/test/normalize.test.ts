@@ -21,6 +21,8 @@ describe("normalizeGitHubIssueComment", () => {
 
     expect(event?.source).toBe("github");
     expect(event?.command.intent).toBe("fix");
+    expect(event?.context[0]).toMatchObject({ provider: "github", kind: "issue" });
+    expect(event?.workItem).toMatchObject({ provider: "github", kind: "issue", externalId: "acme/demo#1" });
     expect(event?.permissions.map((permission) => permission.scope)).toContain("pr:create");
     expect(event?.metadata).toMatchObject({ owner: "acme", repo: "demo", issueNumber: 1, installationId: 99 });
   });
@@ -43,7 +45,8 @@ describe("normalizeGitHubIssueComment", () => {
     });
 
     expect(event?.id).toBe("evt_github_pr_review_comment_456");
-    expect(event?.context[0]?.kind).toBe("github.pull_request");
+    expect(event?.context[0]).toMatchObject({ provider: "github", kind: "pull_request" });
+    expect(event?.workItem).toMatchObject({ provider: "github", kind: "pull_request", externalId: "acme/demo#2" });
     expect(event?.callback.threadKey).toBe("acme/demo#2");
     expect(event?.metadata).toMatchObject({ pullRequestNumber: 2, installationId: 77 });
   });

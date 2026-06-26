@@ -4,6 +4,31 @@ import { describe, expect, it } from "vitest";
 import { createOpenTagRepository } from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
+function githubIssueContext(issueNumber: number) {
+  return [
+    {
+      provider: "github" as const,
+      kind: "issue" as const,
+      uri: `https://github.com/acme/demo/issues/${issueNumber}`,
+      visibility: "public" as const
+    }
+  ];
+}
+
+function githubIssueWorkItem(issueNumber: number) {
+  return {
+    provider: "github" as const,
+    kind: "issue" as const,
+    externalId: `acme/demo#${issueNumber}`,
+    uri: `https://github.com/acme/demo/issues/${issueNumber}`,
+    ownerContainer: {
+      provider: "github" as const,
+      id: "acme/demo",
+      uri: "https://github.com/acme/demo"
+    }
+  };
+}
+
 describe("OpenTag repository", () => {
   it("creates and claims a run once", async () => {
     const sqlite = new Database(":memory:");
@@ -29,7 +54,8 @@ describe("OpenTag repository", () => {
         actor: { provider: "github", providerUserId: "42", handle: "octocat" },
         target: { mention: "@opentag", agentId: "opentag" },
         command: { rawText: "fix this", intent: "fix", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+        context: githubIssueContext(1),
+        workItem: githubIssueWorkItem(1),
         permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
         callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
         metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
@@ -410,7 +436,8 @@ describe("OpenTag repository", () => {
         actor: { provider: "github", providerUserId: "42", handle: "octocat" },
         target: { mention: "@opentag", agentId: "opentag" },
         command: { rawText: "fix this", intent: "fix", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+        context: githubIssueContext(1),
+        workItem: githubIssueWorkItem(1),
         permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
         callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
         metadata: { owner: "acme", repo: "demo" }
@@ -593,7 +620,8 @@ describe("OpenTag repository", () => {
         actor: { provider: "github", providerUserId: "42", handle: "octocat" },
         target: { mention: "@opentag", agentId: "opentag" },
         command: { rawText: "label this bug", intent: "run", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/2", visibility: "public" }],
+        context: githubIssueContext(2),
+        workItem: githubIssueWorkItem(2),
         permissions: [
           { scope: "issue:comment", reason: "reply to source thread" },
           { scope: "repo:write", reason: "mutate issue labels after approval" }
@@ -757,7 +785,8 @@ describe("OpenTag repository", () => {
         actor: { provider: "github", providerUserId: "42", handle: "octocat" },
         target: { mention: "@opentag", agentId: "opentag" },
         command: { rawText: "label this", intent: "run", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/4", visibility: "public" }],
+        context: githubIssueContext(4),
+        workItem: githubIssueWorkItem(4),
         permissions: [
           { scope: "issue:comment", reason: "reply to source thread" },
           { scope: "repo:write", reason: "mutate labels after approval" }
@@ -860,7 +889,8 @@ describe("OpenTag repository", () => {
         actor: { provider: "github", providerUserId: "42", handle: "octocat" },
         target: { mention: "@opentag", agentId: "opentag" },
         command: { rawText: "mark blocked", intent: "run", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/5", visibility: "public" }],
+        context: githubIssueContext(5),
+        workItem: githubIssueWorkItem(5),
         permissions: [
           { scope: "issue:comment", reason: "reply to source thread" },
           { scope: "repo:write", reason: "mutate status after approval" }
@@ -928,7 +958,8 @@ describe("OpenTag repository", () => {
       actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
       target: { mention: "@opentag", agentId: "opentag" },
       command: { rawText: "triage this", intent: "run" as const, args: {} },
-      context: [{ kind: "github.issue" as const, uri: "https://github.com/acme/demo/issues/3", visibility: "public" as const }],
+      context: githubIssueContext(3),
+      workItem: githubIssueWorkItem(3),
       permissions: [
         { scope: "issue:comment" as const, reason: "reply to source thread" },
         { scope: "repo:write" as const, reason: "mutate issue metadata after approval" }

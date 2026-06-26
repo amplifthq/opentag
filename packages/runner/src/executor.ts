@@ -1,4 +1,4 @@
-import type { ContextPacket, ContextPointer, OpenTagCommand, OpenTagRunResult, PermissionGrant } from "@opentag/core";
+import { contextPointerLabel, type ContextPacket, type ContextPointer, type OpenTagCommand, type OpenTagRunResult, type PermissionGrant } from "@opentag/core";
 
 export type ExecutorEvent = {
   type: "executor.started" | "executor.progress" | "executor.completed" | "executor.failed";
@@ -35,7 +35,7 @@ export function renderContextPacketForPrompt(packet?: ContextPacket): string[] {
   if (packet.sources?.length) {
     lines.push("- selected sources:");
     for (const source of packet.sources) {
-      lines.push(`  - [${source.role}] ${source.pointer.kind}: ${source.pointer.uri}`);
+      lines.push(`  - [${source.role}] ${contextPointerLabel(source.pointer)}: ${source.pointer.uri}`);
       lines.push(`    reason: ${source.reason}`);
     }
   }

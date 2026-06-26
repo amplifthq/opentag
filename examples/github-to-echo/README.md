@@ -73,8 +73,19 @@ curl -X POST http://localhost:3030/v1/runs \
       "target": { "mention": "@opentag", "agentId": "opentag" },
       "command": { "rawText": "fix this", "intent": "fix", "args": {} },
       "context": [
-        { "kind": "github.issue", "uri": "https://github.com/acme/demo/issues/1", "visibility": "public" }
+        { "provider": "github", "kind": "issue", "uri": "https://github.com/acme/demo/issues/1", "visibility": "public" }
       ],
+      "workItem": {
+        "provider": "github",
+        "kind": "issue",
+        "externalId": "acme/demo#1",
+        "uri": "https://github.com/acme/demo/issues/1",
+        "ownerContainer": {
+          "provider": "github",
+          "id": "acme/demo",
+          "uri": "https://github.com/acme/demo"
+        }
+      },
       "permissions": [
         { "scope": "issue:comment", "reason": "reply to source thread" }
       ],

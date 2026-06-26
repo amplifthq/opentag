@@ -200,9 +200,20 @@ const body = {
       args: {}
     },
     context: [
-      { kind: "github.repo", uri: "${REPO_URL}", visibility: "public" },
-      { kind: "github.issue", uri: "${ISSUE_URL}", visibility: "public" }
+      { provider: "github", kind: "repo", uri: "${REPO_URL}", visibility: "public" },
+      { provider: "github", kind: "issue", uri: "${ISSUE_URL}", visibility: "public" }
     ],
+    workItem: {
+      provider: "github",
+      kind: "issue",
+      externalId: "${OWNER}/${REPO}#${ISSUE_NUMBER}",
+      uri: "${ISSUE_URL}",
+      ownerContainer: {
+        provider: "github",
+        id: "${OWNER}/${REPO}",
+        uri: "${REPO_URL}"
+      }
+    },
     permissions: [
       { scope: "issue:comment", reason: "reply to the source GitHub thread" },
       { scope: "runner:local", reason: "execute the run on a paired local daemon" },

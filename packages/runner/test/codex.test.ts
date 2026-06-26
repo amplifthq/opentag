@@ -74,10 +74,10 @@ describe("Codex executor", () => {
         runId: "run_1",
         workspacePath: "/tmp/demo",
         command: { rawText: "fix this", intent: "fix", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+        context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
         contextPacket: {
           summary: "Fix the requested issue with the narrowest possible change.",
-          sourcePointers: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+          sourcePointers: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
           facts: [{ text: "CI is failing on the linked issue." }],
           exclusions: ["Do not touch unrelated operational files."]
         },

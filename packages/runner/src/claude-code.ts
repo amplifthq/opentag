@@ -1,4 +1,4 @@
-import type { ContextPacket, ContextPointer } from "@opentag/core";
+import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
@@ -14,7 +14,7 @@ export type ClaudeCodeExecutorOptions = {
 
 function contextLines(context: ContextPointer[]): string {
   if (!context.length) return "No additional context pointers were provided.";
-  return context.map((pointer) => `- ${pointer.kind}: ${pointer.uri}`).join("\n");
+  return context.map((pointer) => `- ${contextPointerLabel(pointer)}: ${pointer.uri}`).join("\n");
 }
 
 function buildPrompt(input: {

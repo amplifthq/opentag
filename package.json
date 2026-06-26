@@ -5,12 +5,12 @@
   "packageManager": "pnpm@9.15.0",
   "license": "MIT",
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "corepack pnpm -r build",
     "test": "vitest run",
     "typecheck": "tsc -b",
-    "lint": "pnpm -r lint",
-    "smoke:protocol": "NODE_OPTIONS='--conditions=development' pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
-    "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts"
+    "lint": "corepack pnpm -r lint",
+    "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
+    "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

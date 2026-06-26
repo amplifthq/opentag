@@ -38,7 +38,8 @@ describe("OpenTagEventSchema", () => {
       },
       context: [
         {
-          kind: "github.issue",
+          provider: "github",
+          kind: "issue",
           uri: "https://github.com/acme/demo/issues/1",
           visibility: "public"
         }
@@ -81,7 +82,8 @@ describe("OpenTagEventSchema", () => {
       },
       context: [
         {
-          kind: "telegram.message",
+          provider: "telegram",
+          kind: "message",
           uri: "telegram://bot/123/chat/456/message/789",
           visibility: "organization"
         }
@@ -102,6 +104,91 @@ describe("OpenTagEventSchema", () => {
 
     expect(parsed.source).toBe("telegram");
     expect(parsed.callback.provider).toBe("telegram");
+  });
+
+  it("accepts adapter-defined providers and context kinds without changing core", () => {
+    const parsed = OpenTagEventSchema.parse({
+      id: "evt_linear_1",
+      source: "linear",
+      sourceEventId: "comment_123",
+      receivedAt: "2026-06-25T00:00:00.000Z",
+      actor: {
+        provider: "linear",
+        providerUserId: "user_123"
+      },
+      target: {
+        mention: "@opentag",
+        agentId: "opentag"
+      },
+      command: {
+        rawText: "triage this",
+        intent: "run",
+        args: {}
+      },
+      context: [
+        {
+          provider: "linear",
+          kind: "issue",
+          uri: "linear://issue/ENG-123",
+          visibility: "organization"
+        }
+      ],
+      permissions: [
+        {
+          scope: "issue:comment",
+          reason: "reply to source thread"
+        }
+      ],
+      callback: {
+        provider: "linear",
+        uri: "linear://comment/123"
+      },
+      metadata: {}
+    });
+
+    expect(parsed.context[0]).toMatchObject({ provider: "linear", kind: "issue" });
+  });
+
+  it("rejects legacy provider-prefixed context kinds", () => {
+    expect(() =>
+      OpenTagEventSchema.parse({
+        id: "evt_legacy_kind",
+        source: "github",
+        sourceEventId: "comment_legacy_kind",
+        receivedAt: "2026-06-25T00:00:00.000Z",
+        actor: {
+          provider: "github",
+          providerUserId: "42"
+        },
+        target: {
+          mention: "@opentag",
+          agentId: "opentag"
+        },
+        command: {
+          rawText: "fix this",
+          intent: "fix",
+          args: {}
+        },
+        context: [
+          {
+            kind: "github.issue",
+            uri: "https://github.com/acme/demo/issues/1",
+            visibility: "public"
+          }
+        ],
+        permissions: [
+          {
+            scope: "issue:comment",
+            reason: "reply to source thread"
+          }
+        ],
+        callback: {
+          provider: "github",
+          uri: "https://api.github.com/repos/acme/demo/issues/1/comments"
+        },
+        metadata: {}
+      })
+    ).toThrow(/provider prefix/);
   });
 
   it("accepts the current public executor hints", () => {
@@ -195,7 +282,7 @@ describe("Agent Work Protocol schemas", () => {
   it("accepts a minimal context packet with assembly stages", () => {
     const packet = ContextPacketSchema.parse({
       summary: "Investigate the failing test on the linked issue.",
-      sourcePointers: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/123", visibility: "public" }],
+      sourcePointers: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/123", visibility: "public" }],
       intent: {
         rawText: "@opentag investigate flaky test",
         normalizedIntent: "investigate",
@@ -203,7 +290,7 @@ describe("Agent Work Protocol schemas", () => {
       },
       sources: [
         {
-          pointer: { kind: "github.issue", uri: "https://github.com/acme/demo/issues/123", visibility: "public" },
+          pointer: { provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/123", visibility: "public" },
           role: "primary",
           included: true,
           reason: "The issue is the primary source for the request."

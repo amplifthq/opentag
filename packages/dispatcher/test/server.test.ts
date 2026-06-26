@@ -9,7 +9,18 @@ const validEvent = {
   actor: { provider: "github", providerUserId: "42", handle: "octocat" },
   target: { mention: "@opentag", agentId: "opentag" },
   command: { rawText: "fix this", intent: "fix", args: {} },
-  context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+  context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+  workItem: {
+    provider: "github",
+    kind: "issue",
+    externalId: "acme/demo#1",
+    uri: "https://github.com/acme/demo/issues/1",
+    ownerContainer: {
+      provider: "github",
+      id: "acme/demo",
+      uri: "https://github.com/acme/demo"
+    }
+  },
   permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
   callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
   metadata: { owner: "acme", repo: "demo" }

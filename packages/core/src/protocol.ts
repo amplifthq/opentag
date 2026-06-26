@@ -44,6 +44,10 @@ function contextPacketSourceRole(classification: ContextSourceClassification): "
   }
 }
 
+export function contextPointerLabel(pointer: ContextPointer): string {
+  return pointer.provider ? `${pointer.provider}.${pointer.kind}` : pointer.kind;
+}
+
 export type ContextPacketAssemblyOptions = {
   budgetTokens?: number;
   risks?: string[];
@@ -121,19 +125,11 @@ function classifyContextPointer(pointer: ContextPointer): ClassifiedContextPoint
   if (pointer.kind === "text") {
     return { pointer, classification: "primary_evidence", reason: "Original user-authored text is primary evidence." };
   }
-  if (
-    pointer.kind === "github.issue" ||
-    pointer.kind === "github.pull_request" ||
-    pointer.kind === "github.comment" ||
-    pointer.kind === "slack.thread" ||
-    pointer.kind === "slack.message" ||
-    pointer.kind === "telegram.thread" ||
-    pointer.kind === "telegram.message"
-  ) {
-    return { pointer, classification: "primary_evidence", reason: `${pointer.kind} is directly attached to the invocation.` };
+  if (["issue", "pull_request", "comment", "thread", "message"].includes(pointer.kind)) {
+    return { pointer, classification: "primary_evidence", reason: `${contextPointerLabel(pointer)} is directly attached to the invocation.` };
   }
-  if (pointer.kind === "github.repo" || pointer.kind === "file" || pointer.kind === "url") {
-    return { pointer, classification: "supporting_context", reason: `${pointer.kind} supports execution but is not itself the request.` };
+  if (["repo", "file", "url"].includes(pointer.kind)) {
+    return { pointer, classification: "supporting_context", reason: `${contextPointerLabel(pointer)} supports execution but is not itself the request.` };
   }
   return { pointer, classification: "supporting_context", reason: "Pointer is relevant context." };
 }
@@ -162,7 +158,7 @@ export function preserveContextFacts(event: OpenTagEvent, classified: Classified
       confidence: "observed"
     },
     ...classified.map((entry) => ({
-      text: `${entry.classification}: ${entry.pointer.kind}`,
+      text: `${entry.classification}: ${contextPointerLabel(entry.pointer)}`,
       sourceUri: entry.pointer.uri,
       source: entry.pointer,
       confidence: "observed" as const
@@ -257,7 +253,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "telegram", "lark", "webhook"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   },
   {
@@ -266,7 +261,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "telegram", "lark", "webhook"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   },
   {
@@ -275,7 +269,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "external_write",
     requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github"],
     requiredPermissionScopes: ["pr:create"],
     requiredExecutorConditions: ["isolated branch exists"]
   },
@@ -285,7 +278,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "external_write",
     requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "linear", "jira", "lark"],
     requiredPermissionScopes: ["repo:write"]
   },
   {
@@ -294,7 +286,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "external_write",
     requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "linear", "jira", "lark"],
     requiredPermissionScopes: ["repo:write"]
   },
   {
@@ -303,7 +294,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "external_write",
     requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["linear", "jira", "lark"],
     requiredPermissionScopes: ["repo:write"]
   },
   {
@@ -312,7 +302,6 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "external_write",
     requiresExplicitIntent: true,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "linear", "jira", "lark"],
     requiredPermissionScopes: ["repo:write"]
   },
   {
@@ -321,77 +310,32 @@ export const DefaultCapabilityContracts = [
     capabilityClass: "callback",
     requiresExplicitIntent: false,
     mayAutoApplyByPolicy: true,
-    adapterTargets: ["github", "slack", "telegram", "lark"],
     requiredPermissionScopes: ["issue:comment", "chat:postMessage"]
   }
 ] satisfies CapabilityContract[];
 
-function firstContextUri(event: OpenTagEvent, kind: ContextPointer["kind"]): string | undefined {
-  return event.context.find((pointer) => pointer.kind === kind)?.uri;
-}
-
-function stringMetadata(event: OpenTagEvent, key: string): string | undefined {
-  const value = event.metadata[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function numberMetadata(event: OpenTagEvent, key: string): number | undefined {
-  const value = event.metadata[key];
-  return typeof value === "number" ? value : undefined;
+function firstContextUri(event: OpenTagEvent, input: { provider?: string; kind: string }): string | undefined {
+  return event.context.find((pointer) => pointer.kind === input.kind && (!input.provider || pointer.provider === input.provider))?.uri;
 }
 
 export function workItemReferenceFromEvent(event: OpenTagEvent): WorkItemReference | undefined {
-  const owner = stringMetadata(event, "owner");
-  const repo = stringMetadata(event, "repo");
-  if (!owner || !repo) return undefined;
-
-  const issueNumber = numberMetadata(event, "issueNumber");
-  if (event.source === "github" && issueNumber !== undefined) {
-    return {
-      provider: "github",
-      kind: "issue",
-      externalId: `${owner}/${repo}#${issueNumber}`,
-      uri: firstContextUri(event, "github.issue") ?? `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
-      ownerContainer: {
-        provider: "github",
-        id: `${owner}/${repo}`,
-        uri: `https://github.com/${owner}/${repo}`
-      }
-    };
-  }
-
-  const pullRequestNumber = numberMetadata(event, "pullRequestNumber");
-  if (event.source === "github" && pullRequestNumber !== undefined) {
-    return {
-      provider: "github",
-      kind: "pull_request",
-      externalId: `${owner}/${repo}#${pullRequestNumber}`,
-      uri: firstContextUri(event, "github.pull_request") ?? `https://github.com/${owner}/${repo}/pull/${pullRequestNumber}`,
-      ownerContainer: {
-        provider: "github",
-        id: `${owner}/${repo}`,
-        uri: `https://github.com/${owner}/${repo}`
-      }
-    };
-  }
-
-  return undefined;
+  return event.workItem;
 }
 
 export function primaryConversationAnchorFromEvent(event: OpenTagEvent): ConversationAnchor {
-  const structuredThreadKey =
-    event.callback.provider === "slack" || event.callback.provider === "telegram" ? event.callback.threadKey : undefined;
+  const sourcePointer =
+    firstContextUri(event, { provider: event.callback.provider, kind: "comment" }) ??
+    firstContextUri(event, { provider: event.callback.provider, kind: "message" }) ??
+    firstContextUri(event, { provider: event.callback.provider, kind: "thread" }) ??
+    firstContextUri(event, { kind: "url" });
   return {
     provider: event.callback.provider,
-    kind: event.callback.provider === "slack" || event.callback.provider === "telegram" ? "thread" : `${event.callback.provider}_thread`,
+    kind: event.callback.threadKey ? "thread" : `${event.callback.provider}_thread`,
     externalId: event.callback.threadKey ?? event.callback.uri,
-    uri:
-      firstContextUri(event, "github.comment") ??
-      firstContextUri(event, "url") ??
-      event.callback.uri,
+    uri: sourcePointer ?? event.callback.uri,
     controlPlane: true,
     canApprove: true,
-    ...(structuredThreadKey ? { threadKey: structuredThreadKey } : {})
+    ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {})
   };
 }
 
@@ -522,7 +466,7 @@ export function preflightMutationIntent(input: {
       }
     };
   }
-  if (input.adapter && !capability.adapterTargets.includes(input.adapter)) {
+  if (input.adapter && capability.adapterTargets && !capability.adapterTargets.includes(input.adapter)) {
     return {
       capability,
       outcome: {

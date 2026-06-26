@@ -281,13 +281,14 @@ Responsibilities:
 ```ts
 type OpenTagEvent = {
   id: string;
-  source: "github" | "slack" | "lark" | "cli" | "webhook";
+  source: string;
   sourceEventId: string;
   receivedAt: string;
   actor: ActorIdentity;
   target: AgentTarget;
   command: OpenTagCommand;
   context: ContextPointer[];
+  workItem?: WorkItemReference;
   permissions: PermissionGrant[];
   callback: CallbackRoute;
   metadata: Record<string, unknown>;
@@ -298,7 +299,7 @@ type OpenTagEvent = {
 
 ```ts
 type ActorIdentity = {
-  provider: "github" | "slack" | "lark";
+  provider: string;
   providerUserId: string;
   handle?: string;
   displayName?: string;
@@ -331,15 +332,8 @@ type OpenTagCommand = {
 
 ```ts
 type ContextPointer = {
-  kind:
-    | "github.repo"
-    | "github.issue"
-    | "github.pull_request"
-    | "github.comment"
-    | "github.commit"
-    | "file"
-    | "url"
-    | "text";
+  provider?: string;
+  kind: string; // e.g. "issue", "pull_request", "message", "file", "url", "text"
   uri: string;
   title?: string;
   visibility: "public" | "private" | "organization";
@@ -350,14 +344,7 @@ type ContextPointer = {
 
 ```ts
 type PermissionGrant = {
-  scope:
-    | "repo:read"
-    | "repo:write"
-    | "issue:comment"
-    | "pr:create"
-    | "pr:update"
-    | "runner:local"
-    | "network:restricted";
+  scope: string;
   reason: string;
   expiresAt?: string;
 };
@@ -367,7 +354,7 @@ type PermissionGrant = {
 
 ```ts
 type CallbackRoute = {
-  provider: "github" | "slack" | "lark" | "webhook";
+  provider: string;
   uri: string;
   threadKey?: string;
 };

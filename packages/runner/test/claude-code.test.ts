@@ -56,10 +56,10 @@ describe("Claude Code executor", () => {
         runId: "run_1",
         workspacePath: "/tmp/demo",
         command: { rawText: "fix this", intent: "fix", args: {} },
-        context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+        context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
         contextPacket: {
           summary: "Use the linked issue and propose the narrowest fix.",
-          sourcePointers: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
+          sourcePointers: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
           intent: {
             rawText: "fix this",
             normalizedIntent: "fix",
@@ -67,7 +67,7 @@ describe("Claude Code executor", () => {
           },
           sources: [
             {
-              pointer: { kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" },
+              pointer: { provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" },
               role: "primary",
               included: true,
               reason: "The issue is the main source for the request."
