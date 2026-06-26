@@ -165,7 +165,16 @@ json_field() {
   local field="$1"
   FIELD="$field" node -e '
 const fs = require("node:fs");
-const data = JSON.parse(fs.readFileSync(0, "utf8"));
+const input = fs.readFileSync(0, "utf8");
+const jsonLine = input
+  .split(/\r?\n/)
+  .map((line) => line.trim())
+  .filter((line) => line.startsWith("{") && line.endsWith("}"))
+  .at(-1);
+if (!jsonLine) {
+  throw new Error("Lark Personal Agent registration did not return JSON credentials.");
+}
+const data = JSON.parse(jsonLine);
 const value = data[process.env.FIELD];
 if (typeof value === "string") process.stdout.write(value);
 ' <<< "$REGISTRATION_JSON"
