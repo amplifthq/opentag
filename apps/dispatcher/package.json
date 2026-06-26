@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@opentag/dispatcher": "workspace:*"
+    "@opentag/dispatcher": "workspace:*",
+    "@opentag/local-runtime": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

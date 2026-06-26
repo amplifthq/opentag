@@ -8,6 +8,7 @@
   "references": [
     { "path": "../../packages/client" },
     { "path": "../../packages/core" },
+    { "path": "../../packages/local-runtime" },
     { "path": "../../packages/runner" }
   ]
 }

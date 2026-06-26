@@ -1,0 +1,72 @@
+{
+  "name": "@opentag/local-runtime",
+  "version": "0.1.0",
+  "description": "Local OpenTag dispatcher, daemon, and diagnostics runtime helpers.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./config": {
+      "development": "./src/config.ts",
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./daemon": {
+      "development": "./src/daemon.ts",
+      "types": "./dist/daemon.d.ts",
+      "import": "./dist/daemon.js"
+    },
+    "./dispatcher": {
+      "development": "./src/dispatcher.ts",
+      "types": "./dist/dispatcher.d.ts",
+      "import": "./dist/dispatcher.js"
+    },
+    "./doctor": {
+      "development": "./src/doctor.ts",
+      "types": "./dist/doctor.d.ts",
+      "import": "./dist/doctor.js"
+    },
+    "./runtime": {
+      "development": "./src/runtime.ts",
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "runtime",
+    "daemon",
+    "dispatcher",
+    "cli"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "@opentag/client": "workspace:*",
+    "@opentag/core": "workspace:*",
+    "@opentag/dispatcher": "workspace:*",
+    "@opentag/github": "workspace:*",
+    "@opentag/runner": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}

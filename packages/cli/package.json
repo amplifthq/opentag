@@ -1,8 +1,11 @@
 {
-  "name": "@opentag/lark",
+  "name": "@opentag/cli",
   "version": "0.1.0",
-  "description": "Lark/Feishu message normalization and callback helpers for OpenTag.",
+  "description": "OpenTag command line interface.",
   "type": "module",
+  "bin": {
+    "opentag": "./dist/index.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -21,10 +24,9 @@
   },
   "keywords": [
     "opentag",
-    "lark",
-    "feishu",
-    "events",
-    "agents"
+    "cli",
+    "agents",
+    "lark"
   ],
   "license": "MIT",
   "scripts": {
@@ -32,12 +34,15 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.68.0",
     "@opentag/client": "workspace:*",
-    "@opentag/core": "workspace:*"
+    "@opentag/core": "workspace:*",
+    "@opentag/lark": "workspace:*",
+    "@opentag/local-runtime": "workspace:*",
+    "commander": "^12.1.0",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
   }
 }

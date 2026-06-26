@@ -32,6 +32,9 @@ importers:
       '@opentag/dispatcher':
         specifier: workspace:*
         version: link:../../packages/dispatcher
+      '@opentag/local-runtime':
+        specifier: workspace:*
+        version: link:../../packages/local-runtime
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.12
@@ -110,6 +113,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@opentag/local-runtime':
+        specifier: workspace:*
+        version: link:../../packages/local-runtime
       '@opentag/runner':
         specifier: workspace:*
         version: link:../../packages/runner
@@ -227,6 +233,34 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/cli:
+    dependencies:
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opentag/lark':
+        specifier: workspace:*
+        version: link:../lark
+      '@opentag/local-runtime':
+        specifier: workspace:*
+        version: link:../local-runtime
+      commander:
+        specifier: ^12.1.0
+        version: 12.1.0
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/client:
     dependencies:
       '@opentag/core':
@@ -317,6 +351,9 @@ importers:
       '@larksuiteoapi/node-sdk':
         specifier: ^1.68.0
         version: 1.68.0
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
@@ -326,6 +363,37 @@ importers:
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
       typescript:
         specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/local-runtime:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      '@opentag/dispatcher':
+        specifier: workspace:*
+        version: link:../dispatcher
+      '@opentag/github':
+        specifier: workspace:*
+        version: link:../github
+      '@opentag/runner':
+        specifier: workspace:*
+        version: link:../runner
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
         version: 5.9.3
 
   packages/runner:

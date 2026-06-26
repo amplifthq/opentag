@@ -1,7 +1,7 @@
 import type { ContextPacket, OpenTagEvent, OpenTagRun } from "@opentag/core";
 import { createEchoExecutor } from "@opentag/runner";
 import { describe, expect, it } from "vitest";
-import { runOneDaemonIteration } from "../src/daemon.js";
+import { runOneDaemonIteration, serveDaemon } from "../src/daemon.js";
 
 const run: OpenTagRun = {
   id: "run_1",
@@ -102,6 +102,41 @@ describe("opentagd", () => {
     });
 
     expect(didWork).toBe(false);
+  });
+
+  it("exits the daemon loop when the abort signal is triggered while idle", async () => {
+    const abortController = new AbortController();
+    let claimCount = 0;
+
+    const daemonPromise = serveDaemon({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: { echo: createEchoExecutor() },
+      pollIntervalMs: 10_000,
+      signal: abortController.signal,
+      client: {
+        async claim() {
+          claimCount += 1;
+          abortController.abort();
+          return null;
+        },
+        async markRunning() {
+          throw new Error("should not run");
+        },
+        async heartbeat() {
+          throw new Error("should not run");
+        },
+        async progress() {
+          throw new Error("should not run");
+        },
+        async complete() {
+          throw new Error("should not run");
+        }
+      }
+    });
+
+    await expect(daemonPromise).resolves.toBeUndefined();
+    expect(claimCount).toBe(1);
   });
 
   it("refuses to execute when the repo has no local workspace mapping", async () => {

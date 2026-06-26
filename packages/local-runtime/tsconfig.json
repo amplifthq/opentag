@@ -6,7 +6,10 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../packages/dispatcher" },
-    { "path": "../../packages/local-runtime" }
+    { "path": "../client" },
+    { "path": "../core" },
+    { "path": "../dispatcher" },
+    { "path": "../github" },
+    { "path": "../runner" }
   ]
 }

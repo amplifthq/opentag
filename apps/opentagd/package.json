@@ -16,6 +16,7 @@
     "@opentag/core": "workspace:*",
     "@opentag/dispatcher": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/local-runtime": "workspace:*",
     "@opentag/runner": "workspace:*",
     "commander": "^12.1.0",
     "zod": "^3.24.1"
