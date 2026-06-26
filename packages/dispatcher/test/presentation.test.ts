@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 
 describe("default callback presentation", () => {
-  it("keeps Slack progress audit-only while allowing GitHub progress delivery", () => {
+  it("keeps chat progress audit-only while allowing GitHub and Telegram progress delivery", () => {
     const presentation = createDefaultCallbackPresentation();
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
+    expect(presentation.shouldDeliverProgress("lark")).toBe(false);
     expect(presentation.shouldDeliverProgress("telegram")).toBe(true);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
   });

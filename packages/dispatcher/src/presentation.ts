@@ -22,7 +22,7 @@ export type CallbackPresentation = {
 export function createDefaultCallbackPresentation(): CallbackPresentation {
   return {
     shouldDeliverProgress(provider) {
-      return provider !== "slack";
+      return provider !== "slack" && provider !== "lark";
     },
 
     acknowledgement(input) {

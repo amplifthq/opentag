@@ -590,6 +590,101 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("renders Lark callbacks as plain text and keeps progress audit-only", async () => {
+    const delivered: { kind: string; body: string }[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+
+    const larkEvent = {
+      ...validEvent,
+      id: "evt_lark_1",
+      source: "lark",
+      sourceEventId: "EvLark123",
+      actor: { provider: "lark", providerUserId: "ou_123", handle: "Felix", organizationId: "tenant_123" },
+      permissions: [{ scope: "chat:postMessage", reason: "reply in thread" }],
+      callback: {
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tk_123|oc_chat|om_msg"
+      }
+    };
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_lark_1", event: larkEvent })
+    });
+    expect(createResponse.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const progressResponse = await app.request("/v1/runners/runner_1/runs/run_lark_1/progress", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "executor.progress", message: "Echo executor started", at: "2026-06-24T00:00:01.000Z" })
+    });
+    expect(progressResponse.status).toBe(200);
+
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_lark_1/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        result: {
+          conclusion: "success",
+          summary: "Echoed OpenTag command: introduce yourself",
+          verification: [{ command: "echo", outcome: "passed" }]
+        }
+      })
+    });
+    expect(completeResponse.status).toBe(200);
+
+    expect(delivered).toEqual([
+      { kind: "acknowledgement", body: "I picked this up: run_lark_1" },
+      {
+        kind: "final",
+        body: "Finished with success.\n\nEchoed OpenTag command: introduce yourself\n\nVerification\n- echo: passed"
+      }
+    ]);
+
+    const eventsResponse = await app.request("/v1/runs/run_lark_1/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "admission.decided",
+      "run.created",
+      "context_packet.generated",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.delivered",
+      "run.claimed",
+      "run.progress",
+      "run.completed",
+      "callback.final.queued",
+      "callback.final.delivered"
+    ]);
+    expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
+      visibility: "audit",
+      importance: "normal",
+      message: "Echo executor started"
+    });
+  });
+
   it("records proposal approval decisions and creates apply plans", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     await app.request("/v1/repo-bindings", {
