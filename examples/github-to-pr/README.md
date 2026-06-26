@@ -58,6 +58,8 @@ Prerequisites:
 - A clean checkout for the target repository.
 - An existing issue, or permission to create a temporary issue.
 
+The examples below set the repo-specific inputs: `OPENTAG_GH_REPO`, `OPENTAG_WORKSPACE_PATH`, and either `OPENTAG_GH_TEST_ISSUE` or `OPENTAG_GH_CREATE_ISSUE`. The script defaults `OPENTAG_RUNNER_ID=runner_claude_local`, `OPENTAG_PAIRING_TOKEN=dev_pairing_token`, and `OPENTAG_DISPATCHER_PORT=3032` unless you override them.
+
 Use an existing issue:
 
 ```bash
@@ -131,5 +133,5 @@ Use `OPENTAG_DISPATCHER_OWNS_CALLBACKS=true` on the Probot app when the dispatch
 - If the script says `gh CLI not found`, install and authenticate GitHub CLI first.
 - If the script says `Claude Code CLI not found`, install and log in to Claude Code or use the echo/manual path in [GitHub to echo](../github-to-echo/README.md).
 - If no pull request appears, confirm `OPENTAG_GH_CREATE_PR=true`, the executor changed files, and the token can push branches and open PRs.
-- If callbacks do not appear, check the dispatcher logs, `OPENTAG_GITHUB_TOKEN`, and the stored run events.
+- If callbacks do not appear, check the dispatcher logs, the active `gh` CLI token that the script stores as `GITHUB_TOKEN`, and the stored run events.
 - If a local checkout is dirty, clean or switch to a disposable checkout before running a coding executor.
