@@ -15,16 +15,44 @@ export function branchNameForRun(runId: string): string {
   return `opentag/${safeRunId}`;
 }
 
+// Git status command used by the helpers below. We use the NUL-delimited
+// porcelain form (`-z`) so that renamed/copied entries and paths containing
+// spaces, quotes, newlines, or unicode survive parsing intact. `-z` also
+// disables the quoting/escaping that the default newline form applies, and
+// `core.quotePath=false` keeps unicode bytes verbatim rather than \NNN escapes.
+export const STATUS_PORCELAIN_Z_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain", "-z"];
+
+// Parses `git status --porcelain -z` output (NUL-delimited records).
+//
+// In the `-z` format each record is terminated by a NUL byte. For ordinary
+// entries a record is `XY <path>`. For rename ("R") and copy ("C") entries the
+// destination is emitted in the `XY <dest>` record and the source path follows
+// as a SEPARATE NUL-terminated record. We consume that following record as the
+// source and keep the destination as the changed path, so consumers never see
+// the literal `original -> renamed` arrow form that breaks `git add --`.
 export function parseStatusEntries(statusOutput: string): GitStatusEntry[] {
-  return statusOutput
-    .split("\n")
-    .map((line) => line.replace(/\r$/, ""))
-    .filter(Boolean)
-    .map((line) => ({
-      status: line.slice(0, 2),
-      path: line.slice(3).trim()
-    }))
-    .filter((entry) => entry.path.length > 0);
+  const records = statusOutput.split("\0");
+  const entries: GitStatusEntry[] = [];
+
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (!record) continue;
+
+    const status = record.slice(0, 2);
+    const path = record.slice(3);
+
+    // Rename/copy records carry a trailing source record we must skip past so
+    // it is not mistaken for an independent change.
+    const isRenameOrCopy = status[0] === "R" || status[0] === "C";
+    if (isRenameOrCopy) {
+      index += 1;
+    }
+
+    if (path.length === 0) continue;
+    entries.push({ status, path });
+  }
+
+  return entries;
 }
 
 export function isInternalArtifactPath(path: string): boolean {
@@ -92,13 +120,13 @@ export async function deleteRunBranch(input: { runner: CommandRunner; workspaceP
 }
 
 export async function changedFiles(input: { runner: CommandRunner; workspacePath: string }): Promise<string[]> {
-  const result = await input.runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
+  const result = await input.runner.run("git", STATUS_PORCELAIN_Z_ARGS, { cwd: input.workspacePath });
   await assertCommandSucceeded(result, "read changed files");
   return parseChangedFiles(result.stdout);
 }
 
 export async function cleanupInternalArtifacts(input: { runner: CommandRunner; workspacePath: string }): Promise<string[]> {
-  const statusResult = await input.runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
+  const statusResult = await input.runner.run("git", STATUS_PORCELAIN_Z_ARGS, { cwd: input.workspacePath });
   await assertCommandSucceeded(statusResult, "scan internal artifacts");
   const untrackedRoots = Array.from(
     new Set(
