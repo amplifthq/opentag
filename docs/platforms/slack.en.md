@@ -9,6 +9,8 @@ OpenTag supports two Slack connection modes:
 
 Both modes support the same core product flow: mention the Slack app, let OpenTag run a local coding agent, and get the result back in the same Slack thread.
 
+Slack-only setup proves the Slack loop. It does not by itself grant GitHub write access. If a run proposes a pull request action, `apply 1` can create a GitHub PR only when OpenTag also has a GitHub repository target and GitHub token configured.
+
 ## Official Links
 
 - [Slack app settings](https://api.slack.com/apps)
@@ -163,3 +165,5 @@ Then mention the app in the bound channel:
 ```
 
 OpenTag should acknowledge the request and later reply in the same Slack thread.
+
+If the reply includes a pull request action, but your config only contains Slack credentials, OpenTag will continue with a follow-up run instead of creating the GitHub PR directly. Configure GitHub as a repository target before expecting Slack `apply 1` replies to create PRs.

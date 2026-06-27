@@ -46,6 +46,8 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@opentag/dispatcher": "workspace:*",
+    "@opentag/runner": "workspace:*",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

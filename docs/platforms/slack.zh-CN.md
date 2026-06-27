@@ -9,6 +9,8 @@ OpenTag 支持两种 Slack 连接方式：
 
 两种方式最终都支持同一个核心体验：在 Slack 里 mention 这个 app，OpenTag 在本机运行 coding agent，然后回到同一个 Slack thread 里回复结果。
 
+Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 写权限。如果某次 run 产出了 pull request action，只有在 OpenTag 同时配置了 GitHub repository target 和 GitHub token 时，Slack thread 里的 `apply 1` 才能直接创建 GitHub PR。
+
 ## 官方入口
 
 - [Slack App 管理页](https://api.slack.com/apps)
@@ -163,3 +165,5 @@ opentag start
 ```
 
 OpenTag 应该会先确认收到请求，执行完成后再回到同一个 Slack thread 里回复。
+
+如果回复里出现 pull request action，但你的配置里只有 Slack 凭据，OpenTag 会创建一个 follow-up run，而不是直接创建 GitHub PR。想让 Slack 里的 `apply 1` 直接创建 PR，需要先配置 GitHub repository target。
