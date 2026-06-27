@@ -45,11 +45,8 @@ function pathExistsOnPath(command: string, env: NodeJS.ProcessEnv = process.env)
   return paths.some((directory) => candidates.some((candidate) => existsSync(join(directory, candidate))));
 }
 
-export function parseExecutorId(value: string): ExecutorId {
-  if (value === "echo" || value === "codex" || value === "claude-code") {
-    return value;
-  }
-  throw new Error("Executor must be echo, codex, or claude-code.");
+export function isExecutorId(value: string): value is ExecutorId {
+  return value === "echo" || value === "codex" || value === "claude-code";
 }
 
 export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorDetection[] {
@@ -87,7 +84,7 @@ export function defaultExecutorId(input: {
   return "echo";
 }
 
-export function executorLabel(id: ExecutorId): string {
+export function executorLabel(id: string): string {
   return EXECUTOR_CATALOG.find((executor) => executor.id === id)?.label ?? id;
 }
 

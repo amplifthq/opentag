@@ -1,6 +1,5 @@
 import type { LarkDomain } from "@opentag/lark";
 import type { CliLanguage } from "../catalogs/languages.js";
-import type { ExecutorId } from "../catalogs/executors.js";
 import type { PlatformId } from "../catalogs/platforms.js";
 import type { SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 
@@ -45,7 +44,7 @@ export type OpenTagSetupInput = {
   language: CliLanguage;
   platform: PlatformId;
   projectPath: string;
-  executor: ExecutorId;
+  executor: string;
   stateDirectory?: string;
   lark?: LarkSetupInput;
   slack?: SlackSetupInput;
@@ -56,7 +55,7 @@ export type SetupDefaults = Partial<{
   language: CliLanguage;
   platform: PlatformId;
   projectPath: string;
-  executor: ExecutorId;
+  executor: string;
   larkSetupMethod: LarkSetupMethod;
   larkDomain: LarkDomain;
   slackMode: SlackSetupMode;

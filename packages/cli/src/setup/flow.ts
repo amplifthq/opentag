@@ -7,8 +7,7 @@ import {
   detectExecutors,
   EXECUTOR_CATALOG,
   executorLabel,
-  parseExecutorId,
-  type ExecutorId
+  isExecutorId
 } from "../catalogs/executors.js";
 import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalogs/languages.js";
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
@@ -292,12 +291,18 @@ async function collectExecutor(
   prompts: PromptAdapter,
   language: CliLanguage,
   env: NodeJS.ProcessEnv | undefined
-): Promise<ExecutorId> {
+): Promise<string> {
   if (options.executor) {
-    return parseExecutorId(options.executor);
+    return options.executor;
   }
   const detections = detectExecutors(env);
   const previous = defaults.executor;
+  if (previous !== undefined && !isExecutorId(previous)) {
+    // Preserve a configured custom executor: the built-in picker can't
+    // represent it, so silently replacing it with a built-in would discard
+    // the user's choice on an unrelated wizard re-run.
+    return previous;
+  }
   const initialValue = defaultExecutorId({
     ...(previous ? { previous } : {}),
     detections

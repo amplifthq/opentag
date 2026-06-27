@@ -8,7 +8,11 @@ import type { ExecutorId } from "./catalogs/executors.js";
 import type { CliLanguage } from "./catalogs/languages.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 
-const ExecutorSchema = z.enum(["echo", "codex", "claude-code"]);
+// Executor ids (repository bindings and the last-used preference) accept any
+// non-empty string so custom executors registered by a standalone runner
+// validate; echo, codex, and claude-code remain the documented built-ins.
+// Mirrors the daemon config and the open runtime dispatch.
+const ExecutorIdSchema = z.string().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
@@ -24,7 +28,7 @@ const RepositoryBindingSchema = z
     owner: z.string().min(1),
     repo: z.string().min(1),
     checkoutPath: z.string().min(1),
-    defaultExecutor: ExecutorSchema,
+    defaultExecutor: ExecutorIdSchema,
     baseBranch: z.string().min(1),
     pushRemote: z.string().min(1),
     worktreeRoot: z.string().min(1),
@@ -136,7 +140,7 @@ const PreferencesSchema = z
     lastSetup: z
       .object({
         platforms: z.array(PlatformSchema).optional(),
-        executor: ExecutorSchema.optional(),
+        executor: ExecutorIdSchema.optional(),
         projectPath: z.string().min(1).optional(),
         larkSetupMethod: LarkSetupMethodSchema.optional(),
         larkDomain: z.enum(["lark", "feishu"]).optional(),

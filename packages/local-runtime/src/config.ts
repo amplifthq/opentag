@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 
-const ExecutorSchema = z.enum(["echo", "codex", "claude-code"]);
+// Accept any non-empty executor id. The built-ins are echo, codex, and
+// claude-code, but custom executors registered by a standalone runner are
+// equally valid — config validation must not be stricter than the runtime
+// dispatch (which resolves executors by id) or the dispatcher wire contract
+// (executor: z.string().min(1)).
+const ExecutorSchema = z.string().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 
