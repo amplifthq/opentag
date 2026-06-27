@@ -34,6 +34,14 @@ export const nodeCommandRunner: CommandRunner = {
         });
       });
 
+      // A large prompt (larger than the OS pipe buffer, ~64KB) written to a
+      // child that exits or closes its stdin before the full write drains emits
+      // an EPIPE on the stdin stream. Without a listener that error is uncaught
+      // and crashes the long-lived local-runtime polling daemon. Swallow it: the
+      // child's exit/close is already handled above and is the authoritative
+      // signal here.
+      child.stdin.on("error", () => {});
+
       if (options.input) {
         child.stdin.write(options.input);
       }
