@@ -8,6 +8,7 @@ export type ExecutorDescriptor = {
   label: string;
   command?: string;
   alwaysAvailable?: boolean;
+  devOnly?: boolean;
 };
 
 export type ExecutorDetection = {
@@ -30,7 +31,8 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
   {
     id: "echo",
     label: "Echo",
-    alwaysAvailable: true
+    alwaysAvailable: true,
+    devOnly: true
   }
 ];
 
@@ -52,7 +54,7 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
       return {
         id: executor.id,
         available: true,
-        reason: "Built in test mode"
+        reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Built in"
       };
     }
     const available = executor.command ? pathExistsOnPath(executor.command, env) : false;
@@ -85,13 +87,20 @@ export function executorLabel(id: ExecutorId): string {
   return EXECUTOR_CATALOG.find((executor) => executor.id === id)?.label ?? id;
 }
 
+function formatExecutorStatus(executor: ExecutorDescriptor, available: boolean): string {
+  if (executor.devOnly) {
+    return "dev/test only";
+  }
+  return available ? "available" : "not found";
+}
+
 export function formatExecutors(env: NodeJS.ProcessEnv = process.env): string {
   const detections = detectExecutors(env);
   return [
     "Coding agents:",
     ...EXECUTOR_CATALOG.map((executor) => {
       const detection = detections.find((entry) => entry.id === executor.id);
-      const status = detection?.available ? "available" : "not found";
+      const status = formatExecutorStatus(executor, detection?.available ?? false);
       return `  ${executor.label}: ${status}${detection ? ` (${detection.reason})` : ""}`;
     })
   ].join("\n");

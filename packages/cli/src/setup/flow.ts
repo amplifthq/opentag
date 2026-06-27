@@ -117,6 +117,24 @@ function formatPlatformsForSetup(language: CliLanguage): string {
   return ["This setup wizard can configure:", ...lines].join("\n");
 }
 
+function formatExecutorHint(input: {
+  language: CliLanguage;
+  executor: (typeof EXECUTOR_CATALOG)[number];
+  available: boolean;
+  current: boolean;
+  selectedByDefault: boolean;
+}): string {
+  if (input.executor.devOnly) {
+    const echoHint = input.language === "zh-CN" ? "开发测试用，不会调用真实 coding agent" : "dev/test only; no real coding agent";
+    return input.current ? `${input.language === "zh-CN" ? "当前选择，" : "current, "}${echoHint}` : echoHint;
+  }
+
+  const availability = input.language === "zh-CN" ? (input.available ? "已检测到" : "未检测到") : input.available ? "available" : "not found";
+  const current = input.current ? (input.language === "zh-CN" ? "当前选择，" : "current, ") : "";
+  const recommended = input.selectedByDefault ? (input.language === "zh-CN" ? "推荐，" : "recommended, ") : "";
+  return `${current || recommended}${availability}`;
+}
+
 async function collectLanguage(options: SetupCommandOptions, defaults: SetupDefaults, prompts: PromptAdapter): Promise<CliLanguage> {
   if (options.language) {
     return parseCliLanguage(options.language);
@@ -174,12 +192,16 @@ async function collectExecutor(
     initialValue,
     options: EXECUTOR_CATALOG.map((executor) => {
       const detection = detections.find((entry) => entry.id === executor.id);
-      const availability = detection?.available ? "available" : "not found";
-      const prefix = executor.id === previous ? "current, " : executor.id === initialValue ? "recommended, " : "";
       return {
         value: executor.id,
         label: executor.label,
-        hint: `${prefix}${availability}`
+        hint: formatExecutorHint({
+          language,
+          executor,
+          available: detection?.available ?? false,
+          current: executor.id === previous,
+          selectedByDefault: executor.id === initialValue
+        })
       };
     })
   });

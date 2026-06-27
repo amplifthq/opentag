@@ -133,6 +133,41 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
+  it("labels Echo as dev/test only in the coding agent prompt", async () => {
+    const configPath = join(tempDir(), "config.json");
+    let echoHint: string | undefined;
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "lark",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        binding: "default_project",
+        force: true,
+        yes: true
+      },
+      {
+        env: { PATH: "" },
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "Which coding agent should OpenTag use?") {
+              echoHint = input.options.find((option) => option.value === "echo")?.hint;
+              return "echo";
+            }
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        })
+      }
+    );
+
+    expect(echoHint).toBe("dev/test only; no real coding agent");
+  });
+
   it("restores prior setup choices as prompt defaults", async () => {
     const projectPath = tempDir();
     const configPath = join(tempDir(), "config.json");
