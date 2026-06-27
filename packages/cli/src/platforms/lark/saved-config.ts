@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import type { LarkDomain } from "@opentag/lark";
-import type { OpenTagCliConfig } from "../../config.js";
+import { assertPrivateConfigFile, type OpenTagCliConfig } from "../../config.js";
 
 const SavedLarkCredentialsSchema = z
   .object({
@@ -41,6 +41,7 @@ export function legacyLarkConfigPath(projectPath: string): string {
 export function readLegacyLarkCredentials(projectPath: string): SavedLarkCredentials | undefined {
   const path = legacyLarkConfigPath(projectPath);
   if (!existsSync(path)) return undefined;
+  assertPrivateConfigFile(path);
 
   const parsed = SavedLarkCredentialsSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
   if (!parsed.success) {

@@ -98,6 +98,16 @@ function createDefaultEventDispatcher(handler: (data: LarkInboundMessageEvent) =
 
 function logIgnored(outcome: LarkMessageHandlerOutcome): void {
   if (outcome.status === "created" || outcome.status === "bound") return;
+  if (outcome.status === "follow_up_queued") {
+    console.log(
+      `[lark] queued follow-up${outcome.followUpRequestId ? ` follow_up_request_id=${outcome.followUpRequestId}` : ""}${outcome.runId ? ` active_run_id=${outcome.runId}` : ""}`
+    );
+    return;
+  }
+  if (outcome.status === "needs_human_decision") {
+    console.log(`[lark] needs human decision${outcome.reason ? `: ${outcome.reason}` : ""}`);
+    return;
+  }
   if (outcome.status === "ignored_unbound_chat") {
     console.log(
       `[lark] ignored unbound chat - bind it: provider=lark accountId(tenant_key)=${outcome.tenantKey} conversationId(chat_id)=${outcome.chatId} (reply '/bind owner/repo' with a Project Target ref, or POST /v1/channel-bindings)`
@@ -160,8 +170,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
     },
     async createRun(event: OpenTagEvent) {
       const runId = `run_${randomUUID()}`;
-      await dispatcherClient.createRun({ runId, event });
-      return { runId };
+      return dispatcherClient.createRun({ runId, event });
     }
   });
 

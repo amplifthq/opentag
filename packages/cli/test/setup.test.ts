@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -140,8 +140,9 @@ describe("OpenTag CLI setup", () => {
     const configPath = join(tempDir(), "config.json");
     const legacyDirectory = join(projectPath, ".opentag", "lark");
     mkdirSync(legacyDirectory, { recursive: true });
+    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
     writeFileSync(
-      join(legacyDirectory, "lark.local.json"),
+      legacyConfigPath,
       `${JSON.stringify({
         appId: "legacy_app",
         appSecret: "legacy_secret",
@@ -149,6 +150,7 @@ describe("OpenTag CLI setup", () => {
         botOpenId: "ou_legacy_bot"
       })}\n`
     );
+    chmodSync(legacyConfigPath, 0o600);
     const scanLarkPersonalAgent = vi.fn(async () => {
       throw new Error("Unexpected Lark scan");
     });

@@ -167,7 +167,9 @@ export function formatConfigError(error: unknown): string {
 }
 
 export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
-  return OpenTagDaemonConfigSchema.parse(value);
+  const parsed = OpenTagDaemonConfigSchema.parse(value);
+  normalizeChannelBindings(parsed);
+  return parsed;
 }
 
 export function createInitialConfig(input: InitConfigInput): OpenTagDaemonConfig {

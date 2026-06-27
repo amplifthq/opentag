@@ -1,4 +1,5 @@
 import { parseProjectTargetRef, type OpenTagEvent } from "@opentag/core";
+import type { CreateRunResult } from "@opentag/client";
 import { type LarkChannelBinding, normalizeLarkMessage, stripLarkMention } from "./normalize.js";
 
 export type LarkMention = { key?: string; id?: { open_id?: string }; name?: string };
@@ -33,7 +34,7 @@ export type LarkMessageHandlerConfig = {
   callbackUri?: string;
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
-  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
+  createRun(event: OpenTagEvent): Promise<CreateRunResult>;
   // Self-service binding from within Lark (`/bind owner/repo`); optional so tests can omit it.
   bindChannel?(input: { tenantKey: string; chatId: string; repoProvider: string; owner: string; repo: string }): Promise<void>;
   // Reply into the originating thread (onboarding hints, bind confirmations); optional.
@@ -51,8 +52,12 @@ export type LarkMessageHandlerOutcome = {
     | "ignored_not_addressed"
     | "ignored_bind_usage"
     | "ignored_unbound_chat"
-    | "ignored_empty_command";
+    | "ignored_empty_command"
+    | "follow_up_queued"
+    | "needs_human_decision";
   runId?: string;
+  followUpRequestId?: string;
+  reason?: string;
   tenantKey?: string;
   chatId?: string;
 };
@@ -222,7 +227,25 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "ignored_empty_command" };
     }
 
-    const { runId } = await config.createRun(event);
-    return { status: "created", runId };
+    const result = await config.createRun(event);
+    if (result.outcome === "run_created") {
+      return { status: "created", runId: result.run.id, tenantKey, chatId };
+    }
+    if (result.outcome === "follow_up_queued") {
+      return {
+        status: "follow_up_queued",
+        followUpRequestId: result.followUpRequest.id,
+        ...(result.decision.activeRunId ? { runId: result.decision.activeRunId } : {}),
+        reason: result.decision.reason,
+        tenantKey,
+        chatId
+      };
+    }
+    return {
+      status: "needs_human_decision",
+      reason: result.decision.reason,
+      tenantKey,
+      chatId
+    };
   };
 }

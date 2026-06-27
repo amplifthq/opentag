@@ -40,6 +40,17 @@ export function resolveWorkspacePath(event: OpenTagEvent, repositories: Reposito
   return resolveRepositoryBinding(event, repositories)?.checkoutPath ?? null;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function failedRunResult(stage: string, error: unknown): OpenTagRunResult {
+  return {
+    conclusion: "failure",
+    summary: `${stage} failed: ${errorMessage(error)}`
+  };
+}
+
 export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
@@ -79,7 +90,7 @@ export async function runOneDaemonIteration(input: {
         })
       : binding.checkoutPath;
 
-      const securityAssessment = assessRunnerSecurity({
+  const securityAssessment = assessRunnerSecurity({
     executorId,
     workspacePath: binding.checkoutPath,
     executionPath,
@@ -104,17 +115,24 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
-      const readiness = await executor.canRun({
-        runId: claimed.run.id,
-        workspacePath: binding.checkoutPath,
-        command: claimed.event.command,
-        context: claimed.event.context,
-        ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
-        permissions: claimed.event.permissions,
-        ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
-        ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
-        ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
-      });
+  let readiness: Awaited<ReturnType<ExecutorAdapter["canRun"]>>;
+  try {
+    readiness = await executor.canRun({
+      runId: claimed.run.id,
+      workspacePath: binding.checkoutPath,
+      command: claimed.event.command,
+      context: claimed.event.context,
+      ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
+      permissions: claimed.event.permissions,
+      ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+      ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+      ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
+    });
+  } catch (error) {
+    await input.client.complete(claimed.run.id, failedRunResult(`${executor.displayName} readiness check`, error));
+    return true;
+  }
+
   if (!readiness.ready) {
     await input.client.complete(claimed.run.id, {
       conclusion: "needs_human",
@@ -134,9 +152,10 @@ export async function runOneDaemonIteration(input: {
     }, heartbeatIntervalMs);
   }
 
-  let executorResult: OpenTagRunResult;
+  let result: OpenTagRunResult;
+  let failureStage = executor.displayName;
   try {
-    executorResult = await executor.run(
+    const executorResult = await executor.run(
       {
         runId: claimed.run.id,
         workspacePath: binding.checkoutPath,
@@ -159,16 +178,19 @@ export async function runOneDaemonIteration(input: {
         }
       }
     );
+    failureStage = "Post-run pull request hook";
+    result = await maybeCreatePullRequest({
+      run: claimed.run,
+      event: claimed.event,
+      binding,
+      result: executorResult,
+      options: input.pullRequestOptions ?? {}
+    });
+  } catch (error) {
+    result = failedRunResult(failureStage, error);
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
   }
-  const result = await maybeCreatePullRequest({
-    run: claimed.run,
-    event: claimed.event,
-    binding,
-    result: executorResult,
-    options: input.pullRequestOptions ?? {}
-  });
   await input.client.complete(claimed.run.id, result);
   return true;
 }
@@ -204,16 +226,22 @@ export async function serveDaemon(input: {
 }): Promise<void> {
   const pollIntervalMs = input.pollIntervalMs ?? 5_000;
   while (!input.signal?.aborted) {
-    const didWork = await runOneDaemonIteration({
-      runnerId: input.runnerId,
-      repositories: input.repositories,
-      executors: input.executors,
-      ...(input.security ? { security: input.security } : {}),
-      ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
-      ...(input.heartbeatIntervalMs ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
-      client: input.client
-    });
-    if (!didWork) {
+    try {
+      const didWork = await runOneDaemonIteration({
+        runnerId: input.runnerId,
+        repositories: input.repositories,
+        executors: input.executors,
+        ...(input.security ? { security: input.security } : {}),
+        ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
+        ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
+        client: input.client
+      });
+      if (!didWork) {
+        await sleep(pollIntervalMs, input.signal);
+      }
+    } catch (error) {
+      if (input.signal?.aborted) break;
+      console.warn("OpenTag daemon iteration failed; retrying:", error);
       await sleep(pollIntervalMs, input.signal);
     }
   }

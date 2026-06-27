@@ -1,6 +1,6 @@
 import type { ContextPacket, OpenTagEvent, OpenTagRun } from "@opentag/core";
 import { createEchoExecutor } from "@opentag/runner";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runOneDaemonIteration, serveDaemon } from "../src/daemon.js";
 
 const run: OpenTagRun = {
@@ -275,6 +275,155 @@ describe("opentagd", () => {
 
     expect(calls.some((call) => call === "heartbeat:run_1")).toBe(true);
     expect(calls.at(-1)).toBe("complete:run_1:success:done");
+  });
+
+  it("completes the run as failed when the executor throws after markRunning", async () => {
+    const calls: string[] = [];
+
+    const didWork = await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run() {
+            throw new Error("executor exploded");
+          },
+          async cancel() {
+            return;
+          }
+        }
+      },
+      heartbeatIntervalMs: 0,
+      client: {
+        async claim() {
+          calls.push("claim");
+          return { run, event };
+        },
+        async markRunning(runId, executor) {
+          calls.push(`running:${runId}:${executor}`);
+        },
+        async heartbeat() {
+          throw new Error("should not run");
+        },
+        async progress() {
+          return;
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(didWork).toBe(true);
+    expect(calls).toEqual(["claim", "running:run_1:echo", "complete:run_1:failure:Echo failed: executor exploded"]);
+  });
+
+  it("completes the run as failed when post-run pull request creation throws", async () => {
+    const calls: string[] = [];
+
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run() {
+            return { conclusion: "success", summary: "done", changedFiles: ["src/app.ts"] };
+          },
+          async cancel() {
+            return;
+          }
+        }
+      },
+      pullRequestOptions: {
+        githubToken: "token",
+        allowAutoCreatePullRequest: true,
+        commandRunner: {
+          async run() {
+            throw new Error("git exploded");
+          }
+        }
+      },
+      client: {
+        async claim() {
+          return {
+            run,
+            event: {
+              ...event,
+              permissions: [...event.permissions, { scope: "pr:create", reason: "create pull request" }]
+            }
+          };
+        },
+        async markRunning(runId, executor) {
+          calls.push(`running:${runId}:${executor}`);
+        },
+        async heartbeat() {
+          return;
+        },
+        async progress() {
+          return;
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(calls).toEqual([
+      "running:run_1:echo",
+      "complete:run_1:failure:Post-run pull request hook failed: git exploded"
+    ]);
+  });
+
+  it("logs and continues the daemon loop after an iteration-level failure", async () => {
+    const abortController = new AbortController();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let claimCount = 0;
+
+    try {
+      await serveDaemon({
+        runnerId: "runner_1",
+        repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+        executors: { echo: createEchoExecutor() },
+        pollIntervalMs: 1,
+        signal: abortController.signal,
+        client: {
+          async claim() {
+            claimCount += 1;
+            if (claimCount === 1) {
+              throw new Error("dispatcher temporarily unavailable");
+            }
+            abortController.abort();
+            return null;
+          },
+          async markRunning() {
+            throw new Error("should not run");
+          },
+          async heartbeat() {
+            throw new Error("should not run");
+          },
+          async progress() {
+            throw new Error("should not run");
+          },
+          async complete() {
+            throw new Error("should not run");
+          }
+        }
+      });
+      expect(claimCount).toBe(2);
+      expect(warn).toHaveBeenCalledWith("OpenTag daemon iteration failed; retrying:", expect.any(Error));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("passes the run context packet into executor input", async () => {

@@ -1,3 +1,4 @@
+import type { CreateRunResult } from "@opentag/client";
 import type { OpenTagEvent } from "@opentag/core";
 import type { LarkChannelBinding } from "@opentag/lark";
 import { describe, expect, it, vi } from "vitest";
@@ -39,6 +40,25 @@ function messageEvent(overrides?: {
 
 const binding: LarkChannelBinding = { tenantKey: "tk_123", chatId: "oc_chat", owner: "acme", repo: "app" };
 
+function runCreated(event: OpenTagEvent, runId = "run_1"): CreateRunResult {
+  return {
+    outcome: "run_created",
+    decision: {
+      action: "start",
+      reason: "new event",
+      reasonCode: "new_event",
+      decidedAt: "2026-06-24T00:00:00.000Z"
+    },
+    run: {
+      id: runId,
+      eventId: event.id,
+      status: "queued",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      updatedAt: "2026-06-24T00:00:00.000Z"
+    }
+  };
+}
+
 function makeHandler(opts?: {
   withBotOpenId?: boolean;
   binding?: LarkChannelBinding | null;
@@ -47,7 +67,7 @@ function makeHandler(opts?: {
   bindChannel?: ReturnType<typeof vi.fn>;
   reply?: ReturnType<typeof vi.fn>;
 }) {
-  const createRun = opts?.createRun ?? vi.fn(async (_event: OpenTagEvent) => ({ runId: "run_1" }));
+  const createRun = opts?.createRun ?? vi.fn(async (event: OpenTagEvent) => runCreated(event));
   const bindChannel = opts?.bindChannel ?? vi.fn(async () => {});
   const reply = opts?.reply ?? vi.fn(async () => {});
   const handler = createLarkMessageHandler({
@@ -196,7 +216,7 @@ describe("createLarkMessageHandler", () => {
   });
 
   it("falls back to now() when create_time is malformed", async () => {
-    const createRun = vi.fn(async (_event: OpenTagEvent) => ({ runId: "run_1" }));
+    const createRun = vi.fn(async (event: OpenTagEvent) => runCreated(event));
     const handler = createLarkMessageHandler({
       agentId: "opentag",
       botOpenId: "ou_bot",

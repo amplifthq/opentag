@@ -193,23 +193,23 @@ describe("opentagd config", () => {
   });
 
   it("rejects conflicting channel binding aliases for the same conversation", () => {
-    const parsed = parseDaemonConfig({
-      dispatcherUrl: "http://localhost:3030",
-      repositories: [],
-      channelBindings: [
-        {
-          provider: "slack",
-          accountId: "T123",
-          conversationId: "C123",
-          repoProvider: "github",
-          owner: "acme",
-          repo: "demo"
-        }
-      ],
-      slackChannels: [{ teamId: "T123", channelId: "C123", repoProvider: "github", owner: "other", repo: "demo" }]
-    });
-
-    expect(() => normalizeChannelBindings(parsed)).toThrow(
+    expect(() =>
+      parseDaemonConfig({
+        dispatcherUrl: "http://localhost:3030",
+        repositories: [],
+        channelBindings: [
+          {
+            provider: "slack",
+            accountId: "T123",
+            conversationId: "C123",
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          }
+        ],
+        slackChannels: [{ teamId: "T123", channelId: "C123", repoProvider: "github", owner: "other", repo: "demo" }]
+      })
+    ).toThrow(
       "Conflicting channel binding for slack:T123/C123: github:acme/demo and github:other/demo"
     );
   });

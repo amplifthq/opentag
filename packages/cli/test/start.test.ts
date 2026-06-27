@@ -32,6 +32,14 @@ function config() {
   });
 }
 
+function hangingFetch(): typeof fetch {
+  return vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  }) as unknown as typeof fetch;
+}
+
 describe("OpenTag CLI start wiring", () => {
   it("derives dispatcher input with the Lark callback sink credentials", () => {
     const built = config();
@@ -124,5 +132,20 @@ describe("OpenTag CLI start wiring", () => {
       })
     ).resolves.toBeUndefined();
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("times out each dispatcher health attempt", async () => {
+    const fetchImpl = hangingFetch();
+
+    await expect(
+      waitForDispatcher({
+        dispatcherUrl: "http://localhost:3030",
+        fetchImpl,
+        attempts: 1,
+        delayMs: 1,
+        timeoutMs: 5
+      })
+    ).rejects.toThrow("Dispatcher did not become healthy at http://localhost:3030/healthz.");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

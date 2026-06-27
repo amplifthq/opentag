@@ -1,4 +1,5 @@
 import { defaultConfigPath, readCliConfig, type OpenTagCliConfig } from "./config.js";
+import { probeDispatcherHealth } from "./health.js";
 
 export type StatusCommandOptions = {
   config?: string;
@@ -26,15 +27,15 @@ export async function statusFromConfig(input: {
   config: OpenTagCliConfig;
   configPath: string;
   fetchImpl?: typeof fetch;
+  healthTimeoutMs?: number;
 }): Promise<StatusSummary> {
-  const fetchImpl = input.fetchImpl ?? fetch;
-  let dispatcher: StatusSummary["dispatcher"] = "offline";
-  try {
-    const response = await fetchImpl(`${input.config.daemon.dispatcherUrl.replace(/\/$/, "")}/healthz`);
-    dispatcher = response.ok ? "online" : "offline";
-  } catch {
-    dispatcher = "offline";
-  }
+  const dispatcher = (await probeDispatcherHealth({
+    dispatcherUrl: input.config.daemon.dispatcherUrl,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    timeoutMs: input.healthTimeoutMs ?? 1_000
+  }))
+    ? "online"
+    : "offline";
 
   return {
     configPath: input.configPath,

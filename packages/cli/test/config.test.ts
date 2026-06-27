@@ -1,6 +1,6 @@
-import { mkdtempSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   defaultConfigPath,
@@ -11,6 +11,7 @@ import {
   writeCliConfigAtomic,
   type OpenTagCliConfig
 } from "../src/config.js";
+import { legacyLarkConfigPath, readLegacyLarkCredentials } from "../src/platforms/lark/saved-config.js";
 import { createSetupConfig } from "../src/setup.js";
 
 function tempDir(): string {
@@ -57,6 +58,40 @@ describe("OpenTag CLI config", () => {
 
     expect(readCliConfig(path)).toEqual(expected);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses to read config files that expose secrets to group or others", () => {
+    const path = join(tempDir(), "config.json");
+    writeFileSync(path, `${JSON.stringify(config())}\n`, { mode: 0o600 });
+    chmodSync(path, 0o644);
+
+    expect(() => readCliConfig(path)).toThrow(`Fix it with: chmod 600 ${path}`);
+  });
+
+  it("refuses to reuse legacy Lark credentials from a non-private file", () => {
+    const projectPath = tempDir();
+    const path = legacyLarkConfigPath(projectPath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ appId: "cli_test", appSecret: "secret_test", domain: "lark" }), { mode: 0o600 });
+    chmodSync(path, 0o644);
+
+    expect(() => readLegacyLarkCredentials(projectPath)).toThrow(`Fix it with: chmod 600 ${path}`);
+  });
+
+  it("reuses legacy Lark credentials from a private file", () => {
+    const projectPath = tempDir();
+    const path = legacyLarkConfigPath(projectPath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ appId: "cli_test", appSecret: "secret_test", domain: "lark" }), { mode: 0o600 });
+    chmodSync(path, 0o600);
+
+    expect(readLegacyLarkCredentials(projectPath)).toMatchObject({
+      appId: "cli_test",
+      appSecret: "secret_test",
+      domain: "lark",
+      source: "legacy_start_lark",
+      path
+    });
   });
 
   it("redacts secrets in config output", () => {

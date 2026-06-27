@@ -8,6 +8,7 @@ import {
   type LocalDispatcherRuntimeInput
 } from "@opentag/local-runtime";
 import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
+import { probeDispatcherHealth } from "./health.js";
 
 export type StartCommandOptions = {
   config?: string;
@@ -125,19 +126,20 @@ export async function waitForDispatcher(input: {
   fetchImpl?: typeof fetch;
   attempts?: number;
   delayMs?: number;
+  timeoutMs?: number;
 }): Promise<void> {
-  const fetchImpl = input.fetchImpl ?? fetch;
   const attempts = input.attempts ?? 60;
   const delayMs = input.delayMs ?? 500;
+  const timeoutMs = input.timeoutMs ?? 1_000;
   const healthUrl = `${input.dispatcherUrl.replace(/\/$/, "")}/healthz`;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const response = await fetchImpl(healthUrl);
-      if (response.ok) return;
-    } catch {
-      // Retry until the dispatcher finishes binding the port.
-    }
+    const healthy = await probeDispatcherHealth({
+      dispatcherUrl: input.dispatcherUrl,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      timeoutMs
+    });
+    if (healthy) return;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
