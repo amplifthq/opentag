@@ -2,6 +2,7 @@ import { executorLabel } from "../catalogs/executors.js";
 import { platformById } from "../catalogs/platforms.js";
 import type { CliLanguage } from "../catalogs/languages.js";
 import type { OpenTagCliConfig } from "../config.js";
+import { formatLarkPersonalAgentSummary } from "../platforms/lark/display.js";
 import type { OpenTagSetupInput } from "./types.js";
 
 function yesNo(value: boolean, language: CliLanguage): string {
@@ -19,6 +20,13 @@ function larkSetupDescription(method: OpenTagSetupInput["lark"]["setupMethod"], 
 
 export function formatSetupReview(input: OpenTagSetupInput, configPath: string): string {
   const platform = platformById(input.platform);
+  const larkPersonalAgent = formatLarkPersonalAgentSummary(
+    {
+      ...input.lark,
+      ...(input.lark.savedCredentialsSource ? { source: input.lark.savedCredentialsSource } : {})
+    },
+    input.language
+  );
   const lines =
     input.language === "zh-CN"
       ? [
@@ -28,6 +36,7 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           `Coding agent: ${executorLabel(input.executor)}`,
           `项目路径: ${input.projectPath}`,
           `Lark 连接方式: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
+          `Personal Agent: ${larkPersonalAgent}`,
           `Lark 域名: ${input.lark.domain}`,
           `默认绑定当前项目: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
         ]
@@ -38,6 +47,7 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           `Coding agent: ${executorLabel(input.executor)}`,
           `Project path: ${input.projectPath}`,
           `Lark setup: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
+          `Personal Agent: ${larkPersonalAgent}`,
           `Lark domain: ${input.lark.domain}`,
           `Default project binding: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
         ];

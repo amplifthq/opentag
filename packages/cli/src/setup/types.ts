@@ -15,6 +15,7 @@ export type LarkSetupInput = {
   botOpenId?: string;
   setupMethod: LarkSetupMethod;
   bindingMethod: BindingMethod;
+  savedCredentialsSource?: SavedLarkCredentials["source"];
 };
 
 export type OpenTagSetupInput = {

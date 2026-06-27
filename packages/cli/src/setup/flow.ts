@@ -10,6 +10,7 @@ import {
 } from "../catalogs/executors.js";
 import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalogs/languages.js";
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
+import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, t } from "../ui/messages.js";
@@ -257,7 +258,10 @@ async function collectLarkSetupMethod(
     options: methods.map((method) => ({
       value: method,
       label: larkSetupLabel(language, method),
-      hint: larkSetupHint(language, method)
+      hint:
+        method === "saved" && savedLarkCredentials
+          ? formatSavedLarkCredentialsHint(savedLarkCredentials, language)
+          : larkSetupHint(language, method)
     }))
   });
 }
@@ -406,7 +410,8 @@ export async function collectSetupInput(
       ...larkCredentials,
       domain: larkDomain,
       setupMethod: larkSetupMethod,
-      bindingMethod
+      bindingMethod,
+      ...(larkSetupMethod === "saved" && savedLarkCredentials ? { savedCredentialsSource: savedLarkCredentials.source } : {})
     }
   };
 
