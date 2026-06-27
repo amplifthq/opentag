@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs";
 import { defaultConfigPath, readCliConfig, type OpenTagCliConfig } from "../config.js";
+import { savedLarkCredentialsFromCliConfig } from "../platforms/lark/saved-config.js";
 import type { SetupDefaults } from "./types.js";
 
 export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults {
   const repository = config.daemon.repositories[0];
   const lark = config.platforms.lark;
   const lastSetup = config.preferences?.lastSetup;
+  const savedLarkCredentials = savedLarkCredentialsFromCliConfig(config);
 
   return {
     ...(config.preferences?.language ? { language: config.preferences.language } : {}),
@@ -20,7 +22,8 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
         ? { bindingMethod: "bind_later" }
         : lark
           ? { bindingMethod: "default_project" }
-          : {})
+          : {}),
+    ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }
 

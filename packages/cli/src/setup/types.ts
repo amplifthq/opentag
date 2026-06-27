@@ -2,8 +2,9 @@ import type { LarkDomain } from "@opentag/lark";
 import type { CliLanguage } from "../catalogs/languages.js";
 import type { ExecutorId } from "../catalogs/executors.js";
 import type { PlatformId } from "../catalogs/platforms.js";
+import type { SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 
-export type LarkSetupMethod = "scan" | "manual";
+export type LarkSetupMethod = "saved" | "scan" | "manual";
 
 export type BindingMethod = "default_project" | "bind_later";
 
@@ -33,4 +34,5 @@ export type SetupDefaults = Partial<{
   larkSetupMethod: LarkSetupMethod;
   larkDomain: LarkDomain;
   bindingMethod: BindingMethod;
+  savedLarkCredentials: SavedLarkCredentials;
 }>;

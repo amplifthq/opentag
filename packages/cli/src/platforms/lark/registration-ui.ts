@@ -4,6 +4,7 @@ import { registerLarkPersonalAgent, type LarkDomain, type RegisteredLarkPersonal
 export type ScanLarkPersonalAgentDependencies = {
   output?: Pick<NodeJS.WriteStream, "write">;
   register?: typeof registerLarkPersonalAgent;
+  showQrCode?: boolean;
 };
 
 export async function scanLarkPersonalAgent(
@@ -12,16 +13,23 @@ export async function scanLarkPersonalAgent(
 ): Promise<RegisteredLarkPersonalAgent> {
   const output = dependencies.output ?? process.stdout;
   const register = dependencies.register ?? registerLarkPersonalAgent;
+  const showQrCode = dependencies.showQrCode ?? process.env.OPENTAG_SHOW_QR === "1";
 
   const registered = await register({
     domain: input.domain,
     onQrCode(info) {
-      output.write("\nScan this QR code with Lark or Feishu, then finish creating the Personal Agent app:\n");
-      qrcode.generate(info.url, { small: true }, (qr) => {
-        output.write(`${qr}\n`);
-      });
+      output.write("\nOpen this URL to create the Lark / Feishu Personal Agent app:\n");
       output.write(`URL: ${info.url}\n`);
       output.write(`This QR code expires in about ${Math.ceil(info.expireIn / 60)} minute(s).\n`);
+      if (showQrCode) {
+        output.write("\nTerminal QR code:\n");
+        qrcode.generate(info.url, { small: true }, (qr) => {
+          output.write(`${qr}\n`);
+        });
+      } else {
+        output.write("Terminal QR codes are hidden by default because Lark setup links are large.\n");
+        output.write("Set OPENTAG_SHOW_QR=1 if you prefer scanning a terminal QR code.\n");
+      }
       output.write("Keep this terminal open. OpenTag will continue automatically after the app is created.\n\n");
     },
     onStatus(info) {

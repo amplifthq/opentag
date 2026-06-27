@@ -58,16 +58,20 @@ export function t(language: CliLanguage, key: MessageKey): string {
 
 export function larkSetupLabel(language: CliLanguage, method: LarkSetupMethod): string {
   if (language === "zh-CN") {
-    return method === "scan" ? "扫码创建 Personal Agent" : "手动填写 App ID / Secret";
+    if (method === "saved") return "使用已保存的 Personal Agent";
+    return method === "scan" ? "创建新的 Personal Agent" : "手动填写 App ID / Secret";
   }
-  return method === "scan" ? "Scan QR code" : "Manual credentials";
+  if (method === "saved") return "Use saved Personal Agent";
+  return method === "scan" ? "Create a new Personal Agent" : "Manual credentials";
 }
 
 export function larkSetupHint(language: CliLanguage, method: LarkSetupMethod): string {
   if (language === "zh-CN") {
-    return method === "scan" ? "推荐" : "已有自建应用时使用";
+    if (method === "saved") return "推荐，不需要重新扫码";
+    return method === "scan" ? "没有已保存配置时使用" : "已有自建应用时使用";
   }
-  return method === "scan" ? "Recommended" : "Use an existing app";
+  if (method === "saved") return "Recommended; no new scan";
+  return method === "scan" ? "Use when no saved app exists" : "Use an existing app";
 }
 
 export function bindingMethodLabel(language: CliLanguage, method: BindingMethod): string {

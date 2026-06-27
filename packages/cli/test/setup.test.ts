@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -133,6 +133,49 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
+  it("uses saved Lark credentials from the legacy start-lark config", async () => {
+    const projectPath = tempDir();
+    const configPath = join(tempDir(), "config.json");
+    const legacyDirectory = join(projectPath, ".opentag", "lark");
+    mkdirSync(legacyDirectory, { recursive: true });
+    writeFileSync(
+      join(legacyDirectory, "lark.local.json"),
+      `${JSON.stringify({
+        appId: "legacy_app",
+        appSecret: "legacy_secret",
+        domain: "feishu",
+        botOpenId: "ou_legacy_bot"
+      })}\n`
+    );
+    const scanLarkPersonalAgent = vi.fn(async () => {
+      throw new Error("Unexpected Lark scan");
+    });
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts(),
+        scanLarkPersonalAgent
+      }
+    );
+
+    expect(scanLarkPersonalAgent).not.toHaveBeenCalled();
+    expect(readCliConfig(configPath).platforms.lark).toEqual({
+      appId: "legacy_app",
+      appSecret: "legacy_secret",
+      domain: "feishu",
+      botOpenId: "ou_legacy_bot",
+      defaultProjectBinding: true
+    });
+    expect(readCliConfig(configPath).preferences?.lastSetup?.larkSetupMethod).toBe("saved");
+  });
+
   it("labels Echo as dev/test only in the coding agent prompt", async () => {
     const configPath = join(tempDir(), "config.json");
     let echoHint: string | undefined;
@@ -214,8 +257,8 @@ describe("OpenTag CLI setup", () => {
     expect(Object.values(seenDefaults)).toContain("zh-CN");
     expect(Object.values(seenDefaults)).toContain("lark");
     expect(Object.values(seenDefaults)).toContain("claude-code");
-    expect(Object.values(seenDefaults)).toContain("manual");
-    expect(Object.values(seenDefaults)).toContain("feishu");
+    expect(Object.values(seenDefaults)).toContain("saved");
     expect(Object.values(seenDefaults)).toContain("bind_later");
+    expect(readCliConfig(configPath).platforms.lark?.domain).toBe("feishu");
   });
 });

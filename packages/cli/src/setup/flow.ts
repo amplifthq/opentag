@@ -10,6 +10,7 @@ import {
 } from "../catalogs/executors.js";
 import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalogs/languages.js";
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
+import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
@@ -41,8 +42,8 @@ export type SetupFlowDependencies = {
 };
 
 function parseLarkSetupMethod(value: string): LarkSetupMethod {
-  if (value === "scan" || value === "manual") return value;
-  throw new Error("Lark setup method must be scan or manual.");
+  if (value === "saved" || value === "scan" || value === "manual") return value;
+  throw new Error("Lark setup method must be saved, scan, or manual.");
 }
 
 function parseLarkDomain(value: string): LarkDomain {
@@ -89,6 +90,10 @@ function assertNoManualLarkCredentialFlags(options: SetupCommandOptions): void {
   if (hasManualLarkCredentials(options)) {
     throw new Error("--lark-app-id, --lark-app-secret, and --lark-bot-open-id can only be used with --lark-setup manual.");
   }
+}
+
+function findSavedLarkCredentials(defaults: SetupDefaults, projectPath: string): SavedLarkCredentials | undefined {
+  return defaults.savedLarkCredentials ?? readLegacyLarkCredentials(projectPath);
 }
 
 function defaultLanguage(options: SetupCommandOptions, defaults: SetupDefaults): CliLanguage {
@@ -230,18 +235,25 @@ async function collectLarkSetupMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
   prompts: PromptAdapter,
-  language: CliLanguage
+  language: CliLanguage,
+  savedLarkCredentials: SavedLarkCredentials | undefined
 ): Promise<LarkSetupMethod> {
   if (options.larkSetup) {
-    return parseLarkSetupMethod(options.larkSetup);
+    const setupMethod = parseLarkSetupMethod(options.larkSetup);
+    if (setupMethod === "saved" && !savedLarkCredentials) {
+      throw new Error("No saved Lark Personal Agent config was found. Use --lark-setup scan or --lark-setup manual.");
+    }
+    return setupMethod;
   }
   if (hasManualLarkCredentials(options)) {
     return "manual";
   }
+  const methods: LarkSetupMethod[] = savedLarkCredentials ? ["saved", "scan", "manual"] : ["scan", "manual"];
+  const previous = defaults.larkSetupMethod && methods.includes(defaults.larkSetupMethod) ? defaults.larkSetupMethod : undefined;
   return prompts.select({
     message: t(language, "larkSetup"),
-    initialValue: defaults.larkSetupMethod ?? "scan",
-    options: (["scan", "manual"] satisfies LarkSetupMethod[]).map((method) => ({
+    initialValue: savedLarkCredentials ? "saved" : previous ?? "scan",
+    options: methods.map((method) => ({
       value: method,
       label: larkSetupLabel(language, method),
       hint: larkSetupHint(language, method)
@@ -249,7 +261,20 @@ async function collectLarkSetupMethod(
   });
 }
 
-async function collectLarkDomain(options: SetupCommandOptions, defaults: SetupDefaults, prompts: PromptAdapter, language: CliLanguage): Promise<LarkDomain> {
+async function collectLarkDomain(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  setupMethod: LarkSetupMethod,
+  savedLarkCredentials: SavedLarkCredentials | undefined
+): Promise<LarkDomain> {
+  if (setupMethod === "saved") {
+    if (!savedLarkCredentials) {
+      throw new Error("No saved Lark Personal Agent config was found.");
+    }
+    return savedLarkCredentials.domain;
+  }
   if (options.larkDomain) {
     return parseLarkDomain(options.larkDomain);
   }
@@ -269,8 +294,20 @@ async function collectLarkCredentials(input: {
   language: CliLanguage;
   setupMethod: LarkSetupMethod;
   domain: LarkDomain;
+  savedLarkCredentials?: SavedLarkCredentials;
   scanLarkPersonalAgent(input: { domain: LarkDomain }): Promise<RegisteredLarkPersonalAgent>;
 }): Promise<Pick<OpenTagSetupInput["lark"], "appId" | "appSecret" | "botOpenId">> {
+  if (input.setupMethod === "saved") {
+    if (!input.savedLarkCredentials) {
+      throw new Error("No saved Lark Personal Agent config was found.");
+    }
+    return {
+      appId: input.savedLarkCredentials.appId,
+      appSecret: input.savedLarkCredentials.appSecret,
+      ...(input.savedLarkCredentials.botOpenId ? { botOpenId: input.savedLarkCredentials.botOpenId } : {})
+    };
+  }
+
   if (input.setupMethod === "scan") {
     assertNoManualLarkCredentialFlags(input.options);
     const registered = await input.scanLarkPersonalAgent({ domain: input.domain });
@@ -345,14 +382,16 @@ export async function collectSetupInput(
   const platform = await collectPlatform(options, defaults, prompts, language);
   const executor = await collectExecutor(options, defaults, prompts, language, dependencies.env);
   const projectPath = await collectProjectPath(options, defaults, prompts, language, cwd);
-  const larkSetupMethod = await collectLarkSetupMethod(options, defaults, prompts, language);
-  const larkDomain = await collectLarkDomain(options, defaults, prompts, language);
+  const savedLarkCredentials = findSavedLarkCredentials(defaults, projectPath.trim() || cwd);
+  const larkSetupMethod = await collectLarkSetupMethod(options, defaults, prompts, language, savedLarkCredentials);
+  const larkDomain = await collectLarkDomain(options, defaults, prompts, language, larkSetupMethod, savedLarkCredentials);
   const larkCredentials = await collectLarkCredentials({
     options,
     prompts,
     language,
     setupMethod: larkSetupMethod,
     domain: larkDomain,
+    ...(savedLarkCredentials ? { savedLarkCredentials } : {}),
     scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent
   });
   const bindingMethod = await collectBindingMethod(options, defaults, prompts, language);

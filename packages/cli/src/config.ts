@@ -13,7 +13,7 @@ const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
 const PlatformSchema = z.enum(["lark", "slack", "github", "telegram"]);
-const LarkSetupMethodSchema = z.enum(["scan", "manual"]);
+const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 
 const RepositoryBindingSchema = z

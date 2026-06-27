@@ -8,6 +8,15 @@ function yesNo(value: boolean, language: CliLanguage): string {
   return language === "zh-CN" ? (value ? "是" : "否") : value ? "yes" : "no";
 }
 
+function larkSetupDescription(method: OpenTagSetupInput["lark"]["setupMethod"], language: CliLanguage): string {
+  if (language === "zh-CN") {
+    if (method === "saved") return "使用已保存的 Personal Agent";
+    return method === "scan" ? "创建新的 Personal Agent" : "手动填写";
+  }
+  if (method === "saved") return "Saved Personal Agent";
+  return method === "scan" ? "Create new Personal Agent" : "Manual credentials";
+}
+
 export function formatSetupReview(input: OpenTagSetupInput, configPath: string): string {
   const platform = platformById(input.platform);
   const lines =
@@ -18,7 +27,7 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           `平台: ${platform.label}`,
           `Coding agent: ${executorLabel(input.executor)}`,
           `项目路径: ${input.projectPath}`,
-          `Lark 连接方式: ${input.lark.setupMethod === "scan" ? "扫码" : "手动填写"}`,
+          `Lark 连接方式: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
           `Lark 域名: ${input.lark.domain}`,
           `默认绑定当前项目: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
         ]
@@ -28,7 +37,7 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           `Platform: ${platform.label}`,
           `Coding agent: ${executorLabel(input.executor)}`,
           `Project path: ${input.projectPath}`,
-          `Lark setup: ${input.lark.setupMethod === "scan" ? "Scan QR code" : "Manual credentials"}`,
+          `Lark setup: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
           `Lark domain: ${input.lark.domain}`,
           `Default project binding: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
         ];
