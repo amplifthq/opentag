@@ -24,6 +24,7 @@ const config: OpenTagDaemonConfig = {
     extraSafeEnv: ["OPENTAG_DEBUG"]
   },
   githubToken: "ghs_test",
+  preparePullRequestBranch: true,
   allowAutoCreatePullRequest: true,
   pairingToken: "pairing_test",
   pollIntervalMs: 1000,
@@ -41,7 +42,12 @@ describe("opentagd runtime helpers", () => {
   });
 
   it("omits pull request options when GitHub PR creation is not configured", () => {
-    const { githubToken: _githubToken, allowAutoCreatePullRequest: _allowAutoCreatePullRequest, ...configWithoutPullRequests } = config;
+    const {
+      githubToken: _githubToken,
+      preparePullRequestBranch: _preparePullRequestBranch,
+      allowAutoCreatePullRequest: _allowAutoCreatePullRequest,
+      ...configWithoutPullRequests
+    } = config;
     expect(pullRequestOptionsFromConfig(configWithoutPullRequests)).toBeUndefined();
   });
 
@@ -54,7 +60,7 @@ describe("opentagd runtime helpers", () => {
     expect(input.executors.codex.id).toBe("codex");
     expect(input.executors["claude-code"].id).toBe("claude-code");
     expect(input.security).toEqual(securityFromConfig(config));
-    expect(input.pullRequestOptions).toEqual({ githubToken: "ghs_test", allowAutoCreatePullRequest: true });
+    expect(input.pullRequestOptions).toEqual({ githubToken: "ghs_test", preparePullRequestBranch: true, allowAutoCreatePullRequest: true });
     expect(input.pollIntervalMs).toBe(1000);
     expect(input.heartbeatIntervalMs).toBe(15000);
     expect(input.client).toEqual({

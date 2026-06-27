@@ -324,7 +324,16 @@ export const NextActionSchema = z.union([
   })
 ]);
 
-export const CanonicalMutationDomainSchema = z.enum(["status", "assignee", "priority", "labels", "schedule", "review", "artifact_links"]);
+export const CanonicalMutationDomainSchema = z.enum([
+  "status",
+  "assignee",
+  "priority",
+  "labels",
+  "schedule",
+  "review",
+  "artifact_links",
+  "pull_request"
+]);
 
 export const MutationIntentSchema = z.object({
   intentId: z.string().min(1),

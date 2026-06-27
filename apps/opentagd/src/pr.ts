@@ -5,6 +5,7 @@ import type { RepositoryBindingConfig } from "./config.js";
 
 export type PullRequestOptions = {
   githubToken?: string;
+  preparePullRequestBranch?: boolean;
   allowAutoCreatePullRequest?: boolean;
   commandRunner?: CommandRunner;
   fetchImpl?: FetchLike;
@@ -33,8 +34,7 @@ export async function maybeCreatePullRequest(input: {
   result: OpenTagRunResult;
   options: PullRequestOptions;
 }): Promise<OpenTagRunResult> {
-  if (!input.options.githubToken) return input.result;
-  if (!input.options.allowAutoCreatePullRequest) return input.result;
+  if (!input.options.allowAutoCreatePullRequest && !input.options.preparePullRequestBranch) return input.result;
   if (!isGitHubRepositoryTarget({ event: input.event, binding: input.binding })) return input.result;
   if (!repositoryTargetMatchesBinding({ event: input.event, binding: input.binding })) return input.result;
   if (!hasPermission(input.event, "pr:create")) return input.result;
@@ -59,6 +59,11 @@ export async function maybeCreatePullRequest(input: {
     remote: input.binding.pushRemote ?? "origin",
     branchName
   });
+
+  if (!input.options.allowAutoCreatePullRequest) {
+    return input.result;
+  }
+  if (!input.options.githubToken) return input.result;
 
   const pullRequestUrl = await createPullRequestViaFetch(
     {

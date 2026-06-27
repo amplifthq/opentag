@@ -8,6 +8,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${OPENTAG_DISPATCHER_PORT:=3033}"
 : "${OPENTAG_RUNNER_ID:=runner_slack_claude_real}"
 : "${OPENTAG_CLAUDE_PERMISSION_MODE:=acceptEdits}"
+: "${OPENTAG_SLACK_APPLY_PR_ACTION:=false}"
 
 if [[ -f "$OPENTAG_ENV_FILE" ]]; then
   set -a
@@ -19,10 +20,25 @@ fi
 : "${OPENTAG_SLACK_BOT_TOKEN:?Set OPENTAG_SLACK_BOT_TOKEN or OPENTAG_ENV_FILE}"
 : "${OPENTAG_CONFIG_PATH:?Set OPENTAG_CONFIG_PATH or OPENTAG_ENV_FILE}"
 : "${OPENTAG_CLAUDE_COMMAND:=claude}"
+PREPARE_PR_BRANCH="${OPENTAG_SLACK_PREPARE_PR_BRANCH:-${OPENTAG_PREPARE_PR_BRANCH:-false}}"
+GITHUB_TOKEN="${OPENTAG_GITHUB_TOKEN:-}"
+if [[ "$OPENTAG_SLACK_APPLY_PR_ACTION" == "true" && "$PREPARE_PR_BRANCH" != "true" ]]; then
+  PREPARE_PR_BRANCH=true
+fi
 
 if ! command -v "$OPENTAG_CLAUDE_COMMAND" >/dev/null 2>&1; then
   echo "Claude Code CLI not found at '$OPENTAG_CLAUDE_COMMAND'. Install/login to Claude Code first." >&2
   exit 1
+fi
+
+if [[ "$PREPARE_PR_BRANCH" == "true" || "$OPENTAG_SLACK_APPLY_PR_ACTION" == "true" ]]; then
+  if [[ -z "$GITHUB_TOKEN" ]]; then
+    if ! command -v gh >/dev/null 2>&1; then
+      echo "Set OPENTAG_GITHUB_TOKEN or install/authenticate GitHub CLI before enabling Slack PR apply." >&2
+      exit 1
+    fi
+    GITHUB_TOKEN="$(gh auth token)"
+  fi
 fi
 
 cd "$ROOT_DIR"
@@ -52,6 +68,10 @@ TMP_ROOT="$(mktemp -d /tmp/opentag-slack-claude.XXXXXX)"
 CHECKOUT_PATH="${OPENTAG_WORKSPACE_PATH:-$TMP_ROOT/$REPO}"
 CONFIG_PATH="$(mktemp /tmp/opentag-slack-claude-config.XXXXXX)"
 DATABASE_PATH="${OPENTAG_DATABASE_PATH:-$TMP_ROOT/opentag-slack-claude.db}"
+GITHUB_TOKEN_CONFIG=""
+if [[ -n "$GITHUB_TOKEN" ]]; then
+  GITHUB_TOKEN_CONFIG=$(printf '  "githubToken": "%s",\n' "$GITHUB_TOKEN")
+fi
 
 if [[ ! -d "$CHECKOUT_PATH/.git" ]]; then
   if ! command -v gh >/dev/null 2>&1; then
@@ -66,6 +86,7 @@ cat > "$CONFIG_PATH" <<JSON
   "runnerId": "${OPENTAG_RUNNER_ID}",
   "dispatcherUrl": "http://localhost:${OPENTAG_DISPATCHER_PORT}",
   "pairingToken": "${OPENTAG_PAIRING_TOKEN}",
+${GITHUB_TOKEN_CONFIG}  "preparePullRequestBranch": ${PREPARE_PR_BRANCH},
   "pollIntervalMs": 1000,
   "heartbeatIntervalMs": 15000,
   "claudeCode": {
@@ -110,6 +131,9 @@ echo "Starting dispatcher on :${OPENTAG_DISPATCHER_PORT}"
   export OPENTAG_DATABASE_PATH="$DATABASE_PATH"
   export OPENTAG_PAIRING_TOKEN
   export OPENTAG_SLACK_BOT_TOKEN
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    export OPENTAG_GITHUB_TOKEN="$GITHUB_TOKEN"
+  fi
   NODE_OPTIONS='--conditions=development' apps/dispatcher/node_modules/.bin/tsx apps/dispatcher/src/index.ts
 ) &
 DISPATCHER_PID=$!
@@ -118,6 +142,8 @@ sleep 2
 export OPENTAG_CONFIG_PATH="$CONFIG_PATH"
 export OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}"
 export OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN"
+export OPENTAG_SLACK_APPLY_PR_ACTION
+export PREPARE_PR_BRANCH
 
 NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts register-runner
 NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts bind-repos
@@ -176,6 +202,7 @@ body = {
             {"scope": "runner:local", "reason": "execute on local daemon"},
             {"scope": "repo:read", "reason": "inspect mapped repository"},
             {"scope": "repo:write", "reason": "modify local branch"},
+            *([{"scope": "pr:create", "reason": "open a pull request after source-thread approval"}] if os.environ.get("PREPARE_PR_BRANCH") == "true" or os.environ.get("OPENTAG_SLACK_APPLY_PR_ACTION") == "true" else []),
         ],
         "callback": {"provider": "slack", "uri": "https://slack.com/api/chat.postMessage", "threadKey": f"{os.environ['TEAM_ID']}|{os.environ['CHANNEL_ID']}|{thread_ts}"},
         "metadata": {"teamId": os.environ["TEAM_ID"], "channelId": os.environ["CHANNEL_ID"], "messageTs": thread_ts, "repoProvider": "github", "owner": os.environ["OWNER"], "repo": os.environ["REPO"]},
@@ -186,11 +213,69 @@ req = urllib.request.Request(
     data=json.dumps(body).encode(),
     headers={"Authorization": "Bearer " + os.environ["OPENTAG_DISPATCHER_TOKEN"], "Content-Type": "application/json"},
 )
-with urllib.request.urlopen(req) as resp:
+with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req) as resp:
     print(json.dumps({"runId": run_id, "status": resp.status}))
 PY
 
 NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts run-once
+
+if [[ "$OPENTAG_SLACK_APPLY_PR_ACTION" == "true" ]]; then
+  echo "Applying suggested PR action from the Slack source thread"
+  python3 - <<'PY'
+import json, os, urllib.request
+req = urllib.request.Request(
+    "https://slack.com/api/chat.postMessage",
+    data=json.dumps({"channel": os.environ["CHANNEL_ID"], "thread_ts": os.environ["THREAD_TS"], "text": "apply 1"}).encode(),
+    headers={"Authorization": "Bearer " + os.environ["OPENTAG_SLACK_BOT_TOKEN"], "Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req) as resp:
+    body = json.loads(resp.read())
+if not body.get("ok"):
+    raise SystemExit(body)
+print(json.dumps({"applyMessageTs": body["ts"]}))
+PY
+  node <<'NODE'
+const body = {
+  rawText: "apply 1",
+  actor: {
+    provider: "slack",
+    providerUserId: process.env.OPENTAG_SLACK_ACTOR_USER_ID ?? "U_LOCAL",
+    handle: process.env.OPENTAG_SLACK_ACTOR_USER_ID ?? "U_LOCAL",
+    organizationId: process.env.TEAM_ID
+  },
+  callback: {
+    provider: "slack",
+    uri: "https://slack.com/api/chat.postMessage",
+    threadKey: `${process.env.TEAM_ID}|${process.env.CHANNEL_ID}|${process.env.THREAD_TS}`
+  },
+  metadata: {
+    source: "slack-api-assisted-smoke",
+    teamId: process.env.TEAM_ID,
+    channelId: process.env.CHANNEL_ID,
+    messageTs: process.env.THREAD_TS,
+    repoProvider: "github",
+    owner: process.env.OWNER,
+    repo: process.env.REPO,
+    runId: process.env.RUN_ID
+  }
+};
+
+fetch(`${process.env.OPENTAG_DISPATCHER_URL}/v1/thread-actions`, {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "authorization": `Bearer ${process.env.OPENTAG_DISPATCHER_TOKEN}`
+  },
+  body: JSON.stringify(body)
+}).then(async (response) => {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`thread action failed: ${response.status} ${text}`);
+  }
+  console.log(text);
+});
+NODE
+fi
 
 echo "Metrics:"
 curl -s -H "authorization: Bearer $OPENTAG_DISPATCHER_TOKEN" "$OPENTAG_DISPATCHER_URL/v1/runs/$RUN_ID/metrics"

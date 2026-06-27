@@ -67,6 +67,7 @@ export const OpenTagDaemonConfigSchema = z.object({
   claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
   security: RunnerSecurityPolicySchema.optional(),
   githubToken: z.string().min(1).optional(),
+  preparePullRequestBranch: z.boolean().optional(),
   allowAutoCreatePullRequest: z.boolean().optional(),
   pairingToken: z.string().min(1).optional(),
   pollIntervalMs: PositiveIntegerSchema.default(5000),
@@ -304,6 +305,7 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
         }
       : {}),
     ...(process.env.OPENTAG_GITHUB_TOKEN ? { githubToken: process.env.OPENTAG_GITHUB_TOKEN } : {}),
+    ...(process.env.OPENTAG_PREPARE_PR_BRANCH ? { preparePullRequestBranch: process.env.OPENTAG_PREPARE_PR_BRANCH === "true" } : {}),
     ...(process.env.OPENTAG_ALLOW_AUTO_CREATE_PR ? { allowAutoCreatePullRequest: process.env.OPENTAG_ALLOW_AUTO_CREATE_PR === "true" } : {}),
     ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
     ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: parseNumberFromEnv("OPENTAG_POLL_INTERVAL_MS") } : {}),

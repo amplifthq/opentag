@@ -49,6 +49,55 @@ function nextActionSummary(result: OpenTagRunResult): string | undefined {
   return result.nextAction.summary;
 }
 
+function stringParam(params: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = params?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArrayParam(params: Record<string, unknown> | undefined, key: string): string[] {
+  const value = params?.[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function renderVerificationParams(params: Record<string, unknown> | undefined): string[] {
+  const value = params?.["verification"];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const command = (item as Record<string, unknown>)["command"];
+      const outcome = (item as Record<string, unknown>)["outcome"];
+      return typeof command === "string" && typeof outcome === "string" ? `   - \`${command}\`: ${outcome}` : undefined;
+    })
+    .filter((line): line is string => Boolean(line));
+}
+
+function renderSuggestedActionDetails(params: Record<string, unknown> | undefined, action: string): string[] {
+  if (action !== "create_pull_request") return [];
+  const lines: string[] = [];
+  const title = stringParam(params, "title");
+  const head = stringParam(params, "head") ?? stringParam(params, "branch");
+  const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
+  const changedFiles = stringArrayParam(params, "changedFiles");
+  const risks = stringArrayParam(params, "risks");
+  const verification = renderVerificationParams(params);
+  if (title) lines.push(`   Title: ${markdownToSlackMrkdwn(title)}`);
+  if (head || base) lines.push(`   Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
+  if (changedFiles.length > 0) lines.push(`   Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
+  if (risks.length > 0) {
+    lines.push("   Risks:");
+    for (const risk of risks) {
+      lines.push(`   - ${markdownToSlackMrkdwn(risk)}`);
+    }
+  }
+  if (verification.length > 0) {
+    lines.push("   Verification:");
+    lines.push(...verification);
+  }
+  return lines;
+}
+
 function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
   const candidates = suggestedActionCandidatesFromResult(result);
   if (candidates.length === 0) return [];
@@ -62,6 +111,7 @@ function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
       `   Proposal: \`${candidate.proposalId}\``,
       `   Intent ID: \`${candidate.intent.intentId}\``
     );
+    lines.push(...renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action));
     if (candidate.proposalPreconditions?.length) {
       lines.push("   Preconditions:");
       for (const precondition of candidate.proposalPreconditions) {

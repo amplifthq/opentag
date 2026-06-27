@@ -45,12 +45,13 @@ export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
 }
 
 export function pullRequestOptionsFromConfig(config: OpenTagDaemonConfig): PullRequestOptions | undefined {
-  if (!config.githubToken && config.allowAutoCreatePullRequest === undefined) {
+  if (!config.githubToken && config.preparePullRequestBranch === undefined && config.allowAutoCreatePullRequest === undefined) {
     return undefined;
   }
 
   return {
     ...(config.githubToken ? { githubToken: config.githubToken } : {}),
+    ...(config.preparePullRequestBranch !== undefined ? { preparePullRequestBranch: config.preparePullRequestBranch } : {}),
     ...(config.allowAutoCreatePullRequest !== undefined ? { allowAutoCreatePullRequest: config.allowAutoCreatePullRequest } : {})
   };
 }

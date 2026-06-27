@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assembleContextPacketFromEvent,
+  conversationKeysFromEvent,
   contextPacketFromEvent,
   createAdapterMutationCompilerRegistry,
   defaultRunEventMetadata,
@@ -58,6 +59,19 @@ describe("protocol helpers", () => {
         canApprove: true
       }
     });
+  });
+
+  it("keeps a legacy repo conversation key alias for GitHub issue-scoped threads", () => {
+    const issueScopedEvent: OpenTagEvent = {
+      ...githubEvent,
+      callback: {
+        ...githubEvent.callback,
+        threadKey: "acme/demo#7"
+      }
+    };
+
+    expect(conversationKeysFromEvent(issueScopedEvent)).toEqual(["github:acme/demo#7", "github:acme/demo"]);
+    expect(conversationKeysFromEvent(githubEvent)).toEqual(["github:acme/demo"]);
   });
 
   it("does not invent a canonical work item when only a Slack thread is known", () => {

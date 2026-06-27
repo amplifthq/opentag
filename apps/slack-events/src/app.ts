@@ -131,11 +131,11 @@ export function createSlackEventsApp(input: {
     if (payload.type !== "event_callback" || !payload.event || !["app_mention", "message"].includes(payload.event.type)) {
       return c.json({ ok: true });
     }
-    if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
-      return c.json({ error: "invalid_event_payload" }, 400);
-    }
     if (payload.event.type === "message" && (payload.event.subtype || payload.event.bot_id)) {
       return c.json({ ok: true });
+    }
+    if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
+      return c.json({ error: "invalid_event_payload" }, 400);
     }
 
     const rawThreadActionText =

@@ -109,9 +109,24 @@ describe("Claude Code executor", () => {
       proposalId: "proposal_run_1",
       sourceRunId: "run_1",
       intents: [
+        {
+          intentId: "proposal_run_1_create_pr",
+          domain: "pull_request",
+          action: "create_pull_request",
+          params: { title: "OpenTag run run_1", head: "opentag/run_1", base: "main" }
+        },
         { intentId: "proposal_run_1_link_branch", domain: "artifact_links", action: "link_artifact" },
         { intentId: "proposal_run_1_request_review", domain: "review", action: "request_review" }
       ]
+    });
+    expect(result.verification).toBeUndefined();
+    expect(result.suggestedChanges?.[0]?.intents[0]?.params?.["body"]).not.toContain("claude --print");
+    expect(result.suggestedChanges?.[0]?.intents[0]?.params?.["verification"]).toBeUndefined();
+    expect(result.nextAction).toMatchObject({
+      hint: {
+        kind: "create_pull_request",
+        selectedIntentIds: ["proposal_run_1_create_pr"]
+      }
     });
   });
 

@@ -4,11 +4,13 @@ export function createExecutorRunResult(input: {
   executorName: string;
   runId: string;
   branchName: string;
+  baseBranch?: string;
   output: string;
   changedFiles: string[];
-  verificationCommand: string;
+  extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
+  const summary = input.output.slice(-4000);
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [
@@ -18,6 +20,25 @@ export function createExecutorRunResult(input: {
             sourceRunId: input.runId,
             summary: `${input.executorName} changed ${input.changedFiles.length} file(s) on branch ${input.branchName}.`,
             intents: [
+              {
+                intentId: `${proposalId}_create_pr`,
+                domain: "pull_request" as const,
+                action: "create_pull_request",
+                summary: `Create a pull request for branch ${input.branchName}.`,
+                params: {
+                  title: `OpenTag run ${input.runId}`,
+                  body: [
+                    "## Summary",
+                    "",
+                    summary
+                  ].join("\n"),
+                  head: input.branchName,
+                  base: input.baseBranch ?? "main",
+                  changedFiles: input.changedFiles,
+                  risks: ["Creates a pull request from the executor-produced branch; review the diff before merging."],
+                  executorConditions: ["isolated branch exists"]
+                }
+              },
               {
                 intentId: `${proposalId}_link_branch`,
                 domain: "artifact_links" as const,
@@ -40,30 +61,23 @@ export function createExecutorRunResult(input: {
 
   return {
     conclusion: "success",
-    summary: input.output.slice(-4000),
+    summary,
     changedFiles: input.changedFiles,
-    artifacts: [{ kind: input.changedFiles.length > 0 ? "patch" : "audit_trail", title: "Run branch", uri: input.branchName }],
-    ...(suggestedChanges ? { suggestedChanges } : {}),
-    verification: [
-      {
-        command: input.verificationCommand,
-        outcome: "passed",
-        excerpt: input.output.slice(-1000)
-      }
+    artifacts: [
+      ...(input.changedFiles.length > 0 ? [{ kind: "patch" as const, title: "Run branch", uri: input.branchName }] : []),
+      ...(input.extraArtifacts ?? [])
     ],
+    ...(suggestedChanges ? { suggestedChanges } : {}),
     nextAction:
       input.changedFiles.length > 0
         ? {
-            summary: "Review the local branch and explicitly create a pull request if the proposal is acceptable.",
+            summary: "Review the proposed pull request action and reply `apply 1` if the branch should become a PR.",
             hint: {
               kind: "create_pull_request",
               targetId: proposalId,
-              selectedIntentIds: [`${proposalId}_link_branch`, `${proposalId}_request_review`]
+              selectedIntentIds: [`${proposalId}_create_pr`]
             }
           }
-        : {
-            summary: "No file changes were detected.",
-            hint: { kind: "none" }
-          }
+        : "No file changes were detected."
   };
 }

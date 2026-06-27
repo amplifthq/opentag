@@ -24,6 +24,11 @@ describe("thread action commands", () => {
       selection: { kind: "intent", intentId: "intent_label_1" },
       rawText: "reject intent_label_1"
     });
+    expect(parseThreadActionCommand("apply pr")).toEqual({
+      verb: "apply",
+      selection: { kind: "domain", domain: "pull_request" },
+      rawText: "apply pr"
+    });
   });
 
   it("does not treat regex-special selection tokens as parser syntax", () => {

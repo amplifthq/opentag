@@ -82,6 +82,29 @@ function githubPullRequestEvent(input: { id: string; sourceEventId: string; thre
   };
 }
 
+function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "slack",
+    sourceEventId: input.sourceEventId,
+    actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+    context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" }],
+    permissions: [
+      { scope: "chat:postMessage", reason: "reply to source thread" },
+      { scope: "runner:local", reason: "execute on local daemon" },
+      { scope: "repo:write", reason: "modify the mapped repository" },
+      { scope: "pr:create", reason: "create an approved pull request" }
+    ],
+    callback: {
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: input.threadKey
+    },
+    metadata: { teamId: "T123", channelId: "C123", messageTs: "1710000000.000100", repoProvider: "github", owner: "acme", repo: "demo" }
+  };
+}
+
 async function seedCompletedProposal(input: {
   app: ReturnType<typeof createDispatcherApp>;
   runId: string;
@@ -1870,6 +1893,83 @@ describe("dispatcher API", () => {
     expect(delivered).toHaveLength(deliveredCountAfterFirstApply);
   });
 
+  it("resolves issue-scoped action replies against legacy repo-scoped GitHub issue proposals", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+          });
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_apply_legacy",
+      event: githubIssueEvent({
+        id: "evt_thread_apply_legacy",
+        sourceEventId: "comment_thread_apply_legacy",
+        threadKey: "acme/demo"
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_apply_legacy",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the legacy bug.",
+          intents: [
+            {
+              intentId: "intent_label_legacy_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      decision: { proposalId: "proposal_thread_apply_legacy", approvedIntentIds: ["intent_label_legacy_bug"] },
+      plan: {
+        proposalId: "proposal_thread_apply_legacy",
+        outcomes: [{ intentId: "intent_label_legacy_bug", outcome: "applied" }]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/issues/1/labels",
+        method: "POST",
+        body: { labels: ["bug"] }
+      }
+    ]);
+  });
+
   it("does not execute the adapter twice for concurrent duplicate apply replies", async () => {
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({
@@ -2216,6 +2316,219 @@ describe("dispatcher API", () => {
     ]);
   });
 
+  it("applies a model-suggested create PR action from a source-thread reply", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return Response.json({ html_url: "https://github.com/acme/demo/pull/42" });
+        }
+      }
+    });
+
+    const event = githubIssueEvent({ id: "evt_thread_create_pr", sourceEventId: "comment_thread_create_pr", threadKey: "acme/demo#1" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_pr",
+      event: {
+        ...event,
+        permissions: [...event.permissions, { scope: "pr:create", reason: "create an approved pull request" }]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_pr",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create PR for branch opentag/run_thread_create_pr.",
+              params: {
+                title: "OpenTag run run_thread_create_pr",
+                body: "PR body",
+                head: "opentag/run_thread_create_pr",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                verification: [{ command: "pnpm test", outcome: "passed" }],
+                risks: ["Review before merge."],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        proposalId: "proposal_thread_create_pr",
+        outcomes: [
+          {
+            intentId: "intent_create_pr",
+            outcome: "applied",
+            externalUri: "https://github.com/acme/demo/pull/42"
+          }
+        ]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls",
+        method: "POST",
+        authorization: "Bearer gh_test",
+        body: {
+          title: "OpenTag run run_thread_create_pr",
+          body: [
+            "PR body",
+            "",
+            "## Changed Files",
+            "- `src/demo.ts`",
+            "",
+            "## Risks",
+            "- Review before merge.",
+            "",
+            "## Verification",
+            "- `pnpm test`: passed",
+            "",
+            "## Executor Conditions",
+            "- isolated branch exists"
+          ].join("\n"),
+          head: "opentag/run_thread_create_pr",
+          base: "main"
+        }
+      }
+    ]);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/42"))).toBe(true);
+  });
+
+  it("routes repo-level create_pull_request actions from Slack threads to the GitHub adapter", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return Response.json({ html_url: "https://github.com/acme/demo/pull/43" });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_slack_create_pr",
+      event: slackRepoEvent({ id: "evt_slack_create_pr", sourceEventId: "slack_thread_create_pr", threadKey: "T123|C123|1710000000.000100" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_slack_create_pr",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_slack_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create PR for branch opentag/run_slack_create_pr.",
+              params: {
+                title: "OpenTag run run_slack_create_pr",
+                body: "PR body",
+                head: "opentag/run_slack_create_pr",
+                base: "main",
+                changedFiles: ["README.md"],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    const bindingResponse = await app.request("/v1/slack-channel-bindings", jsonRequest({
+      teamId: "T123",
+      channelId: "C123",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    expect(bindingResponse.status).toBe(201);
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        adapter: "github",
+        proposalId: "proposal_slack_create_pr",
+        outcomes: [
+          {
+            intentId: "intent_slack_create_pr",
+            outcome: "applied",
+            externalUri: "https://github.com/acme/demo/pull/43"
+          }
+        ]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls",
+        method: "POST",
+        authorization: "Bearer gh_test",
+        body: {
+          title: "OpenTag run run_slack_create_pr",
+          body: ["PR body", "", "## Changed Files", "- `README.md`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          head: "opentag/run_slack_create_pr",
+          base: "main"
+        }
+      }
+    ]);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/43"))).toBe(true);
+  });
+
   it("falls back to a child run when a PR review request lacks reviewer params", async () => {
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({
@@ -2329,14 +2642,33 @@ describe("dispatcher API", () => {
     expect(stored.event.metadata).toMatchObject({
       parentRunId: "run_thread_continue",
       sourceProposalId: "proposal_thread_continue",
-      threadActionVerb: "continue"
+      threadActionVerb: "continue",
+      approvalDecisionId: body.decision.id,
+      selectedIntentIds: ["intent_continue_tests"],
+      previousRunSummary: "Prepared suggested actions."
     });
     expect(stored.event.context.some((pointer: { uri?: string }) => pointer.uri?.includes("OpenTag thread action continuation."))).toBe(true);
+    expect(stored.run.contextPacket.facts.map((fact: { text: string }) => fact.text)).toEqual(
+      expect.arrayContaining([
+        "Action loop thread action: continue",
+        "Action loop parent run: run_thread_continue",
+        "Action loop proposal: proposal_thread_continue",
+        `Action loop approval decision: ${body.decision.id}`,
+        "Action loop selected intents: intent_continue_tests",
+        "Action loop previous result: Prepared suggested actions."
+      ])
+    );
   });
 
   it("falls back to a child run when an approved action has no direct adapter operation", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
       githubApply: {
         token: "gh_test",
         fetchImpl: async () => {
@@ -2389,5 +2721,40 @@ describe("dispatcher API", () => {
       }
     });
     expect(body.run.sourceApplyPlanId).toBe(body.plan.id);
+    const runResponse = await app.request(`/v1/runs/${body.run.id}`);
+    expect(runResponse.status).toBe(200);
+    const stored = await runResponse.json();
+    expect(stored.event.metadata).toMatchObject({
+      parentRunId: "run_thread_fallback",
+      sourceProposalId: "proposal_thread_fallback",
+      approvalDecisionId: body.decision.id,
+      sourceApplyPlanId: body.plan.id,
+      selectedIntentIds: ["intent_request_review"],
+      threadActionVerb: "apply",
+      previousRunSummary: "Prepared suggested actions."
+    });
+    expect(stored.event.metadata.fallbackReason).toContain("No selected intent has a direct adapter execution path.");
+    expect(stored.run.contextPacket.facts.map((fact: { text: string }) => fact.text)).toEqual(
+      expect.arrayContaining([
+        "Action loop thread action: apply",
+        "Action loop parent run: run_thread_fallback",
+        "Action loop proposal: proposal_thread_fallback",
+        `Action loop approval decision: ${body.decision.id}`,
+        `Action loop apply plan: ${body.plan.id}`,
+        "Action loop selected intents: intent_request_review",
+        "Action loop previous result: Prepared suggested actions.",
+        "Action loop fallback reason: No selected intent has a direct adapter execution path."
+      ])
+    );
+    expect(
+      delivered.some(
+        (message) =>
+          message.kind === "final" &&
+          message.body.includes("Context carried into the child run:") &&
+          message.body.includes(`Child run: \`${body.run.id}\``) &&
+          message.body.includes(`Approval decision: \`${body.decision.id}\``) &&
+          message.body.includes("Fallback reason:")
+      )
+    ).toBe(true);
   });
 });
