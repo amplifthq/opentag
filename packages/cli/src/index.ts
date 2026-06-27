@@ -27,6 +27,7 @@ program
   .option("--config <path>", "Config file path")
   .option("--project <path>", "Project checkout path")
   .option("--executor <executor>", "Default executor: echo, codex, or claude-code")
+  .option("--lark-setup <method>", "Lark setup method: scan or manual")
   .option("--lark-app-id <id>", "Lark app id")
   .option("--lark-app-secret <secret>", "Lark app secret")
   .option("--lark-domain <domain>", "Lark domain: lark or feishu")

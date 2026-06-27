@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { projectTargetRefFromLocalPath } from "@opentag/core";
+import type { LarkDomain, RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
   defaultConfigPath,
   defaultStateDirectory,
@@ -12,6 +13,7 @@ import {
   type OpenTagCliConfig,
   type PathEnvironment
 } from "./config.js";
+import { scanLarkPersonalAgent } from "./lark-registration.js";
 
 export type LarkSetupInput = {
   projectPath: string;
@@ -19,22 +21,32 @@ export type LarkSetupInput = {
   lark: {
     appId: string;
     appSecret: string;
-    domain: "lark" | "feishu";
+    domain: LarkDomain;
     botOpenId?: string;
   };
   stateDirectory?: string;
 };
+
+type LarkSetupMethod = "scan" | "manual";
 
 export type SetupCommandOptions = {
   platform?: string;
   config?: string;
   project?: string;
   executor?: "echo" | "codex" | "claude-code";
+  larkSetup?: LarkSetupMethod;
   larkAppId?: string;
   larkAppSecret?: string;
-  larkDomain?: "lark" | "feishu";
+  larkDomain?: LarkDomain;
   larkBotOpenId?: string;
   force?: boolean;
+};
+
+export type SetupCommandDependencies = {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  prompt?(question: string): Promise<string>;
+  scanLarkPersonalAgent?: typeof scanLarkPersonalAgent;
 };
 
 function pairingToken(): string {
@@ -55,7 +67,12 @@ function parseExecutor(value: string): "echo" | "codex" | "claude-code" {
   throw new Error("Executor must be echo, codex, or claude-code.");
 }
 
-function parseLarkDomain(value: string): "lark" | "feishu" {
+function parseLarkSetupMethod(value: string): LarkSetupMethod {
+  if (value === "scan" || value === "manual") return value;
+  throw new Error("Lark setup method must be scan or manual.");
+}
+
+function parseLarkDomain(value: string): LarkDomain {
   if (value === "lark" || value === "feishu") return value;
   throw new Error("Lark domain must be lark or feishu.");
 }
@@ -66,6 +83,25 @@ function nonEmpty(value: string, label: string): string {
     throw new Error(`${label} is required.`);
   }
   return trimmed;
+}
+
+function hasManualLarkCredentials(options: SetupCommandOptions): boolean {
+  return Boolean(options.larkAppId || options.larkAppSecret || options.larkBotOpenId);
+}
+
+function assertCompleteManualLarkCredentials(options: SetupCommandOptions): void {
+  if (options.larkAppId && !options.larkAppSecret) {
+    throw new Error("--lark-app-secret is required when --lark-app-id is provided.");
+  }
+  if (options.larkAppSecret && !options.larkAppId) {
+    throw new Error("--lark-app-id is required when --lark-app-secret is provided.");
+  }
+}
+
+function assertNoManualLarkCredentialFlags(options: SetupCommandOptions): void {
+  if (hasManualLarkCredentials(options)) {
+    throw new Error("--lark-app-id, --lark-app-secret, and --lark-bot-open-id can only be used with --lark-setup manual.");
+  }
 }
 
 export function createSetupConfig(input: LarkSetupInput, env: PathEnvironment = process.env): OpenTagCliConfig {
@@ -113,39 +149,68 @@ export function createSetupConfig(input: LarkSetupInput, env: PathEnvironment = 
   };
 }
 
-async function promptForMissingSetupInput(options: SetupCommandOptions): Promise<LarkSetupInput> {
-  const readline = createInterface({ input, output });
-  try {
-    const projectAnswer = options.project ?? (await readline.question(`Project path [${process.cwd()}]: `));
-    const projectPath = projectAnswer.trim() || process.cwd();
+async function promptForMissingSetupInput(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<LarkSetupInput> {
+  const readline = dependencies.prompt ? undefined : createInterface({ input, output });
+  const question =
+    dependencies.prompt ??
+    ((prompt: string) => {
+      return readline!.question(prompt);
+    });
+  const cwd = dependencies.cwd ?? process.cwd();
+  const scan = dependencies.scanLarkPersonalAgent ?? scanLarkPersonalAgent;
 
-    const detectedExecutor = defaultExecutor();
-    const executorAnswer = options.executor ?? (await readline.question(`Executor [${detectedExecutor}]: `));
+  try {
+    const projectAnswer = options.project ?? (await question(`Project path [${cwd}]: `));
+    const projectPath = projectAnswer.trim() || cwd;
+
+    const detectedExecutor = defaultExecutor(dependencies.env);
+    const executorAnswer = options.executor ?? (await question(`Executor [${detectedExecutor}]: `));
     const executor = parseExecutor(executorAnswer.trim() || detectedExecutor);
 
-    const domainAnswer = options.larkDomain ?? (await readline.question("Lark domain [lark]: "));
+    const setupMethodAnswer =
+      options.larkSetup ??
+      (hasManualLarkCredentials(options) ? "manual" : await question("Lark setup method (scan/manual) [scan]: "));
+    const setupMethod = parseLarkSetupMethod(setupMethodAnswer.trim() || "scan");
+
+    if (setupMethod === "scan") {
+      assertNoManualLarkCredentialFlags(options);
+    } else {
+      assertCompleteManualLarkCredentials(options);
+    }
+
+    const domainAnswer = options.larkDomain ?? (await question("Lark domain [lark]: "));
     const domain = parseLarkDomain(domainAnswer.trim() || "lark");
 
-    const appId = nonEmpty(options.larkAppId ?? (await readline.question("Lark App ID: ")), "Lark App ID");
-    const appSecret = nonEmpty(options.larkAppSecret ?? (await readline.question("Lark App Secret: ")), "Lark App Secret");
-    const botOpenId = (options.larkBotOpenId ?? (await readline.question("Lark Bot Open ID (optional): "))).trim();
+    let lark: RegisteredLarkPersonalAgent;
+    if (setupMethod === "scan") {
+      lark = await scan({ domain });
+    } else {
+      lark = {
+        appId: nonEmpty(options.larkAppId ?? (await question("Lark App ID: ")), "Lark App ID"),
+        appSecret: nonEmpty(options.larkAppSecret ?? (await question("Lark App Secret: ")), "Lark App Secret"),
+        domain
+      };
+    }
+
+    const botOpenId =
+      (lark.botOpenId ?? options.larkBotOpenId ?? (await question("Lark Bot Open ID (optional): "))).trim();
 
     return {
       projectPath,
       executor,
       lark: {
-        appId,
-        appSecret,
-        domain,
+        appId: lark.appId,
+        appSecret: lark.appSecret,
+        domain: lark.domain,
         ...(botOpenId ? { botOpenId } : {})
       }
     };
   } finally {
-    readline.close();
+    readline?.close();
   }
 }
 
-export async function runSetupCommand(options: SetupCommandOptions): Promise<void> {
+export async function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
   const platform = options.platform ?? "lark";
   if (platform !== "lark") {
     throw new Error("Only the lark platform is supported in this CLI preview.");
@@ -156,7 +221,7 @@ export async function runSetupCommand(options: SetupCommandOptions): Promise<voi
     throw new Error(`OpenTag config already exists at ${configPath}. Use --force to overwrite it.`);
   }
 
-  const setupInput = await promptForMissingSetupInput(options);
+  const setupInput = await promptForMissingSetupInput(options, dependencies);
   const config = createSetupConfig(setupInput);
   ensurePrivateDirectory(config.state.directory);
   ensurePrivateDirectory(config.state.worktreeRoot);
