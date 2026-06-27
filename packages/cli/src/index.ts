@@ -35,6 +35,8 @@ program
   .option("--lark-app-secret <secret>", "Lark app secret")
   .option("--lark-domain <domain>", "Lark domain: lark or feishu")
   .option("--lark-bot-open-id <openId>", "Lark bot open id for group mentions")
+  .option("--slack-mode <mode>", "Slack connection mode: socket_mode or events_api")
+  .option("--slack-app-token <token>", "Slack app-level token for Socket Mode")
   .option("--slack-signing-secret <secret>", "Slack signing secret")
   .option("--slack-bot-token <token>", "Slack bot user OAuth token")
   .option("--slack-app-id <id>", "Slack app id")

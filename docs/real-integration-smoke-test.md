@@ -271,7 +271,7 @@ Expected Slack thread shape:
 
 Routine progress stays audit-only by default, so it should not produce additional Slack thread replies.
 
-### Slack App Setup
+### Slack Events API App Setup
 
 Required bot scopes:
 
@@ -291,9 +291,9 @@ Install the app to the workspace, then collect:
 
 Invite the bot user into the test channel before sending any mention.
 
-### Socket Mode
+### Events API Transport
 
-Disable Socket Mode when using Events API over a public Request URL.
+This smoke path uses Events API over a public Request URL. Disable Socket Mode for this specific app setup.
 
 If Socket Mode is still enabled, Slack may give confusing signals in the dashboard and you end up debugging the wrong transport.
 

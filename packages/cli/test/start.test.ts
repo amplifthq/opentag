@@ -9,6 +9,7 @@ import {
   githubIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
   slackIngressConfigFromCliConfig,
+  slackSocketModeIngressConfigFromCliConfig,
   waitForDispatcher
 } from "../src/start.js";
 
@@ -42,7 +43,27 @@ function slackConfig() {
     executor: "echo",
     stateDirectory: join(tempDir(), "state"),
     slack: {
+      mode: "events_api",
       signingSecret: "slack_signing_secret",
+      botToken: "xoxb-token",
+      appId: "A123",
+      teamId: "T123",
+      channelId: "C123",
+      bindingMethod: "default_project"
+    }
+  });
+}
+
+function slackSocketModeConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "slack",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    slack: {
+      mode: "socket_mode",
+      appToken: "xapp-token",
       botToken: "xoxb-token",
       appId: "A123",
       teamId: "T123",
@@ -105,6 +126,20 @@ describe("OpenTag CLI start wiring", () => {
     });
     expect(slackIngressConfigFromCliConfig(built)).toMatchObject({
       signingSecret: "slack_signing_secret",
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      appId: "A123"
+    });
+  });
+
+  it("derives Slack Socket Mode input without requiring a public Events URL", () => {
+    const built = slackSocketModeConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      slackBotToken: "xoxb-token"
+    });
+    expect(slackSocketModeIngressConfigFromCliConfig(built)).toMatchObject({
+      appToken: "xapp-token",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       appId: "A123"

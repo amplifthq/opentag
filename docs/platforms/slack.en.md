@@ -2,38 +2,46 @@
 
 Use this guide when `opentag setup` asks for Slack credentials.
 
-## What You Need
+OpenTag supports two Slack connection modes:
+
+- **Local Socket Mode**: recommended for running OpenTag on this computer. No public URL is required.
+- **Public Events API**: best for hosted OpenTag, or advanced local testing with a tunnel.
+
+Both modes support the same core product flow: mention the Slack app, let OpenTag run a local coding agent, and get the result back in the same Slack thread.
+
+## Recommended: Local Socket Mode
+
+Choose this mode when you want `opentag start` on your computer to receive Slack mentions directly.
+
+### What You Need
 
 - A Slack app installed in your workspace.
-- A public URL that forwards to your local OpenTag Slack ingress.
+- Socket Mode enabled for that app.
+- A Slack App-Level Token that starts with `xapp-`.
+- A Slack Bot User OAuth Token that starts with `xoxb-`.
 - The target Slack channel where people will mention the app.
 
-For local testing, expose OpenTag with a tunnel:
-
-```bash
-ngrok http 3040
-```
-
-Your Slack Request URL should look like:
-
-```text
-https://<your-tunnel-host>/slack/events
-```
-
-## Create the Slack App
+### Create the Slack App
 
 1. Open [Slack API Apps](https://api.slack.com/apps).
 2. Create a new app from scratch.
 3. Choose the workspace where you want to test OpenTag.
-4. Go to **Basic Information** and copy **Signing Secret**.
+
+### Enable Socket Mode
+
+1. Go to **Socket Mode**.
+2. Enable Socket Mode.
+3. Create an App-Level Token with this scope:
+   - `connections:write`
+4. Copy the App-Level Token. It starts with `xapp-`.
 
 OpenTag asks for this as:
 
 ```text
-Slack Signing Secret
+Slack App-Level Token
 ```
 
-## Add Bot Permissions
+### Add Bot Permissions
 
 1. Go to **OAuth & Permissions**.
 2. Under **Bot Token Scopes**, add:
@@ -48,21 +56,60 @@ OpenTag asks for this as:
 Slack Bot User OAuth Token
 ```
 
-## Enable Events
+### Subscribe to App Mentions
 
 1. Go to **Event Subscriptions**.
 2. Enable events.
-3. Paste your Request URL:
+3. Under **Subscribe to bot events**, add:
+   - `app_mention`
+4. Save changes.
+
+Do not enter a Request URL for Socket Mode. Slack delivers the event through the WebSocket connection opened by `opentag start`.
+
+## Advanced: Public Events API
+
+Choose this mode when OpenTag has a stable public endpoint, or when you intentionally want to test with a tunnel.
+
+### What You Need
+
+- A Slack app installed in your workspace.
+- A public URL that forwards to your local OpenTag Slack ingress.
+- A Slack Signing Secret.
+- A Slack Bot User OAuth Token.
+- The target Slack channel where people will mention the app.
+
+For local testing, expose OpenTag with a tunnel:
+
+```bash
+ngrok http 3040
+```
+
+Your Slack Request URL should look like:
 
 ```text
 https://<your-tunnel-host>/slack/events
 ```
 
-4. Under **Subscribe to bot events**, add:
-   - `app_mention`
-5. Save changes.
+### Configure Events API
 
-Use the Events API Request URL path exactly as shown above. Do not enable Socket Mode for this local Events API setup.
+1. Go to **Basic Information** and copy **Signing Secret**.
+2. Go to **OAuth & Permissions** and add the same bot scopes:
+   - `app_mentions:read`
+   - `chat:write`
+3. Install or reinstall the app.
+4. Go to **Event Subscriptions**.
+5. Enable events.
+6. Paste your Request URL:
+
+```text
+https://<your-tunnel-host>/slack/events
+```
+
+7. Under **Subscribe to bot events**, add:
+   - `app_mention`
+8. Save changes.
+
+Do not enable Socket Mode for this Events API setup.
 
 ## Find Team and Channel IDs
 

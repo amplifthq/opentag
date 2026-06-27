@@ -34,10 +34,12 @@
   "dependencies": {
     "@hono/node-server": "^1.13.7",
     "@opentag/client": "workspace:*",
+    "@opentag/core": "workspace:*",
     "hono": "^4.6.15",
-    "@opentag/core": "workspace:*"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
+    "@types/ws": "^8.18.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   }

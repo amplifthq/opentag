@@ -1,63 +1,19 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
-import { createOpenTagClient } from "@opentag/client";
-import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
 import { Hono } from "hono";
-import { encodeSlackThreadKey, normalizeSlackAppMention, stripSlackAppMention, type SlackChannelBinding } from "./normalize.js";
-
-export type SlackThreadActionInput = {
-  id: string;
-  rawText: string;
-  actor: {
-    provider: "slack";
-    providerUserId: string;
-    handle: string;
-    organizationId: string;
-  };
-  callback: {
-    provider: "slack";
-    uri: string;
-    threadKey: string;
-  };
-  metadata: Record<string, unknown>;
-};
-
-export type SlackEventEnvelope = {
-  token?: string;
-  type: "url_verification" | "event_callback";
-  challenge?: string;
-  team_id?: string;
-  api_app_id?: string;
-  event?: {
-    type: string;
-    user?: string;
-    text?: string;
-    ts?: string;
-    thread_ts?: string;
-    channel?: string;
-    subtype?: string;
-    bot_id?: string;
-  };
-  event_id?: string;
-  event_time?: number;
-  authorizations?: Array<{ user_id?: string }>;
-};
+import { createSlackDispatcherEventProcessorInput } from "./dispatcher-events.js";
+import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventEnvelope, type SlackEventProcessorInput } from "./events.js";
 
 export type SlackEventsAppInput = {
-  slackApps: Array<{
-    signingSecret: string;
-    agentId: string;
-    appId?: string;
-    callbackUri?: string;
-  }>;
-  resolveChannelBinding(input: { teamId: string; channelId: string }): Promise<SlackChannelBinding | null>;
-  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
-  submitThreadAction?(action: SlackThreadActionInput): Promise<unknown>;
-  now(): string;
+  slackApps: Array<
+    SlackAppRuntimeConfig & {
+      signingSecret: string;
+    }
+  >;
   clock?: () => number;
-};
+} & SlackEventProcessorInput;
 
-export type SlackIngressConfig = {
+export type SlackEventsApiIngressConfig = {
   signingSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
@@ -66,6 +22,8 @@ export type SlackIngressConfig = {
   appId?: string;
   callbackUri?: string;
 };
+
+export type SlackIngressConfig = SlackEventsApiIngressConfig;
 
 export type SlackIngressHandle = {
   url: string;
@@ -105,6 +63,7 @@ export function verifySlackTimestamp(input: { timestamp: string; nowMs: number; 
 
 export function createSlackEventsApp(input: SlackEventsAppInput) {
   const app = new Hono();
+  const processor = createSlackEventProcessor(input);
 
   function parseSlackPayload(rawBody: string): SlackEventEnvelope | null {
     try {
@@ -160,104 +119,17 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
     if ("error" in resolvedSlackApp) {
       return c.json({ error: resolvedSlackApp.error }, 401);
     }
-    const { slackApp } = resolvedSlackApp;
-    if (payload.type === "url_verification") {
-      return c.text(payload.challenge ?? "");
+    const result = await processor.process(payload, resolvedSlackApp.slackApp);
+    if (result.kind === "text") {
+      return c.text(result.body, result.status);
     }
-    if (payload.type !== "event_callback" || !payload.event || !["app_mention", "message"].includes(payload.event.type)) {
-      return c.json({ ok: true });
-    }
-    if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
-      return c.json({ error: "invalid_event_payload" }, 400);
-    }
-    if (payload.event.type === "message" && (payload.event.subtype || payload.event.bot_id)) {
-      return c.json({ ok: true });
-    }
-
-    const rawThreadActionText =
-      payload.event.type === "app_mention"
-        ? stripSlackAppMention(payload.event.text, payload.authorizations?.[0]?.user_id)
-        : payload.event.text.trim();
-    if (payload.event.type === "message" && (!rawThreadActionText || !parseThreadActionCommand(rawThreadActionText))) {
-      return c.json({ ok: true });
-    }
-
-    const binding = await input.resolveChannelBinding({
-      teamId: payload.team_id,
-      channelId: payload.event.channel
-    });
-    if (!binding) {
-      return c.json({ ok: true, ignored: "unbound_channel" });
-    }
-
-    if (rawThreadActionText && parseThreadActionCommand(rawThreadActionText) && input.submitThreadAction) {
-      await input.submitThreadAction({
-        id: `approval_slack_${payload.event_id}`,
-        rawText: rawThreadActionText,
-        actor: {
-          provider: "slack",
-          providerUserId: payload.event.user,
-          handle: payload.event.user,
-          organizationId: payload.team_id
-        },
-        callback: {
-          provider: "slack",
-          uri: slackApp.callbackUri ?? "https://slack.com/api/chat.postMessage",
-          threadKey: encodeSlackThreadKey({
-            teamId: payload.team_id,
-            channelId: payload.event.channel,
-            threadTs: payload.event.thread_ts ?? payload.event.ts
-          })
-        },
-        metadata: {
-          teamId: payload.team_id,
-          channelId: payload.event.channel,
-          messageTs: payload.event.ts,
-          ...(payload.api_app_id ? { slackAppId: payload.api_app_id } : {}),
-          ...(payload.authorizations?.[0]?.user_id ? { slackBotUserId: payload.authorizations[0].user_id } : {}),
-          repoProvider: binding.repoProvider ?? "github",
-          owner: binding.owner,
-          repo: binding.repo
-        }
-      });
-      return c.json({ ok: true });
-    }
-
-    if (payload.event.type !== "app_mention") {
-      return c.json({ ok: true });
-    }
-
-    const event = normalizeSlackAppMention({
-      teamId: payload.team_id,
-      channelId: payload.event.channel,
-      userId: payload.event.user,
-      text: payload.event.text,
-      ts: payload.event.ts,
-      eventId: payload.event_id,
-      eventTime: payload.event_time ?? Math.floor(Date.parse(input.now()) / 1000),
-      agentId: slackApp.agentId,
-      binding,
-      ...(payload.api_app_id ? { appId: payload.api_app_id } : {}),
-      ...(payload.event.thread_ts ? { threadTs: payload.event.thread_ts } : {}),
-      ...(payload.authorizations?.[0]?.user_id ? { botUserId: payload.authorizations[0].user_id } : {}),
-      ...(slackApp.callbackUri ? { callbackUri: slackApp.callbackUri } : {})
-    });
-    if (!event) {
-      return c.json({ ok: true, ignored: "empty_command" });
-    }
-
-    await input.createRun(event);
-    return c.json({ ok: true });
+    return c.json(result.body, result.status);
   });
 
   return app;
 }
 
-export function startSlackIngress(config: SlackIngressConfig): SlackIngressHandle {
-  const dispatcherClient = createOpenTagClient({
-    dispatcherUrl: config.dispatcherUrl,
-    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
-  });
+export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIngressHandle {
   const port = config.port ?? 3040;
   const server = serve({
     fetch: createSlackEventsApp({
@@ -269,36 +141,7 @@ export function startSlackIngress(config: SlackIngressConfig): SlackIngressHandl
           ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
         }
       ],
-      async resolveChannelBinding(input) {
-        try {
-          const { binding } = await dispatcherClient.getChannelBinding({
-            provider: "slack",
-            accountId: input.teamId,
-            conversationId: input.channelId
-          });
-          return {
-            teamId: binding.accountId,
-            channelId: binding.conversationId,
-            repoProvider: binding.repoProvider,
-            owner: binding.owner,
-            repo: binding.repo
-          };
-        } catch (error) {
-          if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
-            return null;
-          }
-          throw error;
-        }
-      },
-      async createRun(event) {
-        const runId = `run_${randomUUID()}`;
-        const created = await dispatcherClient.createRun({ runId, event });
-        return created.outcome === "run_created" ? { runId: created.run.id } : { runId };
-      },
-      async submitThreadAction(action) {
-        await dispatcherClient.submitThreadAction(action);
-      },
-      now: () => new Date().toISOString()
+      ...createSlackDispatcherEventProcessorInput(config)
     }).fetch,
     port
   });

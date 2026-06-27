@@ -8,7 +8,14 @@ import {
   startDispatcher,
   type LocalDispatcherRuntimeInput
 } from "@opentag/local-runtime";
-import { startSlackIngress, type SlackIngressConfig, type SlackIngressHandle } from "@opentag/slack";
+import {
+  startSlackIngress,
+  startSlackSocketModeIngress,
+  type SlackEventsApiIngressConfig,
+  type SlackIngressHandle,
+  type SlackSocketModeIngressConfig,
+  type SlackSocketModeIngressHandle
+} from "@opentag/slack";
 import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
 
@@ -24,7 +31,8 @@ export type BootstrapClient = {
 
 type PlatformIngressHandle =
   | { platform: "lark"; url?: string; handle: LarkIngressHandle }
-  | { platform: "slack"; url: string; handle: SlackIngressHandle }
+  | { platform: "slack"; mode: "events_api"; url: string; handle: SlackIngressHandle }
+  | { platform: "slack"; mode: "socket_mode"; handle: SlackSocketModeIngressHandle }
   | { platform: "github"; url: string; webhookPath: string; handle: GitHubIngressHandle };
 
 function dispatcherPortFromUrl(dispatcherUrl: string): number {
@@ -125,14 +133,35 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
   };
 }
 
-export function slackIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackIngressConfig {
+function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "events_api" {
   const slack = requireSlackConfig(config);
+  return slack.mode ?? "events_api";
+}
+
+export function slackIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackEventsApiIngressConfig {
+  const slack = requireSlackConfig(config);
+  if (!slack.signingSecret) {
+    throw new Error("Slack Events API mode requires platforms.slack.signingSecret.");
+  }
   return {
     signingSecret: slack.signingSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(slack.appId ? { appId: slack.appId } : {}),
     ...(slack.port ? { port: slack.port } : {})
+  };
+}
+
+export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackSocketModeIngressConfig {
+  const slack = requireSlackConfig(config);
+  if (!slack.appToken) {
+    throw new Error("Slack Socket Mode requires platforms.slack.appToken.");
+  }
+  return {
+    appToken: slack.appToken,
+    dispatcherUrl: config.daemon.dispatcherUrl,
+    ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(slack.appId ? { appId: slack.appId } : {})
   };
 }
 
@@ -248,8 +277,18 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
       });
     }
     if (config.platforms.slack) {
-      const handle = startSlackIngress(slackIngressConfigFromCliConfig(config));
-      ingresses.push({ platform: "slack", url: handle.url, handle });
+      if (slackModeFromCliConfig(config) === "socket_mode") {
+        const handle = startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config));
+        ingresses.push({ platform: "slack", mode: "socket_mode", handle });
+        handle.startPromise.catch((error: unknown) => {
+          if (!abortController.signal.aborted) {
+            abortController.abort(error);
+          }
+        });
+      } else {
+        const handle = startSlackIngress(slackIngressConfigFromCliConfig(config));
+        ingresses.push({ platform: "slack", mode: "events_api", url: handle.url, handle });
+      }
     }
     if (config.platforms.github) {
       const handle = startGitHubIngress(githubIngressConfigFromCliConfig(config));
@@ -266,7 +305,11 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
     console.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
-        console.log(`Slack Events: ${ingress.url}/slack/events`);
+        if (ingress.mode === "socket_mode") {
+          console.log("Slack: using Socket Mode");
+        } else {
+          console.log(`Slack Events: ${ingress.url}/slack/events`);
+        }
       } else if (ingress.platform === "github") {
         console.log(`GitHub Webhook: ${ingress.url}${ingress.webhookPath}`);
       } else {

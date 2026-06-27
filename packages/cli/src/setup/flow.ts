@@ -14,11 +14,11 @@ import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, 
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 import type { PromptAdapter } from "../ui/prompts.js";
-import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, t } from "../ui/messages.js";
+import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
 import { formatPlatformSetupGuide } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, GitHubSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput } from "./types.js";
+import type { BindingMethod, GitHubSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
 
 type LarkCredentialInput = {
   appId: string;
@@ -37,6 +37,8 @@ export type SetupCommandOptions = {
   larkAppSecret?: string;
   larkDomain?: string;
   larkBotOpenId?: string;
+  slackMode?: string;
+  slackAppToken?: string;
   slackSigningSecret?: string;
   slackBotToken?: string;
   slackAppId?: string;
@@ -68,6 +70,12 @@ function parseLarkSetupMethod(value: string): LarkSetupMethod {
 function parseLarkDomain(value: string): LarkDomain {
   if (value === "lark" || value === "feishu") return value;
   throw new Error("Lark domain must be lark or feishu.");
+}
+
+function parseSlackSetupMode(value: string): SlackSetupMode {
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "socket_mode" || normalized === "events_api") return normalized;
+  throw new Error("Slack mode must be socket_mode or events_api.");
 }
 
 function parseBindingMethod(value: string): BindingMethod {
@@ -416,10 +424,39 @@ async function collectSlackSetup(
   prompts: PromptAdapter,
   language: CliLanguage
 ): Promise<SlackSetupInput> {
-  const signingSecret = nonEmpty(
-    options.slackSigningSecret ?? (await prompts.password({ message: t(language, "slackSigningSecret") })),
-    "Slack Signing Secret"
-  );
+  const derivedMode = options.slackMode
+    ? parseSlackSetupMode(options.slackMode)
+    : options.slackAppToken && !options.slackSigningSecret
+      ? "socket_mode"
+      : options.slackSigningSecret && !options.slackAppToken
+        ? "events_api"
+        : undefined;
+  const selectedMode = derivedMode
+    ? derivedMode
+    : await prompts.select({
+        message: t(language, "slackMode"),
+        initialValue: defaults.slackMode ?? "socket_mode",
+        options: (["socket_mode", "events_api"] satisfies SlackSetupMode[]).map((candidate) => ({
+          value: candidate,
+          label: slackModeLabel(language, candidate),
+          hint: slackModeHint(language, candidate)
+        }))
+      });
+
+  const appToken =
+    selectedMode === "socket_mode"
+      ? nonEmpty(
+          options.slackAppToken ?? (await prompts.password({ message: t(language, "slackAppToken") })),
+          "Slack App-Level Token"
+        )
+      : undefined;
+  const signingSecret =
+    selectedMode === "events_api"
+      ? nonEmpty(
+          options.slackSigningSecret ?? (await prompts.password({ message: t(language, "slackSigningSecret") })),
+          "Slack Signing Secret"
+        )
+      : undefined;
   const botToken = nonEmpty(
     options.slackBotToken ?? (await prompts.password({ message: t(language, "slackBotToken") })),
     "Slack Bot User OAuth Token"
@@ -451,7 +488,9 @@ async function collectSlackSetup(
   );
   const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "slack");
   return {
-    signingSecret,
+    mode: selectedMode,
+    ...(appToken ? { appToken } : {}),
+    ...(signingSecret ? { signingSecret } : {}),
     botToken,
     teamId,
     channelId,
@@ -523,8 +562,8 @@ async function collectBindingMethod(
     initialValue: defaults.bindingMethod ?? "default_project",
     options: (["default_project", "bind_later"] satisfies BindingMethod[]).map((method) => ({
       value: method,
-      label: bindingMethodLabel(language, method),
-      hint: bindingMethodHint(language, method)
+      label: bindingMethodLabel(language, method, platform),
+      hint: bindingMethodHint(language, method, platform)
     }))
   });
 }

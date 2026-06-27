@@ -5,6 +5,7 @@ import type { PlatformId } from "../catalogs/platforms.js";
 import type { SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 
 export type LarkSetupMethod = "saved" | "scan" | "manual";
+export type SlackSetupMode = "socket_mode" | "events_api";
 
 export type BindingMethod = "default_project" | "bind_later";
 
@@ -19,7 +20,9 @@ export type LarkSetupInput = {
 };
 
 export type SlackSetupInput = {
-  signingSecret: string;
+  mode: SlackSetupMode;
+  appToken?: string;
+  signingSecret?: string;
   botToken: string;
   teamId: string;
   channelId: string;
@@ -55,6 +58,7 @@ export type SetupDefaults = Partial<{
   executor: ExecutorId;
   larkSetupMethod: LarkSetupMethod;
   larkDomain: LarkDomain;
+  slackMode: SlackSetupMode;
   bindingMethod: BindingMethod;
   slackTeamId: string;
   slackChannelId: string;

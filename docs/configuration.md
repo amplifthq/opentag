@@ -16,7 +16,7 @@ OpenTag has five runtime surfaces today:
 | Dispatcher | `apps/dispatcher` | Run storage, leases, callbacks, pairing token checks |
 | Local daemon | `apps/opentagd` | Runner identity, Project Target bindings, local checkout paths, executor settings |
 | GitHub ingress | `apps/github-probot` | GitHub App webhooks and GitHub event normalization |
-| Slack ingress | `apps/slack-events` | Slack Events API verification and Slack event normalization |
+| Slack ingress | `@opentag/cli` / `apps/slack-events` | Slack Socket Mode or Events API transport and Slack event normalization |
 | Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
@@ -244,7 +244,14 @@ on the dispatcher. That avoids duplicate acknowledgement comments.
 
 ## Slack Ingress Environment
 
-`apps/slack-events` verifies Slack Events API requests and creates OpenTag runs.
+`opentag start` supports two Slack transports:
+
+- Socket Mode, recommended for local CLI use. It uses a Slack App-Level Token and
+  does not need a public URL.
+- Events API, intended for hosted OpenTag or advanced local tunnel testing. It
+  verifies signed Slack HTTP requests on `/slack/events`.
+
+The legacy `apps/slack-events` process is still an Events API ingress only.
 
 | Variable | Required | Notes |
 | --- | --- | --- |

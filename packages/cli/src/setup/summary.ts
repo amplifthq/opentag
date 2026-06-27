@@ -63,18 +63,26 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
     );
   }
   if (input.slack) {
+    const slackConnectionLines =
+      input.slack.mode === "socket_mode"
+        ? input.language === "zh-CN"
+          ? ["Slack 连接方式: 本地 Socket Mode", "Slack 入站: 通过 Slack WebSocket，不需要公网 URL"]
+          : ["Slack connection: Local Socket Mode", "Slack ingress: Slack WebSocket; no public URL required"]
+        : input.language === "zh-CN"
+          ? ["Slack 连接方式: 公网 Events API", `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`]
+          : ["Slack connection: Public Events API", `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`];
     platformLines.push(
       ...(input.language === "zh-CN"
         ? [
+            ...slackConnectionLines,
             `Slack Team ID: ${input.slack.teamId}`,
             `Slack Channel ID: ${input.slack.channelId}`,
-            `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`,
             `默认绑定当前项目: ${yesNo(input.slack.bindingMethod === "default_project", input.language)}`
           ]
         : [
+            ...slackConnectionLines,
             `Slack Team ID: ${input.slack.teamId}`,
             `Slack Channel ID: ${input.slack.channelId}`,
-            `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`,
             `Default project binding: ${yesNo(input.slack.bindingMethod === "default_project", input.language)}`
           ])
     );

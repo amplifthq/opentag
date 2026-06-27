@@ -7,7 +7,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "lark":
         return ["推荐直接扫码创建 Personal Agent", "手动配置时需要 Lark App ID 和 App Secret"];
       case "slack":
-        return ["Slack Signing Secret", "Slack Bot User OAuth Token", "Slack Team ID", "Slack Channel ID"];
+        return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "Slack Team ID", "Slack Channel ID"];
       case "github":
         return ["GitHub 仓库 owner/repo", "GitHub callback token", "GitHub webhook secret"];
       case "telegram":
@@ -19,7 +19,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "lark":
       return ["QR scan is the recommended path", "manual setup needs a Lark App ID and App Secret"];
     case "slack":
-      return ["Slack Signing Secret", "Slack Bot User OAuth Token", "Slack Team ID", "Slack Channel ID"];
+      return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Slack Team ID", "Slack Channel ID"];
     case "github":
       return ["GitHub repository owner/repo", "GitHub callback token", "GitHub webhook secret"];
     case "telegram":

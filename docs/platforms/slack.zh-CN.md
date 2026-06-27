@@ -2,38 +2,46 @@
 
 当 `opentag setup` 询问 Slack 配置时，用这份教程对照填写。
 
-## 你需要准备什么
+OpenTag 支持两种 Slack 连接方式：
+
+- **本地 Socket Mode**：推荐在这台电脑上运行 OpenTag 时使用，不需要公网 URL。
+- **公网 Events API**：适合云端部署，或者高级用户用 tunnel 做本地测试。
+
+两种方式最终都支持同一个核心体验：在 Slack 里 mention 这个 app，OpenTag 在本机运行 coding agent，然后回到同一个 Slack thread 里回复结果。
+
+## 推荐：本地 Socket Mode
+
+如果你想让这台电脑上的 `opentag start` 直接接收 Slack mention，选这个模式。
+
+### 你需要准备什么
 
 - 一个安装到 Slack workspace 的 Slack App。
-- 一个可以转发到本机 OpenTag Slack ingress 的公网 URL。
+- 这个 app 已开启 Socket Mode。
+- 一个以 `xapp-` 开头的 Slack App-Level Token。
+- 一个以 `xoxb-` 开头的 Slack Bot User OAuth Token。
 - 一个用于测试的 Slack channel。
 
-本地测试时，可以先用 tunnel 暴露 OpenTag：
-
-```bash
-ngrok http 3040
-```
-
-Slack 的 Request URL 应该长这样：
-
-```text
-https://<你的 tunnel 域名>/slack/events
-```
-
-## 创建 Slack App
+### 创建 Slack App
 
 1. 打开 [Slack API Apps](https://api.slack.com/apps)。
 2. 创建一个新的 app，选择 **From scratch**。
 3. 选择要测试的 workspace。
-4. 进入 **Basic Information**，复制 **Signing Secret**。
+
+### 开启 Socket Mode
+
+1. 进入 **Socket Mode**。
+2. 打开 Socket Mode。
+3. 创建一个 App-Level Token，添加这个 scope：
+   - `connections:write`
+4. 复制 App-Level Token。它一般以 `xapp-` 开头。
 
 OpenTag 里对应这个字段：
 
 ```text
-Slack Signing Secret
+Slack App-Level Token
 ```
 
-## 添加 Bot 权限
+### 添加 Bot 权限
 
 1. 进入 **OAuth & Permissions**。
 2. 在 **Bot Token Scopes** 里添加：
@@ -48,21 +56,60 @@ OpenTag 里对应这个字段：
 Slack Bot User OAuth Token
 ```
 
-## 开启 Events
+### 订阅 App Mention 事件
 
 1. 进入 **Event Subscriptions**。
 2. 打开事件订阅。
-3. 填入 Request URL：
+3. 在 **Subscribe to bot events** 里添加：
+   - `app_mention`
+4. 保存设置。
+
+Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack WebSocket，Slack 会通过这条连接把事件推回来。
+
+## 高级：公网 Events API
+
+如果 OpenTag 有一个稳定的公网 endpoint，或者你明确要用 tunnel 做本地测试，选这个模式。
+
+### 你需要准备什么
+
+- 一个安装到 Slack workspace 的 Slack App。
+- 一个可以转发到本机 OpenTag Slack ingress 的公网 URL。
+- Slack Signing Secret。
+- Slack Bot User OAuth Token。
+- 一个用于测试的 Slack channel。
+
+本地测试时，可以先用 tunnel 暴露 OpenTag：
+
+```bash
+ngrok http 3040
+```
+
+Slack 的 Request URL 应该长这样：
 
 ```text
 https://<你的 tunnel 域名>/slack/events
 ```
 
-4. 在 **Subscribe to bot events** 里添加：
-   - `app_mention`
-5. 保存设置。
+### 配置 Events API
 
-这里要用 Events API 的 Request URL。这个本地配置路径不要开启 Socket Mode，否则你会调错接入方式。
+1. 进入 **Basic Information**，复制 **Signing Secret**。
+2. 进入 **OAuth & Permissions**，添加同样的 bot scopes：
+   - `app_mentions:read`
+   - `chat:write`
+3. 安装或重新安装 app。
+4. 进入 **Event Subscriptions**。
+5. 打开事件订阅。
+6. 填入 Request URL：
+
+```text
+https://<你的 tunnel 域名>/slack/events
+```
+
+7. 在 **Subscribe to bot events** 里添加：
+   - `app_mention`
+8. 保存设置。
+
+这条 Events API 路线不要开启 Socket Mode，否则你会调错接入方式。
 
 ## 找到 Team ID 和 Channel ID
 

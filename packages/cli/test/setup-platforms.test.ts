@@ -57,6 +57,7 @@ describe("OpenTag CLI setup platforms", () => {
 
     expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/slack.en.md");
     expect(notes.join("\n")).toContain("Slack Signing Secret");
+    expect(notes.join("\n")).toContain("Slack App-Level Token");
   });
 
   it("prints the localized GitHub setup guide", async () => {
@@ -109,6 +110,7 @@ describe("OpenTag CLI setup platforms", () => {
     const config = readCliConfig(configPath);
     expect(config.platforms.lark).toBeUndefined();
     expect(config.platforms.slack).toMatchObject({
+      mode: "events_api",
       signingSecret: "slack_signing_secret",
       botToken: "xoxb-token",
       appId: "A123",
@@ -126,6 +128,41 @@ describe("OpenTag CLI setup platforms", () => {
         repo: config.daemon.repositories[0]!.repo
       }
     ]);
+  });
+
+  it("writes Slack Socket Mode config by default for local setup", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "slack",
+        executor: "echo",
+        slackAppToken: "xapp-token",
+        slackBotToken: "xoxb-token",
+        slackAppId: "A123",
+        slackTeamId: "T123",
+        slackChannelId: "C123",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.slack).toMatchObject({
+      mode: "socket_mode",
+      appToken: "xapp-token",
+      botToken: "xoxb-token",
+      appId: "A123",
+      teamId: "T123",
+      channelId: "C123",
+      defaultProjectBinding: true
+    });
+    expect(config.preferences?.lastSetup?.slackMode).toBe("socket_mode");
   });
 
   it("writes a GitHub config with a GitHub repository binding", async () => {

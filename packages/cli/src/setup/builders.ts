@@ -83,6 +83,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
         ...(input.slack
           ? {
               bindingMethod: input.slack.bindingMethod,
+              slackMode: input.slack.mode,
               slackTeamId: input.slack.teamId,
               slackChannelId: input.slack.channelId
             }
@@ -125,7 +126,9 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       ...(input.slack
         ? {
             slack: {
-              signingSecret: input.slack.signingSecret,
+              mode: input.slack.mode,
+              ...(input.slack.appToken ? { appToken: input.slack.appToken } : {}),
+              ...(input.slack.signingSecret ? { signingSecret: input.slack.signingSecret } : {}),
               botToken: input.slack.botToken,
               teamId: input.slack.teamId,
               channelId: input.slack.channelId,

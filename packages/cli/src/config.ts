@@ -14,6 +14,7 @@ const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
 const PlatformSchema = z.enum(["lark", "slack", "github", "telegram"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
+const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 const OptionalPortSchema = z.number().int().positive().optional();
 
@@ -89,7 +90,9 @@ const LarkPlatformSchema = z
 
 const SlackPlatformSchema = z
   .object({
-    signingSecret: z.string().min(1),
+    mode: SlackModeSchema.optional(),
+    appToken: z.string().min(1).optional(),
+    signingSecret: z.string().min(1).optional(),
     botToken: z.string().min(1),
     teamId: z.string().min(1),
     channelId: z.string().min(1),
@@ -97,7 +100,24 @@ const SlackPlatformSchema = z
     defaultProjectBinding: z.boolean().optional(),
     port: OptionalPortSchema
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const mode = value.mode ?? "events_api";
+    if (mode === "socket_mode" && !value.appToken) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["appToken"],
+        message: "Slack Socket Mode requires appToken."
+      });
+    }
+    if (mode === "events_api" && !value.signingSecret) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["signingSecret"],
+        message: "Slack Events API requires signingSecret."
+      });
+    }
+  });
 
 const GitHubPlatformSchema = z
   .object({
@@ -120,6 +140,7 @@ const PreferencesSchema = z
         larkSetupMethod: LarkSetupMethodSchema.optional(),
         larkDomain: z.enum(["lark", "feishu"]).optional(),
         bindingMethod: BindingMethodSchema.optional(),
+        slackMode: SlackModeSchema.optional(),
         slackTeamId: z.string().min(1).optional(),
         slackChannelId: z.string().min(1).optional(),
         githubOwner: z.string().min(1).optional(),
@@ -208,8 +229,10 @@ export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
 }
 
 export function ensurePrivateDirectory(path: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  chmodSync(path, 0o700);
+  const createdPath = mkdirSync(path, { recursive: true, mode: 0o700 });
+  if (createdPath) {
+    chmodSync(path, 0o700);
+  }
 }
 
 export function writeCliConfigAtomic(path: string, config: OpenTagCliConfig): void {
@@ -234,7 +257,7 @@ export function assertPrivateConfigFile(path: string): void {
 }
 
 function redactValue(key: string, value: unknown): unknown {
-  if (["appSecret", "botToken", "githubToken", "pairingToken", "signingSecret", "webhookSecret"].includes(key)) {
+  if (["appSecret", "appToken", "botToken", "githubToken", "pairingToken", "signingSecret", "webhookSecret"].includes(key)) {
     return "[REDACTED]";
   }
   if (Array.isArray(value)) {

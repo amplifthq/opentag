@@ -1,5 +1,5 @@
 import type { CliLanguage } from "../catalogs/languages.js";
-import type { BindingMethod, LarkSetupMethod } from "../setup/types.js";
+import type { BindingMethod, LarkSetupMethod, SlackSetupMode } from "../setup/types.js";
 
 type MessageKey =
   | "intro"
@@ -12,6 +12,8 @@ type MessageKey =
   | "larkAppId"
   | "larkAppSecret"
   | "larkBotOpenId"
+  | "slackMode"
+  | "slackAppToken"
   | "slackSigningSecret"
   | "slackBotToken"
   | "slackAppId"
@@ -37,6 +39,8 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     larkAppId: "Lark App ID",
     larkAppSecret: "Lark App Secret",
     larkBotOpenId: "Lark Bot Open ID (optional)",
+    slackMode: "How should OpenTag connect to Slack?",
+    slackAppToken: "Slack App-Level Token",
     slackSigningSecret: "Slack Signing Secret",
     slackBotToken: "Slack Bot User OAuth Token",
     slackAppId: "Slack App ID (optional)",
@@ -61,6 +65,8 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     larkAppId: "Lark App ID",
     larkAppSecret: "Lark App Secret",
     larkBotOpenId: "Lark Bot Open ID（可选）",
+    slackMode: "OpenTag 要如何连接 Slack？",
+    slackAppToken: "Slack App-Level Token",
     slackSigningSecret: "Slack Signing Secret",
     slackBotToken: "Slack Bot User OAuth Token",
     slackAppId: "Slack App ID（可选）",
@@ -98,16 +104,34 @@ export function larkSetupHint(language: CliLanguage, method: LarkSetupMethod): s
   return method === "scan" ? "Use when no saved app exists" : "Use an existing app";
 }
 
-export function bindingMethodLabel(language: CliLanguage, method: BindingMethod): string {
+export function slackModeLabel(language: CliLanguage, mode: SlackSetupMode): string {
   if (language === "zh-CN") {
-    return method === "default_project" ? "默认使用这个项目" : "稍后在 Lark 里用 /bind 绑定";
+    return mode === "socket_mode" ? "本地 Socket Mode（推荐）" : "公网 Events API";
   }
-  return method === "default_project" ? "Use this project by default" : "Bind later from Lark with /bind";
+  return mode === "socket_mode" ? "Local Socket Mode (Recommended)" : "Public Events API";
 }
 
-export function bindingMethodHint(language: CliLanguage, method: BindingMethod): string {
+export function slackModeHint(language: CliLanguage, mode: SlackSetupMode): string {
   if (language === "zh-CN") {
-    return method === "default_project" ? "推荐，最快跑通" : "适合多个项目";
+    return mode === "socket_mode" ? "适合本机运行，不需要公网 URL" : "适合云端部署或 tunnel 测试";
   }
-  return method === "default_project" ? "Recommended" : "Best for multiple projects";
+  return mode === "socket_mode" ? "Best for this computer; no public URL" : "Best for hosted OpenTag or tunnel testing";
+}
+
+export function bindingMethodLabel(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" = "lark"): string {
+  if (language === "zh-CN") {
+    if (method === "default_project") return "默认使用这个项目";
+    return platform === "slack" ? "稍后在 OpenTag 配置里绑定" : "稍后在 Lark 里用 /bind 绑定";
+  }
+  if (method === "default_project") return "Use this project by default";
+  return platform === "slack" ? "Bind later from OpenTag config" : "Bind later from Lark with /bind";
+}
+
+export function bindingMethodHint(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" = "lark"): string {
+  if (language === "zh-CN") {
+    if (method === "default_project") return "推荐，最快跑通";
+    return platform === "slack" ? "适合先只保存 Slack 连接" : "适合多个项目";
+  }
+  if (method === "default_project") return "Recommended";
+  return platform === "slack" ? "Use when you only want to save the Slack connection first" : "Best for multiple projects";
 }

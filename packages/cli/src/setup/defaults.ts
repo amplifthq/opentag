@@ -30,6 +30,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.larkSetupMethod ? { larkSetupMethod: lastSetup.larkSetupMethod } : {}),
     ...(lastSetup?.larkDomain ? { larkDomain: lastSetup.larkDomain } : lark?.domain ? { larkDomain: lark.domain } : {}),
     ...(bindingMethod ? { bindingMethod } : {}),
+    ...(lastSetup?.slackMode ? { slackMode: lastSetup.slackMode } : slack ? { slackMode: slack.mode ?? "events_api" } : {}),
     ...(lastSetup?.slackTeamId ? { slackTeamId: lastSetup.slackTeamId } : slack?.teamId ? { slackTeamId: slack.teamId } : {}),
     ...(lastSetup?.slackChannelId ? { slackChannelId: lastSetup.slackChannelId } : slack?.channelId ? { slackChannelId: slack.channelId } : {}),
     ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),

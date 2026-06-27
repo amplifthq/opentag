@@ -60,6 +60,18 @@ describe("OpenTag CLI config", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it("does not chmod an existing custom config directory", () => {
+    const parent = tempDir();
+    chmodSync(parent, 0o755);
+    const beforeMode = statSync(parent).mode & 0o777;
+    const path = join(parent, "config.json");
+
+    writeCliConfigAtomic(path, config());
+
+    expect(statSync(parent).mode & 0o777).toBe(beforeMode);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
   it("refuses to read config files that expose secrets to group or others", () => {
     const path = join(tempDir(), "config.json");
     writeFileSync(path, `${JSON.stringify(config())}\n`, { mode: 0o600 });
