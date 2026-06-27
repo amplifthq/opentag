@@ -95,12 +95,26 @@ function defaultLanguage(options: SetupCommandOptions, defaults: SetupDefaults):
   return options.language ? parseCliLanguage(options.language) : defaults.language ?? "en";
 }
 
-function formatPlatformsForSetup(language: CliLanguage): string {
-  const lines = PLATFORM_CATALOG.map((platform) => `- ${platform.label}: ${formatPlatformStatus(platform.status)}`);
+function formatPlatformStatusForSetup(language: CliLanguage, status: (typeof PLATFORM_CATALOG)[number]["status"]): string {
   if (language === "zh-CN") {
-    return ["OpenTag CLI 当前支持和规划中的平台：", ...lines].join("\n");
+    switch (status) {
+      case "setup_ready":
+        return "这个 setup 向导现在可配置";
+      case "setup_pending":
+        return "适配器已有，setup 向导待接入";
+      case "experimental_setup_pending":
+        return "实验适配器，setup 向导待接入";
+    }
   }
-  return ["OpenTag CLI platforms:", ...lines].join("\n");
+  return formatPlatformStatus(status);
+}
+
+function formatPlatformsForSetup(language: CliLanguage): string {
+  const lines = PLATFORM_CATALOG.map((platform) => `- ${platform.label}: ${formatPlatformStatusForSetup(language, platform.status)}`);
+  if (language === "zh-CN") {
+    return ["这个 setup 向导当前可配置的平台：", ...lines].join("\n");
+  }
+  return ["This setup wizard can configure:", ...lines].join("\n");
 }
 
 async function collectLanguage(options: SetupCommandOptions, defaults: SetupDefaults, prompts: PromptAdapter): Promise<CliLanguage> {
@@ -128,7 +142,7 @@ async function collectPlatform(options: SetupCommandOptions, defaults: SetupDefa
         options: PLATFORM_CATALOG.filter((platform) => platform.startable).map((platform) => ({
           value: platform.id,
           label: platform.label,
-          hint: formatPlatformStatus(platform.status)
+          hint: formatPlatformStatusForSetup(language, platform.status)
         }))
       });
   const descriptor = platformById(selected);

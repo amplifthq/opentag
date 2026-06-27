@@ -1,6 +1,6 @@
 export type PlatformId = "lark" | "slack" | "github" | "telegram";
 
-export type PlatformStatus = "ready" | "coming_soon" | "experimental";
+export type PlatformStatus = "setup_ready" | "setup_pending" | "experimental_setup_pending";
 
 export type PlatformDescriptor = {
   id: PlatformId;
@@ -13,25 +13,25 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
   {
     id: "lark",
     label: "Lark / Feishu",
-    status: "ready",
+    status: "setup_ready",
     startable: true
   },
   {
     id: "slack",
     label: "Slack",
-    status: "coming_soon",
+    status: "setup_pending",
     startable: false
   },
   {
     id: "github",
     label: "GitHub",
-    status: "coming_soon",
+    status: "setup_pending",
     startable: false
   },
   {
     id: "telegram",
     label: "Telegram",
-    status: "experimental",
+    status: "experimental_setup_pending",
     startable: false
   }
 ];
@@ -53,18 +53,18 @@ export function platformById(id: PlatformId): PlatformDescriptor {
 
 export function formatPlatformStatus(status: PlatformStatus): string {
   switch (status) {
-    case "ready":
-      return "Ready";
-    case "coming_soon":
-      return "Coming soon";
-    case "experimental":
-      return "Experimental";
+    case "setup_ready":
+      return "Setup wizard ready";
+    case "setup_pending":
+      return "Adapter exists; CLI setup pending";
+    case "experimental_setup_pending":
+      return "Experimental adapter; CLI setup pending";
   }
 }
 
 export function formatPlatforms(): string {
   return [
-    "Platforms:",
+    "CLI setup support:",
     ...PLATFORM_CATALOG.map((platform) => {
       return `  ${platform.label}: ${formatPlatformStatus(platform.status)}`;
     })
