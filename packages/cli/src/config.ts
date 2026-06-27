@@ -71,6 +71,7 @@ const DaemonConfigSchema = z
     claudeCode: ClaudeCodeSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: z.string().min(1).optional(),
+    preparePullRequestBranch: z.boolean().optional(),
     allowAutoCreatePullRequest: z.boolean().optional(),
     pairingToken: z.string().min(1),
     pollIntervalMs: PositiveIntegerSchema,

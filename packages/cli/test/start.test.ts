@@ -164,6 +164,16 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("fails fast for GitHub when run branches are not prepared for apply actions", () => {
+    const built = githubConfig();
+    built.daemon.preparePullRequestBranch = false;
+    built.daemon.allowAutoCreatePullRequest = false;
+
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).toThrow(
+      "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled."
+    );
+  });
+
   it("derives Lark ingress config with a default repo binding for one Project Target", () => {
     const built = config();
     const ingress = larkIngressConfigFromCliConfig(built);

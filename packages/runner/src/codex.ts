@@ -11,6 +11,7 @@ import {
   removeRunWorktree,
   worktreePathForRun
 } from "./git.js";
+import { createExecutorRunResult } from "./result.js";
 import { assessRunnerSecurity, formatSecurityAssessment, scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
 
 export type CodexExecutorOptions = {
@@ -182,28 +183,15 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         });
 
         const output = codexResult.stdout.trim() || codexResult.stderr.trim() || "Codex completed without textual output.";
-        return {
-          conclusion: "success",
-          summary: output.slice(-4000),
+        return createExecutorRunResult({
+          executorName: "Codex",
+          runId: input.runId,
+          branchName,
+          ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
+          output,
           changedFiles: files,
-          artifacts: [
-            ...(files.length > 0 ? [{ title: "Run branch", uri: branchName }] : []),
-            ...(keepWorktree === "always" ? [{ title: "Run worktree", uri: worktreePath }] : [])
-          ],
-          verification: [
-            {
-              command: "codex exec",
-              outcome: "passed",
-              excerpt: output.slice(-1000)
-            }
-          ],
-          nextAction:
-            files.length > 0
-              ? keepWorktree === "always"
-                ? "Review the local worktree or pull request branch."
-                : "Review the local branch or pull request."
-              : "No file changes were detected."
-        };
+          extraArtifacts: keepWorktree === "always" ? [{ title: "Run worktree", uri: worktreePath }] : []
+        });
       } finally {
         const shouldRemove = keepWorktree === "never" || (keepWorktree === "on_failure" && completed);
         if (shouldRemove) {

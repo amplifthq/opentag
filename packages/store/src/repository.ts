@@ -315,6 +315,12 @@ function syntheticManualApprovalPolicyRules(decision: ApprovalDecision): PolicyR
   ];
 }
 
+function executorConditionsFromIntent(intent: { params?: Record<string, unknown> | undefined }): string[] {
+  const value = intent.params?.["executorConditions"];
+  if (!Array.isArray(value)) return [];
+  return value.filter((condition): condition is string => typeof condition === "string" && condition.length > 0);
+}
+
 function lineageScopeKey(input: { runId: string; snapshot: SuggestedChangesSnapshot }): string {
   return input.snapshot.workThread?.id ?? `run:${input.runId}`;
 }
@@ -593,6 +599,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         intent,
         permissions: event.permissions,
         policyRules,
+        executorConditions: executorConditionsFromIntent(intent),
         ...(input.adapter ? { adapter: input.adapter } : {})
       }).outcome;
     });

@@ -128,9 +128,9 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
         executorName: "Claude Code",
         runId: input.runId,
         branchName,
+        ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
         output,
-        changedFiles: files,
-        verificationCommand: "claude --print"
+        changedFiles: files
       });
     },
     async cancel() {

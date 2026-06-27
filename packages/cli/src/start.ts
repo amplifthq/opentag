@@ -89,6 +89,11 @@ export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): L
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
   }
+  if (github && !config.daemon.preparePullRequestBranch && !config.daemon.allowAutoCreatePullRequest) {
+    throw new Error(
+      "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled. Run `opentag setup` and choose GitHub to update this config."
+    );
+  }
   return {
     port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),
     databasePath: config.state.databasePath,

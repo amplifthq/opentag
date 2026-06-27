@@ -197,6 +197,7 @@ describe("OpenTag CLI setup platforms", () => {
       webhookPath: "/github/webhooks"
     });
     expect(config.daemon.githubToken).toBe("ghp_token");
+    expect(config.daemon.preparePullRequestBranch).toBe(true);
     expect(config.daemon.allowAutoCreatePullRequest).toBe(false);
     expect(config.daemon.repositories).toEqual(
       expect.arrayContaining([
@@ -227,6 +228,7 @@ describe("OpenTag CLI setup platforms", () => {
 
     const config = readCliConfig(configPath);
     expect(config.platforms.github?.webhookSecret).toMatch(/^[a-f0-9]{64}$/);
+    expect(config.daemon.preparePullRequestBranch).toBe(true);
     expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
     expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
   });

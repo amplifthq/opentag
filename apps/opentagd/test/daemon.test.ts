@@ -1,4 +1,4 @@
-import type { ContextPacket, OpenTagEvent, OpenTagRun } from "@opentag/core";
+import type { ContextPacket, OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
 import { createEchoExecutor } from "@opentag/runner";
 import { describe, expect, it, vi } from "vitest";
 import { runOneDaemonIteration, serveDaemon } from "../src/daemon.js";
@@ -323,21 +323,44 @@ describe("opentagd", () => {
     expect(calls).toEqual(["claim", "running:run_1:echo", "complete:run_1:failure:Echo failed: executor exploded"]);
   });
 
-  it("completes the run as failed when post-run pull request creation throws", async () => {
-    const calls: string[] = [];
+  it("completes with needs_human when preparing the PR action branch fails", async () => {
+    const commands: string[] = [];
+    let completed: OpenTagRunResult | undefined;
+    const executorResult: OpenTagRunResult = {
+      conclusion: "success",
+      summary: "Changed README.md.",
+      changedFiles: ["README.md"],
+      suggestedChanges: [
+        {
+          proposalId: "proposal_run_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          sourceRunId: "run_1",
+          summary: "Create a pull request.",
+          intents: [
+            {
+              intentId: "proposal_run_1_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create a pull request for the run branch.",
+              params: { head: "opentag/run_1", base: "main" }
+            }
+          ]
+        }
+      ]
+    };
 
-    await runOneDaemonIteration({
+    const didWork = await runOneDaemonIteration({
       runnerId: "runner_1",
-      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo", defaultExecutor: "capture" }],
       executors: {
-        echo: {
-          id: "echo",
-          displayName: "Echo",
+        capture: {
+          id: "capture",
+          displayName: "Capture Executor",
           async canRun() {
             return { ready: true };
           },
           async run() {
-            return { conclusion: "success", summary: "done", changedFiles: ["src/app.ts"] };
+            return executorResult;
           },
           async cancel() {
             return;
@@ -345,11 +368,14 @@ describe("opentagd", () => {
         }
       },
       pullRequestOptions: {
-        githubToken: "token",
-        allowAutoCreatePullRequest: true,
+        preparePullRequestBranch: true,
         commandRunner: {
-          async run() {
-            throw new Error("git exploded");
+          async run(command, args) {
+            commands.push(`${command} ${args.join(" ")}`);
+            if (args[0] === "push") {
+              return { exitCode: 128, stdout: "", stderr: "network unavailable" };
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
           }
         }
       },
@@ -359,12 +385,16 @@ describe("opentagd", () => {
             run,
             event: {
               ...event,
-              permissions: [...event.permissions, { scope: "pr:create", reason: "create pull request" }]
+              permissions: [
+                ...event.permissions,
+                { scope: "repo:write", reason: "commit code changes on a run branch" },
+                { scope: "pr:create", reason: "create the pull request action" }
+              ]
             }
           };
         },
-        async markRunning(runId, executor) {
-          calls.push(`running:${runId}:${executor}`);
+        async markRunning() {
+          return;
         },
         async heartbeat() {
           return;
@@ -372,16 +402,22 @@ describe("opentagd", () => {
         async progress() {
           return;
         },
-        async complete(runId, result) {
-          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        async complete(_runId, result) {
+          completed = result;
         }
       }
     });
 
-    expect(calls).toEqual([
-      "running:run_1:echo",
-      "complete:run_1:failure:Post-run pull request hook failed: git exploded"
-    ]);
+    expect(didWork).toBe(true);
+    expect(commands).toEqual(["git add -- README.md", "git commit -m OpenTag run run_1", "git push -u origin opentag/run_1"]);
+    expect(completed).toMatchObject({
+      conclusion: "needs_human",
+      changedFiles: ["README.md"],
+      nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
+    });
+    expect(completed?.summary).toContain("could not prepare the pull request action");
+    expect(completed?.summary).toContain("network unavailable");
+    expect(completed?.suggestedChanges).toBeUndefined();
   });
 
   it("logs and continues the daemon loop after an iteration-level failure", async () => {

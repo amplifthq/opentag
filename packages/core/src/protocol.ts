@@ -148,6 +148,40 @@ export function filterClassifiedContextPointers(classified: ClassifiedContextPoi
 
 type ContextPacketFact = { text: string; sourceUri?: string; source?: ContextPointer; confidence?: ContextPacketFactConfidence };
 
+function metadataString(event: OpenTagEvent, key: string): string | undefined {
+  const value = event.metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function metadataStringArray(event: OpenTagEvent, key: string): string[] {
+  const value = event.metadata[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function preserveActionLoopFacts(event: OpenTagEvent): ContextPacketFact[] {
+  const facts: ContextPacketFact[] = [];
+  const threadActionVerb = metadataString(event, "threadActionVerb");
+  const parentRunId = metadataString(event, "parentRunId");
+  const sourceProposalId = metadataString(event, "sourceProposalId");
+  const approvalDecisionId = metadataString(event, "approvalDecisionId");
+  const sourceApplyPlanId = metadataString(event, "sourceApplyPlanId");
+  const previousRunSummary = metadataString(event, "previousRunSummary");
+  const fallbackReason = metadataString(event, "fallbackReason");
+  const selectedIntentIds = metadataStringArray(event, "selectedIntentIds");
+
+  if (threadActionVerb) facts.push({ text: `Action loop thread action: ${threadActionVerb}`, confidence: "observed" });
+  if (parentRunId) facts.push({ text: `Action loop parent run: ${parentRunId}`, confidence: "observed" });
+  if (sourceProposalId) facts.push({ text: `Action loop proposal: ${sourceProposalId}`, confidence: "observed" });
+  if (approvalDecisionId) facts.push({ text: `Action loop approval decision: ${approvalDecisionId}`, confidence: "observed" });
+  if (sourceApplyPlanId) facts.push({ text: `Action loop apply plan: ${sourceApplyPlanId}`, confidence: "observed" });
+  if (selectedIntentIds.length > 0) facts.push({ text: `Action loop selected intents: ${selectedIntentIds.join(", ")}`, confidence: "observed" });
+  if (previousRunSummary) facts.push({ text: `Action loop previous result: ${previousRunSummary}`, confidence: "observed" });
+  if (fallbackReason) facts.push({ text: `Action loop fallback reason: ${fallbackReason}`, confidence: "observed" });
+
+  return facts;
+}
+
 export function preserveContextFacts(event: OpenTagEvent, classified: ClassifiedContextPointer[]): ContextPacketFact[] {
   const sourceUri = classified[0]?.pointer.uri;
   return [
@@ -157,6 +191,7 @@ export function preserveContextFacts(event: OpenTagEvent, classified: Classified
       ...(classified[0]?.pointer ? { source: classified[0].pointer } : {}),
       confidence: "observed"
     },
+    ...preserveActionLoopFacts(event),
     ...classified.map((entry) => ({
       text: `${entry.classification}: ${contextPointerLabel(entry.pointer)}`,
       sourceUri: entry.pointer.uri,
@@ -340,8 +375,38 @@ export function primaryConversationAnchorFromEvent(event: OpenTagEvent): Convers
   };
 }
 
+function callbackConversationKey(callback: OpenTagEvent["callback"]): string {
+  return `${callback.provider}:${callback.threadKey ?? callback.uri}`;
+}
+
+function metadataRecordString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function metadataIssueNumber(metadata: Record<string, unknown>): string | undefined {
+  const value = metadata["issueNumber"];
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
+  return undefined;
+}
+
+function legacyGitHubIssueConversationKey(event: OpenTagEvent): string | undefined {
+  if (event.callback.provider !== "github") return undefined;
+  const owner = metadataRecordString(event.metadata, "owner");
+  const repo = metadataRecordString(event.metadata, "repo");
+  const issueNumber = metadataIssueNumber(event.metadata);
+  if (!owner || !repo || !issueNumber) return undefined;
+  if (event.callback.threadKey !== `${owner}/${repo}#${issueNumber}`) return undefined;
+  return `github:${owner}/${repo}`;
+}
+
 export function conversationKeyFromEvent(event: OpenTagEvent): string {
-  return `${event.callback.provider}:${event.callback.threadKey ?? event.callback.uri}`;
+  return callbackConversationKey(event.callback);
+}
+
+export function conversationKeysFromEvent(event: OpenTagEvent): string[] {
+  return [...new Set([conversationKeyFromEvent(event), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
 }
 
 export function workThreadFromEvent(event: OpenTagEvent): WorkThread | undefined {

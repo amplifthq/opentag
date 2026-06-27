@@ -1,5 +1,5 @@
 import {
-  conversationKeyFromEvent,
+  conversationKeysFromEvent,
   projectTargetRefFromEvent,
   RunAdmissionDecisionSchema,
   type OpenTagEvent,
@@ -158,9 +158,11 @@ export function createAdmissionRuntime(input: {
         };
       }
 
-      const activeRun = await input.repo.findActiveRunForConversation({
-        conversationKey: conversationKeyFromEvent(request.event)
-      });
+      let activeRun: { run: OpenTagRun; event: OpenTagEvent } | null = null;
+      for (const conversationKey of conversationKeysFromEvent(request.event)) {
+        activeRun = await input.repo.findActiveRunForConversation({ conversationKey });
+        if (activeRun) break;
+      }
       if (activeRun) {
         const decision = admissionDecision({
           action: "queue_follow_up",

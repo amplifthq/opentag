@@ -192,7 +192,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     callback: {
       provider: "github",
       uri: input.apiCommentsUrl,
-      threadKey: `${input.owner}/${input.repo}`
+      threadKey: `${input.owner}/${input.repo}#${input.issueNumber}`
     },
     metadata: {
       repoProvider: "github",

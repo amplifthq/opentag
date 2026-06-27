@@ -55,8 +55,10 @@ const DOMAIN_ALIASES: Record<string, string> = {
   reviews: "review",
   artifact: "artifact_links",
   artifacts: "artifact_links",
-  pr: "artifact_links",
-  pull_request: "artifact_links"
+  pr: "pull_request",
+  prs: "pull_request",
+  pull_request: "pull_request",
+  pull_requests: "pull_request"
 };
 
 function normalizeToken(token: string): string {

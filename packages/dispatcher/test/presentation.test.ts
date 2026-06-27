@@ -152,4 +152,49 @@ describe("default callback presentation", () => {
       }
     });
   });
+
+  it("renders create PR suggested actions with PR-specific details", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const result = {
+      conclusion: "needs_human" as const,
+      summary: "Prepared a PR proposal.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_pr",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request.",
+          intents: [
+            {
+              intentId: "intent_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create a pull request for branch opentag/run_1.",
+              params: {
+                title: "OpenTag run run_1",
+                head: "opentag/run_1",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                risks: ["Review before merge."],
+                verification: [{ command: "pnpm test", outcome: "passed" }]
+              }
+            }
+          ]
+        }
+      ]
+    };
+
+    const github = presentation.final({ provider: "github", result }).body;
+    expect(github).toContain("Title: OpenTag run run_1");
+    expect(github).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(github).toContain("Changed files: `src/demo.ts`");
+    expect(github).toContain("`pnpm test`: passed");
+
+    const slack = presentation.final({ provider: "slack", result });
+    expect(slack.body).toContain("Title: OpenTag run run_1");
+    expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(slack.body).toContain("Changed files: `src/demo.ts`");
+    expect(slack.body).toContain("`pnpm test`: passed");
+    expect(JSON.stringify(slack.blocks)).toContain("Title: OpenTag run run_1");
+    expect(JSON.stringify(slack.blocks)).toContain("`pnpm test`: passed");
+  });
 });

@@ -51,6 +51,17 @@ function failedRunResult(stage: string, error: unknown): OpenTagRunResult {
   };
 }
 
+function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
+  return {
+    conclusion: "needs_human",
+    summary: `Executor completed, but OpenTag could not prepare the pull request action: ${errorMessage(error)}`,
+    ...(result.changedFiles ? { changedFiles: result.changedFiles } : {}),
+    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+    ...(result.verification ? { verification: result.verification } : {}),
+    nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
+  };
+}
+
 export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
@@ -152,10 +163,9 @@ export async function runOneDaemonIteration(input: {
     }, heartbeatIntervalMs);
   }
 
-  let result: OpenTagRunResult;
-  let failureStage = executor.displayName;
+  let executorResult: OpenTagRunResult;
   try {
-    const executorResult = await executor.run(
+    executorResult = await executor.run(
       {
         runId: claimed.run.id,
         workspacePath: binding.checkoutPath,
@@ -178,7 +188,15 @@ export async function runOneDaemonIteration(input: {
         }
       }
     );
-    failureStage = "Post-run pull request hook";
+  } catch (error) {
+    await input.client.complete(claimed.run.id, failedRunResult(executor.displayName, error));
+    return true;
+  } finally {
+    if (heartbeatHandle) clearInterval(heartbeatHandle);
+  }
+
+  let result: OpenTagRunResult;
+  try {
     result = await maybeCreatePullRequest({
       run: claimed.run,
       event: claimed.event,
@@ -187,9 +205,7 @@ export async function runOneDaemonIteration(input: {
       options: input.pullRequestOptions ?? {}
     });
   } catch (error) {
-    result = failedRunResult(failureStage, error);
-  } finally {
-    if (heartbeatHandle) clearInterval(heartbeatHandle);
+    result = pullRequestPreparationFailureResult(executorResult, error);
   }
   await input.client.complete(claimed.run.id, result);
   return true;

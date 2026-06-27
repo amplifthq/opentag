@@ -172,14 +172,22 @@ export async function runDoctor(input: {
     }
   }
 
-  if (input.config.githubToken) {
+  if (input.config.allowAutoCreatePullRequest) {
     checks.push(
-      input.config.allowAutoCreatePullRequest
-        ? check("ok", "GitHub token", "Configured for PR creation")
-        : check("warn", "GitHub token", "Configured, but auto PR creation is disabled")
+      input.config.githubToken
+        ? check("ok", "GitHub PR actions", "Configured for legacy immediate PR creation")
+        : check("warn", "GitHub PR actions", "Immediate PR creation is enabled, but githubToken is not configured")
     );
+  } else if (input.config.preparePullRequestBranch) {
+    checks.push(
+      input.config.githubToken
+        ? check("ok", "GitHub PR actions", "Configured for thread-native `apply 1` PR creation")
+        : check("warn", "GitHub PR actions", "Run branches will be pushed, but githubToken is required for `apply 1` PR creation")
+    );
+  } else if (input.config.githubToken) {
+    checks.push(check("warn", "GitHub PR actions", "githubToken is configured, but run branch preparation is disabled"));
   } else {
-    checks.push(check("warn", "GitHub token", "Not configured; PR creation will be skipped"));
+    checks.push(check("warn", "GitHub PR actions", "Not configured; PR creation actions will be skipped or fail"));
   }
 
   return checks;

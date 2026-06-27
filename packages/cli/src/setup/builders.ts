@@ -109,6 +109,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       repositories: repositoryBindings,
       ...(channelBindings.length > 0 ? { channelBindings } : {}),
       ...(input.github ? { githubToken: input.github.token } : {}),
+      ...(input.github ? { preparePullRequestBranch: true } : {}),
       ...(input.github ? { allowAutoCreatePullRequest: input.github.autoCreatePullRequest } : {}),
       pollIntervalMs: 5000,
       heartbeatIntervalMs: 15000

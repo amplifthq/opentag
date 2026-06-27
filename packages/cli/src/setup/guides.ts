@@ -26,7 +26,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "slack":
         return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "Slack Team ID", "Slack Channel ID"];
       case "github":
-        return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；允许时也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "需要一个公网 tunnel 转发 GitHub webhook"];
+        return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；你回复 apply 1 后也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "需要一个公网 tunnel 转发 GitHub webhook"];
       case "telegram":
         return [];
     }
@@ -38,7 +38,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "slack":
       return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Slack Team ID", "Slack Channel ID"];
     case "github":
-      return ["GitHub repository owner/repo", "GitHub token for comments and optional pull requests", "OpenTag generates the webhook secret", "A public tunnel is required for GitHub webhook delivery"];
+      return ["GitHub repository owner/repo", "GitHub token for comments and PR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "A public tunnel is required for GitHub webhook delivery"];
     case "telegram":
       return [];
   }
@@ -193,11 +193,11 @@ export function formatSlackCredentialHelp(language: CliLanguage, mode: SlackSetu
 }
 
 export function formatGitHubTokenHelp(language: CliLanguage, input: { autoCreatePullRequest: boolean }): string {
-  const permissions =
-    input.autoCreatePullRequest
-      ? ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: Read and write"]
-      : ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: not needed unless you allow OpenTag to create pull requests"];
   if (language === "zh-CN") {
+    const permissions =
+      input.autoCreatePullRequest
+        ? ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: Read and write"]
+        : ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: 默认 apply 1 流程不需要；run branch 会使用本机 git remote 凭据推送"];
     return [
       "GitHub token 在哪里创建:",
       `- 直接打开: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,
@@ -210,6 +210,10 @@ export function formatGitHubTokenHelp(language: CliLanguage, input: { autoCreate
     ].join("\n");
   }
 
+  const permissions =
+    input.autoCreatePullRequest
+      ? ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: Read and write"]
+      : ["- Issues: Read and write", "- Pull requests: Read and write", "- Contents: not needed for the default apply-1 flow; branch push uses your local git remote credentials"];
   return [
     "Where to create the GitHub token:",
     `- Direct token page: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,

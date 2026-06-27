@@ -34,7 +34,7 @@ Real smoke tests have validated:
 
 - GitHub issue -> OpenTag -> local Claude Code -> commit branch -> pull request -> GitHub callback
 - Slack thread -> OpenTag -> local Claude Code -> Slack final callback with audit-only progress
-- model-suggested actions -> source-thread `apply 1` reply -> approval decision -> apply plan or child run fallback
+- model-suggested actions -> source-thread `apply 1` reply -> approval decision -> apply plan -> GitHub PR, adapter write, or child run fallback
 
 ## Quick Start
 
@@ -58,7 +58,7 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 - **Control where execution happens** - keep coding work local with `opentagd`, or use hosted/custom runners that implement the same claim and callback contracts.
 - **Use any approved executor** - built-in adapters cover `echo`, `claude-code`, and `codex`; custom runners can implement the same contract.
 - **Return outcomes, not noise** - human threads get useful acknowledgements and final results while detailed progress stays in audit events and metrics.
-- **Turn model suggestions into safe actions** - final callbacks can render suggested next steps such as labels, review requests, follow-up runs, or PR work; users approve, apply, reject, or continue from the same source thread.
+- **Turn model suggestions into safe actions** - final callbacks can render suggested next steps such as labels, review requests, follow-up runs, or `create_pull_request` actions with title, branch, changed-file, risk, and execution context; users approve, apply, reject, or continue from the same source thread.
 - **Govern external writes** - Project Target bindings, permission scopes, context packets, and audit trails make agent authority explicit.
 
 ## How It Works
@@ -93,7 +93,7 @@ flowchart LR
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| GitHub | Works today | Issue comments, PR review comments, callbacks, and pull request creation from local daemon runs when configured |
+| GitHub | Works today | Issue comments, PR review comments, callbacks, thread-approved pull request creation from prepared run branches, and legacy immediate PR creation when configured |
 | Slack | Works today | App mentions, channel-to-Project Target bindings, thread callbacks, and audit-only routine progress |
 | Local daemon | Works today | Polling, heartbeats, lease-based claiming, Project Target bindings, and dirty-worktree protection |
 | Executors | Works today | `echo`, Claude Code (`claude --print`), Codex (`codex exec`), and custom executor contracts |

@@ -147,8 +147,9 @@ Use daemon security settings to keep executor runs constrained:
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
 | `security` | none | Runner security policy |
-| `githubToken` | none | GitHub token for callback comments, GitHub apply helpers, and optional PR creation |
-| `allowAutoCreatePullRequest` | `false` | Enables PR creation when executor results include changed files |
+| `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
+| `preparePullRequestBranch` | `false` | Commits and pushes executor run branches so a later source-thread `apply 1` can create the PR through an ApplyPlan |
+| `allowAutoCreatePullRequest` | `false` | Legacy mode that creates a PR immediately when executor results include changes |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 
@@ -197,8 +198,9 @@ for repeatable setups.
 | `OPENTAG_ALLOWED_WORKSPACE_ROOT` | none | Restricts allowed checkout paths |
 | `OPENTAG_ALLOW_UNSAFE_PROMPTS` | `false` | Allows prompts normally rejected by runner security |
 | `OPENTAG_EXTRA_SAFE_ENV` | none | Comma-separated env names preserved for executor processes |
-| `OPENTAG_GITHUB_TOKEN` | none | GitHub token for callback comments and optional PR creation |
-| `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Allows daemon PR creation |
+| `OPENTAG_GITHUB_TOKEN` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
+| `OPENTAG_PREPARE_PR_BRANCH` | `false` | Pushes executor run branches for thread-native PR creation after approval |
+| `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Allows legacy immediate daemon PR creation |
 | `OPENTAG_PAIRING_TOKEN` | none | Shared dispatcher token |
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |
 | `OPENTAG_HEARTBEAT_INTERVAL_MS` | `15000` | Heartbeat interval |
