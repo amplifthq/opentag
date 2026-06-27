@@ -34,6 +34,7 @@ import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
@@ -1806,6 +1807,25 @@ export function createDispatcherApp(input: {
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
     return c.json({ events });
+  });
+
+  app.onError((err, c) => {
+    // Preserve explicit HTTP errors raised by handlers/middleware.
+    if (err instanceof HTTPException) {
+      return err.getResponse();
+    }
+    // Malformed JSON bodies (c.req.json() throws SyntaxError) and schema
+    // validation failures from .parse() are client errors, not server faults.
+    // This mirrors the safeParse → 400 convention already used by the
+    // /v1/proposals/:proposalId/approvals route.
+    if (err instanceof z.ZodError) {
+      return c.json({ error: "invalid_request_body", issues: err.issues }, 400);
+    }
+    if (err instanceof SyntaxError) {
+      return c.json({ error: "invalid_json_body" }, 400);
+    }
+    // Unknown errors remain 500.
+    throw err;
   });
 
   return app;

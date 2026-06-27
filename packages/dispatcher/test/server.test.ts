@@ -2757,4 +2757,28 @@ describe("dispatcher API", () => {
       )
     ).toBe(true);
   });
+
+  it("returns 400 for a malformed JSON body", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const response = await app.request("/v1/runners", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ not valid json"
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error: string };
+    expect(payload.error).toBe("invalid_json_body");
+  });
+
+  it("returns 400 for a body that fails schema validation", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const response = await app.request("/v1/runners", jsonRequest({ nope: true }));
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error: string };
+    expect(payload.error).toBe("invalid_request_body");
+  });
 });
