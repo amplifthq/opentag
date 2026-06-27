@@ -31,6 +31,7 @@ export type SetupCommandOptions = {
   binding?: string;
   force?: boolean;
   yes?: boolean;
+  start?: boolean;
 };
 
 export type SetupFlowDependencies = {

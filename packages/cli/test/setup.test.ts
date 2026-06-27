@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -53,6 +53,7 @@ describe("OpenTag CLI setup", () => {
         config: configPath,
         project: projectPath,
         executor: "echo",
+        start: false,
         force: true
       },
       {
@@ -90,6 +91,7 @@ describe("OpenTag CLI setup", () => {
       larkAppSecret: "secret_manual",
       larkBotOpenId: "ou_manual_bot",
       binding: "bind_later",
+      start: false,
       force: true
     }, { prompts: testPrompts() });
 
@@ -176,6 +178,63 @@ describe("OpenTag CLI setup", () => {
     expect(readCliConfig(configPath).preferences?.lastSetup?.larkSetupMethod).toBe("saved");
   });
 
+  it("summarizes the saved project path instead of the internal Project Target id", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        start: false,
+        force: true
+      },
+      {
+        prompts: testPrompts({
+          note(message) {
+            notes.push(message);
+          }
+        })
+      }
+    );
+
+    const completeNote = notes.at(-1) ?? "";
+    expect(completeNote).toContain("OpenTag config saved.");
+    expect(completeNote).toContain(`Project path: ${realpathSync.native(projectPath)}`);
+    expect(completeNote).not.toContain("Project Target");
+    expect(completeNote).not.toContain("path_");
+  });
+
+  it("starts OpenTag directly after interactive setup when confirmed", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTag = vi.fn(async () => undefined);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true
+      },
+      {
+        prompts: testPrompts(),
+        startOpenTag
+      }
+    );
+
+    expect(startOpenTag).toHaveBeenCalledWith({ config: configPath });
+  });
+
   it("labels Echo as dev/test only in the coding agent prompt", async () => {
     const configPath = join(tempDir(), "config.json");
     let echoHint: string | undefined;
@@ -235,7 +294,8 @@ describe("OpenTag CLI setup", () => {
     await runSetupCommand(
       {
         config: configPath,
-        force: true
+        force: true,
+        start: false
       },
       {
         prompts: testPrompts({

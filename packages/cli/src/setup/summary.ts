@@ -46,10 +46,20 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
 
 export function formatSetupComplete(config: OpenTagCliConfig, configPath: string): string {
   const repository = config.daemon.repositories[0];
+  const language = config.preferences?.language ?? "en";
+  if (language === "zh-CN") {
+    return [
+      "OpenTag 配置已保存。",
+      `配置文件: ${configPath}`,
+      repository ? `项目路径: ${repository.checkoutPath}` : undefined
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join("\n");
+  }
   return [
-    `OpenTag config written to ${configPath}`,
-    repository ? `Project Target: ${repository.provider}:${repository.owner}/${repository.repo}` : undefined,
-    "Run `opentag start` to start OpenTag."
+    "OpenTag config saved.",
+    `Config: ${configPath}`,
+    repository ? `Project path: ${repository.checkoutPath}` : undefined
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");

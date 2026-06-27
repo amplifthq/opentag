@@ -37,6 +37,8 @@ program
   .option("--lark-bot-open-id <openId>", "Lark bot open id for group mentions")
   .option("--binding <method>", "Binding method: default_project or bind_later")
   .option("--force", "Overwrite an existing config")
+  .option("--start", "Start OpenTag immediately after setup")
+  .option("--no-start", "Do not ask to start OpenTag after setup")
   .option("-y, --yes", "Skip setup confirmation")
   .action(async (options) => {
     try {
