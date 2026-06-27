@@ -7,18 +7,10 @@ export function createExecutorRunResult(input: {
   baseBranch?: string;
   output: string;
   changedFiles: string[];
-  verificationCommand: string;
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
   const summary = input.output.slice(-4000);
-  const verification = [
-    {
-      command: input.verificationCommand,
-      outcome: "passed" as const,
-      excerpt: input.output.slice(-1000)
-    }
-  ];
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [
@@ -38,18 +30,11 @@ export function createExecutorRunResult(input: {
                   body: [
                     "## Summary",
                     "",
-                    summary,
-                    "",
-                    "## Changed Files",
-                    ...input.changedFiles.map((file) => `- \`${file}\``),
-                    "",
-                    "## Verification",
-                    ...verification.map((check) => `- \`${check.command}\`: ${check.outcome}`)
+                    summary
                   ].join("\n"),
                   head: input.branchName,
                   base: input.baseBranch ?? "main",
                   changedFiles: input.changedFiles,
-                  verification: verification.map((check) => ({ command: check.command, outcome: check.outcome })),
                   risks: ["Creates a pull request from the executor-produced branch; review the diff before merging."],
                   executorConditions: ["isolated branch exists"]
                 }
@@ -83,7 +68,6 @@ export function createExecutorRunResult(input: {
       ...(input.extraArtifacts ?? [])
     ],
     ...(suggestedChanges ? { suggestedChanges } : {}),
-    verification,
     nextAction:
       input.changedFiles.length > 0
         ? {

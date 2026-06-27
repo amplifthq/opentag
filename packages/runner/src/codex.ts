@@ -190,7 +190,6 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
           ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
           output,
           changedFiles: files,
-          verificationCommand: "codex exec",
           extraArtifacts: keepWorktree === "always" ? [{ title: "Run worktree", uri: worktreePath }] : []
         });
       } finally {

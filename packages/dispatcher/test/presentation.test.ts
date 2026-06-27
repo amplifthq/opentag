@@ -189,8 +189,12 @@ describe("default callback presentation", () => {
     expect(github).toContain("Changed files: `src/demo.ts`");
     expect(github).toContain("`pnpm test`: passed");
 
-    const slack = presentation.final({ provider: "slack", result }).body;
-    expect(slack).toContain("Title: OpenTag run run_1");
-    expect(slack).toContain("Branch: `opentag/run_1` -> `main`");
+    const slack = presentation.final({ provider: "slack", result });
+    expect(slack.body).toContain("Title: OpenTag run run_1");
+    expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(slack.body).toContain("Changed files: `src/demo.ts`");
+    expect(slack.body).toContain("`pnpm test`: passed");
+    expect(JSON.stringify(slack.blocks)).toContain("Title: OpenTag run run_1");
+    expect(JSON.stringify(slack.blocks)).toContain("`pnpm test`: passed");
   });
 });

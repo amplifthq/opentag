@@ -124,10 +124,11 @@ For the thread-native PR flow, prefer:
 
 ```bash
 OPENTAG_GH_PREPARE_PR_BRANCH=true \
-OPENTAG_GH_APPLY_PR_ACTION=true
+OPENTAG_GH_APPLY_PR_ACTION=true \
+scripts/dev/run-gh-claude-local-test.sh
 ```
 
-This lets the daemon commit and push the executor-produced run branch, but it does not open the PR immediately. The final callback should render a `create_pull_request` suggested action with the PR title, head branch, base branch, changed files, risks, and verification. Reply in the source thread with:
+This lets the daemon commit and push the executor-produced run branch, but it does not open the PR immediately. The final callback should render a `create_pull_request` suggested action with the PR title, head branch, base branch, changed files, risks, executor conditions, and any real verification the executor reported. Reply in the source thread with:
 
 ```text
 apply 1
@@ -458,8 +459,8 @@ Use this trace when validating the model action layer against a real GitHub issu
 | --- | --- |
 | Mention | Source thread URL and exact mention text |
 | Run created | Dispatcher `runId`, source `eventId`, and `run.created` audit event |
-| Executor result | Branch name, changed files, verification summary, and final callback body |
-| Suggested action | Rendered `create_pull_request` action with title, head branch, base branch, risks, and verification |
+| Executor result | Branch name, changed files, executor conditions, optional real verification, and final callback body |
+| Suggested action | Rendered `create_pull_request` action with title, head branch, base branch, risks, executor conditions, and optional real verification |
 | Approval/apply reply | Source-thread reply text such as `apply 1` and actor identity |
 | ApprovalDecision | `approval.decision.recorded` event and selected intent IDs |
 | ApplyPlan | `apply_plan.created` event, adapter, selected intent IDs, and preflight outcomes |
@@ -513,7 +514,7 @@ scripts/dev/run-gh-claude-local-test.sh
 Observed source-thread callbacks:
 
 - Final run callback rendered Suggested action `1. Create a pull request for branch opentag/run_gh_claude_1782542192.`
-- The rendered action included title `OpenTag run run_gh_claude_1782542192`, branch `opentag/run_gh_claude_1782542192 -> main`, changed file `README.md`, risk note, and `claude --print: passed`.
+- The rendered action included title `OpenTag run run_gh_claude_1782542192`, branch `opentag/run_gh_claude_1782542192 -> main`, changed file `README.md`, risk note, and executor condition `isolated branch exists`.
 - The automatic `apply 1` thread action returned a final callback with `proposal_run_gh_claude_1782542192_create_pr: applied (https://github.com/amplifthq/opentag-test/pull/21)`.
 
 Observed audit events:
@@ -560,7 +561,7 @@ This trace validated the same thread-native PR flow from a real Slack thread int
 Command shape:
 
 ```bash
-OPENTAG_ENV_FILE=/Users/mingyoo/repos/opentag/.env.slack-test \
+OPENTAG_ENV_FILE=/absolute/path/to/opentag/.env.slack-test \
 OPENTAG_DATABASE_PATH=/tmp/opentag-slack-action-loop-3.db \
 OPENTAG_SLACK_APPLY_PR_ACTION=true \
 scripts/dev/run-slack-claude-local-test.sh
@@ -569,7 +570,7 @@ scripts/dev/run-slack-claude-local-test.sh
 Observed Slack thread callbacks:
 
 - Final run callback rendered Suggested action `1. Create a pull request for branch opentag/run_slack_claude_real_1782543299.`
-- The rendered action included title `OpenTag run run_slack_claude_real_1782543299`, branch `opentag/run_slack_claude_real_1782543299 -> main`, changed file `README.md`, risk note, and `claude --print: passed`.
+- The rendered action included title `OpenTag run run_slack_claude_real_1782543299`, branch `opentag/run_slack_claude_real_1782543299 -> main`, changed file `README.md`, risk note, and executor condition `isolated branch exists`.
 - The `apply 1` thread action returned a final Slack callback with `proposal_run_slack_claude_real_1782543299_create_pr: applied (https://github.com/amplifthq/opentag-test/pull/22)`.
 
 Observed metrics:

@@ -34,7 +34,6 @@ export async function maybeCreatePullRequest(input: {
   result: OpenTagRunResult;
   options: PullRequestOptions;
 }): Promise<OpenTagRunResult> {
-  if (!input.options.githubToken) return input.result;
   if (!input.options.allowAutoCreatePullRequest && !input.options.preparePullRequestBranch) return input.result;
   if (!isGitHubRepositoryTarget({ event: input.event, binding: input.binding })) return input.result;
   if (!repositoryTargetMatchesBinding({ event: input.event, binding: input.binding })) return input.result;
@@ -64,6 +63,7 @@ export async function maybeCreatePullRequest(input: {
   if (!input.options.allowAutoCreatePullRequest) {
     return input.result;
   }
+  if (!input.options.githubToken) return input.result;
 
   const pullRequestUrl = await createPullRequestViaFetch(
     {

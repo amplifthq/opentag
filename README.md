@@ -58,7 +58,7 @@ The smoke tests start an in-process dispatcher with a temporary SQLite database 
 - **Control where execution happens** - keep coding work local with `opentagd`, or use hosted/custom runners that implement the same claim and callback contracts.
 - **Use any approved executor** - built-in adapters cover `echo`, `claude-code`, and `codex`; custom runners can implement the same contract.
 - **Return outcomes, not noise** - human threads get useful acknowledgements and final results while detailed progress stays in audit events and metrics.
-- **Turn model suggestions into safe actions** - final callbacks can render suggested next steps such as labels, review requests, follow-up runs, or `create_pull_request` actions with title, branch, risk, and verification context; users approve, apply, reject, or continue from the same source thread.
+- **Turn model suggestions into safe actions** - final callbacks can render suggested next steps such as labels, review requests, follow-up runs, or `create_pull_request` actions with title, branch, changed-file, risk, and execution context; users approve, apply, reject, or continue from the same source thread.
 - **Govern external writes** - Project Target bindings, permission scopes, context packets, and audit trails make agent authority explicit.
 
 ## How It Works

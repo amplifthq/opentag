@@ -40,6 +40,15 @@ PR_CREATE_PERMISSION=""
 if [[ "${OPENTAG_GH_CREATE_PR:-false}" == "true" || "$PREPARE_PR_BRANCH" == "true" ]]; then
   PR_CREATE_PERMISSION=', { scope: "pr:create", reason: "open a pull request for completed code changes" }'
 fi
+PR_CONFIG_FIELDS=""
+if [[ "${OPENTAG_GH_CREATE_PR:-false}" == "true" || "$PREPARE_PR_BRANCH" == "true" ]]; then
+  PR_CONFIG_FIELDS="${PR_CONFIG_FIELDS}  \"preparePullRequestBranch\": true,
+"
+fi
+if [[ "${OPENTAG_GH_CREATE_PR:-false}" == "true" ]]; then
+  PR_CONFIG_FIELDS="${PR_CONFIG_FIELDS}  \"allowAutoCreatePullRequest\": true,
+"
+fi
 
 if [[ ! -d "$CHECKOUT_PATH/.git" ]]; then
   mkdir -p "$(dirname "$CHECKOUT_PATH")"
@@ -74,9 +83,7 @@ cat > "$CONFIG_PATH" <<JSON
   "dispatcherUrl": "http://localhost:${DISPATCHER_PORT}",
   "pairingToken": "${OPENTAG_PAIRING_TOKEN}",
   "githubToken": "${GITHUB_TOKEN}",
-  "preparePullRequestBranch": ${PREPARE_PR_BRANCH},
-  "allowAutoCreatePullRequest": ${OPENTAG_GH_CREATE_PR:-false},
-  "pollIntervalMs": 1000,
+${PR_CONFIG_FIELDS}  "pollIntervalMs": 1000,
   "heartbeatIntervalMs": 15000,
   "claudeCode": {
     "command": "${OPENTAG_CLAUDE_COMMAND:-claude}",

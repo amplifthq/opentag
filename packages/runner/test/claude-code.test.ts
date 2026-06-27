@@ -119,6 +119,9 @@ describe("Claude Code executor", () => {
         { intentId: "proposal_run_1_request_review", domain: "review", action: "request_review" }
       ]
     });
+    expect(result.verification).toBeUndefined();
+    expect(result.suggestedChanges?.[0]?.intents[0]?.params?.["body"]).not.toContain("claude --print");
+    expect(result.suggestedChanges?.[0]?.intents[0]?.params?.["verification"]).toBeUndefined();
     expect(result.nextAction).toMatchObject({
       hint: {
         kind: "create_pull_request",

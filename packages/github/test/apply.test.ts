@@ -71,6 +71,52 @@ describe("GitHub apply helpers", () => {
     });
   });
 
+  it("keeps explicit PR body text while appending structured PR metadata", () => {
+    expect(
+      compileGitHubIssueMutationIntent({
+        intentId: "intent_create_pr",
+        domain: "pull_request",
+        action: "create_pull_request",
+        summary: "Create a PR for the generated branch.",
+        params: {
+          title: "OpenTag run run_1",
+          body: "Custom model-written PR body.",
+          head: "opentag/run_1",
+          base: "main",
+          changedFiles: ["src/demo.ts"],
+          verification: [{ command: "pnpm test", outcome: "passed" }],
+          risks: ["Review before merge."],
+          executorConditions: ["isolated branch exists"]
+        }
+      })
+    ).toEqual({
+      ok: true,
+      intentId: "intent_create_pr",
+      operation: {
+        kind: "create_pull_request",
+        intentId: "intent_create_pr",
+        title: "OpenTag run run_1",
+        body: [
+          "Custom model-written PR body.",
+          "",
+          "## Changed Files",
+          "- `src/demo.ts`",
+          "",
+          "## Risks",
+          "- Review before merge.",
+          "",
+          "## Verification",
+          "- `pnpm test`: passed",
+          "",
+          "## Executor Conditions",
+          "- isolated branch exists"
+        ].join("\n"),
+        head: "opentag/run_1",
+        base: "main"
+      }
+    });
+  });
+
   it("compiles status and priority through explicit GitHub label mappings", () => {
     expect(
       compileGitHubIssueMutationIntent(

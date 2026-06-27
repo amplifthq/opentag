@@ -2328,7 +2328,21 @@ describe("dispatcher API", () => {
         authorization: "Bearer gh_test",
         body: {
           title: "OpenTag run run_thread_create_pr",
-          body: "PR body",
+          body: [
+            "PR body",
+            "",
+            "## Changed Files",
+            "- `src/demo.ts`",
+            "",
+            "## Risks",
+            "- Review before merge.",
+            "",
+            "## Verification",
+            "- `pnpm test`: passed",
+            "",
+            "## Executor Conditions",
+            "- isolated branch exists"
+          ].join("\n"),
           head: "opentag/run_thread_create_pr",
           base: "main"
         }
@@ -2429,7 +2443,7 @@ describe("dispatcher API", () => {
         authorization: "Bearer gh_test",
         body: {
           title: "OpenTag run run_slack_create_pr",
-          body: "PR body",
+          body: ["PR body", "", "## Changed Files", "- `README.md`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
           head: "opentag/run_slack_create_pr",
           base: "main"
         }
