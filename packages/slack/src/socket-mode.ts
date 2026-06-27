@@ -5,6 +5,35 @@ import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventE
 const SLACK_CONNECTIONS_OPEN_URL = "https://slack.com/api/apps.connections.open";
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 
+// Slack Web API `error` codes that represent a terminal authentication or
+// configuration problem with the app token. Retrying these is pointless: the
+// request will fail identically forever, spamming logs and risking rate limits
+// or an API ban. Startup must fail loudly so the operator fixes the config,
+// rather than the daemon silently looping. Transient/network errors (e.g.
+// `ratelimited`, HTTP 5xx, fetch failures) are NOT in this set and are retried.
+const TERMINAL_SLACK_ERROR_CODES = [
+  "invalid_auth",
+  "not_authed",
+  "account_inactive",
+  "token_revoked",
+  "token_expired",
+  "not_allowed_token_type",
+  "no_permission",
+  "missing_scope",
+  "ekm_access_denied"
+] as const;
+
+/**
+ * Returns true when the error from opening the Socket Mode connection is a
+ * terminal auth/config failure that must propagate (reject startup) instead of
+ * being retried. The Slack error code is embedded in the thrown Error message by
+ * {@link openSlackSocketUrl} (e.g. "...connection failed: invalid_auth").
+ */
+function isTerminalSlackAuthError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return TERMINAL_SLACK_ERROR_CODES.some((code) => error.message.includes(code));
+}
+
 export type SlackSocketModeEnvelope = {
   type?: string;
   envelope_id?: string;
@@ -161,6 +190,16 @@ export function startSlackSocketModeApp(
         const socketUrl = await openSlackSocketUrl({ appToken: input.appToken, fetchImpl });
         await runOneConnection(socketUrl);
       } catch (error) {
+        // A terminal auth/config error (invalid app token, missing scope, etc.)
+        // will never succeed on retry, so we must NOT swallow it: rethrow so
+        // startPromise rejects and startup fails loudly instead of looping
+        // forever against Slack's API.
+        if (isTerminalSlackAuthError(error)) {
+          if (!closed) {
+            logError("[slack] terminal Socket Mode auth/config error, aborting:", error);
+          }
+          throw error;
+        }
         // A transient apps.connections.open failure (or any error opening the
         // connection) must NOT reject startPromise: the CLI aborts the entire
         // OpenTag daemon when this promise rejects, so one blip in Slack's API
