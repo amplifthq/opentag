@@ -1,3 +1,5 @@
+import type { CliLanguage } from "./languages.js";
+
 export type PlatformId = "lark" | "slack" | "github" | "telegram";
 
 export type PlatformStatus = "setup_ready" | "setup_pending" | "experimental_setup_pending";
@@ -7,6 +9,23 @@ export type PlatformDescriptor = {
   label: string;
   status: PlatformStatus;
   startable: boolean;
+};
+
+const SETUP_GUIDE_BASE_URL = "https://github.com/amplifthq/opentag/blob/main/docs/platforms";
+
+const PLATFORM_SETUP_GUIDE_FILES: Partial<Record<PlatformId, Record<CliLanguage, string>>> = {
+  lark: {
+    en: "lark.en.md",
+    "zh-CN": "lark.zh-CN.md"
+  },
+  slack: {
+    en: "slack.en.md",
+    "zh-CN": "slack.zh-CN.md"
+  },
+  github: {
+    en: "github.en.md",
+    "zh-CN": "github.zh-CN.md"
+  }
 };
 
 export const PLATFORM_CATALOG: PlatformDescriptor[] = [
@@ -49,6 +68,11 @@ export function platformById(id: PlatformId): PlatformDescriptor {
     throw new Error(`Unknown platform: ${id}`);
   }
   return descriptor;
+}
+
+export function platformSetupGuideUrl(id: PlatformId, language: CliLanguage): string | undefined {
+  const file = PLATFORM_SETUP_GUIDE_FILES[id]?.[language];
+  return file ? `${SETUP_GUIDE_BASE_URL}/${file}` : undefined;
 }
 
 export function formatPlatformStatus(status: PlatformStatus): string {

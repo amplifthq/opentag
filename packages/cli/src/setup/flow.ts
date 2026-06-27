@@ -16,6 +16,7 @@ import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platfor
 import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
+import { formatPlatformSetupGuide } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
 import type { BindingMethod, GitHubSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput } from "./types.js";
 
@@ -226,6 +227,10 @@ async function collectPlatform(options: SetupCommandOptions, defaults: SetupDefa
   const descriptor = platformById(selected);
   if (!descriptor.startable) {
     throw new Error(`${descriptor.label} setup is not available in the OpenTag CLI yet.`);
+  }
+  const guide = formatPlatformSetupGuide(selected, language);
+  if (guide) {
+    prompts.note(guide);
   }
   return selected;
 }

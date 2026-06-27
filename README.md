@@ -132,6 +132,7 @@ Runnable apps live in `apps/dispatcher`, `apps/opentagd`, `apps/github-probot`, 
 - [Embedded dispatcher](examples/embedded-dispatcher/README.md) - host OpenTag inside another Node service.
 - [Custom runner](examples/custom-runner/README.md) - build a third-party runner with `@opentag/client` and `@opentag/runner`.
 - [Start OpenTag for Lark locally](docs/lark-local-start.md) - one-command local MVP path for Lark or Feishu long-connection testing.
+- [Platform setup guides](docs/platforms/README.md) - values to collect for Lark / Feishu, Slack, and GitHub CLI setup.
 - [Configuration](docs/configuration.md) - map dispatcher, daemon, ingress, callback, and runner settings.
 - [Adapter authoring](docs/adapter-authoring.md) - add new work app adapters without changing the execution model.
 - [Real integration smoke test](docs/real-integration-smoke-test.md) - real GitHub and Slack setup, trigger, and debugging order.
