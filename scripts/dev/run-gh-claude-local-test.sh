@@ -35,8 +35,9 @@ fi
 GITHUB_TOKEN="$(gh auth token)"
 CHECKOUT_PATH="${OPENTAG_WORKSPACE_PATH:-$ROOT_DIR}"
 ISSUE_NUMBER="${OPENTAG_GH_TEST_ISSUE:-}"
+PREPARE_PR_BRANCH="${OPENTAG_GH_PREPARE_PR_BRANCH:-${OPENTAG_PREPARE_PR_BRANCH:-false}}"
 PR_CREATE_PERMISSION=""
-if [[ "${OPENTAG_GH_CREATE_PR:-false}" == "true" ]]; then
+if [[ "${OPENTAG_GH_CREATE_PR:-false}" == "true" || "$PREPARE_PR_BRANCH" == "true" ]]; then
   PR_CREATE_PERMISSION=', { scope: "pr:create", reason: "open a pull request for completed code changes" }'
 fi
 
@@ -73,6 +74,7 @@ cat > "$CONFIG_PATH" <<JSON
   "dispatcherUrl": "http://localhost:${DISPATCHER_PORT}",
   "pairingToken": "${OPENTAG_PAIRING_TOKEN}",
   "githubToken": "${GITHUB_TOKEN}",
+  "preparePullRequestBranch": ${PREPARE_PR_BRANCH},
   "allowAutoCreatePullRequest": ${OPENTAG_GH_CREATE_PR:-false},
   "pollIntervalMs": 1000,
   "heartbeatIntervalMs": 15000,
@@ -250,6 +252,45 @@ NODE
 
 echo "Running local daemon once with Claude Code"
 OPENTAG_CONFIG_PATH="$CONFIG_PATH" NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts run-once
+
+if [[ "${OPENTAG_GH_APPLY_PR_ACTION:-false}" == "true" ]]; then
+  echo "Applying suggested PR action from the source thread"
+  node <<NODE
+const body = {
+  rawText: "apply 1",
+  actor: {
+    provider: "github",
+    providerUserId: "${ACTOR_ID}",
+    handle: "${ACTOR_LOGIN}"
+  },
+  callback: {
+    provider: "github",
+    uri: "${COMMENTS_API_URL}",
+    threadKey: "${OWNER}/${REPO}#${ISSUE_NUMBER}"
+  },
+  metadata: {
+    source: "github-cli-smoke",
+    issueUrl: "${ISSUE_URL}",
+    runId: "${RUN_ID}"
+  }
+};
+
+fetch("http://localhost:${DISPATCHER_PORT}/v1/thread-actions", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    "authorization": "Bearer ${OPENTAG_PAIRING_TOKEN}"
+  },
+  body: JSON.stringify(body)
+}).then(async (response) => {
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(\`thread action failed: \${response.status} \${text}\`);
+  }
+  console.log(text);
+});
+NODE
+fi
 
 echo
 echo "GitHub-assisted Claude Code local test completed."

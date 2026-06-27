@@ -220,6 +220,60 @@ describe("Slack events app", () => {
     expect(submitThreadAction).not.toHaveBeenCalled();
   });
 
+  it("ignores Slack message subtypes before validating user-authored message fields", async () => {
+    const resolveChannelBinding = vi.fn(async () => ({ teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }));
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvChanged",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "message",
+        subtype: "message_changed",
+        channel: "C123",
+        message: {
+          user: "U456",
+          text: "apply 1",
+          ts: `${currentTimestamp}.000400`
+        },
+        ts: `${currentTimestamp}.000400`
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      resolveChannelBinding,
+      createRun,
+      submitThreadAction,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(resolveChannelBinding).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).not.toHaveBeenCalled();
+  });
+
   it("supports multiple Slack apps with different secrets and agent ids", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_2" }));
     const rawBody = JSON.stringify({

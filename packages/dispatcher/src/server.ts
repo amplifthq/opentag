@@ -9,6 +9,7 @@ import {
   type ActorIdentity,
   type ApplyIntentOutcome,
   type ApplyPlan,
+  type MutationIntent,
   type OpenTagEvent,
   type OpenTagRun,
   type SuggestedChangesSnapshot,
@@ -330,13 +331,27 @@ async function resolveThreadAction(input: {
   return resolveCandidateSelection({ command: input.command, proposals });
 }
 
-function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string }): string {
-  const repoProvider = input.event.metadata["repoProvider"];
-  const isGitHubRepo = repoProvider === "github" || (input.event.source === "github" && repoProvider === undefined);
-  return isGitHubRepo &&
-    typeof input.event.metadata["owner"] === "string" &&
-    typeof input.event.metadata["repo"] === "string" &&
-    (typeof input.event.metadata["issueNumber"] === "number" || typeof input.event.metadata["pullRequestNumber"] === "number")
+function isGitHubRepoEvent(event: OpenTagEvent): boolean {
+  const repoProvider = event.metadata["repoProvider"];
+  return repoProvider === "github" || (event.source === "github" && repoProvider === undefined);
+}
+
+function hasGitHubRepoTarget(event: OpenTagEvent): boolean {
+  return isGitHubRepoEvent(event) && typeof event.metadata["owner"] === "string" && typeof event.metadata["repo"] === "string";
+}
+
+function hasGitHubIssueOrPullTarget(event: OpenTagEvent): boolean {
+  return typeof event.metadata["issueNumber"] === "number" || typeof event.metadata["pullRequestNumber"] === "number";
+}
+
+function isRepoLevelGitHubIntent(intent: MutationIntent): boolean {
+  return intent.action === "create_pull_request";
+}
+
+function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string; selectedIntents: MutationIntent[] }): string {
+  return hasGitHubRepoTarget(input.event) &&
+    (hasGitHubIssueOrPullTarget(input.event) ||
+      (input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isRepoLevelGitHubIntent(intent))))
     ? "github"
     : input.callbackProvider;
 }
@@ -471,18 +486,16 @@ function githubTargetFromEvent(event: OpenTagEvent):
   | {
       owner: string;
       repoName: string;
-      issueNumber: number;
+      issueNumber?: number;
       pullRequestNumber?: number;
-      targetKind: "issue" | "pull_request";
+      targetKind?: "issue" | "pull_request";
     }
   | null {
   const owner = event.metadata["owner"];
   const repoName = event.metadata["repo"];
   const issueNumber = event.metadata["issueNumber"];
   const pullRequestNumber = event.metadata["pullRequestNumber"];
-  const repoProvider = event.metadata["repoProvider"];
-  const isGitHubRepo = repoProvider === "github" || (event.source === "github" && repoProvider === undefined);
-  if (!isGitHubRepo) return null;
+  if (!hasGitHubRepoTarget(event)) return null;
   if (typeof owner !== "string" || typeof repoName !== "string") return null;
   if (typeof pullRequestNumber === "number") {
     return { owner, repoName, issueNumber: pullRequestNumber, pullRequestNumber, targetKind: "pull_request" };
@@ -490,11 +503,46 @@ function githubTargetFromEvent(event: OpenTagEvent):
   if (typeof issueNumber === "number") {
     return { owner, repoName, issueNumber, targetKind: "issue" };
   }
-  return null;
+  return { owner, repoName };
 }
 
 function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandidates"]): string {
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
+}
+
+function childRunContextLines(input: {
+  resolved: ResolvedThreadAction;
+  sourceApplyPlanId?: string;
+  fallbackReason?: string;
+}): string[] {
+  const previousSummary = input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary;
+  return [
+    `- Proposal: \`${input.resolved.proposal.snapshot.proposalId}\``,
+    `- Selected intents: ${input.resolved.selectedIntentIds.map((intentId) => `\`${intentId}\``).join(", ")}`,
+    `- Previous run: \`${input.resolved.proposal.runId}\``,
+    `- Previous result: ${previousSummary}`,
+    ...(input.sourceApplyPlanId ? [`- Apply plan: \`${input.sourceApplyPlanId}\``] : []),
+    ...(input.fallbackReason ? [`- Fallback reason: ${input.fallbackReason}`] : [])
+  ];
+}
+
+function renderChildRunCreatedBody(input: {
+  lead: string;
+  resolved: ResolvedThreadAction;
+  childRun: OpenTagRun;
+  sourceApplyPlanId?: string;
+  fallbackReason?: string;
+}): string {
+  return [
+    input.lead,
+    "",
+    `Child run: \`${input.childRun.id}\``,
+    "",
+    "Context carried into the child run:",
+    ...childRunContextLines(input),
+    "",
+    "The model will continue from this approved proposal instead of starting from a fresh mention."
+  ].join("\n");
 }
 
 function actionContextPointer(input: {
@@ -508,6 +556,8 @@ function actionContextPointer(input: {
     `User reply: ${input.command.rawText}`,
     `Action: ${input.command.verb}`,
     `Proposal: ${input.resolved.proposal.snapshot.proposalId}`,
+    `Proposal summary: ${input.resolved.proposal.snapshot.summary}`,
+    `Selected actions: ${selectedActionSummary(input.resolved.selectedCandidates)}`,
     `Selected intents: ${input.resolved.selectedIntentIds.join(", ")}`,
     `Previous run: ${input.resolved.proposal.runId}`,
     `Previous summary: ${input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary}`
@@ -636,7 +686,10 @@ async function executeGitHubApplyPlan(input: {
 
   const executedOutcomes: ApplyIntentOutcome[] = [];
   const compilerRegistry = createAdapterMutationCompilerRegistry([
-    createGitHubIssueMutationCompiler({ mappings: mappingsFromAdapterPlan(input.plan.adapterPlan), targetKind: target.targetKind })
+    createGitHubIssueMutationCompiler({
+      mappings: mappingsFromAdapterPlan(input.plan.adapterPlan),
+      ...(target.targetKind ? { targetKind: target.targetKind } : {})
+    })
   ]);
   for (const compilation of compilerRegistry.compile("github", executableIntents)) {
     if (!compilation.ok) {
@@ -649,7 +702,7 @@ async function executeGitHubApplyPlan(input: {
           token: input.githubApply.token,
           owner: target.owner,
           repo: target.repoName,
-          issueNumber: target.issueNumber,
+          ...(typeof target.issueNumber === "number" ? { issueNumber: target.issueNumber } : {}),
           ...(target.pullRequestNumber ? { pullRequestNumber: target.pullRequestNumber } : {})
         },
         operation: compilation.operation as GitHubIssueMutationOperation,
@@ -1054,7 +1107,14 @@ export function createDispatcherApp(input: {
     }
 
     const selectionText = selectedActionSummary(resolved.resolved.selectedCandidates);
-    const adapter = adapterForAction({ event: resolved.resolved.proposal.event, callbackProvider: parsed.callback.provider });
+    const selectedIntents = resolved.resolved.proposal.snapshot.intents.filter((intent) =>
+      resolved.resolved.selectedIntentIds.includes(intent.intentId)
+    );
+    const adapter = adapterForAction({
+      event: resolved.resolved.proposal.event,
+      callbackProvider: parsed.callback.provider,
+      selectedIntents
+    });
     const applyPlanId = stableApplyPlanId({ resolved: resolved.resolved, adapter });
     if (command.verb === "apply") {
       const existingPlan = await repo.getApplyPlan({ id: applyPlanId });
@@ -1076,6 +1136,25 @@ export function createDispatcherApp(input: {
           }),
           sourceApplyPlanId: existingPlan.id,
           fallbackReason
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: resolved.resolved.proposal.runId,
+            kind: "final",
+            provider: parsed.callback.provider,
+            uri: parsed.callback.uri,
+            body: renderChildRunCreatedBody({
+              lead: "This action was already planned, so OpenTag will not execute the external write again.",
+              resolved: resolved.resolved,
+              childRun,
+              sourceApplyPlanId: existingPlan.id,
+              fallbackReason
+            }),
+            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+          }
         });
         return c.json({ outcome: "already_planned", decision: existingDecision, plan: existingPlan, run: childRun }, 200);
       }
@@ -1171,7 +1250,11 @@ export function createDispatcherApp(input: {
         resolved: resolved.resolved,
         runId: stableChildRunId({ command, resolved: resolved.resolved })
       });
-      const body = `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.\n\nRun: \`${childRun.id}\``;
+      const body = renderChildRunCreatedBody({
+        lead: `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
+        resolved: resolved.resolved,
+        childRun
+      });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -1215,6 +1298,25 @@ export function createDispatcherApp(input: {
         }),
         sourceApplyPlanId: planResult.plan.id,
         fallbackReason
+      });
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body: renderChildRunCreatedBody({
+            lead: "This action was already planned, so OpenTag will not execute the external write again.",
+            resolved: resolved.resolved,
+            childRun,
+            sourceApplyPlanId: planResult.plan.id,
+            fallbackReason
+          }),
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
       });
       return c.json({ outcome: "already_planned", decision, plan: planResult.plan, run: childRun }, 200);
     }
@@ -1265,13 +1367,13 @@ export function createDispatcherApp(input: {
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
     });
-    const body = [
-      `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
-      "",
-      execution.fallbackReason ?? "The adapter could not execute the selected intent.",
-      "",
-      `I created a follow-up run so the model can continue with the approved context: \`${childRun.id}\`.`
-    ].join("\n");
+    const body = renderChildRunCreatedBody({
+      lead: `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
+      resolved: resolved.resolved,
+      childRun,
+      sourceApplyPlanId: execution.plan.id,
+      fallbackReason: execution.fallbackReason ?? "The adapter could not execute the selected intent."
+    });
     await deliverAndAudit({
       repo,
       sink: callbackSink,
@@ -1544,14 +1646,14 @@ export function createDispatcherApp(input: {
         token: githubApply.token,
         owner: executableTarget.target.owner,
         repo: executableTarget.target.repoName,
-        issueNumber: executableTarget.target.issueNumber,
+        ...(typeof executableTarget.target.issueNumber === "number" ? { issueNumber: executableTarget.target.issueNumber } : {}),
         ...(executableTarget.target.pullRequestNumber ? { pullRequestNumber: executableTarget.target.pullRequestNumber } : {})
       };
       const executedOutcomes = [];
       const compilerRegistry = createAdapterMutationCompilerRegistry([
         createGitHubIssueMutationCompiler({
           mappings: mappingsFromAdapterPlan(plan.adapterPlan),
-          targetKind: executableTarget.target.targetKind
+          ...(executableTarget.target.targetKind ? { targetKind: executableTarget.target.targetKind } : {})
         })
       ]);
       for (const compilation of compilerRegistry.compile("github", executableIntents)) {

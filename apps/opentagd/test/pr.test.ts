@@ -141,6 +141,42 @@ describe("maybeCreatePullRequest", () => {
     expect(commands).toEqual([]);
   });
 
+  it("can prepare a remote PR branch without creating the pull request", async () => {
+    const commands: string[] = [];
+    const requests: string[] = [];
+    const updated = await maybeCreatePullRequest({
+      run,
+      event,
+      binding: {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/demo",
+        baseBranch: "main",
+        pushRemote: "origin"
+      },
+      result,
+      options: {
+        githubToken: "ghs_test",
+        preparePullRequestBranch: true,
+        commandRunner: {
+          async run(command, args) {
+            commands.push(`${command} ${args.join(" ")}`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        },
+        fetchImpl: (async (url) => {
+          requests.push(String(url));
+          return Response.json({ html_url: "https://github.com/acme/demo/pull/1" });
+        }) as typeof fetch
+      }
+    });
+
+    expect(updated).toBe(result);
+    expect(commands).toEqual(["git add -- src/demo.ts", "git commit -m OpenTag run run_1", "git push -u origin opentag/run_1"]);
+    expect(requests).toEqual([]);
+  });
+
   it("creates a GitHub pull request for Slack runs mapped to a GitHub repository", async () => {
     const commands: string[] = [];
     const requests: string[] = [];

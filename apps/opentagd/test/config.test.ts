@@ -54,6 +54,7 @@ describe("opentagd config", () => {
     const parsed = parseDaemonConfig({
       runnerId: "runner_test",
       dispatcherUrl: "http://localhost:3030",
+      preparePullRequestBranch: true,
       repositories: [
         {
           owner: "acme",
@@ -72,6 +73,7 @@ describe("opentagd config", () => {
       worktreeRoot: "/tmp/worktrees",
       keepWorktree: "always"
     });
+    expect(parsed.preparePullRequestBranch).toBe(true);
   });
 
   it("defaults Slack channel bindings to github repoProvider", () => {
@@ -114,6 +116,20 @@ describe("opentagd config", () => {
       owner: "acme",
       repo: "demo"
     });
+  });
+
+  it("loads thread-native PR branch preparation from env", () => {
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
+    process.env.OPENTAG_GITHUB_TOKEN = "ghs_test";
+    process.env.OPENTAG_PREPARE_PR_BRANCH = "true";
+
+    const config = loadConfigFromEnv();
+
+    expect(config.githubToken).toBe("ghs_test");
+    expect(config.preparePullRequestBranch).toBe(true);
   });
 
   it("parses generic channel bindings through the validated schema", () => {

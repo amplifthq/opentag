@@ -40,6 +40,37 @@ describe("GitHub apply helpers", () => {
     });
   });
 
+  it("compiles create_pull_request intents into GitHub pull request operations", () => {
+    expect(
+      compileGitHubIssueMutationIntent({
+        intentId: "intent_create_pr",
+        domain: "pull_request",
+        action: "create_pull_request",
+        summary: "Create a PR for the generated branch.",
+        params: {
+          title: "OpenTag run run_1",
+          head: "opentag/run_1",
+          base: "main",
+          changedFiles: ["src/demo.ts"],
+          risks: ["Review before merge."]
+        }
+      })
+    ).toEqual({
+      ok: true,
+      intentId: "intent_create_pr",
+      operation: {
+        kind: "create_pull_request",
+        intentId: "intent_create_pr",
+        title: "OpenTag run run_1",
+        body: ["## Summary", "", "Create a PR for the generated branch.", "", "## Changed Files", "- `src/demo.ts`", "", "## Risks", "- Review before merge."].join(
+          "\n"
+        ),
+        head: "opentag/run_1",
+        base: "main"
+      }
+    });
+  });
+
   it("compiles status and priority through explicit GitHub label mappings", () => {
     expect(
       compileGitHubIssueMutationIntent(
@@ -333,6 +364,56 @@ describe("GitHub apply helpers", () => {
         method: "POST",
         authorization: "Bearer ghs_test",
         body: { reviewers: ["alice", "bob"], team_reviewers: ["core"] }
+      }
+    ]);
+  });
+
+  it("applies create_pull_request intents through the GitHub pulls API", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown; authorization: string | null }> = [];
+    const fetchImpl = (async (url, init) => {
+      requests.push({
+        url: String(url),
+        method: init?.method ?? "GET",
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+        authorization: new Headers(init?.headers).get("authorization")
+      });
+      return Response.json({ html_url: "https://github.com/acme/demo/pull/42" });
+    }) as typeof fetch;
+
+    await expect(
+      applyGitHubIssueMutationIntent({
+        target: { token: "ghs_test", owner: "acme", repo: "demo" },
+        fetchImpl,
+        intent: {
+          intentId: "intent_create_pr",
+          domain: "pull_request",
+          action: "create_pull_request",
+          summary: "Create a PR.",
+          params: {
+            title: "OpenTag run run_1",
+            body: "PR body",
+            head: "opentag/run_1",
+            base: "main"
+          }
+        }
+      })
+    ).resolves.toEqual({
+      intentId: "intent_create_pr",
+      outcome: "applied",
+      externalUri: "https://github.com/acme/demo/pull/42"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls",
+        method: "POST",
+        authorization: "Bearer ghs_test",
+        body: {
+          title: "OpenTag run run_1",
+          body: "PR body",
+          head: "opentag/run_1",
+          base: "main"
+        }
       }
     ]);
   });
