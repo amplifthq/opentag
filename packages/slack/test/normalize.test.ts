@@ -10,6 +10,16 @@ describe("Slack normalization", () => {
     expect(stripSlackAppMention("<@U_TEAMMATE> <@U_APP> fix this", "U_APP")).toBe("fix this");
   });
 
+  it("matches the bot when its leading mention carries a display-name label", () => {
+    expect(stripSlackAppMention("<@U_APP|opentag> fix this", "U_APP")).toBe("fix this");
+  });
+
+  it("matches a labeled bot mention even when preceded by a labeled teammate mention", () => {
+    expect(
+      stripSlackAppMention("<@U_TEAMMATE|alice> <@U_APP|opentag> fix this", "U_APP")
+    ).toBe("fix this");
+  });
+
   it("preserves mentions that appear mid-sentence", () => {
     expect(stripSlackAppMention("<@U_APP> ping <@U_TEAMMATE> now", "U_APP")).toBe(
       "ping <@U_TEAMMATE> now"

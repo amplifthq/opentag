@@ -44,9 +44,13 @@ export function stripSlackAppMention(text: string, botUserId?: string): string |
     // accept this as a command directed at the bot. This lets a teammate
     // mention precede the bot mention without breaking routing.
     const mentionedIds = leadingRun.match(MENTION_TOKEN) ?? [];
-    const botIsMentioned = mentionedIds.some(
-      (token) => token.slice(2, -1).toLowerCase() === botUserId.toLowerCase()
-    );
+    const botIsMentioned = mentionedIds.some((token) => {
+      // Slack mentions may carry a display-name/label suffix, e.g.
+      // "<@U12345|alice>". Strip the label so we compare against the bare
+      // user ID rather than "U12345|alice".
+      const id = token.slice(2, -1).split("|")[0] ?? "";
+      return id.toLowerCase() === botUserId.toLowerCase();
+    });
     if (!botIsMentioned) return null;
   }
 
