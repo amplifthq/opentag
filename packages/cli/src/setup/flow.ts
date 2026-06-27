@@ -602,7 +602,7 @@ async function collectGitHubSetup(
   const autoCreatePullRequest =
     options.githubAutoCreatePr ??
     (options.yes
-      ? false
+      ? defaults.githubAutoCreatePullRequest ?? false
       : await prompts.confirm({
           message: t(language, "githubAutoCreatePr"),
           initialValue: defaults.githubAutoCreatePullRequest ?? false
@@ -631,7 +631,7 @@ async function collectGitHubSetup(
     webhookSecret,
     owner: repository.owner,
     repo: repository.repo,
-    webhookPath: parseGitHubWebhookPath(options.githubWebhookPath ?? "/github/webhooks"),
+    webhookPath: parseGitHubWebhookPath(options.githubWebhookPath ?? defaults.githubWebhookPath ?? "/github/webhooks"),
     autoCreatePullRequest,
     port
   };

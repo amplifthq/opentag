@@ -538,6 +538,82 @@ describe("OpenTag CLI setup", () => {
     expect(readCliConfig(configPath).platforms.github?.webhookSecret).toBe("github_webhook_secret");
   });
 
+  it("keeps the existing GitHub webhook path on setup reruns", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        githubWebhookPath: "/opentag",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    expect(readCliConfig(configPath).platforms.github?.webhookPath).toBe("/opentag");
+  });
+
+  it("keeps the existing GitHub auto-PR choice on --yes setup reruns", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        githubAutoCreatePr: true,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
+    expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
+  });
+
   it("rejects a GitHub webhook path that is not rooted", async () => {
     await expect(
       runSetupCommand(

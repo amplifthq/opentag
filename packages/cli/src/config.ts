@@ -254,6 +254,7 @@ export function writeCliConfigAtomic(path: string, config: OpenTagCliConfig): vo
 }
 
 export function assertPrivateConfigFile(path: string): void {
+  if (process.platform === "win32") return;
   const mode = statSync(path).mode & 0o777;
   if ((mode & 0o077) !== 0) {
     throw new Error(`OpenTag config contains secrets and must not be readable by group or others: ${path}\nFix it with: chmod 600 ${path}`);
