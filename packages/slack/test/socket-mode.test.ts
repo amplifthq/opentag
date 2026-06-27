@@ -109,4 +109,55 @@ describe("Slack Socket Mode", () => {
     await handle.close();
     expect(socket.closeCalled).toBe(true);
   });
+
+  it("retries after a transient apps.connections.open failure instead of rejecting the start promise", async () => {
+    const socket = new FakeWebSocket();
+    let socketCreated = false;
+    // First open attempt fails (Slack returns ok:false), second succeeds. A
+    // rejecting startPromise would abort the entire OpenTag daemon, so the loop
+    // must swallow the transient failure and retry.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ ok: false, error: "ratelimited" }))
+      .mockResolvedValue(Response.json({ ok: true, url: "wss://slack.example/socket" })) as unknown as typeof fetch;
+
+    let rejected = false;
+    const handle = startSlackSocketModeApp(
+      {
+        appToken: "xapp-token",
+        slackApp: {
+          agentId: "opentag",
+          appId: "A123"
+        },
+        async resolveChannelBinding() {
+          return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+        },
+        createRun: vi.fn(async () => ({ runId: "run_1" })),
+        now: () => "2024-06-24T00:00:00.000Z"
+      },
+      {
+        fetchImpl,
+        reconnectDelayMs: 1,
+        createWebSocket() {
+          socketCreated = true;
+          return socket as unknown as WebSocket;
+        },
+        log() {},
+        logError() {}
+      }
+    );
+
+    handle.startPromise.catch(() => {
+      rejected = true;
+    });
+
+    // The first attempt fails; the second attempt must run and open the socket.
+    await eventually(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
+    await eventually(() => expect(socketCreated).toBe(true));
+    expect(rejected).toBe(false);
+
+    await handle.close();
+    // close() awaits startPromise; if it had rejected, the flag would be set.
+    expect(rejected).toBe(false);
+  });
 });

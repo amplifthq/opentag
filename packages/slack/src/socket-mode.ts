@@ -157,8 +157,19 @@ export function startSlackSocketModeApp(
 
   const startPromise = (async () => {
     while (!closed) {
-      const socketUrl = await openSlackSocketUrl({ appToken: input.appToken, fetchImpl });
-      await runOneConnection(socketUrl);
+      try {
+        const socketUrl = await openSlackSocketUrl({ appToken: input.appToken, fetchImpl });
+        await runOneConnection(socketUrl);
+      } catch (error) {
+        // A transient apps.connections.open failure (or any error opening the
+        // connection) must NOT reject startPromise: the CLI aborts the entire
+        // OpenTag daemon when this promise rejects, so one blip in Slack's API
+        // would otherwise take down every other ingress and the dispatcher.
+        // Log it and fall through to the shared backoff/retry below.
+        if (!closed) {
+          logError("[slack] failed to open Socket Mode connection, retrying:", error);
+        }
+      }
       if (!closed) {
         await wait(reconnectDelayMs);
       }
