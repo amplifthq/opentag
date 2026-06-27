@@ -22,6 +22,7 @@ type MessageKey =
   | "githubRepository"
   | "githubToken"
   | "githubWebhookSecret"
+  | "githubAutoCreatePr"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -47,8 +48,9 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     slackTeamId: "Slack Team ID",
     slackChannelId: "Slack Channel ID",
     githubRepository: "GitHub repository (owner/repo)",
-    githubToken: "GitHub token for callbacks",
+    githubToken: "GitHub token for comments and pull requests",
     githubWebhookSecret: "GitHub webhook secret",
+    githubAutoCreatePr: "Allow OpenTag to create pull requests when runs change files?",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -73,8 +75,9 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     slackTeamId: "Slack Team ID",
     slackChannelId: "Slack Channel ID",
     githubRepository: "GitHub 仓库（owner/repo）",
-    githubToken: "GitHub callback token",
+    githubToken: "GitHub token（用于回写评论和创建 PR）",
     githubWebhookSecret: "GitHub webhook secret",
+    githubAutoCreatePr: "当 run 修改了文件时，允许 OpenTag 自动创建 pull request 吗？",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

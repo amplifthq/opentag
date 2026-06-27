@@ -15,7 +15,7 @@ OpenTag has five runtime surfaces today:
 | --- | --- | --- |
 | Dispatcher | `apps/dispatcher` | Run storage, leases, callbacks, pairing token checks |
 | Local daemon | `apps/opentagd` | Runner identity, Project Target bindings, local checkout paths, executor settings |
-| GitHub ingress | `apps/github-probot` | GitHub App webhooks and GitHub event normalization |
+| GitHub ingress | `@opentag/cli` / `apps/github-probot` | Repository webhooks or GitHub App webhooks and GitHub event normalization |
 | Slack ingress | `@opentag/cli` / `apps/slack-events` | Slack Socket Mode or Events API transport and Slack event normalization |
 | Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
 
@@ -147,8 +147,8 @@ Use daemon security settings to keep executor runs constrained:
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
 | `security` | none | Runner security policy |
-| `githubToken` | none | Optional token for PR creation from daemon-produced branches |
-| `allowAutoCreatePullRequest` | `false` | Enables PR creation when executor results include changes |
+| `githubToken` | none | GitHub token for callback comments, GitHub apply helpers, and optional PR creation |
+| `allowAutoCreatePullRequest` | `false` | Enables PR creation when executor results include changed files |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 
@@ -197,7 +197,7 @@ for repeatable setups.
 | `OPENTAG_ALLOWED_WORKSPACE_ROOT` | none | Restricts allowed checkout paths |
 | `OPENTAG_ALLOW_UNSAFE_PROMPTS` | `false` | Allows prompts normally rejected by runner security |
 | `OPENTAG_EXTRA_SAFE_ENV` | none | Comma-separated env names preserved for executor processes |
-| `OPENTAG_GITHUB_TOKEN` | none | Optional GitHub token for PR creation |
+| `OPENTAG_GITHUB_TOKEN` | none | GitHub token for callback comments and optional PR creation |
 | `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Allows daemon PR creation |
 | `OPENTAG_PAIRING_TOKEN` | none | Shared dispatcher token |
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |
@@ -226,7 +226,21 @@ If `OPENTAG_PAIRING_TOKEN` is set on the dispatcher, use the same value as:
 
 ## GitHub Ingress Environment
 
-`apps/github-probot` uses Probot for GitHub App webhooks.
+`opentag start` uses the publishable `@opentag/github` repository-webhook
+ingress. This is the CLI default. GitHub must send webhooks to a public URL
+that forwards to the local listener, usually:
+
+```text
+https://<your-tunnel-host>/github/webhooks
+```
+
+The CLI stores the repository webhook secret in `platforms.github.webhookSecret`.
+It verifies `x-hub-signature-256` and handles these GitHub events:
+
+- `issue_comment`
+- `pull_request_review_comment`
+
+`apps/github-probot` is the advanced GitHub App ingress and uses Probot.
 
 | Variable | Required | Notes |
 | --- | --- | --- |

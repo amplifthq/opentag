@@ -18,6 +18,7 @@ import {
 } from "@opentag/slack";
 import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
+import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 
 export type StartCommandOptions = {
   config?: string;
@@ -311,7 +312,11 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
           console.log(`Slack Events: ${ingress.url}/slack/events`);
         }
       } else if (ingress.platform === "github") {
-        console.log(`GitHub Webhook: ${ingress.url}${ingress.webhookPath}`);
+        const github = config.platforms.github!;
+        console.log(`GitHub local webhook: ${githubLocalWebhookUrl({ port: github.port, webhookPath: ingress.webhookPath })}`);
+        console.log(`GitHub Payload URL: ${githubPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
+        console.log(`GitHub settings: ${githubWebhooksSettingsUrl(github)}`);
+        console.log(`Tunnel example: ngrok http ${github.port ?? 3000}`);
       } else {
         console.log("Lark / Feishu: connected through Personal Agent long connection");
       }

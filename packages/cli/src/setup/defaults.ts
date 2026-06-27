@@ -35,6 +35,11 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.slackChannelId ? { slackChannelId: lastSetup.slackChannelId } : slack?.channelId ? { slackChannelId: slack.channelId } : {}),
     ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),
     ...(lastSetup?.githubRepo ? { githubRepo: lastSetup.githubRepo } : github?.repo ? { githubRepo: github.repo } : {}),
+    ...(lastSetup?.githubAutoCreatePullRequest !== undefined
+      ? { githubAutoCreatePullRequest: lastSetup.githubAutoCreatePullRequest }
+      : config.daemon.allowAutoCreatePullRequest !== undefined
+        ? { githubAutoCreatePullRequest: config.daemon.allowAutoCreatePullRequest }
+        : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }

@@ -82,7 +82,7 @@ describe("OpenTag CLI setup platforms", () => {
     );
 
     expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/github.zh-CN.md");
-    expect(notes.join("\n")).toContain("GitHub webhook secret");
+    expect(notes.join("\n")).toContain("OpenTag 会自动生成 webhook secret");
   });
 
   it("writes a Slack config and default channel binding without Lark", async () => {
@@ -194,10 +194,37 @@ describe("OpenTag CLI setup platforms", () => {
       webhookPath: "/github/webhooks"
     });
     expect(config.daemon.githubToken).toBe("ghp_token");
+    expect(config.daemon.allowAutoCreatePullRequest).toBe(false);
     expect(config.daemon.repositories).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ provider: "github", owner: "acme", repo: "demo" })
       ])
     );
+  });
+
+  it("generates the GitHub webhook secret and records the pull request choice", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "github",
+        executor: "echo",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_token",
+        githubAutoCreatePr: true,
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.github?.webhookSecret).toMatch(/^[a-f0-9]{64}$/);
+    expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
+    expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
   });
 });

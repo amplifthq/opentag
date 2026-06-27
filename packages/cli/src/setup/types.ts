@@ -37,6 +37,7 @@ export type GitHubSetupInput = {
   owner: string;
   repo: string;
   webhookPath: string;
+  autoCreatePullRequest: boolean;
   port?: number;
 };
 
@@ -64,5 +65,6 @@ export type SetupDefaults = Partial<{
   slackChannelId: string;
   githubOwner: string;
   githubRepo: string;
+  githubAutoCreatePullRequest: boolean;
   savedLarkCredentials: SavedLarkCredentials;
 }>;

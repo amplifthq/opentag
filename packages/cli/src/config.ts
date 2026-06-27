@@ -144,7 +144,8 @@ const PreferencesSchema = z
         slackTeamId: z.string().min(1).optional(),
         slackChannelId: z.string().min(1).optional(),
         githubOwner: z.string().min(1).optional(),
-        githubRepo: z.string().min(1).optional()
+        githubRepo: z.string().min(1).optional(),
+        githubAutoCreatePullRequest: z.boolean().optional()
       })
       .strict()
       .optional()

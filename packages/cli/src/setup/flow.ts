@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { LarkDomain, RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
@@ -48,6 +49,7 @@ export type SetupCommandOptions = {
   githubWebhookSecret?: string;
   githubRepository?: string;
   githubWebhookPath?: string;
+  githubAutoCreatePr?: boolean;
   binding?: string;
   force?: boolean;
   yes?: boolean;
@@ -131,6 +133,10 @@ function nonEmpty(value: string, label: string): string {
 function optionalTrimmed(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function generateGitHubWebhookSecret(): string {
+  return randomBytes(32).toString("hex");
 }
 
 function hasManualLarkCredentials(options: SetupCommandOptions): boolean {
@@ -528,16 +534,22 @@ async function collectGitHubSetup(
   );
   const repository = parseGitHubRepository(repositoryInput);
   const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
-  const webhookSecret = nonEmpty(
-    options.githubWebhookSecret ?? (await prompts.password({ message: t(language, "githubWebhookSecret") })),
-    "GitHub webhook secret"
-  );
+  const webhookSecret = options.githubWebhookSecret ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret") : generateGitHubWebhookSecret();
+  const autoCreatePullRequest =
+    options.githubAutoCreatePr ??
+    (options.yes
+      ? false
+      : await prompts.confirm({
+          message: t(language, "githubAutoCreatePr"),
+          initialValue: defaults.githubAutoCreatePullRequest ?? false
+        }));
   return {
     token,
     webhookSecret,
     owner: repository.owner,
     repo: repository.repo,
-    webhookPath: options.githubWebhookPath ?? "/github/webhooks"
+    webhookPath: options.githubWebhookPath ?? "/github/webhooks",
+    autoCreatePullRequest
   };
 }
 

@@ -9,7 +9,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "slack":
         return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "Slack Team ID", "Slack Channel ID"];
       case "github":
-        return ["GitHub 仓库 owner/repo", "GitHub callback token", "GitHub webhook secret"];
+        return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；允许时也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "需要一个公网 tunnel 转发 GitHub webhook"];
       case "telegram":
         return [];
     }
@@ -21,7 +21,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "slack":
       return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Slack Team ID", "Slack Channel ID"];
     case "github":
-      return ["GitHub repository owner/repo", "GitHub callback token", "GitHub webhook secret"];
+      return ["GitHub repository owner/repo", "GitHub token for comments and optional pull requests", "OpenTag generates the webhook secret", "A public tunnel is required for GitHub webhook delivery"];
     case "telegram":
       return [];
   }

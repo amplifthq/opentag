@@ -85,7 +85,8 @@ function githubConfig() {
       webhookSecret: "github_webhook_secret",
       owner: "acme",
       repo: "demo",
-      webhookPath: "/github/webhooks"
+      webhookPath: "/github/webhooks",
+      autoCreatePullRequest: false
     }
   });
 }
