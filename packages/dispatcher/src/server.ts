@@ -3,6 +3,7 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  conversationKeysFromEvent,
   parseThreadActionCommand,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
@@ -184,6 +185,46 @@ function conversationKeyFromCallback(input: { provider: string; uri: string; thr
   return `${input.provider}:${input.threadKey ?? input.uri}`;
 }
 
+function metadataIssueNumber(metadata: Record<string, unknown> | undefined): string | undefined {
+  const value = metadata?.["issueNumber"];
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
+  return undefined;
+}
+
+function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function githubIssueWorkItemExternalId(metadata: Record<string, unknown> | undefined): string | undefined {
+  const owner = metadataString(metadata, "owner");
+  const repo = metadataString(metadata, "repo");
+  const issueNumber = metadataIssueNumber(metadata);
+  if (!owner || !repo || !issueNumber) return undefined;
+  return `${owner}/${repo}#${issueNumber}`;
+}
+
+function conversationKeysFromThreadAction(input: {
+  callback: { provider: string; uri: string; threadKey?: string | undefined };
+  metadata?: Record<string, unknown> | undefined;
+}): string[] {
+  const primary = conversationKeyFromCallback(input.callback);
+  const keys = [primary];
+  const issueNumber = metadataIssueNumber(input.metadata);
+  if (input.callback.provider === "github" && input.callback.threadKey && issueNumber) {
+    const suffix = `#${issueNumber}`;
+    if (input.callback.threadKey.endsWith(suffix)) {
+      keys.push(`github:${input.callback.threadKey.slice(0, -suffix.length)}`);
+    }
+  }
+  return [...new Set(keys)];
+}
+
+function proposalMatchesWorkItem(proposal: ActionProposal, externalId: string): boolean {
+  return proposal.snapshot.workThread?.workItemReference.externalId === externalId || proposal.event.workItem?.externalId === externalId;
+}
+
 function stableHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
@@ -305,7 +346,14 @@ async function resolveThreadAction(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   command: ThreadActionCommand;
   callback: { provider: string; uri: string; threadKey?: string | undefined };
+  metadata?: Record<string, unknown> | undefined;
 }): Promise<ResolveThreadActionResult> {
+  const conversationKeys = conversationKeysFromThreadAction({
+    callback: input.callback,
+    ...(input.metadata ? { metadata: input.metadata } : {})
+  });
+  const primaryConversationKey = conversationKeys[0];
+  const targetWorkItemExternalId = githubIssueWorkItemExternalId(input.metadata);
   if (input.command.selection.kind === "proposal") {
     const stored = await input.repo.getSuggestedChanges({ proposalId: input.command.selection.proposalId });
     if (!stored) {
@@ -315,20 +363,29 @@ async function resolveThreadAction(input: {
     if (!claimed) {
       return { ok: false, reason: "no_proposal", message: `I found the proposal but not its source run.` };
     }
-    const expectedConversationKey = conversationKeyFromCallback(input.callback);
-    if (conversationKeyFromCallback(claimed.event.callback) !== expectedConversationKey) {
+    const proposalConversationKeys = conversationKeysFromEvent(claimed.event);
+    if (!proposalConversationKeys.some((key) => conversationKeys.includes(key))) {
+      return { ok: false, reason: "no_match", runId: stored.runId, message: "That proposal does not belong to this source thread." };
+    }
+    const proposal = { runId: stored.runId, run: claimed.run, event: claimed.event, snapshot: stored.snapshot };
+    if (targetWorkItemExternalId && !proposalMatchesWorkItem(proposal, targetWorkItemExternalId)) {
       return { ok: false, reason: "no_match", runId: stored.runId, message: "That proposal does not belong to this source thread." };
     }
     return resolveCandidateSelection({
       command: input.command,
-      proposals: [{ runId: stored.runId, run: claimed.run, event: claimed.event, snapshot: stored.snapshot }]
+      proposals: [proposal]
     });
   }
 
-  const proposals = await input.repo.listLatestSuggestedChangesForConversation({
-    conversationKey: conversationKeyFromCallback(input.callback)
-  });
-  return resolveCandidateSelection({ command: input.command, proposals });
+  for (const conversationKey of conversationKeys) {
+    const proposals = await input.repo.listLatestSuggestedChangesForConversation({ conversationKey });
+    const scopedProposals =
+      conversationKey !== primaryConversationKey && targetWorkItemExternalId
+        ? proposals.filter((proposal) => proposalMatchesWorkItem(proposal, targetWorkItemExternalId))
+        : proposals;
+    if (scopedProposals.length > 0) return resolveCandidateSelection({ command: input.command, proposals: scopedProposals });
+  }
+  return resolveCandidateSelection({ command: input.command, proposals: [] });
 }
 
 function isGitHubRepoEvent(event: OpenTagEvent): boolean {
@@ -1088,7 +1145,8 @@ export function createDispatcherApp(input: {
     const resolved = await resolveThreadAction({
       repo,
       command,
-      callback: parsed.callback
+      callback: parsed.callback,
+      ...(parsed.metadata ? { metadata: parsed.metadata } : {})
     });
     if (!resolved.ok) {
       if (resolved.runId) {

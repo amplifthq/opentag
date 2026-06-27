@@ -1893,6 +1893,83 @@ describe("dispatcher API", () => {
     expect(delivered).toHaveLength(deliveredCountAfterFirstApply);
   });
 
+  it("resolves issue-scoped action replies against legacy repo-scoped GitHub issue proposals", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+          });
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_apply_legacy",
+      event: githubIssueEvent({
+        id: "evt_thread_apply_legacy",
+        sourceEventId: "comment_thread_apply_legacy",
+        threadKey: "acme/demo"
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_apply_legacy",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the legacy bug.",
+          intents: [
+            {
+              intentId: "intent_label_legacy_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      decision: { proposalId: "proposal_thread_apply_legacy", approvedIntentIds: ["intent_label_legacy_bug"] },
+      plan: {
+        proposalId: "proposal_thread_apply_legacy",
+        outcomes: [{ intentId: "intent_label_legacy_bug", outcome: "applied" }]
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/issues/1/labels",
+        method: "POST",
+        body: { labels: ["bug"] }
+      }
+    ]);
+  });
+
   it("does not execute the adapter twice for concurrent duplicate apply replies", async () => {
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({

@@ -107,6 +107,81 @@ describe("Admission Runtime", () => {
     expect(appendRunEvent).not.toHaveBeenCalled();
   });
 
+  it("queues issue-scoped GitHub follow-ups against legacy repo-scoped active runs", async () => {
+    const checkedConversationKeys: string[] = [];
+    const issueScopedEvent = {
+      ...event,
+      id: "evt_issue_scoped",
+      callback: {
+        provider: "github" as const,
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+    };
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding: async () => ({
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_1"
+        }),
+        findActiveRunForConversation: async ({ conversationKey }: { conversationKey: string }) => {
+          checkedConversationKeys.push(conversationKey);
+          if (conversationKey !== "github:acme/demo") return null;
+          return {
+            run: {
+              id: "run_legacy_active",
+              eventId: "evt_legacy_active",
+              status: "running",
+              createdAt: "2026-06-24T00:00:00.000Z",
+              updatedAt: "2026-06-24T00:00:00.000Z"
+            },
+            event
+          };
+        },
+        createFollowUpRequest: async () => ({
+          followUpRequest: {
+            id: "follow_up_legacy",
+            sourceEventId: issueScopedEvent.id,
+            conversationKey: "github:acme/demo#1",
+            activeRunId: "run_legacy_active",
+            event: issueScopedEvent,
+            decision: {
+              action: "queue_follow_up",
+              reason: "active run exists",
+              reasonCode: "active_run_same_thread",
+              decidedAt: "2026-06-24T00:00:00.000Z",
+              activeRunId: "run_legacy_active",
+              eventId: issueScopedEvent.id
+            },
+            status: "queued",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            updatedAt: "2026-06-24T00:00:00.000Z"
+          },
+          created: true
+        }),
+        appendRunEvent: async () => undefined
+      } as never
+    });
+
+    const result = await admission.admitRun({ requestId: "follow_up_legacy", event: issueScopedEvent });
+
+    expect(checkedConversationKeys).toEqual(["github:acme/demo#1", "github:acme/demo"]);
+    expect(result).toMatchObject({
+      outcome: "follow_up_queued",
+      decision: {
+        action: "queue_follow_up",
+        activeRunId: "run_legacy_active"
+      },
+      followUpRequest: {
+        activeRunId: "run_legacy_active"
+      }
+    });
+  });
+
   it("admits local Project Target events through the shared project target ref", async () => {
     const localProject = projectTargetRefFromLocalPath("/Users/test/work/app");
     const getRepoBinding = vi.fn(async () => ({

@@ -375,8 +375,38 @@ export function primaryConversationAnchorFromEvent(event: OpenTagEvent): Convers
   };
 }
 
+function callbackConversationKey(callback: OpenTagEvent["callback"]): string {
+  return `${callback.provider}:${callback.threadKey ?? callback.uri}`;
+}
+
+function metadataRecordString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function metadataIssueNumber(metadata: Record<string, unknown>): string | undefined {
+  const value = metadata["issueNumber"];
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return String(value);
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value)) return value;
+  return undefined;
+}
+
+function legacyGitHubIssueConversationKey(event: OpenTagEvent): string | undefined {
+  if (event.callback.provider !== "github") return undefined;
+  const owner = metadataRecordString(event.metadata, "owner");
+  const repo = metadataRecordString(event.metadata, "repo");
+  const issueNumber = metadataIssueNumber(event.metadata);
+  if (!owner || !repo || !issueNumber) return undefined;
+  if (event.callback.threadKey !== `${owner}/${repo}#${issueNumber}`) return undefined;
+  return `github:${owner}/${repo}`;
+}
+
 export function conversationKeyFromEvent(event: OpenTagEvent): string {
-  return `${event.callback.provider}:${event.callback.threadKey ?? event.callback.uri}`;
+  return callbackConversationKey(event.callback);
+}
+
+export function conversationKeysFromEvent(event: OpenTagEvent): string[] {
+  return [...new Set([conversationKeyFromEvent(event), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
 }
 
 export function workThreadFromEvent(event: OpenTagEvent): WorkThread | undefined {
