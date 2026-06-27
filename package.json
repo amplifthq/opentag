@@ -9,6 +9,7 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "lint": "corepack pnpm -r lint",
+    "release:check": "node scripts/release/check-cli-package.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
     "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
     "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts"

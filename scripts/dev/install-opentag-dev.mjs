@@ -75,7 +75,7 @@ function createShim() {
 }
 
 console.log("Building @opentag/cli...");
-run("corepack", ["pnpm", "--filter", "@opentag/cli", "build"]);
+run("corepack", ["pnpm", "--filter", "@opentag/cli...", "build"]);
 
 createShim();
 

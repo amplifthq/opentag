@@ -1,8 +1,11 @@
 {
   "name": "@opentag/local-runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local OpenTag dispatcher, daemon, and diagnostics runtime helpers.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

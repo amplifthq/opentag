@@ -1,8 +1,11 @@
 {
   "name": "@opentag/store",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "SQLite and Drizzle persistence primitives for OpenTag runs and leases.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
