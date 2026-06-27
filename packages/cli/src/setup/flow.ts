@@ -14,7 +14,7 @@ import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, 
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
-import type { PromptAdapter } from "../ui/prompts.js";
+import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
 import { formatGitHubTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
@@ -292,39 +292,49 @@ async function collectExecutor(
   language: CliLanguage,
   env: NodeJS.ProcessEnv | undefined
 ): Promise<string> {
-  if (options.executor) {
-    return options.executor;
+  if (options.executor !== undefined) {
+    const executor = options.executor.trim();
+    if (executor.length === 0) {
+      throw new Error("Executor id must not be empty.");
+    }
+    return executor;
   }
   const detections = detectExecutors(env);
   const previous = defaults.executor;
-  if (previous !== undefined && !isExecutorId(previous)) {
-    // Preserve a configured custom executor: the built-in picker can't
-    // represent it, so silently replacing it with a built-in would discard
-    // the user's choice on an unrelated wizard re-run.
-    return previous;
-  }
-  const initialValue = defaultExecutorId({
-    ...(previous ? { previous } : {}),
-    detections
+  const previousBuiltIn = previous !== undefined && isExecutorId(previous) ? previous : undefined;
+  // A configured custom executor can't be represented by the built-in picker,
+  // so surface it as a pre-selected option: the user keeps it by default but
+  // can still switch to a built-in, instead of it being silently overwritten
+  // (or the prompt being skipped) on an unrelated wizard re-run.
+  const customPrevious = previous !== undefined && previousBuiltIn === undefined ? previous : undefined;
+  const initialValue =
+    customPrevious ??
+    defaultExecutorId({
+      ...(previousBuiltIn ? { previous: previousBuiltIn } : {}),
+      detections
+    });
+
+  const builtInOptions: Array<PromptOption<string>> = EXECUTOR_CATALOG.map((executor) => {
+    const detection = detections.find((entry) => entry.id === executor.id);
+    return {
+      value: executor.id,
+      label: executor.label,
+      hint: formatExecutorHint({
+        language,
+        executor,
+        available: detection?.available ?? false,
+        current: executor.id === previous,
+        selectedByDefault: executor.id === initialValue
+      })
+    };
   });
 
   return prompts.select({
     message: t(language, "executor"),
     initialValue,
-    options: EXECUTOR_CATALOG.map((executor) => {
-      const detection = detections.find((entry) => entry.id === executor.id);
-      return {
-        value: executor.id,
-        label: executor.label,
-        hint: formatExecutorHint({
-          language,
-          executor,
-          available: detection?.available ?? false,
-          current: executor.id === previous,
-          selectedByDefault: executor.id === initialValue
-        })
-      };
-    })
+    options: customPrevious
+      ? [{ value: customPrevious, label: customPrevious, hint: t(language, "executorCustomHint") }, ...builtInOptions]
+      : builtInOptions
   });
 }
 

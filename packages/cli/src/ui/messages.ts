@@ -6,6 +6,7 @@ type MessageKey =
   | "language"
   | "platform"
   | "executor"
+  | "executorCustomHint"
   | "projectPath"
   | "larkSetup"
   | "larkDomain"
@@ -36,6 +37,7 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     language: "Language / 语言",
     platform: "Where should OpenTag listen?",
     executor: "Which coding agent should OpenTag use?",
+    executorCustomHint: "Currently configured custom executor",
     projectPath: "Which project should OpenTag use?",
     larkSetup: "How should OpenTag connect to Lark / Feishu?",
     larkDomain: "Which Lark domain should OpenTag use?",
@@ -65,6 +67,7 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     language: "Language / 语言",
     platform: "OpenTag 要监听哪个平台？",
     executor: "OpenTag 要使用哪个 coding agent？",
+    executorCustomHint: "当前配置的自定义执行器",
     projectPath: "OpenTag 要使用哪个项目？",
     larkSetup: "OpenTag 要如何连接 Lark / 飞书？",
     larkDomain: "OpenTag 要使用哪个 Lark 域名？",
