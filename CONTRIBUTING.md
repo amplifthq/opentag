@@ -15,6 +15,25 @@ Install dependencies from the repository root:
 pnpm install
 ```
 
+## Local CLI development
+
+Build the local CLI and install a checkout-backed `opentag-dev` command:
+
+```bash
+corepack pnpm opentag-dev
+```
+
+This creates or updates `~/.local/bin/opentag-dev` so it runs `packages/cli/dist/index.js` from your current checkout. It does not install or shadow the future official `opentag` command, so a published CLI and your local development CLI can exist side by side.
+
+After setup, use the development CLI from any terminal:
+
+```bash
+opentag-dev --help
+opentag-dev config path
+```
+
+If your shell cannot find `opentag-dev`, add `~/.local/bin` to `PATH`.
+
 ## Local checks
 
 Before opening a pull request, run the checks that match your change. For code changes, the full local check sequence is:
