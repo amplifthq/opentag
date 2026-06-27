@@ -9,7 +9,7 @@ import {
   protocolRunFieldsFromEvent,
   workThreadFromEvent
 } from "../src/protocol.js";
-import type { OpenTagEvent } from "../src/schema.js";
+import { ContextPacketSchema, type OpenTagEvent } from "../src/schema.js";
 
 const githubEvent: OpenTagEvent = {
   id: "evt_github_comment_1",
@@ -116,6 +116,21 @@ describe("protocol helpers", () => {
     expect(packet.assembly?.stages).toEqual(["collect", "classify", "filter", "preserve", "summarize", "budget", "emit"]);
     expect(packet.risks?.[0]).toContain("repo:write");
     expect(packet.exclusions?.[0]).toContain("explicit capability");
+  });
+
+  it("emits a schema-valid packet when the command rawText is empty", () => {
+    const emptyRawTextEvent: OpenTagEvent = {
+      ...githubEvent,
+      command: { ...githubEvent.command, rawText: "" }
+    };
+
+    const packet = contextPacketFromEvent(emptyRawTextEvent);
+
+    // OpenTagCommandSchema.rawText allows "" but ContextPacketIntentSchema.rawText
+    // is min length 1. The packet must remain valid so the store does not accept it
+    // on write (createRun) and then throw on read (runFromRow parse).
+    expect(packet.intent.rawText.length).toBeGreaterThan(0);
+    expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
   });
 
   it("applies context packet budget as an explicit assembly stage", () => {

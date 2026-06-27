@@ -237,7 +237,11 @@ export function assembleContextPacketFromEvent(
     summary,
     sourcePointers: budgeted.map((entry) => entry.pointer),
     intent: {
-      rawText: event.command.rawText,
+      // OpenTagCommandSchema.rawText permits an empty string, but
+      // ContextPacketIntentSchema.rawText requires min length 1. Falling back to
+      // the (always non-empty) summary keeps the emitted packet schema-valid, so
+      // the store does not accept the run on write and then throw on read.
+      rawText: event.command.rawText || summary,
       normalizedIntent: event.command.intent,
       requestedBy: event.actor
     },
