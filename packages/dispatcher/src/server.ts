@@ -512,6 +512,7 @@ function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandida
 
 function childRunContextLines(input: {
   resolved: ResolvedThreadAction;
+  approvalDecisionId?: string;
   sourceApplyPlanId?: string;
   fallbackReason?: string;
 }): string[] {
@@ -520,6 +521,7 @@ function childRunContextLines(input: {
     `- Proposal: \`${input.resolved.proposal.snapshot.proposalId}\``,
     `- Selected intents: ${input.resolved.selectedIntentIds.map((intentId) => `\`${intentId}\``).join(", ")}`,
     `- Previous run: \`${input.resolved.proposal.runId}\``,
+    ...(input.approvalDecisionId ? [`- Approval decision: \`${input.approvalDecisionId}\``] : []),
     `- Previous result: ${previousSummary}`,
     ...(input.sourceApplyPlanId ? [`- Apply plan: \`${input.sourceApplyPlanId}\``] : []),
     ...(input.fallbackReason ? [`- Fallback reason: ${input.fallbackReason}`] : [])
@@ -530,6 +532,7 @@ function renderChildRunCreatedBody(input: {
   lead: string;
   resolved: ResolvedThreadAction;
   childRun: OpenTagRun;
+  approvalDecisionId?: string;
   sourceApplyPlanId?: string;
   fallbackReason?: string;
 }): string {
@@ -548,6 +551,7 @@ function renderChildRunCreatedBody(input: {
 function actionContextPointer(input: {
   command: ThreadActionCommand;
   resolved: ResolvedThreadAction;
+  approvalDecisionId?: string;
   applyPlanId?: string;
   fallbackReason?: string;
 }): OpenTagEvent["context"][number] {
@@ -562,6 +566,7 @@ function actionContextPointer(input: {
     `Previous run: ${input.resolved.proposal.runId}`,
     `Previous summary: ${input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary}`
   ];
+  if (input.approvalDecisionId) lines.push(`Approval decision: ${input.approvalDecisionId}`);
   if (input.applyPlanId) lines.push(`Apply plan: ${input.applyPlanId}`);
   if (input.fallbackReason) lines.push(`Fallback reason: ${input.fallbackReason}`);
   return {
@@ -577,6 +582,7 @@ async function createChildRunForThreadAction(input: {
   command: ThreadActionCommand;
   resolved: ResolvedThreadAction;
   runId?: string;
+  approvalDecisionId?: string;
   sourceApplyPlanId?: string;
   fallbackReason?: string;
 }): Promise<OpenTagRun> {
@@ -589,9 +595,11 @@ async function createChildRunForThreadAction(input: {
       threadActionVerb: input.command.verb,
       rawText: input.command.rawText,
       ...(input.command.reason ? { reason: input.command.reason } : {}),
+      ...(input.approvalDecisionId ? { approvalDecisionId: input.approvalDecisionId } : {}),
       ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
     }
   });
+  const previousRunSummary = input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary;
   const commandText =
     input.command.verb === "continue"
       ? `Continue approved OpenTag action: ${selectedActionSummary(input.resolved.selectedCandidates)}`
@@ -608,6 +616,7 @@ async function createChildRunForThreadAction(input: {
         actionContextPointer({
           command: input.command,
           resolved: input.resolved,
+          ...(input.approvalDecisionId ? { approvalDecisionId: input.approvalDecisionId } : {}),
           ...(input.sourceApplyPlanId ? { applyPlanId: input.sourceApplyPlanId } : {}),
           ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
         })
@@ -617,7 +626,10 @@ async function createChildRunForThreadAction(input: {
         sourceProposalId: input.resolved.proposal.snapshot.proposalId,
         selectedIntentIds: input.resolved.selectedIntentIds,
         threadActionVerb: input.command.verb,
-        ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {})
+        previousRunSummary,
+        ...(input.approvalDecisionId ? { approvalDecisionId: input.approvalDecisionId } : {}),
+        ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {}),
+        ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
       }
     }),
     parentRunId: input.resolved.proposal.runId,
@@ -1134,6 +1146,7 @@ export function createDispatcherApp(input: {
             sourceApplyPlanId: existingPlan.id,
             fallbackReason
           }),
+          approvalDecisionId: existingPlan.approvalDecisionId,
           sourceApplyPlanId: existingPlan.id,
           fallbackReason
         });
@@ -1150,6 +1163,7 @@ export function createDispatcherApp(input: {
               lead: "This action was already planned, so OpenTag will not execute the external write again.",
               resolved: resolved.resolved,
               childRun,
+              approvalDecisionId: existingPlan.approvalDecisionId,
               sourceApplyPlanId: existingPlan.id,
               fallbackReason
             }),
@@ -1248,12 +1262,14 @@ export function createDispatcherApp(input: {
         repo,
         command,
         resolved: resolved.resolved,
-        runId: stableChildRunId({ command, resolved: resolved.resolved })
+        runId: stableChildRunId({ command, resolved: resolved.resolved }),
+        approvalDecisionId: decision.id
       });
       const body = renderChildRunCreatedBody({
         lead: `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
         resolved: resolved.resolved,
-        childRun
+        childRun,
+        approvalDecisionId: decision.id
       });
       await deliverAndAudit({
         repo,
@@ -1296,6 +1312,7 @@ export function createDispatcherApp(input: {
           sourceApplyPlanId: planResult.plan.id,
           fallbackReason
         }),
+        approvalDecisionId: decision.id,
         sourceApplyPlanId: planResult.plan.id,
         fallbackReason
       });
@@ -1312,6 +1329,7 @@ export function createDispatcherApp(input: {
             lead: "This action was already planned, so OpenTag will not execute the external write again.",
             resolved: resolved.resolved,
             childRun,
+            approvalDecisionId: decision.id,
             sourceApplyPlanId: planResult.plan.id,
             fallbackReason
           }),
@@ -1364,6 +1382,7 @@ export function createDispatcherApp(input: {
         sourceApplyPlanId: execution.plan.id,
         fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
       }),
+      approvalDecisionId: decision.id,
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
     });
@@ -1371,6 +1390,7 @@ export function createDispatcherApp(input: {
       lead: `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
       resolved: resolved.resolved,
       childRun,
+      approvalDecisionId: decision.id,
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "The adapter could not execute the selected intent."
     });

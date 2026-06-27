@@ -2565,9 +2565,22 @@ describe("dispatcher API", () => {
     expect(stored.event.metadata).toMatchObject({
       parentRunId: "run_thread_continue",
       sourceProposalId: "proposal_thread_continue",
-      threadActionVerb: "continue"
+      threadActionVerb: "continue",
+      approvalDecisionId: body.decision.id,
+      selectedIntentIds: ["intent_continue_tests"],
+      previousRunSummary: "Prepared suggested actions."
     });
     expect(stored.event.context.some((pointer: { uri?: string }) => pointer.uri?.includes("OpenTag thread action continuation."))).toBe(true);
+    expect(stored.run.contextPacket.facts.map((fact: { text: string }) => fact.text)).toEqual(
+      expect.arrayContaining([
+        "Action loop thread action: continue",
+        "Action loop parent run: run_thread_continue",
+        "Action loop proposal: proposal_thread_continue",
+        `Action loop approval decision: ${body.decision.id}`,
+        "Action loop selected intents: intent_continue_tests",
+        "Action loop previous result: Prepared suggested actions."
+      ])
+    );
   });
 
   it("falls back to a child run when an approved action has no direct adapter operation", async () => {
@@ -2631,12 +2644,38 @@ describe("dispatcher API", () => {
       }
     });
     expect(body.run.sourceApplyPlanId).toBe(body.plan.id);
+    const runResponse = await app.request(`/v1/runs/${body.run.id}`);
+    expect(runResponse.status).toBe(200);
+    const stored = await runResponse.json();
+    expect(stored.event.metadata).toMatchObject({
+      parentRunId: "run_thread_fallback",
+      sourceProposalId: "proposal_thread_fallback",
+      approvalDecisionId: body.decision.id,
+      sourceApplyPlanId: body.plan.id,
+      selectedIntentIds: ["intent_request_review"],
+      threadActionVerb: "apply",
+      previousRunSummary: "Prepared suggested actions."
+    });
+    expect(stored.event.metadata.fallbackReason).toContain("No selected intent has a direct adapter execution path.");
+    expect(stored.run.contextPacket.facts.map((fact: { text: string }) => fact.text)).toEqual(
+      expect.arrayContaining([
+        "Action loop thread action: apply",
+        "Action loop parent run: run_thread_fallback",
+        "Action loop proposal: proposal_thread_fallback",
+        `Action loop approval decision: ${body.decision.id}`,
+        `Action loop apply plan: ${body.plan.id}`,
+        "Action loop selected intents: intent_request_review",
+        "Action loop previous result: Prepared suggested actions.",
+        "Action loop fallback reason: No selected intent has a direct adapter execution path."
+      ])
+    );
     expect(
       delivered.some(
         (message) =>
           message.kind === "final" &&
           message.body.includes("Context carried into the child run:") &&
           message.body.includes(`Child run: \`${body.run.id}\``) &&
+          message.body.includes(`Approval decision: \`${body.decision.id}\``) &&
           message.body.includes("Fallback reason:")
       )
     ).toBe(true);
