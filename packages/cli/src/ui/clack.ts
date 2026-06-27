@@ -38,7 +38,7 @@ export function createClackPromptAdapter(): PromptAdapter {
       p.outro(message);
     },
     note(message) {
-      p.note(message);
+      p.log.message(message);
     },
     async select<Value extends string>(input: {
       message: string;
