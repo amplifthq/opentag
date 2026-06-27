@@ -1,7 +1,7 @@
 import { DEFAULT_GITHUB_WEBHOOK_PORT } from "../ports.js";
 
 export function githubLocalWebhookUrl(input: { port?: number | undefined; webhookPath?: string | undefined }): string {
-  return `http://localhost:${input.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}${input.webhookPath ?? "/github/webhooks"}`;
+  return `http://127.0.0.1:${input.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}${input.webhookPath ?? "/github/webhooks"}`;
 }
 
 export function githubPublicWebhookUrlPlaceholder(webhookPath = "/github/webhooks"): string {

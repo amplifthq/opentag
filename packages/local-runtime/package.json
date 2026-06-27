@@ -31,6 +31,11 @@
       "types": "./dist/doctor.d.ts",
       "import": "./dist/doctor.js"
     },
+    "./pr": {
+      "development": "./src/pr.ts",
+      "types": "./dist/pr.d.ts",
+      "import": "./dist/pr.js"
+    },
     "./runtime": {
       "development": "./src/runtime.ts",
       "types": "./dist/runtime.d.ts",

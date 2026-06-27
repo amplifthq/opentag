@@ -24,7 +24,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "lark":
         return ["推荐直接扫码创建 Personal Agent", "手动配置时需要 Lark App ID 和 App Secret"];
       case "slack":
-        return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "Slack Team ID", "Slack Channel ID", "测试前需要把 Slack app 邀请进目标 channel"];
+        return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "Slack bot scopes 需要 app_mentions:read、chat:write、channels:history", "订阅 bot events: app_mention、message.channels", "Slack Team ID", "Slack Channel ID", "测试前需要把 Slack app 邀请进目标 channel"];
       case "github":
         return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；你回复 apply 1 后也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3050", "需要一个公网 tunnel 转发 GitHub webhook"];
       case "telegram":
@@ -36,7 +36,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "lark":
       return ["QR scan is the recommended path", "manual setup needs a Lark App ID and App Secret"];
     case "slack":
-      return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Slack Team ID", "Slack Channel ID", "Invite the Slack app to the target channel before testing"];
+      return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Slack bot scopes need app_mentions:read, chat:write, channels:history", "Subscribe to bot events: app_mention, message.channels", "Slack Team ID", "Slack Channel ID", "Invite the Slack app to the target channel before testing"];
     case "github":
       return ["GitHub repository owner/repo", "GitHub token for comments and PR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3050", "A public tunnel is required for GitHub webhook delivery"];
     case "telegram":
@@ -165,7 +165,8 @@ export function formatSlackCredentialHelp(language: CliLanguage, mode: SlackSetu
       `- Slack App 管理页: ${OFFICIAL_SETUP_LINKS.slackApps}`,
       ...modeSpecific,
       "- Slack Bot User OAuth Token: OAuth & Permissions -> Bot User OAuth Token",
-      "- Bot Token Scopes: app_mentions:read, chat:write",
+      "- Bot Token Scopes: app_mentions:read, chat:write, channels:history",
+      "- Bot Events: app_mention, message.channels",
       "- Team ID / Channel ID: 用浏览器打开 Slack channel，从地址里复制 T... 和 C...",
       "- 测试前在目标 channel 里运行 /invite @你的 App 名称，把 app 邀请进 channel"
     ].join("\n");
@@ -188,7 +189,8 @@ export function formatSlackCredentialHelp(language: CliLanguage, mode: SlackSetu
     `- Slack app settings: ${OFFICIAL_SETUP_LINKS.slackApps}`,
     ...modeSpecific,
     "- Slack Bot User OAuth Token: OAuth & Permissions -> Bot User OAuth Token",
-    "- Bot Token Scopes: app_mentions:read, chat:write",
+    "- Bot Token Scopes: app_mentions:read, chat:write, channels:history",
+    "- Bot Events: app_mention, message.channels",
     "- Team ID / Channel ID: open the Slack channel in a browser and copy the T... and C... values from the URL",
     "- Before testing, run /invite @your app name in the target channel so Slack sends mentions to the app"
   ].join("\n");

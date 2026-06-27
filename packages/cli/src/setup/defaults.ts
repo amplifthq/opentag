@@ -37,6 +37,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),
     ...(lastSetup?.githubRepo ? { githubRepo: lastSetup.githubRepo } : github?.repo ? { githubRepo: github.repo } : {}),
     ...(lastSetup?.githubPort ? { githubPort: lastSetup.githubPort } : github?.port ? { githubPort: github.port } : {}),
+    ...(github?.webhookSecret ? { githubWebhookSecret: github.webhookSecret } : {}),
     ...(lastSetup?.githubAutoCreatePullRequest !== undefined
       ? { githubAutoCreatePullRequest: lastSetup.githubAutoCreatePullRequest }
       : config.daemon.allowAutoCreatePullRequest !== undefined

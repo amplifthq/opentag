@@ -41,8 +41,8 @@ Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 
 如果 Slack 提供 **Create from manifest**，这条路更快。Manifest 里一次性配置：
 
 - 开启 Socket Mode。
-- Bot scopes: `app_mentions:read`, `chat:write`。
-- Bot event subscription: `app_mention`。
+- Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`。
+- Bot event subscriptions: `app_mention`, `message.channels`。
 
 后面仍然需要安装 app，并创建 App-Level Token。
 
@@ -67,6 +67,7 @@ Slack App-Level Token
 2. 在 **Bot Token Scopes** 里添加：
    - `app_mentions:read`
    - `chat:write`
+   - `channels:history`
 3. 安装或重新安装 app 到 workspace。
 4. 复制 **Bot User OAuth Token**。它一般以 `xoxb-` 开头。
 
@@ -82,9 +83,12 @@ Slack Bot User OAuth Token
 2. 打开事件订阅。
 3. 在 **Subscribe to bot events** 里添加：
    - `app_mention`
+   - `message.channels`
 4. 保存设置。
 
 Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack WebSocket，Slack 会通过这条连接把事件推回来。
+
+`message.channels` 用来接收 public channel 里的 thread reply，比如用户回复 `apply 1`。如果你要在 private channel 里测试，还要添加 `groups:history` bot scope，并订阅 `message.groups`。
 
 ## 高级：公网 Events API
 
@@ -117,6 +121,7 @@ https://<你的 tunnel 域名>/slack/events
 3. 进入 **OAuth & Permissions**，添加同样的 bot scopes：
    - `app_mentions:read`
    - `chat:write`
+   - `channels:history`
 4. 安装或重新安装 app。
 5. 进入 **Event Subscriptions**。
 6. 打开事件订阅。
@@ -128,9 +133,12 @@ https://<你的 tunnel 域名>/slack/events
 
 8. 在 **Subscribe to bot events** 里添加：
    - `app_mention`
+   - `message.channels`
 9. 保存设置。
 
 这条 Events API 路线不要开启 Socket Mode，否则你会调错接入方式。
+
+`message.channels` 用来接收 public channel 里的 thread reply，比如用户回复 `apply 1`。如果你要在 private channel 里测试，还要添加 `groups:history` bot scope，并订阅 `message.groups`。
 
 ## 找到 Team ID 和 Channel ID
 

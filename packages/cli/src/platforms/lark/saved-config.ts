@@ -38,12 +38,20 @@ export function legacyLarkConfigPath(projectPath: string): string {
   return join(projectPath, ".opentag", "lark", "lark.local.json");
 }
 
+function parseJsonFile(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`Saved Lark config at ${path} is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 export function readLegacyLarkCredentials(projectPath: string): SavedLarkCredentials | undefined {
   const path = legacyLarkConfigPath(projectPath);
   if (!existsSync(path)) return undefined;
   assertPrivateConfigFile(path);
 
-  const parsed = SavedLarkCredentialsSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
+  const parsed = SavedLarkCredentialsSchema.safeParse(parseJsonFile(path));
   if (!parsed.success) {
     throw new Error(`Saved Lark config at ${path} is invalid: ${parsed.error.message}`);
   }

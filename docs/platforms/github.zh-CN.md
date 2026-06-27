@@ -108,7 +108,7 @@ ngrok http 3050
 OpenTag 本地监听地址是：
 
 ```text
-http://localhost:3050/github/webhooks
+http://127.0.0.1:3050/github/webhooks
 ```
 
 GitHub webhook 的 Payload URL 要使用公网 tunnel 域名：

@@ -30,6 +30,11 @@ export type LocalDispatcherHandle = {
   close(): Promise<void>;
 };
 
+type ClosableServer = ReturnType<typeof serve> & {
+  closeAllConnections?: () => void;
+  closeIdleConnections?: () => void;
+};
+
 function parseAgentTokenMap(name: string, raw: string | undefined): Record<string, string> | undefined {
   if (!raw) return undefined;
   try {
@@ -37,7 +42,17 @@ function parseAgentTokenMap(name: string, raw: string | undefined): Record<strin
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("Value is not a JSON object");
     }
-    return Object.keys(parsed).length > 0 ? (parsed as Record<string, string>) : undefined;
+    const entries = Object.entries(parsed);
+    if (entries.length === 0) return undefined;
+    for (const [agentId, token] of entries) {
+      if (!agentId.trim()) {
+        throw new Error("Agent id must be a non-empty string");
+      }
+      if (typeof token !== "string" || !token.trim()) {
+        throw new Error(`Token for agent ${agentId} must be a non-empty string`);
+      }
+    }
+    return Object.fromEntries(entries) as Record<string, string>;
   } catch (error) {
     throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -87,7 +102,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
 }
 
 export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispatcherHandle {
-  const server = serve({
+  const server: ClosableServer = serve({
     fetch: createDispatcherApp({
       databasePath: input.databasePath,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
@@ -123,6 +138,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     server,
     close() {
       return new Promise((resolve, reject) => {
+        server.closeIdleConnections?.();
         server.close((error?: Error) => {
           if (error) {
             reject(error);
@@ -130,6 +146,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           }
           resolve();
         });
+        server.closeAllConnections?.();
       });
     }
   };

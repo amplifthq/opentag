@@ -41,8 +41,8 @@ Choose this mode when you want `opentag start` on your computer to receive Slack
 If Slack offers **Create from manifest**, that is the fastest path. Use a manifest with:
 
 - Socket Mode enabled.
-- Bot scopes: `app_mentions:read`, `chat:write`.
-- Bot event subscription: `app_mention`.
+- Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`.
+- Bot event subscriptions: `app_mention`, `message.channels`.
 
 You still need to install the app and create the App-Level Token in the steps below.
 
@@ -67,6 +67,7 @@ Slack App-Level Token
 2. Under **Bot Token Scopes**, add:
    - `app_mentions:read`
    - `chat:write`
+   - `channels:history`
 3. Install or reinstall the app to your workspace.
 4. Copy **Bot User OAuth Token**. It starts with `xoxb-`.
 
@@ -82,9 +83,12 @@ Slack Bot User OAuth Token
 2. Enable events.
 3. Under **Subscribe to bot events**, add:
    - `app_mention`
+   - `message.channels`
 4. Save changes.
 
 Do not enter a Request URL for Socket Mode. Slack delivers the event through the WebSocket connection opened by `opentag start`.
+
+`message.channels` lets OpenTag receive thread replies such as `apply 1` in public channels. For private channels, also add the `groups:history` bot scope and subscribe to `message.groups`.
 
 ## Advanced: Public Events API
 
@@ -117,6 +121,7 @@ https://<your-tunnel-host>/slack/events
 3. Go to **OAuth & Permissions** and add the same bot scopes:
    - `app_mentions:read`
    - `chat:write`
+   - `channels:history`
 4. Install or reinstall the app.
 5. Go to **Event Subscriptions**.
 6. Enable events.
@@ -128,9 +133,12 @@ https://<your-tunnel-host>/slack/events
 
 8. Under **Subscribe to bot events**, add:
    - `app_mention`
+   - `message.channels`
 9. Save changes.
 
 Do not enable Socket Mode for this Events API setup.
+
+`message.channels` lets OpenTag receive thread replies such as `apply 1` in public channels. For private channels, also add the `groups:history` bot scope and subscribe to `message.groups`.
 
 ## Find Team and Channel IDs
 

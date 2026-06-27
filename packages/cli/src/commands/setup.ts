@@ -32,7 +32,8 @@ function startingMessage(language: string | undefined): string {
 }
 
 export async function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
-  const configPath = options.config ?? defaultConfigPath();
+  const env = dependencies.env ?? process.env;
+  const configPath = options.config ?? defaultConfigPath(env);
   if (options.yes && existsSync(configPath) && !options.force) {
     throw new Error(`OpenTag config already exists at ${configPath}. Use --force with --yes to overwrite it.`);
   }
@@ -45,7 +46,7 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
     ...(dependencies.env ? { env: dependencies.env } : {}),
     ...(dependencies.defaults ? { defaults: dependencies.defaults } : {})
   });
-  const config = createSetupConfig(setupInput);
+  const config = createSetupConfig(setupInput, env);
   ensurePrivateDirectory(config.state.directory);
   ensurePrivateDirectory(config.state.worktreeRoot);
   writeCliConfigAtomic(configPath, config);

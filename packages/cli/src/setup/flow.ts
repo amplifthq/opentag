@@ -137,6 +137,13 @@ function nonEmpty(value: string, label: string): string {
   return trimmed;
 }
 
+function assertExistingPath(path: string): string {
+  if (!existsSync(path)) {
+    throw new Error(`Path does not exist: ${path}`);
+  }
+  return path;
+}
+
 function optionalTrimmed(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
@@ -144,6 +151,14 @@ function optionalTrimmed(value: string | undefined): string | undefined {
 
 function generateGitHubWebhookSecret(): string {
   return randomBytes(32).toString("hex");
+}
+
+function parseGitHubWebhookPath(value: string): string {
+  const trimmed = nonEmpty(value, "GitHub webhook path");
+  if (!trimmed.startsWith("/")) {
+    throw new Error("GitHub webhook path must start with /.");
+  }
+  return trimmed;
 }
 
 function hasManualLarkCredentials(options: SetupCommandOptions): boolean {
@@ -171,6 +186,21 @@ function assertNoManualLarkCredentialFlags(options: SetupCommandOptions): void {
 
 function findSavedLarkCredentials(defaults: SetupDefaults, projectPath: string): SavedLarkCredentials | undefined {
   return defaults.savedLarkCredentials ?? readLegacyLarkCredentials(projectPath);
+}
+
+function shouldReadSavedLarkCredentials(options: SetupCommandOptions): boolean {
+  return !options.larkSetup || parseLarkSetupMethod(options.larkSetup) === "saved";
+}
+
+function loadDefaultsForSetup(options: SetupCommandOptions, configPath: string): SetupDefaults {
+  try {
+    return loadSetupDefaults(configPath);
+  } catch (error) {
+    if (options.force) {
+      return {};
+    }
+    throw error;
+  }
 }
 
 function defaultLanguage(options: SetupCommandOptions, defaults: SetupDefaults): CliLanguage {
@@ -295,7 +325,7 @@ async function collectExecutor(
 
 async function collectProjectPath(options: SetupCommandOptions, defaults: SetupDefaults, prompts: PromptAdapter, language: CliLanguage, cwd: string): Promise<string> {
   if (options.project) {
-    return options.project;
+    return assertExistingPath(options.project);
   }
   const initialValue = defaults.projectPath ?? cwd;
   return prompts.text({
@@ -559,7 +589,7 @@ async function collectGitHubSetup(
         ...(repositoryDefault ? { initialValue: repositoryDefault, placeholder: repositoryDefault } : { placeholder: "owner/repo" }),
         validate(value) {
           try {
-            parseGitHubRepository(value || repositoryDefault || "");
+            parseGitHubRepository(value);
             return undefined;
           } catch (error) {
             return error instanceof Error ? error.message : String(error);
@@ -581,7 +611,9 @@ async function collectGitHubSetup(
     prompts.note(formatGitHubTokenHelp(language, { autoCreatePullRequest }));
   }
   const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
-  const webhookSecret = options.githubWebhookSecret ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret") : generateGitHubWebhookSecret();
+  const webhookSecret = options.githubWebhookSecret
+    ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret")
+    : defaults.githubWebhookSecret ?? generateGitHubWebhookSecret();
   const port =
     parsePortInput(options.githubPort, "GitHub webhook port") ??
     (options.yes
@@ -599,7 +631,7 @@ async function collectGitHubSetup(
     webhookSecret,
     owner: repository.owner,
     repo: repository.repo,
-    webhookPath: options.githubWebhookPath ?? "/github/webhooks",
+    webhookPath: parseGitHubWebhookPath(options.githubWebhookPath ?? "/github/webhooks"),
     autoCreatePullRequest,
     port
   };
@@ -613,14 +645,17 @@ async function collectBindingMethod(
   platform: "lark" | "slack"
 ): Promise<BindingMethod> {
   if (options.binding) {
-    return parseBindingMethod(options.binding);
+    const binding = parseBindingMethod(options.binding);
+    if (platform === "slack" && binding === "bind_later") {
+      throw new Error("Slack setup requires a channel binding. Use --binding default_project.");
+    }
+    return binding;
+  }
+  if (platform === "slack") {
+    return "default_project";
   }
   const message =
-    platform === "slack"
-      ? language === "zh-CN"
-        ? "Slack channel 要如何绑定到这个项目？"
-        : "How should Slack channels bind to this project?"
-      : t(language, "bindingMethod");
+    t(language, "bindingMethod");
   return prompts.select({
     message,
     initialValue: defaults.bindingMethod ?? "default_project",
@@ -637,7 +672,7 @@ export async function collectSetupInput(
   configPath: string,
   dependencies: SetupFlowDependencies
 ): Promise<OpenTagSetupInput> {
-  const defaults = dependencies.defaults ?? loadSetupDefaults(configPath);
+  const defaults = dependencies.defaults ?? loadDefaultsForSetup(options, configPath);
   const prompts = dependencies.prompts;
   const cwd = dependencies.cwd ?? process.cwd();
 
@@ -648,7 +683,10 @@ export async function collectSetupInput(
   const executor = await collectExecutor(options, defaults, prompts, language, dependencies.env);
   const projectPath = await collectProjectPath(options, defaults, prompts, language, cwd);
   const resolvedProjectPath = projectPath.trim() || cwd;
-  const savedLarkCredentials = platform === "lark" ? findSavedLarkCredentials(defaults, resolvedProjectPath) : undefined;
+  const savedLarkCredentials =
+    platform === "lark" && shouldReadSavedLarkCredentials(options)
+      ? findSavedLarkCredentials(defaults, resolvedProjectPath)
+      : undefined;
   const larkSetupMethod =
     platform === "lark" ? await collectLarkSetupMethod(options, defaults, prompts, language, savedLarkCredentials) : undefined;
   const larkDomain =

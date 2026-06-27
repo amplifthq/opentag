@@ -67,6 +67,7 @@ export type SetupDefaults = Partial<{
   githubOwner: string;
   githubRepo: string;
   githubPort: number;
+  githubWebhookSecret: string;
   githubAutoCreatePullRequest: boolean;
   savedLarkCredentials: SavedLarkCredentials;
 }>;

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, extname, join } from "node:path";
 
 export type ExecutorId = "echo" | "codex" | "claude-code";
 
@@ -37,8 +37,12 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
 ];
 
 function pathExistsOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
-  const paths = env.PATH?.split(":") ?? [];
-  return paths.some((directory) => existsSync(join(directory, command)));
+  const paths = env.PATH?.split(delimiter).filter(Boolean) ?? [];
+  const candidates =
+    process.platform === "win32" && !extname(command)
+      ? [command, ...(env.PATHEXT?.split(delimiter).filter(Boolean) ?? [".COM", ".EXE", ".BAT", ".CMD"]).map((extension) => `${command}${extension.toLowerCase()}`)]
+      : [command];
+  return paths.some((directory) => candidates.some((candidate) => existsSync(join(directory, candidate))));
 }
 
 export function parseExecutorId(value: string): ExecutorId {

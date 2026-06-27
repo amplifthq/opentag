@@ -10,6 +10,7 @@ import {
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
+  shouldRethrowAbortReason,
   slackIngressConfigFromCliConfig,
   slackSocketModeIngressConfigFromCliConfig,
   waitForDispatcher
@@ -307,5 +308,11 @@ describe("OpenTag CLI start wiring", () => {
       })
     ).rejects.toThrow("Dispatcher did not become healthy at http://localhost:3030/healthz.");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats Ctrl-C shutdown as normal but still rethrows subsystem failures", () => {
+    expect(shouldRethrowAbortReason({ shutdownRequested: true, reason: new Error("AbortError") })).toBe(false);
+    expect(shouldRethrowAbortReason({ shutdownRequested: false, reason: new Error("daemon crashed") })).toBe(true);
+    expect(shouldRethrowAbortReason({ shutdownRequested: false, reason: "stopped" })).toBe(false);
   });
 });

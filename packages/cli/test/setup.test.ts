@@ -398,4 +398,183 @@ describe("OpenTag CLI setup", () => {
 
     expect(readCliConfig(configPath).platforms.github?.port).toBe(3050);
   });
+
+  it("uses injected config and state env paths during setup", async () => {
+    const configHome = tempDir();
+    const stateDirectory = tempDir();
+    const configPath = join(configHome, "config.json");
+
+    await runSetupCommand(
+      {
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true,
+        yes: true
+      },
+      {
+        env: {
+          OPENTAG_CONFIG_HOME: configHome,
+          OPENTAG_STATE_DIR: stateDirectory
+        },
+        prompts: testPrompts()
+      }
+    );
+
+    expect(readCliConfig(configPath).state.directory).toBe(stateDirectory);
+  });
+
+  it("allows --force to replace an invalid existing config", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeFileSync(configPath, "{not valid json");
+    chmodSync(configPath, 0o600);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    expect(readCliConfig(configPath).platforms.lark?.appId).toBe("cli_manual");
+  });
+
+  it("does not read stale saved Lark credentials when scan is explicitly selected", async () => {
+    const projectPath = tempDir();
+    const configPath = join(tempDir(), "config.json");
+    const legacyDirectory = join(projectPath, ".opentag", "lark");
+    mkdirSync(legacyDirectory, { recursive: true });
+    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
+    writeFileSync(legacyConfigPath, "{not valid json");
+    chmodSync(legacyConfigPath, 0o600);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        larkSetup: "scan",
+        start: false,
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts(),
+        scanLarkPersonalAgent: vi.fn(async () => ({
+          appId: "cli_scan",
+          appSecret: "secret_scan",
+          domain: "lark" as const
+        }))
+      }
+    );
+
+    expect(readCliConfig(configPath).platforms.lark?.appId).toBe("cli_scan");
+  });
+
+  it("fails fast when --project points at a missing path", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: join(tempDir(), "missing"),
+          executor: "echo",
+          larkSetup: "manual",
+          larkDomain: "lark",
+          larkAppId: "cli_manual",
+          larkAppSecret: "secret_manual",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("Path does not exist:");
+  });
+
+  it("keeps the existing GitHub webhook secret on setup reruns", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        githubWebhookSecret: "github_webhook_secret",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    expect(readCliConfig(configPath).platforms.github?.webhookSecret).toBe("github_webhook_secret");
+  });
+
+  it("rejects a GitHub webhook path that is not rooted", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          platform: "github",
+          executor: "echo",
+          githubRepository: "acme/demo",
+          githubToken: "ghp_test",
+          githubWebhookPath: "github/webhooks",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("GitHub webhook path must start with /.");
+  });
+
+  it("rejects Slack setup without an initial channel binding", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          platform: "slack",
+          executor: "echo",
+          slackAppToken: "xapp-token",
+          slackBotToken: "xoxb-token",
+          slackTeamId: "T123",
+          slackChannelId: "C123",
+          binding: "bind_later",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("Slack setup requires a channel binding.");
+  });
 });

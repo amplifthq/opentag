@@ -342,6 +342,10 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   });
 }
 
+export function shouldRethrowAbortReason(input: { shutdownRequested: boolean; reason: unknown }): boolean {
+  return !input.shutdownRequested && input.reason instanceof Error;
+}
+
 export async function runStartCommand(options: StartCommandOptions): Promise<void> {
   const configPath = options.config ?? defaultConfigPath();
   const config = readCliConfig(configPath);
@@ -353,8 +357,12 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
   const abortController = new AbortController();
   const dispatcher = startDispatcher(dispatcherRuntimeInputFromCliConfig(config));
   const ingresses: PlatformIngressHandle[] = [];
+  let shutdownRequested = false;
 
-  const onSignal = () => abortController.abort();
+  const onSignal = () => {
+    shutdownRequested = true;
+    abortController.abort();
+  };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
 
@@ -428,7 +436,7 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
 
     await waitForAbort(abortController.signal);
     const reason = abortController.signal.reason;
-    if (reason instanceof Error) {
+    if (shouldRethrowAbortReason({ shutdownRequested, reason })) {
       throw reason;
     }
   } finally {

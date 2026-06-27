@@ -1,1 +1,1 @@
-export * from "@opentag/local-runtime";
+export * from "@opentag/local-runtime/pr";

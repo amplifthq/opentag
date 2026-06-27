@@ -1,5 +1,29 @@
+import { createServer, type Server } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import { computeGitHubSignature, createGitHubWebhookApp } from "../src/ingress.js";
+import { computeGitHubSignature, createGitHubWebhookApp, startGitHubIngress } from "../src/ingress.js";
+
+async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to allocate a test port.");
+  }
+  return { server, port: address.port };
+}
+
+async function waitUntilListening(server: Server): Promise<void> {
+  if (server.listening) return;
+  await new Promise<void>((resolve) => {
+    server.once("listening", () => resolve());
+  });
+}
 
 function signedRequest(input: { body: string; secret: string; event: string }): RequestInit {
   return {
@@ -14,6 +38,25 @@ function signedRequest(input: { body: string; secret: string; event: string }): 
 }
 
 describe("GitHub webhook ingress", () => {
+  it("binds the local server to loopback by default", async () => {
+    const { server, port } = await listenOnRandomPort();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+
+    const handle = startGitHubIngress({
+      webhookSecret: "secret",
+      dispatcherUrl: "http://localhost:3030",
+      port
+    });
+    try {
+      await waitUntilListening(handle.server);
+      expect(handle.url).toBe(`http://127.0.0.1:${port}`);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("creates a run for a signed issue comment mention", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const app = createGitHubWebhookApp({

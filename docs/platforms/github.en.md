@@ -108,7 +108,7 @@ ngrok http 3050
 OpenTag listens locally at:
 
 ```text
-http://localhost:3050/github/webhooks
+http://127.0.0.1:3050/github/webhooks
 ```
 
 Your GitHub webhook payload URL should use the public tunnel host:

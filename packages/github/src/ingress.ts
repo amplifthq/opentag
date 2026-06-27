@@ -63,6 +63,7 @@ export type GitHubIngressConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
   port?: number;
+  hostname?: string;
   webhookPath?: string;
 };
 
@@ -262,6 +263,7 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
   });
   const port = config.port ?? 3000;
+  const hostname = config.hostname ?? "127.0.0.1";
   const webhookPath = config.webhookPath ?? "/github/webhooks";
   const server = serve({
     fetch: createGitHubWebhookApp({
@@ -277,11 +279,12 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
       },
       now: () => new Date().toISOString()
     }).fetch,
-    port
+    port,
+    hostname
   });
 
   return {
-    url: `http://localhost:${port}`,
+    url: `http://${hostname}:${port}`,
     webhookPath,
     server,
     close() {
