@@ -541,6 +541,104 @@ Observed ApplyPlan outcome:
 }
 ```
 
+### Recorded Trace: 2026-06-27 GitHub App ingress `create_pull_request`
+
+This trace validated the same action loop through a real GitHub App
+`issue_comment.created` webhook delivered to Probot through the public webhook
+URL. Unlike the script-assisted trace above, the source-thread `apply 1` reply
+also entered through the GitHub App webhook.
+
+| Field | Value |
+| --- | --- |
+| Source issue | `https://github.com/amplifthq/opentag-test/issues/24` |
+| Mention comment | `https://github.com/amplifthq/opentag-test/issues/24#issuecomment-4816025393` |
+| Apply comment | `https://github.com/amplifthq/opentag-test/issues/24#issuecomment-4816029160` |
+| Run ID | `run_1782548134282` |
+| Proposal ID | `proposal_run_1782548134282` |
+| Applied intent | `proposal_run_1782548134282_create_pr` |
+| Approval ID | `approval_github_comment_4816029160` |
+| ApplyPlan ID | `apply_023a7401d573` |
+| Created PR | `https://github.com/amplifthq/opentag-test/pull/25` |
+| Head branch | `opentag/run_1782548134282` |
+| Base branch | `main` |
+
+Observed source-thread callbacks:
+
+- Acknowledgement: `OpenTag picked this up. Run: run_1782548134282`.
+- Final run callback rendered Suggested action `1. Create a pull request for branch opentag/run_1782548134282.`
+- The rendered action included title `OpenTag run run_1782548134282`, branch `opentag/run_1782548134282 -> main`, changed file `README.md`, risk note, and executor condition `isolated branch exists`.
+- The real `apply 1` issue comment returned a final callback with `proposal_run_1782548134282_create_pr: applied (https://github.com/amplifthq/opentag-test/pull/25)`.
+
+Observed thread identity:
+
+```text
+proposal_run_1782548134282 | run_1782548134282 |
+thread_github_amplifthq/opentag-test#24_amplifthq/opentag-test#24 |
+primaryAnchor.threadKey=amplifthq/opentag-test#24 |
+workItemReference.externalId=amplifthq/opentag-test#24
+```
+
+The issue-scoped thread key matters: source-thread approvals should not share a
+repo-wide action namespace across unrelated issues.
+
+Observed audit events:
+
+- `context_packet.generated`
+- `run.created`
+- `run.claimed`
+- `proposal.snapshot.created`
+- `run.completed`
+- `approval.decision.recorded`
+- `apply_plan.created`
+- `apply_plan.executed`
+- final callback delivery for the PR URL
+
+Observed ApprovalDecision:
+
+```json
+{
+  "id": "approval_github_comment_4816029160",
+  "proposalId": "proposal_run_1782548134282",
+  "approvedIntentIds": ["proposal_run_1782548134282_create_pr"],
+  "approvedBy": {
+    "provider": "github",
+    "handle": "mingyooagi"
+  },
+  "metadata": {
+    "source": "thread_action",
+    "rawText": "apply 1",
+    "callback": {
+      "provider": "github",
+      "threadKey": "amplifthq/opentag-test#24"
+    }
+  }
+}
+```
+
+Observed ApplyPlan outcome:
+
+```json
+{
+  "id": "apply_023a7401d573",
+  "proposalId": "proposal_run_1782548134282",
+  "approvalDecisionId": "approval_github_comment_4816029160",
+  "selectedIntentIds": ["proposal_run_1782548134282_create_pr"],
+  "adapter": "github",
+  "outcomes": [
+    {
+      "intentId": "proposal_run_1782548134282_create_pr",
+      "outcome": "applied",
+      "externalUri": "https://github.com/amplifthq/opentag-test/pull/25"
+    }
+  ]
+}
+```
+
+Dogfood findings fixed from this trace:
+
+- GitHub issue mentions now use issue-scoped callback thread keys such as `owner/repo#24`, matching the thread action replies submitted by Probot.
+- If preparing the PR action branch fails after the executor finishes, the daemon completes the run with a `needs_human` result instead of crashing and leaving a stale running lease.
+
 ### Recorded Trace: 2026-06-27 Slack `create_pull_request`
 
 This trace validated the same thread-native PR flow from a real Slack thread into the real `amplifthq/opentag-test` repository. It also verifies that repo-level `create_pull_request` intents from Slack are applied through the GitHub adapter instead of being trapped behind the Slack source adapter.

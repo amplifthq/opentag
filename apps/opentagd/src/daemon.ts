@@ -40,6 +40,28 @@ export function resolveWorkspacePath(event: OpenTagEvent, repositories: Reposito
   return resolveRepositoryBinding(event, repositories)?.checkoutPath ?? null;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function executorFailureResult(executorName: string, error: unknown): OpenTagRunResult {
+  return {
+    conclusion: "failure",
+    summary: `${executorName} failed before completing the run: ${errorMessage(error)}`
+  };
+}
+
+function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
+  return {
+    conclusion: "needs_human",
+    summary: `Executor completed, but OpenTag could not prepare the pull request action: ${errorMessage(error)}`,
+    ...(result.changedFiles ? { changedFiles: result.changedFiles } : {}),
+    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
+    ...(result.verification ? { verification: result.verification } : {}),
+    nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
+  };
+}
+
 export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
@@ -159,16 +181,24 @@ export async function runOneDaemonIteration(input: {
         }
       }
     );
+  } catch (error) {
+    await input.client.complete(claimed.run.id, executorFailureResult(executor.displayName, error));
+    return true;
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
   }
-  const result = await maybeCreatePullRequest({
-    run: claimed.run,
-    event: claimed.event,
-    binding,
-    result: executorResult,
-    options: input.pullRequestOptions ?? {}
-  });
+  let result: OpenTagRunResult;
+  try {
+    result = await maybeCreatePullRequest({
+      run: claimed.run,
+      event: claimed.event,
+      binding,
+      result: executorResult,
+      options: input.pullRequestOptions ?? {}
+    });
+  } catch (error) {
+    result = pullRequestPreparationFailureResult(executorResult, error);
+  }
   await input.client.complete(claimed.run.id, result);
   return true;
 }
