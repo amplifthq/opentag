@@ -1,0 +1,39 @@
+# @opentag/lark
+
+Lark / Feishu adapter helpers for OpenTag.
+
+Use this package to receive Lark Personal Agent messages, normalize them into OpenTag events, register a Personal Agent by QR scan, and send local replies through the OpenTag dispatcher.
+
+## Install
+
+```bash
+pnpm add @opentag/lark
+```
+
+## Exports
+
+- `createLarkMessageHandler`: handles `im.message.receive_v1` events.
+- `startLarkIngress`: starts a Lark long-connection ingress.
+- `registerLarkPersonalAgent`: creates a Personal Agent registration flow.
+- `normalizeLarkMessage`: converts Lark messages into `OpenTagEvent` objects.
+- `renderLarkFinalResult`: renders OpenTag run results for Lark.
+
+## Example
+
+```ts
+import { startLarkIngress } from "@opentag/lark";
+
+const ingress = startLarkIngress({
+  appId: process.env.LARK_APP_ID!,
+  appSecret: process.env.LARK_APP_SECRET!,
+  domain: "lark",
+  dispatcherUrl: "http://localhost:3030",
+  agentId: "opentag"
+});
+
+await ingress.startPromise;
+```
+
+## Stability
+
+The event normalization and ingress config shapes are public adapter contracts. Add optional fields instead of changing existing required fields.

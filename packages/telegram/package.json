@@ -1,8 +1,11 @@
 {
   "name": "@opentag/telegram",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Telegram message normalization and callback helpers for OpenTag.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

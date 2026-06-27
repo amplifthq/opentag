@@ -8,7 +8,9 @@
   "references": [
     { "path": "../client" },
     { "path": "../core" },
+    { "path": "../github" },
     { "path": "../lark" },
-    { "path": "../local-runtime" }
+    { "path": "../local-runtime" },
+    { "path": "../slack" }
   ]
 }
