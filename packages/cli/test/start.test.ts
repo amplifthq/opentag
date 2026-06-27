@@ -6,7 +6,9 @@ import { createSetupConfig } from "../src/setup.js";
 import {
   bootstrapLocalDispatcher,
   dispatcherRuntimeInputFromCliConfig,
+  githubIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
+  slackIngressConfigFromCliConfig,
   waitForDispatcher
 } from "../src/start.js";
 
@@ -28,6 +30,41 @@ function config() {
       botOpenId: "ou_bot",
       setupMethod: "scan",
       bindingMethod: "default_project"
+    }
+  });
+}
+
+function slackConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "slack",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    slack: {
+      signingSecret: "slack_signing_secret",
+      botToken: "xoxb-token",
+      appId: "A123",
+      teamId: "T123",
+      channelId: "C123",
+      bindingMethod: "default_project"
+    }
+  });
+}
+
+function githubConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "github",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    github: {
+      token: "ghp_token",
+      webhookSecret: "github_webhook_secret",
+      owner: "acme",
+      repo: "demo",
+      webhookPath: "/github/webhooks"
     }
   });
 }
@@ -54,6 +91,40 @@ describe("OpenTag CLI start wiring", () => {
         appSecret: "secret_test",
         domain: "lark"
       }
+    });
+  });
+
+  it("derives dispatcher and ingress input for Slack without Lark", () => {
+    const built = slackConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      slackBotToken: "xoxb-token"
+    });
+    expect(slackIngressConfigFromCliConfig(built)).toMatchObject({
+      signingSecret: "slack_signing_secret",
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      appId: "A123"
+    });
+  });
+
+  it("derives dispatcher and ingress input for GitHub without Lark", () => {
+    const built = githubConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      githubToken: "ghp_token"
+    });
+    expect(githubIngressConfigFromCliConfig(built)).toMatchObject({
+      webhookSecret: "github_webhook_secret",
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      webhookPath: "/github/webhooks"
     });
   });
 

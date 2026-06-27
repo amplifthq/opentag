@@ -3,13 +3,13 @@ import { platformById } from "../catalogs/platforms.js";
 import type { CliLanguage } from "../catalogs/languages.js";
 import type { OpenTagCliConfig } from "../config.js";
 import { formatLarkPersonalAgentSummary } from "../platforms/lark/display.js";
-import type { OpenTagSetupInput } from "./types.js";
+import type { LarkSetupMethod, OpenTagSetupInput } from "./types.js";
 
 function yesNo(value: boolean, language: CliLanguage): string {
   return language === "zh-CN" ? (value ? "是" : "否") : value ? "yes" : "no";
 }
 
-function larkSetupDescription(method: OpenTagSetupInput["lark"]["setupMethod"], language: CliLanguage): string {
+function larkSetupDescription(method: LarkSetupMethod, language: CliLanguage): string {
   if (language === "zh-CN") {
     if (method === "saved") return "使用已保存的 Personal Agent";
     return method === "scan" ? "创建新的 Personal Agent" : "手动填写";
@@ -20,37 +20,79 @@ function larkSetupDescription(method: OpenTagSetupInput["lark"]["setupMethod"], 
 
 export function formatSetupReview(input: OpenTagSetupInput, configPath: string): string {
   const platform = platformById(input.platform);
-  const larkPersonalAgent = formatLarkPersonalAgentSummary(
-    {
-      ...input.lark,
-      ...(input.lark.savedCredentialsSource ? { source: input.lark.savedCredentialsSource } : {})
-    },
-    input.language
-  );
-  const lines =
+  const commonLines =
     input.language === "zh-CN"
       ? [
           "请确认 OpenTag 配置：",
           `配置文件: ${configPath}`,
           `平台: ${platform.label}`,
           `Coding agent: ${executorLabel(input.executor)}`,
-          `项目路径: ${input.projectPath}`,
-          `Lark 连接方式: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
-          `Personal Agent: ${larkPersonalAgent}`,
-          `Lark 域名: ${input.lark.domain}`,
-          `默认绑定当前项目: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
+          `项目路径: ${input.projectPath}`
         ]
       : [
           "Review your OpenTag setup:",
           `Config: ${configPath}`,
           `Platform: ${platform.label}`,
           `Coding agent: ${executorLabel(input.executor)}`,
-          `Project path: ${input.projectPath}`,
-          `Lark setup: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
-          `Personal Agent: ${larkPersonalAgent}`,
-          `Lark domain: ${input.lark.domain}`,
-          `Default project binding: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
+          `Project path: ${input.projectPath}`
         ];
+
+  const platformLines: string[] = [];
+  if (input.lark) {
+    const larkPersonalAgent = formatLarkPersonalAgentSummary(
+      {
+        ...input.lark,
+        ...(input.lark.savedCredentialsSource ? { source: input.lark.savedCredentialsSource } : {})
+      },
+      input.language
+    );
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            `Lark 连接方式: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
+            `Personal Agent: ${larkPersonalAgent}`,
+            `Lark 域名: ${input.lark.domain}`,
+            `默认绑定当前项目: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
+          ]
+        : [
+            `Lark setup: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
+            `Personal Agent: ${larkPersonalAgent}`,
+            `Lark domain: ${input.lark.domain}`,
+            `Default project binding: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
+          ])
+    );
+  }
+  if (input.slack) {
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            `Slack Team ID: ${input.slack.teamId}`,
+            `Slack Channel ID: ${input.slack.channelId}`,
+            `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`,
+            `默认绑定当前项目: ${yesNo(input.slack.bindingMethod === "default_project", input.language)}`
+          ]
+        : [
+            `Slack Team ID: ${input.slack.teamId}`,
+            `Slack Channel ID: ${input.slack.channelId}`,
+            `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`,
+            `Default project binding: ${yesNo(input.slack.bindingMethod === "default_project", input.language)}`
+          ])
+    );
+  }
+  if (input.github) {
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            `GitHub 仓库: ${input.github.owner}/${input.github.repo}`,
+            `GitHub Webhook URL: http://localhost:${input.github.port ?? 3000}${input.github.webhookPath}`
+          ]
+        : [
+            `GitHub repository: ${input.github.owner}/${input.github.repo}`,
+            `GitHub Webhook URL: http://localhost:${input.github.port ?? 3000}${input.github.webhookPath}`
+          ])
+    );
+  }
+  const lines = [...commonLines, ...platformLines];
   return lines.join("\n");
 }
 

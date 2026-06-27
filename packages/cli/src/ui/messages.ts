@@ -12,6 +12,14 @@ type MessageKey =
   | "larkAppId"
   | "larkAppSecret"
   | "larkBotOpenId"
+  | "slackSigningSecret"
+  | "slackBotToken"
+  | "slackAppId"
+  | "slackTeamId"
+  | "slackChannelId"
+  | "githubRepository"
+  | "githubToken"
+  | "githubWebhookSecret"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -29,6 +37,14 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     larkAppId: "Lark App ID",
     larkAppSecret: "Lark App Secret",
     larkBotOpenId: "Lark Bot Open ID (optional)",
+    slackSigningSecret: "Slack Signing Secret",
+    slackBotToken: "Slack Bot User OAuth Token",
+    slackAppId: "Slack App ID (optional)",
+    slackTeamId: "Slack Team ID",
+    slackChannelId: "Slack Channel ID",
+    githubRepository: "GitHub repository (owner/repo)",
+    githubToken: "GitHub token for callbacks",
+    githubWebhookSecret: "GitHub webhook secret",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -45,6 +61,14 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     larkAppId: "Lark App ID",
     larkAppSecret: "Lark App Secret",
     larkBotOpenId: "Lark Bot Open ID（可选）",
+    slackSigningSecret: "Slack Signing Secret",
+    slackBotToken: "Slack Bot User OAuth Token",
+    slackAppId: "Slack App ID（可选）",
+    slackTeamId: "Slack Team ID",
+    slackChannelId: "Slack Channel ID",
+    githubRepository: "GitHub 仓库（owner/repo）",
+    githubToken: "GitHub callback token",
+    githubWebhookSecret: "GitHub webhook secret",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

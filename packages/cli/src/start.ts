@@ -1,4 +1,5 @@
 import { createDispatcherAdminClient, type ChannelBindingInput, type RepositoryBindingConfig } from "@opentag/client";
+import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
   createDaemonRuntimeInput,
@@ -7,6 +8,7 @@ import {
   startDispatcher,
   type LocalDispatcherRuntimeInput
 } from "@opentag/local-runtime";
+import { startSlackIngress, type SlackIngressConfig, type SlackIngressHandle } from "@opentag/slack";
 import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
 
@@ -19,6 +21,11 @@ export type BootstrapClient = {
   bindRepository(binding: RepositoryBindingConfig): Promise<void>;
   bindChannel(binding: ChannelBindingInput): Promise<void>;
 };
+
+type PlatformIngressHandle =
+  | { platform: "lark"; url?: string; handle: LarkIngressHandle }
+  | { platform: "slack"; url: string; handle: SlackIngressHandle }
+  | { platform: "github"; url: string; webhookPath: string; handle: GitHubIngressHandle };
 
 function dispatcherPortFromUrl(dispatcherUrl: string): number {
   const url = new URL(dispatcherUrl);
@@ -38,23 +45,56 @@ function dispatcherPortFromUrl(dispatcherUrl: string): number {
 function requireLarkConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["lark"]> {
   const lark = config.platforms.lark;
   if (!lark) {
-    throw new Error("This config has no startable platform yet. Run `opentag setup` and choose Lark / Feishu.");
+    throw new Error("This config has no Lark platform config.");
   }
   return lark;
 }
 
+function requireSlackConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["slack"]> {
+  const slack = config.platforms.slack;
+  if (!slack) {
+    throw new Error("This config has no Slack platform config.");
+  }
+  return slack;
+}
+
+function requireGitHubConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["github"]> {
+  const github = config.platforms.github;
+  if (!github) {
+    throw new Error("This config has no GitHub platform config.");
+  }
+  return github;
+}
+
+function hasStartablePlatform(config: OpenTagCliConfig): boolean {
+  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github);
+}
+
 export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): LocalDispatcherRuntimeInput {
-  const lark = requireLarkConfig(config);
+  if (!hasStartablePlatform(config)) {
+    throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, or GitHub.");
+  }
+  const lark = config.platforms.lark;
+  const slack = config.platforms.slack;
+  const github = config.platforms.github;
+  if (github && !config.daemon.githubToken) {
+    throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
+  }
   return {
     port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),
     databasePath: config.state.databasePath,
     ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
-    lark: {
-      appId: lark.appId,
-      appSecret: lark.appSecret,
-      domain: lark.domain
-    }
+    ...(lark
+      ? {
+          lark: {
+            appId: lark.appId,
+            appSecret: lark.appSecret,
+            domain: lark.domain
+          }
+        }
+      : {}),
+    ...(slack ? { slackBotToken: slack.botToken } : {})
   };
 }
 
@@ -82,6 +122,28 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
     ...(defaultRepoBinding ? { defaultRepoBinding } : {})
+  };
+}
+
+export function slackIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackIngressConfig {
+  const slack = requireSlackConfig(config);
+  return {
+    signingSecret: slack.signingSecret,
+    dispatcherUrl: config.daemon.dispatcherUrl,
+    ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(slack.appId ? { appId: slack.appId } : {}),
+    ...(slack.port ? { port: slack.port } : {})
+  };
+}
+
+export function githubIngressConfigFromCliConfig(config: OpenTagCliConfig): GitHubIngressConfig {
+  const github = requireGitHubConfig(config);
+  return {
+    webhookSecret: github.webhookSecret,
+    dispatcherUrl: config.daemon.dispatcherUrl,
+    ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(github.port ? { port: github.port } : {}),
+    ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})
   };
 }
 
@@ -162,7 +224,7 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
 
   const abortController = new AbortController();
   const dispatcher = startDispatcher(dispatcherRuntimeInputFromCliConfig(config));
-  let ingress: LarkIngressHandle | undefined;
+  const ingresses: PlatformIngressHandle[] = [];
 
   const onSignal = () => abortController.abort();
   process.once("SIGINT", onSignal);
@@ -176,12 +238,23 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
       ...createDaemonRuntimeInput(config.daemon),
       signal: abortController.signal
     });
-    ingress = startLarkIngress(larkIngressConfigFromCliConfig(config));
-    ingress.startPromise.catch((error: unknown) => {
-      if (!abortController.signal.aborted) {
-        abortController.abort(error);
-      }
-    });
+    if (config.platforms.lark) {
+      const handle = startLarkIngress(larkIngressConfigFromCliConfig(config));
+      ingresses.push({ platform: "lark", handle });
+      handle.startPromise.catch((error: unknown) => {
+        if (!abortController.signal.aborted) {
+          abortController.abort(error);
+        }
+      });
+    }
+    if (config.platforms.slack) {
+      const handle = startSlackIngress(slackIngressConfigFromCliConfig(config));
+      ingresses.push({ platform: "slack", url: handle.url, handle });
+    }
+    if (config.platforms.github) {
+      const handle = startGitHubIngress(githubIngressConfigFromCliConfig(config));
+      ingresses.push({ platform: "github", url: handle.url, webhookPath: handle.webhookPath, handle });
+    }
     daemonPromise.catch((error: unknown) => {
       if (!abortController.signal.aborted) {
         abortController.abort(error);
@@ -191,6 +264,15 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
     console.log("OpenTag is running.");
     console.log(`Config: ${configPath}`);
     console.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
+    for (const ingress of ingresses) {
+      if (ingress.platform === "slack") {
+        console.log(`Slack Events: ${ingress.url}/slack/events`);
+      } else if (ingress.platform === "github") {
+        console.log(`GitHub Webhook: ${ingress.url}${ingress.webhookPath}`);
+      } else {
+        console.log("Lark / Feishu: connected through Personal Agent long connection");
+      }
+    }
     console.log("Press Ctrl-C to stop.");
 
     await waitForAbort(abortController.signal);
@@ -202,7 +284,7 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
     abortController.abort();
-    await ingress?.close();
+    await Promise.allSettled([...ingresses].reverse().map((ingress) => ingress.handle.close()));
     await dispatcher.close();
   }
 }

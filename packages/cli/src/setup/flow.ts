@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { LarkDomain, RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
@@ -16,7 +17,13 @@ import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, LarkSetupMethod, OpenTagSetupInput, SetupDefaults } from "./types.js";
+import type { BindingMethod, GitHubSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput } from "./types.js";
+
+type LarkCredentialInput = {
+  appId: string;
+  appSecret: string;
+  botOpenId?: string;
+};
 
 export type SetupCommandOptions = {
   platform?: string;
@@ -29,6 +36,15 @@ export type SetupCommandOptions = {
   larkAppSecret?: string;
   larkDomain?: string;
   larkBotOpenId?: string;
+  slackSigningSecret?: string;
+  slackBotToken?: string;
+  slackAppId?: string;
+  slackTeamId?: string;
+  slackChannelId?: string;
+  githubToken?: string;
+  githubWebhookSecret?: string;
+  githubRepository?: string;
+  githubWebhookPath?: string;
   binding?: string;
   force?: boolean;
   yes?: boolean;
@@ -56,6 +72,43 @@ function parseLarkDomain(value: string): LarkDomain {
 function parseBindingMethod(value: string): BindingMethod {
   if (value === "default_project" || value === "bind_later") return value;
   throw new Error("Binding method must be default_project or bind_later.");
+}
+
+function parseGitHubRepository(value: string): { owner: string; repo: string } {
+  const trimmed = value.trim().replace(/^github:/, "");
+  const match = trimmed.match(/^([^/\s]+)\/([^/\s]+)$/);
+  if (!match) {
+    throw new Error("GitHub repository must use owner/repo.");
+  }
+  return {
+    owner: match[1]!,
+    repo: match[2]!.replace(/\.git$/, "")
+  };
+}
+
+function githubRepositoryFromRemote(projectPath: string): string | undefined {
+  let remote: string;
+  try {
+    remote = execFileSync("git", ["-C", projectPath, "remote", "get-url", "origin"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
+    return undefined;
+  }
+
+  const patterns = [
+    /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/,
+    /^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?$/,
+    /^ssh:\/\/git@github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?$/
+  ];
+  for (const pattern of patterns) {
+    const match = remote.match(pattern);
+    if (match) {
+      return `${match[1]}/${match[2]}`;
+    }
+  }
+  return undefined;
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -301,7 +354,7 @@ async function collectLarkCredentials(input: {
   domain: LarkDomain;
   savedLarkCredentials?: SavedLarkCredentials;
   scanLarkPersonalAgent(input: { domain: LarkDomain }): Promise<RegisteredLarkPersonalAgent>;
-}): Promise<Pick<OpenTagSetupInput["lark"], "appId" | "appSecret" | "botOpenId">> {
+}): Promise<LarkCredentialInput> {
   if (input.setupMethod === "saved") {
     if (!input.savedLarkCredentials) {
       throw new Error("No saved Lark Personal Agent config was found.");
@@ -352,17 +405,116 @@ async function collectLarkCredentials(input: {
   };
 }
 
-async function collectBindingMethod(
+async function collectSlackSetup(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
   prompts: PromptAdapter,
   language: CliLanguage
+): Promise<SlackSetupInput> {
+  const signingSecret = nonEmpty(
+    options.slackSigningSecret ?? (await prompts.password({ message: t(language, "slackSigningSecret") })),
+    "Slack Signing Secret"
+  );
+  const botToken = nonEmpty(
+    options.slackBotToken ?? (await prompts.password({ message: t(language, "slackBotToken") })),
+    "Slack Bot User OAuth Token"
+  );
+  const appId = optionalTrimmed(
+    options.slackAppId ??
+      (await prompts.text({
+        message: t(language, "slackAppId"),
+        placeholder: "A..."
+      }))
+  );
+  const teamId = nonEmpty(
+    options.slackTeamId ??
+      (await prompts.text({
+        message: t(language, "slackTeamId"),
+        placeholder: "T...",
+        ...(defaults.slackTeamId ? { initialValue: defaults.slackTeamId } : {})
+      })),
+    "Slack Team ID"
+  );
+  const channelId = nonEmpty(
+    options.slackChannelId ??
+      (await prompts.text({
+        message: t(language, "slackChannelId"),
+        placeholder: "C...",
+        ...(defaults.slackChannelId ? { initialValue: defaults.slackChannelId } : {})
+      })),
+    "Slack Channel ID"
+  );
+  const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "slack");
+  return {
+    signingSecret,
+    botToken,
+    teamId,
+    channelId,
+    bindingMethod,
+    ...(appId ? { appId } : {})
+  };
+}
+
+async function collectGitHubSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  projectPath: string
+): Promise<GitHubSetupInput> {
+  const repositoryDefault =
+    options.githubRepository ??
+    (defaults.githubOwner && defaults.githubRepo ? `${defaults.githubOwner}/${defaults.githubRepo}` : undefined) ??
+    githubRepositoryFromRemote(projectPath);
+  const repositoryInput = nonEmpty(
+    options.githubRepository ??
+      (await prompts.text({
+        message: t(language, "githubRepository"),
+        ...(repositoryDefault ? { initialValue: repositoryDefault, placeholder: repositoryDefault } : { placeholder: "owner/repo" }),
+        validate(value) {
+          try {
+            parseGitHubRepository(value || repositoryDefault || "");
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+      })),
+    "GitHub repository"
+  );
+  const repository = parseGitHubRepository(repositoryInput);
+  const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
+  const webhookSecret = nonEmpty(
+    options.githubWebhookSecret ?? (await prompts.password({ message: t(language, "githubWebhookSecret") })),
+    "GitHub webhook secret"
+  );
+  return {
+    token,
+    webhookSecret,
+    owner: repository.owner,
+    repo: repository.repo,
+    webhookPath: options.githubWebhookPath ?? "/github/webhooks"
+  };
+}
+
+async function collectBindingMethod(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  platform: "lark" | "slack"
 ): Promise<BindingMethod> {
   if (options.binding) {
     return parseBindingMethod(options.binding);
   }
+  const message =
+    platform === "slack"
+      ? language === "zh-CN"
+        ? "Slack channel 要如何绑定到这个项目？"
+        : "How should Slack channels bind to this project?"
+      : t(language, "bindingMethod");
   return prompts.select({
-    message: t(language, "bindingMethod"),
+    message,
     initialValue: defaults.bindingMethod ?? "default_project",
     options: (["default_project", "bind_later"] satisfies BindingMethod[]).map((method) => ({
       value: method,
@@ -387,32 +539,48 @@ export async function collectSetupInput(
   const platform = await collectPlatform(options, defaults, prompts, language);
   const executor = await collectExecutor(options, defaults, prompts, language, dependencies.env);
   const projectPath = await collectProjectPath(options, defaults, prompts, language, cwd);
-  const savedLarkCredentials = findSavedLarkCredentials(defaults, projectPath.trim() || cwd);
-  const larkSetupMethod = await collectLarkSetupMethod(options, defaults, prompts, language, savedLarkCredentials);
-  const larkDomain = await collectLarkDomain(options, defaults, prompts, language, larkSetupMethod, savedLarkCredentials);
-  const larkCredentials = await collectLarkCredentials({
-    options,
-    prompts,
-    language,
-    setupMethod: larkSetupMethod,
-    domain: larkDomain,
-    ...(savedLarkCredentials ? { savedLarkCredentials } : {}),
-    scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent
-  });
-  const bindingMethod = await collectBindingMethod(options, defaults, prompts, language);
+  const resolvedProjectPath = projectPath.trim() || cwd;
+  const savedLarkCredentials = platform === "lark" ? findSavedLarkCredentials(defaults, resolvedProjectPath) : undefined;
+  const larkSetupMethod =
+    platform === "lark" ? await collectLarkSetupMethod(options, defaults, prompts, language, savedLarkCredentials) : undefined;
+  const larkDomain =
+    platform === "lark" && larkSetupMethod
+      ? await collectLarkDomain(options, defaults, prompts, language, larkSetupMethod, savedLarkCredentials)
+      : undefined;
+  const larkCredentials =
+    platform === "lark" && larkSetupMethod && larkDomain
+      ? await collectLarkCredentials({
+          options,
+          prompts,
+          language,
+          setupMethod: larkSetupMethod,
+          domain: larkDomain,
+          ...(savedLarkCredentials ? { savedLarkCredentials } : {}),
+          scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent
+        })
+      : undefined;
+  const larkBindingMethod = platform === "lark" ? await collectBindingMethod(options, defaults, prompts, language, "lark") : undefined;
+  const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
+  const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
 
   const setupInput: OpenTagSetupInput = {
     language,
     platform,
-    projectPath: projectPath.trim() || cwd,
+    projectPath: resolvedProjectPath,
     executor,
-    lark: {
-      ...larkCredentials,
-      domain: larkDomain,
-      setupMethod: larkSetupMethod,
-      bindingMethod,
-      ...(larkSetupMethod === "saved" && savedLarkCredentials ? { savedCredentialsSource: savedLarkCredentials.source } : {})
-    }
+    ...(larkCredentials && larkDomain && larkSetupMethod && larkBindingMethod
+      ? {
+          lark: {
+            ...larkCredentials,
+            domain: larkDomain,
+            setupMethod: larkSetupMethod,
+            bindingMethod: larkBindingMethod,
+            ...(larkSetupMethod === "saved" && savedLarkCredentials ? { savedCredentialsSource: savedLarkCredentials.source } : {})
+          }
+        }
+      : {}),
+    ...(slackSetup ? { slack: slackSetup } : {}),
+    ...(githubSetup ? { github: githubSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));

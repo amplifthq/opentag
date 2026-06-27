@@ -19,6 +19,51 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
   const stateDirectory = input.stateDirectory ?? defaultStateDirectory(env);
   const worktreeRoot = join(stateDirectory, "worktrees");
   const databasePath = join(stateDirectory, "opentag.db");
+  const repositoryBindings = [
+    {
+      provider: target.provider,
+      owner: target.owner,
+      repo: target.repo,
+      checkoutPath,
+      defaultExecutor: input.executor,
+      baseBranch: "main",
+      pushRemote: "origin",
+      worktreeRoot,
+      keepWorktree: "on_failure" as const
+    },
+    ...(input.github
+      ? [
+          {
+            provider: "github",
+            owner: input.github.owner,
+            repo: input.github.repo,
+            checkoutPath,
+            defaultExecutor: input.executor,
+            baseBranch: "main",
+            pushRemote: "origin",
+            worktreeRoot,
+            keepWorktree: "on_failure" as const
+          }
+        ]
+      : [])
+  ].filter((binding, index, bindings) => {
+    return bindings.findIndex((candidate) => candidate.provider === binding.provider && candidate.owner === binding.owner && candidate.repo === binding.repo) === index;
+  });
+
+  const channelBindings = [
+    ...(input.slack && input.slack.bindingMethod === "default_project"
+      ? [
+          {
+            provider: "slack",
+            accountId: input.slack.teamId,
+            conversationId: input.slack.channelId,
+            repoProvider: target.provider,
+            owner: target.owner,
+            repo: target.repo
+          }
+        ]
+      : [])
+  ];
 
   return {
     schemaVersion: 1,
@@ -28,9 +73,26 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
         platforms: [input.platform],
         executor: input.executor,
         projectPath: checkoutPath,
-        larkSetupMethod: input.lark.setupMethod,
-        larkDomain: input.lark.domain,
-        bindingMethod: input.lark.bindingMethod
+        ...(input.lark
+          ? {
+              larkSetupMethod: input.lark.setupMethod,
+              larkDomain: input.lark.domain,
+              bindingMethod: input.lark.bindingMethod
+            }
+          : {}),
+        ...(input.slack
+          ? {
+              bindingMethod: input.slack.bindingMethod,
+              slackTeamId: input.slack.teamId,
+              slackChannelId: input.slack.channelId
+            }
+          : {}),
+        ...(input.github
+          ? {
+              githubOwner: input.github.owner,
+              githubRepo: input.github.repo
+            }
+          : {})
       }
     },
     state: {
@@ -42,30 +104,48 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       runnerId: "runner_local",
       dispatcherUrl: "http://localhost:3030",
       pairingToken: pairingToken(),
-      repositories: [
-        {
-          provider: target.provider,
-          owner: target.owner,
-          repo: target.repo,
-          checkoutPath,
-          defaultExecutor: input.executor,
-          baseBranch: "main",
-          pushRemote: "origin",
-          worktreeRoot,
-          keepWorktree: "on_failure"
-        }
-      ],
+      repositories: repositoryBindings,
+      ...(channelBindings.length > 0 ? { channelBindings } : {}),
+      ...(input.github ? { githubToken: input.github.token } : {}),
       pollIntervalMs: 5000,
       heartbeatIntervalMs: 15000
     },
     platforms: {
-      lark: {
-        appId: input.lark.appId,
-        appSecret: input.lark.appSecret,
-        domain: input.lark.domain,
-        defaultProjectBinding: input.lark.bindingMethod === "default_project",
-        ...(input.lark.botOpenId ? { botOpenId: input.lark.botOpenId } : {})
-      }
+      ...(input.lark
+        ? {
+            lark: {
+              appId: input.lark.appId,
+              appSecret: input.lark.appSecret,
+              domain: input.lark.domain,
+              defaultProjectBinding: input.lark.bindingMethod === "default_project",
+              ...(input.lark.botOpenId ? { botOpenId: input.lark.botOpenId } : {})
+            }
+          }
+        : {}),
+      ...(input.slack
+        ? {
+            slack: {
+              signingSecret: input.slack.signingSecret,
+              botToken: input.slack.botToken,
+              teamId: input.slack.teamId,
+              channelId: input.slack.channelId,
+              defaultProjectBinding: input.slack.bindingMethod === "default_project",
+              ...(input.slack.appId ? { appId: input.slack.appId } : {}),
+              ...(input.slack.port ? { port: input.slack.port } : {})
+            }
+          }
+        : {}),
+      ...(input.github
+        ? {
+            github: {
+              webhookSecret: input.github.webhookSecret,
+              owner: input.github.owner,
+              repo: input.github.repo,
+              webhookPath: input.github.webhookPath,
+              ...(input.github.port ? { port: input.github.port } : {})
+            }
+          }
+        : {})
     }
   };
 }

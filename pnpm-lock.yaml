@@ -244,12 +244,18 @@ importers:
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
+      '@opentag/github':
+        specifier: workspace:*
+        version: link:../github
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
       '@opentag/local-runtime':
         specifier: workspace:*
         version: link:../local-runtime
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../slack
       commander:
         specifier: ^12.1.0
         version: 12.1.0
@@ -341,9 +347,18 @@ importers:
 
   packages/github:
     dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
     devDependencies:
       tsup:
         specifier: ^8.3.5
@@ -417,9 +432,18 @@ importers:
 
   packages/slack:
     dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
     devDependencies:
       tsup:
         specifier: ^8.5.1

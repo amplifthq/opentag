@@ -18,13 +18,34 @@ export type LarkSetupInput = {
   savedCredentialsSource?: SavedLarkCredentials["source"];
 };
 
+export type SlackSetupInput = {
+  signingSecret: string;
+  botToken: string;
+  teamId: string;
+  channelId: string;
+  appId?: string;
+  bindingMethod: BindingMethod;
+  port?: number;
+};
+
+export type GitHubSetupInput = {
+  token: string;
+  webhookSecret: string;
+  owner: string;
+  repo: string;
+  webhookPath: string;
+  port?: number;
+};
+
 export type OpenTagSetupInput = {
   language: CliLanguage;
   platform: PlatformId;
   projectPath: string;
   executor: ExecutorId;
   stateDirectory?: string;
-  lark: LarkSetupInput;
+  lark?: LarkSetupInput;
+  slack?: SlackSetupInput;
+  github?: GitHubSetupInput;
 };
 
 export type SetupDefaults = Partial<{
@@ -35,5 +56,9 @@ export type SetupDefaults = Partial<{
   larkSetupMethod: LarkSetupMethod;
   larkDomain: LarkDomain;
   bindingMethod: BindingMethod;
+  slackTeamId: string;
+  slackChannelId: string;
+  githubOwner: string;
+  githubRepo: string;
   savedLarkCredentials: SavedLarkCredentials;
 }>;

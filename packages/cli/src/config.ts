@@ -15,6 +15,7 @@ const CliLanguageSchema = z.enum(["en", "zh-CN"]);
 const PlatformSchema = z.enum(["lark", "slack", "github", "telegram"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
+const OptionalPortSchema = z.number().int().positive().optional();
 
 const RepositoryBindingSchema = z
   .object({
@@ -86,6 +87,28 @@ const LarkPlatformSchema = z
   })
   .strict();
 
+const SlackPlatformSchema = z
+  .object({
+    signingSecret: z.string().min(1),
+    botToken: z.string().min(1),
+    teamId: z.string().min(1),
+    channelId: z.string().min(1),
+    appId: z.string().min(1).optional(),
+    defaultProjectBinding: z.boolean().optional(),
+    port: OptionalPortSchema
+  })
+  .strict();
+
+const GitHubPlatformSchema = z
+  .object({
+    webhookSecret: z.string().min(1),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    webhookPath: z.string().min(1).optional(),
+    port: OptionalPortSchema
+  })
+  .strict();
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -96,7 +119,11 @@ const PreferencesSchema = z
         projectPath: z.string().min(1).optional(),
         larkSetupMethod: LarkSetupMethodSchema.optional(),
         larkDomain: z.enum(["lark", "feishu"]).optional(),
-        bindingMethod: BindingMethodSchema.optional()
+        bindingMethod: BindingMethodSchema.optional(),
+        slackTeamId: z.string().min(1).optional(),
+        slackChannelId: z.string().min(1).optional(),
+        githubOwner: z.string().min(1).optional(),
+        githubRepo: z.string().min(1).optional()
       })
       .strict()
       .optional()
@@ -117,7 +144,9 @@ export const OpenTagCliConfigSchema = z
     daemon: DaemonConfigSchema,
     platforms: z
       .object({
-        lark: LarkPlatformSchema.optional()
+        lark: LarkPlatformSchema.optional(),
+        slack: SlackPlatformSchema.optional(),
+        github: GitHubPlatformSchema.optional()
       })
       .strict()
   })
@@ -205,7 +234,7 @@ export function assertPrivateConfigFile(path: string): void {
 }
 
 function redactValue(key: string, value: unknown): unknown {
-  if (["appSecret", "pairingToken", "githubToken"].includes(key)) {
+  if (["appSecret", "botToken", "githubToken", "pairingToken", "signingSecret", "webhookSecret"].includes(key)) {
     return "[REDACTED]";
   }
   if (Array.isArray(value)) {

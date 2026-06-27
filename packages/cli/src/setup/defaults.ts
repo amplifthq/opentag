@@ -1,28 +1,39 @@
 import { existsSync } from "node:fs";
 import { defaultConfigPath, readCliConfig, type OpenTagCliConfig } from "../config.js";
 import { savedLarkCredentialsFromCliConfig } from "../platforms/lark/saved-config.js";
-import type { SetupDefaults } from "./types.js";
+import type { BindingMethod, SetupDefaults } from "./types.js";
+
+function defaultBindingMethod(config: OpenTagCliConfig): BindingMethod | undefined {
+  const lastSetup = config.preferences?.lastSetup;
+  if (lastSetup?.bindingMethod) return lastSetup.bindingMethod;
+  if (config.platforms.lark?.defaultProjectBinding === false) return "bind_later";
+  if (config.platforms.lark) return "default_project";
+  if (config.platforms.slack?.defaultProjectBinding === false) return "bind_later";
+  if (config.platforms.slack) return "default_project";
+  return undefined;
+}
 
 export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults {
   const repository = config.daemon.repositories[0];
   const lark = config.platforms.lark;
+  const slack = config.platforms.slack;
+  const github = config.platforms.github;
   const lastSetup = config.preferences?.lastSetup;
   const savedLarkCredentials = savedLarkCredentialsFromCliConfig(config);
+  const bindingMethod = defaultBindingMethod(config);
 
   return {
     ...(config.preferences?.language ? { language: config.preferences.language } : {}),
-    ...(lastSetup?.platforms?.[0] ? { platform: lastSetup.platforms[0] } : lark ? { platform: "lark" } : {}),
+    ...(lastSetup?.platforms?.[0] ? { platform: lastSetup.platforms[0] } : lark ? { platform: "lark" } : slack ? { platform: "slack" } : github ? { platform: "github" } : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(lastSetup?.larkSetupMethod ? { larkSetupMethod: lastSetup.larkSetupMethod } : {}),
     ...(lastSetup?.larkDomain ? { larkDomain: lastSetup.larkDomain } : lark?.domain ? { larkDomain: lark.domain } : {}),
-    ...(lastSetup?.bindingMethod
-      ? { bindingMethod: lastSetup.bindingMethod }
-      : lark?.defaultProjectBinding === false
-        ? { bindingMethod: "bind_later" }
-        : lark
-          ? { bindingMethod: "default_project" }
-          : {}),
+    ...(bindingMethod ? { bindingMethod } : {}),
+    ...(lastSetup?.slackTeamId ? { slackTeamId: lastSetup.slackTeamId } : slack?.teamId ? { slackTeamId: slack.teamId } : {}),
+    ...(lastSetup?.slackChannelId ? { slackChannelId: lastSetup.slackChannelId } : slack?.channelId ? { slackChannelId: slack.channelId } : {}),
+    ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),
+    ...(lastSetup?.githubRepo ? { githubRepo: lastSetup.githubRepo } : github?.repo ? { githubRepo: github.repo } : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }

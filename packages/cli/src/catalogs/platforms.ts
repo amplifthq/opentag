@@ -19,14 +19,14 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
   {
     id: "slack",
     label: "Slack",
-    status: "setup_pending",
-    startable: false
+    status: "setup_ready",
+    startable: true
   },
   {
     id: "github",
     label: "GitHub",
-    status: "setup_pending",
-    startable: false
+    status: "setup_ready",
+    startable: true
   },
   {
     id: "telegram",

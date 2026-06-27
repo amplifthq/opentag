@@ -1,4 +1,5 @@
 export * from "./apply.js";
+export * from "./ingress.js";
 export * from "./normalize.js";
 export * from "./pull-request.js";
 export * from "./render.js";
