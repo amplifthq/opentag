@@ -20,6 +20,8 @@ function tempDir(): string {
 function config(): OpenTagCliConfig {
   const projectPath = tempDir();
   return createSetupConfig({
+    language: "en",
+    platform: "lark",
     projectPath,
     executor: "echo",
     stateDirectory: join(tempDir(), "state"),
@@ -27,7 +29,9 @@ function config(): OpenTagCliConfig {
       appId: "cli_test",
       appSecret: "secret_test",
       domain: "lark",
-      botOpenId: "ou_bot"
+      botOpenId: "ou_bot",
+      setupMethod: "scan",
+      bindingMethod: "default_project"
     }
   });
 }
@@ -67,10 +71,18 @@ describe("OpenTag CLI config", () => {
     const checkoutPath = realpathSync.native(projectPath);
     const stateDirectory = join(tempDir(), "state");
     const built = createSetupConfig({
+      language: "zh-CN",
+      platform: "lark",
       projectPath,
       stateDirectory,
       executor: "codex",
-      lark: { appId: "cli_test", appSecret: "secret_test", domain: "feishu" }
+      lark: {
+        appId: "cli_test",
+        appSecret: "secret_test",
+        domain: "feishu",
+        setupMethod: "manual",
+        bindingMethod: "bind_later"
+      }
     });
 
     expect(built.daemon.repositories[0]).toMatchObject({
@@ -82,5 +94,13 @@ describe("OpenTag CLI config", () => {
     });
     expect(built.state.databasePath).toBe(join(stateDirectory, "opentag.db"));
     expect(built.platforms.lark?.domain).toBe("feishu");
+    expect(built.platforms.lark?.defaultProjectBinding).toBe(false);
+    expect(built.preferences?.language).toBe("zh-CN");
+    expect(built.preferences?.lastSetup).toMatchObject({
+      platforms: ["lark"],
+      executor: "codex",
+      larkSetupMethod: "manual",
+      bindingMethod: "bind_later"
+    });
   });
 });

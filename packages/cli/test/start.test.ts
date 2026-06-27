@@ -16,6 +16,8 @@ function tempDir(): string {
 
 function config() {
   return createSetupConfig({
+    language: "en",
+    platform: "lark",
     projectPath: tempDir(),
     executor: "echo",
     stateDirectory: join(tempDir(), "state"),
@@ -23,7 +25,9 @@ function config() {
       appId: "cli_test",
       appSecret: "secret_test",
       domain: "lark",
-      botOpenId: "ou_bot"
+      botOpenId: "ou_bot",
+      setupMethod: "scan",
+      bindingMethod: "default_project"
     }
   });
 }
@@ -63,6 +67,13 @@ describe("OpenTag CLI start wiring", () => {
         repo: repository.repo
       }
     });
+  });
+
+  it("omits default Lark repo binding when setup chose bind later", () => {
+    const built = config();
+    built.platforms.lark!.defaultProjectBinding = false;
+
+    expect(larkIngressConfigFromCliConfig(built).defaultRepoBinding).toBeUndefined();
   });
 
   it("bootstraps runner, Project Target, and channel bindings in dispatcher state", async () => {

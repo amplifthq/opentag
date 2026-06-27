@@ -12,10 +12,18 @@ function tempDir(): string {
 describe("OpenTag CLI status", () => {
   it("reports offline dispatcher without failing the config summary", async () => {
     const config = createSetupConfig({
+      language: "en",
+      platform: "lark",
       projectPath: tempDir(),
       executor: "echo",
       stateDirectory: join(tempDir(), "state"),
-      lark: { appId: "cli_test", appSecret: "secret_test", domain: "lark" }
+      lark: {
+        appId: "cli_test",
+        appSecret: "secret_test",
+        domain: "lark",
+        setupMethod: "scan",
+        bindingMethod: "default_project"
+      }
     });
 
     const summary = await statusFromConfig({

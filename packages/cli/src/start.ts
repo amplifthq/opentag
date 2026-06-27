@@ -37,7 +37,7 @@ function dispatcherPortFromUrl(dispatcherUrl: string): number {
 function requireLarkConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["lark"]> {
   const lark = config.platforms.lark;
   if (!lark) {
-    throw new Error("This CLI preview requires platforms.lark in config. Run `opentag setup` first.");
+    throw new Error("This config has no startable platform yet. Run `opentag setup` and choose Lark / Feishu.");
   }
   return lark;
 }
@@ -58,6 +58,7 @@ export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): L
 }
 
 function defaultRepoBindingFromConfig(config: OpenTagCliConfig): LarkIngressConfig["defaultRepoBinding"] {
+  if (config.platforms.lark?.defaultProjectBinding === false) return undefined;
   if (config.daemon.repositories.length !== 1) return undefined;
   const repository = config.daemon.repositories[0];
   if (!repository) return undefined;

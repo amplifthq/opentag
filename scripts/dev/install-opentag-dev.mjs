@@ -67,8 +67,8 @@ function createShim() {
 
   const shim =
     process.platform === "win32"
-      ? `@echo off\r\nnode "${cliEntry}" %*\r\n`
-      : `#!/bin/sh\nexec node "${cliEntry}" "$@"\n`;
+      ? `@echo off\r\nset OPENTAG_CLI_NAME=opentag-dev\r\nnode "${cliEntry}" %*\r\n`
+      : `#!/bin/sh\nOPENTAG_CLI_NAME=opentag-dev exec node "${cliEntry}" "$@"\n`;
 
   writeFileSync(shimPath, shim, { mode: 0o755 });
   chmodSync(shimPath, 0o755);

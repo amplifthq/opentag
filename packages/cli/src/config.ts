@@ -4,10 +4,17 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
 import { z } from "zod";
+import type { ExecutorId } from "./catalogs/executors.js";
+import type { CliLanguage } from "./catalogs/languages.js";
+import type { PlatformId } from "./catalogs/platforms.js";
 
 const ExecutorSchema = z.enum(["echo", "codex", "claude-code"]);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
+const CliLanguageSchema = z.enum(["en", "zh-CN"]);
+const PlatformSchema = z.enum(["lark", "slack", "github", "telegram"]);
+const LarkSetupMethodSchema = z.enum(["scan", "manual"]);
+const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 
 const RepositoryBindingSchema = z
   .object({
@@ -74,7 +81,25 @@ const LarkPlatformSchema = z
     appId: z.string().min(1),
     appSecret: z.string().min(1),
     domain: z.enum(["lark", "feishu"]),
-    botOpenId: z.string().min(1).optional()
+    botOpenId: z.string().min(1).optional(),
+    defaultProjectBinding: z.boolean().optional()
+  })
+  .strict();
+
+const PreferencesSchema = z
+  .object({
+    language: CliLanguageSchema.optional(),
+    lastSetup: z
+      .object({
+        platforms: z.array(PlatformSchema).optional(),
+        executor: ExecutorSchema.optional(),
+        projectPath: z.string().min(1).optional(),
+        larkSetupMethod: LarkSetupMethodSchema.optional(),
+        larkDomain: z.enum(["lark", "feishu"]).optional(),
+        bindingMethod: BindingMethodSchema.optional()
+      })
+      .strict()
+      .optional()
   })
   .strict();
 
@@ -88,6 +113,7 @@ export const OpenTagCliConfigSchema = z
         worktreeRoot: z.string().min(1)
       })
       .strict(),
+    preferences: PreferencesSchema.optional(),
     daemon: DaemonConfigSchema,
     platforms: z
       .object({
@@ -100,6 +126,12 @@ export const OpenTagCliConfigSchema = z
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
   daemon: OpenTagDaemonConfig;
 };
+
+export type OpenTagCliPreferences = NonNullable<OpenTagCliConfig["preferences"]>;
+export type OpenTagCliLastSetup = NonNullable<OpenTagCliPreferences["lastSetup"]>;
+export type OpenTagCliLanguage = CliLanguage;
+export type OpenTagCliPlatform = PlatformId;
+export type OpenTagCliExecutor = ExecutorId;
 
 export type PathEnvironment = Partial<
   Record<"OPENTAG_CONFIG_PATH" | "OPENTAG_CONFIG_HOME" | "OPENTAG_STATE_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME", string>
