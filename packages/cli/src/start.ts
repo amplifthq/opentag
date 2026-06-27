@@ -1,3 +1,4 @@
+import { createServer } from "node:net";
 import { createDispatcherAdminClient, type ChannelBindingInput, type RepositoryBindingConfig } from "@opentag/client";
 import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
@@ -19,6 +20,7 @@ import {
 import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
 
 export type StartCommandOptions = {
   config?: string;
@@ -77,6 +79,96 @@ function requireGitHubConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
 
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
   return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github);
+}
+
+type LocalPortCheck = {
+  label: string;
+  port: number;
+  fix: string;
+};
+
+function localStartPortChecks(config: OpenTagCliConfig): LocalPortCheck[] {
+  const checks: LocalPortCheck[] = [
+    {
+      label: "dispatcher",
+      port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),
+      fix: "Change daemon.dispatcherUrl in the OpenTag config."
+    }
+  ];
+  const slack = config.platforms.slack;
+  if (slack && slackModeFromCliConfig(config) === "events_api") {
+    checks.push({
+      label: "Slack Events API",
+      port: slack.port ?? DEFAULT_SLACK_EVENTS_PORT,
+      fix: "Run `opentag setup --platform slack --slack-mode events_api --slack-port <port> --force`, or edit platforms.slack.port in the OpenTag config."
+    });
+  }
+  const github = config.platforms.github;
+  if (github) {
+    checks.push({
+      label: "GitHub local webhook",
+      port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
+      fix: "Run `opentag setup --platform github --github-port <port> --force`, or edit platforms.github.port in the OpenTag config."
+    });
+  }
+  return checks;
+}
+
+async function assertPortAvailable(check: LocalPortCheck): Promise<void> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            [
+              `OpenTag cannot start ${check.label} because port ${check.port} is already in use.`,
+              check.fix,
+              `To inspect the current process: lsof -nP -iTCP:${check.port} -sTCP:LISTEN`
+            ].join("\n")
+          )
+        );
+        return;
+      }
+      reject(
+        new Error(
+          [`OpenTag cannot start ${check.label} on port ${check.port}: ${error.message}`, check.fix].join("\n")
+        )
+      );
+    });
+    // Tunnels commonly forward to localhost/127.0.0.1; this catches the real
+    // collision even when another address family would still let Node listen.
+    server.listen(check.port, "127.0.0.1", () => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  });
+}
+
+export async function assertStartPortsAvailable(config: OpenTagCliConfig): Promise<void> {
+  const checks = localStartPortChecks(config);
+  const seen = new Map<number, LocalPortCheck>();
+  for (const check of checks) {
+    const existing = seen.get(check.port);
+    if (existing) {
+      throw new Error(
+        [
+          `OpenTag cannot start because ${existing.label} and ${check.label} both use port ${check.port}.`,
+          `${existing.label}: ${existing.fix}`,
+          `${check.label}: ${check.fix}`
+        ].join("\n")
+      );
+    }
+    seen.set(check.port, check);
+  }
+  for (const check of checks) {
+    await assertPortAvailable(check);
+  }
 }
 
 export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): LocalDispatcherRuntimeInput {
@@ -177,7 +269,7 @@ export function githubIngressConfigFromCliConfig(config: OpenTagCliConfig): GitH
     webhookSecret: github.webhookSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
-    ...(github.port ? { port: github.port } : {}),
+    port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
     ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})
   };
 }
@@ -256,6 +348,7 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
 
   ensurePrivateDirectory(config.state.directory);
   ensurePrivateDirectory(config.state.worktreeRoot);
+  await assertStartPortsAvailable(config);
 
   const abortController = new AbortController();
   const dispatcher = startDispatcher(dispatcherRuntimeInputFromCliConfig(config));
@@ -311,17 +404,22 @@ export async function runStartCommand(options: StartCommandOptions): Promise<voi
     console.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
+        const slack = config.platforms.slack!;
         if (ingress.mode === "socket_mode") {
           console.log("Slack: using Socket Mode");
+          console.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
+          console.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
         } else {
           console.log(`Slack Events: ${ingress.url}/slack/events`);
+          console.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
+          console.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
         }
       } else if (ingress.platform === "github") {
         const github = config.platforms.github!;
         console.log(`GitHub local webhook: ${githubLocalWebhookUrl({ port: github.port, webhookPath: ingress.webhookPath })}`);
         console.log(`GitHub Payload URL: ${githubPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
         console.log(`GitHub settings: ${githubWebhooksSettingsUrl(github)}`);
-        console.log(`Tunnel example: ngrok http ${github.port ?? 3000}`);
+        console.log(`Tunnel example: ngrok http ${github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}`);
       } else {
         console.log("Lark / Feishu: connected through Personal Agent long connection");
       }

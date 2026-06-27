@@ -1,0 +1,10 @@
+export const DEFAULT_SLACK_EVENTS_PORT = 3040;
+export const DEFAULT_GITHUB_WEBHOOK_PORT = 3050;
+
+export function parseLocalPort(value: string | number, label: string): number {
+  const port = typeof value === "number" ? value : Number(value.trim());
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`${label} must be an integer from 1 to 65535.`);
+  }
+  return port;
+}

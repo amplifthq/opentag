@@ -1,9 +1,11 @@
 import { mkdtempSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createSetupConfig } from "../src/setup.js";
 import {
+  assertStartPortsAvailable,
   bootstrapLocalDispatcher,
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
@@ -73,7 +75,7 @@ function slackSocketModeConfig() {
   });
 }
 
-function githubConfig() {
+function githubConfig(port?: number) {
   return createSetupConfig({
     language: "en",
     platform: "github",
@@ -86,9 +88,26 @@ function githubConfig() {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false
+      autoCreatePullRequest: false,
+      port: port ?? 3050
     }
   });
+}
+
+async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Failed to allocate a test port.");
+  }
+  return { server, port: address.port };
 }
 
 function hangingFetch(): typeof fetch {
@@ -162,6 +181,30 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherToken: built.daemon.pairingToken,
       webhookPath: "/github/webhooks"
     });
+  });
+
+  it("uses the CLI GitHub webhook port default for legacy configs without a saved port", () => {
+    const built = githubConfig();
+    delete built.platforms.github!.port;
+
+    expect(githubIngressConfigFromCliConfig(built)).toMatchObject({
+      port: 3050
+    });
+  });
+
+  it("fails before start when the GitHub webhook port is already in use", async () => {
+    const { server, port } = await listenOnRandomPort();
+    try {
+      const built = githubConfig(port);
+
+      await expect(assertStartPortsAvailable(built)).rejects.toThrow(
+        `OpenTag cannot start GitHub local webhook because port ${port} is already in use.`
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("fails fast for GitHub when run branches are not prepared for apply actions", () => {

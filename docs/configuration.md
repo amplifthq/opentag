@@ -237,6 +237,9 @@ https://<your-tunnel-host>/github/webhooks
 ```
 
 The CLI stores the repository webhook secret in `platforms.github.webhookSecret`.
+`opentag setup` writes the CLI local webhook port to `platforms.github.port`;
+new CLI configs default to `3050` to avoid common frontend dev-server port
+collisions.
 It verifies `x-hub-signature-256` and handles these GitHub events:
 
 - `issue_comment`
@@ -249,7 +252,7 @@ It verifies `x-hub-signature-256` and handles these GitHub events:
 | `APP_ID` | yes | GitHub App ID expected by Probot |
 | `WEBHOOK_SECRET` | yes | GitHub App webhook secret |
 | `PRIVATE_KEY_PATH` | yes | Path to GitHub App private key |
-| `PORT` | no | Usually `3000` in local scripts |
+| `PORT` | no | Probot app port; older local scripts usually use `3000`. CLI configs use `platforms.github.port` instead |
 | `WEBHOOK_PATH` | no | Usually `/github/webhooks` |
 | `OPENTAG_DISPATCHER_URL` | yes for real dispatch | Dispatcher URL. If omitted, the app logs and does not dispatch the run |
 | `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |

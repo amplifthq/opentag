@@ -4,6 +4,7 @@ import type { CliLanguage } from "../catalogs/languages.js";
 import type { OpenTagCliConfig } from "../config.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "../platforms/github/display.js";
 import { formatLarkPersonalAgentSummary } from "../platforms/lark/display.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "../platforms/ports.js";
 import type { LarkSetupMethod, OpenTagSetupInput } from "./types.js";
 
 function yesNo(value: boolean, language: CliLanguage): string {
@@ -70,8 +71,8 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           ? ["Slack 连接方式: 本地 Socket Mode", "Slack 入站: 通过 Slack WebSocket，不需要公网 URL"]
           : ["Slack connection: Local Socket Mode", "Slack ingress: Slack WebSocket; no public URL required"]
         : input.language === "zh-CN"
-          ? ["Slack 连接方式: 公网 Events API", `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`]
-          : ["Slack connection: Public Events API", `Slack Events URL: http://localhost:${input.slack.port ?? 3040}/slack/events`];
+          ? ["Slack 连接方式: 公网 Events API", `Slack Events URL: http://localhost:${input.slack.port ?? DEFAULT_SLACK_EVENTS_PORT}/slack/events`]
+          : ["Slack connection: Public Events API", `Slack Events URL: http://localhost:${input.slack.port ?? DEFAULT_SLACK_EVENTS_PORT}/slack/events`];
     platformLines.push(
       ...(input.language === "zh-CN"
         ? [
@@ -118,11 +119,19 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
   const repository = config.daemon.repositories[0];
   const language = config.preferences?.language ?? "en";
   const github = config.platforms.github;
+  const slack = config.platforms.slack;
+  const githubPort = github?.port ?? DEFAULT_GITHUB_WEBHOOK_PORT;
   if (language === "zh-CN") {
     return [
       "OpenTag 配置已保存。",
       `配置文件: ${configPath}`,
       repository ? `项目路径: ${repository.checkoutPath}` : undefined,
+      slack ? "" : undefined,
+      slack ? "Slack 下一步：" : undefined,
+      slack ? `绑定 channel: ${slack.teamId}/${slack.channelId}` : undefined,
+      slack ? "测试前先在 Slack channel 里运行 /invite @你的 App 名称。" : undefined,
+      slack?.mode === "socket_mode" ? "Socket Mode 不需要公网 URL；直接保持 opentag start 运行即可。" : undefined,
+      slack?.mode !== "socket_mode" && slack ? `Events API 本地监听: http://localhost:${slack.port ?? DEFAULT_SLACK_EVENTS_PORT}/slack/events` : undefined,
       github ? "" : undefined,
       github ? "GitHub webhook 下一步：" : undefined,
       github ? `GitHub 设置页: ${githubWebhooksSettingsUrl(github)}` : undefined,
@@ -131,7 +140,7 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
       github ? "Content type: application/json" : undefined,
       github ? "Events: Issue comments, Pull request review comments" : undefined,
       github ? `本地监听: ${githubLocalWebhookUrl({ port: github.port, webhookPath: github.webhookPath })}` : undefined,
-      github ? "公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http 3000。" : undefined,
+      github ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${githubPort}。` : undefined,
       github ? "当 OpenTag 给出 create_pull_request 建议动作后，在 thread 里回复 apply 1 创建 PR。" : undefined
     ]
       .filter((line): line is string => Boolean(line))
@@ -141,6 +150,12 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
     "OpenTag config saved.",
     `Config: ${configPath}`,
     repository ? `Project path: ${repository.checkoutPath}` : undefined,
+    slack ? "" : undefined,
+    slack ? "Slack next steps:" : undefined,
+    slack ? `Bound channel: ${slack.teamId}/${slack.channelId}` : undefined,
+    slack ? "Before testing, run /invite @your app name in that Slack channel." : undefined,
+    slack?.mode === "socket_mode" ? "Socket Mode does not need a public URL; keep opentag start running." : undefined,
+    slack?.mode !== "socket_mode" && slack ? `Events API local listener: http://localhost:${slack.port ?? DEFAULT_SLACK_EVENTS_PORT}/slack/events` : undefined,
     github ? "" : undefined,
     github ? "GitHub webhook next steps:" : undefined,
     github ? `GitHub settings: ${githubWebhooksSettingsUrl(github)}` : undefined,
@@ -149,7 +164,7 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
     github ? "Content type: application/json" : undefined,
     github ? "Events: Issue comments, Pull request review comments" : undefined,
     github ? `Local listener: ${githubLocalWebhookUrl({ port: github.port, webhookPath: github.webhookPath })}` : undefined,
-    github ? "Point a public tunnel at the local listener, for example: ngrok http 3000." : undefined,
+    github ? `Point a public tunnel at the local listener, for example: ngrok http ${githubPort}.` : undefined,
     github ? "When OpenTag shows a create_pull_request action, reply `apply 1` in the thread to create the PR." : undefined
   ]
     .filter((line): line is string => Boolean(line))

@@ -19,9 +19,11 @@ type MessageKey =
   | "slackAppId"
   | "slackTeamId"
   | "slackChannelId"
+  | "slackPort"
   | "githubRepository"
   | "githubToken"
   | "githubWebhookSecret"
+  | "githubPort"
   | "githubAutoCreatePr"
   | "bindingMethod"
   | "confirmSetup"
@@ -47,9 +49,11 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     slackAppId: "Slack App ID (optional)",
     slackTeamId: "Slack Team ID",
     slackChannelId: "Slack Channel ID",
+    slackPort: "Local Slack Events API port",
     githubRepository: "GitHub repository (owner/repo)",
     githubToken: "GitHub token for comments and `apply 1` pull requests",
     githubWebhookSecret: "GitHub webhook secret",
+    githubPort: "Local GitHub webhook port",
     githubAutoCreatePr: "Create pull requests immediately after runs? (advanced)",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
@@ -74,9 +78,11 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     slackAppId: "Slack App ID（可选）",
     slackTeamId: "Slack Team ID",
     slackChannelId: "Slack Channel ID",
+    slackPort: "本地 Slack Events API 端口",
     githubRepository: "GitHub 仓库（owner/repo）",
     githubToken: "GitHub token（用于回写评论和 apply 1 创建 PR）",
     githubWebhookSecret: "GitHub webhook secret",
+    githubPort: "本地 GitHub webhook 端口",
     githubAutoCreatePr: "run 结束后立刻自动创建 pull request 吗？（高级选项）",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",

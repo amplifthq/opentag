@@ -16,7 +16,7 @@ const PlatformSchema = z.enum(["lark", "slack", "github", "telegram"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
-const OptionalPortSchema = z.number().int().positive().optional();
+const OptionalPortSchema = z.number().int().min(1).max(65535).optional();
 
 const RepositoryBindingSchema = z
   .object({
@@ -144,8 +144,10 @@ const PreferencesSchema = z
         slackMode: SlackModeSchema.optional(),
         slackTeamId: z.string().min(1).optional(),
         slackChannelId: z.string().min(1).optional(),
+        slackPort: OptionalPortSchema,
         githubOwner: z.string().min(1).optional(),
         githubRepo: z.string().min(1).optional(),
+        githubPort: OptionalPortSchema,
         githubAutoCreatePullRequest: z.boolean().optional()
       })
       .strict()

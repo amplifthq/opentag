@@ -110,7 +110,8 @@ async function createGitHubConfiguredDispatcher() {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false
+      autoCreatePullRequest: false,
+      port: 3050
     }
   });
   const githubRequests: Array<{ url: string; method?: string; authorization?: string | null; body?: unknown }> = [];

@@ -38,7 +38,7 @@ export type GitHubSetupInput = {
   repo: string;
   webhookPath: string;
   autoCreatePullRequest: boolean;
-  port?: number;
+  port: number;
 };
 
 export type OpenTagSetupInput = {
@@ -63,8 +63,10 @@ export type SetupDefaults = Partial<{
   bindingMethod: BindingMethod;
   slackTeamId: string;
   slackChannelId: string;
+  slackPort?: number;
   githubOwner: string;
   githubRepo: string;
+  githubPort: number;
   githubAutoCreatePullRequest: boolean;
   savedLarkCredentials: SavedLarkCredentials;
 }>;

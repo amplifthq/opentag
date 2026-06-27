@@ -194,7 +194,8 @@ describe("OpenTag CLI setup platforms", () => {
       webhookSecret: "github_webhook_secret",
       owner: "acme",
       repo: "demo",
-      webhookPath: "/github/webhooks"
+      webhookPath: "/github/webhooks",
+      port: 3050
     });
     expect(config.daemon.githubToken).toBe("ghp_token");
     expect(config.daemon.preparePullRequestBranch).toBe(true);

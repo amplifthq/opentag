@@ -60,10 +60,17 @@ OpenTag asks for:
 ```text
 GitHub repository (owner/repo)
 Allow OpenTag to create pull requests immediately after runs?
+Local GitHub webhook port
 GitHub token for comments and pull requests
 ```
 
 OpenTag generates the webhook secret for you. You do not need to make one up.
+
+The CLI default local webhook port is `3050`. If that port is already used on your computer, choose a different one:
+
+```bash
+opentag setup --platform github --github-port 3051 --force
+```
 
 ## 2. Create The GitHub Token
 
@@ -95,13 +102,13 @@ opentag start
 Then expose the GitHub listener with a tunnel, for example:
 
 ```bash
-ngrok http 3000
+ngrok http 3050
 ```
 
 OpenTag listens locally at:
 
 ```text
-http://localhost:3000/github/webhooks
+http://localhost:3050/github/webhooks
 ```
 
 Your GitHub webhook payload URL should use the public tunnel host:
@@ -153,7 +160,8 @@ Expected result:
 
 Check these first:
 
-- The tunnel is running and points to port `3000`.
+- If OpenTag says the webhook port is already in use, rerun setup with `--github-port <free-port>` and point the tunnel at that same port.
+- The tunnel is running and points to the local GitHub webhook port from `opentag start`, usually `3050`.
 - The GitHub webhook Payload URL ends with `/github/webhooks`.
 - The webhook content type is `application/json`.
 - The webhook secret exactly matches the one saved by OpenTag.

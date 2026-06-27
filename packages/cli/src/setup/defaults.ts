@@ -33,8 +33,10 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.slackMode ? { slackMode: lastSetup.slackMode } : slack ? { slackMode: slack.mode ?? "events_api" } : {}),
     ...(lastSetup?.slackTeamId ? { slackTeamId: lastSetup.slackTeamId } : slack?.teamId ? { slackTeamId: slack.teamId } : {}),
     ...(lastSetup?.slackChannelId ? { slackChannelId: lastSetup.slackChannelId } : slack?.channelId ? { slackChannelId: slack.channelId } : {}),
+    ...(lastSetup?.slackPort ? { slackPort: lastSetup.slackPort } : slack?.port ? { slackPort: slack.port } : {}),
     ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),
     ...(lastSetup?.githubRepo ? { githubRepo: lastSetup.githubRepo } : github?.repo ? { githubRepo: github.repo } : {}),
+    ...(lastSetup?.githubPort ? { githubPort: lastSetup.githubPort } : github?.port ? { githubPort: github.port } : {}),
     ...(lastSetup?.githubAutoCreatePullRequest !== undefined
       ? { githubAutoCreatePullRequest: lastSetup.githubAutoCreatePullRequest }
       : config.daemon.allowAutoCreatePullRequest !== undefined

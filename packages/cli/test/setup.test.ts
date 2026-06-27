@@ -353,4 +353,49 @@ describe("OpenTag CLI setup", () => {
     expect(Object.values(seenDefaults)).toContain("bind_later");
     expect(readCliConfig(configPath).platforms.lark?.domain).toBe("feishu");
   });
+
+  it("writes the GitHub local webhook port from setup options", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        githubPort: "3050",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.github?.port).toBe(3050);
+    expect(config.preferences?.lastSetup?.githubPort).toBe(3050);
+  });
+
+  it("uses the CLI GitHub webhook port default for new setup configs", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        platform: "github",
+        executor: "echo",
+        language: "en",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    expect(readCliConfig(configPath).platforms.github?.port).toBe(3050);
+  });
 });

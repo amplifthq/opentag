@@ -14,6 +14,7 @@ import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalog
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
 import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
@@ -45,10 +46,12 @@ export type SetupCommandOptions = {
   slackAppId?: string;
   slackTeamId?: string;
   slackChannelId?: string;
+  slackPort?: string;
   githubToken?: string;
   githubWebhookSecret?: string;
   githubRepository?: string;
   githubWebhookPath?: string;
+  githubPort?: string;
   githubAutoCreatePr?: boolean;
   binding?: string;
   force?: boolean;
@@ -95,6 +98,10 @@ function parseGitHubRepository(value: string): { owner: string; repo: string } {
     owner: match[1]!,
     repo: match[2]!.replace(/\.git$/, "")
   };
+}
+
+function parsePortInput(value: string | undefined, label: string): number | undefined {
+  return value === undefined ? undefined : parseLocalPort(value, label);
 }
 
 function githubRepositoryFromRemote(projectPath: string): string | undefined {
@@ -452,6 +459,10 @@ async function collectSlackSetup(
         }))
       });
 
+  if (selectedMode === "socket_mode" && options.slackPort) {
+    throw new Error("--slack-port can only be used with --slack-mode events_api.");
+  }
+
   if (
     (selectedMode === "socket_mode" && (!options.slackAppToken || !options.slackBotToken)) ||
     (selectedMode === "events_api" && (!options.slackSigningSecret || !options.slackBotToken))
@@ -502,6 +513,20 @@ async function collectSlackSetup(
       })),
     "Slack Channel ID"
   );
+  const port =
+    selectedMode === "events_api"
+      ? (parsePortInput(options.slackPort, "Slack Events API port") ??
+        (options.yes
+          ? defaults.slackPort ?? DEFAULT_SLACK_EVENTS_PORT
+          : parseLocalPort(
+              await prompts.text({
+                message: t(language, "slackPort"),
+                initialValue: String(defaults.slackPort ?? DEFAULT_SLACK_EVENTS_PORT),
+                placeholder: String(DEFAULT_SLACK_EVENTS_PORT)
+              }),
+              "Slack Events API port"
+            )))
+      : undefined;
   const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "slack");
   return {
     mode: selectedMode,
@@ -511,7 +536,8 @@ async function collectSlackSetup(
     teamId,
     channelId,
     bindingMethod,
-    ...(appId ? { appId } : {})
+    ...(appId ? { appId } : {}),
+    ...(port ? { port } : {})
   };
 }
 
@@ -556,13 +582,26 @@ async function collectGitHubSetup(
   }
   const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
   const webhookSecret = options.githubWebhookSecret ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret") : generateGitHubWebhookSecret();
+  const port =
+    parsePortInput(options.githubPort, "GitHub webhook port") ??
+    (options.yes
+      ? defaults.githubPort ?? DEFAULT_GITHUB_WEBHOOK_PORT
+      : parseLocalPort(
+          await prompts.text({
+            message: t(language, "githubPort"),
+            initialValue: String(defaults.githubPort ?? DEFAULT_GITHUB_WEBHOOK_PORT),
+            placeholder: String(DEFAULT_GITHUB_WEBHOOK_PORT)
+          }),
+          "GitHub webhook port"
+        ));
   return {
     token,
     webhookSecret,
     owner: repository.owner,
     repo: repository.repo,
     webhookPath: options.githubWebhookPath ?? "/github/webhooks",
-    autoCreatePullRequest
+    autoCreatePullRequest,
+    port
   };
 }
 

@@ -21,6 +21,8 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("app_mention");
     expect(combined).toContain("Do not enter a Request URL for Socket Mode");
     expect(combined).toContain("Socket Mode 不需要填写 Request URL");
+    expect(combined).toContain("Create from manifest");
+    expect(combined).toContain("/invite @OpenTag");
     expect(combined).toContain("GitHub repository target");
     expect(combined).toContain("GitHub token");
   });
@@ -40,5 +42,7 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("apply 1");
     expect(combined).toContain("Content type");
     expect(combined).toContain("application/json");
+    expect(combined).toContain("3050");
+    expect(combined).toContain("--github-port");
   });
 });

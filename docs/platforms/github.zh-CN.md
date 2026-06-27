@@ -60,10 +60,17 @@ OpenTag 会问：
 ```text
 GitHub 仓库（owner/repo）
 允许 OpenTag 在 run 结束后立刻自动创建 pull request 吗？
+本地 GitHub webhook 端口
 GitHub token（用于回写评论和创建 PR）
 ```
 
 Webhook secret 由 OpenTag 自动生成，你不用自己想。
+
+CLI 默认本地 webhook 端口是 `3050`。如果这台电脑上已经有别的服务占用了这个端口，可以换一个：
+
+```bash
+opentag setup --platform github --github-port 3051 --force
+```
 
 ## 2. 创建 GitHub Token
 
@@ -95,13 +102,13 @@ opentag start
 然后用 tunnel 暴露 GitHub listener，例如：
 
 ```bash
-ngrok http 3000
+ngrok http 3050
 ```
 
 OpenTag 本地监听地址是：
 
 ```text
-http://localhost:3000/github/webhooks
+http://localhost:3050/github/webhooks
 ```
 
 GitHub webhook 的 Payload URL 要使用公网 tunnel 域名：
@@ -153,7 +160,8 @@ setup 完成、`opentag start` 运行中、GitHub webhook 创建完成后，在 
 
 先检查这些：
 
-- tunnel 是否还在运行，并且指向本机 `3000` 端口。
+- 如果 OpenTag 提示 webhook 端口被占用，用 `--github-port <空闲端口>` 重新 setup，并让 tunnel 指向同一个端口。
+- tunnel 是否还在运行，并且指向 `opentag start` 显示的本地 GitHub webhook 端口，通常是 `3050`。
 - GitHub webhook 的 Payload URL 是否以 `/github/webhooks` 结尾。
 - webhook content type 是否是 `application/json`。
 - webhook secret 是否和 OpenTag 保存的完全一致。

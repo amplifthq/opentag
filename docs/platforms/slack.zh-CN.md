@@ -38,6 +38,14 @@ Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 
 3. 选择要测试的 workspace。
 4. 保持这个 app 页面打开。OpenTag 后面问到的 Slack 值都从这个页面拿。
 
+如果 Slack 提供 **Create from manifest**，这条路更快。Manifest 里一次性配置：
+
+- 开启 Socket Mode。
+- Bot scopes: `app_mentions:read`, `chat:write`。
+- Bot event subscription: `app_mention`。
+
+后面仍然需要安装 app，并创建 App-Level Token。
+
 ### 开启 Socket Mode
 
 1. 在 [Slack API Apps](https://api.slack.com/apps) 里打开你的 app。
@@ -148,7 +156,13 @@ https://app.slack.com/client/T0123456789/C0123456789
 - Team ID 是 `T0123456789`
 - Channel ID 是 `C0123456789`
 
-测试前记得把 Slack app 邀请进这个 channel。
+测试前记得把 Slack app 邀请进这个 channel。在目标 channel 里运行：
+
+```text
+/invite @OpenTag
+```
+
+如果你改过 app 显示名称，就用实际的 app 名称。
 
 ## 测试
 

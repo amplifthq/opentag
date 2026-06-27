@@ -38,6 +38,14 @@ Choose this mode when you want `opentag start` on your computer to receive Slack
 3. Choose the workspace where you want to test OpenTag.
 4. Keep this app page open. Every Slack value OpenTag asks for comes from this page.
 
+If Slack offers **Create from manifest**, that is the fastest path. Use a manifest with:
+
+- Socket Mode enabled.
+- Bot scopes: `app_mentions:read`, `chat:write`.
+- Bot event subscription: `app_mention`.
+
+You still need to install the app and create the App-Level Token in the steps below.
+
 ### Enable Socket Mode
 
 1. In [Slack API Apps](https://api.slack.com/apps), open your app.
@@ -148,7 +156,13 @@ In that example:
 - Team ID: `T0123456789`
 - Channel ID: `C0123456789`
 
-Invite the Slack app to the channel before testing.
+Invite the Slack app to the channel before testing. In the target channel, run:
+
+```text
+/invite @OpenTag
+```
+
+Use your app's actual display name if you renamed it.
 
 ## Test
 

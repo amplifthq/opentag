@@ -85,13 +85,15 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               bindingMethod: input.slack.bindingMethod,
               slackMode: input.slack.mode,
               slackTeamId: input.slack.teamId,
-              slackChannelId: input.slack.channelId
+              slackChannelId: input.slack.channelId,
+              ...(input.slack.port ? { slackPort: input.slack.port } : {})
             }
           : {}),
         ...(input.github
           ? {
               githubOwner: input.github.owner,
               githubRepo: input.github.repo,
+              githubPort: input.github.port,
               githubAutoCreatePullRequest: input.github.autoCreatePullRequest
             }
           : {})
@@ -148,7 +150,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               owner: input.github.owner,
               repo: input.github.repo,
               webhookPath: input.github.webhookPath,
-              ...(input.github.port ? { port: input.github.port } : {})
+              port: input.github.port
             }
           }
         : {})
