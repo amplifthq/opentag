@@ -51,6 +51,7 @@ export type LarkMessageHandlerOutcome = {
     | "ignored_group_requires_bot_open_id"
     | "ignored_not_addressed"
     | "ignored_bind_usage"
+    | "ignored_bind_unavailable"
     | "ignored_unbound_chat"
     | "ignored_empty_command"
     | "follow_up_queued"
@@ -153,6 +154,9 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
 
     // Self-service binding: connect this chat to a Project Target without leaving Lark.
     const bindRequest = parseBindCommand(command);
+    if (bindRequest && !config.bindChannel) {
+      return { status: "ignored_bind_unavailable", tenantKey, chatId };
+    }
     if (bindRequest && config.bindChannel) {
       if (!bindRequest.ok) {
         await config.reply?.({ messageId, text: BIND_USAGE });

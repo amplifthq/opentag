@@ -148,6 +148,21 @@ describe("createLarkMessageHandler", () => {
     expect(reply).toHaveBeenCalledTimes(1);
   });
 
+  it("does not turn /bind into a run when self-service binding is unavailable", async () => {
+    const createRun = vi.fn(async (event: OpenTagEvent) => runCreated(event));
+    const handler = createLarkMessageHandler({
+      agentId: "opentag",
+      botOpenId: "ou_bot",
+      resolveChannelBinding: async () => binding,
+      createRun
+    });
+
+    const outcome = await handler(messageEvent({ text: "@_user_1 /bind amplifthq/opentag" }));
+
+    expect(outcome.status).toBe("ignored_bind_unavailable");
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
   it("replies with an onboarding hint when the chat is unbound", async () => {
     const { handler, reply, createRun } = makeHandler({ binding: null });
     const outcome = await handler(messageEvent());
