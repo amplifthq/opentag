@@ -129,7 +129,26 @@ describe("protocol helpers", () => {
     // OpenTagCommandSchema.rawText allows "" but ContextPacketIntentSchema.rawText
     // is min length 1. The packet must remain valid so the store does not accept it
     // on write (createRun) and then throw on read (runFromRow parse).
-    expect(packet.intent.rawText.length).toBeGreaterThan(0);
+    // `intent` is optional on ContextPacketSchema, so assert it is defined before
+    // dereferencing to keep the test type-checking cleanly under strictNullChecks.
+    expect(packet.intent).toBeDefined();
+    expect(packet.intent?.rawText).toBe(packet.summary);
+    expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
+  });
+
+  it("falls back to summary when the command rawText is whitespace-only", () => {
+    const whitespaceRawTextEvent: OpenTagEvent = {
+      ...githubEvent,
+      command: { ...githubEvent.command, rawText: "   " }
+    };
+
+    const packet = contextPacketFromEvent(whitespaceRawTextEvent);
+
+    // A whitespace-only rawText is functionally empty: it must fall back to the
+    // non-empty summary rather than being treated as truthy and stored as-is.
+    expect(packet.intent).toBeDefined();
+    expect(packet.intent?.rawText).toBe(packet.summary);
+    expect(packet.intent?.rawText.trim().length).toBeGreaterThan(0);
     expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
   });
 
