@@ -17,7 +17,7 @@ import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platfor
 import type { PromptAdapter } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatPlatformSetupGuide } from "./guides.js";
+import { formatGitHubTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
 import type { BindingMethod, GitHubSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
 
@@ -396,6 +396,9 @@ async function collectLarkCredentials(input: {
   }
 
   assertCompleteManualLarkCredentials(input.options);
+  if (!hasCompleteManualLarkCredentials(input.options)) {
+    input.prompts.note(formatLarkManualCredentialHelp(input.language, input.domain));
+  }
   const appId = nonEmpty(input.options.larkAppId ?? (await input.prompts.text({ message: t(input.language, "larkAppId") })), "Lark App ID");
   const appSecret = nonEmpty(
     input.options.larkAppSecret ??
@@ -448,6 +451,13 @@ async function collectSlackSetup(
           hint: slackModeHint(language, candidate)
         }))
       });
+
+  if (
+    (selectedMode === "socket_mode" && (!options.slackAppToken || !options.slackBotToken)) ||
+    (selectedMode === "events_api" && (!options.slackSigningSecret || !options.slackBotToken))
+  ) {
+    prompts.note(formatSlackCredentialHelp(language, selectedMode));
+  }
 
   const appToken =
     selectedMode === "socket_mode"
@@ -533,8 +543,6 @@ async function collectGitHubSetup(
     "GitHub repository"
   );
   const repository = parseGitHubRepository(repositoryInput);
-  const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
-  const webhookSecret = options.githubWebhookSecret ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret") : generateGitHubWebhookSecret();
   const autoCreatePullRequest =
     options.githubAutoCreatePr ??
     (options.yes
@@ -543,6 +551,11 @@ async function collectGitHubSetup(
           message: t(language, "githubAutoCreatePr"),
           initialValue: defaults.githubAutoCreatePullRequest ?? false
         }));
+  if (!options.githubToken) {
+    prompts.note(formatGitHubTokenHelp(language, { autoCreatePullRequest }));
+  }
+  const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
+  const webhookSecret = options.githubWebhookSecret ? nonEmpty(options.githubWebhookSecret, "GitHub webhook secret") : generateGitHubWebhookSecret();
   return {
     token,
     webhookSecret,

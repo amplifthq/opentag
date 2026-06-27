@@ -2,6 +2,14 @@
 
 Use this guide when `opentag setup` asks how OpenTag should connect to Lark / Feishu.
 
+## Official Links
+
+- [Lark Developer Console](https://open.larksuite.com/app)
+- [Feishu Developer Console](https://open.feishu.cn/app)
+- [How to obtain App ID and App Secret](https://open.larksuite.com/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/how-to-obtain-app-id)
+- [Lark long connection / WebSocket events](https://open.larksuite.com/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-/use-websocket)
+- [Feishu long connection / WebSocket events](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN)
+
 ## Recommended Path: QR Scan
 
 The easiest setup path is:
@@ -38,7 +46,14 @@ Lark App Secret
 Lark Bot Open ID (optional)
 ```
 
-You can find App ID and App Secret in the Lark / Feishu developer console for your app.
+You can find App ID and App Secret in the Lark / Feishu developer console:
+
+1. Open the console that matches your tenant:
+   - Lark: [https://open.larksuite.com/app](https://open.larksuite.com/app)
+   - Feishu: [https://open.feishu.cn/app](https://open.feishu.cn/app)
+2. Open your app.
+3. Go to **Credentials & Basic Info**.
+4. Copy **App ID** and **App Secret** into OpenTag.
 
 The app must support bot messages and long-connection events. If you are not sure, use the QR scan path instead.
 

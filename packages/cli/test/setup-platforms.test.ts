@@ -56,6 +56,8 @@ describe("OpenTag CLI setup platforms", () => {
     );
 
     expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/slack.en.md");
+    expect(notes.join("\n")).toContain("https://api.slack.com/apps");
+    expect(notes.join("\n")).toContain("https://docs.slack.dev/apis/events-api/using-socket-mode/");
     expect(notes.join("\n")).toContain("Slack Signing Secret");
     expect(notes.join("\n")).toContain("Slack App-Level Token");
   });
@@ -82,6 +84,7 @@ describe("OpenTag CLI setup platforms", () => {
     );
 
     expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/github.zh-CN.md");
+    expect(notes.join("\n")).toContain("https://github.com/settings/personal-access-tokens/new");
     expect(notes.join("\n")).toContain("OpenTag 会自动生成 webhook secret");
   });
 

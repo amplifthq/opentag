@@ -9,6 +9,14 @@ OpenTag supports two Slack connection modes:
 
 Both modes support the same core product flow: mention the Slack app, let OpenTag run a local coding agent, and get the result back in the same Slack thread.
 
+## Official Links
+
+- [Slack app settings](https://api.slack.com/apps)
+- [Slack app quickstart](https://docs.slack.dev/quickstart/)
+- [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
+- [Verifying requests from Slack](https://docs.slack.dev/authentication/verifying-requests-from-slack/)
+- [Slack OAuth scopes](https://api.slack.com/scopes)
+
 ## Recommended: Local Socket Mode
 
 Choose this mode when you want `opentag start` on your computer to receive Slack mentions directly.
@@ -26,14 +34,16 @@ Choose this mode when you want `opentag start` on your computer to receive Slack
 1. Open [Slack API Apps](https://api.slack.com/apps).
 2. Create a new app from scratch.
 3. Choose the workspace where you want to test OpenTag.
+4. Keep this app page open. Every Slack value OpenTag asks for comes from this page.
 
 ### Enable Socket Mode
 
-1. Go to **Socket Mode**.
-2. Enable Socket Mode.
-3. Create an App-Level Token with this scope:
+1. In [Slack API Apps](https://api.slack.com/apps), open your app.
+2. Go to **Socket Mode**.
+3. Enable Socket Mode.
+4. Create an App-Level Token with this scope:
    - `connections:write`
-4. Copy the App-Level Token. It starts with `xapp-`.
+5. Copy the App-Level Token. It starts with `xapp-`.
 
 OpenTag asks for this as:
 
@@ -43,7 +53,7 @@ Slack App-Level Token
 
 ### Add Bot Permissions
 
-1. Go to **OAuth & Permissions**.
+1. In the same Slack app, go to **OAuth & Permissions**.
 2. Under **Bot Token Scopes**, add:
    - `app_mentions:read`
    - `chat:write`
@@ -58,7 +68,7 @@ Slack Bot User OAuth Token
 
 ### Subscribe to App Mentions
 
-1. Go to **Event Subscriptions**.
+1. In the same Slack app, go to **Event Subscriptions**.
 2. Enable events.
 3. Under **Subscribe to bot events**, add:
    - `app_mention`
@@ -92,22 +102,23 @@ https://<your-tunnel-host>/slack/events
 
 ### Configure Events API
 
-1. Go to **Basic Information** and copy **Signing Secret**.
-2. Go to **OAuth & Permissions** and add the same bot scopes:
+1. In [Slack API Apps](https://api.slack.com/apps), open your app.
+2. Go to **Basic Information** -> **App Credentials** and copy **Signing Secret**.
+3. Go to **OAuth & Permissions** and add the same bot scopes:
    - `app_mentions:read`
    - `chat:write`
-3. Install or reinstall the app.
-4. Go to **Event Subscriptions**.
-5. Enable events.
-6. Paste your Request URL:
+4. Install or reinstall the app.
+5. Go to **Event Subscriptions**.
+6. Enable events.
+7. Paste your Request URL:
 
 ```text
 https://<your-tunnel-host>/slack/events
 ```
 
-7. Under **Subscribe to bot events**, add:
+8. Under **Subscribe to bot events**, add:
    - `app_mention`
-8. Save changes.
+9. Save changes.
 
 Do not enable Socket Mode for this Events API setup.
 

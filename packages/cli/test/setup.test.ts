@@ -104,6 +104,36 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
+  it("shows official Lark console links before manual credential prompts", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+    const prompts = testPrompts({
+      note(message) {
+        notes.push(message);
+      },
+      text: vi.fn(async (input) => {
+        return input.message.includes("App ID") ? "cli_manual" : "";
+      }),
+      password: vi.fn(async () => "secret_manual")
+    });
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        larkDomain: "feishu",
+        start: false,
+        force: true
+      },
+      { prompts }
+    );
+
+    expect(notes.join("\n")).toContain("https://open.feishu.cn/app");
+    expect(notes.join("\n")).toContain("https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN");
+  });
+
   it("does not prompt for optional Lark bot open id when manual credentials are provided", async () => {
     const configPath = join(tempDir(), "config.json");
     const prompts = testPrompts({

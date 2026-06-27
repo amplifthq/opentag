@@ -12,6 +12,7 @@ GitHub App 安装模式是长期产品路线，但还不是当前 CLI 的默认 
 - [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
 - [Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 - [Managing fine-grained personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [Create a fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
 
 ## OpenTag 会帮你做什么
 
@@ -48,12 +49,32 @@ OpenTag 会问：
 
 ```text
 GitHub 仓库（owner/repo）
+当 run 修改了文件时，允许 OpenTag 自动创建 pull request 吗？
 GitHub token（用于回写评论和创建 PR）
 ```
 
 Webhook secret 由 OpenTag 自动生成，你不用自己想。
 
-## 2. 创建公网 tunnel
+## 2. 创建 GitHub Token
+
+OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result 评论。
+
+1. 打开 [GitHub token 创建页](https://github.com/settings/personal-access-tokens/new)。
+2. 如果 GitHub 询问 token 类型，选择 **Generate new token**。
+3. 填一个容易识别的名字，例如 `OpenTag local agent`。
+4. 在 **Repository access** 里选择 **Only select repositories**，只选择你在 `opentag setup` 里填写的仓库。
+5. 在 **Repository permissions** 里设置：
+   - **Issues**: Read and write
+   - **Pull requests**: Read and write
+6. 如果你允许 OpenTag 在 coding agent 修改文件后自动创建 pull request，还需要：
+   - **Contents**: Read and write
+7. 点击 **Generate token**。
+8. 立即复制 token。GitHub 只会显示一次。
+9. 把 token 粘贴到 `GitHub token（用于回写评论和创建 PR）` 这个输入项里。
+
+默认 setup 不需要 webhook 管理权限。除非未来你明确要让 OpenTag 自动创建 GitHub webhook，否则不要额外授予 webhook administration 权限。
+
+## 3. 创建公网 tunnel
 
 先启动 OpenTag：
 
@@ -79,7 +100,9 @@ GitHub webhook 的 Payload URL 要使用公网 tunnel 域名：
 https://<你的 tunnel 域名>/github/webhooks
 ```
 
-## 3. 创建 Repository Webhook
+## 4. 创建 Repository Webhook
+
+GitHub 官方教程是 [Creating repository webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks)。
 
 1. 打开 GitHub 仓库。
 2. 进入 **Settings** -> **Webhooks**。
@@ -97,20 +120,7 @@ https://<你的 tunnel 域名>/github/webhooks
    - **Pull request review comments**
 8. 保存 webhook。
 
-## 4. GitHub Token 权限
-
-OpenTag 会用这个 token 回写 acknowledgement、progress 和 final result 评论。
-
-如果使用 fine-grained personal access token，请授权到目标仓库，并打开：
-
-- **Issues**: Read and write
-- **Pull requests**: Read and write
-
-如果你允许 OpenTag 在 coding agent 修改文件后自动创建 pull request，还需要：
-
-- **Contents**: Read and write
-
-默认 setup 不需要 webhook 管理权限。除非未来你明确要让 OpenTag 自动创建 GitHub webhook，否则不要额外授予 webhook administration 权限。
+保存后，GitHub 会在这个 webhook 页面展示最近的 delivery。后面如果 OpenTag 没反应，优先到这里看 GitHub 有没有把事件发出来。
 
 ## 测试
 

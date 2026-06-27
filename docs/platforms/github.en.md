@@ -12,6 +12,7 @@ GitHub App installation is the longer-term product path, but it is not the defau
 - [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
 - [Validating webhook deliveries](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)
 - [Managing fine-grained personal access tokens](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens)
+- [Create a fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
 
 ## What OpenTag Handles
 
@@ -48,12 +49,32 @@ OpenTag asks for:
 
 ```text
 GitHub repository (owner/repo)
+Allow OpenTag to create pull requests when runs change files?
 GitHub token for comments and pull requests
 ```
 
 OpenTag generates the webhook secret for you. You do not need to make one up.
 
-## 2. Create A Public Tunnel
+## 2. Create The GitHub Token
+
+OpenTag uses this token to post acknowledgement, progress, and final result comments.
+
+1. Open [GitHub's token creation page](https://github.com/settings/personal-access-tokens/new).
+2. Choose **Generate new token** if GitHub asks which token type to create.
+3. Use a clear name, for example `OpenTag local agent`.
+4. Under **Repository access**, choose **Only select repositories** and select the repository you entered in `opentag setup`.
+5. Under **Repository permissions**, set:
+   - **Issues**: Read and write
+   - **Pull requests**: Read and write
+6. If you allowed OpenTag to create pull requests when a coding agent changes files, also set:
+   - **Contents**: Read and write
+7. Click **Generate token**.
+8. Copy the token immediately. GitHub only shows it once.
+9. Paste it into the `GitHub token for comments and pull requests` prompt.
+
+Do not grant webhook administration permission unless you specifically want a future workflow where OpenTag creates the webhook for you. The default setup does not need it.
+
+## 3. Create A Public Tunnel
 
 Start OpenTag:
 
@@ -79,7 +100,9 @@ Your GitHub webhook payload URL should use the public tunnel host:
 https://<your-tunnel-host>/github/webhooks
 ```
 
-## 3. Create The Repository Webhook
+## 4. Create The Repository Webhook
+
+The official GitHub guide is [Creating repository webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks).
 
 1. Open your repository on GitHub.
 2. Go to **Settings** -> **Webhooks**.
@@ -97,20 +120,7 @@ https://<your-tunnel-host>/github/webhooks
    - **Pull request review comments**
 8. Save the webhook.
 
-## 4. GitHub Token Permissions
-
-OpenTag uses this token to post acknowledgement, progress, and final result comments.
-
-For a fine-grained personal access token, grant access to the target repository and include:
-
-- **Issues**: Read and write
-- **Pull requests**: Read and write
-
-If you allow OpenTag to create pull requests when a coding agent changes files, also include:
-
-- **Contents**: Read and write
-
-Do not grant webhook administration permission unless you specifically want a future workflow where OpenTag creates the webhook for you. The default setup does not need it.
+After saving, GitHub shows recent deliveries for this webhook. If OpenTag does not react later, this page is the first place to check whether GitHub sent the event.
 
 ## Test
 
