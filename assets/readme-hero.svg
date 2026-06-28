@@ -51,7 +51,7 @@
       <text class="ink title" x="124" y="71">Slack</text>
       <rect class="soft" x="118" y="98" width="374" height="64" rx="12"/>
       <text class="body accent" x="156" y="139" font-weight="650">@opentag</text>
-      <text class="body ink" x="284" y="139">investigate this</text>
+      <text class="body ink" x="284" y="139">fix the failing test</text>
     </g>
 
     <g transform="translate(64 266)">
@@ -61,7 +61,7 @@
       <text class="ink title" x="124" y="71">GitHub</text>
       <rect class="soft" x="118" y="98" width="374" height="64" rx="12"/>
       <text class="body accent" x="156" y="139" font-weight="650">@opentag</text>
-      <text class="body ink" x="284" y="139">investigate this</text>
+      <text class="body ink" x="284" y="139">review this PR</text>
     </g>
 
     <g transform="translate(64 458)">
@@ -71,7 +71,7 @@
       <text class="ink title" x="124" y="71">Lark / Feishu</text>
       <rect class="soft" x="118" y="98" width="374" height="64" rx="12"/>
       <text class="body accent" x="156" y="139" font-weight="650">@opentag</text>
-      <text class="body ink" x="284" y="139">investigate this</text>
+      <text class="body ink" x="284" y="139">update the docs</text>
     </g>
   </g>
 
