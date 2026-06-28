@@ -352,14 +352,22 @@ If Socket Mode is still enabled, Slack may give confusing signals in the dashboa
 Expose the Slack Events ingress port:
 
 ```bash
+cloudflared tunnel --url http://localhost:3040
+```
+
+ngrok works too:
+
+```bash
 ngrok http 3040
 ```
 
 Use the resulting public URL in Slack Event Subscriptions:
 
 ```text
-https://<ngrok-host>/slack/events
+https://<tunnel-host>/slack/events
 ```
+
+Do not use `http://localhost:3040/slack/events` in Slack. Slack validates the Request URL from Slack's servers, so the URL must be public HTTPS and must forward to the local Slack ingress port `3040`.
 
 ### Local Processes
 

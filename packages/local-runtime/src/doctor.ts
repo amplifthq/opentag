@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
 import { createOpenTagClient } from "@opentag/client";
 import { normalizeChannelBindings } from "./config.js";
@@ -14,6 +16,51 @@ export type DoctorCheck = {
 
 function check(status: DoctorCheckStatus, name: string, message: string): DoctorCheck {
   return { name, status, message };
+}
+
+const CODEX_SERVICE_TIERS = new Set(["fast", "flex"]);
+
+function defaultCodexConfigPath(): string {
+  return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
+}
+
+function parseCodexServiceTiers(configText: string): string[] {
+  return [...configText.matchAll(/^\s*service_tier\s*=\s*["']([^"']+)["']\s*$/gm)]
+    .map((match) => match[1])
+    .filter((value): value is string => Boolean(value));
+}
+
+function shouldCheckCodexConfig(config: OpenTagDaemonConfig): boolean {
+  return config.repositories.some((repository) => repository.defaultExecutor === "codex");
+}
+
+function checkCodexConfig(configPath = defaultCodexConfigPath()): DoctorCheck {
+  if (!existsSync(configPath)) {
+    return check("ok", "Codex config", `No Codex config file found at ${configPath}; CLI defaults will be used`);
+  }
+
+  let configText: string;
+  try {
+    configText = readFileSync(configPath, "utf8");
+  } catch (error) {
+    return check("fail", "Codex config", error instanceof Error ? error.message : String(error));
+  }
+
+  const serviceTiers = parseCodexServiceTiers(configText);
+  if (!serviceTiers.length) {
+    return check("ok", "Codex config", `No service_tier override configured in ${configPath}`);
+  }
+
+  const invalidTier = serviceTiers.find((tier) => !CODEX_SERVICE_TIERS.has(tier));
+  if (invalidTier) {
+    return check(
+      "fail",
+      "Codex config",
+      `Unsupported service_tier '${invalidTier}' in ${configPath}. Use 'fast' or 'flex'.`
+    );
+  }
+
+  return check("ok", "Codex config", `service_tier=${serviceTiers.join(", ")}`);
 }
 
 async function checkGitCheckout(input: {
@@ -84,6 +131,7 @@ export async function runDoctor(input: {
   executors: Record<string, ExecutorAdapter>;
   fetchImpl?: typeof fetch;
   commandRunner?: CommandRunner;
+  codexConfigPath?: string;
 }): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const commandRunner = input.commandRunner ?? nodeCommandRunner;
@@ -110,6 +158,10 @@ export async function runDoctor(input: {
 
   if (!input.config.repositories.length) {
     checks.push(check("fail", "repository config", "No repositories are configured."));
+  }
+
+  if (shouldCheckCodexConfig(input.config)) {
+    checks.push(checkCodexConfig(input.codexConfigPath));
   }
 
   for (const repository of input.config.repositories) {

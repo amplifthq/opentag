@@ -102,17 +102,27 @@ Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack 
 - Slack Bot User OAuth Token。
 - 一个用于测试的 Slack channel。
 
-本地测试时，可以先用 tunnel 暴露 OpenTag：
+本地测试时，可以先用 tunnel 暴露 OpenTag。Cloudflare Tunnel 很适合快速手动测试：
+
+```bash
+cloudflared tunnel --url http://localhost:3040
+```
+
+也可以用 ngrok：
 
 ```bash
 ngrok http 3040
 ```
+
+验证 Slack app 时，保持 tunnel 进程运行。免费的 Cloudflare `trycloudflare.com` 地址会在重启 `cloudflared` 后变化，所以每次重启 tunnel 后都要更新 Slack 里的 Request URL。
 
 Slack 的 Request URL 应该长这样：
 
 ```text
 https://<你的 tunnel 域名>/slack/events
 ```
+
+不要把 `http://localhost:3040/slack/events` 填进 Slack Request URL。Slack 会从 Slack 自己的服务器访问并验证这个 URL，所以它必须是一个会转发到本机 OpenTag Slack ingress 的公网 HTTPS URL。
 
 ### 配置 Events API
 
@@ -139,6 +149,12 @@ https://<你的 tunnel 域名>/slack/events
 这条 Events API 路线不要开启 Socket Mode，否则你会调错接入方式。
 
 `message.channels` 用来接收 public channel 里的 thread reply，比如用户回复 `apply 1`。如果你要在 private channel 里测试，还要添加 `groups:history` bot scope，并订阅 `message.groups`。
+
+如果 Slack 提示 Request URL 没有返回 challenge value，优先检查这三件事：
+
+1. `opentag start` 或 Slack Events ingress 正在本机 `3040` 端口运行。
+2. tunnel 转发的是 `http://localhost:3040`，不是 dispatcher 端口。
+3. Slack 里的 Request URL 以 `/slack/events` 结尾，并且使用的是当前 tunnel hostname。
 
 ## 找到 Team ID 和 Channel ID
 

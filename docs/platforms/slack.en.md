@@ -102,17 +102,27 @@ Choose this mode when OpenTag has a stable public endpoint, or when you intentio
 - A Slack Bot User OAuth Token.
 - The target Slack channel where people will mention the app.
 
-For local testing, expose OpenTag with a tunnel:
+For local testing, expose OpenTag with a tunnel. Cloudflare Tunnel works well for quick manual tests:
+
+```bash
+cloudflared tunnel --url http://localhost:3040
+```
+
+ngrok works too:
 
 ```bash
 ngrok http 3040
 ```
+
+Keep the tunnel process running while you verify the Slack app. The free Cloudflare `trycloudflare.com` URL changes when you restart `cloudflared`, so update Slack's Request URL after each restart.
 
 Your Slack Request URL should look like:
 
 ```text
 https://<your-tunnel-host>/slack/events
 ```
+
+Do not use `http://localhost:3040/slack/events` as the Slack Request URL. Slack validates the URL from Slack's servers, so it must be a public HTTPS URL that forwards to your local OpenTag Slack ingress.
 
 ### Configure Events API
 
@@ -139,6 +149,12 @@ https://<your-tunnel-host>/slack/events
 Do not enable Socket Mode for this Events API setup.
 
 `message.channels` lets OpenTag receive thread replies such as `apply 1` in public channels. For private channels, also add the `groups:history` bot scope and subscribe to `message.groups`.
+
+If Slack says the Request URL did not respond with the challenge value, check these three things:
+
+1. `opentag start` or the Slack Events ingress is running locally on port `3040`.
+2. Your tunnel forwards to `http://localhost:3040`, not the dispatcher port.
+3. The Request URL in Slack ends with `/slack/events` and uses the current tunnel hostname.
 
 ## Find Team and Channel IDs
 
