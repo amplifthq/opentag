@@ -90,14 +90,14 @@ async function runCodexDoctor(codexConfig: string) {
 
 describe("local-runtime doctor", () => {
   it("passes when the Codex service tier is supported", async () => {
-    const checks = await runCodexDoctor('service_tier = "fast"\n');
+    const checks = await runCodexDoctor('service_tier = "fast" # use the low-latency tier\n');
 
     expect(doctorHasFailures(checks)).toBe(false);
     expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=fast");
   });
 
   it("fails when the Codex service tier is unsupported", async () => {
-    const checks = await runCodexDoctor('service_tier = "default"\n');
+    const checks = await runCodexDoctor("service_tier = 'default' # old setting\n");
 
     expect(doctorHasFailures(checks)).toBe(true);
     expect(formatDoctorChecks(checks)).toContain("FAIL Codex config: Unsupported service_tier 'default'");

@@ -25,8 +25,8 @@ function defaultCodexConfigPath(): string {
 }
 
 function parseCodexServiceTiers(configText: string): string[] {
-  return [...configText.matchAll(/^\s*service_tier\s*=\s*["']([^"']+)["']\s*$/gm)]
-    .map((match) => match[1])
+  return [...configText.matchAll(/^\s*service_tier\s*=\s*(?:"([^"]+)"|'([^']+)')(?:\s*#.*)?\s*$/gm)]
+    .map((match) => match[1] ?? match[2])
     .filter((value): value is string => Boolean(value));
 }
 
