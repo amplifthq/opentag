@@ -13,6 +13,8 @@
 
 # OpenTag
 
+**[opentag.im](https://opentag.im)**
+
 **Connect Slack, GitHub, or Lark to a local coding agent.**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
