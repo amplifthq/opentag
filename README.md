@@ -43,7 +43,6 @@ Requires Node.js 20 or newer.
 npm install -g @opentag/cli
 opentag setup
 opentag doctor
-opentag start
 ```
 
 No global install:
@@ -51,17 +50,18 @@ No global install:
 ```bash
 npx @opentag/cli setup
 npx @opentag/cli doctor
-npx @opentag/cli start
 ```
 
-`opentag setup` asks four practical questions:
+`opentag setup` is the main entry point. It asks four practical questions:
 
 1. Where should OpenTag listen?
 2. Which coding agent should OpenTag use?
 3. Which local project should OpenTag work on?
 4. Which platform credentials should OpenTag save?
 
-After setup, keep `opentag start` running and mention OpenTag from the connected platform:
+After setup saves the config, it asks whether to start OpenTag now. If you skip that prompt or stop OpenTag later, run `opentag start` manually.
+
+Once OpenTag is running, mention it from the connected platform:
 
 ```text
 @opentag investigate this
@@ -81,7 +81,7 @@ Use the published OpenTag CLI. Please:
 2. Install or run the published OpenTag CLI.
 3. Run opentag setup and help me choose Slack, GitHub, or Lark / Feishu, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
-5. Start OpenTag with opentag start and verify the setup with opentag status or opentag doctor.
+5. When setup asks whether to start OpenTag, start it. If we skip that or need to restart later, use opentag start. Then verify the setup with opentag status or opentag doctor.
 
 Do not invent credentials or secrets. Ask me before entering any token, app ID, channel ID, repository, or project path.
 ```
@@ -100,7 +100,7 @@ OpenTag also has an experimental Telegram adapter, but CLI setup is not ready fo
 
 ## What Runs Locally
 
-`opentag start` runs in the foreground on your computer. It starts:
+`opentag setup` can start the local foreground process for you at the end. `opentag start` is the manual start or restart command. It starts:
 
 - a local dispatcher
 - a local runner for the project you selected
@@ -145,8 +145,8 @@ OpenTag's CLI path is local-first.
 
 | Command | What it does |
 | --- | --- |
-| `opentag setup` | Create or update local OpenTag config |
-| `opentag start` | Start the local OpenTag stack |
+| `opentag setup` | Create or update local OpenTag config, then offer to start it |
+| `opentag start` | Manually start or restart the local OpenTag stack |
 | `opentag status` | Show local config and runtime status |
 | `opentag doctor` | Run deeper setup checks |
 | `opentag platforms` | List platform setup support |
