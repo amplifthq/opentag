@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { createDispatcherApp } from "../src/server.js";
 
 const validEvent = {
@@ -2756,5 +2757,61 @@ describe("dispatcher API", () => {
           message.body.includes("Fallback reason:")
       )
     ).toBe(true);
+  });
+
+  it("returns 400 for a malformed JSON body", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const response = await app.request("/v1/runners", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ not valid json"
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error: string };
+    expect(payload.error).toBe("invalid_json_body");
+  });
+
+  it("returns 400 for a body that fails schema validation", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const response = await app.request("/v1/runners", jsonRequest({ nope: true }));
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error: string };
+    expect(payload.error).toBe("invalid_request_body");
+  });
+
+  it("does not mask an internal ZodError as a 400 (yields 500)", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    // Simulate a non-request-body ZodError, e.g. a store repository validating a
+    // DB row. It must surface as 500 so monitoring alerts on it, not 400.
+    app.get("/__test/internal-zod", () => {
+      z.object({ value: z.string() }).parse({ value: 123 });
+      return new Response("unreachable");
+    });
+
+    const response = await app.request("/__test/internal-zod");
+
+    expect(response.status).toBe(500);
+    const text = await response.text();
+    expect(text).not.toContain("invalid_request_body");
+  });
+
+  it("does not mask an internal SyntaxError as a 400 (yields 500)", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    // Simulate a non-request-body SyntaxError, e.g. JSON.parse of a corrupt DB
+    // column or an external API response. It must surface as 500, not 400.
+    app.get("/__test/internal-syntax", () => {
+      JSON.parse("{ not valid json");
+      return new Response("unreachable");
+    });
+
+    const response = await app.request("/__test/internal-syntax");
+
+    expect(response.status).toBe(500);
+    const text = await response.text();
+    expect(text).not.toContain("invalid_json_body");
   });
 });

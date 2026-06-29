@@ -34,7 +34,39 @@ import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+
+/**
+ * Parse and validate a request body, mapping ONLY request-body parse failures to
+ * HTTP 400. Malformed JSON (SyntaxError from c.req.json()) and request-schema
+ * validation failures (ZodError from schema.parse()) are tagged as HTTPException
+ * with status 400 so the global onError handler can return them as client errors
+ * without masking unrelated internal ZodError/SyntaxError as 400s. Any other
+ * error is rethrown unchanged and falls through to a 500.
+ */
+async function parseBody<S extends z.ZodTypeAny>(c: Context, schema: S): Promise<z.infer<S>> {
+  let json: unknown;
+  try {
+    json = await c.req.json();
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      throw new HTTPException(400, {
+        res: c.json({ error: "invalid_json_body" }, 400)
+      });
+    }
+    throw err;
+  }
+
+  const result = schema.safeParse(json);
+  if (!result.success) {
+    throw new HTTPException(400, {
+      res: c.json({ error: "invalid_request_body", issues: result.error.issues }, 400)
+    });
+  }
+  return result.data;
+}
 import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
 
@@ -937,7 +969,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners", async (c) => {
-    const parsed = CreateRunnerSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CreateRunnerSchema);
     await repo.registerRunner(parsed);
     return c.json({ ok: true }, 201);
   });
@@ -949,7 +981,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings", async (c) => {
-    const parsed = CreateRepoBindingSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CreateRepoBindingSchema);
     await repo.createRepoBinding({
       provider: parsed.provider,
       owner: parsed.owner,
@@ -973,7 +1005,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings/:provider/:owner/:repo/policy-rules", async (c) => {
-    const parsed = UpsertPolicyRuleSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, UpsertPolicyRuleSchema);
     const rule = await repo.upsertRepoPolicyRule({
       provider: c.req.param("provider"),
       owner: c.req.param("owner"),
@@ -993,7 +1025,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings/:provider/:owner/:repo/mutation-mappings", async (c) => {
-    const parsed = UpsertMutationMappingSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, UpsertMutationMappingSchema);
     const mapping = await repo.upsertRepoMutationMapping({
       provider: c.req.param("provider"),
       owner: c.req.param("owner"),
@@ -1029,7 +1061,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/channel-bindings", async (c) => {
-    const parsed = CreateChannelBindingSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CreateChannelBindingSchema);
     await repo.upsertChannelBinding({
       provider: parsed.provider,
       accountId: parsed.accountId,
@@ -1053,7 +1085,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/slack-channel-bindings", async (c) => {
-    const parsed = CreateSlackChannelBindingSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CreateSlackChannelBindingSchema);
     await repo.createSlackChannelBinding(parsed);
     return c.json({ ok: true }, 201);
   });
@@ -1068,7 +1100,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runs", async (c) => {
-    const parsed = CreateRunSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CreateRunSchema);
     const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
 
     if (admitted.outcome === "needs_human_decision") {
@@ -1136,7 +1168,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/thread-actions", async (c) => {
-    const parsed = ThreadActionInputSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, ThreadActionInputSchema);
     const command = parseThreadActionCommand(parsed.rawText);
     if (!command) {
       return c.json({ outcome: "ignored", reason: "not_action_command" }, 202);
@@ -1475,7 +1507,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/follow-up-requests/:id/create-run", async (c) => {
-    const parsed = PromoteFollowUpRequestSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, PromoteFollowUpRequestSchema);
     let promoted;
     try {
       promoted = await repo.createRunFromFollowUpRequest({
@@ -1533,7 +1565,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/running", async (c) => {
-    const body = z.object({ executor: z.string().min(1) }).parse(await c.req.json());
+    const body = await parseBody(c, z.object({ executor: z.string().min(1) }));
     const ok = await repo.markRunning({
       runId: c.req.param("runId"),
       runnerId: c.req.param("runnerId"),
@@ -1552,7 +1584,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runners/:runnerId/runs/:runId/progress", async (c) => {
     const runId = c.req.param("runId");
-    const body = ProgressSchema.parse(await c.req.json());
+    const body = await parseBody(c, ProgressSchema);
     const ok = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
@@ -1594,7 +1626,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runners/:runnerId/runs/:runId/complete", async (c) => {
     const runId = c.req.param("runId");
-    const parsed = CompleteRunSchema.parse(await c.req.json());
+    const parsed = await parseBody(c, CompleteRunSchema);
     const ok = await repo.completeRun({ runId, runnerId: c.req.param("runnerId"), result: parsed.result });
     if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
     const stored = await repo.getRun({ runId });
@@ -1638,7 +1670,16 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/proposals/:proposalId/approvals", async (c) => {
     const proposalId = c.req.param("proposalId");
-    const parsedBody = ApprovalDecisionInputSchema.safeParse(await c.req.json());
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        return c.json({ error: "invalid_json_body" }, 400);
+      }
+      throw err;
+    }
+    const parsedBody = ApprovalDecisionInputSchema.safeParse(rawBody);
     if (!parsedBody.success) return c.json({ error: "invalid_approval_decision" }, 400);
     const body = parsedBody.data;
     const decision = await repo.recordApprovalDecision({
@@ -1664,7 +1705,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/proposals/:proposalId/apply-plans", async (c) => {
     const proposalId = c.req.param("proposalId");
-    const body = ApplyPlanInputSchema.parse(await c.req.json());
+    const body = await parseBody(c, ApplyPlanInputSchema);
     let executableTarget:
       | {
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
@@ -1767,7 +1808,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runs/:runId/child-runs", async (c) => {
     const parentRunId = c.req.param("runId");
-    const body = ChildRunInputSchema.parse(await c.req.json());
+    const body = await parseBody(c, ChildRunInputSchema);
     const parent = await repo.getRun({ runId: parentRunId });
     if (!parent) return c.json({ error: "parent_run_not_found" }, 404);
     const receivedAt = new Date().toISOString();
@@ -1806,6 +1847,22 @@ export function createDispatcherApp(input: {
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
     return c.json({ events });
+  });
+
+  app.onError((err, c) => {
+    // Preserve explicit HTTP errors raised by handlers/middleware. Request-body
+    // parse failures are surfaced as tagged HTTPException(400) by parseBody(),
+    // so they are returned to the client here. Crucially, we no longer map raw
+    // ZodError/SyntaxError to 400 globally: an internal ZodError (e.g. a store
+    // repository validating a DB row) or a SyntaxError from an internal
+    // JSON.parse must remain a 500 so monitoring still alerts on it.
+    if (err instanceof HTTPException) {
+      return err.getResponse();
+    }
+    // Unknown errors (including internal ZodError/SyntaxError) remain 500 so
+    // monitoring still alerts on genuine server faults.
+    console.error("dispatcher unhandled error", err);
+    return c.json({ error: "internal_server_error" }, 500);
   });
 
   return app;
