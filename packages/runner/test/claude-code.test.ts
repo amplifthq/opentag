@@ -100,6 +100,9 @@ describe("Claude Code executor", () => {
     expect(claudePrintCall?.input).toContain("[primary] github.issue: https://github.com/acme/demo/issues/1");
     expect(claudePrintCall?.input).toContain("Do not modify unrelated callback code.");
     expect(claudePrintCall?.input).toContain("fix this");
+    expect(claudePrintCall?.input).toContain("OpenTag owns the source-control handoff after you finish.");
+    expect(claudePrintCall?.input).toContain("Do not run, request, or recommend git add, git commit, git push, or gh pr create.");
+    expect(claudePrintCall?.input).toContain("OpenTag will publish the run branch and expose pull-request creation as a suggested action.");
     expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.completed"]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested Claude Code change.");
