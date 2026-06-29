@@ -1,5 +1,25 @@
-import { describe, expect, it, vi } from "vitest";
-import { handleIssueCommentCreated, handlePullRequestReviewCommentCreated } from "../src/app.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { handleIssueCommentCreated, handlePullRequestReviewCommentCreated, newRunId } from "../src/app.js";
+
+describe("newRunId", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("produces a unique id for distinct runs created in the same millisecond", () => {
+    // Freeze the clock: a Date.now()-based id would collide here, pass the
+    // eventId guard, then throw SQLITE_CONSTRAINT on the run primary key.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-24T00:00:00.000Z"));
+
+    const first = newRunId();
+    const second = newRunId();
+
+    expect(first).toMatch(/^run_/);
+    expect(second).toMatch(/^run_/);
+    expect(first).not.toBe(second);
+  });
+});
 
 describe("GitHub Probot handler", () => {
   it("creates a dispatcher run for an opentag mention", async () => {

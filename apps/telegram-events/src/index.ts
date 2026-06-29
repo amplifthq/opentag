@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import { createTelegramEventsApp } from "./app.js";
@@ -89,7 +90,7 @@ serve({
       }
     },
     async createRun(event) {
-      const runId = `run_${Date.now()}`;
+      const runId = `run_${randomUUID()}`;
       await dispatcherClient.createRun({ runId, event });
       return { runId };
     },

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createOpenTagClient, type ThreadActionInput } from "@opentag/client";
 import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
 import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, renderAcknowledgement } from "@opentag/github";
@@ -135,9 +136,17 @@ export async function handlePullRequestReviewCommentCreated(input: {
   }
 }
 
+export function newRunId(): string {
+  // Use a unique id like every other ingress (slack/lark/github) already does.
+  // createRun only guards on eventId, not on the run's primary key, so a
+  // Date.now()-based id would collide for two distinct same-millisecond events
+  // and surface as a SQLITE_CONSTRAINT error (500 + dropped event).
+  return `run_${randomUUID()}`;
+}
+
 async function createDispatcherRun(input: { event: OpenTagEvent; log: { warn(data: unknown, message: string): void } }): Promise<{ runId?: string }> {
   const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
-  const runId = `run_${Date.now()}`;
+  const runId = newRunId();
   if (!dispatcherUrl) {
     input.log.warn({ runId, event: input.event }, "OPENTAG_DISPATCHER_URL is not set; run was not dispatched");
     return {};
