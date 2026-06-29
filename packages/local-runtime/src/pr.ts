@@ -29,6 +29,7 @@ function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: R
 
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
+  executor: string;
   event: OpenTagEvent;
   binding: RepositoryBindingConfig;
   result: OpenTagRunResult;
@@ -45,7 +46,7 @@ export async function maybeCreatePullRequest(input: {
 
   const branchName = branchNameForRun(input.run.id);
   const runner = input.options.commandRunner ?? nodeCommandRunner;
-  if (input.run.executor !== "codex") {
+  if (input.executor !== "codex") {
     await commitChangedFiles({
       runner,
       workspacePath: input.binding.checkoutPath,

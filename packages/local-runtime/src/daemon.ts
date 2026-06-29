@@ -199,6 +199,7 @@ export async function runOneDaemonIteration(input: {
   try {
     result = await maybeCreatePullRequest({
       run: claimed.run,
+      executor: executorId,
       event: claimed.event,
       binding,
       result: executorResult,

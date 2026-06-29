@@ -218,11 +218,7 @@ describe("CLI platform contract smoke", () => {
       }
     });
 
-    expect(gitCommands).toEqual([
-      "git add -- README.md",
-      "git commit -m OpenTag run run_github_contract",
-      "git push -u origin opentag/run_github_contract"
-    ]);
+    expect(gitCommands).toEqual(["git push -u origin opentag/run_github_contract"]);
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("Create a pull request"))).toBe(true);
 
     const applyBody = JSON.stringify({

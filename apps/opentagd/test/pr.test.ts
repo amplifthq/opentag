@@ -68,6 +68,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
+      executor: "echo",
       event,
       binding: {
         provider: "github",
@@ -111,6 +112,7 @@ describe("maybeCreatePullRequest", () => {
     await expect(
       maybeCreatePullRequest({
         run,
+        executor: "echo",
         event,
         binding: { provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" },
         result,
@@ -124,6 +126,7 @@ describe("maybeCreatePullRequest", () => {
     await expect(
       maybeCreatePullRequest({
         run,
+        executor: "echo",
         event,
         binding: { provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" },
         result,
@@ -146,6 +149,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
+      executor: "echo",
       event,
       binding: {
         provider: "github",
@@ -181,6 +185,7 @@ describe("maybeCreatePullRequest", () => {
     const commands: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
+      executor: "echo",
       event,
       binding: {
         provider: "github",
@@ -211,6 +216,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
+      executor: "echo",
       event: slackEvent,
       binding: {
         provider: "github",
@@ -246,7 +252,8 @@ describe("maybeCreatePullRequest", () => {
   it("does not recommit files for Codex-generated branches before opening the pull request", async () => {
     const commands: string[] = [];
     await maybeCreatePullRequest({
-      run: { ...run, executor: "codex" },
+      run,
+      executor: "codex",
       event,
       binding: {
         provider: "github",
@@ -281,6 +288,7 @@ describe("maybeCreatePullRequest", () => {
     };
     const updated = await maybeCreatePullRequest({
       run,
+      executor: "echo",
       event: mismatchEvent,
       binding: {
         provider: "github",

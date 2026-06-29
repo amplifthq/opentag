@@ -323,6 +323,70 @@ describe("opentagd", () => {
     expect(calls).toEqual(["claim", "running:run_1:echo", "complete:run_1:failure:Echo failed: executor exploded"]);
   });
 
+  it("does not recommit codex changes from the claimed run row when preparing a PR branch", async () => {
+    const checkoutPath = "/tmp/demo";
+    const commands: string[] = [];
+    let completed: OpenTagRunResult | undefined;
+
+    const didWork = await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath, defaultExecutor: "codex" }],
+      executors: {
+        codex: {
+          ...createEchoExecutor(),
+          id: "codex",
+          displayName: "Codex",
+          async run() {
+            return { conclusion: "success", summary: "Changed README.md.", changedFiles: ["README.md"] };
+          }
+        }
+      },
+      pullRequestOptions: {
+        preparePullRequestBranch: true,
+        commandRunner: {
+          async run(command, args, options) {
+            commands.push(`${options?.cwd ?? ""}: ${command} ${args.join(" ")}`);
+            if (command === "git" && args[0] === "commit" && options?.cwd === checkoutPath) {
+              return { exitCode: 1, stdout: "", stderr: "nothing to commit" };
+            }
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        }
+      },
+      client: {
+        async claim() {
+          return {
+            run,
+            event: {
+              ...event,
+              permissions: [
+                ...event.permissions,
+                { scope: "repo:write", reason: "write branch" },
+                { scope: "pr:create", reason: "create the pull request action" }
+              ]
+            }
+          };
+        },
+        async markRunning() {
+          return;
+        },
+        async heartbeat() {
+          return;
+        },
+        async progress() {
+          return;
+        },
+        async complete(_runId, result) {
+          completed = result;
+        }
+      }
+    });
+
+    expect(didWork).toBe(true);
+    expect(commands).toEqual(["/tmp/demo: git push -u origin opentag/run_1"]);
+    expect(completed).toMatchObject({ conclusion: "success", changedFiles: ["README.md"] });
+  });
+
   it("completes with needs_human when preparing the PR action branch fails", async () => {
     const commands: string[] = [];
     let completed: OpenTagRunResult | undefined;
