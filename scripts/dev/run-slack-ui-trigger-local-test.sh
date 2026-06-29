@@ -109,7 +109,7 @@ sql_escape() {
 }
 
 sqlite_one() {
-  sqlite3 -noheader "$DATABASE_PATH" "$1" 2>/dev/null || true
+  sqlite3 -cmd ".timeout 5000" -noheader "$DATABASE_PATH" "$1" 2>/dev/null || true
 }
 
 kill_pid() {
@@ -276,11 +276,7 @@ req = urllib.request.Request(
 with urllib.request.urlopen(req, timeout=10) as resp:
     body = json.loads(resp.read())
 if body.get("ok"):
-    print(json.dumps({
-        "user_id": body.get("user_id", ""),
-        "bot_id": body.get("bot_id", ""),
-        "team": body.get("team", ""),
-    }))
+    print(body.get("user_id", ""))
 PY
 }
 
@@ -356,7 +352,7 @@ print_latest_apply_plan() {
     return 0
   fi
   local plan_json
-  plan_json="$(sqlite3 "$DATABASE_PATH" "select plan_json from apply_plans where approval_decision_id = '$(sql_escape "$decision_id")' order by created_at desc limit 1;" 2>/dev/null || true)"
+  plan_json="$(sqlite_one "select plan_json from apply_plans where approval_decision_id = '$(sql_escape "$decision_id")' order by created_at desc limit 1;")"
   if [[ -z "$plan_json" ]]; then
     return 0
   fi
@@ -398,10 +394,11 @@ callback_delivered_after_action() {
   [[ -n "$after_callback_count" && -n "$before_callback_count" && "$after_callback_count" -gt "$before_callback_count" ]]
 }
 
-CONFIG_SUMMARY="$(
+eval "$(
   python3 - <<'PY'
 import json
 import os
+import shlex
 
 with open(os.environ["OPENTAG_CONFIG_PATH"], "r", encoding="utf-8") as f:
     cfg = json.load(f)
@@ -446,21 +443,24 @@ matching_repos = [
 ]
 repo = matching_repos[0] if matching_repos else (repos[0] if repos else {})
 
-print(json.dumps({
+summary = {
     **binding,
     "baseBranch": repo.get("baseBranch", "main"),
     "pushRemote": repo.get("pushRemote", "origin"),
-}))
+}
+
+for env_name, key in [
+    ("OWNER", "owner"),
+    ("REPO", "repo"),
+    ("REPO_PROVIDER", "repoProvider"),
+    ("TEAM_ID", "teamId"),
+    ("CHANNEL_ID", "channelId"),
+    ("BASE_BRANCH", "baseBranch"),
+    ("PUSH_REMOTE", "pushRemote"),
+]:
+    print(f"{env_name}={shlex.quote(str(summary[key]))}")
 PY
 )"
-
-OWNER="$(node -e "console.log(JSON.parse(process.argv[1]).owner)" "$CONFIG_SUMMARY")"
-REPO="$(node -e "console.log(JSON.parse(process.argv[1]).repo)" "$CONFIG_SUMMARY")"
-REPO_PROVIDER="$(node -e "console.log(JSON.parse(process.argv[1]).repoProvider)" "$CONFIG_SUMMARY")"
-TEAM_ID="$(node -e "console.log(JSON.parse(process.argv[1]).teamId)" "$CONFIG_SUMMARY")"
-CHANNEL_ID="$(node -e "console.log(JSON.parse(process.argv[1]).channelId)" "$CONFIG_SUMMARY")"
-BASE_BRANCH="$(node -e "console.log(JSON.parse(process.argv[1]).baseBranch)" "$CONFIG_SUMMARY")"
-PUSH_REMOTE="$(node -e "console.log(JSON.parse(process.argv[1]).pushRemote)" "$CONFIG_SUMMARY")"
 export OWNER REPO REPO_PROVIDER TEAM_ID CHANNEL_ID BASE_BRANCH PUSH_REMOTE
 
 TMP_ROOT="$(mktemp -d /tmp/opentag-slack-ui-trigger.XXXXXX)"
@@ -549,16 +549,13 @@ ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
 ensure_port_free "$OPENTAG_SLACK_PORT" "Slack ingress"
 
 echo "Starting dispatcher on :${OPENTAG_DISPATCHER_PORT}"
-(
-  export PORT="$OPENTAG_DISPATCHER_PORT"
-  export OPENTAG_DATABASE_PATH="$DATABASE_PATH"
-  export OPENTAG_PAIRING_TOKEN
-  export OPENTAG_SLACK_BOT_TOKEN
-  if [[ -n "$GITHUB_TOKEN" ]]; then
-    export OPENTAG_GITHUB_TOKEN="$GITHUB_TOKEN"
-  fi
-  NODE_OPTIONS='--conditions=development' apps/dispatcher/node_modules/.bin/tsx apps/dispatcher/src/index.ts
-) &
+PORT="$OPENTAG_DISPATCHER_PORT" \
+OPENTAG_DATABASE_PATH="$DATABASE_PATH" \
+OPENTAG_PAIRING_TOKEN="$OPENTAG_PAIRING_TOKEN" \
+OPENTAG_SLACK_BOT_TOKEN="$OPENTAG_SLACK_BOT_TOKEN" \
+OPENTAG_GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+NODE_OPTIONS='--conditions=development' \
+apps/dispatcher/node_modules/.bin/tsx apps/dispatcher/src/index.ts &
 DISPATCHER_PID=$!
 
 wait_for_dispatcher "http://localhost:${OPENTAG_DISPATCHER_PORT}"
@@ -573,22 +570,20 @@ NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps
 NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts bind-slack-channels
 
 echo "Starting local daemon"
-(
-  export OPENTAG_CONFIG_PATH="$CONFIG_PATH"
-  export OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}"
-  export OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN"
-  NODE_OPTIONS='--conditions=development' apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts serve
-) &
+OPENTAG_CONFIG_PATH="$CONFIG_PATH" \
+OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}" \
+OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN" \
+NODE_OPTIONS='--conditions=development' \
+apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts serve &
 DAEMON_PID=$!
 
 echo "Starting Slack Events ingress on :${OPENTAG_SLACK_PORT}"
-(
-  export SLACK_SIGNING_SECRET
-  export OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}"
-  export OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN"
-  export PORT="$OPENTAG_SLACK_PORT"
-  NODE_OPTIONS='--conditions=development' apps/slack-events/node_modules/.bin/tsx apps/slack-events/src/index.ts
-) &
+SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
+OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}" \
+OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN" \
+PORT="$OPENTAG_SLACK_PORT" \
+NODE_OPTIONS='--conditions=development' \
+apps/slack-events/node_modules/.bin/tsx apps/slack-events/src/index.ts &
 SLACK_PID=$!
 sleep 2
 
@@ -637,8 +632,7 @@ PUBLIC_URL="${PUBLIC_URL%/}"
 
 public_ingress_probe "$PUBLIC_URL"
 
-BOT_IDENTITY="$(fetch_slack_bot_identity)"
-BOT_USER_ID="$(node -e "const v = process.argv[1] ? JSON.parse(process.argv[1]) : {}; console.log(v.user_id || '')" "${BOT_IDENTITY:-}")"
+BOT_USER_ID="$(fetch_slack_bot_identity)"
 
 if bool_true "$OPENTAG_UI_TRIGGER_RECORD" && command -v screencapture >/dev/null 2>&1; then
   mkdir -p "$ROOT_DIR/artifacts/e2e-recordings"
@@ -738,9 +732,9 @@ if bool_true "$OPENTAG_UI_TRIGGER_WAIT_FOR_ACTION" && [[ "${SUGGESTED_COUNT:-0}"
   if [[ "${after_count:-0}" -le "${before_count:-0}" ]]; then
     echo "Timed out waiting for a Slack action. Leaving stack evidence below."
   else
-    latest_decision="$(sqlite3 "$DATABASE_PATH" "select decision_json from approval_decisions order by created_at desc limit 1;" || true)"
-    latest_decision_id="$(sqlite3 "$DATABASE_PATH" "select id from approval_decisions order by created_at desc limit 1;" || true)"
-    latest_raw_text="$(sqlite3 "$DATABASE_PATH" "select coalesce(json_extract(decision_json, '$.metadata.rawText'), '') from approval_decisions order by created_at desc limit 1;" || true)"
+    latest_decision="$(sqlite_one "select decision_json from approval_decisions order by created_at desc limit 1;")"
+    latest_decision_id="$(sqlite_one "select id from approval_decisions order by created_at desc limit 1;")"
+    latest_raw_text="$(sqlite_one "select coalesce(json_extract(decision_json, '$.metadata.rawText'), '') from approval_decisions order by created_at desc limit 1;")"
     python3 - "$latest_decision" <<'PY' || true
 import json
 import sys
