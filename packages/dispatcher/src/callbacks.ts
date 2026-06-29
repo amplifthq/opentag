@@ -24,9 +24,9 @@ function githubCommentUriFrom(input: { commentsUri: string; responseBody: { id?:
 }
 
 function slackBotTokenFor(input: {
-  botToken?: string;
-  botTokensByAgentId?: Record<string, string>;
-  agentId?: string;
+  botToken?: string | undefined;
+  botTokensByAgentId?: Record<string, string> | undefined;
+  agentId?: string | undefined;
 }): string | undefined {
   if (
     input.agentId &&
@@ -112,9 +112,9 @@ export function createSlackCallbackSink(input: {
     async deliver(message: CallbackMessage): Promise<void> {
       if (message.provider !== "slack") return;
       const botToken = slackBotTokenFor({
-        ...(input.botToken ? { botToken: input.botToken } : {}),
-        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
-        ...(message.agentId ? { agentId: message.agentId } : {})
+        botToken: input.botToken,
+        botTokensByAgentId: input.botTokensByAgentId,
+        agentId: message.agentId
       });
       if (!botToken) return;
 
@@ -179,9 +179,9 @@ export function createSlackSourceReceiptSink(input: {
       if (!target) return { delivered: false };
 
       const botToken = slackBotTokenFor({
-        ...(input.botToken ? { botToken: input.botToken } : {}),
-        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
-        ...(receipt.agentId ? { agentId: receipt.agentId } : {})
+        botToken: input.botToken,
+        botTokensByAgentId: input.botTokensByAgentId,
+        agentId: receipt.agentId
       });
       if (!botToken) return { delivered: false };
 
@@ -203,9 +203,9 @@ export function createSlackSourceReceiptSink(input: {
       if (!response.ok) {
         throw new Error(`deliver Slack source receipt failed: ${response.status} ${await response.text()}`);
       }
-      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      if (body.ok === false && body.error !== "already_reacted") {
-        throw new Error(`deliver Slack source receipt failed: ${body.error ?? "unknown_error"}`);
+      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string } | null;
+      if (body?.ok === false && body.error !== "already_reacted") {
+        throw new Error(`deliver Slack source receipt failed: ${body?.error ?? "unknown_error"}`);
       }
       return { delivered: true };
     }
@@ -258,9 +258,9 @@ export function createTelegramCallbackSink(input: {
     async deliver(message: CallbackMessage): Promise<void> {
       if (message.provider !== "telegram") return;
       const botToken = slackBotTokenFor({
-        ...(input.botToken ? { botToken: input.botToken } : {}),
-        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
-        ...(message.agentId ? { agentId: message.agentId } : {})
+        botToken: input.botToken,
+        botTokensByAgentId: input.botTokensByAgentId,
+        agentId: message.agentId
       });
       if (!botToken) return;
 

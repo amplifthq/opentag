@@ -608,7 +608,7 @@ function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGra
 }
 
 function childRunPermissionsForThreadAction(input: { resolved: ResolvedThreadAction; command: ThreadActionCommand }): PermissionGrant[] {
-  let permissions = [...input.resolved.proposal.event.permissions];
+  let permissions = [...(input.resolved.proposal.event.permissions ?? [])];
   if (input.command.verb === "apply" || input.command.verb === "continue") {
     permissions = addPermissionGrant(permissions, {
       scope: "repo:read",
