@@ -13,6 +13,8 @@
 
 # OpenTag
 
+**[opentag.im](https://opentag.im)**
+
 **把 Slack、GitHub 或 Lark 连接到你本地的 coding agent。**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
