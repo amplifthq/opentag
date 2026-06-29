@@ -23,15 +23,15 @@ describe("Codex executor", () => {
         if (command === "git" && args.join(" ") === "rev-parse --verify main^{commit}") {
           return { exitCode: 0, stdout: "abc123\n", stderr: "" };
         }
-        if (command === "git" && args.join(" ") === "status --porcelain") {
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
           return calls.length < 4
             ? { exitCode: 0, stdout: "", stderr: "" }
             : {
                 exitCode: 0,
                 stdout:
                   calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .omx")
-                    ? " M src/demo.ts\n?? test/demo.test.ts\n"
-                    : "?? .omx/\n M src/demo.ts\n?? test/demo.test.ts\n",
+                    ? " M src/demo.ts\0?? test/demo.test.ts\0"
+                    : "?? .omx/\0 M src/demo.ts\0?? test/demo.test.ts\0",
                 stderr: ""
               };
         }
@@ -158,7 +158,7 @@ describe("Codex executor", () => {
         if (command === "git" && args.join(" ") === "rev-parse --verify main^{commit}") {
           return { exitCode: 0, stdout: "abc123\n", stderr: "" };
         }
-        if (command === "git" && args.join(" ") === "status --porcelain") {
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (command === "git" && args[0] === "worktree" && args[1] === "add") {
@@ -227,7 +227,31 @@ describe("Codex executor", () => {
 
 describe("git helpers", () => {
   it("parses porcelain changed files and filters internal artifacts", () => {
-    expect(parseChangedFiles("?? .omx/\n M src/demo.ts\n?? test/demo.test.ts\n")).toEqual(["src/demo.ts", "test/demo.test.ts"]);
+    expect(parseChangedFiles("?? .omx/\0 M src/demo.ts\0?? test/demo.test.ts\0")).toEqual(["src/demo.ts", "test/demo.test.ts"]);
+  });
+
+  it("keeps the rename destination and skips the source record", () => {
+    // `R  dest\0src\0` — porcelain -z emits the destination in the record and
+    // the source as a separate following NUL-terminated record.
+    expect(parseChangedFiles("R  src/new-name.ts\0src/old-name.ts\0")).toEqual(["src/new-name.ts"]);
+  });
+
+  it("parses copy records the same way as renames", () => {
+    expect(parseChangedFiles("C  src/copy.ts\0src/original.ts\0")).toEqual(["src/copy.ts"]);
+  });
+
+  it("preserves quoted and unicode paths verbatim under -z", () => {
+    // With `-z` and core.quotePath=false git emits raw bytes: no surrounding
+    // quotes, no escaping, and spaces inside the path are kept intact.
+    expect(parseChangedFiles(' M src/a file with spaces.ts\0?? "weird".ts\0 M café/résumé.ts\0')).toEqual([
+      "src/a file with spaces.ts",
+      '"weird".ts',
+      "café/résumé.ts"
+    ]);
+  });
+
+  it("handles a rename of a unicode path followed by an ordinary change", () => {
+    expect(parseChangedFiles("R  docs/náme.md\0docs/óld.md\0 M src/demo.ts\0")).toEqual(["docs/náme.md", "src/demo.ts"]);
   });
 
   it("sanitizes branch names", () => {
@@ -239,8 +263,8 @@ describe("git helpers", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push(`${command} ${args.join(" ")}`);
-        if (command === "git" && args.join(" ") === "status --porcelain") {
-          return { exitCode: 0, stdout: " M src/demo.ts\n?? test/demo.test.ts\n", stderr: "" };
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -253,7 +277,7 @@ describe("git helpers", () => {
     });
 
     expect(calls).toEqual([
-      "git status --porcelain",
+      "git -c core.quotePath=false status --porcelain -z",
       "git add -- src/demo.ts test/demo.test.ts",
       "git commit -m OpenTag run run_1"
     ]);

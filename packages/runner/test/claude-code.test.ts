@@ -11,17 +11,15 @@ describe("Claude Code executor", () => {
         if (command === "claude" && args.includes("--version")) {
           return { exitCode: 0, stdout: "1.0.0", stderr: "" };
         }
+        // The canRun dirty-check uses plain `status --porcelain`; the git
+        // helpers (cleanup + changedFiles) use the NUL-delimited `-z` form.
         if (command === "git" && args.join(" ") === "status --porcelain") {
-          return calls.length < 4
-            ? { exitCode: 0, stdout: "", stderr: "" }
-            : {
-                exitCode: 0,
-                stdout:
-                  calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .claude")
-                    ? " M src/demo.ts\n?? test/demo.test.ts\n"
-                    : "?? .claude/\n M src/demo.ts\n?? test/demo.test.ts\n",
-                stderr: ""
-              };
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .claude")
+            ? { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" }
+            : { exitCode: 0, stdout: "?? .claude/\0 M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" };
         }
         if (command === "git" && args[0] === "checkout") {
           return { exitCode: 0, stdout: "", stderr: "" };
