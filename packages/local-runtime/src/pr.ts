@@ -29,7 +29,7 @@ function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: R
 
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
-  executor: string;
+  executor?: string;
   event: OpenTagEvent;
   binding: RepositoryBindingConfig;
   result: OpenTagRunResult;
@@ -46,7 +46,11 @@ export async function maybeCreatePullRequest(input: {
 
   const branchName = branchNameForRun(input.run.id);
   const runner = input.options.commandRunner ?? nodeCommandRunner;
-  if (input.executor !== "codex") {
+  // Codex commits inside its own worktree, so the daemon must not re-add/commit its
+  // files. Prefer the explicitly-resolved executor; fall back to the run row for
+  // backward compatibility when an external caller omits it.
+  const resolvedExecutor = input.executor ?? input.run.executor;
+  if (resolvedExecutor !== "codex") {
     await commitChangedFiles({
       runner,
       workspacePath: input.binding.checkoutPath,
