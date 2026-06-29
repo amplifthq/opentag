@@ -70,10 +70,12 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
   return { teamId, channelId, threadTs };
 }
 
-function commandLooksWriteCapable(command: OpenTagCommand): boolean {
-  return /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i.test(
-    command.rawText
-  );
+const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i;
+const REPO_WRITE_TARGET_PATTERN =
+  /\b(repo|repository|code|file|files|branch|commit|diff|patch|readme|pr|pull\s+request|package\.json|pnpm|npm|test|build)\b|(?:^|\s)[./\w-]+\.(?:cjs|css|go|html|js|json|jsx|lock|md|mjs|py|rb|rs|sh|toml|ts|tsx|txt|yaml|yml)\b/i;
+
+function commandLooksRepoWriteCapable(command: OpenTagCommand): boolean {
+  return UNKNOWN_WRITE_VERB_PATTERN.test(command.rawText) && REPO_WRITE_TARGET_PATTERN.test(command.rawText);
 }
 
 function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
@@ -92,7 +94,7 @@ function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
     }
   ];
 
-  if (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksWriteCapable(command))) {
+  if (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksRepoWriteCapable(command))) {
     permissions.push(
       {
         scope: "repo:read",

@@ -1048,10 +1048,10 @@ async function deliverSourceReceiptBestEffort(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   sink: SourceReceiptSink;
   receipt: SourceReceipt;
-}): Promise<void> {
+}): Promise<SourceReceiptDelivery> {
   try {
     const result = await input.sink.deliver(input.receipt);
-    if (!result.delivered) return;
+    if (!result.delivered) return result;
     await input.repo.appendRunEvent({
       runId: input.receipt.runId,
       type: "source_receipt.delivered",
@@ -1063,6 +1063,7 @@ async function deliverSourceReceiptBestEffort(input: {
       importance: "low",
       message: `Source ${input.receipt.state} receipt delivered.`
     });
+    return result;
   } catch (error) {
     await input.repo.appendRunEvent({
       runId: input.receipt.runId,
@@ -1076,6 +1077,7 @@ async function deliverSourceReceiptBestEffort(input: {
       importance: "low",
       message: `Source ${input.receipt.state} receipt failed.`
     });
+    return { delivered: false };
   }
 }
 
@@ -1296,7 +1298,7 @@ export function createDispatcherApp(input: {
       );
     }
     const { run } = createdRun;
-    await deliverSourceReceiptBestEffort({
+    const sourceReceiptDelivery = await deliverSourceReceiptBestEffort({
       repo,
       sink: sourceReceiptSink,
       receipt: {
@@ -1307,7 +1309,10 @@ export function createDispatcherApp(input: {
         ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {})
       }
     });
-    if (presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider)) {
+    const shouldDeliverAcknowledgement =
+      presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider) ||
+      (parsed.event.callback.provider === "slack" && !sourceReceiptDelivery.delivered);
+    if (shouldDeliverAcknowledgement) {
       await deliverAndAudit({
         repo,
         sink: callbackSink,

@@ -595,6 +595,56 @@ describe("createGitHubCallbackSink", () => {
     ).resolves.toEqual({ delivered: true });
   });
 
+  it("bounds Slack source receipt reaction delivery with a timeout", async () => {
+    let aborted = false;
+    const sink = createSlackSourceReceiptSink({
+      botToken: "xoxb-test",
+      timeoutMs: 1,
+      fetchImpl: (async (_url, init) => {
+        const signal = init?.signal;
+        if (!signal) throw new Error("expected abort signal");
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => {
+            aborted = true;
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (signal.aborted) {
+            abort();
+            return;
+          }
+          signal.addEventListener("abort", abort, { once: true });
+        });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "slack",
+        state: "received",
+        event: {
+          id: "evt_1",
+          source: "slack",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100" }],
+          callback: {
+            provider: "slack",
+            uri: "https://slack.com/api/chat.postMessage",
+            threadKey: "T123|C123|1710000000.000100"
+          },
+          metadata: { teamId: "T123", channelId: "C123", messageTs: "1710000000.000100" }
+        }
+      })
+    ).resolves.toEqual({ delivered: false });
+    expect(aborted).toBe(true);
+  });
+
   it("fans out across composed sinks", async () => {
     const messages: string[] = [];
     const sink = createCompositeCallbackSink([

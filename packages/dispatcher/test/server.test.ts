@@ -606,6 +606,11 @@ describe("dispatcher API", () => {
         async deliver(message) {
           delivered.push({ kind: message.kind, body: message.body, ...(message.blocks?.length ? { blocks: message.blocks } : {}) });
         }
+      },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
+        }
       }
     });
 
@@ -694,6 +699,7 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "source_receipt.delivered",
       "run.claimed",
       "run.progress",
       "run.completed",
@@ -778,6 +784,42 @@ describe("dispatcher API", () => {
         state: "received"
       }
     });
+  });
+
+  it("falls back to a Slack text acknowledgement when the source receipt is not delivered", async () => {
+    const callbacks: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          callbacks.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = slackRepoEvent({ id: "evt_slack_receipt_fallback", sourceEventId: "EvSlackReceiptFallback", threadKey: "T123|C123|1710000000.000100" });
+    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_fallback", event }));
+    expect(createResponse.status).toBe(201);
+    expect(callbacks).toEqual([{ kind: "acknowledgement", body: "Working on it." }]);
+
+    const eventsResponse = await app.request("/v1/runs/run_slack_receipt_fallback/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "admission.decided",
+      "run.created",
+      "context_packet.generated",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.delivered"
+    ]);
   });
 
   it("renders Lark final callbacks as plain text while keeping acknowledgement and progress audit-only", async () => {
@@ -1815,6 +1857,11 @@ describe("dispatcher API", () => {
             kind: message.kind,
             ...(message.agentId ? { agentId: message.agentId } : {})
           });
+        }
+      },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
         }
       }
     });

@@ -188,10 +188,11 @@ describe("default callback presentation", () => {
     };
 
     const github = presentation.final({ provider: "github", result }).body;
-    expect(github).toContain("Title: OpenTag run run_1");
-    expect(github).toContain("Branch: `opentag/run_1` -> `main`");
-    expect(github).toContain("Changed files: `src/demo.ts`");
-    expect(github).toContain("`pnpm test`: passed");
+    expect(github).toContain("- Title: OpenTag run run_1");
+    expect(github).toContain("- Branch: `opentag/run_1` -> `main`");
+    expect(github).toContain("- Changed files: `src/demo.ts`");
+    expect(github).toContain("- Verification:\n  - `pnpm test`: passed");
+    expect(github).not.toContain("   Title:");
 
     const slack = presentation.final({ provider: "slack", result });
     expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");

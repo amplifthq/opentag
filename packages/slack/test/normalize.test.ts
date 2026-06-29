@@ -150,4 +150,26 @@ describe("Slack normalization", () => {
       expect.arrayContaining(["chat:postMessage", "reactions:write", "runner:local", "repo:read", "repo:write", "pr:create"])
     );
   });
+
+  it("keeps non-repo unknown write-like requests read-only", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_APP> Add a Linear ticket for this customer",
+      ts: "1710000000.000100",
+      eventId: "Ev791",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: {
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+
+    expect(event?.command.intent).toBe("unknown");
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "reactions:write", "runner:local"]);
+  });
 });
