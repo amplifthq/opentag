@@ -42,8 +42,9 @@ export function parseStatusEntries(statusOutput: string): GitStatusEntry[] {
     const path = record.slice(3);
 
     // Rename/copy records carry a trailing source record we must skip past so
-    // it is not mistaken for an independent change.
-    const isRenameOrCopy = status[0] === "R" || status[0] === "C";
+    // it is not mistaken for an independent change. Git's XY status can put
+    // rename/copy in either column (index or worktree), so check both.
+    const isRenameOrCopy = status.includes("R") || status.includes("C");
     if (isRenameOrCopy) {
       index += 1;
     }

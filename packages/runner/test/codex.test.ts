@@ -240,6 +240,14 @@ describe("git helpers", () => {
     expect(parseChangedFiles("C  src/copy.ts\0src/original.ts\0")).toEqual(["src/copy.ts"]);
   });
 
+  it("keeps the worktree-side rename destination and skips the source record", () => {
+    expect(parseChangedFiles(" R src/new-name.ts\0src/old-name.ts\0")).toEqual(["src/new-name.ts"]);
+  });
+
+  it("parses worktree-side copy records the same way as index-side copies", () => {
+    expect(parseChangedFiles(" C src/copy.ts\0src/original.ts\0")).toEqual(["src/copy.ts"]);
+  });
+
   it("preserves quoted and unicode paths verbatim under -z", () => {
     // With `-z` and core.quotePath=false git emits raw bytes: no surrounding
     // quotes, no escaping, and spaces inside the path are kept intact.
