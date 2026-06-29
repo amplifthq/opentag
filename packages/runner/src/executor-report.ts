@@ -38,6 +38,17 @@ export function executorReportPromptLines(): string[] {
   ];
 }
 
+export function executorPolicyPromptLines(): string[] {
+  return [
+    "Work autonomously but keep the change narrow. Run relevant verification if you modify files.",
+    "OpenTag owns the source-control handoff after you finish.",
+    "Do not run, request, or recommend git add, git commit, git push, or gh pr create.",
+    "Do not ask the user to approve local source-control commands; summarize file changes and verification only.",
+    "OpenTag will publish the run branch and expose pull-request creation as a suggested action.",
+    ...executorReportPromptLines()
+  ];
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }

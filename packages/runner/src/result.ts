@@ -3,18 +3,17 @@ import { parseExecutorReport, renderExecutorReportSummary } from "./executor-rep
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
 
+const DIRECT_SOURCE_CONTROL_COMMAND_PATTERN = /^\s*(?:[-*]\s*)?(?:`{1,3})?\s*(?:git\s+(?:add|commit|push|checkout)|gh\s+pr\s+create)\b/i;
+
 const GIT_HANDOFF_PATTERNS = [
-  /\bgit\s+(?:add|commit|push|status|checkout)\b/i,
-  /\bgh\s+pr\s+create\b/i,
-  /\binteractive user approval\b/i,
-  /\bpermission system\b/i,
-  /\brequires?\s+approval\b.*\b(?:git|commit|push|pull request|pr)\b/i,
-  /\b(?:cannot|can't|need|needs|please|approve|approval|required)\b.*\b(?:git|commit|push|pull request|pr)\b/i,
-  /\b(?:commit|push|create (?:a )?(?:pull request|pr)|open (?:a )?pull request)\b.*\b(?:approve|approval|manual|finish|next|requires?|required)\b/i
+  DIRECT_SOURCE_CONTROL_COMMAND_PATTERN,
+  /\b(?:interactive user approval|permission system)\b.*\b(?:git|source-control|commit|push|pull request|pr)\b/i,
+  /\b(?:git|source-control|commit|push|pull request|pr)\b.*\b(?:interactive user approval|permission system)\b/i,
+  /(?=.*\b(?:git\s+(?:add|commit|push|checkout)|gh\s+pr\s+create|commit|push|pull request|pr)\b)(?=.*\b(?:approval|approve|manual|need|needs|cannot|can't|please|requires?|required|finish|next action|remaining work|blocked|blocker|permission)\b)/i
 ];
 
 const HANDOFF_HEADING_PATTERN =
-  /^(?:#{1,6}\s*)?(?:\*\*)?\s*(?:blocker|recommended next action|next action|remaining work|manual steps|to finish)\b/i;
+  /^(?:#{1,6}\s*)?(?:\*\*)?\s*(?:blocker|recommended next action|next action|remaining work|manual steps|to finish)\b.*\b(?:git|source-control|commit|push|pull request|pr)\b/i;
 
 function looksLikeGitHandoff(line: string): boolean {
   return GIT_HANDOFF_PATTERNS.some((pattern) => pattern.test(line));
@@ -48,6 +47,7 @@ function cleanOrFallbackExecutorSummary(input: {
 
   const summary = filteredLines
     .join("\n")
+    .replace(/(?:^|\n)\s*(?:To finish|Manual steps):\s*\n```[^\n]*\n\s*```/gi, "\n")
     .replace(/```[^\n]*\n\s*```/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
