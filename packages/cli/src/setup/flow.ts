@@ -300,13 +300,16 @@ async function collectExecutor(
     return executor;
   }
   const detections = detectExecutors(env);
-  const previous = defaults.executor;
-  const previousBuiltIn = previous !== undefined && isExecutorId(previous) ? previous : undefined;
+  const normalizedPrevious = defaults.executor?.trim();
+  if (normalizedPrevious !== undefined && normalizedPrevious.length === 0) {
+    throw new Error("Executor id must not be empty.");
+  }
+  const previousBuiltIn = normalizedPrevious !== undefined && isExecutorId(normalizedPrevious) ? normalizedPrevious : undefined;
   // A configured custom executor can't be represented by the built-in picker,
   // so surface it as a pre-selected option: the user keeps it by default but
   // can still switch to a built-in, instead of it being silently overwritten
   // (or the prompt being skipped) on an unrelated wizard re-run.
-  const customPrevious = previous !== undefined && previousBuiltIn === undefined ? previous : undefined;
+  const customPrevious = normalizedPrevious !== undefined && previousBuiltIn === undefined ? normalizedPrevious : undefined;
   const initialValue =
     customPrevious ??
     defaultExecutorId({
@@ -323,7 +326,7 @@ async function collectExecutor(
         language,
         executor,
         available: detection?.available ?? false,
-        current: executor.id === previous,
+        current: executor.id === normalizedPrevious,
         selectedByDefault: executor.id === initialValue
       })
     };

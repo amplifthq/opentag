@@ -24,6 +24,13 @@ describe("parseDaemonConfig defaultExecutor", () => {
     expect(config.repositories[0].defaultExecutor).toBe("custom-runner");
   });
 
+  it("trims executor ids before storing them", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository, defaultExecutor: " custom-runner " }]
+    });
+    expect(config.repositories[0].defaultExecutor).toBe("custom-runner");
+  });
+
   it("defaults defaultExecutor to echo when omitted", () => {
     const config = parseDaemonConfig({ repositories: [{ ...baseRepository }] });
     expect(config.repositories[0].defaultExecutor).toBe("echo");
@@ -33,6 +40,14 @@ describe("parseDaemonConfig defaultExecutor", () => {
     expect(() =>
       parseDaemonConfig({
         repositories: [{ ...baseRepository, defaultExecutor: "" }]
+      })
+    ).toThrow();
+  });
+
+  it("rejects a whitespace-only executor id", () => {
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository, defaultExecutor: "   " }]
       })
     ).toThrow();
   });

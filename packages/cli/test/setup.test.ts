@@ -78,6 +78,48 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
+  it("normalizes a saved built-in executor before reusing setup defaults", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "lark",
+        larkSetup: "manual",
+        larkDomain: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts(),
+        defaults: { executor: " codex " }
+      }
+    );
+
+    expect(readCliConfig(configPath).daemon.repositories[0].defaultExecutor).toBe("codex");
+  });
+
+  it("rejects whitespace-only saved executor defaults", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          platform: "lark",
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          defaults: { executor: "   " }
+        }
+      )
+    ).rejects.toThrow("Executor id must not be empty.");
+  });
+
   it("supports explicit manual Lark credentials", async () => {
     const configPath = join(tempDir(), "config.json");
 

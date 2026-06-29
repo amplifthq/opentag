@@ -4,15 +4,14 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
 import { z } from "zod";
-import type { ExecutorId } from "./catalogs/executors.js";
 import type { CliLanguage } from "./catalogs/languages.js";
 import type { PlatformId } from "./catalogs/platforms.js";
 
 // Executor ids (repository bindings and the last-used preference) accept any
-// non-empty string so custom executors registered by a standalone runner
+// trimmed non-empty string so custom executors registered by a standalone runner
 // validate; echo, codex, and claude-code remain the documented built-ins.
 // Mirrors the daemon config and the open runtime dispatch.
-const ExecutorIdSchema = z.string().min(1);
+const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
@@ -189,7 +188,7 @@ export type OpenTagCliPreferences = NonNullable<OpenTagCliConfig["preferences"]>
 export type OpenTagCliLastSetup = NonNullable<OpenTagCliPreferences["lastSetup"]>;
 export type OpenTagCliLanguage = CliLanguage;
 export type OpenTagCliPlatform = PlatformId;
-export type OpenTagCliExecutor = ExecutorId;
+export type OpenTagCliExecutor = string;
 
 export type PathEnvironment = Partial<
   Record<"OPENTAG_CONFIG_PATH" | "OPENTAG_CONFIG_HOME" | "OPENTAG_STATE_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME", string>

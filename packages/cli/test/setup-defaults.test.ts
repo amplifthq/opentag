@@ -44,4 +44,12 @@ describe("setupDefaultsFromConfig executor", () => {
   it("preserves a built-in executor", () => {
     expect(setupDefaultsFromConfig(cliConfig("codex")).executor).toBe("codex");
   });
+
+  it("normalizes a stored built-in executor before setup reuses it", () => {
+    expect(setupDefaultsFromConfig(cliConfig(" codex ")).executor).toBe("codex");
+  });
+
+  it("rejects whitespace-only stored executor ids", () => {
+    expect(() => cliConfig("   ")).toThrow();
+  });
 });
