@@ -55,6 +55,8 @@ export type SlackReactionPayload = {
 
 export type SlackSourceReceiptState = "received";
 
+const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
+
 export function buildSlackSuggestedActionButtonValue(input: SlackSuggestedActionButtonValue): string {
   return JSON.stringify(input);
 }
@@ -217,10 +219,15 @@ function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
   if (candidates.length === 0) return [];
 
   const lines = ["*Suggested actions*"];
-  for (const candidate of candidates) {
+  const visibleCandidates = candidates.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+  for (const candidate of visibleCandidates) {
     lines.push("", ...renderSuggestedActionCandidateLines(candidate));
   }
 
+  const remainingCount = candidates.length - visibleCandidates.length;
+  if (remainingCount > 0) {
+    lines.push("", `Showing first ${visibleCandidates.length} of ${candidates.length} actions. Reply with an action number for the rest.`);
+  }
   lines.push("", "Use the buttons below, or reply `apply 1`, `approve 1`, or `reject 1`.");
   return lines;
 }
@@ -272,7 +279,7 @@ export function renderSlackFinalResult(result: OpenTagRunResult): string {
     lines.push(
       `Verified: ${result.verification
         .slice(0, 3)
-        .map((check) => `\`${check.command}\` ${check.outcome}`)
+        .map((check) => `\`${markdownToSlackMrkdwn(check.command)}\` ${markdownToSlackMrkdwn(check.outcome)}`)
         .join(", ")}`
     );
   }
@@ -337,7 +344,8 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
         text: "*Suggested actions*\nChoose an action in this thread. Details stay in the OpenTag audit log."
       }
     });
-    for (const candidate of suggestedActionCandidates) {
+    const visibleCandidates = suggestedActionCandidates.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+    for (const candidate of visibleCandidates) {
       blocks.push({
         type: "section",
         text: {
@@ -349,6 +357,16 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
         type: "actions",
         block_id: `opentag_actions_${candidate.index}`,
         elements: createSuggestedActionButtons(candidate)
+      });
+    }
+    const remainingCount = suggestedActionCandidates.length - visibleCandidates.length;
+    if (remainingCount > 0) {
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `Showing first ${visibleCandidates.length} of ${suggestedActionCandidates.length} actions. Reply with an action number for the rest.`
+        }
       });
     }
   }

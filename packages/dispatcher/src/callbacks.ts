@@ -11,6 +11,8 @@ import type { CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } 
 
 export type FetchLike = typeof fetch;
 
+const DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS = 2_000;
+
 function slackUpdateUriFrom(postMessageUri: string): string {
   return postMessageUri.replace(/\/chat\.postMessage$/, "/chat.update");
 }
@@ -49,6 +51,28 @@ function slackSourceMessageTarget(receipt: SourceReceipt): { channelId: string; 
   const channelId = metadataString(receipt.event.metadata, "channelId");
   const messageTs = metadataString(receipt.event.metadata, "messageTs");
   return channelId && messageTs ? { channelId, messageTs } : null;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function fetchWithTimeout(input: {
+  fetchImpl: FetchLike;
+  uri: string;
+  init: RequestInit;
+  timeoutMs: number;
+}): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
+  try {
+    return await input.fetchImpl(input.uri, { ...input.init, signal: controller.signal });
+  } catch (error) {
+    if (isAbortError(error)) return null;
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
@@ -169,9 +193,11 @@ export function createSlackSourceReceiptSink(input: {
   botTokensByAgentId?: Record<string, string>;
   fetchImpl?: FetchLike;
   reactionsAddUri?: string;
+  timeoutMs?: number;
 }): SourceReceiptSink {
   const fetchImpl = input.fetchImpl ?? fetch;
   const reactionsAddUri = input.reactionsAddUri ?? "https://slack.com/api/reactions.add";
+  const timeoutMs = input.timeoutMs ?? DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS;
 
   return {
     async deliver(receipt: SourceReceipt) {
@@ -185,20 +211,26 @@ export function createSlackSourceReceiptSink(input: {
       });
       if (!botToken) return { delivered: false };
 
-      const response = await fetchImpl(reactionsAddUri, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${botToken}`,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(
-          createSlackReactionPayload({
-            channelId: target.channelId,
-            messageTs: target.messageTs,
-            name: slackSourceReceiptReactionName(receipt.state)
-          })
-        )
+      const response = await fetchWithTimeout({
+        fetchImpl,
+        uri: reactionsAddUri,
+        timeoutMs,
+        init: {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${botToken}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify(
+            createSlackReactionPayload({
+              channelId: target.channelId,
+              messageTs: target.messageTs,
+              name: slackSourceReceiptReactionName(receipt.state)
+            })
+          )
+        }
       });
+      if (!response) return { delivered: false };
 
       if (!response.ok) {
         throw new Error(`deliver Slack source receipt failed: ${response.status} ${await response.text()}`);

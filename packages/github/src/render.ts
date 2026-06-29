@@ -25,7 +25,7 @@ function renderVerificationParams(params: Record<string, unknown> | undefined): 
       if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
       const command = (item as Record<string, unknown>)["command"];
       const outcome = (item as Record<string, unknown>)["outcome"];
-      return typeof command === "string" && typeof outcome === "string" ? `   - \`${command}\`: ${outcome}` : undefined;
+      return typeof command === "string" && typeof outcome === "string" ? `  - \`${command}\`: ${outcome}` : undefined;
     })
     .filter((line): line is string => Boolean(line));
 }
@@ -39,17 +39,17 @@ function renderSuggestedActionDetails(params: Record<string, unknown> | undefine
   const changedFiles = stringArrayParam(params, "changedFiles");
   const risks = stringArrayParam(params, "risks");
   const verification = renderVerificationParams(params);
-  if (title) lines.push(`   Title: ${title}`);
-  if (head || base) lines.push(`   Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
-  if (changedFiles.length > 0) lines.push(`   Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
+  if (title) lines.push(`- Title: ${title}`);
+  if (head || base) lines.push(`- Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
+  if (changedFiles.length > 0) lines.push(`- Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
   if (risks.length > 0) {
-    lines.push("   Risks:");
+    lines.push("- Risks:");
     for (const risk of risks) {
-      lines.push(`   - ${risk}`);
+      lines.push(`  - ${risk}`);
     }
   }
   if (verification.length > 0) {
-    lines.push("   Verification:");
+    lines.push("- Verification:");
     lines.push(...verification);
   }
   return lines;

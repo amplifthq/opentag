@@ -20,12 +20,12 @@ describe("Slack callback rendering", () => {
     const text = renderSlackFinalResult({
       conclusion: "success",
       summary: "Echoed **OpenTag** command: [introduce yourself](https://example.com/cmd)",
-      verification: [{ command: "echo", outcome: "passed" }],
+      verification: [{ command: "echo '<tag>' & check", outcome: "passed" }],
       nextAction: "Open [thread](https://example.com/thread) & follow up"
     });
 
     expect(text).toBe(
-      "*Finished: success.*\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\nVerified: `echo` passed\nNext: Open <https://example.com/thread|thread> &amp; follow up"
+      "*Finished: success.*\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\nVerified: `echo '&lt;tag&gt;' &amp; check` passed\nNext: Open <https://example.com/thread|thread> &amp; follow up"
     );
     expect(text).not.toContain("**success**");
   });
@@ -123,11 +123,52 @@ describe("Slack callback rendering", () => {
     });
 
     if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
-    expect(parseSlackSuggestedActionButtonValue(actionsBlock.elements[0]?.value ?? "")).toEqual({
-      version: 1,
-      command: "apply 1",
-      proposalId: "proposal_1",
-      intentId: "intent_label_1"
+    expect(actionsBlock.elements.map((element) => parseSlackSuggestedActionButtonValue(element.value))).toEqual([
+      {
+        version: 1,
+        command: "apply 1",
+        proposalId: "proposal_1",
+        intentId: "intent_label_1"
+      },
+      {
+        version: 1,
+        command: "approve 1",
+        proposalId: "proposal_1",
+        intentId: "intent_label_1"
+      },
+      {
+        version: 1,
+        command: "reject 1",
+        proposalId: "proposal_1",
+        intentId: "intent_label_1"
+      }
+    ]);
+  });
+
+  it("caps suggested action blocks to stay under Slack's Block Kit limit", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "needs_human",
+      summary: "Prepared many proposals.",
+      suggestedChanges: Array.from({ length: 30 }, (_item, index) => ({
+        proposalId: `proposal_${index + 1}`,
+        createdAt: "2026-06-24T00:00:00.000Z",
+        summary: `Move item ${index + 1}.`,
+        intents: [
+          {
+            intentId: `intent_${index + 1}`,
+            domain: "labels",
+            action: "add_label",
+            summary: `Add label ${index + 1}.`,
+            params: { label: `label-${index + 1}` }
+          }
+        ]
+      }))
     });
+
+    const rendered = JSON.stringify(blocks);
+    expect(blocks.length).toBeLessThanOrEqual(50);
+    expect(rendered).toContain("Apply 20");
+    expect(rendered).not.toContain("Apply 21");
+    expect(rendered).toContain("Showing first 20 of 30 actions");
   });
 });

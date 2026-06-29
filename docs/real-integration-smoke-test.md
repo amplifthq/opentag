@@ -416,7 +416,7 @@ Expected result:
 - dispatcher creates a run
 - daemon claims and executes the run
 - the Slack thread receives:
-  - acknowledgement
+  - reaction receipt (`eyes`)
   - final result
 
 Routine progress should be visible in dispatcher audit events, not as Slack replies.
