@@ -564,6 +564,37 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("does not crash when Slack source receipt responses have a null JSON body", async () => {
+    const sink = createSlackSourceReceiptSink({
+      botToken: "xoxb-test",
+      fetchImpl: (async () => Response.json(null)) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "slack",
+        state: "received",
+        event: {
+          id: "evt_1",
+          source: "slack",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100" }],
+          callback: {
+            provider: "slack",
+            uri: "https://slack.com/api/chat.postMessage",
+            threadKey: "T123|C123|1710000000.000100"
+          },
+          metadata: { teamId: "T123", channelId: "C123", messageTs: "1710000000.000100" }
+        }
+      })
+    ).resolves.toEqual({ delivered: true });
+  });
+
   it("fans out across composed sinks", async () => {
     const messages: string[] = [];
     const sink = createCompositeCallbackSink([
