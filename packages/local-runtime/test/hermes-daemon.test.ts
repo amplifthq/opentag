@@ -94,8 +94,8 @@ describe("Hermes daemon integration", () => {
     {
       source: "github",
       metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 },
-      profileTemplate: "opentag-{provider}-{repoProvider}-{owner}-{repo}",
-      expectedProfile: "opentag-github-github-acme-demo"
+      profileTemplate: "opentag-{provider}-{repoProvider}-{owner}-{repo}-{issueNumber}",
+      expectedProfile: "opentag-github-github-acme-demo-1"
     },
     {
       source: "telegram",

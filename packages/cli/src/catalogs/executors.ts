@@ -7,6 +7,7 @@ export type ExecutorDescriptor = {
   id: ExecutorId;
   label: string;
   command?: string;
+  commandEnv?: string;
   alwaysAvailable?: boolean;
   devOnly?: boolean;
 };
@@ -26,12 +27,14 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
   {
     id: "claude-code",
     label: "Claude Code",
-    command: "claude"
+    command: "claude",
+    commandEnv: "OPENTAG_CLAUDE_COMMAND"
   },
   {
     id: "hermes",
     label: "Hermes",
-    command: "hermes"
+    command: "hermes",
+    commandEnv: "OPENTAG_HERMES_COMMAND"
   },
   {
     id: "echo",
@@ -42,12 +45,17 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
 ];
 
 function pathExistsOnPath(command: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (command.includes("/") || command.includes("\\")) return existsSync(command);
   const paths = env.PATH?.split(delimiter).filter(Boolean) ?? [];
   const candidates =
     process.platform === "win32" && !extname(command)
       ? [command, ...(env.PATHEXT?.split(delimiter).filter(Boolean) ?? [".COM", ".EXE", ".BAT", ".CMD"]).map((extension) => `${command}${extension.toLowerCase()}`)]
       : [command];
   return paths.some((directory) => candidates.some((candidate) => existsSync(join(directory, candidate))));
+}
+
+function executorCommand(executor: ExecutorDescriptor, env: NodeJS.ProcessEnv): string | undefined {
+  return executor.commandEnv ? env[executor.commandEnv] || executor.command : executor.command;
 }
 
 export function isExecutorId(value: string): value is ExecutorId {
@@ -63,11 +71,12 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
         reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Built in"
       };
     }
-    const available = executor.command ? pathExistsOnPath(executor.command, env) : false;
+    const command = executorCommand(executor, env);
+    const available = command ? pathExistsOnPath(command, env) : false;
     return {
       id: executor.id,
       available,
-      reason: available ? `Found ${executor.command} on PATH` : `Could not find ${executor.command} on PATH`
+      reason: available ? `Found ${command} on PATH` : `Could not find ${command} on PATH`
     };
   });
 }

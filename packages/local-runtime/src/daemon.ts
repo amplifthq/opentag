@@ -62,26 +62,27 @@ function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: un
   };
 }
 
-function metadataToken(metadata: Record<string, unknown>, key: string): string | undefined {
-  const value = metadata[key];
+function metadataToken(metadata: Record<string, unknown> | null | undefined, key: string): string | undefined {
+  const value = metadata?.[key];
   if (typeof value === "string") return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   return undefined;
 }
 
 function executorMetadata(event: OpenTagEvent): Record<string, unknown> {
+  const metadata = event.metadata ?? {};
   const accountId =
-    metadataToken(event.metadata, "accountId") ??
-    metadataToken(event.metadata, "teamId") ??
-    metadataToken(event.metadata, "tenantKey") ??
-    metadataToken(event.metadata, "botId");
+    metadataToken(metadata, "accountId") ??
+    metadataToken(metadata, "teamId") ??
+    metadataToken(metadata, "tenantKey") ??
+    metadataToken(metadata, "botId");
   const conversationId =
-    metadataToken(event.metadata, "conversationId") ??
-    metadataToken(event.metadata, "channelId") ??
-    metadataToken(event.metadata, "chatId");
+    metadataToken(metadata, "conversationId") ??
+    metadataToken(metadata, "channelId") ??
+    metadataToken(metadata, "chatId");
 
   return {
-    ...event.metadata,
+    ...metadata,
     provider: event.source,
     ...(accountId ? { accountId } : {}),
     ...(conversationId ? { conversationId } : {})

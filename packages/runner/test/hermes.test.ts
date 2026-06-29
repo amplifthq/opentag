@@ -42,7 +42,7 @@ describe("Hermes executor", () => {
         workspacePath: "/tmp/demo",
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [],
-        metadata: { provider: "slack", accountId: "T123", conversationId: "C456" }
+        metadata: { provider: "slack", accountId: "T123", conversationId: 456 }
       })
     ).resolves.toEqual({ ready: true });
 
@@ -71,7 +71,7 @@ describe("Hermes executor", () => {
         exclusions: ["Do not modify unrelated callback code."]
       },
       baseBranch: "main",
-      metadata: { provider: "slack", accountId: "T123", conversationId: "C456" }
+      metadata: { provider: "slack", accountId: "T123", conversationId: 456 }
     }, {
       emit: async () => {}
     });
@@ -81,7 +81,7 @@ describe("Hermes executor", () => {
 
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "checkout -B opentag/run_1 main")).toBe(true);
     expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain("opentag-slack-T123-C456");
+    expect(hermesCall?.args).toContain("opentag-slack-T123-456");
     expect(hermesCall?.args).not.toContain("--provider");
     expect(hermesCall?.args).not.toContain("--model");
     expect(hermesCall?.args).not.toContain("-s");
@@ -95,5 +95,62 @@ describe("Hermes executor", () => {
 
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested Hermes change.");
+  });
+
+  it("returns not ready when git status throws", async () => {
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "hermes" && args.includes("--version")) {
+          return { exitCode: 0, stdout: "1.0.0", stderr: "" };
+        }
+        throw new Error("bad cwd");
+      }
+    };
+
+    await expect(
+      createHermesExecutor({ runner }).canRun({
+        runId: "run_1",
+        workspacePath: "/tmp/missing",
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: []
+      })
+    ).resolves.toEqual({ ready: false, reason: "Workspace is not a git checkout: bad cwd" });
+  });
+
+  it("cleans internal artifacts when Hermes exits unsuccessfully", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+
+        if (command === "git" && args[0] === "checkout") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "hermes" && args.includes("-z")) {
+          return { exitCode: 1, stdout: "", stderr: "failed" };
+        }
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: "?? .omx/session.json\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "clean -fd -- .omx") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await expect(
+      createHermesExecutor({ runner }).run({
+        runId: "run_1",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: []
+      }, {
+        emit: async () => {}
+      })
+    ).rejects.toThrow("hermes -z failed with exit code 1: failed");
+
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .omx")).toBe(true);
   });
 });
