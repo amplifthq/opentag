@@ -202,7 +202,9 @@ export function preserveContextFacts(event: OpenTagEvent, classified: Classified
 }
 
 export function summarizeContextPacket(event: OpenTagEvent): string {
-  return event.command.rawText || `OpenTag ${event.command.intent} request`;
+  // A whitespace-only rawText is functionally empty, so fall back to the derived
+  // request label rather than emitting a blank summary.
+  return event.command.rawText.trim() || `OpenTag ${event.command.intent} request`;
 }
 
 export function budgetContextPointers(classified: ClassifiedContextPointer[], budgetTokens?: number): ClassifiedContextPointer[] {
@@ -237,7 +239,14 @@ export function assembleContextPacketFromEvent(
     summary,
     sourcePointers: budgeted.map((entry) => entry.pointer),
     intent: {
-      rawText: event.command.rawText,
+      // OpenTagCommandSchema.rawText permits an empty string, but
+      // ContextPacketIntentSchema.rawText requires min length 1. A
+      // whitespace-only rawText is functionally empty, so trim before the
+      // emptiness check and fall back to the (always non-empty) summary. The
+      // original, untrimmed rawText is preserved whenever it has real content,
+      // keeping the emitted packet schema-valid so the store does not accept the
+      // run on write and then throw on read.
+      rawText: event.command.rawText.trim() ? event.command.rawText : summary,
       normalizedIntent: event.command.intent,
       requestedBy: event.actor
     },

@@ -9,7 +9,7 @@ import {
   protocolRunFieldsFromEvent,
   workThreadFromEvent
 } from "../src/protocol.js";
-import type { OpenTagEvent } from "../src/schema.js";
+import { ContextPacketSchema, type OpenTagEvent } from "../src/schema.js";
 
 const githubEvent: OpenTagEvent = {
   id: "evt_github_comment_1",
@@ -116,6 +116,40 @@ describe("protocol helpers", () => {
     expect(packet.assembly?.stages).toEqual(["collect", "classify", "filter", "preserve", "summarize", "budget", "emit"]);
     expect(packet.risks?.[0]).toContain("repo:write");
     expect(packet.exclusions?.[0]).toContain("explicit capability");
+  });
+
+  it("emits a schema-valid packet when the command rawText is empty", () => {
+    const emptyRawTextEvent: OpenTagEvent = {
+      ...githubEvent,
+      command: { ...githubEvent.command, rawText: "" }
+    };
+
+    const packet = contextPacketFromEvent(emptyRawTextEvent);
+
+    // OpenTagCommandSchema.rawText allows "" but ContextPacketIntentSchema.rawText
+    // is min length 1. The packet must remain valid so the store does not accept it
+    // on write (createRun) and then throw on read (runFromRow parse).
+    // `intent` is optional on ContextPacketSchema, so assert it is defined before
+    // dereferencing to keep the test type-checking cleanly under strictNullChecks.
+    expect(packet.intent).toBeDefined();
+    expect(packet.intent?.rawText).toBe(packet.summary);
+    expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
+  });
+
+  it("falls back to summary when the command rawText is whitespace-only", () => {
+    const whitespaceRawTextEvent: OpenTagEvent = {
+      ...githubEvent,
+      command: { ...githubEvent.command, rawText: "   " }
+    };
+
+    const packet = contextPacketFromEvent(whitespaceRawTextEvent);
+
+    // A whitespace-only rawText is functionally empty: it must fall back to the
+    // non-empty summary rather than being treated as truthy and stored as-is.
+    expect(packet.intent).toBeDefined();
+    expect(packet.intent?.rawText).toBe(packet.summary);
+    expect(packet.intent?.rawText.trim().length).toBeGreaterThan(0);
+    expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
   });
 
   it("applies context packet budget as an explicit assembly stage", () => {
