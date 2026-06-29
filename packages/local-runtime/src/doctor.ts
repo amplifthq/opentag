@@ -18,7 +18,9 @@ function check(status: DoctorCheckStatus, name: string, message: string): Doctor
   return { name, status, message };
 }
 
-const CODEX_SERVICE_TIERS = new Set(["fast", "flex"]);
+// Codex accepts built-in tiers (e.g. flex, fast), legacy request values (e.g. priority),
+// and catalog-provided tier IDs. OpenTag should not maintain a closed allowlist here.
+const CODEX_DEPRECATED_SERVICE_TIERS = new Set(["default"]);
 
 function defaultCodexConfigPath(): string {
   return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
@@ -51,12 +53,12 @@ function checkCodexConfig(configPath = defaultCodexConfigPath()): DoctorCheck {
     return check("ok", "Codex config", `No service_tier override configured in ${configPath}`);
   }
 
-  const invalidTier = serviceTiers.find((tier) => !CODEX_SERVICE_TIERS.has(tier));
-  if (invalidTier) {
+  const deprecatedTier = serviceTiers.find((tier) => CODEX_DEPRECATED_SERVICE_TIERS.has(tier));
+  if (deprecatedTier) {
     return check(
       "fail",
       "Codex config",
-      `Unsupported service_tier '${invalidTier}' in ${configPath}. Use 'fast' or 'flex'.`
+      `Deprecated service_tier '${deprecatedTier}' in ${configPath}. Remove it or set a current Codex tier such as 'flex' or 'fast'.`
     );
   }
 

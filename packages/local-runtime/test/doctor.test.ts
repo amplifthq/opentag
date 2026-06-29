@@ -96,10 +96,24 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=fast");
   });
 
-  it("fails when the Codex service tier is unsupported", async () => {
+  it("fails when the Codex service tier is a known deprecated value", async () => {
     const checks = await runCodexDoctor("service_tier = 'default' # old setting\n");
 
     expect(doctorHasFailures(checks)).toBe(true);
-    expect(formatDoctorChecks(checks)).toContain("FAIL Codex config: Unsupported service_tier 'default'");
+    expect(formatDoctorChecks(checks)).toContain("FAIL Codex config: Deprecated service_tier 'default'");
+  });
+
+  it("passes when the Codex service tier is priority", async () => {
+    const checks = await runCodexDoctor('service_tier = "priority"\n');
+
+    expect(doctorHasFailures(checks)).toBe(false);
+    expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=priority");
+  });
+
+  it("passes when the Codex service tier is a catalog-provided id", async () => {
+    const checks = await runCodexDoctor('service_tier = "acme-enterprise-tier"\n');
+
+    expect(doctorHasFailures(checks)).toBe(false);
+    expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=acme-enterprise-tier");
   });
 });
