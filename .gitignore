@@ -16,3 +16,4 @@ coverage/
 *.tsbuildinfo
 .agents/
 skills-lock.json
+opentag.local.json
