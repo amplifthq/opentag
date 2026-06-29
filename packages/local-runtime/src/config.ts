@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 
-// Accept any trimmed non-empty executor id. The built-ins are echo, codex, and
+// Accept any trimmed non-empty executor id. The built-ins are echo, codex,
 // claude-code, and hermes, but custom executors registered by a standalone runner are
 // equally valid — config validation must not be stricter than the runtime
 // dispatch (which resolves executors by id) or the dispatcher wire contract

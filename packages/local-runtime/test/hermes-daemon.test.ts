@@ -24,13 +24,17 @@ function runForEvent(input: { event: OpenTagEvent; profileTemplate: string }) {
   const runner: CommandRunner = {
     async run(command, args) {
       calls.push({ command, args });
+      const joinedArgs = args.join(" ");
 
       if (command === "hermes" && args.includes("--version")) {
         return { exitCode: 0, stdout: "1.0.0", stderr: "" };
       }
-      if (command === "git" && args.join(" ") === "status --porcelain") {
+      if (command === "git" && joinedArgs === "status --porcelain") {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      if (command === "git" && joinedArgs === "-c core.quotePath=false status --porcelain -z") {
         return calls.some((call) => call.command === "hermes" && call.args.includes("-z"))
-          ? { exitCode: 0, stdout: " M src/demo.ts\n", stderr: "" }
+          ? { exitCode: 0, stdout: " M src/demo.ts\0", stderr: "" }
           : { exitCode: 0, stdout: "", stderr: "" };
       }
       if (command === "git" && args[0] === "checkout") {

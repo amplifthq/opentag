@@ -9,7 +9,7 @@ const baseRepository = {
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
-    for (const executor of ["echo", "codex", "claude-code"]) {
+    for (const executor of ["echo", "codex", "claude-code", "hermes"]) {
       const config = parseDaemonConfig({
         repositories: [{ ...baseRepository, defaultExecutor: executor }]
       });

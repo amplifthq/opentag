@@ -8,18 +8,23 @@ describe("Hermes executor", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
+        const joinedArgs = args.join(" ");
 
         if (command === "hermes" && args.includes("--version")) {
           return { exitCode: 0, stdout: "1.0.0", stderr: "" };
         }
 
-        if (command === "git" && args.join(" ") === "status --porcelain") {
+        if (command === "git" && joinedArgs === "status --porcelain") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+
+        if (command === "git" && joinedArgs === "-c core.quotePath=false status --porcelain -z") {
           return calls.some((call) => call.command === "hermes" && call.args.includes("-z"))
-            ? { exitCode: 0, stdout: " M src/demo.ts\n?? test/demo.test.ts\n", stderr: "" }
+            ? { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" }
             : { exitCode: 0, stdout: "", stderr: "" };
         }
 
-        if (command === "git" && args.join(" ") === "checkout -B opentag/run_1 main") {
+        if (command === "git" && joinedArgs === "checkout -B opentag/run_1 main") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
 
@@ -122,6 +127,7 @@ describe("Hermes executor", () => {
     const runner: CommandRunner = {
       async run(command, args) {
         calls.push({ command, args });
+        const joinedArgs = args.join(" ");
 
         if (command === "git" && args[0] === "checkout") {
           return { exitCode: 0, stdout: "", stderr: "" };
@@ -129,10 +135,10 @@ describe("Hermes executor", () => {
         if (command === "hermes" && args.includes("-z")) {
           return { exitCode: 1, stdout: "", stderr: "failed" };
         }
-        if (command === "git" && args.join(" ") === "status --porcelain") {
-          return { exitCode: 0, stdout: "?? .omx/session.json\n", stderr: "" };
+        if (command === "git" && joinedArgs === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "?? .omx/session.json\0", stderr: "" };
         }
-        if (command === "git" && args.join(" ") === "clean -fd -- .omx") {
+        if (command === "git" && joinedArgs === "clean -fd -- .omx") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
 
