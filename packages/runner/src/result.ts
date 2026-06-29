@@ -1,4 +1,5 @@
 import type { OpenTagRunResult } from "@opentag/core";
+import { parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
 
@@ -70,7 +71,8 @@ export function createExecutorRunResult(input: {
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
-  const summary = cleanOrFallbackExecutorSummary(input);
+  const report = parseExecutorReport(input.output);
+  const summary = report ? renderExecutorReportSummary({ ...input, report }) : cleanOrFallbackExecutorSummary(input);
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [

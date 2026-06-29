@@ -1,5 +1,6 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
+import { executorReportPromptLines } from "./executor-report.js";
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
@@ -40,7 +41,7 @@ function buildPrompt(input: {
     "Do not run, request, or recommend git add, git commit, git push, or gh pr create.",
     "Do not ask the user to approve local source-control commands; summarize file changes and verification only.",
     "OpenTag will publish the run branch and expose pull-request creation as a suggested action.",
-    "End with a concise summary of what changed, what was verified, and the recommended next action."
+    ...executorReportPromptLines()
   ].join("\n");
 }
 
