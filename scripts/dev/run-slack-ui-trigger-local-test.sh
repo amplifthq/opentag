@@ -253,7 +253,13 @@ PY
 public_ingress_probe() {
   local public_url="$1"
   local code
-  code="$(curl -sS -o /tmp/opentag-slack-ui-trigger-probe.json -w "%{http_code}" -X POST "$public_url/slack/events" -H "content-type: application/json" --data '{}' || true)"
+  local probe_body
+  if [[ -n "$TMP_ROOT" ]]; then
+    probe_body="$TMP_ROOT/slack-ingress-probe.json"
+  else
+    probe_body="$(mktemp /tmp/opentag-slack-ui-trigger-probe.XXXXXX)"
+  fi
+  code="$(curl -sS -o "$probe_body" -w "%{http_code}" -X POST "$public_url/slack/events" -H "content-type: application/json" --data '{}' || true)"
   if [[ "$code" == "401" ]]; then
     echo "Public Slack ingress probe reached OpenTag (401 without Slack signature is expected)."
     return 0
@@ -388,9 +394,10 @@ apply_plan_external_writes_executed() {
 }
 
 callback_delivered_after_action() {
-  local before_callback_count="$1"
+  local run_id="$1"
+  local before_callback_count="$2"
   local after_callback_count
-  after_callback_count="$(sqlite_one "select count(*) from callback_deliveries;")"
+  after_callback_count="$(sqlite_one "select count(*) from callback_deliveries where run_id = '$(sql_escape "$run_id")';")"
   [[ -n "$after_callback_count" && -n "$before_callback_count" && "$after_callback_count" -gt "$before_callback_count" ]]
 }
 
@@ -441,12 +448,12 @@ matching_repos = [
     and repo.get("owner") == binding["owner"]
     and repo.get("repo") == binding["repo"]
 ]
-repo = matching_repos[0] if matching_repos else (repos[0] if repos else {})
+repo = matching_repos[0] if matching_repos else {}
 
 summary = {
     **binding,
-    "baseBranch": repo.get("baseBranch", "main"),
-    "pushRemote": repo.get("pushRemote", "origin"),
+    "baseBranch": repo.get("baseBranch") or "main",
+    "pushRemote": repo.get("pushRemote") or "origin",
 }
 
 for env_name, key in [
@@ -483,12 +490,14 @@ fi
 
 PREPARE_PR_BRANCH="${OPENTAG_SLACK_PREPARE_PR_BRANCH:-${OPENTAG_PREPARE_PR_BRANCH:-false}}"
 GITHUB_TOKEN="${OPENTAG_GITHUB_TOKEN:-}"
+EFFECTIVE_GITHUB_APPLY=false
 if bool_true "$OPENTAG_UI_TRIGGER_ENABLE_GITHUB_APPLY"; then
   if [[ -z "$GITHUB_TOKEN" ]] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
   fi
   if [[ -n "$GITHUB_TOKEN" ]]; then
     PREPARE_PR_BRANCH=true
+    EFFECTIVE_GITHUB_APPLY=true
     echo "GitHub apply is enabled; runner will prepare a pushed PR branch."
   else
     echo "GitHub apply is disabled because no token is available; Apply buttons may fall back to a follow-up run."
@@ -497,7 +506,10 @@ elif [[ "$PREPARE_PR_BRANCH" == "true" && -z "$GITHUB_TOKEN" ]]; then
   require_cmd gh
   GITHUB_TOKEN="$(gh auth token)"
 fi
-export CHECKOUT_PATH CONFIG_PATH DATABASE_PATH PREPARE_PR_BRANCH GITHUB_TOKEN
+if [[ -n "$GITHUB_TOKEN" && "$PREPARE_PR_BRANCH" == "true" ]]; then
+  EFFECTIVE_GITHUB_APPLY=true
+fi
+export CHECKOUT_PATH CONFIG_PATH DATABASE_PATH PREPARE_PR_BRANCH GITHUB_TOKEN EFFECTIVE_GITHUB_APPLY
 export OPENTAG_RUNNER_ID OPENTAG_DISPATCHER_PORT OPENTAG_PAIRING_TOKEN
 export OPENTAG_CLAUDE_COMMAND OPENTAG_CLAUDE_PERMISSION_MODE
 
@@ -713,15 +725,17 @@ print_slack_thread "$CHANNEL_ID" "$THREAD_TS"
 
 SUGGESTED_COUNT="$(sqlite_one "select count(*) from suggested_changes where run_id = '$(sql_escape "$RUN_ID")';")"
 if bool_true "$OPENTAG_UI_TRIGGER_WAIT_FOR_ACTION" && [[ "${SUGGESTED_COUNT:-0}" != "0" ]]; then
-  before_count="$(sqlite_one "select count(*) from approval_decisions;")"
-  before_callback_count="$(sqlite_one "select count(*) from callback_deliveries;")"
+  RUN_SQL="$(sql_escape "$RUN_ID")"
+  PROPOSALS_FOR_RUN_SQL="select proposal_id from suggested_changes where run_id = '$RUN_SQL'"
+  before_count="$(sqlite_one "select count(*) from approval_decisions where proposal_id in ($PROPOSALS_FOR_RUN_SQL);")"
+  before_callback_count="$(sqlite_one "select count(*) from callback_deliveries where run_id = '$RUN_SQL';")"
   echo
   echo "Suggested changes detected: $SUGGESTED_COUNT"
   echo "Click a Slack Block Kit action button now, for example Reject 2 or Apply 1."
   echo "Waiting for an approval_decisions row..."
   deadline=$((SECONDS + OPENTAG_UI_TRIGGER_ACTION_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    after_count="$(sqlite_one "select count(*) from approval_decisions;")"
+    after_count="$(sqlite_one "select count(*) from approval_decisions where proposal_id in ($PROPOSALS_FOR_RUN_SQL);")"
     if [[ -n "$after_count" && -n "$before_count" && "$after_count" -gt "$before_count" ]]; then
       echo "Detected Slack button/thread action."
       break
@@ -732,9 +746,9 @@ if bool_true "$OPENTAG_UI_TRIGGER_WAIT_FOR_ACTION" && [[ "${SUGGESTED_COUNT:-0}"
   if [[ "${after_count:-0}" -le "${before_count:-0}" ]]; then
     echo "Timed out waiting for a Slack action. Leaving stack evidence below."
   else
-    latest_decision="$(sqlite_one "select decision_json from approval_decisions order by created_at desc limit 1;")"
-    latest_decision_id="$(sqlite_one "select id from approval_decisions order by created_at desc limit 1;")"
-    latest_raw_text="$(sqlite_one "select coalesce(json_extract(decision_json, '$.metadata.rawText'), '') from approval_decisions order by created_at desc limit 1;")"
+    latest_decision="$(sqlite_one "select decision_json from approval_decisions where proposal_id in ($PROPOSALS_FOR_RUN_SQL) order by created_at desc limit 1;")"
+    latest_decision_id="$(sqlite_one "select id from approval_decisions where proposal_id in ($PROPOSALS_FOR_RUN_SQL) order by created_at desc limit 1;")"
+    latest_raw_text="$(sqlite_one "select coalesce(json_extract(decision_json, '$.metadata.rawText'), '') from approval_decisions where proposal_id in ($PROPOSALS_FOR_RUN_SQL) order by created_at desc limit 1;")"
     python3 - "$latest_decision" <<'PY' || true
 import json
 import sys
@@ -752,18 +766,18 @@ print("Latest approval decision:", json.dumps({
 }, sort_keys=True))
 PY
     echo "Waiting for dispatcher to finish the approved action..."
-    require_apply_execution="${OPENTAG_UI_TRIGGER_REQUIRE_APPLY_EXECUTION:-$OPENTAG_UI_TRIGGER_ENABLE_GITHUB_APPLY}"
+    require_apply_execution="${OPENTAG_UI_TRIGGER_REQUIRE_APPLY_EXECUTION:-$EFFECTIVE_GITHUB_APPLY}"
     action_deadline=$((SECONDS + OPENTAG_UI_TRIGGER_ACTION_TIMEOUT_SECONDS))
     action_finished=false
     while (( SECONDS < action_deadline )); do
       callback_done=false
       apply_done=false
 
-      if callback_delivered_after_action "$before_callback_count"; then
+      if callback_delivered_after_action "$RUN_ID" "$before_callback_count"; then
         callback_done=true
       fi
 
-      if [[ "$latest_raw_text" == apply* ]] && bool_true "$require_apply_execution"; then
+      if [[ "$latest_raw_text" == [Aa]pply* ]] && bool_true "$require_apply_execution"; then
         if apply_plan_external_writes_executed "$latest_decision_id"; then
           apply_done=true
         fi
