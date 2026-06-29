@@ -103,6 +103,9 @@ describe("Claude Code executor", () => {
     expect(claudePrintCall?.input).toContain("OpenTag owns the source-control handoff after you finish.");
     expect(claudePrintCall?.input).toContain("Do not run, request, or recommend git add, git commit, git push, or gh pr create.");
     expect(claudePrintCall?.input).toContain("OpenTag will publish the run branch and expose pull-request creation as a suggested action.");
+    expect(claudePrintCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_START");
+    expect(claudePrintCall?.input).toContain('"outcome": "passed"');
+    expect(claudePrintCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_END");
     expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.completed"]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested Claude Code change.");

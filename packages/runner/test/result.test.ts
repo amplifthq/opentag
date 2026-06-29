@@ -1,7 +1,47 @@
 import { describe, expect, it } from "vitest";
+import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-report.js";
 import { createExecutorRunResult } from "../src/result.js";
 
 describe("createExecutorRunResult", () => {
+  it("renders user-visible summaries from the structured executor report when present", () => {
+    const result = createExecutorRunResult({
+      executorName: "Claude Code",
+      runId: "run_1",
+      branchName: "opentag/run_1",
+      output: [
+        "Raw executor note: please approve `git commit` and `gh pr create` to finish.",
+        EXECUTOR_REPORT_START,
+        JSON.stringify({
+          changes: [{ file: "README.md", summary: "Added one sentence about clean Slack approval summaries." }],
+          verification: [{ outcome: "passed", summary: "The edit applied cleanly." }],
+          risks: ["No known risks beyond reviewing the generated diff."]
+        }),
+        EXECUTOR_REPORT_END
+      ].join("\n"),
+      changedFiles: ["README.md"]
+    });
+
+    expect(result.summary).toBe(
+      [
+        "What changed:",
+        "- `README.md`: Added one sentence about clean Slack approval summaries.",
+        "",
+        "Verified:",
+        "- passed - The edit applied cleanly.",
+        "",
+        "Risks:",
+        "- No known risks beyond reviewing the generated diff."
+      ].join("\n")
+    );
+    expect(result.summary).not.toMatch(/git\s+commit/i);
+    expect(result.summary).not.toMatch(/gh\s+pr\s+create/i);
+
+    const pullRequestBody = result.suggestedChanges?.[0]?.intents[0]?.params?.["body"];
+    expect(pullRequestBody).toContain("- `README.md`: Added one sentence about clean Slack approval summaries.");
+    expect(pullRequestBody).not.toMatch(/git\s+commit/i);
+    expect(pullRequestBody).not.toMatch(/gh\s+pr\s+create/i);
+  });
+
   it("removes executor source-control handoff instructions from user-visible summaries", () => {
     const result = createExecutorRunResult({
       executorName: "Claude Code",

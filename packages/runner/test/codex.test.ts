@@ -116,6 +116,9 @@ describe("Codex executor", () => {
     expect(codexExecCall?.input).toContain("OpenTag owns the source-control handoff after you finish.");
     expect(codexExecCall?.input).toContain("Do not run, request, or recommend git add, git commit, git push, or gh pr create.");
     expect(codexExecCall?.input).toContain("OpenTag will publish the run branch and expose pull-request creation as a suggested action.");
+    expect(codexExecCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_START");
+    expect(codexExecCall?.input).toContain('"outcome": "passed"');
+    expect(codexExecCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_END");
     expect(codexExecCall?.cwd).toBe(worktreePath);
     expect(codexExecCall?.env?.OPENAI_API_KEY).toBeUndefined();
     expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.progress", "executor.completed"]);
