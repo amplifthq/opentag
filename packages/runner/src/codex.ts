@@ -1,6 +1,6 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
-import { executorReportPromptLines } from "./executor-report.js";
+import { executorPolicyPromptLines } from "./executor-report.js";
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import {
   branchNameForRun,
@@ -45,12 +45,7 @@ function buildPrompt(input: {
     "Context pointers:",
     contextLines(input.context),
     "",
-    "Work autonomously but keep the change narrow. Run relevant verification if you modify files.",
-    "OpenTag owns the source-control handoff after you finish.",
-    "Do not run, request, or recommend git add, git commit, git push, or gh pr create.",
-    "Do not ask the user to approve local source-control commands; summarize file changes and verification only.",
-    "OpenTag will publish the run branch and expose pull-request creation as a suggested action.",
-    ...executorReportPromptLines()
+    ...executorPolicyPromptLines()
   ].join("\n");
 }
 

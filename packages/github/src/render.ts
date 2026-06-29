@@ -25,7 +25,10 @@ function renderVerificationParams(params: Record<string, unknown> | undefined): 
       if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
       const command = (item as Record<string, unknown>)["command"];
       const outcome = (item as Record<string, unknown>)["outcome"];
-      return typeof command === "string" && typeof outcome === "string" ? `  - \`${command}\`: ${outcome}` : undefined;
+      const summary = (item as Record<string, unknown>)["summary"];
+      if (typeof outcome !== "string") return undefined;
+      const prefix = typeof command === "string" && command.length > 0 ? `\`${command}\`: ${outcome}` : outcome;
+      return typeof summary === "string" && summary.length > 0 ? `  - ${prefix} - ${summary}` : `  - ${prefix}`;
     })
     .filter((line): line is string => Boolean(line));
 }

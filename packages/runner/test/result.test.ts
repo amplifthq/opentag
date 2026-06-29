@@ -97,4 +97,26 @@ describe("createExecutorRunResult", () => {
     expect(result.summary).not.toMatch(/git\s+add/i);
     expect(result.suggestedChanges?.[0]?.intents[0]?.params?.["body"]).not.toMatch(/git\s+add/i);
   });
+
+  it("preserves generic blocker and permission-system status lines in fallback summaries", () => {
+    const result = createExecutorRunResult({
+      executorName: "Claude Code",
+      runId: "run_1",
+      branchName: "opentag/run_1",
+      output: [
+        "What changed:",
+        "- Updated permission-system documentation.",
+        "",
+        "Blocker: External API credentials are missing.",
+        "",
+        "Verified: Not run because credentials are missing."
+      ].join("\n"),
+      changedFiles: ["docs/security.md"]
+    });
+
+    expect(result.summary).toContain("What changed:");
+    expect(result.summary).toContain("Updated permission-system documentation.");
+    expect(result.summary).toContain("Blocker: External API credentials are missing.");
+    expect(result.summary).toContain("Verified: Not run because credentials are missing.");
+  });
 });
