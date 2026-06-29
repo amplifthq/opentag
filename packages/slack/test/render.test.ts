@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseSlackSuggestedActionButtonValue,
   createSlackFinalResultBlocks,
   createSlackPostMessagePayload,
+  createSlackReactionPayload,
   createSlackUpdateMessagePayload,
   markdownToSlackMrkdwn,
   renderSlackAcknowledgement,
-  renderSlackFinalResult
+  renderSlackFinalResult,
+  slackSourceReceiptReactionName
 } from "../src/render.js";
 
 describe("Slack callback rendering", () => {
   it("renders Slack-friendly acknowledgement messages", () => {
-    expect(renderSlackAcknowledgement("run_1")).toBe("I picked this up: `run_1`");
+    expect(renderSlackAcknowledgement("run_1")).toBe("Working on it.");
   });
 
   it("uses Slack mrkdwn for final results", () => {
@@ -22,7 +25,7 @@ describe("Slack callback rendering", () => {
     });
 
     expect(text).toBe(
-      "Finished with *success*.\n\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\n\n*Verification*\n- `echo`: passed\n\n*Next action*: Open <https://example.com/thread|thread> &amp; follow up"
+      "*Finished: success.*\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\nVerified: `echo` passed\nNext: Open <https://example.com/thread|thread> &amp; follow up"
     );
     expect(text).not.toContain("**success**");
   });
@@ -47,6 +50,15 @@ describe("Slack callback rendering", () => {
     });
   });
 
+  it("builds lightweight source receipt reaction payloads", () => {
+    expect(slackSourceReceiptReactionName("received")).toBe("eyes");
+    expect(createSlackReactionPayload({ channelId: "C123", messageTs: "171.001", name: "eyes" })).toEqual({
+      channel: "C123",
+      timestamp: "171.001",
+      name: "eyes"
+    });
+  });
+
   it("builds Block Kit sections for final results", () => {
     const blocks = createSlackFinalResultBlocks({
       conclusion: "success",
@@ -59,17 +71,63 @@ describe("Slack callback rendering", () => {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: "*Finished with success.*\nSee <https://example.com/pr|PR>"
+          text: "*Finished: success.*\nSee <https://example.com/pr|PR>"
         }
       },
-      { type: "divider" },
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: "*Verification*\n- `echo '&lt;tag&gt;'`: passed"
+          text: "Verified: `echo '&lt;tag&gt;'` passed"
         }
       }
     ]);
+  });
+
+  it("adds Block Kit buttons for suggested source-thread actions", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "needs_human",
+      summary: "Prepared a proposal.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Move issue forward.",
+          intents: [
+            {
+              intentId: "intent_label_1",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const rendered = JSON.stringify(blocks);
+    expect(rendered).toContain("1. *Add the bug label.*");
+    expect(rendered).not.toContain("Proposal:");
+    expect(rendered).not.toContain("Intent ID:");
+
+    const actionsBlock = blocks.find((block) => block.type === "actions");
+    expect(actionsBlock).toMatchObject({
+      type: "actions",
+      block_id: "opentag_actions_1",
+      elements: [
+        { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
+        { type: "button", text: { type: "plain_text", text: "Approve" }, action_id: "opentag:approve:1" },
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+      ]
+    });
+
+    if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
+    expect(parseSlackSuggestedActionButtonValue(actionsBlock.elements[0]?.value ?? "")).toEqual({
+      version: 1,
+      command: "apply 1",
+      proposalId: "proposal_1",
+      intentId: "intent_label_1"
+    });
   });
 });

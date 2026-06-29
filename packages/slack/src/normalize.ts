@@ -70,11 +70,21 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
   return { teamId, channelId, threadTs };
 }
 
-function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+function commandLooksWriteCapable(command: OpenTagCommand): boolean {
+  return /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i.test(
+    command.rawText
+  );
+}
+
+function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     {
       scope: "chat:postMessage",
       reason: "reply in the originating Slack thread"
+    },
+    {
+      scope: "reactions:write",
+      reason: "mark the originating Slack message as received without posting a thread reply"
     },
     {
       scope: "runner:local",
@@ -82,7 +92,7 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
     }
   ];
 
-  if (intent === "fix" || intent === "run") {
+  if (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksWriteCapable(command))) {
     permissions.push(
       {
         scope: "repo:read",
@@ -187,7 +197,7 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       },
       ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForIntent(command.intent),
+    permissions: permissionsForCommand(command),
     callback: {
       provider: "slack",
       uri: input.callbackUri ?? "https://slack.com/api/chat.postMessage",

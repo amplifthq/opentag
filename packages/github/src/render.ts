@@ -59,32 +59,41 @@ function renderSuggestedActions(result: OpenTagRunResult): string[] {
   const candidates = suggestedActionCandidatesFromResult(result);
   if (candidates.length === 0) return [];
 
-  const lines = ["Suggested actions:"];
+  const lines = [
+    "### Suggested actions:",
+    "",
+    "Source-thread approval: choose one command in this GitHub thread to apply a protocolized mutation or PR action to the system of record."
+  ];
   for (const candidate of candidates) {
     lines.push(
       "",
-      `${candidate.index}. **${candidate.intent.summary}**`,
-      `   Intent: \`${candidate.intent.action}\` (\`${candidate.intent.domain}\`)`,
-      `   Proposal: \`${candidate.proposalId}\``,
-      `   Intent ID: \`${candidate.intent.intentId}\``
+      `#### Action ${candidate.index}: ${candidate.intent.summary}`,
+      "",
+      `- System-of-record action: \`${candidate.intent.action}\` (\`${candidate.intent.domain}\`)`,
+      `- Proposal: \`${candidate.proposalId}\``,
+      `- Intent ID: \`${candidate.intent.intentId}\``
     );
     lines.push(...renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action));
     if (candidate.proposalPreconditions?.length) {
-      lines.push("   Preconditions:");
+      lines.push("- Preconditions:");
       for (const precondition of candidate.proposalPreconditions) {
-        lines.push(`   - ${precondition}`);
+        lines.push(`  - ${precondition}`);
       }
     }
+    lines.push(
+      "",
+      "**Approve in this thread**",
+      "",
+      `| Decision | Comment command | Effect |`,
+      `| --- | --- | --- |`,
+      `| Apply now | \`apply ${candidate.index}\` | Applies this action to the system of record. |`,
+      `| Approve only | \`approve ${candidate.index}\` | Records approval without applying yet. |`,
+      `| Continue | \`continue ${candidate.index}\` | Starts a follow-up run from this proposal. |`,
+      `| Reject | \`reject ${candidate.index}\` | Rejects this action. |`
+    );
   }
 
-  lines.push(
-    "",
-    "Reply with:",
-    "- `approve 1` to record approval without applying yet",
-    "- `apply 1` or `apply all` to apply supported actions",
-    "- `continue 1` to continue with a follow-up run",
-    "- `reject 1` to reject an action"
-  );
+  lines.push("", "Bulk shortcut: comment `apply all` to apply every supported approved action in this thread.");
   return lines;
 }
 

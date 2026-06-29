@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { createCompositeCallbackSink, createGitHubCallbackSink, createSlackCallbackSink, createTelegramCallbackSink } from "../src/callbacks.js";
+import {
+  createCompositeCallbackSink,
+  createGitHubCallbackSink,
+  createSlackCallbackSink,
+  createSlackSourceReceiptSink,
+  createTelegramCallbackSink
+} from "../src/callbacks.js";
 
 describe("createGitHubCallbackSink", () => {
   it("posts GitHub callback messages to the callback URI", async () => {
@@ -495,6 +501,64 @@ describe("createGitHubCallbackSink", () => {
               }
             }
           ]
+        }
+      }
+    ]);
+  });
+
+  it("adds Slack source receipt reactions to the source message", async () => {
+    const requests: { url: string; authorization: string | null; body: unknown }[] = [];
+    const sink = createSlackSourceReceiptSink({
+      botTokensByAgentId: {
+        opentag: "xoxb-opentag"
+      },
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          authorization: new Headers(init?.headers).get("authorization"),
+          body: JSON.parse(String(init?.body))
+        });
+        return Response.json({ ok: true });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "slack",
+        state: "received",
+        agentId: "opentag",
+        event: {
+          id: "evt_1",
+          source: "slack",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100" }],
+          permissions: [
+            { scope: "chat:postMessage", reason: "reply to source thread" },
+            { scope: "reactions:write", reason: "mark the source Slack message as received" }
+          ],
+          callback: {
+            provider: "slack",
+            uri: "https://slack.com/api/chat.postMessage",
+            threadKey: "T123|C123|1710000000.000100"
+          },
+          metadata: { teamId: "T123", channelId: "C123", messageTs: "1710000000.000100" }
+        }
+      })
+    ).resolves.toEqual({ delivered: true });
+
+    expect(requests).toEqual([
+      {
+        url: "https://slack.com/api/reactions.add",
+        authorization: "Bearer xoxb-opentag",
+        body: {
+          channel: "C123",
+          timestamp: "1710000000.000100",
+          name: "eyes"
         }
       }
     ]);

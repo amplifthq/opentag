@@ -1,4 +1,4 @@
-import { suggestedActionCandidatesFromResult, type OpenTagRunResult } from "@opentag/core";
+import { suggestedActionCandidatesFromResult, type OpenTagRunResult, type SuggestedActionCandidate } from "@opentag/core";
 
 export type SlackTextBlock = {
   type: "section";
@@ -12,7 +12,32 @@ export type SlackDividerBlock = {
   type: "divider";
 };
 
-export type SlackBlock = SlackTextBlock | SlackDividerBlock;
+export type SlackButtonElement = {
+  type: "button";
+  text: {
+    type: "plain_text";
+    text: string;
+    emoji?: boolean;
+  };
+  action_id: string;
+  value: string;
+  style?: "primary" | "danger";
+};
+
+export type SlackActionsBlock = {
+  type: "actions";
+  block_id?: string;
+  elements: SlackButtonElement[];
+};
+
+export type SlackBlock = SlackTextBlock | SlackDividerBlock | SlackActionsBlock;
+
+export type SlackSuggestedActionButtonValue = {
+  version: 1;
+  command: string;
+  proposalId: string;
+  intentId: string;
+};
 
 export type SlackMessagePayload = {
   channel: string;
@@ -21,6 +46,43 @@ export type SlackMessagePayload = {
   ts?: string;
   blocks?: SlackBlock[];
 };
+
+export type SlackReactionPayload = {
+  channel: string;
+  timestamp: string;
+  name: string;
+};
+
+export type SlackSourceReceiptState = "received";
+
+export function buildSlackSuggestedActionButtonValue(input: SlackSuggestedActionButtonValue): string {
+  return JSON.stringify(input);
+}
+
+export function parseSlackSuggestedActionButtonValue(value: string): SlackSuggestedActionButtonValue | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<SlackSuggestedActionButtonValue>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.command !== "string" ||
+      parsed.command.trim().length === 0 ||
+      typeof parsed.proposalId !== "string" ||
+      parsed.proposalId.length === 0 ||
+      typeof parsed.intentId !== "string" ||
+      parsed.intentId.length === 0
+    ) {
+      return null;
+    }
+    return {
+      version: 1,
+      command: parsed.command.trim(),
+      proposalId: parsed.proposalId,
+      intentId: parsed.intentId
+    };
+  } catch {
+    return null;
+  }
+}
 
 function escapeSlackText(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -40,7 +102,21 @@ export function markdownToSlackMrkdwn(text: string): string {
 }
 
 export function renderSlackAcknowledgement(runId: string): string {
-  return `I picked this up: \`${runId}\``;
+  void runId;
+  return "Working on it.";
+}
+
+export function slackSourceReceiptReactionName(state: SlackSourceReceiptState): string {
+  if (state === "received") return "eyes";
+  return "eyes";
+}
+
+export function createSlackReactionPayload(input: { channelId: string; messageTs: string; name: string }): SlackReactionPayload {
+  return {
+    channel: input.channelId,
+    timestamp: input.messageTs,
+    name: input.name
+  };
 }
 
 function nextActionSummary(result: OpenTagRunResult): string | undefined {
@@ -98,52 +174,112 @@ function renderSuggestedActionDetails(params: Record<string, unknown> | undefine
   return lines;
 }
 
+function truncateSlackText(text: string, maxLength: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function firstMarkdownSection(text: string, heading: string): string | undefined {
+  const pattern = new RegExp(`\\*\\*${heading}:\\*\\*\\s*([\\s\\S]*?)(?=\\n\\s*\\n\\*\\*[^*]+:\\*\\*|\\n\\s*\\n[A-Z][^\\n]{0,60}:|$)`, "i");
+  const match = text.match(pattern);
+  return match?.[1]?.trim();
+}
+
+function compactSlackSummary(summary: string): string {
+  const whatChanged = firstMarkdownSection(summary, "What changed");
+  const firstParagraph = summary
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .find(Boolean);
+  const selected = whatChanged ?? firstParagraph ?? summary;
+  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), 360);
+}
+
+function compactNextAction(nextAction: string): string {
+  return truncateSlackText(nextAction, 180);
+}
+
+function renderSuggestedActionCandidateLines(candidate: SuggestedActionCandidate): string[] {
+  const lines = [`${candidate.index}. *${markdownToSlackMrkdwn(candidate.intent.summary)}*`];
+  const details = renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action)
+    .filter((line) => line.trim().startsWith("Branch:") || line.trim().startsWith("Changed files:"))
+    .map((line) => line.replace(/^\s+/, ""));
+  lines.push(...details);
+  if (candidate.proposalPreconditions?.length) {
+    lines.push(`Preconditions: ${candidate.proposalPreconditions.length} check(s) in the audit log.`);
+  }
+  return lines;
+}
+
 function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
   const candidates = suggestedActionCandidatesFromResult(result);
   if (candidates.length === 0) return [];
 
   const lines = ["*Suggested actions*"];
   for (const candidate of candidates) {
-    lines.push(
-      "",
-      `${candidate.index}. *${markdownToSlackMrkdwn(candidate.intent.summary)}*`,
-      `   Intent: \`${candidate.intent.action}\` (\`${candidate.intent.domain}\`)`,
-      `   Proposal: \`${candidate.proposalId}\``,
-      `   Intent ID: \`${candidate.intent.intentId}\``
-    );
-    lines.push(...renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action));
-    if (candidate.proposalPreconditions?.length) {
-      lines.push("   Preconditions:");
-      for (const precondition of candidate.proposalPreconditions) {
-        lines.push(`   - ${markdownToSlackMrkdwn(precondition)}`);
-      }
-    }
+    lines.push("", ...renderSuggestedActionCandidateLines(candidate));
   }
 
-  lines.push(
-    "",
-    "Reply with:",
-    "- `approve 1` to record approval",
-    "- `apply 1` or `apply all` to apply supported actions",
-    "- `continue 1` to continue with a follow-up run",
-    "- `reject 1` to reject an action"
-  );
+  lines.push("", "Use the buttons below, or reply `apply 1`, `approve 1`, or `reject 1`.");
   return lines;
 }
 
+function createSuggestedActionButtons(candidate: SuggestedActionCandidate): SlackButtonElement[] {
+  return [
+    {
+      type: "button",
+      text: { type: "plain_text", text: `Apply ${candidate.index}`, emoji: true },
+      action_id: `opentag:apply:${candidate.index}`,
+      value: buildSlackSuggestedActionButtonValue({
+        version: 1,
+        command: `apply ${candidate.index}`,
+        proposalId: candidate.proposalId,
+        intentId: candidate.intent.intentId
+      }),
+      style: "primary"
+    },
+    {
+      type: "button",
+      text: { type: "plain_text", text: "Approve", emoji: true },
+      action_id: `opentag:approve:${candidate.index}`,
+      value: buildSlackSuggestedActionButtonValue({
+        version: 1,
+        command: `approve ${candidate.index}`,
+        proposalId: candidate.proposalId,
+        intentId: candidate.intent.intentId
+      })
+    },
+    {
+      type: "button",
+      text: { type: "plain_text", text: "Reject", emoji: true },
+      action_id: `opentag:reject:${candidate.index}`,
+      value: buildSlackSuggestedActionButtonValue({
+        version: 1,
+        command: `reject ${candidate.index}`,
+        proposalId: candidate.proposalId,
+        intentId: candidate.intent.intentId
+      }),
+      style: "danger"
+    }
+  ];
+}
+
 export function renderSlackFinalResult(result: OpenTagRunResult): string {
-  const lines = [`Finished with *${result.conclusion}*.`, "", markdownToSlackMrkdwn(result.summary)];
+  const lines = [`*Finished: ${result.conclusion}.*`, markdownToSlackMrkdwn(compactSlackSummary(result.summary))];
 
   if (result.verification?.length) {
-    lines.push("", "*Verification*");
-    for (const check of result.verification) {
-      lines.push(`- \`${check.command}\`: ${check.outcome}`);
-    }
+    lines.push(
+      `Verified: ${result.verification
+        .slice(0, 3)
+        .map((check) => `\`${check.command}\` ${check.outcome}`)
+        .join(", ")}`
+    );
   }
 
   const nextAction = nextActionSummary(result);
-  if (nextAction) {
-    lines.push("", `*Next action*: ${markdownToSlackMrkdwn(nextAction)}`);
+  if (nextAction && !result.suggestedChanges?.length) {
+    lines.push(`Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`);
   }
 
   const suggestedActions = renderSuggestedActionsMarkdown(result);
@@ -160,43 +296,61 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Finished with ${result.conclusion}.*\n${markdownToSlackMrkdwn(result.summary)}`
+        text: `*Finished: ${result.conclusion}.*\n${markdownToSlackMrkdwn(compactSlackSummary(result.summary))}`
       }
     }
   ];
 
   if (result.verification?.length) {
-    blocks.push({ type: "divider" });
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: markdownToSlackMrkdwn(["*Verification*", ...result.verification.map((check) => `- \`${check.command}\`: ${check.outcome}`)].join("\n"))
+        text: `Verified: ${markdownToSlackMrkdwn(
+          result.verification
+            .slice(0, 3)
+            .map((check) => `\`${check.command}\` ${check.outcome}`)
+            .join(", ")
+        )}`
       }
     });
   }
 
   const nextAction = nextActionSummary(result);
-  if (nextAction) {
+  const suggestedActionCandidates = suggestedActionCandidatesFromResult(result);
+  if (nextAction && suggestedActionCandidates.length === 0) {
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Next action*: ${markdownToSlackMrkdwn(nextAction)}`
+        text: `Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`
       }
     });
   }
 
-  const suggestedActions = renderSuggestedActionsMarkdown(result);
-  if (suggestedActions.length > 0) {
+  if (suggestedActionCandidates.length > 0) {
     blocks.push({ type: "divider" });
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: suggestedActions.join("\n")
+        text: "*Suggested actions*\nChoose an action in this thread. Details stay in the OpenTag audit log."
       }
     });
+    for (const candidate of suggestedActionCandidates) {
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: renderSuggestedActionCandidateLines(candidate).join("\n")
+        }
+      });
+      blocks.push({
+        type: "actions",
+        block_id: `opentag_actions_${candidate.index}`,
+        elements: createSuggestedActionButtons(candidate)
+      });
+    }
   }
 
   return blocks;

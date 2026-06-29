@@ -272,6 +272,15 @@ on the dispatcher. That avoids duplicate acknowledgement comments.
 
 The legacy `apps/slack-events` process is still an Events API ingress only.
 
+Slack suggested action buttons require **Interactivity & Shortcuts** in the Slack
+app:
+
+- Socket Mode: turn Interactivity on, but do not set a Request URL. Slack sends
+  Block Kit actions over the Socket Mode WebSocket.
+- Events API: turn Interactivity on and set its Request URL to the same public
+  `/slack/events` URL used by Event Subscriptions, for example
+  `https://<your-tunnel>/slack/events`.
+
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `OPENTAG_DISPATCHER_URL` | yes | Dispatcher URL |
