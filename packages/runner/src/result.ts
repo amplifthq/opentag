@@ -1,5 +1,65 @@
 import type { OpenTagRunResult } from "@opentag/core";
 
+const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
+
+const GIT_HANDOFF_PATTERNS = [
+  /\bgit\s+(?:add|commit|push|status|checkout)\b/i,
+  /\bgh\s+pr\s+create\b/i,
+  /\binteractive user approval\b/i,
+  /\bpermission system\b/i,
+  /\brequires?\s+approval\b.*\b(?:git|commit|push|pull request|pr)\b/i,
+  /\b(?:cannot|can't|need|needs|please|approve|approval|required)\b.*\b(?:git|commit|push|pull request|pr)\b/i,
+  /\b(?:commit|push|create (?:a )?(?:pull request|pr)|open (?:a )?pull request)\b.*\b(?:approve|approval|manual|finish|next|requires?|required)\b/i
+];
+
+const HANDOFF_HEADING_PATTERN =
+  /^(?:#{1,6}\s*)?(?:\*\*)?\s*(?:blocker|recommended next action|next action|remaining work|manual steps|to finish)\b/i;
+
+function looksLikeGitHandoff(line: string): boolean {
+  return GIT_HANDOFF_PATTERNS.some((pattern) => pattern.test(line));
+}
+
+function stripGitHandoffTail(line: string): string {
+  if (!looksLikeGitHandoff(line)) return line;
+  return line
+    .replace(/\s*(?:Blocker|Recommended next action|Next action|Remaining work|Manual steps|To finish)\s*:.*$/i, "")
+    .trimEnd();
+}
+
+function cleanOrFallbackExecutorSummary(input: {
+  executorName: string;
+  output: string;
+  changedFiles: string[];
+}): string {
+  const rawSummary = input.output.slice(-MAX_EXECUTOR_SUMMARY_LENGTH).replace(/\r\n/g, "\n");
+  const filteredLines: string[] = [];
+
+  for (const rawLine of rawSummary.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (HANDOFF_HEADING_PATTERN.test(trimmed)) continue;
+
+    const withoutHandoffTail = stripGitHandoffTail(rawLine);
+    if (looksLikeGitHandoff(withoutHandoffTail)) continue;
+    if (withoutHandoffTail.trim().length === 0 && trimmed.length > 0) continue;
+
+    filteredLines.push(withoutHandoffTail);
+  }
+
+  const summary = filteredLines
+    .join("\n")
+    .replace(/```[^\n]*\n\s*```/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (summary.length > 0) return summary;
+
+  if (input.changedFiles.length === 0) {
+    return `${input.executorName} completed without file changes.`;
+  }
+
+  return `${input.executorName} changed ${input.changedFiles.length} file(s). Changed files: ${input.changedFiles.join(", ")}.`;
+}
+
 export function createExecutorRunResult(input: {
   executorName: string;
   runId: string;
@@ -10,7 +70,7 @@ export function createExecutorRunResult(input: {
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
-  const summary = input.output.slice(-4000);
+  const summary = cleanOrFallbackExecutorSummary(input);
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [
