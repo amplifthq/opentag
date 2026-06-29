@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 
 describe("default callback presentation", () => {
-  it("keeps Lark acknowledgements silent while preserving other provider acknowledgements", () => {
+  it("keeps chat acknowledgements quiet where thread noise matters", () => {
     const presentation = createDefaultCallbackPresentation();
 
     expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
-    expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("telegram")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("github")).toBe(true);
   });
@@ -29,27 +29,26 @@ describe("default callback presentation", () => {
     };
 
     expect(presentation.acknowledgement({ provider: "github", runId: "run_1" })).toBe("OpenTag picked this up. Run: `run_1`");
-    expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe("I picked this up: `run_1`");
+    expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe("Working on it.");
     expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe("I picked this up: run_1");
     expect(presentation.final({ provider: "github", result })).toEqual({
       body: "OpenTag finished with **success**.\n\ndone\n\nVerification:\n- `echo`: passed"
     });
     expect(presentation.final({ provider: "slack", result })).toEqual({
-      body: "Finished with *success*.\n\ndone\n\n*Verification*\n- `echo`: passed",
+      body: "*Finished: success.*\ndone\nVerified: `echo` passed",
       blocks: [
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: "*Finished with success.*\ndone"
+            text: "*Finished: success.*\ndone"
           }
         },
-        { type: "divider" },
         {
           type: "section",
           text: {
             type: "mrkdwn",
-            text: "*Verification*\n- `echo`: passed"
+            text: "Verified: `echo` passed"
           }
         }
       ]
@@ -90,20 +89,20 @@ describe("default callback presentation", () => {
     };
 
     expect(presentation.final({ provider: "github", result }).body).toContain("Next action: Approve intent_label_1");
-    expect(presentation.final({ provider: "slack", result }).body).toContain("*Next action*: Approve intent_label_1");
+    expect(presentation.final({ provider: "slack", result }).body).toContain("Next: Approve intent_label_1");
     expect(presentation.final({ provider: "slack", result }).blocks).toEqual([
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: "*Finished with needs_human.*\nPrepared a suggested change snapshot."
+          text: "*Finished: needs_human.*\nPrepared a suggested change snapshot."
         }
       },
       {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: "*Next action*: Approve intent_label_1 to add the bug label."
+          text: "Next: Approve intent_label_1 to add the bug label."
         }
       }
     ]);
@@ -136,20 +135,25 @@ describe("default callback presentation", () => {
 
     const github = presentation.final({ provider: "github", result }).body;
     expect(github).toContain("Suggested actions:");
-    expect(github).toContain("1. **Add the bug label.**");
+    expect(github).toContain("Source-thread approval:");
+    expect(github).toContain("#### Action 1: Add the bug label.");
+    expect(github).toContain("System-of-record action: `add_label` (`labels`)");
     expect(github).toContain("Proposal: `proposal_1`");
     expect(github).toContain("Intent ID: `intent_label_1`");
-    expect(github).toContain("`apply 1`");
+    expect(github).toContain("| Apply now | `apply 1` |");
 
     const slack = presentation.final({ provider: "slack", result });
     expect(slack.body).toContain("*Suggested actions*");
     expect(slack.body).toContain("1. *Add the bug label.*");
-    expect(slack.body).toContain("`continue 1`");
+    expect(slack.body).not.toContain("Proposal:");
+    expect(slack.body).not.toContain("Intent ID:");
     expect(slack.blocks?.at(-1)).toMatchObject({
-      type: "section",
-      text: {
-        type: "mrkdwn"
-      }
+      type: "actions",
+      elements: [
+        { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
+        { type: "button", text: { type: "plain_text", text: "Approve" }, action_id: "opentag:approve:1" },
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+      ]
     });
   });
 
@@ -190,11 +194,11 @@ describe("default callback presentation", () => {
     expect(github).toContain("`pnpm test`: passed");
 
     const slack = presentation.final({ provider: "slack", result });
-    expect(slack.body).toContain("Title: OpenTag run run_1");
     expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");
     expect(slack.body).toContain("Changed files: `src/demo.ts`");
-    expect(slack.body).toContain("`pnpm test`: passed");
-    expect(JSON.stringify(slack.blocks)).toContain("Title: OpenTag run run_1");
-    expect(JSON.stringify(slack.blocks)).toContain("`pnpm test`: passed");
+    expect(slack.body).not.toContain("Title: OpenTag run run_1");
+    expect(slack.body).not.toContain("`pnpm test`: passed");
+    expect(JSON.stringify(slack.blocks)).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(JSON.stringify(slack.blocks)).not.toContain("Title: OpenTag run run_1");
   });
 });

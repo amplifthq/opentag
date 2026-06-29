@@ -11,12 +11,15 @@ OpenTag 支持两种 Slack 连接方式：
 
 Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 写权限。如果某次 run 产出了 pull request action，只有在 OpenTag 同时配置了 GitHub repository target 和 GitHub token 时，Slack thread 里的 `apply 1` 才能直接创建 GitHub PR。
 
+Suggested action 按钮依赖 Slack Block Kit interactivity。需要在 Slack app 里开启 **Interactivity & Shortcuts**，这样 **Apply 1** 这类按钮才会提交和手动回复 `apply 1` 相同的 source-thread action。
+
 ## 官方入口
 
 - [Slack App 管理页](https://api.slack.com/apps)
 - [Slack App Quickstart](https://docs.slack.dev/quickstart/)
 - [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
 - [Verifying requests from Slack](https://docs.slack.dev/authentication/verifying-requests-from-slack/)
+- [Slack interactivity](https://api.slack.com/interactivity)
 - [Slack OAuth scopes](https://api.slack.com/scopes)
 
 ## 推荐：本地 Socket Mode
@@ -41,7 +44,7 @@ Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 
 如果 Slack 提供 **Create from manifest**，这条路更快。Manifest 里一次性配置：
 
 - 开启 Socket Mode。
-- Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`。
+- Bot scopes: `app_mentions:read`, `chat:write`, `reactions:write`, `channels:history`。
 - Bot event subscriptions: `app_mention`, `message.channels`。
 
 后面仍然需要安装 app，并创建 App-Level Token。
@@ -67,6 +70,7 @@ Slack App-Level Token
 2. 在 **Bot Token Scopes** 里添加：
    - `app_mentions:read`
    - `chat:write`
+   - `reactions:write`
    - `channels:history`
 3. 安装或重新安装 app 到 workspace。
 4. 复制 **Bot User OAuth Token**。它一般以 `xoxb-` 开头。
@@ -89,6 +93,15 @@ Slack Bot User OAuth Token
 Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack WebSocket，Slack 会通过这条连接把事件推回来。
 
 `message.channels` 用来接收 public channel 里的 thread reply，比如用户回复 `apply 1`。如果你要在 private channel 里测试，还要添加 `groups:history` bot scope，并订阅 `message.groups`。
+
+### 开启按钮交互
+
+1. 在同一个 Slack app 里进入 **Interactivity & Shortcuts**。
+2. 打开 **Interactivity**。
+3. Socket Mode 不需要填写 Request URL。Slack 会通过同一条 Socket Mode WebSocket 连接发送 Block Kit button action。
+4. 保存设置。
+
+这一步会让 Slack 里的 **Apply 1**、**Approve**、**Reject** 按钮真正可用。如果没有开启 Interactivity，OpenTag 仍然可以接收用户手打的 `apply 1` thread reply，但点击按钮会在 Slack 侧失败，事件不会到达 OpenTag。
 
 ## 高级：公网 Events API
 
@@ -131,6 +144,7 @@ https://<你的 tunnel 域名>/slack/events
 3. 进入 **OAuth & Permissions**，添加同样的 bot scopes：
    - `app_mentions:read`
    - `chat:write`
+   - `reactions:write`
    - `channels:history`
 4. 安装或重新安装 app。
 5. 进入 **Event Subscriptions**。
@@ -146,9 +160,23 @@ https://<你的 tunnel 域名>/slack/events
    - `message.channels`
 9. 保存设置。
 
+### 配置按钮交互
+
+1. 在同一个 Slack app 里进入 **Interactivity & Shortcuts**。
+2. 打开 **Interactivity**。
+3. 填入同一个公网 Request URL：
+
+```text
+https://<你的 tunnel 域名>/slack/events
+```
+
+4. 保存设置。
+
 这条 Events API 路线不要开启 Socket Mode，否则你会调错接入方式。
 
 `message.channels` 用来接收 public channel 里的 thread reply，比如用户回复 `apply 1`。如果你要在 private channel 里测试，还要添加 `groups:history` bot scope，并订阅 `message.groups`。
+
+**Event Subscriptions** 和 **Interactivity & Shortcuts** 都使用同一个 `/slack/events` URL。OpenTag 会对两类请求都做 Slack 签名校验，然后把按钮点击转成和手动回复相同的 `/v1/thread-actions` 流程。
 
 如果 Slack 提示 Request URL 没有返回 challenge value，优先检查这三件事：
 
@@ -203,5 +231,13 @@ opentag start
 ```
 
 OpenTag 应该会先确认收到请求，执行完成后再回到同一个 Slack thread 里回复。
+默认确认方式是在你的源消息上加一个轻量的 `eyes` reaction，而不是额外发一条 thread reply。
+
+当 OpenTag 发出 suggested actions 时，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
 
 如果回复里出现 pull request action，但你的配置里只有 Slack 凭据，OpenTag 会创建一个 follow-up run，而不是直接创建 GitHub PR。想让 Slack 里的 `apply 1` 直接创建 PR，需要先配置 GitHub repository target。
+
+如果 suggested action 按钮能看到，但点击后 Slack 提示失败，优先检查 **Interactivity & Shortcuts**：
+
+- Socket Mode：Interactivity 已开启，不需要 Request URL。
+- Events API：Interactivity 已开启，Request URL 是 `https://<你的 tunnel 域名>/slack/events`。

@@ -172,5 +172,6 @@ Example config fragment:
 }
 ```
 
-3. Point Slack Events API to `/slack/events` on `apps/slack-events`.
-4. Send an `app_mention` in the bound channel. OpenTag will acknowledge, stream progress, and post the final summary back to that Slack thread.
+3. Point Slack **Event Subscriptions** to `/slack/events` on `apps/slack-events`.
+4. Enable Slack **Interactivity & Shortcuts** and point its Request URL to the same `/slack/events` endpoint. This lets Block Kit buttons such as **Apply 1** submit the same source-thread action as typing `apply 1`.
+5. Send an `app_mention` in the bound channel. OpenTag will add a lightweight reaction receipt, keep routine progress audit-only, and post the final summary back to that Slack thread.

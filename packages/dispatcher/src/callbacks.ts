@@ -1,7 +1,13 @@
 import { createLarkReplyClient, type LarkReplyClient, parseLarkThreadKey, replyLarkMessage } from "@opentag/lark";
-import { createSlackPostMessagePayload, createSlackUpdateMessagePayload, parseSlackThreadKey } from "@opentag/slack";
+import {
+  createSlackPostMessagePayload,
+  createSlackReactionPayload,
+  createSlackUpdateMessagePayload,
+  parseSlackThreadKey,
+  slackSourceReceiptReactionName
+} from "@opentag/slack";
 import { createTelegramSendMessageDraftPayload, createTelegramSendMessagePayload, parseTelegramThreadKey } from "@opentag/telegram";
-import type { CallbackMessage, CallbackSink } from "./server.js";
+import type { CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
 
@@ -31,6 +37,18 @@ function slackBotTokenFor(input: {
     return input.botTokensByAgentId[input.agentId];
   }
   return input.botToken;
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function slackSourceMessageTarget(receipt: SourceReceipt): { channelId: string; messageTs: string } | null {
+  if (receipt.provider !== "slack") return null;
+  const channelId = metadataString(receipt.event.metadata, "channelId");
+  const messageTs = metadataString(receipt.event.metadata, "messageTs");
+  return channelId && messageTs ? { channelId, messageTs } : null;
 }
 
 export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
@@ -142,6 +160,54 @@ export function createSlackCallbackSink(input: {
           }
         }
       }
+    }
+  };
+}
+
+export function createSlackSourceReceiptSink(input: {
+  botToken?: string;
+  botTokensByAgentId?: Record<string, string>;
+  fetchImpl?: FetchLike;
+  reactionsAddUri?: string;
+}): SourceReceiptSink {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const reactionsAddUri = input.reactionsAddUri ?? "https://slack.com/api/reactions.add";
+
+  return {
+    async deliver(receipt: SourceReceipt) {
+      const target = slackSourceMessageTarget(receipt);
+      if (!target) return { delivered: false };
+
+      const botToken = slackBotTokenFor({
+        ...(input.botToken ? { botToken: input.botToken } : {}),
+        ...(input.botTokensByAgentId ? { botTokensByAgentId: input.botTokensByAgentId } : {}),
+        ...(receipt.agentId ? { agentId: receipt.agentId } : {})
+      });
+      if (!botToken) return { delivered: false };
+
+      const response = await fetchImpl(reactionsAddUri, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${botToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(
+          createSlackReactionPayload({
+            channelId: target.channelId,
+            messageTs: target.messageTs,
+            name: slackSourceReceiptReactionName(receipt.state)
+          })
+        )
+      });
+
+      if (!response.ok) {
+        throw new Error(`deliver Slack source receipt failed: ${response.status} ${await response.text()}`);
+      }
+      const body = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (body.ok === false && body.error !== "already_reacted") {
+        throw new Error(`deliver Slack source receipt failed: ${body.error ?? "unknown_error"}`);
+      }
+      return { delivered: true };
     }
   };
 }

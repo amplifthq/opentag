@@ -314,12 +314,12 @@ Slack thread -> dispatcher -> opentagd -> local Claude Code -> pushed run branch
 Expected Slack thread shape:
 
 - original user/bot seed message
-- OpenTag acknowledgement
+- OpenTag `eyes` reaction receipt on the source message
 - OpenTag final result
 - optional `apply 1` reply when validating the action loop
 - optional apply result callback containing the PR URL or child-run fallback context
 
-Routine progress stays audit-only by default, so it should not produce additional Slack thread replies.
+Routine acknowledgement and progress stay out of Slack thread replies by default, so they should not produce additional Slack messages.
 
 ### Slack Events API App Setup
 
@@ -327,6 +327,7 @@ Required bot scopes:
 
 - `app_mentions:read`
 - `chat:write`
+- `reactions:write`
 
 Required bot event:
 
@@ -457,7 +458,7 @@ Important fields:
 - `childRunCount`
 - `applyOutcomeCounts`
 
-For Slack, `humanCallbackCount` should normally be `2` for a completed run: acknowledgement plus final. A low `threadNoiseRatio` means OpenTag is recording detail in audit without flooding the human thread.
+For Slack, `humanCallbackCount` should normally be `1` for a completed run: the final callback. The source receipt is a reaction, and routine progress stays audit-only. A low `threadNoiseRatio` means OpenTag is recording detail in audit without flooding the human thread.
 
 ## Dogfood Trace: Thread-Native Action Loop
 

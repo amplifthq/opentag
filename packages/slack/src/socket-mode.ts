@@ -1,6 +1,6 @@
 import WebSocket, { type RawData } from "ws";
 import { createSlackDispatcherEventProcessorInput, type SlackDispatcherEventConfig } from "./dispatcher-events.js";
-import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventEnvelope, type SlackEventProcessorInput } from "./events.js";
+import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventProcessorInput, type SlackIngressPayload } from "./events.js";
 
 const SLACK_CONNECTIONS_OPEN_URL = "https://slack.com/api/apps.connections.open";
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
@@ -37,7 +37,7 @@ function isTerminalSlackAuthError(error: unknown): boolean {
 export type SlackSocketModeEnvelope = {
   type?: string;
   envelope_id?: string;
-  payload?: SlackEventEnvelope;
+  payload?: SlackIngressPayload;
   accepts_response_payload?: boolean;
 };
 
@@ -120,10 +120,13 @@ async function handleSocketMessage(input: {
 
   input.socket.send(JSON.stringify({ envelope_id: envelope.envelope_id }));
 
-  if (envelope.type !== "events_api" || !envelope.payload) {
+  if (!envelope.payload) {
     return;
   }
   if (input.slackApp.appId && envelope.payload.api_app_id && envelope.payload.api_app_id !== input.slackApp.appId) {
+    return;
+  }
+  if (envelope.type !== "events_api" && envelope.payload.type !== "block_actions") {
     return;
   }
 

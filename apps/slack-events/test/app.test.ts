@@ -171,6 +171,109 @@ describe("Slack events app", () => {
     });
   });
 
+  it("submits source-thread actions from Slack Block Kit buttons", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const interactivePayload = {
+      type: "block_actions",
+      api_app_id: "A_GEMINI",
+      team: { id: "T123" },
+      user: { id: "U456", username: "alice" },
+      channel: { id: "C123" },
+      message: {
+        ts: `${currentTimestamp}.000500`,
+        thread_ts: `${currentTimestamp}.000100`
+      },
+      container: {
+        type: "message",
+        channel_id: "C123",
+        message_ts: `${currentTimestamp}.000500`,
+        thread_ts: `${currentTimestamp}.000100`
+      },
+      trigger_id: "trigger_apply_1",
+      actions: [
+        {
+          type: "button",
+          action_id: "opentag:apply:1",
+          block_id: "opentag_actions_1",
+          value: JSON.stringify({
+            version: 1,
+            command: "apply 1",
+            proposalId: "proposal_1",
+            intentId: "intent_label_1"
+          }),
+          action_ts: `${currentTimestamp}.000600`
+        }
+      ]
+    };
+    const rawBody = new URLSearchParams({ payload: JSON.stringify(interactivePayload) }).toString();
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [
+        {
+          appId: "A_GEMINI",
+          signingSecret: "secret",
+          agentId: "gemini",
+          callbackUri: "http://127.0.0.1:3102/slack-callback"
+        }
+      ],
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      submitThreadAction,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledWith({
+      id: "approval_slack_block_trigger_apply_1",
+      rawText: "apply 1",
+      actor: {
+        provider: "slack",
+        providerUserId: "U456",
+        handle: "alice",
+        organizationId: "T123"
+      },
+      callback: {
+        provider: "slack",
+        uri: "http://127.0.0.1:3102/slack-callback",
+        threadKey: `T123|C123|${currentTimestamp}.000100`
+      },
+      metadata: {
+        source: "slack_button",
+        teamId: "T123",
+        channelId: "C123",
+        messageTs: `${currentTimestamp}.000500`,
+        slackAppId: "A_GEMINI",
+        actionId: "opentag:apply:1",
+        blockId: "opentag_actions_1",
+        actionTs: `${currentTimestamp}.000600`,
+        proposalId: "proposal_1",
+        intentId: "intent_label_1",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+  });
+
   it("ignores plain non-action messages before resolving channel bindings", async () => {
     const resolveChannelBinding = vi.fn(async () => ({ teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }));
     const createRun = vi.fn(async () => ({ runId: "run_1" }));

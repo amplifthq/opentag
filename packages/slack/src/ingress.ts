@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { createSlackDispatcherEventProcessorInput } from "./dispatcher-events.js";
-import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventEnvelope, type SlackEventProcessorInput } from "./events.js";
+import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventProcessorInput, type SlackIngressPayload } from "./events.js";
 
 export type SlackEventsAppInput = {
   slackApps: Array<
@@ -65,9 +65,14 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
   const app = new Hono();
   const processor = createSlackEventProcessor(input);
 
-  function parseSlackPayload(rawBody: string): SlackEventEnvelope | null {
+  function parseSlackPayload(rawBody: string, contentType?: string): SlackIngressPayload | null {
     try {
-      return JSON.parse(rawBody) as SlackEventEnvelope;
+      if (contentType?.includes("application/x-www-form-urlencoded") || rawBody.startsWith("payload=")) {
+        const interactivePayload = new URLSearchParams(rawBody).get("payload");
+        if (!interactivePayload) return null;
+        return JSON.parse(interactivePayload) as SlackIngressPayload;
+      }
+      return JSON.parse(rawBody) as SlackIngressPayload;
     } catch {
       return null;
     }
@@ -106,7 +111,7 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
       return c.json({ error: "stale_signature_timestamp" }, 401);
     }
     const rawBody = await c.req.text();
-    const payload = parseSlackPayload(rawBody);
+    const payload = parseSlackPayload(rawBody, c.req.header("content-type"));
     if (!payload) {
       return c.json({ error: "invalid_json" }, 400);
     }

@@ -11,12 +11,15 @@ Both modes support the same core product flow: mention the Slack app, let OpenTa
 
 Slack-only setup proves the Slack loop. It does not by itself grant GitHub write access. If a run proposes a pull request action, `apply 1` can create a GitHub PR only when OpenTag also has a GitHub repository target and GitHub token configured.
 
+Suggested action buttons use Slack Block Kit interactivity. Enable **Interactivity & Shortcuts** in the Slack app so buttons such as **Apply 1** can submit the same source-thread action as a typed `apply 1` reply.
+
 ## Official Links
 
 - [Slack app settings](https://api.slack.com/apps)
 - [Slack app quickstart](https://docs.slack.dev/quickstart/)
 - [Using Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/)
 - [Verifying requests from Slack](https://docs.slack.dev/authentication/verifying-requests-from-slack/)
+- [Slack interactivity](https://api.slack.com/interactivity)
 - [Slack OAuth scopes](https://api.slack.com/scopes)
 
 ## Recommended: Local Socket Mode
@@ -41,7 +44,7 @@ Choose this mode when you want `opentag start` on your computer to receive Slack
 If Slack offers **Create from manifest**, that is the fastest path. Use a manifest with:
 
 - Socket Mode enabled.
-- Bot scopes: `app_mentions:read`, `chat:write`, `channels:history`.
+- Bot scopes: `app_mentions:read`, `chat:write`, `reactions:write`, `channels:history`.
 - Bot event subscriptions: `app_mention`, `message.channels`.
 
 You still need to install the app and create the App-Level Token in the steps below.
@@ -67,6 +70,7 @@ Slack App-Level Token
 2. Under **Bot Token Scopes**, add:
    - `app_mentions:read`
    - `chat:write`
+   - `reactions:write`
    - `channels:history`
 3. Install or reinstall the app to your workspace.
 4. Copy **Bot User OAuth Token**. It starts with `xoxb-`.
@@ -89,6 +93,15 @@ Slack Bot User OAuth Token
 Do not enter a Request URL for Socket Mode. Slack delivers the event through the WebSocket connection opened by `opentag start`.
 
 `message.channels` lets OpenTag receive thread replies such as `apply 1` in public channels. For private channels, also add the `groups:history` bot scope and subscribe to `message.groups`.
+
+### Enable Interactivity For Buttons
+
+1. In the same Slack app, go to **Interactivity & Shortcuts**.
+2. Turn **Interactivity** on.
+3. Do not enter a Request URL for Socket Mode. Slack sends Block Kit button actions over the same Socket Mode WebSocket connection.
+4. Save changes.
+
+This is what makes Slack buttons such as **Apply 1**, **Approve**, and **Reject** work. If Interactivity is off, OpenTag can still receive typed thread replies like `apply 1`, but clicking a button will fail in Slack before it reaches OpenTag.
 
 ## Advanced: Public Events API
 
@@ -131,6 +144,7 @@ Do not use `http://localhost:3040/slack/events` as the Slack Request URL. Slack 
 3. Go to **OAuth & Permissions** and add the same bot scopes:
    - `app_mentions:read`
    - `chat:write`
+   - `reactions:write`
    - `channels:history`
 4. Install or reinstall the app.
 5. Go to **Event Subscriptions**.
@@ -146,9 +160,23 @@ https://<your-tunnel-host>/slack/events
    - `message.channels`
 9. Save changes.
 
+### Configure Interactivity For Buttons
+
+1. In the same Slack app, go to **Interactivity & Shortcuts**.
+2. Turn **Interactivity** on.
+3. Paste the same public Request URL:
+
+```text
+https://<your-tunnel-host>/slack/events
+```
+
+4. Save changes.
+
 Do not enable Socket Mode for this Events API setup.
 
 `message.channels` lets OpenTag receive thread replies such as `apply 1` in public channels. For private channels, also add the `groups:history` bot scope and subscribe to `message.groups`.
+
+Use the same `/slack/events` URL for **Event Subscriptions** and **Interactivity & Shortcuts**. OpenTag verifies the Slack signature for both request types, then routes button clicks into the same `/v1/thread-actions` flow used by typed replies.
 
 If Slack says the Request URL did not respond with the challenge value, check these three things:
 
@@ -203,5 +231,13 @@ Then mention the app in the bound channel:
 ```
 
 OpenTag should acknowledge the request and later reply in the same Slack thread.
+By default, the acknowledgement is a lightweight `eyes` reaction on your source message instead of a new thread reply.
+
+When OpenTag posts suggested actions, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
 
 If the reply includes a pull request action, but your config only contains Slack credentials, OpenTag will continue with a follow-up run instead of creating the GitHub PR directly. Configure GitHub as a repository target before expecting Slack `apply 1` replies to create PRs.
+
+If suggested action buttons are visible but clicking them shows an error in Slack, re-check **Interactivity & Shortcuts**:
+
+- Socket Mode: Interactivity is on, and no Request URL is required.
+- Events API: Interactivity is on, and the Request URL is `https://<your-tunnel-host>/slack/events`.

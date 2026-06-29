@@ -5,6 +5,7 @@ import {
   createGitHubCallbackSink,
   createLarkCallbackSink,
   createSlackCallbackSink,
+  createSlackSourceReceiptSink,
   createTelegramCallbackSink
 } from "@opentag/dispatcher";
 
@@ -107,6 +108,10 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       databasePath: input.databasePath,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
       ...(input.githubToken ? { githubApply: { token: input.githubToken } } : {}),
+      sourceReceiptSink: createSlackSourceReceiptSink({
+        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
+        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
+      }),
       callbackSink: createCompositeCallbackSink([
         createGitHubCallbackSink({
           ...(input.githubToken ? { token: input.githubToken } : {})

@@ -13,6 +13,7 @@ import {
   type MutationIntent,
   type OpenTagEvent,
   type OpenTagRun,
+  type PermissionGrant,
   type SuggestedChangesSnapshot,
   type SuggestedActionCandidate,
   type ThreadActionCommand,
@@ -184,6 +185,7 @@ function childEventFromParent(input: {
   receivedAt: string;
   extraContext?: OpenTagEvent["context"];
   metadata?: Record<string, unknown>;
+  permissions?: PermissionGrant[];
 }): OpenTagEvent {
   return {
     ...input.parentEvent,
@@ -202,7 +204,8 @@ function childEventFromParent(input: {
     metadata: {
       ...input.parentEvent.metadata,
       ...(input.metadata ?? {})
-    }
+    },
+    permissions: input.permissions ?? input.parentEvent.permissions
   };
 }
 
@@ -599,6 +602,32 @@ function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandida
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
 }
 
+function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGrant): PermissionGrant[] {
+  if (permissions.some((permission) => permission.scope === grant.scope)) return permissions;
+  return [...permissions, grant];
+}
+
+function childRunPermissionsForThreadAction(input: { resolved: ResolvedThreadAction; command: ThreadActionCommand }): PermissionGrant[] {
+  let permissions = [...input.resolved.proposal.event.permissions];
+  if (input.command.verb === "apply" || input.command.verb === "continue") {
+    permissions = addPermissionGrant(permissions, {
+      scope: "repo:read",
+      reason: "inspect the repository while continuing an approved source-thread action"
+    });
+    permissions = addPermissionGrant(permissions, {
+      scope: "repo:write",
+      reason: "apply an approved source-thread mutation on a run branch"
+    });
+  }
+  if (input.resolved.selectedCandidates.some((candidate) => candidate.intent.action === "create_pull_request")) {
+    permissions = addPermissionGrant(permissions, {
+      scope: "pr:create",
+      reason: "create the pull request approved in the source thread"
+    });
+  }
+  return permissions;
+}
+
 function childRunContextLines(input: {
   resolved: ResolvedThreadAction;
   approvalDecisionId?: string;
@@ -621,10 +650,17 @@ function renderChildRunCreatedBody(input: {
   lead: string;
   resolved: ResolvedThreadAction;
   childRun: OpenTagRun;
+  provider?: string;
   approvalDecisionId?: string;
   sourceApplyPlanId?: string;
   fallbackReason?: string;
 }): string {
+  if (input.provider === "slack") {
+    return [
+      "Approved. OpenTag will continue from this proposal in a follow-up run.",
+      ...(input.fallbackReason ? [`Reason: ${input.fallbackReason}`] : [])
+    ].join("\n");
+  }
   return [
     input.lead,
     "",
@@ -635,6 +671,56 @@ function renderChildRunCreatedBody(input: {
     "",
     "The model will continue from this approved proposal instead of starting from a fresh mention."
   ].join("\n");
+}
+
+function renderAppliedThreadActionBody(input: {
+  provider: string;
+  selectionText: string;
+  proposalId: string;
+  selectedIntentIds: string[];
+  outcomes: ApplyIntentOutcome[];
+}): string {
+  const selectedOutcomes = input.outcomes.filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
+  if (input.provider === "slack") {
+    const lines = [`Applied ${input.selectionText}.`];
+    for (const outcome of selectedOutcomes) {
+      if (outcome.externalUri) {
+        lines.push(`Result: ${outcome.externalUri}`);
+      } else if (outcome.message) {
+        lines.push(`Result: ${outcome.outcome}. ${outcome.message}`);
+      } else {
+        lines.push(`Result: ${outcome.outcome}.`);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  return [
+    `Applied ${input.selectionText} from \`${input.proposalId}\`.`,
+    "",
+    "Result:",
+    ...selectedOutcomes.map((outcome) => `- \`${outcome.intentId}\`: ${outcome.outcome}${outcome.externalUri ? ` (${outcome.externalUri})` : ""}`)
+  ].join("\n");
+}
+
+function renderThreadActionRecordedBody(input: {
+  provider: string;
+  verb: "approve" | "reject";
+  selectionText: string;
+  proposalId: string;
+  applyIndex?: number;
+}): string {
+  const pastTense = input.verb === "approve" ? "Approved" : "Rejected";
+  if (input.provider === "slack") {
+    if (input.verb === "approve") {
+      return `${pastTense} ${input.selectionText}.\nNext: use Apply ${input.applyIndex ?? 1} when you want OpenTag to perform it.`;
+    }
+    return `${pastTense} ${input.selectionText}.`;
+  }
+  if (input.verb === "approve") {
+    return `${pastTense} ${input.selectionText} from \`${input.proposalId}\`.\n\nReply with \`apply ${input.applyIndex ?? 1}\` to apply it, or \`continue ${input.applyIndex ?? 1}\` to continue with a follow-up run.`;
+  }
+  return `${pastTense} ${input.selectionText} from \`${input.proposalId}\`.`;
 }
 
 function actionContextPointer(input: {
@@ -719,7 +805,8 @@ async function createChildRunForThreadAction(input: {
         ...(input.approvalDecisionId ? { approvalDecisionId: input.approvalDecisionId } : {}),
         ...(input.sourceApplyPlanId ? { sourceApplyPlanId: input.sourceApplyPlanId } : {}),
         ...(input.fallbackReason ? { fallbackReason: input.fallbackReason } : {})
-      }
+      },
+      permissions: childRunPermissionsForThreadAction({ resolved: input.resolved, command: input.command })
     }),
     parentRunId: input.resolved.proposal.runId,
     triggeredByAction: action,
@@ -743,6 +830,24 @@ export type CallbackMessage = {
 
 export type CallbackSink = {
   deliver(message: CallbackMessage): Promise<void>;
+};
+
+export type SourceReceiptState = "received";
+
+export type SourceReceiptDelivery = {
+  delivered: boolean;
+};
+
+export type SourceReceipt = {
+  runId: string;
+  provider: string;
+  state: SourceReceiptState;
+  event: OpenTagEvent;
+  agentId?: string;
+};
+
+export type SourceReceiptSink = {
+  deliver(receipt: SourceReceipt): Promise<SourceReceiptDelivery>;
 };
 
 export type CallbackRetryOptions = {
@@ -833,6 +938,12 @@ async function executeGitHubApplyPlan(input: {
 const noopCallbackSink: CallbackSink = {
   async deliver() {
     return;
+  }
+};
+
+const noopSourceReceiptSink: SourceReceiptSink = {
+  async deliver() {
+    return { delivered: false };
   }
 };
 
@@ -933,6 +1044,41 @@ async function deliverAndAudit(input: {
   });
 }
 
+async function deliverSourceReceiptBestEffort(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  sink: SourceReceiptSink;
+  receipt: SourceReceipt;
+}): Promise<void> {
+  try {
+    const result = await input.sink.deliver(input.receipt);
+    if (!result.delivered) return;
+    await input.repo.appendRunEvent({
+      runId: input.receipt.runId,
+      type: "source_receipt.delivered",
+      payload: {
+        provider: input.receipt.provider,
+        state: input.receipt.state
+      },
+      visibility: "audit",
+      importance: "low",
+      message: `Source ${input.receipt.state} receipt delivered.`
+    });
+  } catch (error) {
+    await input.repo.appendRunEvent({
+      runId: input.receipt.runId,
+      type: "source_receipt.failed",
+      payload: {
+        provider: input.receipt.provider,
+        state: input.receipt.state,
+        error: error instanceof Error ? error.message : String(error)
+      },
+      visibility: "audit",
+      importance: "low",
+      message: `Source ${input.receipt.state} receipt failed.`
+    });
+  }
+}
+
 function isAuthorized(request: Request, pairingToken: string | undefined): boolean {
   if (!pairingToken) return true;
   return request.headers.get("authorization") === `Bearer ${pairingToken}`;
@@ -941,6 +1087,7 @@ function isAuthorized(request: Request, pairingToken: string | undefined): boole
 export function createDispatcherApp(input: {
   databasePath: string;
   callbackSink?: CallbackSink;
+  sourceReceiptSink?: SourceReceiptSink;
   pairingToken?: string;
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
@@ -952,6 +1099,7 @@ export function createDispatcherApp(input: {
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
   const callbackSink = input.callbackSink ?? noopCallbackSink;
+  const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
   const callbackRetry = input.callbackRetry ?? {};
   const admission = createAdmissionRuntime({
@@ -1148,6 +1296,17 @@ export function createDispatcherApp(input: {
       );
     }
     const { run } = createdRun;
+    await deliverSourceReceiptBestEffort({
+      repo,
+      sink: sourceReceiptSink,
+      receipt: {
+        runId: run.id,
+        provider: parsed.event.callback.provider,
+        state: "received",
+        event: parsed.event,
+        ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {})
+      }
+    });
     if (presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider)) {
       await deliverAndAudit({
         repo,
@@ -1253,6 +1412,7 @@ export function createDispatcherApp(input: {
               lead: "This action was already planned, so OpenTag will not execute the external write again.",
               resolved: resolved.resolved,
               childRun,
+              provider: parsed.callback.provider,
               approvalDecisionId: existingPlan.approvalDecisionId,
               sourceApplyPlanId: existingPlan.id,
               fallbackReason
@@ -1309,7 +1469,12 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
-      const body = `Rejected ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.`;
+      const body = renderThreadActionRecordedBody({
+        provider: parsed.callback.provider,
+        verb: "reject",
+        selectionText,
+        proposalId: resolved.resolved.proposal.snapshot.proposalId
+      });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -1330,7 +1495,13 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
-      const body = `Approved ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.\n\nReply with \`apply ${resolved.resolved.selectedCandidates[0]?.index ?? 1}\` to apply it, or \`continue ${resolved.resolved.selectedCandidates[0]?.index ?? 1}\` to continue with a follow-up run.`;
+      const body = renderThreadActionRecordedBody({
+        provider: parsed.callback.provider,
+        verb: "approve",
+        selectionText,
+        proposalId: resolved.resolved.proposal.snapshot.proposalId,
+        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+      });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -1359,6 +1530,7 @@ export function createDispatcherApp(input: {
         lead: `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
         resolved: resolved.resolved,
         childRun,
+        provider: parsed.callback.provider,
         approvalDecisionId: decision.id
       });
       await deliverAndAudit({
@@ -1419,6 +1591,7 @@ export function createDispatcherApp(input: {
             lead: "This action was already planned, so OpenTag will not execute the external write again.",
             resolved: resolved.resolved,
             childRun,
+            provider: parsed.callback.provider,
             approvalDecisionId: decision.id,
             sourceApplyPlanId: planResult.plan.id,
             fallbackReason
@@ -1438,14 +1611,13 @@ export function createDispatcherApp(input: {
     });
     if (execution.executed) {
       const outcomes = execution.plan.outcomes ?? [];
-      const body = [
-        `Applied ${selectionText} from \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
-        "",
-        "Result:",
-        ...outcomes
-          .filter((outcome) => resolved.resolved.selectedIntentIds.includes(outcome.intentId))
-          .map((outcome) => `- \`${outcome.intentId}\`: ${outcome.outcome}${outcome.externalUri ? ` (${outcome.externalUri})` : ""}`)
-      ].join("\n");
+      const body = renderAppliedThreadActionBody({
+        provider: parsed.callback.provider,
+        selectionText,
+        proposalId: resolved.resolved.proposal.snapshot.proposalId,
+        selectedIntentIds: resolved.resolved.selectedIntentIds,
+        outcomes
+      });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -1480,6 +1652,7 @@ export function createDispatcherApp(input: {
       lead: `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
       resolved: resolved.resolved,
       childRun,
+      provider: parsed.callback.provider,
       approvalDecisionId: decision.id,
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "The adapter could not execute the selected intent."

@@ -93,6 +93,7 @@ function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: s
     context: [{ provider: "slack", kind: "message", uri: "slack://team/T123/channel/C123/message/1710000000.000100", visibility: "organization" }],
     permissions: [
       { scope: "chat:postMessage", reason: "reply to source thread" },
+      { scope: "reactions:write", reason: "mark the source Slack message as received" },
       { scope: "runner:local", reason: "execute on local daemon" },
       { scope: "repo:write", reason: "modify the mapped repository" },
       { scope: "pr:create", reason: "create an approved pull request" }
@@ -663,24 +664,22 @@ describe("dispatcher API", () => {
     expect(completeResponse.status).toBe(200);
 
     expect(delivered).toEqual([
-      { kind: "acknowledgement", body: "I picked this up: `run_slack_1`" },
       {
         kind: "final",
-        body: "Finished with *success*.\n\nEchoed OpenTag command: introduce yourself\n\n*Verification*\n- `echo`: passed",
+        body: "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed",
         blocks: [
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: "*Finished with success.*\nEchoed OpenTag command: introduce yourself"
+              text: "*Finished: success.*\nEchoed OpenTag command: introduce yourself"
             }
           },
-          { type: "divider" },
           {
             type: "section",
             text: {
               type: "mrkdwn",
-              text: "*Verification*\n- `echo`: passed"
+              text: "Verified: `echo` passed"
             }
           }
         ]
@@ -695,8 +694,6 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
-      "callback.acknowledgement.queued",
-      "callback.acknowledgement.delivered",
       "run.claimed",
       "run.progress",
       "run.completed",
@@ -707,6 +704,79 @@ describe("dispatcher API", () => {
       visibility: "audit",
       importance: "normal",
       message: "Echo executor started"
+    });
+  });
+
+  it("delivers Slack source receipts without posting text acknowledgements", async () => {
+    const callbacks: { kind: string }[] = [];
+    const receipts: Array<{ runId: string; provider: string; state: string; agentId?: string; channelId: unknown; messageTs: unknown }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          callbacks.push({ kind: message.kind });
+        }
+      },
+      sourceReceiptSink: {
+        async deliver(receipt) {
+          receipts.push({
+            runId: receipt.runId,
+            provider: receipt.provider,
+            state: receipt.state,
+            ...(receipt.agentId ? { agentId: receipt.agentId } : {}),
+            channelId: receipt.event.metadata["channelId"],
+            messageTs: receipt.event.metadata["messageTs"]
+          });
+          return { delivered: true };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = slackRepoEvent({ id: "evt_slack_receipt", sourceEventId: "EvSlackReceipt", threadKey: "T123|C123|1710000000.000100" });
+    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt", event }));
+    expect(createResponse.status).toBe(201);
+
+    const replayResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_replay", event }));
+    expect(replayResponse.status).toBe(200);
+
+    expect(callbacks).toEqual([]);
+    expect(receipts).toEqual([
+      {
+        runId: "run_slack_receipt",
+        provider: "slack",
+        state: "received",
+        agentId: "opentag",
+        channelId: "C123",
+        messageTs: "1710000000.000100"
+      }
+    ]);
+
+    const eventsResponse = await app.request("/v1/runs/run_slack_receipt/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "admission.decided",
+      "run.created",
+      "context_packet.generated",
+      "source_receipt.delivered",
+      "admission.decided",
+      "run.create_idempotent_replay"
+    ]);
+    expect(events.find((event: { type: string }) => event.type === "source_receipt.delivered")).toMatchObject({
+      visibility: "audit",
+      importance: "low",
+      payload: {
+        provider: "slack",
+        state: "received"
+      }
     });
   });
 
@@ -1790,7 +1860,6 @@ describe("dispatcher API", () => {
     expect(completeResponse.status).toBe(200);
 
     expect(delivered).toEqual([
-      { kind: "acknowledgement", agentId: "deepseek" },
       { kind: "final", agentId: "deepseek" }
     ]);
   });
@@ -2527,7 +2596,10 @@ describe("dispatcher API", () => {
         }
       }
     ]);
-    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/43"))).toBe(true);
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/43"));
+    expect(finalMessage?.body).toContain("Applied 1. Create PR for branch opentag/run_slack_create_pr.");
+    expect(finalMessage?.body).not.toContain("proposal_slack_create_pr");
+    expect(finalMessage?.body).not.toContain("intent_slack_create_pr");
   });
 
   it("falls back to a child run when a PR review request lacks reviewer params", async () => {
@@ -2735,6 +2807,9 @@ describe("dispatcher API", () => {
       previousRunSummary: "Prepared suggested actions."
     });
     expect(stored.event.metadata.fallbackReason).toContain("No selected intent has a direct adapter execution path.");
+    expect(stored.event.permissions.map((permission: { scope: string }) => permission.scope)).toEqual(
+      expect.arrayContaining(["repo:read", "repo:write"])
+    );
     expect(stored.run.contextPacket.facts.map((fact: { text: string }) => fact.text)).toEqual(
       expect.arrayContaining([
         "Action loop thread action: apply",
