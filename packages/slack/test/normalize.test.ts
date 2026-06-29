@@ -6,6 +6,51 @@ describe("Slack normalization", () => {
     expect(stripSlackAppMention("<@U_APP> fix this", "U_APP")).toBe("fix this");
   });
 
+  it("strips the full leading mention run when a teammate is mentioned before the bot", () => {
+    expect(stripSlackAppMention("<@U_TEAMMATE> <@U_APP> fix this", "U_APP")).toBe("fix this");
+  });
+
+  it("matches the bot when its leading mention carries a display-name label", () => {
+    expect(stripSlackAppMention("<@U_APP|opentag> fix this", "U_APP")).toBe("fix this");
+  });
+
+  it("matches a labeled bot mention even when preceded by a labeled teammate mention", () => {
+    expect(
+      stripSlackAppMention("<@U_TEAMMATE|alice> <@U_APP|opentag> fix this", "U_APP")
+    ).toBe("fix this");
+  });
+
+  it("preserves mentions that appear mid-sentence", () => {
+    expect(stripSlackAppMention("<@U_APP> ping <@U_TEAMMATE> now", "U_APP")).toBe(
+      "ping <@U_TEAMMATE> now"
+    );
+  });
+
+  it("returns null when the bot is not part of the leading mention run", () => {
+    expect(stripSlackAppMention("<@U_TEAMMATE> fix this", "U_APP")).toBeNull();
+  });
+
+  it("routes intent correctly when a teammate is mentioned before the bot", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_TEAMMATE> <@U_APP> fix this",
+      ts: "1710000000.000100",
+      eventId: "Ev999",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: {
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+
+    expect(event?.command.intent).toBe("fix");
+  });
+
   it("normalizes an app_mention into an OpenTagEvent", () => {
     const event = normalizeSlackAppMention({
       teamId: "T123",

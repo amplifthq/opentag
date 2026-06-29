@@ -24,19 +24,38 @@ export type SlackAppMentionInput = {
   binding: SlackChannelBinding;
 };
 
-export function stripSlackAppMention(text: string, botUserId?: string): string | null {
-  const patterns = botUserId
-    ? [new RegExp(`^<@${botUserId}>\\s*`, "i"), /^<@[^>]+>\s*/]
-    : [/^<@[^>]+>\s*/];
+// Matches a run of one or more leading user mentions (e.g. a teammate mention
+// placed before the bot mention) along with the whitespace separating them.
+const LEADING_MENTION_RUN = /^(?:<@[^>]+>\s*)+/;
+// Matches a single mention token, used to confirm the bot itself appears in the
+// leading run so we only treat the message as an at-mention of the bot.
+const MENTION_TOKEN = /<@([^>]+)>/g;
 
-  for (const pattern of patterns) {
-    const stripped = text.replace(pattern, "").trim();
-    if (stripped !== text.trim()) {
-      return stripped.length > 0 ? stripped : null;
-    }
+export function stripSlackAppMention(text: string, botUserId?: string): string | null {
+  const run = text.match(LEADING_MENTION_RUN);
+  if (!run) return null;
+
+  // Only strip the *leading* run of mentions; mentions later in the message
+  // (e.g. "<@bot> ping <@teammate> now") must be preserved as command text.
+  const leadingRun = run[0];
+
+  if (botUserId) {
+    // Require that the bot is mentioned somewhere in the leading run before we
+    // accept this as a command directed at the bot. This lets a teammate
+    // mention precede the bot mention without breaking routing.
+    const mentionedIds = leadingRun.match(MENTION_TOKEN) ?? [];
+    const botIsMentioned = mentionedIds.some((token) => {
+      // Slack mentions may carry a display-name/label suffix, e.g.
+      // "<@U12345|alice>". Strip the label so we compare against the bare
+      // user ID rather than "U12345|alice".
+      const id = token.slice(2, -1).split("|")[0] ?? "";
+      return id.toLowerCase() === botUserId.toLowerCase();
+    });
+    if (!botIsMentioned) return null;
   }
 
-  return null;
+  const stripped = text.slice(leadingRun.length).trim();
+  return stripped.length > 0 ? stripped : null;
 }
 
 export function encodeSlackThreadKey(input: { teamId: string; channelId: string; threadTs: string }): string {
