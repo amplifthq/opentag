@@ -12,6 +12,7 @@ Then run:
 
 ```bash
 opentag setup
+opentag doctor
 opentag start
 ```
 
@@ -60,6 +61,16 @@ The setup wizard links to the matching guide for each platform:
 - Node.js 20 or newer.
 - A local coding agent if you choose Codex or Claude Code.
 - Platform credentials for the platform you connect.
+
+## No Install
+
+The scoped CLI package supports one-off runs without a global install:
+
+```bash
+npx @opentag/cli doctor
+npx @opentag/cli setup
+npx @opentag/cli start
+```
 
 ## Local Development
 

@@ -15,7 +15,11 @@
 
 **把 Slack、GitHub 或 Lark 连接到你本地的 coding agent。**
 
+[![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
+[![pnpm build](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20build)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
+[![pnpm typecheck](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20typecheck)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
+[![pnpm test](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20test)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#许可证)
 
@@ -30,6 +34,7 @@ OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agen
 ```bash
 npm install -g @opentag/cli
 opentag setup
+opentag doctor
 opentag start
 ```
 
@@ -37,6 +42,7 @@ opentag start
 
 ```bash
 npx @opentag/cli setup
+npx @opentag/cli doctor
 npx @opentag/cli start
 ```
 
@@ -64,7 +70,7 @@ Help me set up OpenTag from https://github.com/amplifthq/opentag.
 
 Use the published OpenTag CLI. Please:
 1. Check that Node.js 20 or newer is available.
-2. Install or run @opentag/cli.
+2. Install or run the published OpenTag CLI.
 3. Run opentag setup and help me choose Slack, GitHub, or Lark / Feishu, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
 5. Start OpenTag with opentag start and verify the setup with opentag status or opentag doctor.
@@ -196,7 +202,7 @@ opentag-dev setup
 
 ## 软件包
 
-OpenTag 的 npm 包发布在 `@opentag` scope 下。
+当前公开发布版本：`v0.2.0`。OpenTag 的 npm 包发布在 `@opentag` scope 下。
 
 | 包 | 用途 |
 | --- | --- |

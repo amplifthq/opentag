@@ -15,7 +15,11 @@
 
 **Connect Slack, GitHub, or Lark to a local coding agent.**
 
+[![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
+[![pnpm build](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20build)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
+[![pnpm typecheck](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20typecheck)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
+[![pnpm test](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20test)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
@@ -30,6 +34,7 @@ Requires Node.js 20 or newer.
 ```bash
 npm install -g @opentag/cli
 opentag setup
+opentag doctor
 opentag start
 ```
 
@@ -37,6 +42,7 @@ No global install:
 
 ```bash
 npx @opentag/cli setup
+npx @opentag/cli doctor
 npx @opentag/cli start
 ```
 
@@ -64,7 +70,7 @@ Help me set up OpenTag from https://github.com/amplifthq/opentag.
 
 Use the published OpenTag CLI. Please:
 1. Check that Node.js 20 or newer is available.
-2. Install or run @opentag/cli.
+2. Install or run the published OpenTag CLI.
 3. Run opentag setup and help me choose Slack, GitHub, or Lark / Feishu, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
 5. Start OpenTag with opentag start and verify the setup with opentag status or opentag doctor.
@@ -196,7 +202,7 @@ opentag-dev setup
 
 ## Packages
 
-The npm package family is published under the `@opentag` scope.
+Current public release: `v0.2.0`. The npm package family is published under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |

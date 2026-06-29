@@ -74,6 +74,7 @@ try {
 
   console.log("Checking the installed opentag command...");
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });
+  run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

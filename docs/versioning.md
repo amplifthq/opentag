@@ -6,11 +6,15 @@ OpenTag packages are versioned and published as a coordinated package family.
 
 Public packages:
 
+- `@opentag/cli`
+- `@opentag/local-runtime`
 - `@opentag/core`
 - `@opentag/client`
 - `@opentag/dispatcher`
 - `@opentag/github`
+- `@opentag/lark`
 - `@opentag/slack`
+- `@opentag/telegram`
 - `@opentag/runner`
 - `@opentag/store`
 
@@ -23,9 +27,10 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The current public release is `0.1.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The current public release is `0.2.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
+The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
 
 For each npm release:
 
@@ -67,3 +72,4 @@ After `1.0.0`, follow SemVer:
 7. Run `pnpm build`.
 8. Run `npm pack --dry-run --json` in each public package directory.
 9. Publish public packages with `publishConfig.access=public`.
+10. Create a matching GitHub Release, for example `v0.2.0`, pointing at the commit that produced the npm packages.

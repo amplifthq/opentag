@@ -4,7 +4,7 @@ OpenTag npm packages are published manually from a local checkout until a releas
 
 ## What gets published
 
-Publish all public packages together with the same version. The CLI depends on local runtime and adapter packages, so publishing only `@opentag/cli` is not enough.
+Publish all public packages together with the same version. The CLI depends on local runtime and adapter packages, so publishing only one package is not enough.
 
 Current release version:
 
@@ -65,12 +65,14 @@ corepack pnpm release:publish -- --otp 123456
 
 ## User install check
 
-After publishing, verify the global CLI path:
+After publishing, verify the global CLI and no-install paths:
 
 ```bash
 npm install -g @opentag/cli
 opentag --help
-opentag setup
+opentag doctor
+npx @opentag/cli --help
+npx @opentag/cli doctor
 ```
 
 The `@opentag/cli` package exposes this binary:
