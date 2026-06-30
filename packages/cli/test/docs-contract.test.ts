@@ -7,6 +7,56 @@ function repoFile(path: string): string {
 }
 
 describe("platform setup docs contract", () => {
+  it("keeps the OpenTag skill aligned with Codex askhuman setup guidance", () => {
+    const skill = repoFile("skills/opentag/SKILL.md");
+
+    expect(skill).toContain("request_user_input");
+    expect(skill).toContain("askhuman");
+    expect(skill).toContain("Codex Plan mode");
+    expect(skill).toContain("Codex Default mode cannot render askhuman choice cards");
+    expect(skill).toContain("runtime-provided Plan-mode transition");
+    expect(skill).toContain("askhuman cannot render from Default mode");
+    expect(skill).toContain("Do not claim a Plan-mode handoff happened");
+    expect(skill).toContain("do not ask the user to switch modes");
+    expect(skill).toContain("do not ask the same choices in plain text");
+    expect(skill).toContain("do not present a plain-text fallback");
+    expect(skill).toContain("do not continue with CLI defaults");
+    expect(skill).toContain("Never request secrets through askhuman");
+    expect(skill).toContain("Do not ask setup users to run `codex exec` directly");
+    expect(skill).toContain("check `codex exec --help` first");
+    expect(skill).toContain("only use flags that the installed Codex version advertises");
+    expect(skill).toContain("Npm Registry And Network Failures");
+    expect(skill).toContain("ENOTFOUND");
+    expect(skill).toContain("EAI_AGAIN");
+    expect(skill).toContain("ETIMEDOUT");
+    expect(skill).toContain("ECONNRESET");
+    expect(skill).toContain("npm config get registry");
+    expect(skill).toContain("npm config get proxy");
+    expect(skill).toContain("npm config get https-proxy");
+    expect(skill).toContain("registry.npmjs.org");
+    expect(skill).toContain("npm view @opentag/cli version --fetch-timeout=15000");
+    expect(skill).toContain("do not permanently change `npm config` without explicit user confirmation");
+    expect(skill).toContain("Only use a proxy URL the user provides or that is already active in the environment");
+    expect(skill).toContain("do not claim the CLI is available offline");
+    expect(skill).toContain("Platform: Slack, GitHub, or Lark / Feishu");
+    expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
+    expect(skill).toContain("Local project: the current working directory");
+    expect(skill).toContain("Slack Socket Mode vs Events API");
+    expect(skill).toContain("Lark / Feishu domain");
+    expect(skill).toContain("Lark scan vs manual setup");
+    expect(skill).toContain("default project binding vs bind later");
+    expect(skill).toContain("--platform");
+    expect(skill).toContain("--executor");
+    expect(skill).toContain("--project");
+    expect(skill).toContain("--slack-mode");
+    expect(skill).toContain("--lark-domain");
+    expect(skill).toContain("--lark-setup");
+    expect(skill).toContain("--binding");
+    expect(skill).not.toContain("agent-owned flow control");
+    expect(skill).not.toContain("trigger the Codex Plan-mode transition or handoff first");
+    expect(skill).not.toContain("ask for the same choices in plain text instead");
+  });
+
   it("keeps Slack setup docs aligned with the official Socket Mode and Events API requirements", () => {
     const english = repoFile("docs/platforms/slack.en.md");
     const chinese = repoFile("docs/platforms/slack.zh-CN.md");
