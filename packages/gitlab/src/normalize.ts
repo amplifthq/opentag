@@ -182,6 +182,26 @@ function gitlabWorkItem(input: {
   };
 }
 
+/**
+ * Derive a `(owner, repo)` pair from a GitLab `path_with_namespace` for the
+ * project-target lookup. GitLab nests projects under namespaces
+ * (`group/subgroup/project`); the `owner` slot in `projectTargetRefFromEvent`
+ * holds the full nested namespace, the `repo` slot holds the project leaf.
+ *
+ * Returns `undefined` for paths with no `/` separator (single-segment paths).
+ * The shape predicate `PROJECT_PATH_NAMESPACE_PATTERN` (round 2) already
+ * rejects single-segment paths at the ingress boundary, so this branch is
+ * only reachable via direct unit-call against `normalizeGitLabNote`.
+ */
+function ownerRepoFromProjectPath(pathWithNamespace: string): { owner: string; repo: string } | undefined {
+  const lastSlash = pathWithNamespace.lastIndexOf("/");
+  if (lastSlash === -1) return undefined;
+  return {
+    owner: pathWithNamespace.substring(0, lastSlash),
+    repo: pathWithNamespace.substring(lastSlash + 1)
+  };
+}
+
 function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
   if (!command.parsed) return {};
   return {
@@ -223,6 +243,7 @@ export function normalizeGitLabNote(input: GitLabNoteInput): OpenTagEvent | null
 
   const grantPermissions = isMergeRequest ? permissionsForMergeRequestIntent : permissionsForIntent;
   const iid = isMergeRequest ? (input.mergeRequestIid ?? input.issueIid) : input.issueIid;
+  const ownerRepo = ownerRepoFromProjectPath(input.projectPathWithNamespace);
 
   return {
     id: `evt_gitlab_note_${input.id}`,
@@ -269,6 +290,7 @@ export function normalizeGitLabNote(input: GitLabNoteInput): OpenTagEvent | null
     },
     metadata: {
       repoProvider: "gitlab",
+      ...ownerRepo,
       projectPathWithNamespace: input.projectPathWithNamespace,
       projectId: input.projectId,
       projectVisibility: input.projectVisibility,

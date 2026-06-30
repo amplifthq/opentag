@@ -262,3 +262,91 @@ describe("normalizeGitLabNote", () => {
     expect(event?.permissions.map((p) => p.scope)).toContain("pr:update");
   });
 });
+
+describe("owner/repo projection from projectPathWithNamespace", () => {
+  const baseInput = {
+    id: "1",
+    noteBody: "@opentag fix this",
+    noteUrl: "https://gitlab.com/acme/demo/-/issues/1#note_1",
+    apiNotesUrl: "https://gitlab.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+    issueIid: 1,
+    workItemUrl: "https://gitlab.com/acme/demo/-/issues/1",
+    projectId: 42,
+    projectVisibility: "public" as const,
+    actorId: 7,
+    actorUsername: "alice",
+    noteableType: "Issue" as const,
+    receivedAt: "2026-06-29T00:00:00.000Z"
+  };
+
+  it("derives owner + repo for a single-level path (acme/demo)", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/demo" });
+
+    expect(event?.metadata).toMatchObject({
+      repoProvider: "gitlab",
+      owner: "acme",
+      repo: "demo",
+      projectPathWithNamespace: "acme/demo",
+      projectId: 42
+    });
+  });
+
+  it("derives owner + repo for a nested-group path (acme/team/demo)", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/team/demo" });
+
+    expect(event?.metadata).toMatchObject({
+      repoProvider: "gitlab",
+      owner: "acme/team",
+      repo: "demo",
+      projectPathWithNamespace: "acme/team/demo"
+    });
+  });
+
+  it("derives owner + repo for a three-deep nested path (acme/team/sub/demo)", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/team/sub/demo" });
+
+    expect(event?.metadata).toMatchObject({
+      owner: "acme/team/sub",
+      repo: "demo"
+    });
+  });
+
+  it("preserves the existing metadata fields alongside the new owner/repo", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/team/demo" });
+
+    expect(event?.metadata).toMatchObject({
+      repoProvider: "gitlab",
+      projectPathWithNamespace: "acme/team/demo",
+      projectId: 42,
+      projectVisibility: "public",
+      issueIid: 1,
+      noteableType: "Issue",
+      owner: "acme/team",
+      repo: "demo"
+    });
+  });
+
+  it("preserves callback.threadKey as the full pathWithNamespace|kind|iid", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/team/demo" });
+
+    expect(event?.callback.threadKey).toBe("acme/team/demo|issue|1");
+  });
+
+  it("preserves WorkItemReference.ownerContainer.id as the full pathWithNamespace", () => {
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme/team/demo" });
+
+    expect(event?.workItem.ownerContainer.id).toBe("acme/team/demo");
+    expect(event?.workItem.ownerContainer.uri).toBe("https://gitlab.com/acme/team/demo");
+  });
+
+  it("omits owner and repo when projectPathWithNamespace has a single segment (defensive)", () => {
+    // Defensive: PROJECT_PATH_NAMESPACE_PATTERN in the ingress handler already
+    // rejects single-segment paths at the boundary, so this branch is reachable
+    // only via direct unit-call against normalizeGitLabNote.
+    const event = normalizeGitLabNote({ ...baseInput, projectPathWithNamespace: "acme" });
+
+    expect(event).not.toBeNull();
+    expect(event?.metadata).not.toHaveProperty("owner");
+    expect(event?.metadata).not.toHaveProperty("repo");
+  });
+});
