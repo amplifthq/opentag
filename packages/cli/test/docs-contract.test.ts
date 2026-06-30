@@ -7,6 +7,32 @@ function repoFile(path: string): string {
 }
 
 describe("platform setup docs contract", () => {
+  it("keeps the OpenTag skill aligned with Codex askhuman setup guidance", () => {
+    const skill = repoFile("skills/opentag/SKILL.md");
+
+    expect(skill).toContain("request_user_input");
+    expect(skill).toContain("askhuman");
+    expect(skill).toContain("Plan mode");
+    expect(skill).toContain("Default mode");
+    expect(skill).toContain("route setup choice collection through Codex Plan mode");
+    expect(skill).toContain("use a Codex runtime-provided Plan-mode transition if one is actually available");
+    expect(skill).toContain("report that askhuman cannot render from Default mode");
+    expect(skill).toContain("Do not claim a handoff happened");
+    expect(skill).toContain("do not ask the user to switch modes");
+    expect(skill).toContain("do not continue setup from Default mode");
+    expect(skill).toContain("do not ask the same choices in plain text");
+    expect(skill).toContain("Platform: Slack, GitHub, or Lark / Feishu");
+    expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
+    expect(skill).toContain("Never request secrets through askhuman");
+    expect(skill).toContain("--platform");
+    expect(skill).toContain("--executor");
+    expect(skill).toContain("--project");
+    expect(skill).not.toContain("agent-owned flow control");
+    expect(skill).not.toContain("trigger the Codex Plan-mode transition or handoff first");
+    expect(skill).not.toContain("ask for the same choices in plain text instead");
+    expect(skill).not.toContain("text fallback");
+  });
+
   it("keeps Slack setup docs aligned with the official Socket Mode and Events API requirements", () => {
     const english = repoFile("docs/platforms/slack.en.md");
     const chinese = repoFile("docs/platforms/slack.zh-CN.md");
