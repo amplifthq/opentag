@@ -484,17 +484,14 @@ describe("GitLab webhook ingress", () => {
       });
     }
 
-    const expectedPath = (pathWithNamespace: string): string =>
-      `https://gitlab.com/api/v4/projects/${encodeURIComponent(pathWithNamespace)}/issues/1/notes`;
-
-    async function postNote(pathWithNamespace: string): Promise<Response> {
+    async function postNote(pathWithNamespace: string): Promise<{ response: Response; createRun: ReturnType<typeof vi.fn> }> {
       const createRun = vi.fn(async () => ({ runId: "run_1" }));
       const app = createGitLabWebhookApp({
         webhookSecret: "shared-secret",
         createRun,
         now: () => "2026-06-29T00:00:00.000Z"
       });
-      return app.request("/gitlab/webhooks", {
+      const response = await app.request("/gitlab/webhooks", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -503,62 +500,65 @@ describe("GitLab webhook ingress", () => {
         },
         body: buildNoteBody(pathWithNamespace)
       });
+      return { response, createRun };
     }
 
     it("accepts a two-segment path_with_namespace (regression)", async () => {
-      const response = await postNote("acme/demo");
+      const { response } = await postNote("acme/demo");
       expect(response.status).toBe(200);
     });
 
     it("accepts a three-segment nested-subgroup path", async () => {
-      const response = await postNote("acme/team/demo");
+      const { response } = await postNote("acme/team/demo");
       expect(response.status).toBe(200);
     });
 
     it("accepts a four-segment nested-subgroup path", async () => {
-      const response = await postNote("acme/team/sub/demo");
+      const { response } = await postNote("acme/team/sub/demo");
       expect(response.status).toBe(200);
     });
 
     it("rejects a single-segment path (no slash)", async () => {
-      const response = await postNote("acme");
+      const { response } = await postNote("acme");
       expect(response.status).toBe(422);
     });
 
     it("rejects a trailing-slash path", async () => {
-      const response = await postNote("acme/demo/");
+      const { response } = await postNote("acme/demo/");
       expect(response.status).toBe(422);
     });
 
     it("rejects a pipe character anywhere in the path", async () => {
-      const response = await postNote("acme|evil/demo");
+      const { response } = await postNote("acme|evil/demo");
       expect(response.status).toBe(422);
     });
 
     it("rejects whitespace inside a segment", async () => {
-      const response = await postNote("acme /demo");
+      const { response } = await postNote("acme /demo");
       expect(response.status).toBe(422);
     });
 
     it("rejects an empty path", async () => {
-      const response = await postNote("");
+      const { response } = await postNote("");
       expect(response.status).toBe(422);
     });
 
     it("encodes nested-segment slashes for the REST callback URL", async () => {
-      // The dispatcher-callback URI is built by encodeProjectPath; assert the
-      // encoded form survives the nested-subgroup change so callers hitting
-      // `/api/v4/projects/<encoded>/issues/<iid>/notes` still resolve.
-      const response = await postNote("acme/team/demo");
+      // The dispatcher-callback URI is built by encodeProjectPath inside
+      // buildApiNotesUrl; assert the URI that createRun actually received so
+      // a regression in buildApiNotesUrl (e.g. dropping encodeProjectPath
+      // for nested paths) is caught here. Recomputing the expected URL
+      // locally would be tautological.
+      const { response, createRun } = await postNote("acme/team/demo");
       expect(response.status).toBe(200);
-      const body = (await response.json()) as { ok?: boolean };
-      expect(body).toMatchObject({ ok: true });
-      // Indirect: a 200 with createRun invoked confirms the API URL parse
-      // did not throw. The URL itself is not in the response; assert the
-      // expected encoded form separately to lock the contract.
-      expect(expectedPath("acme/team/demo")).toBe(
+      expect(createRun).toHaveBeenCalledTimes(1);
+      const event = createRun.mock.calls[0]![0] as {
+        callback: { uri: string; threadKey: string };
+      };
+      expect(event.callback.uri).toBe(
         "https://gitlab.com/api/v4/projects/acme%2Fteam%2Fdemo/issues/1/notes"
       );
+      expect(event.callback.threadKey).toBe("acme/team/demo|issue|1");
     });
   });
 
@@ -776,11 +776,15 @@ describe("GitLab webhook ingress", () => {
     });
 
     it("returns 422 when the merge-request note is missing merge_request.url", async () => {
+      // object_attributes.url mirrors the merge-request note URL so the only
+      // missing field is merge_request.url — keeping the 422 assertion focused
+      // on that gap and avoiding spurious URL/type consistency failures.
       const { response, createRun } = await postRaw({
         ...supportedBase,
         object_attributes: {
           ...supportedBase.object_attributes,
-          noteable_type: "MergeRequest"
+          noteable_type: "MergeRequest",
+          url: "https://gitlab.com/acme/demo/-/merge_requests/9#note_4001"
         },
         issue: undefined,
         merge_request: { iid: 9, url: undefined }
