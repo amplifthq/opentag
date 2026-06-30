@@ -297,12 +297,11 @@ export function renderSlackFinalResult(result: OpenTagRunResult, options: SlackR
     );
   }
 
+  const suggestedActions = renderSuggestedActionsMarkdown(result, options);
   const nextAction = nextActionSummary(result);
-  if (nextAction && !result.suggestedChanges?.length) {
+  if (nextAction && suggestedActions.length === 0) {
     lines.push(`Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`);
   }
-
-  const suggestedActions = renderSuggestedActionsMarkdown(result, options);
   if (suggestedActions.length > 0) {
     lines.push("", ...suggestedActions);
   }
@@ -383,17 +382,18 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult, options: 
         }
       });
     }
-    if (options.auditRunId) {
-      blocks.push({
-        type: "context",
-        elements: [
-          {
-            type: "mrkdwn",
-            text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${options.auditRunId}\``)
-          }
-        ]
-      });
-    }
+  }
+
+  if (options.auditRunId) {
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${options.auditRunId}\``)
+        }
+      ]
+    });
   }
 
   return blocks;

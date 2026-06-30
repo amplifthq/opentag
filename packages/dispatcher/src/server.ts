@@ -488,15 +488,54 @@ function executorConditionsFromIntent(intent: { params?: Record<string, unknown>
   return value.filter((condition): condition is string => typeof condition === "string" && condition.length > 0);
 }
 
-async function githubPreflight(input: {
+const GITHUB_PREFLIGHT_TIMEOUT_MS = 5_000;
+
+type GitHubPreflightCache = Map<string, Promise<ActionReceiptCapability | null>>;
+
+function githubPreflightCacheKey(input: { owner: string; repo: string; path: string }): string {
+  return `${input.owner}/${input.repo}${input.path}`;
+}
+
+function createGitHubPreflightDeadline(timeoutMs: number): { signal?: AbortSignal; clear: () => void; didTimeout: () => boolean } {
+  if (typeof AbortController === "undefined") return { clear: () => {}, didTimeout: () => false };
+  const controller = new AbortController();
+  let didTimeout = false;
+  const timeout = setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
+  return {
+    signal: controller.signal,
+    clear: () => clearTimeout(timeout),
+    didTimeout: () => didTimeout
+  };
+}
+
+type GitHubPreflightInput = {
   githubApply: GitHubApplyOptions;
   owner: string;
   repo: string;
   path: string;
   description: string;
   notFoundReason: string;
-}): Promise<ActionReceiptCapability | null> {
+  cache?: GitHubPreflightCache;
+};
+
+async function githubPreflight(input: GitHubPreflightInput): Promise<ActionReceiptCapability | null> {
+  if (input.cache) {
+    const cacheKey = githubPreflightCacheKey(input);
+    const cached = input.cache.get(cacheKey);
+    if (cached) return await cached;
+    const pending = githubPreflightUncached(input);
+    input.cache.set(cacheKey, pending);
+    return await pending;
+  }
+  return await githubPreflightUncached(input);
+}
+
+async function githubPreflightUncached(input: Omit<GitHubPreflightInput, "cache">): Promise<ActionReceiptCapability | null> {
   let response: Response;
+  const deadline = createGitHubPreflightDeadline(GITHUB_PREFLIGHT_TIMEOUT_MS);
   try {
     response = await (input.githubApply.fetchImpl ?? fetch)(`https://api.github.com/repos/${input.owner}/${input.repo}${input.path}`, {
       method: "GET",
@@ -504,13 +543,22 @@ async function githubPreflight(input: {
         accept: "application/vnd.github+json",
         authorization: `Bearer ${input.githubApply.token}`,
         "x-github-api-version": "2022-11-28"
-      }
+      },
+      ...(deadline.signal ? { signal: deadline.signal } : {})
     });
   } catch (error) {
+    if (deadline.didTimeout()) {
+      return {
+        state: "needs_setup",
+        setupReason: `GitHub preflight timed out for ${input.description} after ${GITHUB_PREFLIGHT_TIMEOUT_MS}ms.`
+      };
+    }
     return {
       state: "needs_setup",
       setupReason: `GitHub preflight failed for ${input.description}: ${error instanceof Error ? error.message : String(error)}.`
     };
+  } finally {
+    deadline.clear();
   }
 
   if (response.ok) return null;
@@ -537,11 +585,13 @@ async function preflightGitHubOperation(input: {
   githubApply: GitHubApplyOptions;
   target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
   operation: GitHubIssueMutationOperation;
+  preflightCache?: GitHubPreflightCache;
 }): Promise<ActionReceiptCapability | null> {
   const base = {
     githubApply: input.githubApply,
     owner: input.target.owner,
-    repo: input.target.repoName
+    repo: input.target.repoName,
+    ...(input.preflightCache ? { cache: input.preflightCache } : {})
   };
 
   if (input.operation.kind === "create_pull_request") {
@@ -597,6 +647,7 @@ async function directApplyReceiptCapability(input: {
   callbackProvider: string;
   intent: MutationIntent;
   githubApply?: GitHubApplyOptions;
+  preflightCache?: GitHubPreflightCache;
 }): Promise<ActionReceiptCapability> {
   const capability = capabilityForMutationIntent(input.intent);
   if (!capability) {
@@ -678,7 +729,8 @@ async function directApplyReceiptCapability(input: {
   const preflight = await preflightGitHubOperation({
     githubApply: input.githubApply,
     target: githubTarget,
-    operation: compilation.operation as GitHubIssueMutationOperation
+    operation: compilation.operation as GitHubIssueMutationOperation,
+    ...(input.preflightCache ? { preflightCache: input.preflightCache } : {})
   });
   if (preflight) return preflight;
 
@@ -690,18 +742,22 @@ async function actionReceiptContextForFinal(input: {
   result: OpenTagRunResult;
   githubApply?: GitHubApplyOptions;
 }): Promise<ActionReceiptContext> {
-  const capabilityByIntentId: Record<string, ActionReceiptCapability> = {};
-  for (const snapshot of input.result.suggestedChanges ?? []) {
-    for (const intent of snapshot.intents) {
-      capabilityByIntentId[intent.intentId] = await directApplyReceiptCapability({
-        event: input.event,
-        callbackProvider: input.event.callback.provider,
-        intent,
-        ...(input.githubApply ? { githubApply: input.githubApply } : {})
-      });
-    }
-  }
-  return { capabilityByIntentId };
+  const preflightCache: GitHubPreflightCache = new Map();
+  const capabilityEntries = await Promise.all(
+    (input.result.suggestedChanges ?? []).flatMap((snapshot) =>
+      snapshot.intents.map(async (intent) => {
+        const capability = await directApplyReceiptCapability({
+          event: input.event,
+          callbackProvider: input.event.callback.provider,
+          intent,
+          ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+          preflightCache
+        });
+        return [intent.intentId, capability] as const;
+      })
+    )
+  );
+  return { capabilityByIntentId: Object.fromEntries(capabilityEntries) };
 }
 
 async function authorizeThreadAction(input: {
@@ -1010,12 +1066,14 @@ async function selectedDirectApplyStatus(input: {
   githubApply?: GitHubApplyOptions;
 }): Promise<{ ready: boolean; reason?: string }> {
   if (input.candidates.length === 0) return { ready: false, reason: "No selected action was found." };
+  const preflightCache: GitHubPreflightCache = new Map();
   for (const candidate of input.candidates) {
     const capability = await directApplyReceiptCapability({
       event: input.event,
       callbackProvider: input.callbackProvider,
       intent: candidate.intent,
-      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+      ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+      preflightCache
     });
     if (capability.state !== "ready_to_apply") {
       return {

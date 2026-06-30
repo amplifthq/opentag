@@ -149,7 +149,6 @@ if [[ -z "$OWNER" || -z "$REPO" || "$OWNER" == "$REPO" ]]; then
 fi
 export OWNER REPO
 
-REPO_URL="$(gh repo view "$OWNER/$REPO" --json url --jq '.url')"
 PERMISSION="$(gh repo view "$OWNER/$REPO" --json viewerPermission --jq '.viewerPermission')"
 if [[ "$PERMISSION" != "ADMIN" && "$PERMISSION" != "MAINTAIN" ]]; then
   echo "GitHub repository webhook creation requires ADMIN or MAINTAIN access; current permission is $PERMISSION." >&2
@@ -317,8 +316,10 @@ applied_receipt_has_double_period() {
   ' | grep -E '\.\.$' >/dev/null
 }
 
-latest_apply_plan() {
-  sqlite_one "select plan_json from apply_plans order by created_at desc limit 1;"
+latest_apply_plan_for_run() {
+  local run_id_sql
+  run_id_sql="$(sql_escape "$1")"
+  sqlite_one "select ap.plan_json from apply_plans ap join suggested_changes sc on sc.proposal_id = ap.proposal_id where sc.run_id = '$run_id_sql' order by ap.created_at desc limit 1;"
 }
 
 if [[ ! -d "$CHECKOUT_PATH/.git" ]]; then
@@ -559,7 +560,7 @@ if bool_true "$OPENTAG_GH_LIVE_APPLY"; then
   PR_URL=""
   deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
   while (( SECONDS < deadline )); do
-    plan_json="$(latest_apply_plan)"
+    plan_json="$(latest_apply_plan_for_run "$RUN_ID")"
     if [[ -n "$plan_json" ]]; then
       PR_URL="$(python3 - "$plan_json" <<'PY' || true
 import json
@@ -586,7 +587,7 @@ PY
   done
   if [[ -z "$PR_URL" ]]; then
     echo "Timed out waiting for applied PR URL." >&2
-    latest_apply_plan | python3 -m json.tool || true
+    latest_apply_plan_for_run "$RUN_ID" | python3 -m json.tool || true
     exit 1
   fi
   echo "Created PR: $PR_URL"

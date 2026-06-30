@@ -30,6 +30,24 @@ describe("Slack callback rendering", () => {
     expect(text).not.toContain("**success**");
   });
 
+  it("keeps the text fallback when suggested changes render no receipts", () => {
+    const text = renderSlackFinalResult({
+      conclusion: "needs_human",
+      summary: "Prepared a follow-up.",
+      nextAction: "Reply continue 1 to refresh.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_empty",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "No visible actions.",
+          intents: []
+        }
+      ]
+    });
+
+    expect(text).toContain("Next: Reply continue 1 to refresh.");
+  });
+
   it("converts common Markdown to Slack mrkdwn", () => {
     expect(markdownToSlackMrkdwn("**bold** and [docs](https://example.com)")).toBe("*bold* and <https://example.com|docs>");
     expect(markdownToSlackMrkdwn("Use <tag> & [docs & api](https://example.com?a=1&b=2)")).toBe(
@@ -82,6 +100,25 @@ describe("Slack callback rendering", () => {
         }
       }
     ]);
+  });
+
+  it("adds the quiet audit context even when no receipts render", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "success",
+      summary: "Done."
+    }, {
+      auditRunId: "run_without_receipts"
+    });
+
+    expect(blocks.at(-1)).toEqual({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "Audit: `opentag status --run run_without_receipts`"
+        }
+      ]
+    });
   });
 
   it("adds Block Kit buttons for suggested source-thread actions", () => {
@@ -182,6 +219,8 @@ describe("Slack callback rendering", () => {
     const rendered = JSON.stringify(blocks);
     expect(rendered).toContain("Needs approval");
     expect(rendered).not.toContain("Apply 1");
+    expect(rendered).not.toContain("opentag:apply:1");
+    expect(rendered).not.toContain('"command":"apply 1"');
     expect(rendered).toContain("Approve only");
     expect(rendered).toContain("Reject");
   });

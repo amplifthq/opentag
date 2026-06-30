@@ -686,6 +686,15 @@ describe("dispatcher API", () => {
               type: "mrkdwn",
               text: "Verified: `echo` passed"
             }
+          },
+          {
+            type: "context",
+            elements: [
+              {
+                type: "mrkdwn",
+                text: "Audit: `opentag status --run run_slack_1`"
+              }
+            ]
           }
         ]
       }
@@ -2164,7 +2173,7 @@ describe("dispatcher API", () => {
 
   it("renders needs-setup receipts when GitHub preflight cannot access the target", async () => {
     const delivered: Array<{ kind: string; body: string }> = [];
-    const githubRequests: Array<{ url: string; method?: string; authorization?: string | null }> = [];
+    const githubRequests: Array<{ url: string; method?: string; authorization?: string | null; hasSignal: boolean }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
       callbackSink: {
@@ -2178,7 +2187,8 @@ describe("dispatcher API", () => {
           githubRequests.push({
             url: String(url),
             method: init?.method,
-            authorization: new Headers(init?.headers).get("authorization")
+            authorization: new Headers(init?.headers).get("authorization"),
+            hasSignal: Boolean(init?.signal)
           });
           return new Response("forbidden", { status: 403 });
         }
@@ -2211,7 +2221,8 @@ describe("dispatcher API", () => {
       {
         url: "https://api.github.com/repos/acme/demo/issues/1",
         method: "GET",
-        authorization: "Bearer gh_test"
+        authorization: "Bearer gh_test",
+        hasSignal: true
       }
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
@@ -2219,6 +2230,61 @@ describe("dispatcher API", () => {
     expect(finalMessage?.body).toContain("GitHub apply token cannot access GitHub issue or pull request #1.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
+  });
+
+  it("deduplicates receipt preflight requests for multiple intents on the same target", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_preflight_dedupe",
+      event: githubIssueEvent({ id: "evt_thread_preflight_dedupe", sourceEventId: "comment_thread_preflight_dedupe", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_preflight_dedupe",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug_dedupe",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            },
+            {
+              intentId: "intent_label_help_dedupe",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the help wanted label.",
+              params: { label: "help wanted" }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(githubRequests).toEqual(["https://api.github.com/repos/acme/demo/issues/1"]);
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
+    expect(finalMessage?.body).toContain("### Ready to apply");
+    expect(finalMessage?.body).toContain("`apply 1`");
+    expect(finalMessage?.body).toContain("`apply 2`");
   });
 
   it("renders needs-setup receipts when GitHub preflight cannot find the target issue or branch", async () => {

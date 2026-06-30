@@ -153,8 +153,19 @@ describe("action receipts", () => {
       index: 3,
       intent: { ...candidate.intent, intentId: "intent_approval", summary: "Request human review." }
     });
+    const unsupported = buildActionReceipt({
+      ...candidate,
+      index: 4,
+      intent: { ...candidate.intent, intentId: "intent_unsupported", summary: "Needs manual intervention." }
+    }, {
+      capabilityByIntentId: {
+        intent_unsupported: { state: "unsupported", setupReason: "This action is audit-only for now." }
+      }
+    });
 
     expect(actionReceiptHeading([ready, setup])).toBe("Some actions need setup");
+    expect(actionReceiptHeading([unsupported])).toBe("Needs attention");
+    expect(actionReceiptHeading([ready, unsupported])).toBe("Some actions need attention");
     expect(actionReceiptHeading([ready, approval])).toBe("Needs review");
   });
 });
