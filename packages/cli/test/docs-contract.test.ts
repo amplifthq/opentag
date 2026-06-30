@@ -30,13 +30,20 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("EAI_AGAIN");
     expect(skill).toContain("ETIMEDOUT");
     expect(skill).toContain("ECONNRESET");
+    expect(skill).toContain("TLS certificate errors");
     expect(skill).toContain("npm config get registry");
     expect(skill).toContain("npm config get proxy");
     expect(skill).toContain("npm config get https-proxy");
     expect(skill).toContain("registry.npmjs.org");
     expect(skill).toContain("npm view @opentag/cli version --fetch-timeout=15000");
+    expect(skill).toContain("proxy-scoped registry retry");
+    expect(skill).toContain('HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" curl -I');
+    expect(skill).toContain("Only after registry reachability is confirmed");
+    expect(skill).toContain("npx --yes @opentag/cli --help");
     expect(skill).toContain("do not permanently change `npm config` without explicit user confirmation");
     expect(skill).toContain("Only use a proxy URL the user provides or that is already active in the environment");
+    expect(skill).toContain("npm cache metadata exists");
+    expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
     expect(skill).toContain("Platform: Slack, GitHub, or Lark / Feishu");
     expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
@@ -52,6 +59,9 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("--lark-domain");
     expect(skill).toContain("--lark-setup");
     expect(skill).toContain("--binding");
+    expect(skill).toContain(
+      "Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path."
+    );
     expect(skill).not.toContain("agent-owned flow control");
     expect(skill).not.toContain("trigger the Codex Plan-mode transition or handoff first");
     expect(skill).not.toContain("ask for the same choices in plain text instead");

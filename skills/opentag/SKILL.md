@@ -73,10 +73,16 @@ curl -I --max-time 15 https://registry.npmjs.org/@opentag%2fcli
 npm view @opentag/cli version --fetch-timeout=15000
 ```
 
-If DNS or registry access is flaky, say that the published CLI could not be reached yet and retry once after checking connectivity. If the user has a VPN or proxy, compare direct access with a one-command proxy-scoped retry, but do not permanently change `npm config` without explicit user confirmation:
+If DNS or registry access is flaky, say that the published CLI could not be reached yet and retry once after checking connectivity. If the user has a VPN or proxy, compare direct registry access with a one-command proxy-scoped registry retry, but do not permanently change `npm config` without explicit user confirmation:
 
 ```bash
-HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npx --yes @opentag/cli --help
+HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" curl -I --max-time 15 https://registry.npmjs.org/@opentag%2fcli
+```
+
+Only after registry reachability is confirmed, retry the CLI help command:
+
+```bash
+npx --yes @opentag/cli --help
 ```
 
 Only use a proxy URL the user provides or that is already active in the environment. Do not invent proxy hosts, tokens, certificates, or registry credentials. If npm cache metadata exists but `npx --offline` or `npm pack --offline` still fails, do not claim the CLI is available offline; report that the cache is not executable and wait for registry access to recover.
