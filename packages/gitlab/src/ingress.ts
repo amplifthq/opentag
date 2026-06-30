@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
 import { Hono } from "hono";
-import { normalizeGitLabNote, type GitLabNoteableType } from "./normalize.js";
+import { normalizeGitLabNote, type GitLabNoteableType, type GitLabVisibility } from "./normalize.js";
 
 type GitLabActor = {
   id: number;
@@ -171,27 +171,46 @@ const MAX_WEBHOOK_BODY_BYTES = 1_048_576;
  * `callback.threadKey`. Both fields flow the raw `project.path_with_namespace`
  * through to `callbackConversationKey` (`packages/core/src/protocol.ts:387-389`),
  * so a `|` in the value would be a delimiter-injection surface and whitespace
- * would corrupt the conversational identity. GitLab enforces `^[^/]+/[^/]+$` in
- * practice; this regex tightens it to forbid pipe and whitespace on the
- * adapter side so a hand-crafted payload cannot escape the convention. */
-const PROJECT_PATH_NAMESPACE_PATTERN = /^[^|\/\s]+\/[^|\/\s]+$/;
+ * would corrupt the conversational identity.
+ *
+ * GitLab documents `project.path_with_namespace` as the full hierarchical
+ * path with arbitrary subgroup depth (`group/subgroup/project`, `g1/g2/g3/p`,
+ * etc.). The regex permits one or more `/`-separated segments and forbids
+ * `|`, `/`, and whitespace inside any segment on the adapter side so a
+ * hand-crafted payload cannot escape the convention. The trailing `+` on the
+ * non-capturing group enforces "at least one slash" — a single-segment
+ * identifier would not be a valid `path_with_namespace` per the GitLab API.
+ */
+const PROJECT_PATH_NAMESPACE_PATTERN = /^[^|\/\s]+(?:\/[^|\/\s]+)+$/;
 
-/** Shape predicate for a GitLab Note Hook payload. Only the minimum fields the
- * handler actually reads are checked — the type guard is intentionally permissive
- * about `object_attributes.noteable_type` because Snippet/Commit/etc. notes are
- * silently ignored (return `200 { ok: true }`) downstream per MVP scope and must
- * continue to pass shape validation.
+/** Shape predicate for a GitLab Note Hook payload. The handler
+ * (`handleNoteCreated`) reads every field listed below; a signed payload
+ * missing any of them would otherwise leak `undefined` into the dispatched
+ * event (e.g. a callback URL synthesised from `undefined`) or collapse the
+ * conversation identity onto an `iid = 0` lane. The predicate is intentionally
+ * permissive about `object_attributes.noteable_type` membership because
+ * Snippet/Commit/etc. notes are silently ignored (return `200 { ok: true }`)
+ * downstream per MVP scope and must continue to pass shape validation — the
+ * type itself is checked (string, non-empty) but its value is not constrained
+ * here.
  *
  * Returns `false` if any of:
  * 1. `value` is not an object, or `object_kind !== "note"`.
- * 2. `object_attributes` is not an object, or `object_attributes.note` is not a
- *    non-empty string, or `object_attributes.id` is not a number.
- * 3. `project` is not an object, or `project.path_with_namespace` is not a
- *    non-empty string, or it fails `PROJECT_PATH_NAMESPACE_PATTERN`.
- * 4. `user` is not an object, or `user.id` is not a number.
+ * 2. `object_attributes` is not an object, or any of `note` (non-empty string),
+ *    `id` (number), `url` (non-empty string), `noteable_type` (non-empty
+ *    string) is missing or wrong-typed.
+ * 3. `project` is not an object, or `id` (number), `visibility` (one of
+ *    `private | internal | public`), or `path_with_namespace` (non-empty
+ *    string matching `PROJECT_PATH_NAMESPACE_PATTERN`) is missing or wrong-typed.
+ * 4. `user` is not an object, or `id` (number) or `username` (non-empty string)
+ *    is missing or wrong-typed.
  *
  * Noteable-type membership is NOT checked here — see the file-level rationale.
+ * Integrity of `issue` / `merge_request` (positive iid + non-empty URL for the
+ * matching supported type) is checked in `handleNoteCreated`, not here.
  */
+const GITLAB_PROJECT_VISIBILITY_VALUES = new Set<GitLabVisibility>(["private", "internal", "public"]);
+
 function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
@@ -202,10 +221,14 @@ function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload
   const a = attrs as Record<string, unknown>;
   if (typeof a.note !== "string" || a.note.length === 0) return false;
   if (typeof a.id !== "number") return false;
+  if (typeof a.url !== "string" || a.url.length === 0) return false;
+  if (typeof a.noteable_type !== "string" || a.noteable_type.length === 0) return false;
 
   const project = v.project;
   if (!project || typeof project !== "object") return false;
   const p = project as Record<string, unknown>;
+  if (typeof p.id !== "number") return false;
+  if (typeof p.visibility !== "string" || !GITLAB_PROJECT_VISIBILITY_VALUES.has(p.visibility as GitLabVisibility)) return false;
   if (typeof p.path_with_namespace !== "string") return false;
   if (!PROJECT_PATH_NAMESPACE_PATTERN.test(p.path_with_namespace)) return false;
 
@@ -213,6 +236,7 @@ function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload
   if (!user || typeof user !== "object") return false;
   const u = user as Record<string, unknown>;
   if (typeof u.id !== "number") return false;
+  if (typeof u.username !== "string" || u.username.length === 0) return false;
 
   return true;
 }
@@ -248,17 +272,29 @@ async function handleNoteCreated(input: {
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitLabThreadActionInput): Promise<unknown>;
   now(): string;
-}): Promise<void> {
+}): Promise<{ ok: true } | { ok: false; reason: "invalid_payload" }> {
   const payload = input.payload;
   const noteableType = payload.object_attributes.noteable_type as GitLabNoteableType;
   const isMergeRequest = noteableType === "MergeRequest" || noteableType === "MergeRequestNote";
   const isIssue = noteableType === "Issue" || noteableType === "IssueNote";
-  if (!isIssue && !isMergeRequest) return;
+  if (!isIssue && !isMergeRequest) return { ok: true };
 
-  const issueIid = payload.issue?.iid ?? payload.merge_request?.iid ?? 0;
-  const mergeRequestIid = isMergeRequest ? payload.merge_request?.iid : undefined;
-  const workItemUrl = (isMergeRequest ? payload.merge_request?.url : payload.issue?.url) ?? `https://gitlab.com/${payload.project.path_with_namespace}/${isMergeRequest ? "merge_requests" : "issues"}/${issueIid}`;
-  const issueUrl = payload.issue?.url ?? workItemUrl;
+  // Supported-note integrity check. Real GitLab Note Hook payloads always
+  // carry a positive `issue.iid` (or `merge_request.iid`) AND a non-empty
+  // matching URL. The shape predicate (U2) does not require them because
+  // noteable types outside MVP scope (Snippet/Commit/etc.) legitimately omit
+  // both. The supported types are gated here instead, with a clean 422 so
+  // GitLab marks the delivery as permanently failed rather than retrying.
+  const matchingIid = isMergeRequest ? payload.merge_request?.iid : payload.issue?.iid;
+  const matchingUrl = isMergeRequest ? payload.merge_request?.url : payload.issue?.url;
+  if (typeof matchingIid !== "number" || matchingIid <= 0 || typeof matchingUrl !== "string" || matchingUrl.length === 0) {
+    return { ok: false, reason: "invalid_payload" };
+  }
+
+  const issueIid = matchingIid;
+  const mergeRequestIid = isMergeRequest ? matchingIid : undefined;
+  const workItemUrl = matchingUrl;
+  const issueUrl = isMergeRequest ? undefined : matchingUrl;
 
   // Idempotency key: `actionId` includes the first 12 hex chars of
   // `sha256(rawBody)` so that two otherwise-identical comments whose body
@@ -284,7 +320,7 @@ async function handleNoteCreated(input: {
   // Inline doc-review P0: refuse callbacks that don't point at the approved
   // GitLab surface. Self-hosted GitLab is intentionally excluded from the MVP.
   if (!isGitLabApiHost(callback.uri)) {
-    return;
+    return { ok: true };
   }
 
   if (parseThreadActionCommand(payload.object_attributes.note) && input.submitThreadAction) {
@@ -307,7 +343,7 @@ async function handleNoteCreated(input: {
         noteUrl: payload.object_attributes.url
       }
     });
-    return;
+    return { ok: true };
   }
 
   const event = normalizeGitLabNote({
@@ -317,7 +353,7 @@ async function handleNoteCreated(input: {
     apiNotesUrl: callback.uri,
     issueIid,
     ...(mergeRequestIid !== undefined ? { mergeRequestIid } : {}),
-    workItemUrl: isMergeRequest ? workItemUrl : issueUrl,
+    workItemUrl: isMergeRequest ? workItemUrl : issueUrl ?? workItemUrl,
     projectPathWithNamespace: payload.project.path_with_namespace,
     projectId: payload.project.id,
     projectVisibility: payload.project.visibility,
@@ -330,6 +366,7 @@ async function handleNoteCreated(input: {
   if (event) {
     await input.createRun(event);
   }
+  return { ok: true };
 }
 
 /** Construct a Hono application that exposes a single `POST` route at
@@ -388,13 +425,16 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
       if (!isGitLabNoteHookPayload(payload)) {
         return c.json({ error: "invalid_payload" }, 422);
       }
-      await handleNoteCreated({
+      const result = await handleNoteCreated({
         payload,
         rawBody,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
         now: input.now
       });
+      if (!result.ok) {
+        return c.json({ error: result.reason }, 422);
+      }
       return c.json({ ok: true });
     }
 

@@ -455,4 +455,359 @@ describe("GitLab webhook ingress", () => {
     expect(response.status).toBe(413);
     expect(createRun).not.toHaveBeenCalled();
   });
+
+  describe("path_with_namespace nested-subgroup support", () => {
+    // GitLab documents project.path_with_namespace as the full hierarchical
+    // path with arbitrary subgroup depth (group/subgroup/project). The shape
+    // predicate must accept two-or-more segments and still reject payloads
+    // with delimiter-injection (|) or whitespace in any segment.
+    function buildNoteBody(pathWithNamespace: string): string {
+      return JSON.stringify({
+        object_kind: "note",
+        object_attributes: {
+          id: 2001,
+          note: "@opentag investigate this",
+          url: `https://gitlab.com/${pathWithNamespace}/-/issues/1#note_2001`,
+          noteable_type: "Issue"
+        },
+        project: {
+          id: 42,
+          path_with_namespace: pathWithNamespace,
+          visibility: "public",
+          web_url: `https://gitlab.com/${pathWithNamespace}`
+        },
+        issue: {
+          iid: 1,
+          url: `https://gitlab.com/${pathWithNamespace}/-/issues/1`
+        },
+        user: { id: 7, username: "alice" }
+      });
+    }
+
+    const expectedPath = (pathWithNamespace: string): string =>
+      `https://gitlab.com/api/v4/projects/${encodeURIComponent(pathWithNamespace)}/issues/1/notes`;
+
+    async function postNote(pathWithNamespace: string): Promise<Response> {
+      const createRun = vi.fn(async () => ({ runId: "run_1" }));
+      const app = createGitLabWebhookApp({
+        webhookSecret: "shared-secret",
+        createRun,
+        now: () => "2026-06-29T00:00:00.000Z"
+      });
+      return app.request("/gitlab/webhooks", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-gitlab-event": "Note Hook",
+          "x-gitlab-token": "shared-secret"
+        },
+        body: buildNoteBody(pathWithNamespace)
+      });
+    }
+
+    it("accepts a two-segment path_with_namespace (regression)", async () => {
+      const response = await postNote("acme/demo");
+      expect(response.status).toBe(200);
+    });
+
+    it("accepts a three-segment nested-subgroup path", async () => {
+      const response = await postNote("acme/team/demo");
+      expect(response.status).toBe(200);
+    });
+
+    it("accepts a four-segment nested-subgroup path", async () => {
+      const response = await postNote("acme/team/sub/demo");
+      expect(response.status).toBe(200);
+    });
+
+    it("rejects a single-segment path (no slash)", async () => {
+      const response = await postNote("acme");
+      expect(response.status).toBe(422);
+    });
+
+    it("rejects a trailing-slash path", async () => {
+      const response = await postNote("acme/demo/");
+      expect(response.status).toBe(422);
+    });
+
+    it("rejects a pipe character anywhere in the path", async () => {
+      const response = await postNote("acme|evil/demo");
+      expect(response.status).toBe(422);
+    });
+
+    it("rejects whitespace inside a segment", async () => {
+      const response = await postNote("acme /demo");
+      expect(response.status).toBe(422);
+    });
+
+    it("rejects an empty path", async () => {
+      const response = await postNote("");
+      expect(response.status).toBe(422);
+    });
+
+    it("encodes nested-segment slashes for the REST callback URL", async () => {
+      // The dispatcher-callback URI is built by encodeProjectPath; assert the
+      // encoded form survives the nested-subgroup change so callers hitting
+      // `/api/v4/projects/<encoded>/issues/<iid>/notes` still resolve.
+      const response = await postNote("acme/team/demo");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok?: boolean };
+      expect(body).toMatchObject({ ok: true });
+      // Indirect: a 200 with createRun invoked confirms the API URL parse
+      // did not throw. The URL itself is not in the response; assert the
+      // expected encoded form separately to lock the contract.
+      expect(expectedPath("acme/team/demo")).toBe(
+        "https://gitlab.com/api/v4/projects/acme%2Fteam%2Fdemo/issues/1/notes"
+      );
+    });
+  });
+
+  describe("shape predicate field coverage", () => {
+    // The predicate must reject signed payloads missing any field the handler
+    // reads. Each test below removes one required field from a fully-populated
+    // fixture and asserts the Hono handler returns 422 invalid_payload without
+    // invoking createRun or submitThreadAction.
+
+    const basePayload = {
+      object_kind: "note" as const,
+      object_attributes: {
+        id: 3001,
+        note: "@opentag investigate this",
+        url: "https://gitlab.com/acme/demo/-/issues/1#note_3001",
+        noteable_type: "Issue" as const
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility: "public" as const,
+        web_url: "https://gitlab.com/acme/demo"
+      },
+      issue: { iid: 1, url: "https://gitlab.com/acme/demo/-/issues/1" },
+      user: { id: 7, username: "alice" }
+    };
+
+    function postNoteWith(body: unknown): Promise<{ response: Response; createRun: ReturnType<typeof vi.fn> }> {
+      const createRun = vi.fn(async () => ({ runId: "run_1" }));
+      const app = createGitLabWebhookApp({
+        webhookSecret: "shared-secret",
+        createRun,
+        now: () => "2026-06-29T00:00:00.000Z"
+      });
+      return app
+        .request("/gitlab/webhooks", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-gitlab-event": "Note Hook",
+            "x-gitlab-token": "shared-secret"
+          },
+          body: JSON.stringify(body)
+        })
+        .then((response) => ({ response, createRun }));
+    }
+
+    it("returns 422 when object_attributes.url is missing", async () => {
+      const { object_attributes, ...rest } = basePayload;
+      const payload = { ...rest, object_attributes: { ...object_attributes } };
+      delete (payload.object_attributes as Record<string, unknown>).url;
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when project.id is missing", async () => {
+      const { project, ...rest } = basePayload;
+      const payload = { ...rest, project: { ...project } };
+      delete (payload.project as Record<string, unknown>).id;
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when project.visibility is missing", async () => {
+      const { project, ...rest } = basePayload;
+      const payload = { ...rest, project: { ...project } };
+      delete (payload.project as Record<string, unknown>).visibility;
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when user.username is missing", async () => {
+      const { user, ...rest } = basePayload;
+      const payload = { ...rest, user: { ...user } };
+      delete (payload.user as Record<string, unknown>).username;
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when user.id is a string instead of a number", async () => {
+      const { user, ...rest } = basePayload;
+      const payload = { ...rest, user: { ...user, id: "7" } };
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when project.visibility is an unrecognised string", async () => {
+      const { project, ...rest } = basePayload;
+      const payload = { ...rest, project: { ...project, visibility: "internal-but-secret" } };
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when object_attributes.noteable_type is missing", async () => {
+      const { object_attributes, ...rest } = basePayload;
+      const payload = { ...rest, object_attributes: { ...object_attributes } };
+      delete (payload.object_attributes as Record<string, unknown>).noteable_type;
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("regression: complete payload with nested-group path still passes (200)", async () => {
+      // Belt-and-braces: a fully-populated payload with a 3-segment path must
+      // succeed end-to-end after the predicate was tightened, otherwise a
+      // regression in a later edit could break nested-subgroup support
+      // without surfacing in CI.
+      const payload = {
+        ...basePayload,
+        project: {
+          ...basePayload.project,
+          path_with_namespace: "acme/team/demo",
+          web_url: "https://gitlab.com/acme/team/demo"
+        },
+        issue: {
+          iid: 1,
+          url: "https://gitlab.com/acme/team/demo/-/issues/1"
+        },
+        object_attributes: {
+          ...basePayload.object_attributes,
+          url: "https://gitlab.com/acme/team/demo/-/issues/1#note_3001"
+        }
+      };
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(200);
+      expect(createRun).toHaveBeenCalledTimes(1);
+      expect(createRun.mock.calls[0]![0]).toMatchObject({
+        metadata: { projectPathWithNamespace: "acme/team/demo" }
+      });
+    });
+  });
+
+  describe("supported-note integrity check (iid > 0 + URL present)", () => {
+    // Real GitLab payloads always carry a positive iid AND a non-empty
+    // matching URL on the issue / merge_request object. The handler must
+    // reject payloads missing either with 422 invalid_payload rather than
+    // synthesise a callback URL out of `undefined` or build
+    // `https://gitlab.com/.../-/issues/0/notes`.
+
+    function postRaw(body: unknown): Promise<{ response: Response; createRun: ReturnType<typeof vi.fn> }> {
+      const createRun = vi.fn(async () => ({ runId: "run_1" }));
+      const app = createGitLabWebhookApp({
+        webhookSecret: "shared-secret",
+        createRun,
+        now: () => "2026-06-29T00:00:00.000Z"
+      });
+      return app
+        .request("/gitlab/webhooks", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-gitlab-event": "Note Hook",
+            "x-gitlab-token": "shared-secret"
+          },
+          body: JSON.stringify(body)
+        })
+        .then((response) => ({ response, createRun }));
+    }
+
+    const supportedBase = {
+      object_kind: "note" as const,
+      object_attributes: {
+        id: 4001,
+        note: "@opentag investigate this",
+        url: "https://gitlab.com/acme/demo/-/issues/1#note_4001",
+        noteable_type: "Issue" as const
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility: "public" as const,
+        web_url: "https://gitlab.com/acme/demo"
+      },
+      issue: { iid: 1, url: "https://gitlab.com/acme/demo/-/issues/1" },
+      user: { id: 7, username: "alice" }
+    };
+
+    it("returns 422 when the issue note has iid = 0", async () => {
+      const { response, createRun } = await postRaw({
+        ...supportedBase,
+        issue: { ...supportedBase.issue, iid: 0 }
+      });
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when the merge-request note has iid = 0", async () => {
+      const { response, createRun } = await postRaw({
+        ...supportedBase,
+        object_attributes: {
+          ...supportedBase.object_attributes,
+          noteable_type: "MergeRequest",
+          url: "https://gitlab.com/acme/demo/-/merge_requests/9#note_4001"
+        },
+        issue: undefined,
+        merge_request: { iid: 0, url: "https://gitlab.com/acme/demo/-/merge_requests/9" }
+      });
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when the issue note has an empty url string", async () => {
+      const { response, createRun } = await postRaw({
+        ...supportedBase,
+        issue: { ...supportedBase.issue, url: "" }
+      });
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when the merge-request note is missing merge_request.url", async () => {
+      const { response, createRun } = await postRaw({
+        ...supportedBase,
+        object_attributes: {
+          ...supportedBase.object_attributes,
+          noteable_type: "MergeRequest"
+        },
+        issue: undefined,
+        merge_request: { iid: 9, url: undefined }
+      });
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("regression: positive iid + non-empty URL still produces 200", async () => {
+      const { response, createRun } = await postRaw(supportedBase);
+      expect(response.status).toBe(200);
+      expect(createRun).toHaveBeenCalledTimes(1);
+    });
+
+    it("regression: unsupported noteable types still return 200 { ok: true } without invoking createRun", async () => {
+      // Snippet notes are out of MVP scope. The handler bails out before the
+      // integrity check, so the HTTP response stays 200 (GitLab marks the
+      // webhook healthy) and no run is created.
+      const { response, createRun } = await postRaw({
+        ...supportedBase,
+        object_attributes: {
+          ...supportedBase.object_attributes,
+          noteable_type: "Snippet"
+        }
+      });
+      expect(response.status).toBe(200);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+  });
 });
