@@ -202,7 +202,7 @@ function defaultActionTargetLabel(intent: MutationIntent): string {
 }
 
 function defaultVisibleDecisionsForState(state: ActionReceiptState): ActionReceiptDecision[] {
-  if (state === "ready_to_apply") return ["apply", "reject", "approve"];
+  if (state === "ready_to_apply") return ["apply", "reject"];
   if (state === "needs_approval") return ["approve", "reject"];
   if (state === "needs_setup") return ["continue", "reject"];
   return ["continue", "reject"];
@@ -215,9 +215,13 @@ function defaultPrimaryDecisionForState(state: ActionReceiptState): ActionReceip
 }
 
 export function actionReceiptHeading(receipts: ActionReceipt[]): string {
-  if (receipts.some((receipt) => receipt.state === "ready_to_apply")) return "Ready to apply";
-  if (receipts.some((receipt) => receipt.state === "needs_setup")) return "Needs setup";
-  if (receipts.some((receipt) => receipt.state === "unsupported")) return "Needs attention";
+  const states = new Set(receipts.map((receipt) => receipt.state));
+  if (states.size === 1 && states.has("ready_to_apply")) return "Ready to apply";
+  if (states.has("ready_to_apply") && states.has("needs_setup")) return "Some actions need setup";
+  if (states.has("ready_to_apply") && states.has("unsupported")) return "Some actions need attention";
+  if (states.has("needs_setup")) return "Needs setup";
+  if (states.has("unsupported")) return "Needs attention";
+  if (states.has("ready_to_apply")) return "Needs review";
   return "Needs approval";
 }
 

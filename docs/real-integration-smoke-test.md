@@ -144,7 +144,8 @@ scripts/dev/run-github-webhook-live-test.sh
 Expected evidence:
 
 - GitHub issue comment creates a dispatcher run through `/github/webhooks`.
-- Final GitHub comment renders `### Ready to apply`.
+- Final GitHub comment renders a ready or mixed-state action receipt and
+  advertises `apply 1` only for actions the dispatcher can currently apply.
 - Replying `apply 1` through GitHub creates an `ApprovalDecision` and `ApplyPlan`.
 - Apply executes through GitHub and comments with the created PR URL.
 - The temporary repository webhook is deleted after the run.
@@ -678,7 +679,8 @@ scripts/dev/run-github-webhook-live-test.sh
 Observed source-thread callbacks:
 
 - Mention comment: `@opentag run Add one short sentence to README.md saying GitHub can trigger local Claude Code through OpenTag. Keep the change small and do not modify anything else.`
-- Final run callback rendered `### Ready to apply` and described the source-thread action receipt.
+- Final run callback rendered a source-thread action receipt with `apply 1`
+  available for the create-PR action.
 - Real `apply 1` issue comment returned `Applied: Create a pull request for branch opentag/run_5384bdb9-9b6e-4639-94f4-2b2055be6e56.` plus the PR URL.
 
 Observed metrics after apply:

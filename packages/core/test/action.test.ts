@@ -109,7 +109,7 @@ describe("action receipts", () => {
     expect(receipt).toMatchObject({
       state: "ready_to_apply",
       primaryDecision: "apply",
-      visibleDecisions: ["apply", "reject", "approve"]
+      visibleDecisions: ["apply", "reject"]
     });
     expect(actionReceiptHeading([receipt])).toBe("Ready to apply");
   });
@@ -131,6 +131,31 @@ describe("action receipts", () => {
       visibleDecisions: ["continue", "reject"]
     });
     expect(actionReceiptHeading([receipt])).toBe("Needs setup");
+  });
+
+  it("does not overstate readiness when receipt states are mixed", () => {
+    const ready = buildActionReceipt(candidate, {
+      capabilityByIntentId: {
+        intent_label: { state: "ready_to_apply" }
+      }
+    });
+    const setup = buildActionReceipt({
+      ...candidate,
+      index: 2,
+      intent: { ...candidate.intent, intentId: "intent_setup", summary: "Create a pull request." }
+    }, {
+      capabilityByIntentId: {
+        intent_setup: { state: "needs_setup", setupReason: "GitHub apply is not configured on this dispatcher." }
+      }
+    });
+    const approval = buildActionReceipt({
+      ...candidate,
+      index: 3,
+      intent: { ...candidate.intent, intentId: "intent_approval", summary: "Request human review." }
+    });
+
+    expect(actionReceiptHeading([ready, setup])).toBe("Some actions need setup");
+    expect(actionReceiptHeading([ready, approval])).toBe("Needs review");
   });
 });
 

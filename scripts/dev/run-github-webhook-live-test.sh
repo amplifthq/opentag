@@ -517,12 +517,23 @@ EXPECTED_HEADING="### Ready to apply"
 if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
   EXPECTED_HEADING="### Needs setup"
 fi
-if ! issue_comments_contain "$EXPECTED_HEADING"; then
-  echo "Expected the final GitHub receipt to render '$EXPECTED_HEADING'." >&2
+if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
+  if ! issue_comments_contain "$EXPECTED_HEADING"; then
+    echo "Expected the final GitHub receipt to render '$EXPECTED_HEADING'." >&2
+    exit 1
+  fi
+  if issue_comments_contain '`apply 1`'; then
+    echo "Expected the missing-apply-token receipt not to advertise the apply command." >&2
+    exit 1
+  fi
+elif ! issue_comments_contain "### Ready to apply" &&
+  ! issue_comments_contain "### Some actions need setup" &&
+  ! issue_comments_contain "### Some actions need attention" &&
+  ! issue_comments_contain "### Needs review"; then
+  echo "Expected the final GitHub receipt to render a ready or mixed-state action heading." >&2
   exit 1
-fi
-if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN" && issue_comments_contain '`apply 1`'; then
-  echo "Expected the missing-apply-token receipt not to advertise the apply command." >&2
+elif ! issue_comments_contain '`apply 1`'; then
+  echo "Expected the final GitHub receipt to advertise apply 1 for the ready action." >&2
   exit 1
 fi
 

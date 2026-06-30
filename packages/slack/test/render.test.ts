@@ -125,8 +125,7 @@ describe("Slack callback rendering", () => {
       block_id: "opentag_actions_1",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" },
-        { type: "button", text: { type: "plain_text", text: "Approve only" }, action_id: "opentag:approve:1" }
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
       ]
     });
 
@@ -141,12 +140,6 @@ describe("Slack callback rendering", () => {
       {
         version: 1,
         command: "reject 1",
-        proposalId: "proposal_1",
-        intentId: "intent_label_1"
-      },
-      {
-        version: 1,
-        command: "approve 1",
         proposalId: "proposal_1",
         intentId: "intent_label_1"
       }

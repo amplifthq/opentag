@@ -146,7 +146,7 @@ describe("default callback presentation", () => {
     expect(github).toContain("| Target | GitHub labels |");
     expect(github).toContain("| Preconditions | The issue is still open. |");
     expect(github).toContain("| Apply now | `apply 1` |");
-    expect(github).toContain("| Approve only | `approve 1` |");
+    expect(github).not.toContain("| Approve only | `approve 1` |");
     expect(github).not.toContain("| Continue | `continue 1` |");
     expect(github).not.toContain("Proposal: `proposal_1`");
     expect(github).not.toContain("Intent ID: `intent_label_1`");
@@ -162,8 +162,7 @@ describe("default callback presentation", () => {
       type: "actions",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" },
-        { type: "button", text: { type: "plain_text", text: "Approve only" }, action_id: "opentag:approve:1" }
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
       ]
     });
   });

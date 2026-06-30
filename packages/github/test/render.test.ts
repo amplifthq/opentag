@@ -46,7 +46,7 @@ describe("GitHub result rendering", () => {
     expect(body).toContain("| Verification | `pnpm test`: passed<br>passed - Structured report parsed successfully. |");
     expect(body).toContain("| Apply now | `apply 1` |");
     expect(body.indexOf("| Apply now | `apply 1` |")).toBeLessThan(body.indexOf("| Reject | `reject 1` |"));
-    expect(body.indexOf("| Reject | `reject 1` |")).toBeLessThan(body.indexOf("| Approve only | `approve 1` |"));
+    expect(body).not.toContain("| Approve only | `approve 1` |");
     expect(body).not.toContain("Proposal:");
     expect(body).not.toContain("Intent ID:");
     expect(body).not.toContain("Next action:");

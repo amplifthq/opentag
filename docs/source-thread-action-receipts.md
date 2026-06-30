@@ -92,8 +92,8 @@ are audit metadata. They should not lead the human-facing surface.
 | `Continue` | Start a follow-up run using the proposal context, usually when direct apply is unavailable or more work is needed. |
 
 The UI should use these labels consistently. In a ready-to-apply state, make
-`Apply` and `Reject` the first two visible decisions; keep `Approve only`
-available but visually secondary.
+`Apply` and `Reject` the visible decisions. `Approve only` remains a supported
+typed command, but it should not compete with the primary happy path.
 
 ### Quiet By Default
 
@@ -242,19 +242,20 @@ Recommended Block Kit structure:
 3. One section per action receipt.
 4. One actions block per action with available decisions.
 
-Button labels:
+Decision labels:
 
 | Button | Style | When shown |
 | --- | --- | --- |
 | `Apply` or `Apply 1` | primary | The adapter can execute the action now. |
 | `Reject` | danger | The action can be explicitly rejected. |
-| `Approve only` | default | The approval can be recorded separately from execution. |
+| `Approve only` | typed command | The approval can be recorded separately from execution. |
 | `Continue` | default | Direct apply is unavailable or follow-up work is the intended path. |
 
 Slack copy guidelines:
 
-- use `Ready to apply` instead of `Suggested actions` when at least one action
-  is marked executable by dispatcher capability and preflight context;
+- use `Ready to apply` instead of `Suggested actions` only when every visible
+  action is marked executable by dispatcher capability and preflight context;
+- use `Some actions need setup` or `Needs review` for mixed-state receipts;
 - use `Needs approval` when execution is blocked on human authority;
 - use `Needs setup` when adapter credentials or scopes are missing;
 - hide `Apply` unless the dispatcher has confirmed a direct adapter path for
@@ -298,7 +299,6 @@ OpenTag prepared a source-thread action. Choose one command in this thread.
 | --- | --- |
 | Apply now | `apply 1` |
 | Reject | `reject 1` |
-| Approve only | `approve 1` |
 ```
 
 GitHub can show more detail than Slack, but should still avoid exposing raw
@@ -350,7 +350,8 @@ Requirements:
   instead of provider-local action-name heuristics.
 - Show `Apply` only when dispatcher capability and preflight context says the
   action can be written to the system of record now.
-- Rename visible `Approve` button text to `Approve only` when it does not apply.
+- Keep `Approve only` as a typed command unless a state specifically calls for
+  approval without execution.
 - Keep `Apply` as the primary action only when an adapter can execute now.
 - Hide proposal and intent IDs from primary GitHub comments, or move them into
   optional audit detail.
@@ -389,8 +390,6 @@ The design is working when:
 
 ## Open Questions
 
-- Should Slack hide `Approve only` by default until there is a real delayed-apply
-  workflow?
 - Should GitHub expose audit identifiers in a collapsed details block, or only
   through local CLI/audit commands?
 - Should `Apply all` be visible by default, or reserved for typed commands after
