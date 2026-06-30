@@ -1,13 +1,55 @@
 import { parseOpenTagMention, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant, type WorkItemReference } from "@opentag/core";
 
+/** `object_attributes.noteable_type` discriminator from a GitLab Note Hook
+ * payload. The modern API surfaces `"Issue"` and `"MergeRequest"`; legacy
+ * self-hosted instances (and some web-UI event names) surface the older
+ * `"IssueNote"` / `"MergeRequestNote"` aliases. Other values (`"Snippet"`,
+ * `"Commit"`, `"WikiPage"`, `"Design"`, `"alert"`, `"Epic"`) reach the
+ * handler but are intentionally ignored by `normalizeGitLabNote` (returns
+ * `null`) — they are part of the union for type-safety on the ingress
+ * boundary, not for processing. */
 export type GitLabNoteableType = "Issue" | "MergeRequest" | "Snippet" | "Commit" | "WikiPage" | "Design" | "alert" | "Epic" | "IssueNote" | "MergeRequestNote";
 
+/** GitLab project visibility tier. The adapter collapses `"private"` and
+ * `"internal"` to `ContextPointer.visibility: "private"` because the OpenTag
+ * two-level model only distinguishes public evidence from non-public;
+ * `"internal"` (any logged-in GitLab user) cannot serve as public evidence. */
 export type GitLabVisibility = "private" | "internal" | "public";
 
+/** Normalizer input. Mirrors the fields a GitLab Note Hook payload carries,
+ * extracted by the ingress handler and passed in already-decoded. Field
+ * meanings:
+ *
+ * - `id` — the GitLab `object_attributes.id` (string-coerced for cross-system
+ *   compatibility); becomes `sourceEventId` on the event so the dispatcher can
+ *   dedup redeliveries.
+ * - `noteBody` — the raw note text; the `@opentag` mention parser runs on this.
+ * - `noteUrl` — GitLab HTML URL for the comment (rendered as a `kind: comment`
+ *   context pointer).
+ * - `apiNotesUrl` — pre-built REST URL to POST the reply back through
+ *   (`https://gitlab.com/api/v4/projects/.../issues/{iid}/notes` or
+ *   `merge_requests/{iid}/notes`).
+ * - `issueIid` / `mergeRequestIid` — project-scoped issue or MR iid. For MR
+ *   notes the ingress handler passes both; for issue notes only `issueIid`.
+ * - `workItemUrl` — HTML URL of the issue or MR (rendered as a
+ *   `kind: issue | merge_request` context pointer).
+ * - `projectPathWithNamespace` — raw `acme/demo` form; URL-encoding happens
+ *   only at API-endpoint construction.
+ * - `projectId` / `projectVisibility` — for `metadata.projectId` and the
+ *   public/private collapse in context pointers.
+ * - `actorId` / `actorUsername` — string-coerced into `actor.providerUserId`
+ *   and `actor.handle`.
+ * - `noteableType` — see `GitLabNoteableType`.
+ * - `receivedAt` — ISO-8601 timestamp the note was received by OpenTag.
+ */
 export type GitLabNoteInput = {
+  /** Source-event identifier; becomes `sourceEventId` on the emitted event. */
   id: string;
+  /** Raw comment body — the `@opentag` mention parser runs on this. */
   noteBody: string;
+  /** GitLab HTML URL of the comment; rendered as a `kind: comment` context pointer. */
   noteUrl: string;
+  /** Pre-built REST URL the dispatcher can POST a reply through. */
   apiNotesUrl: string;
   /** For Issue notes: the issue iid within the project. */
   issueIid: number;
@@ -15,13 +57,22 @@ export type GitLabNoteInput = {
   mergeRequestIid?: number;
   /** HTML URL of the issue or merge request the note was posted on. */
   workItemUrl: string;
-  /** URL-encoded project path (e.g. "acme%2Fdemo") for building API endpoints. */
+  /** Raw, slash-separated project path (e.g. `acme/demo`). Encoding for API
+   * URLs happens at the URL-construction site, not here; this value remains a
+   * human-readable identifier that propagates into `WorkItemReference.ownerContainer.id`
+   * and `callback.threadKey`. */
   projectPathWithNamespace: string;
+  /** GitLab numeric project id. Carried into metadata for cross-system lookups. */
   projectId: number;
+  /** Project visibility tier; collapsed to the OpenTag public/private model. */
   projectVisibility: GitLabVisibility;
+  /** GitLab user id of the comment author. String-coerced into `actor.providerUserId`. */
   actorId: number;
+  /** GitLab username of the comment author. Carried into `actor.handle`. */
   actorUsername: string;
+  /** Discriminator from `object_attributes.noteable_type`. */
   noteableType: GitLabNoteableType;
+  /** ISO-8601 timestamp the note was received by OpenTag. */
   receivedAt: string;
 };
 
@@ -112,10 +163,16 @@ function gitlabWorkItem(input: {
   iid: number;
   uri: string;
 }): WorkItemReference {
+  // The work-item-kind prefix on `externalId` is intentional: the dispatcher
+  // admission gate (`packages/dispatcher/src/admission.ts:162-165`) and proposal
+  // lookup (`packages/dispatcher/src/server.ts:386-423`) key off
+  // `callbackConversationKey` derived from `callback.threadKey`. Without the
+  // kind prefix, issue #N and MR !N in the same project produce identical
+  // conversation keys and collide in the dispatcher lane.
   return {
     provider: "gitlab",
     kind: input.kind,
-    externalId: `${input.pathWithNamespace}#${input.iid}`,
+    externalId: `${input.pathWithNamespace}|${input.kind}|${input.iid}`,
     uri: input.uri,
     ownerContainer: {
       provider: "gitlab",
@@ -147,7 +204,8 @@ export function normalizeGitLabNote(input: GitLabNoteInput): OpenTagEvent | null
   const mention = parseOpenTagMention(input.noteBody);
   if (!mention.matched) return null;
 
-  const isMergeRequest = input.noteableType === "MergeRequest";
+  const isMergeRequest =
+    input.noteableType === "MergeRequest" || input.noteableType === "MergeRequestNote";
   // GitLab also surfaces legacy noteable types "IssueNote" / "MergeRequestNote"
   // in some self-hosted instances; treat them the same as the modern types.
   const isIssue = input.noteableType === "Issue" || input.noteableType === "IssueNote";
@@ -207,7 +265,7 @@ export function normalizeGitLabNote(input: GitLabNoteInput): OpenTagEvent | null
     callback: {
       provider: "gitlab",
       uri: input.apiNotesUrl,
-      threadKey: `${input.projectPathWithNamespace}#${iid}`
+      threadKey: `${input.projectPathWithNamespace}|${contextKind}|${iid}`
     },
     metadata: {
       repoProvider: "gitlab",

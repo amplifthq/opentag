@@ -9,7 +9,8 @@ export function gitlabPublicWebhookUrlPlaceholder(webhookPath = "/gitlab/webhook
 }
 
 export function gitlabProjectWebhooksSettingsUrl(input: { projectPathWithNamespace: string }): string {
-  return `https://gitlab.com/${input.projectPathWithNamespace}/-/hooks`;
+  const trimmed = input.projectPathWithNamespace.replace(/^\/+|\/+$/g, "");
+  return `https://gitlab.com/${trimmed}/-/hooks`;
 }
 
 export function gitlabPersonalAccessTokensSettingsUrl(): string {

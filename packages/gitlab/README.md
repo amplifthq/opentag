@@ -27,7 +27,7 @@ const event = normalizeGitLabNote({
   noteUrl: payload.object_attributes.url,
   apiNotesUrl: `https://gitlab.com/api/v4/projects/${encodedPath}/issues/${payload.issue.iid}/notes`,
   issueIid: payload.issue.iid,
-  issueUrl: payload.issue.url,
+  workItemUrl: payload.issue.url,
   projectPathWithNamespace: payload.project.path_with_namespace,
   projectId: payload.project.id,
   projectVisibility: payload.project.visibility,

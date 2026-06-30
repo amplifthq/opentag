@@ -104,14 +104,35 @@ function renderSuggestedActions(result: OpenTagRunResult): string[] {
   return lines;
 }
 
+/** Render the initial acknowledgement message a runner posts back to the
+ * GitLab thread when it picks up a new mention. Includes the run id so the
+ * user can correlate follow-up progress messages to the originating event.
+ *
+ * GitLab-flavored markdown (single backtick for the run id; the surrounding
+ * text is plain prose so the comment renders cleanly inside a GitLab note
+ * without escaping). */
 export function renderAcknowledgement(runId: string): string {
   return `OpenTag picked this up. Run: \`${runId}\``;
 }
 
+/** Render a mid-run progress update. The runner emits these between the
+ * acknowledgement and the final result so the user can see the run is alive
+ * while long operations execute. */
 export function renderProgress(input: { runId: string; message: string }): string {
   return `OpenTag progress for \`${input.runId}\`: ${input.message}`;
 }
 
+/** Render the final result a runner posts back to the GitLab thread when a
+ * run completes. Produces a GitLab-flavored markdown body with:
+ *
+ * 1. The conclusion and summary (`OpenTag finished with **success**.`).
+ * 2. Verification rows (one bullet per `result.verification` entry).
+ * 3. A `Next action` line if `result.nextAction` is set.
+ * 4. A `Suggested actions` block (when `result` carries suggestions) with a
+ *    source-thread approval table. The table reuses the GitHub / Slack shape
+ *    so users can copy `apply N` / `approve N` / `continue N` / `reject N`
+ *    commands verbatim into a GitLab reply.
+ */
 export function renderFinalResult(result: OpenTagRunResult): string {
   const lines = [`OpenTag finished with **${result.conclusion}**.`, "", result.summary];
 

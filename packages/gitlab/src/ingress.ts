@@ -38,6 +38,13 @@ type GitLabNoteObjectAttributes = {
   public_visibility?: boolean;
 };
 
+/** Subset of a GitLab `Note Hook` webhook payload the ingress handler
+ * actually reads. The handler does not consume the full GitLab schema
+ * (notes can carry dozens of optional fields like `repository`,
+ * `object_attributes.created_at`, `object_attributes.updated_at`, etc.) —
+ * only the fields below are validated, persisted, or routed. The shape
+ * predicate `isGitLabNoteHookPayload` enforces this minimal shape before the
+ * handler proceeds. */
 export type GitLabNoteHookPayload = {
   object_kind: "note";
   object_attributes: GitLabNoteObjectAttributes;
@@ -47,8 +54,15 @@ export type GitLabNoteHookPayload = {
   user: GitLabActor;
 };
 
+/** Input passed to the optional `submitThreadAction` callback when a GitLab
+ * note matches `parseThreadActionCommand` (i.e. `apply N`, `approve N`, etc.).
+ * Mirrors the GitHub / Slack `submitThreadAction` shape from sibling adapters
+ * so a single dispatcher consumer can dispatch across providers. */
 export type GitLabThreadActionInput = {
+  /** Idempotency key for the apply-all decision. Includes the body hash so
+   * redeliveries of the same payload collapse to the same id. */
   id: string;
+  /** Raw comment body that triggered the thread action. */
   rawText: string;
   actor: {
     provider: "gitlab";
@@ -57,12 +71,19 @@ export type GitLabThreadActionInput = {
   };
   callback: {
     provider: "gitlab";
+    /** REST URL the dispatcher can POST a follow-up note through. */
     uri: string;
+    /** Conversation identifier; encodes work-item kind so issue and MR
+     * threads in the same project do not collide. */
     threadKey: string;
   };
   metadata: Record<string, unknown>;
 };
 
+/** Construction input for `createGitLabWebhookApp`. The handler is created
+ * once and routes each incoming webhook to either `createRun` (mention path)
+ * or `submitThreadAction` (apply/approve path) depending on the parsed
+ * command. */
 export type GitLabWebhookAppInput = {
   webhookSecret: string;
   webhookPath?: string;
@@ -79,15 +100,29 @@ export type GitLabWebhookAppInput = {
  */
 const GITLAB_API_HOST_ALLOWLIST = new Set(["gitlab.com", "api.gitlab.com"]);
 
+/** Configuration for `startGitLabIngress`. Bundles the dispatcher pairing
+ * info with the local HTTP receiver settings. `port` defaults to `3060` to
+ * avoid the GitHub default `3050`; `hostname` defaults to `127.0.0.1` so the
+ * receiver is loopback-only by default (operators pair with a tunnel rather
+ * than re-binding to `0.0.0.0`). */
 export type GitLabIngressConfig = {
+  /** Shared secret GitLab's webhook will present in `X-Gitlab-Token`. */
   webhookSecret: string;
+  /** Base URL of the paired OpenTag dispatcher (e.g. `http://127.0.0.1:8787`). */
   dispatcherUrl: string;
+  /** Optional pairing token presented to the dispatcher as `Authorization`. */
   dispatcherToken?: string;
+  /** TCP port; defaults to `3060` to avoid clash with the GitHub adapter. */
   port?: number;
+  /** Bind hostname; defaults to `127.0.0.1` (loopback only). */
   hostname?: string;
+  /** HTTP path the webhook is mounted at; defaults to `/gitlab/webhooks`. */
   webhookPath?: string;
 };
 
+/** Opaque handle returned by `startGitLabIngress`. Holds the running server
+ * plus the resolved URL and webhook path. `close()` shuts down the server
+ * and resolves once the underlying socket has fully closed. */
 export type GitLabIngressHandle = {
   url: string;
   webhookPath: string;
@@ -125,6 +160,63 @@ function parseJsonPayload(rawBody: string): unknown {
   }
 }
 
+/** Conservative cap on webhook body size. GitLab Note Hooks are well under 64 KiB
+ * in practice; the 1 MiB ceiling is a defence-in-depth limit so an authenticated
+ * caller (or a misconfigured downstream) cannot push arbitrarily large payloads
+ * into the JSON parser. The cap is enforced via the `Content-Length` header
+ * before reading the body, so the body is never buffered for oversized requests. */
+const MAX_WEBHOOK_BODY_BYTES = 1_048_576;
+
+/** Path-with-namespace guard for `WorkItemReference.ownerContainer.id` and
+ * `callback.threadKey`. Both fields flow the raw `project.path_with_namespace`
+ * through to `callbackConversationKey` (`packages/core/src/protocol.ts:387-389`),
+ * so a `|` in the value would be a delimiter-injection surface and whitespace
+ * would corrupt the conversational identity. GitLab enforces `^[^/]+/[^/]+$` in
+ * practice; this regex tightens it to forbid pipe and whitespace on the
+ * adapter side so a hand-crafted payload cannot escape the convention. */
+const PROJECT_PATH_NAMESPACE_PATTERN = /^[^|\/\s]+\/[^|\/\s]+$/;
+
+/** Shape predicate for a GitLab Note Hook payload. Only the minimum fields the
+ * handler actually reads are checked — the type guard is intentionally permissive
+ * about `object_attributes.noteable_type` because Snippet/Commit/etc. notes are
+ * silently ignored (return `200 { ok: true }`) downstream per MVP scope and must
+ * continue to pass shape validation.
+ *
+ * Returns `false` if any of:
+ * 1. `value` is not an object, or `object_kind !== "note"`.
+ * 2. `object_attributes` is not an object, or `object_attributes.note` is not a
+ *    non-empty string, or `object_attributes.id` is not a number.
+ * 3. `project` is not an object, or `project.path_with_namespace` is not a
+ *    non-empty string, or it fails `PROJECT_PATH_NAMESPACE_PATTERN`.
+ * 4. `user` is not an object, or `user.id` is not a number.
+ *
+ * Noteable-type membership is NOT checked here — see the file-level rationale.
+ */
+function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  if (v.object_kind !== "note") return false;
+
+  const attrs = v.object_attributes;
+  if (!attrs || typeof attrs !== "object") return false;
+  const a = attrs as Record<string, unknown>;
+  if (typeof a.note !== "string" || a.note.length === 0) return false;
+  if (typeof a.id !== "number") return false;
+
+  const project = v.project;
+  if (!project || typeof project !== "object") return false;
+  const p = project as Record<string, unknown>;
+  if (typeof p.path_with_namespace !== "string") return false;
+  if (!PROJECT_PATH_NAMESPACE_PATTERN.test(p.path_with_namespace)) return false;
+
+  const user = v.user;
+  if (!user || typeof user !== "object") return false;
+  const u = user as Record<string, unknown>;
+  if (typeof u.id !== "number") return false;
+
+  return true;
+}
+
 function isGitLabApiHost(uri: string): boolean {
   try {
     const hostname = new URL(uri).hostname.toLowerCase();
@@ -152,6 +244,7 @@ function buildApiNotesUrl(input: {
 
 async function handleNoteCreated(input: {
   payload: GitLabNoteHookPayload;
+  rawBody: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitLabThreadActionInput): Promise<unknown>;
   now(): string;
@@ -167,9 +260,16 @@ async function handleNoteCreated(input: {
   const workItemUrl = (isMergeRequest ? payload.merge_request?.url : payload.issue?.url) ?? `https://gitlab.com/${payload.project.path_with_namespace}/${isMergeRequest ? "merge_requests" : "issues"}/${issueIid}`;
   const issueUrl = payload.issue?.url ?? workItemUrl;
 
-  // Body-binding: hash the raw body and include it in the action id so a
-  // replayed comment cannot be re-executed by replaying only the headers.
-  const actionId = `approval_gitlab_note_${payload.object_attributes.id}`;
+  // Idempotency key: `actionId` includes the first 12 hex chars of
+  // `sha256(rawBody)` so that two otherwise-identical comments whose body
+  // differs cannot collide in the dispatcher's `apply all` decision flow, and
+  // so the same body produces the same id across redeliveries. The 12-hex
+  // width matches the dispatcher's own `stableHash` (server.ts:264) for
+  // cross-package field-width uniformity. This is NOT replay protection —
+  // GitLab suppresses literal retries on 5xx itself; the body hash is for
+  // idempotency of the apply-all decision.
+  const bodyHash = createHash("sha256").update(input.rawBody).digest("hex").slice(0, 12);
+  const actionId = `approval_gitlab_note_${payload.object_attributes.id}_${bodyHash}`;
 
   const callback = {
     provider: "gitlab" as const,
@@ -178,7 +278,7 @@ async function handleNoteCreated(input: {
       noteableType: isMergeRequest ? "MergeRequest" : "Issue",
       iid: issueIid
     }),
-    threadKey: `${payload.project.path_with_namespace}#${issueIid}`
+    threadKey: `${payload.project.path_with_namespace}|${isMergeRequest ? "merge_request" : "issue"}|${issueIid}`
   };
 
   // Inline doc-review P0: refuse callbacks that don't point at the approved
@@ -232,6 +332,21 @@ async function handleNoteCreated(input: {
   }
 }
 
+/** Construct a Hono application that exposes a single `POST` route at
+ * `webhookPath` for GitLab Note Hook deliveries. The handler enforces:
+ *
+ * 1. A `Content-Length` cap of 1 MiB before any body read (returns `413`
+ *    `payload_too_large` for declared payloads above the limit).
+ * 2. The `X-Gitlab-Token` header is present and matches `webhookSecret`
+ *    via `verifyGitLabToken` before the body is read (returns `401`).
+ * 3. The parsed JSON conforms to the `GitLabNoteHookPayload` shape predicate
+ *    (returns `422` `invalid_payload` on shape failure).
+ * 4. Note Hook events are routed through `handleNoteCreated`; System Hook
+ *    pings return `200 { ok: true }` so GitLab marks the webhook reachable.
+ *
+ * The returned `Hono` instance is the application — mount it via `serve`
+ * (Hono node adapter), Vercel/Workers, or any other Hono-compatible host.
+ */
 export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
   const app = new Hono();
   const webhookPath = input.webhookPath ?? "/gitlab/webhooks";
@@ -240,14 +355,22 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
   }
 
   app.post(webhookPath, async (c) => {
+    const contentLengthHeader = c.req.header("content-length");
+    if (contentLengthHeader) {
+      const declared = Number(contentLengthHeader);
+      if (Number.isFinite(declared) && declared >= MAX_WEBHOOK_BODY_BYTES) {
+        return c.json({ error: "payload_too_large" }, 413);
+      }
+    }
+
     const token = c.req.header("x-gitlab-token");
     if (!token) {
       return c.json({ error: "missing_token_header" }, 401);
     }
-    const rawBody = await c.req.text();
     if (!verifyGitLabToken({ webhookSecret: input.webhookSecret, token })) {
       return c.json({ error: "invalid_token" }, 401);
     }
+    const rawBody = await c.req.text();
 
     const eventName = c.req.header("x-gitlab-event");
     const payload = parseJsonPayload(rawBody);
@@ -262,8 +385,12 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
     }
 
     if (eventName === "Note Hook" || eventName === "note") {
+      if (!isGitLabNoteHookPayload(payload)) {
+        return c.json({ error: "invalid_payload" }, 422);
+      }
       await handleNoteCreated({
-        payload: payload as GitLabNoteHookPayload,
+        payload,
+        rawBody,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
         now: input.now
@@ -277,6 +404,19 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
   return app;
 }
 
+/** Start a long-running GitLab webhook receiver bound to a paired
+ * OpenTag dispatcher. Wires:
+ *
+ * 1. A `@opentag/client` for forwarding `createRun` / `submitThreadAction`
+ *    calls to the dispatcher.
+ * 2. The Hono webhook app from `createGitLabWebhookApp`, served via the Hono
+ *    node adapter on `config.port` (default `3060`) at `config.hostname`
+ *    (default `127.0.0.1`, loopback-only).
+ *
+ * Callers should keep the returned handle and call `close()` on shutdown so
+ * the underlying socket releases cleanly. The `server` field is exposed for
+ * diagnostic access; treat it as opaque.
+ */
 export function startGitLabIngress(config: GitLabIngressConfig): GitLabIngressHandle {
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
