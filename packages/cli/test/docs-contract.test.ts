@@ -36,9 +36,11 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("npm config get https-proxy");
     expect(skill).toContain("registry.npmjs.org");
     expect(skill).toContain("npm view @opentag/cli version --fetch-timeout=15000");
-    expect(skill).toContain("proxy-scoped registry retry");
-    expect(skill).toContain('HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" curl -I');
-    expect(skill).toContain("Only after registry reachability is confirmed");
+    expect(skill).toContain("proxy-scoped npm registry retry");
+    expect(skill).toContain(
+      'HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npm view @opentag/cli version --fetch-timeout=15000'
+    );
+    expect(skill).toContain("Only after npm registry metadata is reachable");
     expect(skill).toContain("npx --yes @opentag/cli --help");
     expect(skill).toContain("do not permanently change `npm config` without explicit user confirmation");
     expect(skill).toContain("Only use a proxy URL the user provides or that is already active in the environment");

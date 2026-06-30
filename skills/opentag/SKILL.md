@@ -73,13 +73,13 @@ curl -I --max-time 15 https://registry.npmjs.org/@opentag%2fcli
 npm view @opentag/cli version --fetch-timeout=15000
 ```
 
-If DNS or registry access is flaky, say that the published CLI could not be reached yet and retry once after checking connectivity. If the user has a VPN or proxy, compare direct registry access with a one-command proxy-scoped registry retry, but do not permanently change `npm config` without explicit user confirmation:
+If DNS or registry access is flaky, say that the published CLI could not be reached yet and retry once after checking connectivity. If the user has a VPN or proxy, compare direct npm metadata access with a one-command proxy-scoped npm registry retry, but do not permanently change `npm config` without explicit user confirmation:
 
 ```bash
-HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" curl -I --max-time 15 https://registry.npmjs.org/@opentag%2fcli
+HTTPS_PROXY="<proxy-url>" HTTP_PROXY="<proxy-url>" npm view @opentag/cli version --fetch-timeout=15000
 ```
 
-Only after registry reachability is confirmed, retry the CLI help command:
+Only after npm registry metadata is reachable, retry the CLI help command:
 
 ```bash
 npx --yes @opentag/cli --help
