@@ -167,10 +167,11 @@ function collectHermesSetup(options: SetupCommandOptions, defaults: SetupDefault
   }
 
   const explicitProfile = optionalTrimmed(options.hermesProfile);
+  const explicitProfileTemplate = optionalTrimmed(options.hermesProfileTemplate);
   const command = optionalTrimmed(options.hermesCommand) ?? defaults.hermesCommand;
-  const profile = explicitProfile ?? defaults.hermesProfile;
+  const profile = explicitProfileTemplate ? explicitProfile : explicitProfile ?? defaults.hermesProfile;
   const profileTemplate =
-    optionalTrimmed(options.hermesProfileTemplate) ??
+    explicitProfileTemplate ??
     (explicitProfile ? undefined : defaults.hermesProfileTemplate) ??
     (profile ? undefined : DEFAULT_HERMES_PROFILE_TEMPLATE);
 

@@ -52,3 +52,33 @@ describe("parseDaemonConfig defaultExecutor", () => {
     ).toThrow();
   });
 });
+
+describe("parseDaemonConfig Hermes config", () => {
+  it("trims Hermes config strings", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository, defaultExecutor: "hermes" }],
+      hermes: {
+        command: " custom-hermes ",
+        profile: " opentag-fixed ",
+        profileTemplate: " opentag-{provider}-{owner}-{repo} "
+      }
+    });
+
+    expect(config.hermes).toEqual({
+      command: "custom-hermes",
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{owner}-{repo}"
+    });
+  });
+
+  it("rejects whitespace-only Hermes config strings", () => {
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository, defaultExecutor: "hermes" }],
+        hermes: {
+          profileTemplate: "   "
+        }
+      })
+    ).toThrow();
+  });
+});

@@ -113,6 +113,40 @@ describe("OpenTag CLI config", () => {
     expect(JSON.stringify(redacted)).not.toContain("secret_test");
   });
 
+  it("normalizes Hermes daemon config strings", () => {
+    const parsed = parseCliConfig({
+      ...config(),
+      daemon: {
+        ...config().daemon,
+        hermes: {
+          command: " custom-hermes ",
+          profile: " opentag-fixed ",
+          profileTemplate: " opentag-{provider}-{owner}-{repo} "
+        }
+      }
+    });
+
+    expect(parsed.daemon.hermes).toEqual({
+      command: "custom-hermes",
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{owner}-{repo}"
+    });
+  });
+
+  it("rejects whitespace-only Hermes daemon config strings", () => {
+    expect(() =>
+      parseCliConfig({
+        ...config(),
+        daemon: {
+          ...config().daemon,
+          hermes: {
+            profileTemplate: "   "
+          }
+        }
+      })
+    ).toThrow();
+  });
+
   it("builds a local Project Target and state-backed worktree root during setup", () => {
     const projectPath = tempDir();
     const checkoutPath = realpathSync.native(projectPath);

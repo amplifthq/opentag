@@ -18,9 +18,9 @@ const ClaudeCodeExecutorConfigSchema = z.object({
 });
 
 const HermesExecutorConfigSchema = z.object({
-  command: z.string().min(1).optional(),
-  profile: z.string().min(1).optional(),
-  profileTemplate: z.string().min(1).optional()
+  command: z.string().trim().min(1).optional(),
+  profile: z.string().trim().min(1).optional(),
+  profileTemplate: z.string().trim().min(1).optional()
 });
 
 const RunnerSecurityPolicySchema = z.object({
