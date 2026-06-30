@@ -82,6 +82,7 @@ program
   .command("status")
   .description("Show the local OpenTag status")
   .option("--config <path>", "Config file path")
+  .option("--run <runId>", "Show audit details for one run")
   .action(async (options) => {
     try {
       await runStatusCommand(options);

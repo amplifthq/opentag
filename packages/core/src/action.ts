@@ -25,6 +25,31 @@ export type SuggestedActionCandidate = {
   intent: MutationIntent;
 };
 
+export type ActionReceiptState = "ready_to_apply" | "needs_approval" | "needs_setup" | "unsupported";
+export type ActionReceiptDecision = "apply" | "approve" | "reject" | "continue";
+export type ActionReceiptPrimaryDecision = "apply" | "continue" | "none";
+
+export type ActionReceiptCapability = {
+  state?: ActionReceiptState;
+  targetLabel?: string;
+  setupReason?: string;
+  visibleDecisions?: ActionReceiptDecision[];
+  primaryDecision?: ActionReceiptPrimaryDecision;
+};
+
+export type ActionReceiptContext = {
+  capabilityByIntentId?: Record<string, ActionReceiptCapability>;
+};
+
+export type ActionReceipt = {
+  candidate: SuggestedActionCandidate;
+  state: ActionReceiptState;
+  targetLabel: string;
+  setupReason?: string;
+  visibleDecisions: ActionReceiptDecision[];
+  primaryDecision: ActionReceiptPrimaryDecision;
+};
+
 const ENGLISH_VERBS: Record<string, ThreadActionVerb> = {
   approve: "approve",
   approved: "approve",
@@ -164,4 +189,51 @@ export function suggestedActionCandidatesFromSnapshots(
 
 export function suggestedActionCandidatesFromResult(result: OpenTagRunResult): SuggestedActionCandidate[] {
   return suggestedActionCandidatesFromSnapshots(result.suggestedChanges ?? []);
+}
+
+function defaultActionTargetLabel(intent: MutationIntent): string {
+  if (intent.action === "create_pull_request") return "GitHub pull request";
+  if (intent.domain === "labels") return "GitHub labels";
+  if (intent.domain === "assignee" || intent.domain === "assignees") return "GitHub assignees";
+  if (intent.domain === "review") return "GitHub review request";
+  if (intent.domain === "artifact_links") return "Artifact link";
+  if (intent.domain === "follow_up") return "OpenTag follow-up run";
+  return `${intent.domain} / ${intent.action}`;
+}
+
+function defaultVisibleDecisionsForState(state: ActionReceiptState): ActionReceiptDecision[] {
+  if (state === "ready_to_apply") return ["apply", "reject", "approve"];
+  if (state === "needs_approval") return ["approve", "reject"];
+  if (state === "needs_setup") return ["continue", "reject"];
+  return ["continue", "reject"];
+}
+
+function defaultPrimaryDecisionForState(state: ActionReceiptState): ActionReceiptPrimaryDecision {
+  if (state === "ready_to_apply") return "apply";
+  if (state === "needs_setup" || state === "unsupported") return "continue";
+  return "none";
+}
+
+export function actionReceiptHeading(receipts: ActionReceipt[]): string {
+  if (receipts.some((receipt) => receipt.state === "ready_to_apply")) return "Ready to apply";
+  if (receipts.some((receipt) => receipt.state === "needs_setup")) return "Needs setup";
+  if (receipts.some((receipt) => receipt.state === "unsupported")) return "Needs attention";
+  return "Needs approval";
+}
+
+export function buildActionReceipt(candidate: SuggestedActionCandidate, context: ActionReceiptContext = {}): ActionReceipt {
+  const capability = context.capabilityByIntentId?.[candidate.intent.intentId];
+  const state = capability?.state ?? "needs_approval";
+  return {
+    candidate,
+    state,
+    targetLabel: capability?.targetLabel ?? defaultActionTargetLabel(candidate.intent),
+    ...(capability?.setupReason ? { setupReason: capability.setupReason } : {}),
+    visibleDecisions: capability?.visibleDecisions ?? defaultVisibleDecisionsForState(state),
+    primaryDecision: capability?.primaryDecision ?? defaultPrimaryDecisionForState(state)
+  };
+}
+
+export function buildActionReceiptsFromResult(result: OpenTagRunResult, context: ActionReceiptContext = {}): ActionReceipt[] {
+  return suggestedActionCandidatesFromResult(result).map((candidate) => buildActionReceipt(candidate, context));
 }

@@ -191,6 +191,12 @@ export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): L
     databasePath: config.state.databasePath,
     ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
+    ...(config.daemon.githubToken ? { githubCallbackToken: config.daemon.githubToken } : {}),
+    ...(config.daemon.githubApplyToken !== undefined
+      ? { githubApplyToken: config.daemon.githubApplyToken }
+      : config.daemon.githubToken
+        ? { githubApplyToken: config.daemon.githubToken }
+        : {}),
     ...(lark
       ? {
           lark: {

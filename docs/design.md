@@ -14,12 +14,14 @@ OpenTag is the open mention layer for agents: tag any approved agent from a work
 
 ## Why Now
 
-Claude Tag makes agent mentions feel natural inside team collaboration tools. The opportunity for OpenTag is to turn that interaction pattern into an open, vendor-neutral layer:
+Agent mentions are becoming a natural interaction pattern inside team
+collaboration tools. The opportunity for OpenTag is to make that pattern open,
+vendor-neutral, and protocol-first:
 
-- Claude Tag brings Claude into Slack.
-- OpenTag brings any agent into any workspace.
-- Claude Tag is one model, one vendor, one collaboration surface first.
-- OpenTag should be protocol-first, executor-neutral, and local-runner friendly.
+- OpenTag brings approved agents into existing workspace surfaces.
+- OpenTag supports multiple executors instead of binding the workflow to one model.
+- OpenTag treats local runners and auditable source-thread context as core product boundaries.
+- OpenTag should stay protocol-first, executor-neutral, and local-runner friendly.
 
 The first release should move fast enough to ride the conversation while still proving the idea with a real end-to-end task flow.
 
@@ -696,7 +698,7 @@ Tag Claude Code, Codex, Hermes, OpenClaw, or your own local runner from GitHub o
 ```
 
 ```text
-Claude Tag brings Claude into Slack. OpenTag brings any agent into any workspace.
+Bring approved agents into the workspace where the request already has context.
 ```
 
 ```text

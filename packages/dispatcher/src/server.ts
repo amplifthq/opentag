@@ -3,15 +3,20 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  capabilityForMutationIntent,
   conversationKeysFromEvent,
   parseThreadActionCommand,
+  permissionScopesAllowCapability,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
+  type ActionReceiptCapability,
+  type ActionReceiptContext,
   type ApplyIntentOutcome,
   type ApplyPlan,
   type MutationIntent,
   type OpenTagEvent,
+  type OpenTagRunResult,
   type OpenTagRun,
   type PermissionGrant,
   type SuggestedChangesSnapshot,
@@ -389,6 +394,35 @@ async function resolveThreadAction(input: {
   });
   const primaryConversationKey = conversationKeys[0];
   const targetWorkItemExternalId = githubIssueWorkItemExternalId(input.metadata);
+  const metadataProposalId = metadataString(input.metadata, "proposalId");
+  const metadataIntentId = metadataString(input.metadata, "intentId");
+  if (
+    metadataProposalId &&
+    (input.command.selection.kind === "index" || input.command.selection.kind === "latest")
+  ) {
+    const stored = await input.repo.getSuggestedChanges({ proposalId: metadataProposalId });
+    if (!stored) {
+      return { ok: false, reason: "no_proposal", message: `I could not find proposal \`${metadataProposalId}\`.` };
+    }
+    const claimed = await input.repo.getRun({ runId: stored.runId });
+    if (!claimed) {
+      return { ok: false, reason: "no_proposal", message: "I found the proposal but not its source run." };
+    }
+    const proposalConversationKeys = conversationKeysFromEvent(claimed.event);
+    if (!proposalConversationKeys.some((key) => conversationKeys.includes(key))) {
+      return { ok: false, reason: "no_match", runId: stored.runId, message: "That proposal does not belong to this source thread." };
+    }
+    const proposal = { runId: stored.runId, run: claimed.run, event: claimed.event, snapshot: stored.snapshot };
+    if (targetWorkItemExternalId && !proposalMatchesWorkItem(proposal, targetWorkItemExternalId)) {
+      return { ok: false, reason: "no_match", runId: stored.runId, message: "That proposal does not belong to this source thread." };
+    }
+    return resolveCandidateSelection({
+      command: metadataIntentId
+        ? { ...input.command, selection: { kind: "intent", intentId: metadataIntentId } }
+        : { ...input.command, selection: { kind: "proposal", proposalId: metadataProposalId } },
+      proposals: [proposal]
+    });
+  }
   if (input.command.selection.kind === "proposal") {
     const stored = await input.repo.getSuggestedChanges({ proposalId: input.command.selection.proposalId });
     if (!stored) {
@@ -446,6 +480,228 @@ function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string
       (input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isRepoLevelGitHubIntent(intent))))
     ? "github"
     : input.callbackProvider;
+}
+
+function executorConditionsFromIntent(intent: { params?: Record<string, unknown> | undefined }): string[] {
+  const value = intent.params?.["executorConditions"];
+  if (!Array.isArray(value)) return [];
+  return value.filter((condition): condition is string => typeof condition === "string" && condition.length > 0);
+}
+
+async function githubPreflight(input: {
+  githubApply: GitHubApplyOptions;
+  owner: string;
+  repo: string;
+  path: string;
+  description: string;
+  notFoundReason: string;
+}): Promise<ActionReceiptCapability | null> {
+  let response: Response;
+  try {
+    response = await (input.githubApply.fetchImpl ?? fetch)(`https://api.github.com/repos/${input.owner}/${input.repo}${input.path}`, {
+      method: "GET",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${input.githubApply.token}`,
+        "x-github-api-version": "2022-11-28"
+      }
+    });
+  } catch (error) {
+    return {
+      state: "needs_setup",
+      setupReason: `GitHub preflight failed for ${input.description}: ${error instanceof Error ? error.message : String(error)}.`
+    };
+  }
+
+  if (response.ok) return null;
+
+  if (response.status === 401 || response.status === 403) {
+    return {
+      state: "needs_setup",
+      setupReason: `GitHub apply token cannot access ${input.description}. Check repository permissions and token scopes.`
+    };
+  }
+  if (response.status === 404) {
+    return {
+      state: "needs_setup",
+      setupReason: input.notFoundReason
+    };
+  }
+  return {
+    state: "needs_setup",
+    setupReason: `GitHub preflight failed for ${input.description}: HTTP ${response.status}.`
+  };
+}
+
+async function preflightGitHubOperation(input: {
+  githubApply: GitHubApplyOptions;
+  target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
+  operation: GitHubIssueMutationOperation;
+}): Promise<ActionReceiptCapability | null> {
+  const base = {
+    githubApply: input.githubApply,
+    owner: input.target.owner,
+    repo: input.target.repoName
+  };
+
+  if (input.operation.kind === "create_pull_request") {
+    const head = encodeURIComponent(input.operation.head);
+    const baseBranch = encodeURIComponent(input.operation.base);
+    return (
+      (await githubPreflight({
+        ...base,
+        path: `/branches/${head}`,
+        description: `GitHub branch ${input.operation.head}`,
+        notFoundReason: `GitHub branch ${input.operation.head} was not found.`
+      })) ??
+      (await githubPreflight({
+        ...base,
+        path: `/branches/${baseBranch}`,
+        description: `GitHub base branch ${input.operation.base}`,
+        notFoundReason: `GitHub base branch ${input.operation.base} was not found.`
+      }))
+    );
+  }
+
+  if (input.operation.kind === "request_review") {
+    if (typeof input.target.pullRequestNumber !== "number") {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a GitHub pull request target."
+      };
+    }
+    return await githubPreflight({
+      ...base,
+      path: `/pulls/${input.target.pullRequestNumber}`,
+      description: `GitHub pull request #${input.target.pullRequestNumber}`,
+      notFoundReason: `GitHub pull request #${input.target.pullRequestNumber} was not found.`
+    });
+  }
+
+  if (typeof input.target.issueNumber !== "number") {
+    return {
+      state: "needs_setup",
+      setupReason: "The source thread does not include a GitHub issue or pull request target."
+    };
+  }
+  return await githubPreflight({
+    ...base,
+    path: `/issues/${input.target.issueNumber}`,
+    description: `GitHub issue or pull request #${input.target.issueNumber}`,
+    notFoundReason: `GitHub issue or pull request #${input.target.issueNumber} was not found.`
+  });
+}
+
+async function directApplyReceiptCapability(input: {
+  event: OpenTagEvent;
+  callbackProvider: string;
+  intent: MutationIntent;
+  githubApply?: GitHubApplyOptions;
+}): Promise<ActionReceiptCapability> {
+  const capability = capabilityForMutationIntent(input.intent);
+  if (!capability) {
+    return {
+      state: "unsupported",
+      setupReason: `No source-thread apply capability is registered for ${input.intent.action}.`
+    };
+  }
+  if (capability.capabilityClass !== "external_write") {
+    return {
+      state: "unsupported",
+      setupReason: "This action is audit-only for now; continue if a follow-up run should handle it."
+    };
+  }
+
+  const adapter = adapterForAction({
+    event: input.event,
+    callbackProvider: input.callbackProvider,
+    selectedIntents: [input.intent]
+  });
+  if (adapter !== "github") {
+    return {
+      state: "needs_setup",
+      setupReason: `Direct apply for ${adapter} actions is not configured on this dispatcher.`
+    };
+  }
+  if (!input.githubApply) {
+    return {
+      state: "needs_setup",
+      setupReason: "GitHub apply is not configured on this dispatcher."
+    };
+  }
+  if (!hasGitHubRepoTarget(input.event)) {
+    return {
+      state: "needs_setup",
+      setupReason: "The source thread does not include a GitHub repository target."
+    };
+  }
+  if (!isRepoLevelGitHubIntent(input.intent) && !hasGitHubIssueOrPullTarget(input.event)) {
+    return {
+      state: "needs_setup",
+      setupReason: "The source thread does not include a GitHub issue or pull request target."
+    };
+  }
+  if (!permissionScopesAllowCapability(input.event.permissions ?? [], capability)) {
+    return {
+      state: "needs_setup",
+      setupReason: `Missing platform permission for ${capability.id}.`
+    };
+  }
+
+  const missingExecutorConditions = (capability.requiredExecutorConditions ?? []).filter(
+    (condition) => !executorConditionsFromIntent(input.intent).includes(condition)
+  );
+  if (missingExecutorConditions.length > 0) {
+    return {
+      state: "needs_setup",
+      setupReason: `Missing executor condition: ${missingExecutorConditions.join(", ")}.`
+    };
+  }
+
+  const githubTarget = githubTargetFromEvent(input.event);
+  if (!githubTarget) {
+    return {
+      state: "needs_setup",
+      setupReason: "The source thread does not include a GitHub repository target."
+    };
+  }
+  const compilation = createGitHubIssueMutationCompiler({
+    ...(githubTarget?.targetKind ? { targetKind: githubTarget.targetKind } : {})
+  }).compile(input.intent);
+  if (!compilation.ok) {
+    return {
+      state: compilation.outcome.outcome === "unsupported" ? "unsupported" : "needs_setup",
+      setupReason: compilation.outcome.message ?? "GitHub cannot apply this action from the current source thread."
+    };
+  }
+
+  const preflight = await preflightGitHubOperation({
+    githubApply: input.githubApply,
+    target: githubTarget,
+    operation: compilation.operation as GitHubIssueMutationOperation
+  });
+  if (preflight) return preflight;
+
+  return { state: "ready_to_apply" };
+}
+
+async function actionReceiptContextForFinal(input: {
+  event: OpenTagEvent;
+  result: OpenTagRunResult;
+  githubApply?: GitHubApplyOptions;
+}): Promise<ActionReceiptContext> {
+  const capabilityByIntentId: Record<string, ActionReceiptCapability> = {};
+  for (const snapshot of input.result.suggestedChanges ?? []) {
+    for (const intent of snapshot.intents) {
+      capabilityByIntentId[intent.intentId] = await directApplyReceiptCapability({
+        event: input.event,
+        callbackProvider: input.event.callback.provider,
+        intent,
+        ...(input.githubApply ? { githubApply: input.githubApply } : {})
+      });
+    }
+  }
+  return { capabilityByIntentId };
 }
 
 async function authorizeThreadAction(input: {
@@ -574,6 +830,15 @@ function selectedIntentsAlreadyApplied(input: { plan: ApplyPlan; selectedIntentI
   );
 }
 
+function selectedPlanOutcomes(input: { plan: ApplyPlan; selectedIntentIds: string[] }): ApplyIntentOutcome[] {
+  return (input.plan.outcomes ?? []).filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
+}
+
+function selectedIntentsHaveStaleOutcome(input: { plan: ApplyPlan; selectedIntentIds: string[] }): boolean {
+  const outcomes = selectedPlanOutcomes(input);
+  return outcomes.some((outcome) => outcome.outcome === "stale") && outcomes.every((outcome) => outcome.outcome !== "applied");
+}
+
 function githubTargetFromEvent(event: OpenTagEvent):
   | {
       owner: string;
@@ -602,6 +867,18 @@ function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandida
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
 }
 
+function selectedActionReceiptTitle(selectionText: string): string {
+  return selectionText
+    .split(";")
+    .map((part) => part.trim().replace(/^\d+\.\s*/, ""))
+    .filter(Boolean)
+    .join("; ");
+}
+
+function sentenceWithTerminalPunctuation(value: string): string {
+  return /[.!?。！？]$/u.test(value) ? value : `${value}.`;
+}
+
 function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGrant): PermissionGrant[] {
   if (permissions.some((permission) => permission.scope === grant.scope)) return permissions;
   return [...permissions, grant];
@@ -628,99 +905,126 @@ function childRunPermissionsForThreadAction(input: { resolved: ResolvedThreadAct
   return permissions;
 }
 
-function childRunContextLines(input: {
-  resolved: ResolvedThreadAction;
-  approvalDecisionId?: string;
-  sourceApplyPlanId?: string;
-  fallbackReason?: string;
-}): string[] {
-  const previousSummary = input.resolved.proposal.run.result?.summary ?? input.resolved.proposal.snapshot.summary;
-  return [
-    `- Proposal: \`${input.resolved.proposal.snapshot.proposalId}\``,
-    `- Selected intents: ${input.resolved.selectedIntentIds.map((intentId) => `\`${intentId}\``).join(", ")}`,
-    `- Previous run: \`${input.resolved.proposal.runId}\``,
-    ...(input.approvalDecisionId ? [`- Approval decision: \`${input.approvalDecisionId}\``] : []),
-    `- Previous result: ${previousSummary}`,
-    ...(input.sourceApplyPlanId ? [`- Apply plan: \`${input.sourceApplyPlanId}\``] : []),
-    ...(input.fallbackReason ? [`- Fallback reason: ${input.fallbackReason}`] : [])
-  ];
-}
-
 function renderChildRunCreatedBody(input: {
   lead: string;
   resolved: ResolvedThreadAction;
   childRun: OpenTagRun;
   provider?: string;
+  selectionText?: string;
   approvalDecisionId?: string;
   sourceApplyPlanId?: string;
   fallbackReason?: string;
 }): string {
+  const title = selectedActionReceiptTitle(input.selectionText ?? selectedActionSummary(input.resolved.selectedCandidates));
   if (input.provider === "slack") {
     return [
-      "Approved. OpenTag will continue from this proposal in a follow-up run.",
+      input.lead,
+      `Action: ${title}`,
       ...(input.fallbackReason ? [`Reason: ${input.fallbackReason}`] : [])
     ].join("\n");
   }
   return [
     input.lead,
     "",
+    `Action: ${title}`,
+    "",
     `Child run: \`${input.childRun.id}\``,
     "",
-    "Context carried into the child run:",
-    ...childRunContextLines(input),
-    "",
-    "The model will continue from this approved proposal instead of starting from a fresh mention."
+    ...(input.fallbackReason ? [`Reason: ${input.fallbackReason}`, ""] : []),
+    `Audit: run \`opentag status --run ${input.childRun.id}\` locally.`
   ].join("\n");
 }
 
+function applyOutcomeSummary(outcome: ApplyIntentOutcome): string {
+  if (outcome.externalUri) return `${outcome.outcome}: ${outcome.externalUri}`;
+  if (outcome.message) return `${outcome.outcome}: ${outcome.message}`;
+  return `${outcome.outcome}.`;
+}
+
+function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
+  if (outcomes.length === 0) return ["Result: applied."];
+  if (outcomes.length === 1) {
+    const outcome = outcomes[0]!;
+    if (outcome.externalUri) return [`Result: ${outcome.externalUri}`];
+    if (outcome.message) return [`Result: ${outcome.outcome}. ${outcome.message}`];
+    return [`Result: ${outcome.outcome}.`];
+  }
+  return ["Results:", ...outcomes.map((outcome) => `- ${applyOutcomeSummary(outcome)}`)];
+}
+
 function renderAppliedThreadActionBody(input: {
-  provider: string;
   selectionText: string;
-  proposalId: string;
   selectedIntentIds: string[];
   outcomes: ApplyIntentOutcome[];
 }): string {
   const selectedOutcomes = input.outcomes.filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
-  if (input.provider === "slack") {
-    const lines = [`Applied ${input.selectionText}.`];
-    for (const outcome of selectedOutcomes) {
-      if (outcome.externalUri) {
-        lines.push(`Result: ${outcome.externalUri}`);
-      } else if (outcome.message) {
-        lines.push(`Result: ${outcome.outcome}. ${outcome.message}`);
-      } else {
-        lines.push(`Result: ${outcome.outcome}.`);
-      }
-    }
-    return lines.join("\n");
-  }
+  return [`Applied: ${sentenceWithTerminalPunctuation(selectedActionReceiptTitle(input.selectionText))}`, ...applyOutcomeReceiptLines(selectedOutcomes)].join("\n");
+}
 
+function renderAlreadyAppliedThreadActionBody(input: { selectionText: string }): string {
+  return [`Already applied: ${sentenceWithTerminalPunctuation(selectedActionReceiptTitle(input.selectionText))}`, "No external write was repeated."].join("\n");
+}
+
+function renderAlreadyPlannedThreadActionBody(input: { selectionText: string }): string {
+  return [`Already planned: ${sentenceWithTerminalPunctuation(selectedActionReceiptTitle(input.selectionText))}`, "OpenTag did not execute this repeated reply."].join("\n");
+}
+
+function renderStaleThreadActionBody(input: { selectionText: string; continueIndex: number }): string {
   return [
-    `Applied ${input.selectionText} from \`${input.proposalId}\`.`,
-    "",
-    "Result:",
-    ...selectedOutcomes.map((outcome) => `- \`${outcome.intentId}\`: ${outcome.outcome}${outcome.externalUri ? ` (${outcome.externalUri})` : ""}`)
+    `Stale: ${sentenceWithTerminalPunctuation(selectedActionReceiptTitle(input.selectionText))}`,
+    "The target changed since this action was proposed.",
+    `Reply \`continue ${input.continueIndex}\` to refresh from the current thread state.`
   ].join("\n");
 }
 
 function renderThreadActionRecordedBody(input: {
-  provider: string;
   verb: "approve" | "reject";
   selectionText: string;
-  proposalId: string;
   applyIndex?: number;
+  directApply?: { ready: boolean; reason?: string };
 }): string {
-  const pastTense = input.verb === "approve" ? "Approved" : "Rejected";
-  if (input.provider === "slack") {
-    if (input.verb === "approve") {
-      return `${pastTense} ${input.selectionText}.\nNext: use Apply ${input.applyIndex ?? 1} when you want OpenTag to perform it.`;
-    }
-    return `${pastTense} ${input.selectionText}.`;
-  }
+  const title = selectedActionReceiptTitle(input.selectionText);
   if (input.verb === "approve") {
-    return `${pastTense} ${input.selectionText} from \`${input.proposalId}\`.\n\nReply with \`apply ${input.applyIndex ?? 1}\` to apply it, or \`continue ${input.applyIndex ?? 1}\` to continue with a follow-up run.`;
+    const index = input.applyIndex ?? 1;
+    const nextLines = input.directApply?.ready
+      ? [`Next: reply \`apply ${index}\` to write it to the system of record, or \`continue ${index}\` to continue in OpenTag.`]
+      : [
+          ...(input.directApply?.reason
+            ? [`Direct apply is not available yet: ${sentenceWithTerminalPunctuation(input.directApply.reason)}`]
+            : ["Direct apply is not available yet."]),
+          `Next: reply \`continue ${index}\` to continue in OpenTag.`
+        ];
+    return [
+      `Approved only: ${sentenceWithTerminalPunctuation(title)}`,
+      "No external write was performed.",
+      ...nextLines
+    ].join("\n");
   }
-  return `${pastTense} ${input.selectionText} from \`${input.proposalId}\`.`;
+  return [`Rejected: ${sentenceWithTerminalPunctuation(title)}`, "No external write will be performed for this action."].join("\n");
+}
+
+async function selectedDirectApplyStatus(input: {
+  event: OpenTagEvent;
+  callbackProvider: string;
+  candidates: ResolvedThreadAction["selectedCandidates"];
+  githubApply?: GitHubApplyOptions;
+}): Promise<{ ready: boolean; reason?: string }> {
+  if (input.candidates.length === 0) return { ready: false, reason: "No selected action was found." };
+  for (const candidate of input.candidates) {
+    const capability = await directApplyReceiptCapability({
+      event: input.event,
+      callbackProvider: input.callbackProvider,
+      intent: candidate.intent,
+      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+    });
+    if (capability.state !== "ready_to_apply") {
+      return {
+        ready: false,
+        reason: capability.setupReason ?? `Receipt state is ${capability.state}.`
+      };
+    }
+  }
+  return { ready: true };
 }
 
 function actionContextPointer(input: {
@@ -1387,22 +1691,24 @@ export function createDispatcherApp(input: {
       if (existingPlan) {
         const existingDecision = await repo.getApprovalDecision({ id: existingPlan.approvalDecisionId });
         if (selectedIntentsAlreadyApplied({ plan: existingPlan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
+          await deliverAndAudit({
+            repo,
+            sink: callbackSink,
+            retry: callbackRetry,
+            message: {
+              runId: resolved.resolved.proposal.runId,
+              kind: "final",
+              provider: parsed.callback.provider,
+              uri: parsed.callback.uri,
+              body: renderAlreadyAppliedThreadActionBody({ selectionText }),
+              ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+            }
+          });
           return c.json({ outcome: "already_applied", decision: existingDecision, plan: existingPlan }, 200);
         }
-        const fallbackReason = "An apply plan already exists for this selected action; OpenTag will not execute it again from a repeated thread reply.";
-        const childRun = await createChildRunForThreadAction({
-          repo,
-          command,
-          resolved: resolved.resolved,
-          runId: stableChildRunId({
-            command,
-            resolved: resolved.resolved,
-            sourceApplyPlanId: existingPlan.id,
-            fallbackReason
-          }),
-          approvalDecisionId: existingPlan.approvalDecisionId,
-          sourceApplyPlanId: existingPlan.id,
-          fallbackReason
+        const isStale = selectedIntentsHaveStaleOutcome({
+          plan: existingPlan,
+          selectedIntentIds: resolved.resolved.selectedIntentIds
         });
         await deliverAndAudit({
           repo,
@@ -1413,19 +1719,16 @@ export function createDispatcherApp(input: {
             kind: "final",
             provider: parsed.callback.provider,
             uri: parsed.callback.uri,
-            body: renderChildRunCreatedBody({
-              lead: "This action was already planned, so OpenTag will not execute the external write again.",
-              resolved: resolved.resolved,
-              childRun,
-              provider: parsed.callback.provider,
-              approvalDecisionId: existingPlan.approvalDecisionId,
-              sourceApplyPlanId: existingPlan.id,
-              fallbackReason
-            }),
+            body: isStale
+              ? renderStaleThreadActionBody({
+                  selectionText,
+                  continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+                })
+              : renderAlreadyPlannedThreadActionBody({ selectionText }),
             ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
           }
         });
-        return c.json({ outcome: "already_planned", decision: existingDecision, plan: existingPlan, run: childRun }, 200);
+        return c.json({ outcome: isStale ? "stale" : "already_planned", decision: existingDecision, plan: existingPlan }, 200);
       }
     }
 
@@ -1475,10 +1778,8 @@ export function createDispatcherApp(input: {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
       const body = renderThreadActionRecordedBody({
-        provider: parsed.callback.provider,
         verb: "reject",
-        selectionText,
-        proposalId: resolved.resolved.proposal.snapshot.proposalId
+        selectionText
       });
       await deliverAndAudit({
         repo,
@@ -1500,12 +1801,17 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
+      const directApply = await selectedDirectApplyStatus({
+        event: resolved.resolved.proposal.event,
+        callbackProvider: parsed.callback.provider,
+        candidates: resolved.resolved.selectedCandidates,
+        ...(input.githubApply ? { githubApply: input.githubApply } : {})
+      });
       const body = renderThreadActionRecordedBody({
-        provider: parsed.callback.provider,
         verb: "approve",
         selectionText,
-        proposalId: resolved.resolved.proposal.snapshot.proposalId,
-        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
+        directApply
       });
       await deliverAndAudit({
         repo,
@@ -1532,10 +1838,11 @@ export function createDispatcherApp(input: {
         approvalDecisionId: decision.id
       });
       const body = renderChildRunCreatedBody({
-        lead: `Continuing from ${selectionText} in \`${resolved.resolved.proposal.snapshot.proposalId}\`.`,
+        lead: "Continuing in OpenTag from this approved action.",
         resolved: resolved.resolved,
         childRun,
         provider: parsed.callback.provider,
+        selectionText,
         approvalDecisionId: decision.id
       });
       await deliverAndAudit({
@@ -1566,22 +1873,24 @@ export function createDispatcherApp(input: {
     }
     if (!planResult.created) {
       if (selectedIntentsAlreadyApplied({ plan: planResult.plan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: resolved.resolved.proposal.runId,
+            kind: "final",
+            provider: parsed.callback.provider,
+            uri: parsed.callback.uri,
+            body: renderAlreadyAppliedThreadActionBody({ selectionText }),
+            ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+          }
+        });
         return c.json({ outcome: "already_applied", decision, plan: planResult.plan }, 200);
       }
-      const fallbackReason = "An apply plan already exists for this selected action; OpenTag will not execute it again from a repeated thread reply.";
-      const childRun = await createChildRunForThreadAction({
-        repo,
-        command,
-        resolved: resolved.resolved,
-        runId: stableChildRunId({
-          command,
-          resolved: resolved.resolved,
-          sourceApplyPlanId: planResult.plan.id,
-          fallbackReason
-        }),
-        approvalDecisionId: decision.id,
-        sourceApplyPlanId: planResult.plan.id,
-        fallbackReason
+      const isStale = selectedIntentsHaveStaleOutcome({
+        plan: planResult.plan,
+        selectedIntentIds: resolved.resolved.selectedIntentIds
       });
       await deliverAndAudit({
         repo,
@@ -1592,19 +1901,16 @@ export function createDispatcherApp(input: {
           kind: "final",
           provider: parsed.callback.provider,
           uri: parsed.callback.uri,
-          body: renderChildRunCreatedBody({
-            lead: "This action was already planned, so OpenTag will not execute the external write again.",
-            resolved: resolved.resolved,
-            childRun,
-            provider: parsed.callback.provider,
-            approvalDecisionId: decision.id,
-            sourceApplyPlanId: planResult.plan.id,
-            fallbackReason
-          }),
+          body: isStale
+            ? renderStaleThreadActionBody({
+                selectionText,
+                continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+              })
+            : renderAlreadyPlannedThreadActionBody({ selectionText }),
           ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
         }
       });
-      return c.json({ outcome: "already_planned", decision, plan: planResult.plan, run: childRun }, 200);
+      return c.json({ outcome: isStale ? "stale" : "already_planned", decision, plan: planResult.plan }, 200);
     }
     const plan = planResult.plan;
 
@@ -1617,9 +1923,7 @@ export function createDispatcherApp(input: {
     if (execution.executed) {
       const outcomes = execution.plan.outcomes ?? [];
       const body = renderAppliedThreadActionBody({
-        provider: parsed.callback.provider,
         selectionText,
-        proposalId: resolved.resolved.proposal.snapshot.proposalId,
         selectedIntentIds: resolved.resolved.selectedIntentIds,
         outcomes
       });
@@ -1639,6 +1943,26 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "applied", decision, plan: execution.plan }, 201);
     }
 
+    if (selectedIntentsHaveStaleOutcome({ plan: execution.plan, selectedIntentIds: resolved.resolved.selectedIntentIds })) {
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId: resolved.resolved.proposal.runId,
+          kind: "final",
+          provider: parsed.callback.provider,
+          uri: parsed.callback.uri,
+          body: renderStaleThreadActionBody({
+            selectionText,
+            continueIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1
+          }),
+          ...(parsed.callback.threadKey ? { threadKey: parsed.callback.threadKey } : {})
+        }
+      });
+      return c.json({ outcome: "stale", decision, plan: execution.plan }, 200);
+    }
+
     const childRun = await createChildRunForThreadAction({
       repo,
       command,
@@ -1654,10 +1978,11 @@ export function createDispatcherApp(input: {
       fallbackReason: execution.fallbackReason ?? "OpenTag cannot directly apply this intent yet."
     });
     const body = renderChildRunCreatedBody({
-      lead: `Action ${selectionText} was approved, but OpenTag cannot directly apply it yet.`,
+      lead: "Needs setup before OpenTag can apply this action directly.",
       resolved: resolved.resolved,
       childRun,
       provider: parsed.callback.provider,
+      selectionText,
       approvalDecisionId: decision.id,
       sourceApplyPlanId: execution.plan.id,
       fallbackReason: execution.fallbackReason ?? "The adapter could not execute the selected intent."
@@ -1809,7 +2134,17 @@ export function createDispatcherApp(input: {
     if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-    const finalPresentation = presentation.final({ provider: stored.event.callback.provider, result: parsed.result });
+    const receiptContext = await actionReceiptContextForFinal({
+      event: stored.event,
+      result: parsed.result,
+      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+    });
+    const finalPresentation = presentation.final({
+      provider: stored.event.callback.provider,
+      result: parsed.result,
+      runId,
+      receiptContext
+    });
     await deliverAndAudit({
       repo,
       sink: callbackSink,

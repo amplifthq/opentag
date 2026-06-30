@@ -128,6 +128,46 @@ OPENTAG_GH_APPLY_PR_ACTION=true \
 scripts/dev/run-gh-claude-local-test.sh
 ```
 
+### GitHub Repository Webhook Live Test
+
+Use this when you need to prove the real GitHub repository webhook ingress, not
+only the dispatcher-assisted path. The script starts the local CLI stack,
+exposes the GitHub webhook listener through ngrok, creates a temporary
+repository webhook, posts a real issue comment, replies `apply 1`, waits for the
+PR, and deletes the temporary webhook on exit.
+
+```bash
+OPENTAG_GH_REPO=amplifthq/opentag-test \
+scripts/dev/run-github-webhook-live-test.sh
+```
+
+Expected evidence:
+
+- GitHub issue comment creates a dispatcher run through `/github/webhooks`.
+- Final GitHub comment renders `### Ready to apply`.
+- Replying `apply 1` through GitHub creates an `ApprovalDecision` and `ApplyPlan`.
+- Apply executes through GitHub and comments with the created PR URL.
+- The temporary repository webhook is deleted after the run.
+
+To prove the missing-apply-credentials path while keeping GitHub callbacks live,
+run the same script with direct apply disabled:
+
+```bash
+OPENTAG_GH_REPO=amplifthq/opentag-test \
+OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN=true \
+scripts/dev/run-github-webhook-live-test.sh
+```
+
+Expected evidence for that branch:
+
+- The final GitHub comment renders `### Needs setup`.
+- The comment does not advertise `apply 1` as an available direct-apply command.
+- The script skips the apply reply because the dispatcher has no GitHub apply
+  token.
+
+This path requires `gh` admin or maintain access for the target repository so
+the script can create and delete the temporary webhook.
+
 This lets the daemon commit and push the executor-produced run branch, but it does not open the PR immediately. The final callback should render a `create_pull_request` suggested action with the PR title, head branch, base branch, changed files, risks, executor conditions, and any real verification the executor reported. Reply in the source thread with:
 
 ```text
@@ -317,11 +357,12 @@ Expected Slack thread shape:
 - OpenTag `eyes` reaction receipt on the source message
 - OpenTag final result
 - optional `apply 1` reply when validating the action loop
-- optional apply result callback containing the PR URL or child-run fallback context
+- optional apply result callback containing the PR URL
+- if direct apply is not available, the receipt should show `Needs setup` or `Continue` instead of presenting `Apply` as the primary path
 
 Routine acknowledgement and progress stay out of Slack thread replies by default, so they should not produce additional Slack messages.
 
-### Slack Events API App Setup
+### Slack App Setup
 
 Required bot scopes:
 
@@ -335,16 +376,31 @@ Required bot event:
 
 Install the app to the workspace, then collect:
 
-- `Signing Secret`
+- `App-Level Token` for Socket Mode, or `Signing Secret` for Events API
 - `Bot User OAuth Token`
 - target `teamId`
 - target `channelId`
 
 Invite the bot user into the test channel before sending any mention.
 
+### Socket Mode Transport
+
+For local README recordings, prefer Socket Mode. It avoids public Request URL
+drift and sends app mentions plus Block Kit button actions through Slack's
+WebSocket connection:
+
+```bash
+OPENTAG_SLACK_APP_TOKEN=xapp-... \
+  scripts/dev/run-slack-ui-trigger-local-test.sh
+```
+
+Slack Interactivity still needs to be enabled, but Socket Mode does not require
+an Interactivity Request URL.
+
 ### Events API Transport
 
-This smoke path uses Events API over a public Request URL. Disable Socket Mode for this specific app setup.
+Use Events API only when you intentionally want to validate a public Request URL
+or hosted ingress. Disable Socket Mode for that specific app setup.
 
 If Socket Mode is still enabled, Slack may give confusing signals in the dashboard and you end up debugging the wrong transport.
 
@@ -473,24 +529,181 @@ Use this trace when validating the model action layer against a real GitHub issu
 | Approval/apply reply | Source-thread reply text such as `apply 1` and actor identity |
 | ApprovalDecision | `approval.decision.recorded` event and selected intent IDs |
 | ApplyPlan | `apply_plan.created` event, adapter, selected intent IDs, and preflight outcomes |
-| Adapter or fallback | PR URL when applied, or child run ID plus fallback reason when the adapter cannot apply |
+| Adapter or setup path | PR URL when applied, or a `Needs setup` / continuation reason when the adapter cannot apply |
 | Final callback | Source-thread callback containing the PR URL or child-run continuation context |
 | Metrics | `approvalDecisionCount`, `applyPlanCount`, `childRunCount`, and `applyOutcomeCounts` |
 
 Expected GitHub create-PR success shape:
 
 ```text
-mention -> run -> executor changed files -> final callback with Suggested action #1 create_pull_request
+mention -> run -> executor changed files -> final callback with Ready to apply source-thread action receipt
 apply 1 -> approval decision -> apply plan -> POST /pulls -> callback with https://github.com/<owner>/<repo>/pull/<number>
 ```
 
-Expected fallback shape when the branch is not pushed or the adapter cannot apply:
+Expected unavailable-apply shape when the branch is not pushed or the adapter cannot apply:
 
 ```text
-apply 1 -> approval decision -> apply plan -> child run
+final callback -> Needs setup or Continue -> no primary Apply button
 ```
 
-The fallback callback must explain why the direct apply was not possible, show the child run ID, and list the context carried forward: proposal ID, selected intents, previous run, previous result, apply plan, and fallback reason.
+The receipt must explain why direct apply is not possible. A manually typed
+`continue 1` can still start a follow-up run when a human explicitly chooses to
+carry the proposal context forward.
+
+### Recorded Trace: 2026-06-30 GitHub repository webhook receipt preflight
+
+This trace validated both sides of the source-thread receipt state machine
+against the real `amplifthq/opentag-test` repository webhook path.
+
+#### Ready-to-apply path
+
+| Field | Value |
+| --- | --- |
+| Source issue | `https://github.com/amplifthq/opentag-test/issues/46` |
+| Mention comment | `https://github.com/amplifthq/opentag-test/issues/46#issuecomment-4837078185` |
+| Apply comment | `https://github.com/amplifthq/opentag-test/issues/46#issuecomment-4837085850` |
+| Run ID | `run_afeb0d55-7f40-473e-887d-fb652750881b` |
+| Created PR | `https://github.com/amplifthq/opentag-test/pull/47` |
+| Head branch | `opentag/run_afeb0d55-7f40-473e-887d-fb652750881b` |
+| Base branch | `main` |
+
+Observed behavior:
+
+- The real GitHub issue comment triggered the dispatcher through
+  `/github/webhooks`.
+- The final GitHub callback rendered `### Ready to apply`.
+- The real `apply 1` reply created an `ApprovalDecision` and `ApplyPlan`.
+- The GitHub adapter created PR #47.
+- The apply receipt included `Applied:` and the created PR URL.
+
+Observed metrics after apply:
+
+```json
+{
+  "approvalDecisionCount": 1,
+  "applyPlanCount": 1,
+  "childRunCount": 0,
+  "applyOutcomeCounts": {
+    "applied": 1,
+    "failed": 0,
+    "skipped": 0,
+    "stale": 0,
+    "unsupported": 0
+  },
+  "suggestedChangesCount": 3,
+  "threadNoiseRatio": 0.2857142857142857
+}
+```
+
+#### Missing-apply-token path
+
+| Field | Value |
+| --- | --- |
+| Source issue | `https://github.com/amplifthq/opentag-test/issues/48` |
+| Mention comment | `https://github.com/amplifthq/opentag-test/issues/48#issuecomment-4837099441` |
+| Run ID | `run_08c68db8-36d0-44ba-8f06-954ecb40b5bc` |
+| Head branch | `opentag/run_08c68db8-36d0-44ba-8f06-954ecb40b5bc` |
+
+Command shape:
+
+```bash
+OPENTAG_GH_REPO=amplifthq/opentag-test \
+OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN=true \
+scripts/dev/run-github-webhook-live-test.sh
+```
+
+Observed behavior:
+
+- GitHub callbacks still worked because the callback token remained configured.
+- Dispatcher direct apply was unavailable because the apply token was disabled.
+- The final GitHub callback rendered `### Needs setup`.
+- The receipt did not advertise `apply 1` as an available command.
+- No approval decision, apply plan, child run, or external write was created.
+
+Observed metrics:
+
+```json
+{
+  "approvalDecisionCount": 0,
+  "applyPlanCount": 0,
+  "childRunCount": 0,
+  "applyOutcomeCounts": {
+    "applied": 0,
+    "failed": 0,
+    "skipped": 0,
+    "stale": 0,
+    "unsupported": 0
+  },
+  "suggestedChangesCount": 3,
+  "threadNoiseRatio": 0.25
+}
+```
+
+Repository cleanup:
+
+- Temporary repository webhook `647717865` was deleted by the ready-to-apply run.
+- Temporary repository webhook `647718589` was deleted by the missing-apply-token
+  run.
+- The live script removed temporary config files after each run because they
+  contain local credentials.
+
+### Recorded Trace: 2026-06-30 GitHub repository webhook `create_pull_request`
+
+This trace validated the repository-webhook path against the real
+`amplifthq/opentag-test` repository. Unlike the CLI-assisted smoke test, both
+the initial mention and `apply 1` reply entered through the real GitHub
+repository webhook listener.
+
+| Field | Value |
+| --- | --- |
+| Source issue | `https://github.com/amplifthq/opentag-test/issues/44` |
+| Mention comment | `https://github.com/amplifthq/opentag-test/issues/44#issuecomment-4836858128` |
+| Apply comment | `https://github.com/amplifthq/opentag-test/issues/44#issuecomment-4836863316` |
+| Run ID | `run_5384bdb9-9b6e-4639-94f4-2b2055be6e56` |
+| Proposal ID | `proposal_run_5384bdb9-9b6e-4639-94f4-2b2055be6e56` |
+| Applied intent | `proposal_run_5384bdb9-9b6e-4639-94f4-2b2055be6e56_create_pr` |
+| Approval ID | `approval_github_comment_4836863316` |
+| ApplyPlan ID | `apply_ef9146b4f45d` |
+| Created PR | `https://github.com/amplifthq/opentag-test/pull/45` |
+| Head branch | `opentag/run_5384bdb9-9b6e-4639-94f4-2b2055be6e56` |
+| Base branch | `main` |
+
+Command shape:
+
+```bash
+OPENTAG_GH_LIVE_KILL_PORTS=true \
+scripts/dev/run-github-webhook-live-test.sh
+```
+
+Observed source-thread callbacks:
+
+- Mention comment: `@opentag run Add one short sentence to README.md saying GitHub can trigger local Claude Code through OpenTag. Keep the change small and do not modify anything else.`
+- Final run callback rendered `### Ready to apply` and described the source-thread action receipt.
+- Real `apply 1` issue comment returned `Applied: Create a pull request for branch opentag/run_5384bdb9-9b6e-4639-94f4-2b2055be6e56.` plus the PR URL.
+
+Observed metrics after apply:
+
+```json
+{
+  "approvalDecisionCount": 1,
+  "applyPlanCount": 1,
+  "childRunCount": 0,
+  "applyOutcomeCounts": {
+    "applied": 1,
+    "skipped": 0,
+    "failed": 0,
+    "stale": 0,
+    "unsupported": 0
+  },
+  "suggestedChangesCount": 3,
+  "threadNoiseRatio": 0.2857142857142857
+}
+```
+
+Repository cleanup:
+
+- Temporary repository webhook `647712049` was deleted by the script.
+- `gh api repos/amplifthq/opentag-test/hooks` returned `[]` after cleanup.
 
 ### Recorded Trace: 2026-06-27 GitHub `create_pull_request`
 

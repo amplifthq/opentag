@@ -8,20 +8,30 @@ usage() {
   cat <<'EOF'
 Run a real Slack UI-triggered OpenTag dogfood session.
 
-This starts the local dispatcher, daemon, Slack Events ingress, ngrok, and an
-optional macOS screen recording. After the stack is ready, mention the Slack
-bot in the real Slack UI. The script then watches the local dispatcher DB for
-the run that Slack created, waits for completion, and optionally waits for a
-Slack Block Kit approval/rejection button click.
+This starts the local dispatcher, daemon, Slack ingress, and an optional macOS
+screen recording. When OPENTAG_SLACK_APP_TOKEN is set, Slack uses Socket Mode
+and no public URL is required. Otherwise, the script starts Slack Events API
+ingress and ngrok. After the stack is ready, mention the Slack bot in the real
+Slack UI. The script then watches the local dispatcher DB for the run that
+Slack created, waits for completion, and optionally waits for a Slack Block Kit
+approval/rejection button click.
 
 Required env, usually via .env.slack-test:
   OPENTAG_CONFIG_PATH          Local OpenTag daemon config with slackChannels.
-  SLACK_SIGNING_SECRET         Slack App signing secret.
   OPENTAG_SLACK_BOT_TOKEN      Slack bot token.
 
 Helpful env:
+  OPENTAG_SLACK_APP_TOKEN      Slack app-level token. Enables Socket Mode and
+                               avoids ngrok / Slack Request URL setup.
+  SLACK_SIGNING_SECRET         Slack App signing secret, required only for
+                               Events API mode.
+  OPENTAG_UI_TRIGGER_SLACK_MODE
+                               socket_mode or events_api. Defaults to
+                               socket_mode when OPENTAG_SLACK_APP_TOKEN is set,
+                               otherwise events_api.
   OPENTAG_SLACK_PUBLIC_URL     Fixed ngrok URL already saved in Slack, for
-                               example https://example.ngrok-free.app.
+                               example https://example.ngrok-free.app. Events
+                               API mode only.
   OPENTAG_UI_TRIGGER_COMMAND   Prompt to send after the @bot mention.
   OPENTAG_UI_TRIGGER_RECORD    true/false, default true on macOS.
   OPENTAG_UI_TRIGGER_WAIT_FOR_ACTION
@@ -73,11 +83,33 @@ if [[ -f "$OPENTAG_ENV_FILE" ]]; then
 fi
 
 : "${OPENTAG_CONFIG_PATH:?Set OPENTAG_CONFIG_PATH or OPENTAG_ENV_FILE}"
-: "${SLACK_SIGNING_SECRET:?Set SLACK_SIGNING_SECRET or OPENTAG_ENV_FILE}"
 : "${OPENTAG_SLACK_BOT_TOKEN:?Set OPENTAG_SLACK_BOT_TOKEN or OPENTAG_ENV_FILE}"
+
+SLACK_MODE="${OPENTAG_UI_TRIGGER_SLACK_MODE:-${OPENTAG_SLACK_MODE:-}}"
+if [[ -z "$SLACK_MODE" ]]; then
+  if [[ -n "${OPENTAG_SLACK_APP_TOKEN:-${SLACK_APP_TOKEN:-}}" ]]; then
+    SLACK_MODE="socket_mode"
+  else
+    SLACK_MODE="events_api"
+  fi
+fi
+case "$SLACK_MODE" in
+  socket_mode|events_api) ;;
+  *)
+    echo "OPENTAG_UI_TRIGGER_SLACK_MODE must be socket_mode or events_api, received: $SLACK_MODE" >&2
+    exit 1
+    ;;
+esac
+if [[ "$SLACK_MODE" == "socket_mode" ]]; then
+  : "${OPENTAG_SLACK_APP_TOKEN:=${SLACK_APP_TOKEN:-}}"
+  : "${OPENTAG_SLACK_APP_TOKEN:?Set OPENTAG_SLACK_APP_TOKEN for Socket Mode, or set OPENTAG_UI_TRIGGER_SLACK_MODE=events_api}"
+else
+  : "${SLACK_SIGNING_SECRET:?Set SLACK_SIGNING_SECRET for Events API mode, or set OPENTAG_SLACK_APP_TOKEN for Socket Mode}"
+fi
 
 cd "$ROOT_DIR"
 echo "Using OpenTag repo: $ROOT_DIR"
+echo "Slack ingress mode: $SLACK_MODE"
 
 DISPATCHER_PID=""
 DAEMON_PID=""
@@ -102,6 +134,15 @@ require_cmd() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+screen_is_locked() {
+  if ! command -v ioreg >/dev/null 2>&1; then
+    return 1
+  fi
+  local session_state
+  session_state="$(ioreg -n Root -d1 2>/dev/null)" || return 1
+  grep -q 'CGSSessionScreenIsLocked.*Yes' <<<"$session_state"
 }
 
 sql_escape() {
@@ -161,9 +202,14 @@ require_cmd lsof
 require_cmd "$OPENTAG_CLAUDE_COMMAND"
 echo "Required local commands are available."
 
-if bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
+if [[ "$SLACK_MODE" == "events_api" ]] && bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
   require_cmd ngrok
   echo "ngrok command is available."
+fi
+if bool_true "$OPENTAG_UI_TRIGGER_RECORD" && screen_is_locked; then
+  echo "Screen recording requested, but the macOS session is locked." >&2
+  echo "Unlock the screen and keep Slack visible before rerunning the README recording flow." >&2
+  exit 1
 fi
 
 ensure_port_free() {
@@ -500,7 +546,7 @@ if bool_true "$OPENTAG_UI_TRIGGER_ENABLE_GITHUB_APPLY"; then
     EFFECTIVE_GITHUB_APPLY=true
     echo "GitHub apply is enabled; runner will prepare a pushed PR branch."
   else
-    echo "GitHub apply is disabled because no token is available; Apply buttons may fall back to a follow-up run."
+    echo "GitHub apply is disabled because no token is available; direct-apply actions should render as Needs setup/Continue."
   fi
 elif [[ "$PREPARE_PR_BRANCH" == "true" && -z "$GITHUB_TOKEN" ]]; then
   require_cmd gh
@@ -558,7 +604,9 @@ with open(os.environ["CONFIG_PATH"], "w", encoding="utf-8") as f:
 PY
 
 ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
-ensure_port_free "$OPENTAG_SLACK_PORT" "Slack ingress"
+if [[ "$SLACK_MODE" == "events_api" ]]; then
+  ensure_port_free "$OPENTAG_SLACK_PORT" "Slack ingress"
+fi
 
 echo "Starting dispatcher on :${OPENTAG_DISPATCHER_PORT}"
 PORT="$OPENTAG_DISPATCHER_PORT" \
@@ -589,18 +637,29 @@ NODE_OPTIONS='--conditions=development' \
 apps/opentagd/node_modules/.bin/tsx apps/opentagd/src/index.ts serve &
 DAEMON_PID=$!
 
-echo "Starting Slack Events ingress on :${OPENTAG_SLACK_PORT}"
-SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
-OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}" \
-OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN" \
-PORT="$OPENTAG_SLACK_PORT" \
-NODE_OPTIONS='--conditions=development' \
-apps/slack-events/node_modules/.bin/tsx apps/slack-events/src/index.ts &
+if [[ "$SLACK_MODE" == "socket_mode" ]]; then
+  echo "Starting Slack Socket Mode ingress"
+  OPENTAG_SLACK_MODE="socket_mode" \
+  OPENTAG_SLACK_APP_TOKEN="$OPENTAG_SLACK_APP_TOKEN" \
+  OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}" \
+  OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN" \
+  NODE_OPTIONS='--conditions=development' \
+  apps/slack-events/node_modules/.bin/tsx apps/slack-events/src/index.ts &
+else
+  echo "Starting Slack Events ingress on :${OPENTAG_SLACK_PORT}"
+  OPENTAG_SLACK_MODE="events_api" \
+  SLACK_SIGNING_SECRET="$SLACK_SIGNING_SECRET" \
+  OPENTAG_DISPATCHER_URL="http://localhost:${OPENTAG_DISPATCHER_PORT}" \
+  OPENTAG_DISPATCHER_TOKEN="$OPENTAG_PAIRING_TOKEN" \
+  PORT="$OPENTAG_SLACK_PORT" \
+  NODE_OPTIONS='--conditions=development' \
+  apps/slack-events/node_modules/.bin/tsx apps/slack-events/src/index.ts &
+fi
 SLACK_PID=$!
 sleep 2
 
 PUBLIC_URL="${OPENTAG_SLACK_PUBLIC_URL:-}"
-if bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
+if [[ "$SLACK_MODE" == "events_api" ]] && bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
   existing_tunnel="$(get_ngrok_url_once)"
   if [[ -n "$existing_tunnel" && -z "$PUBLIC_URL" ]]; then
     PUBLIC_URL="$existing_tunnel"
@@ -636,13 +695,17 @@ if bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
   fi
 fi
 
-if [[ -z "$PUBLIC_URL" ]]; then
+if [[ "$SLACK_MODE" == "events_api" && -z "$PUBLIC_URL" ]]; then
   echo "Set OPENTAG_SLACK_PUBLIC_URL or enable OPENTAG_UI_TRIGGER_START_NGROK=true." >&2
   exit 1
 fi
-PUBLIC_URL="${PUBLIC_URL%/}"
+if [[ -n "$PUBLIC_URL" ]]; then
+  PUBLIC_URL="${PUBLIC_URL%/}"
+fi
 
-public_ingress_probe "$PUBLIC_URL"
+if [[ "$SLACK_MODE" == "events_api" ]]; then
+  public_ingress_probe "$PUBLIC_URL"
+fi
 
 BOT_USER_ID="$(fetch_slack_bot_identity)"
 
@@ -661,8 +724,13 @@ export WAIT_STARTED_AT
 
 echo
 echo "Slack UI trigger stack is ready."
-echo "- Slack Request URL must be: $PUBLIC_URL/slack/events"
-echo "- Event Subscriptions and Interactivity should both use that same URL."
+if [[ "$SLACK_MODE" == "socket_mode" ]]; then
+  echo "- Slack uses Socket Mode; no Request URL or ngrok tunnel is required."
+  echo "- Slack Interactivity must be enabled, but Socket Mode does not need an Interactivity Request URL."
+else
+  echo "- Slack Request URL must be: $PUBLIC_URL/slack/events"
+  echo "- Event Subscriptions and Interactivity should both use that same URL."
+fi
 echo "- Bound Slack channel id: $CHANNEL_ID"
 echo "- Bound repository: $REPO_PROVIDER:$OWNER/$REPO"
 echo "- Temporary checkout: $CHECKOUT_PATH"
@@ -692,7 +760,11 @@ done
 
 if [[ -z "$RUN_ID" ]]; then
   echo "Timed out waiting for a Slack-created run." >&2
-  echo "Check Slack Request URL, app_mention subscription, signing secret, and ngrok log: $NGROK_LOG" >&2
+  if [[ "$SLACK_MODE" == "socket_mode" ]]; then
+    echo "Check Socket Mode, app_mention subscription, bot scopes, app token, and channel invite." >&2
+  else
+    echo "Check Slack Request URL, app_mention subscription, signing secret, and ngrok log: $NGROK_LOG" >&2
+  fi
   exit 1
 fi
 

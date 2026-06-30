@@ -13,7 +13,13 @@ export type LocalDispatcherRuntimeInput = {
   port: number;
   databasePath: string;
   pairingToken?: string;
+  /**
+   * Backward-compatible GitHub token. When specific callback/apply tokens are
+   * omitted, this token is used for both callback delivery and direct apply.
+   */
   githubToken?: string;
+  githubCallbackToken?: string;
+  githubApplyToken?: string | null;
   lark?: {
     appId: string;
     appSecret: string;
@@ -81,11 +87,20 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     env.OPENTAG_TELEGRAM_BOT_TOKENS_JSON
   );
 
+  const githubApplyToken =
+    env.OPENTAG_GITHUB_APPLY_DISABLED === "true"
+      ? null
+      : env.OPENTAG_GITHUB_APPLY_TOKEN
+        ? env.OPENTAG_GITHUB_APPLY_TOKEN
+        : undefined;
+
   return {
     port,
     databasePath: env.OPENTAG_DATABASE_PATH ?? "opentag.db",
     ...(env.OPENTAG_PAIRING_TOKEN ? { pairingToken: env.OPENTAG_PAIRING_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
+    ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
+    ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
     ...(env.LARK_APP_ID && env.LARK_APP_SECRET
       ? {
           lark: {
@@ -103,18 +118,21 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
 }
 
 export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispatcherHandle {
+  const githubCallbackToken = input.githubCallbackToken ?? input.githubToken;
+  const githubApplyToken = input.githubApplyToken === null ? undefined : (input.githubApplyToken ?? input.githubToken);
+
   const server: ClosableServer = serve({
     fetch: createDispatcherApp({
       databasePath: input.databasePath,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
-      ...(input.githubToken ? { githubApply: { token: input.githubToken } } : {}),
+      ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
       sourceReceiptSink: createSlackSourceReceiptSink({
         ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
         ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
       }),
       callbackSink: createCompositeCallbackSink([
         createGitHubCallbackSink({
-          ...(input.githubToken ? { token: input.githubToken } : {})
+          ...(githubCallbackToken ? { token: githubCallbackToken } : {})
         }),
         createSlackCallbackSink({
           ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),

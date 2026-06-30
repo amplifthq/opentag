@@ -107,10 +107,22 @@ describe("OpenTag CLI config", () => {
   });
 
   it("redacts secrets in config output", () => {
-    const redacted = redactedCliConfig(config());
+    const source = config();
+    source.daemon.githubApplyToken = "apply_secret";
+    const redacted = redactedCliConfig(source);
 
     expect(JSON.stringify(redacted)).toContain("[REDACTED]");
     expect(JSON.stringify(redacted)).not.toContain("secret_test");
+    expect(JSON.stringify(redacted)).not.toContain("apply_secret");
+  });
+
+  it("keeps an explicit null GitHub apply token visible in redacted config output", () => {
+    const source = config();
+    source.daemon.githubApplyToken = null;
+
+    const redacted = redactedCliConfig(source) as { daemon: { githubApplyToken: null } };
+
+    expect(redacted.daemon.githubApplyToken).toBeNull();
   });
 
   it("normalizes Hermes daemon config strings", () => {

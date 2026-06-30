@@ -35,6 +35,12 @@ https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
 
 ![OpenTag overview](./assets/readme-hero.png)
 
+## Source-thread action receipts
+
+OpenTag 把请求发生的原始 thread 当成审批 agent 建议变更的地方。agent 提出要修改系统记录时，OpenTag 会渲染一个简洁的 action receipt，说明将要改什么、现在是否可以 apply，以及当前最安全的决策是什么。
+
+只有 dispatcher 确认已有 adapter 可以执行该 action 时，OpenTag 才会显示 `Apply`。否则 receipt 会显示需要 setup 或需要注意的原因，同时保留本地 audit 入口，例如 `opentag status --run <run_id>`。
+
 ## 快速开始
 
 需要 Node.js 20 或更新版本。

@@ -1,4 +1,11 @@
-import { suggestedActionCandidatesFromResult, type OpenTagRunResult, type SuggestedActionCandidate } from "@opentag/core";
+import {
+  actionReceiptHeading,
+  buildActionReceiptsFromResult,
+  type ActionReceipt,
+  type ActionReceiptContext,
+  type ActionReceiptDecision,
+  type OpenTagRunResult
+} from "@opentag/core";
 
 export type SlackTextBlock = {
   type: "section";
@@ -56,6 +63,10 @@ export type SlackReactionPayload = {
 export type SlackSourceReceiptState = "received";
 
 const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
+
+export type SlackRenderOptions = {
+  receiptContext?: ActionReceiptContext;
+};
 
 export function buildSlackSuggestedActionButtonValue(input: SlackSuggestedActionButtonValue): string {
   return JSON.stringify(input);
@@ -202,8 +213,13 @@ function compactNextAction(nextAction: string): string {
   return truncateSlackText(nextAction, 180);
 }
 
-function renderSuggestedActionCandidateLines(candidate: SuggestedActionCandidate): string[] {
+function renderSuggestedActionCandidateLines(receipt: ActionReceipt): string[] {
+  const candidate = receipt.candidate;
   const lines = [`${candidate.index}. *${markdownToSlackMrkdwn(candidate.intent.summary)}*`];
+  lines.push(`Target: ${markdownToSlackMrkdwn(receipt.targetLabel)}`);
+  if (receipt.setupReason) {
+    lines.push(`Status: ${markdownToSlackMrkdwn(receipt.setupReason)}`);
+  }
   const details = renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action)
     .filter((line) => line.trim().startsWith("Branch:") || line.trim().startsWith("Changed files:"))
     .map((line) => line.replace(/^\s+/, ""));
@@ -214,65 +230,53 @@ function renderSuggestedActionCandidateLines(candidate: SuggestedActionCandidate
   return lines;
 }
 
-function renderSuggestedActionsMarkdown(result: OpenTagRunResult): string[] {
-  const candidates = suggestedActionCandidatesFromResult(result);
-  if (candidates.length === 0) return [];
+function renderSuggestedActionsMarkdown(result: OpenTagRunResult, options: SlackRenderOptions = {}): string[] {
+  const receipts = buildActionReceiptsFromResult(result, options.receiptContext);
+  if (receipts.length === 0) return [];
 
-  const lines = ["*Suggested actions*"];
-  const visibleCandidates = candidates.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
-  for (const candidate of visibleCandidates) {
-    lines.push("", ...renderSuggestedActionCandidateLines(candidate));
+  const heading = actionReceiptHeading(receipts);
+  const lines = [`*${heading}*`, "Choose an action in this thread. Details stay in the OpenTag audit log."];
+  const visibleReceipts = receipts.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+  for (const receipt of visibleReceipts) {
+    lines.push("", ...renderSuggestedActionCandidateLines(receipt));
   }
 
-  const remainingCount = candidates.length - visibleCandidates.length;
+  const remainingCount = receipts.length - visibleReceipts.length;
   if (remainingCount > 0) {
-    lines.push("", `Showing first ${visibleCandidates.length} of ${candidates.length} actions. Reply with an action number for the rest.`);
+    lines.push("", `Showing first ${visibleReceipts.length} of ${receipts.length} actions. Reply with an action number for the rest.`);
   }
-  lines.push("", "Use the buttons below, or reply `apply 1`, `approve 1`, or `reject 1`.");
+  lines.push("", "Use the buttons below, or reply with the matching command.");
   return lines;
 }
 
-function createSuggestedActionButtons(candidate: SuggestedActionCandidate): SlackButtonElement[] {
-  return [
-    {
-      type: "button",
-      text: { type: "plain_text", text: `Apply ${candidate.index}`, emoji: true },
-      action_id: `opentag:apply:${candidate.index}`,
-      value: buildSlackSuggestedActionButtonValue({
-        version: 1,
-        command: `apply ${candidate.index}`,
-        proposalId: candidate.proposalId,
-        intentId: candidate.intent.intentId
-      }),
-      style: "primary"
-    },
-    {
-      type: "button",
-      text: { type: "plain_text", text: "Approve", emoji: true },
-      action_id: `opentag:approve:${candidate.index}`,
-      value: buildSlackSuggestedActionButtonValue({
-        version: 1,
-        command: `approve ${candidate.index}`,
-        proposalId: candidate.proposalId,
-        intentId: candidate.intent.intentId
-      })
-    },
-    {
-      type: "button",
-      text: { type: "plain_text", text: "Reject", emoji: true },
-      action_id: `opentag:reject:${candidate.index}`,
-      value: buildSlackSuggestedActionButtonValue({
-        version: 1,
-        command: `reject ${candidate.index}`,
-        proposalId: candidate.proposalId,
-        intentId: candidate.intent.intentId
-      }),
-      style: "danger"
-    }
-  ];
+function createSuggestedActionButton(receipt: ActionReceipt, decision: ActionReceiptDecision): SlackButtonElement {
+  const index = receipt.candidate.index;
+  const labels: Record<ActionReceiptDecision, string> = {
+    apply: `Apply ${index}`,
+    approve: "Approve only",
+    continue: "Continue",
+    reject: "Reject"
+  };
+  return {
+    type: "button",
+    text: { type: "plain_text", text: labels[decision], emoji: true },
+    action_id: `opentag:${decision}:${index}`,
+    value: buildSlackSuggestedActionButtonValue({
+      version: 1,
+      command: `${decision} ${index}`,
+      proposalId: receipt.candidate.proposalId,
+      intentId: receipt.candidate.intent.intentId
+    }),
+    ...(decision === "apply" ? { style: "primary" as const } : {}),
+    ...(decision === "reject" ? { style: "danger" as const } : {})
+  };
 }
 
-export function renderSlackFinalResult(result: OpenTagRunResult): string {
+function createSuggestedActionButtons(receipt: ActionReceipt): SlackButtonElement[] {
+  return receipt.visibleDecisions.map((decision) => createSuggestedActionButton(receipt, decision));
+}
+
+export function renderSlackFinalResult(result: OpenTagRunResult, options: SlackRenderOptions = {}): string {
   const lines = [`*Finished: ${result.conclusion}.*`, markdownToSlackMrkdwn(compactSlackSummary(result.summary))];
 
   if (result.verification?.length) {
@@ -289,7 +293,7 @@ export function renderSlackFinalResult(result: OpenTagRunResult): string {
     lines.push(`Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`);
   }
 
-  const suggestedActions = renderSuggestedActionsMarkdown(result);
+  const suggestedActions = renderSuggestedActionsMarkdown(result, options);
   if (suggestedActions.length > 0) {
     lines.push("", ...suggestedActions);
   }
@@ -297,7 +301,7 @@ export function renderSlackFinalResult(result: OpenTagRunResult): string {
   return lines.join("\n");
 }
 
-export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlock[] {
+export function createSlackFinalResultBlocks(result: OpenTagRunResult, options: SlackRenderOptions = {}): SlackBlock[] {
   const blocks: SlackBlock[] = [
     {
       type: "section",
@@ -324,8 +328,8 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
   }
 
   const nextAction = nextActionSummary(result);
-  const suggestedActionCandidates = suggestedActionCandidatesFromResult(result);
-  if (nextAction && suggestedActionCandidates.length === 0) {
+  const receipts = buildActionReceiptsFromResult(result, options.receiptContext);
+  if (nextAction && receipts.length === 0) {
     blocks.push({
       type: "section",
       text: {
@@ -335,37 +339,38 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult): SlackBlo
     });
   }
 
-  if (suggestedActionCandidates.length > 0) {
+  if (receipts.length > 0) {
+    const heading = actionReceiptHeading(receipts);
     blocks.push({ type: "divider" });
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: "*Suggested actions*\nChoose an action in this thread. Details stay in the OpenTag audit log."
+        text: `*${heading}*\nChoose an action in this thread. Details stay in the OpenTag audit log.`
       }
     });
-    const visibleCandidates = suggestedActionCandidates.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
-    for (const candidate of visibleCandidates) {
+    const visibleReceipts = receipts.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+    for (const receipt of visibleReceipts) {
       blocks.push({
         type: "section",
         text: {
           type: "mrkdwn",
-          text: renderSuggestedActionCandidateLines(candidate).join("\n")
+          text: renderSuggestedActionCandidateLines(receipt).join("\n")
         }
       });
       blocks.push({
         type: "actions",
-        block_id: `opentag_actions_${candidate.index}`,
-        elements: createSuggestedActionButtons(candidate)
+        block_id: `opentag_actions_${receipt.candidate.index}`,
+        elements: createSuggestedActionButtons(receipt)
       });
     }
-    const remainingCount = suggestedActionCandidates.length - visibleCandidates.length;
+    const remainingCount = receipts.length - visibleReceipts.length;
     if (remainingCount > 0) {
       blocks.push({
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `Showing first ${visibleCandidates.length} of ${suggestedActionCandidates.length} actions. Reply with an action number for the rest.`
+          text: `Showing first ${visibleReceipts.length} of ${receipts.length} actions. Reply with an action number for the rest.`
         }
       });
     }

@@ -148,6 +148,7 @@ Use daemon security settings to keep executor runs constrained:
 | `claudeCode` | none | Claude Code executor settings |
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
+| `githubApplyToken` | `githubToken` | Optional dispatcher direct-apply token override. Set to `null` to keep GitHub callbacks enabled while rendering direct-apply actions as setup-required. |
 | `preparePullRequestBranch` | `false` | Commits and pushes executor run branches so a later source-thread `apply 1` can create the PR through an ApplyPlan |
 | `allowAutoCreatePullRequest` | `false` | Legacy mode that creates a PR immediately when executor results include changes |
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
@@ -199,6 +200,8 @@ for repeatable setups.
 | `OPENTAG_ALLOW_UNSAFE_PROMPTS` | `false` | Allows prompts normally rejected by runner security |
 | `OPENTAG_EXTRA_SAFE_ENV` | none | Comma-separated env names preserved for executor processes |
 | `OPENTAG_GITHUB_TOKEN` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
+| `OPENTAG_GITHUB_APPLY_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for dispatcher direct-apply helpers |
+| `OPENTAG_GITHUB_APPLY_DISABLED` | `false` | Set to `true` to keep callbacks enabled while forcing direct-apply receipts into setup-required state |
 | `OPENTAG_PREPARE_PR_BRANCH` | `false` | Pushes executor run branches for thread-native PR creation after approval |
 | `OPENTAG_ALLOW_AUTO_CREATE_PR` | `false` | Allows legacy immediate daemon PR creation |
 | `OPENTAG_PAIRING_TOKEN` | none | Shared dispatcher token |
@@ -212,7 +215,10 @@ for repeatable setups.
 | `PORT` | `3030` | Dispatcher HTTP port |
 | `OPENTAG_DATABASE_PATH` | `opentag.db` | SQLite database path |
 | `OPENTAG_PAIRING_TOKEN` | none | Requires `Authorization: Bearer <token>` for `/v1/*` |
-| `OPENTAG_GITHUB_TOKEN` | none | Enables GitHub callback posting and GitHub apply helpers |
+| `OPENTAG_GITHUB_TOKEN` | none | Backward-compatible token used for GitHub callback posting and GitHub apply helpers unless more specific env vars are set |
+| `OPENTAG_GITHUB_CALLBACK_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for GitHub callback posting |
+| `OPENTAG_GITHUB_APPLY_TOKEN` | `OPENTAG_GITHUB_TOKEN` | Optional token override for GitHub direct apply |
+| `OPENTAG_GITHUB_APPLY_DISABLED` | `false` | Set to `true` to disable GitHub direct apply while keeping callbacks enabled |
 | `OPENTAG_SLACK_BOT_TOKEN` | none | Single Slack bot token for callback posting |
 | `OPENTAG_SLACK_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Slack bot token |
 | `LARK_APP_ID` | none | Lark app id for the callback sink that posts replies via the Lark API |

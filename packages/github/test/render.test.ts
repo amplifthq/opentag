@@ -3,7 +3,7 @@ import { renderFinalResult } from "../src/render.js";
 
 describe("GitHub result rendering", () => {
   it("renders suggested-action verification rows without requiring a command", () => {
-    const body = renderFinalResult({
+    const result = {
       conclusion: "success",
       summary: "Prepared a branch.",
       suggestedChanges: [
@@ -32,8 +32,51 @@ describe("GitHub result rendering", () => {
           ]
         }
       ]
+    } as const;
+    const body = renderFinalResult(result, {
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_create_pr: { state: "ready_to_apply" }
+        }
+      }
     });
 
-    expect(body).toContain("- Verification:\n  - `pnpm test`: passed\n  - passed - Structured report parsed successfully.");
+    expect(body).toContain("### Ready to apply");
+    expect(body).toContain("| Target | GitHub pull request |");
+    expect(body).toContain("| Verification | `pnpm test`: passed<br>passed - Structured report parsed successfully. |");
+    expect(body).toContain("| Apply now | `apply 1` |");
+    expect(body.indexOf("| Apply now | `apply 1` |")).toBeLessThan(body.indexOf("| Reject | `reject 1` |"));
+    expect(body.indexOf("| Reject | `reject 1` |")).toBeLessThan(body.indexOf("| Approve only | `approve 1` |"));
+    expect(body).not.toContain("Proposal:");
+    expect(body).not.toContain("Intent ID:");
+    expect(body).not.toContain("Next action:");
+  });
+
+  it("does not render apply commands without receipt capability proof", () => {
+    const body = renderFinalResult({
+      conclusion: "needs_human",
+      summary: "Prepared a label change.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_1",
+          createdAt: "2026-06-29T00:00:00.000Z",
+          summary: "Label issue.",
+          intents: [
+            {
+              intentId: "intent_label",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(body).toContain("### Needs approval");
+    expect(body).not.toContain("`apply 1`");
+    expect(body).toContain("| Approve only | `approve 1` |");
+    expect(body).toContain("| Reject | `reject 1` |");
   });
 });

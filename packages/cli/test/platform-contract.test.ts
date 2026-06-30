@@ -249,6 +249,16 @@ describe("CLI platform contract smoke", () => {
 
     expect(githubRequests).toEqual([
       {
+        url: "https://api.github.com/repos/acme/demo/branches/opentag%2Frun_github_contract",
+        method: "GET",
+        authorization: "Bearer ghp_contract"
+      },
+      {
+        url: "https://api.github.com/repos/acme/demo/branches/main",
+        method: "GET",
+        authorization: "Bearer ghp_contract"
+      },
+      {
         url: "https://api.github.com/repos/acme/demo/pulls",
         method: "POST",
         authorization: "Bearer ghp_contract",

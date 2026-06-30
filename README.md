@@ -35,6 +35,12 @@ https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
 
 ![OpenTag overview](./assets/readme-hero.png)
 
+## Source-Thread Action Receipts
+
+OpenTag treats the thread where a request starts as the approval surface for agent-proposed system-of-record mutations. When an agent suggests a change, OpenTag renders a compact receipt that shows what will change, whether it is ready to apply, and which decision is safe now.
+
+`Apply` appears only when the dispatcher confirms a configured adapter can execute the action. Otherwise the receipt shows setup or attention needed, and the local audit trail stays available through commands such as `opentag status --run <run_id>`.
+
 ## Quick Start
 
 Requires Node.js 20 or newer.

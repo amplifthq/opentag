@@ -1216,6 +1216,7 @@ describe("dispatcher API", () => {
         }
       })
     });
+    githubRequests.length = 0;
     await app.request("/v1/proposals/proposal_execute/approvals", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1956,6 +1957,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -1985,8 +1987,10 @@ describe("dispatcher API", () => {
         authorization: "Bearer gh_test"
       }
     ]);
-    expect(delivered.some((message) => message.body.includes("Suggested actions:"))).toBe(true);
-    expect(delivered.at(-1)?.body).toContain("Applied 1. Add the bug label.");
+    expect(delivered.some((message) => message.body.includes("### Ready to apply"))).toBe(true);
+    expect(delivered.at(-1)?.body).toContain("Applied: Add the bug label.");
+    expect(delivered.at(-1)?.body).not.toContain("proposal_thread_apply");
+    expect(delivered.at(-1)?.body).not.toContain("intent_label_bug");
 
     const deliveredCountAfterFirstApply = delivered.length;
     const replayResponse = await app.request("/v1/thread-actions", jsonRequest({
@@ -2007,7 +2011,386 @@ describe("dispatcher API", () => {
       }
     });
     expect(githubRequests).toHaveLength(1);
-    expect(delivered).toHaveLength(deliveredCountAfterFirstApply);
+    expect(delivered).toHaveLength(deliveredCountAfterFirstApply + 1);
+    expect(delivered.at(-1)?.body).toContain("Already applied: Add the bug label.");
+    expect(delivered.at(-1)?.body).toContain("No external write was repeated.");
+    expect(delivered.at(-1)?.body).not.toContain("proposal_thread_apply");
+  });
+
+  it("renders needs-setup receipts without apply commands when GitHub apply is not configured", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_apply_not_configured",
+      event: githubIssueEvent({ id: "evt_thread_apply_not_configured", sourceEventId: "comment_thread_apply_not_configured", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_apply_not_configured",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug_not_configured",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
+    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("GitHub apply is not configured on this dispatcher.");
+    expect(finalMessage?.body).not.toContain("`apply 1`");
+    expect(finalMessage?.body).toContain("`continue 1`");
+    expect(finalMessage?.body).toContain("`reject 1`");
+  });
+
+  it("renders needs-setup receipts when create PR lacks the branch-exists executor condition", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const event = githubIssueEvent({ id: "evt_thread_pr_missing_condition", sourceEventId: "comment_thread_pr_missing_condition", threadKey: "acme/demo" });
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async () => {
+          throw new Error("missing executor condition should prevent apply from looking ready");
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_pr_missing_condition",
+      event: {
+        ...event,
+        permissions: [...event.permissions, { scope: "pr:create", reason: "create an approved pull request" }]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_pr_missing_condition",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request.",
+          intents: [
+            {
+              intentId: "intent_pr_missing_condition",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create a pull request for branch opentag/missing-condition.",
+              params: {
+                title: "OpenTag run missing condition",
+                head: "opentag/missing-condition",
+                base: "main"
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Create a pull request for branch"));
+    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("Missing executor condition: isolated branch exists.");
+    expect(finalMessage?.body).not.toContain("`apply 1`");
+    expect(finalMessage?.body).toContain("`continue 1`");
+  });
+
+  it("renders needs-setup receipts before GitHub preflight when platform write permission is missing", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async () => {
+          throw new Error("missing platform permission should prevent GitHub preflight");
+        }
+      }
+    });
+    const event = githubIssueEvent({ id: "evt_thread_missing_permission", sourceEventId: "comment_thread_missing_permission", threadKey: "acme/demo" });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_missing_permission",
+      event: {
+        ...event,
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_missing_permission",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_missing_permission",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
+    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("Missing platform permission for set_labels.");
+    expect(finalMessage?.body).not.toContain("`apply 1`");
+    expect(finalMessage?.body).toContain("`continue 1`");
+  });
+
+  it("renders needs-setup receipts when GitHub preflight cannot access the target", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: Array<{ url: string; method?: string; authorization?: string | null }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return new Response("forbidden", { status: 403 });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_preflight_forbidden",
+      event: githubIssueEvent({ id: "evt_thread_preflight_forbidden", sourceEventId: "comment_thread_preflight_forbidden", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_preflight_forbidden",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_preflight_forbidden",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/issues/1",
+        method: "GET",
+        authorization: "Bearer gh_test"
+      }
+    ]);
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
+    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("GitHub apply token cannot access GitHub issue or pull request #1.");
+    expect(finalMessage?.body).not.toContain("`apply 1`");
+    expect(finalMessage?.body).toContain("`continue 1`");
+  });
+
+  it("renders needs-setup receipts when GitHub preflight cannot find the target issue or branch", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return new Response("not found", { status: 404 });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_preflight_not_found",
+      event: {
+        ...githubIssueEvent({ id: "evt_thread_preflight_not_found", sourceEventId: "comment_thread_preflight_not_found", threadKey: "acme/demo" }),
+        permissions: [
+          { scope: "issue:comment", reason: "reply to source thread" },
+          { scope: "repo:write", reason: "apply approved issue metadata" },
+          { scope: "pr:create", reason: "create an approved pull request" }
+        ]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_preflight_not_found_issue",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the missing issue.",
+          intents: [
+            {
+              intentId: "intent_label_preflight_not_found",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        },
+        {
+          proposalId: "proposal_thread_preflight_not_found_branch",
+          createdAt: "2026-06-24T00:00:01.000Z",
+          summary: "Create a pull request.",
+          intents: [
+            {
+              intentId: "intent_pr_preflight_not_found",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create a pull request for branch opentag/missing-branch.",
+              params: {
+                title: "OpenTag missing branch",
+                head: "opentag/missing-branch",
+                base: "main",
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(githubRequests).toEqual([
+      "https://api.github.com/repos/acme/demo/issues/1",
+      "https://api.github.com/repos/acme/demo/branches/opentag%2Fmissing-branch"
+    ]);
+    const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
+    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("GitHub issue or pull request #1 was not found.");
+    expect(finalMessage?.body).toContain("GitHub branch opentag/missing-branch was not found.");
+    expect(finalMessage?.body).not.toContain("`apply 1`");
+  });
+
+  it("renders a stale receipt when applying a superseded source-thread action", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_stale_1",
+      event: githubIssueEvent({ id: "evt_thread_stale_1", sourceEventId: "comment_thread_stale_1", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_stale_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug_stale",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_stale_2",
+      event: githubIssueEvent({ id: "evt_thread_stale_2", sourceEventId: "comment_thread_stale_2", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_stale_2",
+          createdAt: "2026-06-24T00:00:01.000Z",
+          summary: "Refine the label.",
+          intents: [
+            {
+              intentId: "intent_label_triaged_current",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the triaged label.",
+              params: { label: "triaged" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      },
+      metadata: {
+        source: "slack_button",
+        proposalId: "proposal_thread_stale_1",
+        intentId: "intent_label_bug_stale"
+      }
+    }));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "stale",
+      plan: {
+        proposalId: "proposal_thread_stale_1",
+        outcomes: [{ intentId: "intent_label_bug_stale", outcome: "stale" }]
+      }
+    });
+    expect(githubRequests).toHaveLength(0);
+    expect(delivered.at(-1)?.body).toContain("Stale: Add the bug label.");
+    expect(delivered.at(-1)?.body).toContain("The target changed since this action was proposed.");
+    expect(delivered.at(-1)?.body).toContain("Reply `continue 1` to refresh");
+    expect(delivered.at(-1)?.body).not.toContain("Child run:");
+    expect(delivered.at(-1)?.body).not.toContain("proposal_thread_stale_1");
   });
 
   it("resolves issue-scoped action replies against legacy repo-scoped GitHub issue proposals", async () => {
@@ -2052,6 +2435,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -2088,9 +2472,15 @@ describe("dispatcher API", () => {
   });
 
   it("does not execute the adapter twice for concurrent duplicate apply replies", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
     const githubRequests: unknown[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
       githubApply: {
         token: "gh_test",
         fetchImpl: async (url) => {
@@ -2122,6 +2512,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const action = {
       rawText: "apply 1",
@@ -2141,6 +2532,8 @@ describe("dispatcher API", () => {
     expect(responses.map((response) => response.status).sort()).toEqual([200, 201]);
     expect(bodies.map((body) => body.outcome).sort()).toEqual(["already_planned", "applied"]);
     expect(githubRequests).toHaveLength(1);
+    expect(delivered.some((message) => message.body.includes("Already planned: Add the bug label."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("OpenTag did not execute this repeated reply."))).toBe(true);
   });
 
   it("rejects unauthorized source-thread action actors before approval or adapter execution", async () => {
@@ -2178,6 +2571,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -2316,6 +2710,133 @@ describe("dispatcher API", () => {
     expect(secondBody.decision.id).not.toBe("approval_ingress_retry_id");
   });
 
+  it("records approve-only and reject replies with compact source-thread receipts", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_record_receipts",
+      event: githubIssueEvent({ id: "evt_thread_record_receipts", sourceEventId: "comment_thread_record_receipts", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_record_receipts",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the issue.",
+          intents: [
+            {
+              intentId: "intent_label_bug_receipt",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add bug label.",
+              params: { label: "bug" }
+            },
+            {
+              intentId: "intent_label_help_receipt",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add help wanted label.",
+              params: { label: "help wanted" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const baseAction = {
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    };
+    const approve = await app.request("/v1/thread-actions", jsonRequest({ ...baseAction, rawText: "approve 1" }));
+    const reject = await app.request("/v1/thread-actions", jsonRequest({ ...baseAction, rawText: "reject 2" }));
+
+    expect(approve.status).toBe(201);
+    expect(reject.status).toBe(201);
+    expect(delivered.some((message) => message.body.includes("Approved only: Add bug label."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("No external write was performed."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Direct apply is not available yet: GitHub apply is not configured on this dispatcher."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Next: reply `continue 1`"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("Next: reply `apply 1`"))).toBe(false);
+    expect(delivered.some((message) => message.body.includes("Rejected: Add help wanted label."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("No external write will be performed for this action."))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("proposal_thread_record_receipts"))).toBe(false);
+    expect(delivered.some((message) => message.body.includes("intent_label_bug_receipt"))).toBe(false);
+  });
+
+  it("keeps the approve-only apply hint only when direct apply preflight is ready", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const githubRequests: Array<{ url: string; method?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({ url: String(url), method: init?.method });
+          return Response.json({});
+        }
+      }
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_approve_ready",
+      event: githubIssueEvent({ id: "evt_thread_approve_ready", sourceEventId: "comment_thread_approve_ready", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_approve_ready",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the issue.",
+          intents: [
+            {
+              intentId: "intent_label_bug_approve_ready",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "approve 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/issues/1",
+        method: "GET"
+      }
+    ]);
+    expect(delivered.at(-1)?.body).toContain("Approved only: Add bug label.");
+    expect(delivered.at(-1)?.body).toContain("No external write was performed.");
+    expect(delivered.at(-1)?.body).toContain("Next: reply `apply 1` to write it to the system of record");
+    expect(delivered.at(-1)?.body).not.toContain("Direct apply is not available yet");
+  });
+
   it("rejects explicit proposal action replies from the wrong source thread", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     await seedCompletedProposal({
@@ -2394,6 +2915,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -2491,6 +3013,7 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -2605,6 +3128,7 @@ describe("dispatcher API", () => {
       repo: "demo"
     }));
     expect(bindingResponse.status).toBe(201);
+    githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
@@ -2644,7 +3168,8 @@ describe("dispatcher API", () => {
       }
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/43"));
-    expect(finalMessage?.body).toContain("Applied 1. Create PR for branch opentag/run_slack_create_pr.");
+    expect(finalMessage?.body).toContain("Applied: Create PR for branch opentag/run_slack_create_pr.");
+    expect(finalMessage?.body).not.toContain("..");
     expect(finalMessage?.body).not.toContain("proposal_slack_create_pr");
     expect(finalMessage?.body).not.toContain("intent_slack_create_pr");
   });
@@ -2713,7 +3238,15 @@ describe("dispatcher API", () => {
   });
 
   it("creates a child run with proposal context when the user replies continue", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
     await seedCompletedProposal({
       app,
       runId: "run_thread_continue",
@@ -2778,6 +3311,17 @@ describe("dispatcher API", () => {
         "Action loop previous result: Prepared suggested actions."
       ])
     );
+    expect(
+      delivered.some(
+        (message) =>
+          message.body.includes("Continuing in OpenTag from this approved action.") &&
+          message.body.includes("Action: Continue fixing the failing test.") &&
+          message.body.includes(`Child run: \`${body.run.id}\``) &&
+          message.body.includes(`Audit: run \`opentag status --run ${body.run.id}\` locally.`) &&
+          !message.body.includes("proposal_thread_continue") &&
+          !message.body.includes(body.decision.id)
+      )
+    ).toBe(true);
   });
 
   it("falls back to a child run when an approved action has no direct adapter operation", async () => {
@@ -2873,10 +3417,12 @@ describe("dispatcher API", () => {
       delivered.some(
         (message) =>
           message.kind === "final" &&
-          message.body.includes("Context carried into the child run:") &&
+          message.body.includes("Needs setup before OpenTag can apply this action directly.") &&
+          message.body.includes("Action: Request a reviewer.") &&
           message.body.includes(`Child run: \`${body.run.id}\``) &&
-          message.body.includes(`Approval decision: \`${body.decision.id}\``) &&
-          message.body.includes("Fallback reason:")
+          message.body.includes("Reason:") &&
+          message.body.includes(`Audit: run \`opentag status --run ${body.run.id}\` locally.`) &&
+          !message.body.includes(`Approval decision: \`${body.decision.id}\``)
       )
     ).toBe(true);
   });

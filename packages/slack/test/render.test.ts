@@ -104,10 +104,18 @@ describe("Slack callback rendering", () => {
           ]
         }
       ]
+    }, {
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_label_1: { state: "ready_to_apply" }
+        }
+      }
     });
 
     const rendered = JSON.stringify(blocks);
+    expect(rendered).toContain("Ready to apply");
     expect(rendered).toContain("1. *Add the bug label.*");
+    expect(rendered).toContain("Target: GitHub labels");
     expect(rendered).not.toContain("Proposal:");
     expect(rendered).not.toContain("Intent ID:");
 
@@ -117,8 +125,8 @@ describe("Slack callback rendering", () => {
       block_id: "opentag_actions_1",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Approve" }, action_id: "opentag:approve:1" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" },
+        { type: "button", text: { type: "plain_text", text: "Approve only" }, action_id: "opentag:approve:1" }
       ]
     });
 
@@ -132,22 +140,51 @@ describe("Slack callback rendering", () => {
       },
       {
         version: 1,
-        command: "approve 1",
+        command: "reject 1",
         proposalId: "proposal_1",
         intentId: "intent_label_1"
       },
       {
         version: 1,
-        command: "reject 1",
+        command: "approve 1",
         proposalId: "proposal_1",
         intentId: "intent_label_1"
       }
     ]);
   });
 
-  it("caps suggested action blocks to stay under Slack's Block Kit limit", () => {
+  it("does not show Apply when receipt capability is not proven", () => {
     const blocks = createSlackFinalResultBlocks({
       conclusion: "needs_human",
+      summary: "Prepared a proposal.",
+      suggestedChanges: [
+        {
+          proposalId: "proposal_1",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Move issue forward.",
+          intents: [
+            {
+              intentId: "intent_label_1",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const rendered = JSON.stringify(blocks);
+    expect(rendered).toContain("Needs approval");
+    expect(rendered).not.toContain("Apply 1");
+    expect(rendered).toContain("Approve only");
+    expect(rendered).toContain("Reject");
+  });
+
+  it("caps suggested action blocks to stay under Slack's Block Kit limit", () => {
+    const result = {
+      conclusion: "needs_human" as const,
       summary: "Prepared many proposals.",
       suggestedChanges: Array.from({ length: 30 }, (_item, index) => ({
         proposalId: `proposal_${index + 1}`,
@@ -163,6 +200,13 @@ describe("Slack callback rendering", () => {
           }
         ]
       }))
+    };
+    const blocks = createSlackFinalResultBlocks(result, {
+      receiptContext: {
+        capabilityByIntentId: Object.fromEntries(
+          result.suggestedChanges.flatMap((snapshot) => snapshot.intents.map((intent) => [intent.intentId, { state: "ready_to_apply" as const }]))
+        )
+      }
     });
 
     const rendered = JSON.stringify(blocks);

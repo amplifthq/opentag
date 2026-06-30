@@ -11,7 +11,7 @@ OpenTag 支持两种 Slack 连接方式：
 
 Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 写权限。如果某次 run 产出了 pull request action，只有在 OpenTag 同时配置了 GitHub repository target 和 GitHub token 时，Slack thread 里的 `apply 1` 才能直接创建 GitHub PR。
 
-Suggested action 按钮依赖 Slack Block Kit interactivity。需要在 Slack app 里开启 **Interactivity & Shortcuts**，这样 **Apply 1** 这类按钮才会提交和手动回复 `apply 1` 相同的 source-thread action。
+Suggested action 按钮依赖 Slack Block Kit interactivity。需要在 Slack app 里开启 **Interactivity & Shortcuts**，这样 **Apply 1**、**Continue**、**Reject** 这类状态驱动按钮才会提交和手动 thread reply 相同的 source-thread action。
 
 ## 官方入口
 
@@ -101,7 +101,7 @@ Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack 
 3. Socket Mode 不需要填写 Request URL。Slack 会通过同一条 Socket Mode WebSocket 连接发送 Block Kit button action。
 4. 保存设置。
 
-这一步会让 Slack 里的 **Apply 1**、**Approve**、**Reject** 按钮真正可用。如果没有开启 Interactivity，OpenTag 仍然可以接收用户手打的 `apply 1` thread reply，但点击按钮会在 Slack 侧失败，事件不会到达 OpenTag。
+这一步会让 Slack 里的 **Apply 1**、**Continue**、**Reject** 按钮真正可用。如果没有开启 Interactivity，OpenTag 仍然可以接收用户手打的 thread reply，但点击按钮会在 Slack 侧失败，事件不会到达 OpenTag。
 
 ## 高级：公网 Events API
 
@@ -233,9 +233,9 @@ opentag start
 OpenTag 应该会先确认收到请求，执行完成后再回到同一个 Slack thread 里回复。
 默认确认方式是在你的源消息上加一个轻量的 `eyes` reaction，而不是额外发一条 thread reply。
 
-当 OpenTag 发出 suggested actions 时，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
+当 OpenTag 发出 suggested actions 时，先看 receipt state。如果显示 **Ready to apply**，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
 
-如果回复里出现 pull request action，但你的配置里只有 Slack 凭据，OpenTag 会创建一个 follow-up run，而不是直接创建 GitHub PR。想让 Slack 里的 `apply 1` 直接创建 PR，需要先配置 GitHub repository target。
+如果 receipt 显示 **Needs setup**，OpenTag 会显示 **Continue** 或 setup hint，而不是把 **Apply 1** 当成主路径。想让 Slack receipt 直接创建 PR，需要先配置 GitHub repository target。
 
 如果 suggested action 按钮能看到，但点击后 Slack 提示失败，优先检查 **Interactivity & Shortcuts**：
 

@@ -17,4 +17,30 @@ describe("local dispatcher runtime", () => {
       })
     ).toThrow("Token for agent reviewer must be a non-empty string");
   });
+
+  it("can split GitHub callback and apply tokens from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_GITHUB_TOKEN: "ghp_callback_and_apply",
+        OPENTAG_GITHUB_CALLBACK_TOKEN: "ghp_callback",
+        OPENTAG_GITHUB_APPLY_TOKEN: "ghp_apply"
+      })
+    ).toMatchObject({
+      githubToken: "ghp_callback_and_apply",
+      githubCallbackToken: "ghp_callback",
+      githubApplyToken: "ghp_apply"
+    });
+  });
+
+  it("can disable GitHub direct apply while leaving callback token configured", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_GITHUB_TOKEN: "ghp_callback",
+        OPENTAG_GITHUB_APPLY_DISABLED: "true"
+      })
+    ).toMatchObject({
+      githubToken: "ghp_callback",
+      githubApplyToken: null
+    });
+  });
 });

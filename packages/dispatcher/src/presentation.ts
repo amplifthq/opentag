@@ -1,4 +1,4 @@
-import type { OpenTagRunResult } from "@opentag/core";
+import type { ActionReceiptContext, OpenTagRunResult } from "@opentag/core";
 import { renderAcknowledgement, renderFinalResult, renderProgress } from "@opentag/github";
 import { renderLarkAcknowledgement, renderLarkFinalResult } from "@opentag/lark";
 import { createSlackFinalResultBlocks, renderSlackAcknowledgement, renderSlackFinalResult, type SlackBlock } from "@opentag/slack";
@@ -17,7 +17,7 @@ export type CallbackPresentation = {
   shouldDeliverProgress(provider: CallbackProvider): boolean;
   acknowledgement(input: { provider: CallbackProvider; runId: string }): string;
   progress(input: { provider: CallbackProvider; runId: string; message: string }): string;
-  final(input: { provider: CallbackProvider; result: OpenTagRunResult }): PresentedCallbackBody;
+  final(input: { provider: CallbackProvider; result: OpenTagRunResult; runId?: string; receiptContext?: ActionReceiptContext }): PresentedCallbackBody;
 };
 
 export function createDefaultCallbackPresentation(): CallbackPresentation {
@@ -51,10 +51,14 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     final(input) {
+      const renderOptions = {
+        ...(input.receiptContext ? { receiptContext: input.receiptContext } : {}),
+        ...(input.provider === "github" && input.runId ? { auditRunId: input.runId } : {})
+      };
       if (input.provider === "slack") {
         return {
-          body: renderSlackFinalResult(input.result),
-          blocks: createSlackFinalResultBlocks(input.result)
+          body: renderSlackFinalResult(input.result, renderOptions),
+          blocks: createSlackFinalResultBlocks(input.result, renderOptions)
         };
       }
       if (input.provider === "lark") {
@@ -63,7 +67,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
       if (input.provider === "telegram") {
         return { body: renderTelegramFinalResult(input.result) };
       }
-      return { body: renderFinalResult(input.result) };
+      return { body: renderFinalResult(input.result, renderOptions) };
     }
   };
 }

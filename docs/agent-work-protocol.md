@@ -22,16 +22,18 @@ The primary product path is:
 
 ```text
 mention -> run -> executor -> final callback with suggested actions
-       -> source-thread reply such as apply 1
-       -> ApprovalDecision -> ApplyPlan or ChildRun fallback
+       -> source-thread reply such as apply 1 or continue 1
+       -> ApprovalDecision -> ApplyPlan or explicit continuation run
 ```
 
 Ingress apps and product integrations should prefer
 `@opentag/client.submitThreadAction(...)` for source-thread replies. That path
 preserves the user's thread context, applies actor authorization against the
 existing Project Target binding, uses stable approval/apply identifiers for
-webhook retry safety, and falls back to a child run when an adapter cannot apply
-the model's intent directly.
+webhook retry safety, and only presents direct apply as the primary path when a
+capability/preflight check proves the adapter can execute the model's intent.
+When direct apply is not available, the same thread can still carry an explicit
+continuation request.
 
 The lower-level proposal, approval, apply-plan, policy-rule, and
 adapter-mapping HTTP routes are **experimental protocol APIs**. They are useful
@@ -53,6 +55,9 @@ The next design step is to make three ideas first-class:
 - **Attention Budget**: human attention is a scarce system resource.
 - **Context Packet**: executor input should be curated, bounded, and auditable.
 - **Quiet Agent Protocol**: agents should know when not to speak.
+
+For the concrete Slack and GitHub approval rendering pattern that follows these
+principles, see [Source-Thread Action Receipts](./source-thread-action-receipts.md).
 
 Together, these shift OpenTag from a mention router to a protocol for bringing
 agents into real team workflows without flooding people, leaking context, or
@@ -113,7 +118,7 @@ and auditable execution in real team workflows.
 
 That means:
 
-- It is not just an open-source Claude Tag clone.
+- It is not a clone of any single chat-to-agent workflow.
 - It is not a hosted IDE or a general agent framework.
 - It is not an AI project management system.
 - It is a protocol layer between workspace surfaces and approved agent runners.

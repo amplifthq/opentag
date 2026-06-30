@@ -83,6 +83,7 @@ const DaemonConfigSchema = z
     hermes: HermesSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: z.string().min(1).optional(),
+    githubApplyToken: z.string().min(1).nullable().optional(),
     preparePullRequestBranch: z.boolean().optional(),
     allowAutoCreatePullRequest: z.boolean().optional(),
     pairingToken: z.string().min(1),
@@ -274,7 +275,12 @@ export function assertPrivateConfigFile(path: string): void {
 }
 
 function redactValue(key: string, value: unknown): unknown {
-  if (["appSecret", "appToken", "botToken", "githubToken", "pairingToken", "signingSecret", "webhookSecret"].includes(key)) {
+  if (
+    ["appSecret", "appToken", "botToken", "githubToken", "githubApplyToken", "pairingToken", "signingSecret", "webhookSecret"].includes(
+      key
+    )
+  ) {
+    if (value === null || value === undefined) return value;
     return "[REDACTED]";
   }
   if (Array.isArray(value)) {

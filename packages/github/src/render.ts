@@ -1,4 +1,16 @@
-import { suggestedActionCandidatesFromResult, type OpenTagRunResult } from "@opentag/core";
+import {
+  actionReceiptHeading,
+  buildActionReceiptsFromResult,
+  type ActionReceipt,
+  type ActionReceiptContext,
+  type ActionReceiptDecision,
+  type OpenTagRunResult
+} from "@opentag/core";
+
+export type GitHubRenderOptions = {
+  receiptContext?: ActionReceiptContext;
+  auditRunId?: string;
+};
 
 function nextActionSummary(result: OpenTagRunResult): string | undefined {
   if (!result.nextAction) return undefined;
@@ -28,75 +40,102 @@ function renderVerificationParams(params: Record<string, unknown> | undefined): 
       const summary = (item as Record<string, unknown>)["summary"];
       if (typeof outcome !== "string") return undefined;
       const prefix = typeof command === "string" && command.length > 0 ? `\`${command}\`: ${outcome}` : outcome;
-      return typeof summary === "string" && summary.length > 0 ? `  - ${prefix} - ${summary}` : `  - ${prefix}`;
+      return typeof summary === "string" && summary.length > 0 ? `${prefix} - ${summary}` : prefix;
     })
     .filter((line): line is string => Boolean(line));
 }
 
-function renderSuggestedActionDetails(params: Record<string, unknown> | undefined, action: string): string[] {
-  if (action !== "create_pull_request") return [];
-  const lines: string[] = [];
+function inlineCode(value: string): string {
+  return `\`${value.replace(/`/g, "\\`")}\``;
+}
+
+function tableValue(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
+}
+
+function tableList(values: string[]): string {
+  return values.map(tableValue).join("<br>");
+}
+
+function renderSuggestedActionDetails(receipt: ActionReceipt): Array<[string, string]> {
+  const candidate = receipt.candidate;
+  const params = candidate.intent.params;
+  const rows: Array<[string, string]> = [["Target", receipt.targetLabel]];
+  if (receipt.setupReason) rows.push(["Status", receipt.setupReason]);
+  if (candidate.intent.action !== "create_pull_request") {
+    if (candidate.proposalPreconditions?.length) {
+      rows.push(["Preconditions", tableList(candidate.proposalPreconditions)]);
+    }
+    return rows;
+  }
+
   const title = stringParam(params, "title");
   const head = stringParam(params, "head") ?? stringParam(params, "branch");
   const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
   const changedFiles = stringArrayParam(params, "changedFiles");
   const risks = stringArrayParam(params, "risks");
   const verification = renderVerificationParams(params);
-  if (title) lines.push(`- Title: ${title}`);
-  if (head || base) lines.push(`- Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
-  if (changedFiles.length > 0) lines.push(`- Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
-  if (risks.length > 0) {
-    lines.push("- Risks:");
-    for (const risk of risks) {
-      lines.push(`  - ${risk}`);
-    }
+  if (title) rows.push(["Title", title]);
+  if (head || base) rows.push(["Branch", `${inlineCode(head ?? "unknown")} -> ${inlineCode(base ?? "main")}`]);
+  if (changedFiles.length > 0) rows.push(["Changed files", changedFiles.map(inlineCode).join(", ")]);
+  if (verification.length > 0) rows.push(["Verification", tableList(verification)]);
+  if (risks.length > 0) rows.push(["Risks", tableList(risks)]);
+  if (candidate.proposalPreconditions?.length) {
+    rows.push(["Preconditions", tableList(candidate.proposalPreconditions)]);
   }
-  if (verification.length > 0) {
-    lines.push("- Verification:");
-    lines.push(...verification);
-  }
-  return lines;
+  return rows;
 }
 
-function renderSuggestedActions(result: OpenTagRunResult): string[] {
-  const candidates = suggestedActionCandidatesFromResult(result);
-  if (candidates.length === 0) return [];
+function decisionLabel(decision: ActionReceiptDecision): string {
+  if (decision === "apply") return "Apply now";
+  if (decision === "approve") return "Approve only";
+  if (decision === "continue") return "Continue";
+  return "Reject";
+}
+
+function decisionEffect(decision: ActionReceiptDecision): string {
+  if (decision === "apply") return "Approves and applies this action to the system of record.";
+  if (decision === "approve") return "Records approval without applying yet.";
+  if (decision === "continue") return "Starts a follow-up run from this approved action.";
+  return "Rejects this action.";
+}
+
+function renderSuggestedActions(result: OpenTagRunResult, options: GitHubRenderOptions = {}): string[] {
+  const receipts = buildActionReceiptsFromResult(result, options.receiptContext);
+  if (receipts.length === 0) return [];
 
   const lines = [
-    "### Suggested actions:",
+    `### ${actionReceiptHeading(receipts)}`,
     "",
-    "Source-thread approval: choose one command in this GitHub thread to apply a protocolized mutation or PR action to the system of record."
+    "OpenTag prepared a source-thread action receipt. Choose one command in this GitHub thread; full protocol lineage stays in the audit log."
   ];
-  for (const candidate of candidates) {
+  if (options.auditRunId) {
+    lines.push("", `Audit: run ${inlineCode(`opentag status --run ${options.auditRunId}`)} locally.`);
+  }
+  for (const receipt of receipts) {
+    const candidate = receipt.candidate;
     lines.push(
       "",
-      `#### Action ${candidate.index}: ${candidate.intent.summary}`,
+      `#### ${candidate.index}. ${candidate.intent.summary}`,
       "",
-      `- System-of-record action: \`${candidate.intent.action}\` (\`${candidate.intent.domain}\`)`,
-      `- Proposal: \`${candidate.proposalId}\``,
-      `- Intent ID: \`${candidate.intent.intentId}\``
+      "| Field | Value |",
+      "| --- | --- |"
     );
-    lines.push(...renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action));
-    if (candidate.proposalPreconditions?.length) {
-      lines.push("- Preconditions:");
-      for (const precondition of candidate.proposalPreconditions) {
-        lines.push(`  - ${precondition}`);
-      }
+    for (const [label, value] of renderSuggestedActionDetails(receipt)) {
+      lines.push(`| ${label} | ${tableValue(value)} |`);
     }
     lines.push(
       "",
-      "**Approve in this thread**",
+      "**Choose in this thread**",
       "",
       `| Decision | Comment command | Effect |`,
-      `| --- | --- | --- |`,
-      `| Apply now | \`apply ${candidate.index}\` | Applies this action to the system of record. |`,
-      `| Approve only | \`approve ${candidate.index}\` | Records approval without applying yet. |`,
-      `| Continue | \`continue ${candidate.index}\` | Starts a follow-up run from this proposal. |`,
-      `| Reject | \`reject ${candidate.index}\` | Rejects this action. |`
+      `| --- | --- | --- |`
     );
+    for (const decision of receipt.visibleDecisions) {
+      lines.push(`| ${decisionLabel(decision)} | \`${decision} ${candidate.index}\` | ${decisionEffect(decision)} |`);
+    }
   }
 
-  lines.push("", "Bulk shortcut: comment `apply all` to apply every supported approved action in this thread.");
   return lines;
 }
 
@@ -108,7 +147,7 @@ export function renderProgress(input: { runId: string; message: string }): strin
   return `OpenTag progress for \`${input.runId}\`: ${input.message}`;
 }
 
-export function renderFinalResult(result: OpenTagRunResult): string {
+export function renderFinalResult(result: OpenTagRunResult, options: GitHubRenderOptions = {}): string {
   const lines = [`OpenTag finished with **${result.conclusion}**.`, "", result.summary];
 
   if (result.verification?.length) {
@@ -118,14 +157,14 @@ export function renderFinalResult(result: OpenTagRunResult): string {
     }
   }
 
-  const nextAction = nextActionSummary(result);
-  if (nextAction) {
-    lines.push("", `Next action: ${nextAction}`);
-  }
-
-  const suggestedActions = renderSuggestedActions(result);
+  const suggestedActions = renderSuggestedActions(result, options);
   if (suggestedActions.length > 0) {
     lines.push("", ...suggestedActions);
+  } else {
+    const nextAction = nextActionSummary(result);
+    if (nextAction) {
+      lines.push("", `Next action: ${nextAction}`);
+    }
   }
 
   return lines.join("\n");

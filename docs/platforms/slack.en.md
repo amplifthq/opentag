@@ -11,7 +11,7 @@ Both modes support the same core product flow: mention the Slack app, let OpenTa
 
 Slack-only setup proves the Slack loop. It does not by itself grant GitHub write access. If a run proposes a pull request action, `apply 1` can create a GitHub PR only when OpenTag also has a GitHub repository target and GitHub token configured.
 
-Suggested action buttons use Slack Block Kit interactivity. Enable **Interactivity & Shortcuts** in the Slack app so buttons such as **Apply 1** can submit the same source-thread action as a typed `apply 1` reply.
+Suggested action buttons use Slack Block Kit interactivity. Enable **Interactivity & Shortcuts** in the Slack app so state-driven buttons such as **Apply 1**, **Continue**, and **Reject** can submit the same source-thread action as a typed thread reply.
 
 ## Official Links
 
@@ -101,7 +101,7 @@ Do not enter a Request URL for Socket Mode. Slack delivers the event through the
 3. Do not enter a Request URL for Socket Mode. Slack sends Block Kit button actions over the same Socket Mode WebSocket connection.
 4. Save changes.
 
-This is what makes Slack buttons such as **Apply 1**, **Approve**, and **Reject** work. If Interactivity is off, OpenTag can still receive typed thread replies like `apply 1`, but clicking a button will fail in Slack before it reaches OpenTag.
+This is what makes Slack buttons such as **Apply 1**, **Continue**, and **Reject** work. If Interactivity is off, OpenTag can still receive typed thread replies, but clicking a button will fail in Slack before it reaches OpenTag.
 
 ## Advanced: Public Events API
 
@@ -233,9 +233,9 @@ Then mention the app in the bound channel:
 OpenTag should acknowledge the request and later reply in the same Slack thread.
 By default, the acknowledgement is a lightweight `eyes` reaction on your source message instead of a new thread reply.
 
-When OpenTag posts suggested actions, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
+When OpenTag posts suggested actions, follow the receipt state. If it says **Ready to apply**, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
 
-If the reply includes a pull request action, but your config only contains Slack credentials, OpenTag will continue with a follow-up run instead of creating the GitHub PR directly. Configure GitHub as a repository target before expecting Slack `apply 1` replies to create PRs.
+If the receipt says **Needs setup**, OpenTag will show **Continue** or a setup hint instead of presenting **Apply 1** as the primary path. Configure GitHub as a repository target before expecting Slack receipts to create PRs directly.
 
 If suggested action buttons are visible but clicking them shows an error in Slack, re-check **Interactivity & Shortcuts**:
 

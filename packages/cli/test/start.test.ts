@@ -174,13 +174,26 @@ describe("OpenTag CLI start wiring", () => {
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
-      githubToken: "ghp_token"
+      githubToken: "ghp_token",
+      githubCallbackToken: "ghp_token",
+      githubApplyToken: "ghp_token"
     });
     expect(githubIngressConfigFromCliConfig(built)).toMatchObject({
       webhookSecret: "github_webhook_secret",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       webhookPath: "/github/webhooks"
+    });
+  });
+
+  it("can keep GitHub callbacks enabled while disabling direct apply capability", () => {
+    const built = githubConfig();
+    built.daemon.githubApplyToken = null;
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      githubToken: "ghp_token",
+      githubCallbackToken: "ghp_token",
+      githubApplyToken: null
     });
   });
 

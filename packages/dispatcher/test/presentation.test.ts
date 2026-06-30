@@ -132,27 +132,38 @@ describe("default callback presentation", () => {
         }
       ]
     };
+    const receiptContext = {
+      capabilityByIntentId: {
+        intent_label_1: { state: "ready_to_apply" as const }
+      }
+    };
 
-    const github = presentation.final({ provider: "github", result }).body;
-    expect(github).toContain("Suggested actions:");
-    expect(github).toContain("Source-thread approval:");
-    expect(github).toContain("#### Action 1: Add the bug label.");
-    expect(github).toContain("System-of-record action: `add_label` (`labels`)");
-    expect(github).toContain("Proposal: `proposal_1`");
-    expect(github).toContain("Intent ID: `intent_label_1`");
+    const github = presentation.final({ provider: "github", result, runId: "run_receipt_1", receiptContext }).body;
+    expect(github).toContain("### Ready to apply");
+    expect(github).toContain("source-thread action receipt");
+    expect(github).toContain("Audit: run `opentag status --run run_receipt_1` locally.");
+    expect(github).toContain("#### 1. Add the bug label.");
+    expect(github).toContain("| Target | GitHub labels |");
+    expect(github).toContain("| Preconditions | The issue is still open. |");
     expect(github).toContain("| Apply now | `apply 1` |");
+    expect(github).toContain("| Approve only | `approve 1` |");
+    expect(github).not.toContain("| Continue | `continue 1` |");
+    expect(github).not.toContain("Proposal: `proposal_1`");
+    expect(github).not.toContain("Intent ID: `intent_label_1`");
 
-    const slack = presentation.final({ provider: "slack", result });
-    expect(slack.body).toContain("*Suggested actions*");
+    const slack = presentation.final({ provider: "slack", result, runId: "run_receipt_1", receiptContext });
+    expect(slack.body).toContain("*Ready to apply*");
+    expect(slack.body).not.toContain("opentag status --run");
     expect(slack.body).toContain("1. *Add the bug label.*");
+    expect(slack.body).toContain("Target: GitHub labels");
     expect(slack.body).not.toContain("Proposal:");
     expect(slack.body).not.toContain("Intent ID:");
     expect(slack.blocks?.at(-1)).toMatchObject({
       type: "actions",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Approve" }, action_id: "opentag:approve:1" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" },
+        { type: "button", text: { type: "plain_text", text: "Approve only" }, action_id: "opentag:approve:1" }
       ]
     });
   });
@@ -188,11 +199,12 @@ describe("default callback presentation", () => {
     };
 
     const github = presentation.final({ provider: "github", result }).body;
-    expect(github).toContain("- Title: OpenTag run run_1");
-    expect(github).toContain("- Branch: `opentag/run_1` -> `main`");
-    expect(github).toContain("- Changed files: `src/demo.ts`");
-    expect(github).toContain("- Verification:\n  - `pnpm test`: passed");
-    expect(github).not.toContain("   Title:");
+    expect(github).toContain("| Target | GitHub pull request |");
+    expect(github).toContain("| Title | OpenTag run run_1 |");
+    expect(github).toContain("| Branch | `opentag/run_1` -> `main` |");
+    expect(github).toContain("| Changed files | `src/demo.ts` |");
+    expect(github).toContain("| Verification | `pnpm test`: passed |");
+    expect(github).toContain("| Risks | Review before merge. |");
 
     const slack = presentation.final({ provider: "slack", result });
     expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");

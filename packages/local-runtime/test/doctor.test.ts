@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { CommandRunner, ExecutorAdapter } from "@opentag/runner";
+import type { OpenTagDaemonConfig } from "../src/config.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "../src/doctor.js";
 
 const commandRunner: CommandRunner = {
@@ -26,7 +27,7 @@ const codexExecutor: ExecutorAdapter = {
   async cancel() {}
 };
 
-async function runCodexDoctor(codexConfig: string) {
+async function runCodexDoctor(codexConfig: string, configOverrides: Partial<OpenTagDaemonConfig> = {}) {
   const root = mkdtempSync(join(tmpdir(), "opentag-local-runtime-doctor-"));
   const checkoutPath = join(root, "demo");
   const codexConfigPath = join(root, "codex-config.toml");
@@ -53,7 +54,8 @@ async function runCodexDoctor(codexConfig: string) {
         ],
         githubToken: "ghs_test",
         pollIntervalMs: 5000,
-        heartbeatIntervalMs: 15000
+        heartbeatIntervalMs: 15000,
+        ...configOverrides
       },
       executors: { codex: codexExecutor },
       commandRunner,
@@ -115,5 +117,16 @@ describe("local-runtime doctor", () => {
 
     expect(doctorHasFailures(checks)).toBe(false);
     expect(formatDoctorChecks(checks)).toContain("OK   Codex config: service_tier=acme-enterprise-tier");
+  });
+
+  it("warns when direct GitHub apply is explicitly disabled", async () => {
+    const checks = await runCodexDoctor('service_tier = "fast"\n', {
+      preparePullRequestBranch: true,
+      githubApplyToken: null
+    });
+
+    expect(formatDoctorChecks(checks)).toContain(
+      "WARN GitHub PR actions: Run branches can be pushed, but a GitHub apply token is required for direct `apply 1` PR creation"
+    );
   });
 });

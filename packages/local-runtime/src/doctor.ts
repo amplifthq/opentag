@@ -226,6 +226,8 @@ export async function runDoctor(input: {
     }
   }
 
+  const githubApplyToken = input.config.githubApplyToken === null ? undefined : (input.config.githubApplyToken ?? input.config.githubToken);
+
   if (input.config.allowAutoCreatePullRequest) {
     checks.push(
       input.config.githubToken
@@ -234,9 +236,13 @@ export async function runDoctor(input: {
     );
   } else if (input.config.preparePullRequestBranch) {
     checks.push(
-      input.config.githubToken
+      githubApplyToken
         ? check("ok", "GitHub PR actions", "Configured for thread-native `apply 1` PR creation")
-        : check("warn", "GitHub PR actions", "Run branches will be pushed, but githubToken is required for `apply 1` PR creation")
+        : check(
+            "warn",
+            "GitHub PR actions",
+            "Run branches can be pushed, but a GitHub apply token is required for direct `apply 1` PR creation"
+          )
     );
   } else if (input.config.githubToken) {
     checks.push(check("warn", "GitHub PR actions", "githubToken is configured, but run branch preparation is disabled"));
