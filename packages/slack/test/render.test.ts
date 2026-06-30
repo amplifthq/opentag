@@ -105,6 +105,7 @@ describe("Slack callback rendering", () => {
         }
       ]
     }, {
+      auditRunId: "run_receipt_1",
       receiptContext: {
         capabilityByIntentId: {
           intent_label_1: { state: "ready_to_apply" }
@@ -116,10 +117,20 @@ describe("Slack callback rendering", () => {
     expect(rendered).toContain("Ready to apply");
     expect(rendered).toContain("1. *Add the bug label.*");
     expect(rendered).toContain("Target: GitHub labels");
+    expect(rendered).toContain("Audit: `opentag status --run run_receipt_1`");
     expect(rendered).not.toContain("Proposal:");
     expect(rendered).not.toContain("Intent ID:");
 
     const actionsBlock = blocks.find((block) => block.type === "actions");
+    expect(blocks.at(-1)).toEqual({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "Audit: `opentag status --run run_receipt_1`"
+        }
+      ]
+    });
     expect(actionsBlock).toMatchObject({
       type: "actions",
       block_id: "opentag_actions_1",

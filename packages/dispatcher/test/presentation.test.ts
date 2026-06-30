@@ -158,12 +158,16 @@ describe("default callback presentation", () => {
     expect(slack.body).toContain("Target: GitHub labels");
     expect(slack.body).not.toContain("Proposal:");
     expect(slack.body).not.toContain("Intent ID:");
-    expect(slack.blocks?.at(-1)).toMatchObject({
+    expect(slack.blocks?.at(-2)).toMatchObject({
       type: "actions",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
         { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
       ]
+    });
+    expect(slack.blocks?.at(-1)).toEqual({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: "Audit: `opentag status --run run_receipt_1`" }]
     });
   });
 

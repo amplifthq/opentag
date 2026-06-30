@@ -53,7 +53,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     final(input) {
       const renderOptions = {
         ...(input.receiptContext ? { receiptContext: input.receiptContext } : {}),
-        ...(input.provider === "github" && input.runId ? { auditRunId: input.runId } : {})
+        ...((input.provider === "github" || input.provider === "slack") && input.runId ? { auditRunId: input.runId } : {})
       };
       if (input.provider === "slack") {
         return {

@@ -19,6 +19,14 @@ export type SlackDividerBlock = {
   type: "divider";
 };
 
+export type SlackContextBlock = {
+  type: "context";
+  elements: Array<{
+    type: "mrkdwn";
+    text: string;
+  }>;
+};
+
 export type SlackButtonElement = {
   type: "button";
   text: {
@@ -37,7 +45,7 @@ export type SlackActionsBlock = {
   elements: SlackButtonElement[];
 };
 
-export type SlackBlock = SlackTextBlock | SlackDividerBlock | SlackActionsBlock;
+export type SlackBlock = SlackTextBlock | SlackDividerBlock | SlackContextBlock | SlackActionsBlock;
 
 export type SlackSuggestedActionButtonValue = {
   version: 1;
@@ -66,6 +74,7 @@ const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
 
 export type SlackRenderOptions = {
   receiptContext?: ActionReceiptContext;
+  auditRunId?: string;
 };
 
 export function buildSlackSuggestedActionButtonValue(input: SlackSuggestedActionButtonValue): string {
@@ -372,6 +381,17 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult, options: 
           type: "mrkdwn",
           text: `Showing first ${visibleReceipts.length} of ${receipts.length} actions. Reply with an action number for the rest.`
         }
+      });
+    }
+    if (options.auditRunId) {
+      blocks.push({
+        type: "context",
+        elements: [
+          {
+            type: "mrkdwn",
+            text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${options.auditRunId}\``)
+          }
+        ]
       });
     }
   }

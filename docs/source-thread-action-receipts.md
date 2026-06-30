@@ -262,6 +262,7 @@ Slack copy guidelines:
   that action;
 - show at most the first few high-value details in the thread;
 - keep proposal and intent identifiers out of visible copy.
+- expose local audit as low-prominence context, not as another primary action.
 
 Typed commands remain supported for portability:
 
