@@ -27,6 +27,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
         return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "开启 Interactivity & Shortcuts 以支持 Apply 1 按钮", "Slack bot scopes 需要 app_mentions:read、chat:write、reactions:write、channels:history", "订阅 bot events: app_mention、message.channels", "Slack Team ID", "Slack Channel ID", "测试前需要把 Slack app 邀请进目标 channel"];
       case "github":
         return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；你回复 apply 1 后也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3050", "需要一个公网 tunnel 转发 GitHub webhook"];
+      case "gitlab":
+        return [];
       case "telegram":
         return [];
     }
@@ -39,6 +41,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Enable Interactivity & Shortcuts for Apply 1 buttons", "Slack bot scopes need app_mentions:read, chat:write, reactions:write, channels:history", "Subscribe to bot events: app_mention, message.channels", "Slack Team ID", "Slack Channel ID", "Invite the Slack app to the target channel before testing"];
     case "github":
       return ["GitHub repository owner/repo", "GitHub token for comments and PR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3050", "A public tunnel is required for GitHub webhook delivery"];
+    case "gitlab":
+      return [];
     case "telegram":
       return [];
   }
@@ -62,6 +66,8 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
           `GitHub token 创建页: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,
           `Repository webhook 官方文档: ${OFFICIAL_SETUP_LINKS.githubWebhookDocs}`
         ];
+      case "gitlab":
+        return [];
       case "telegram":
         return [];
     }
@@ -83,6 +89,8 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
         `GitHub token page: ${OFFICIAL_SETUP_LINKS.githubTokenPage}`,
         `Repository webhook docs: ${OFFICIAL_SETUP_LINKS.githubWebhookDocs}`
       ];
+    case "gitlab":
+      return [];
     case "telegram":
       return [];
   }

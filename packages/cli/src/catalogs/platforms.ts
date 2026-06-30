@@ -1,6 +1,6 @@
 import type { CliLanguage } from "./languages.js";
 
-export type PlatformId = "lark" | "slack" | "github" | "telegram";
+export type PlatformId = "lark" | "slack" | "github" | "gitlab" | "telegram";
 
 export type PlatformStatus = "setup_ready" | "setup_pending" | "experimental_setup_pending";
 
@@ -26,6 +26,8 @@ const PLATFORM_SETUP_GUIDE_FILES: Partial<Record<PlatformId, Record<CliLanguage,
     en: "github.en.md",
     "zh-CN": "github.zh-CN.md"
   }
+  // gitlab deliberately has no setup guide entry until CLI setup wiring lands;
+  // the MVP only exposes gitlab through the adapter package, not via `opentag setup`.
 };
 
 export const PLATFORM_CATALOG: PlatformDescriptor[] = [
@@ -48,6 +50,12 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
     startable: true
   },
   {
+    id: "gitlab",
+    label: "GitLab",
+    status: "experimental_setup_pending",
+    startable: false
+  },
+  {
     id: "telegram",
     label: "Telegram",
     status: "experimental_setup_pending",
@@ -56,10 +64,10 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
 ];
 
 export function parsePlatformId(value: string): PlatformId {
-  if (value === "lark" || value === "slack" || value === "github" || value === "telegram") {
+  if (value === "lark" || value === "slack" || value === "github" || value === "gitlab" || value === "telegram") {
     return value;
   }
-  throw new Error("Platform must be lark, slack, github, or telegram.");
+  throw new Error("Platform must be lark, slack, github, gitlab, or telegram.");
 }
 
 export function platformById(id: PlatformId): PlatformDescriptor {
