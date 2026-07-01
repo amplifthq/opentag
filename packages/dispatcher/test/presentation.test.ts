@@ -6,7 +6,7 @@ describe("default callback presentation", () => {
   it("uses platform liveness capability to decide callback acknowledgements", () => {
     const presentation = createDefaultCallbackPresentation();
 
-    expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("telegram")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("github")).toBe(true);
@@ -17,12 +17,12 @@ describe("default callback presentation", () => {
     const presentation = createDefaultCallbackPresentation();
 
     expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(false);
-    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(false);
     expect(presentation.shouldDeliverStatusUpdate("telegram")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("github")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("custom")).toBe(true);
     expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "running" })).toBe(false);
-    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "queued" })).toBe(true);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "queued" })).toBe(false);
     expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "github", state: "running" })).toBe(true);
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);

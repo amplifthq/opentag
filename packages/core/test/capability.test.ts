@@ -12,7 +12,7 @@ describe("platform capability catalog", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.github.livenessStrategy).toBe("status_update");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.gitlab.livenessStrategy).toBe("thread_reply");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.slack.livenessStrategy).toBe("source_receipt");
-    expect(OPEN_TAG_PLATFORM_CAPABILITIES.lark.livenessStrategy).toBe("thread_reply");
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.lark.livenessStrategy).toBe("source_receipt");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.telegram.livenessStrategy).toBe("thread_reply");
   });
 
@@ -30,7 +30,7 @@ describe("platform capability catalog", () => {
     expect(shouldDeliverCallbackRunStatus("gitlab")).toBe(true);
     expect(shouldDeliverCallbackRunStatus("telegram")).toBe(true);
     expect(shouldDeliverCallbackRunStatus("slack")).toBe(false);
-    expect(shouldDeliverCallbackRunStatus("lark")).toBe(true);
+    expect(shouldDeliverCallbackRunStatus("lark")).toBe(false);
     expect(shouldDeliverCallbackRunStatus("custom")).toBe(true);
 
     expect(shouldDeliverCallbackProgress("github")).toBe(true);
@@ -42,7 +42,7 @@ describe("platform capability catalog", () => {
 
     expect(shouldDeliverSourceReceipt("slack")).toBe(true);
     expect(shouldDeliverSourceReceipt("github")).toBe(false);
-    expect(shouldDeliverSourceReceipt("lark")).toBe(false);
+    expect(shouldDeliverSourceReceipt("lark")).toBe(true);
     expect(shouldDeliverSourceReceipt("custom")).toBe(false);
   });
 

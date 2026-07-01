@@ -24,12 +24,19 @@ type LarkMessageApi = {
   update?: (payload?: LarkUpdatePayload) => Promise<unknown>;
 };
 
+type LarkRequestPayload = {
+  method: string;
+  url: string;
+  data?: unknown;
+};
+
 export type LarkReplyResult = {
   messageId?: string;
 };
 
 // Minimal client surface OpenTag uses; lark.Client satisfies it structurally.
 export type LarkReplyClient = {
+  request?: (payload: LarkRequestPayload) => Promise<unknown>;
   im: {
     message?: LarkMessageApi;
     v1?: {
@@ -100,6 +107,19 @@ export async function updateLarkTextMessage(client: LarkReplyClient, input: { me
     data: {
       msg_type: "text",
       content: createLarkTextMessageContent(input.text)
+    }
+  });
+}
+
+export async function addLarkMessageReaction(client: LarkReplyClient, input: { messageId: string; emojiType: string }): Promise<void> {
+  if (!client.request) throw new Error("Lark client does not support request.");
+  await client.request({
+    method: "POST",
+    url: `/open-apis/im/v1/messages/${encodeURIComponent(input.messageId)}/reactions`,
+    data: {
+      reaction_type: {
+        emoji_type: input.emojiType
+      }
     }
   });
 }

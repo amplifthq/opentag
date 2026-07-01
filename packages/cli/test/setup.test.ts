@@ -303,7 +303,7 @@ describe("OpenTag CLI setup", () => {
     expect(notes.join("\n")).toContain("https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN");
     expect(notes.join("\n")).toContain("Capabilities:");
     expect(notes.join("\n")).toContain("platform Lark / Feishu:");
-    expect(notes.join("\n")).toContain("liveness=thread_reply");
+    expect(notes.join("\n")).toContain("liveness=source_receipt");
     expect(notes.join("\n")).toContain("executor Echo:");
   });
 

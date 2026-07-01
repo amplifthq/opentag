@@ -102,6 +102,7 @@ function createInteractiveHandler(input: {
   doctor?: Parameters<typeof createLarkMessageHandler>[0]["doctor"];
   stopRun?: Parameters<typeof createLarkMessageHandler>[0]["stopRun"] | null;
   canManageBinding?: Parameters<typeof createLarkMessageHandler>[0]["canManageBinding"] | null;
+  suppressRunCreatedReply?: boolean;
 } = {}) {
   const createRun = vi.fn(async (event: OpenTagEvent) => (input.result ?? runCreated)(event));
   const bindChannel = vi.fn(async () => {});
@@ -136,6 +137,7 @@ function createInteractiveHandler(input: {
     ...(stopRun ? { stopRun } : {}),
     ...(input.status ? { status: input.status } : {}),
     ...(input.doctor ? { doctor: input.doctor } : {}),
+    ...(input.suppressRunCreatedReply !== undefined ? { suppressRunCreatedReply: input.suppressRunCreatedReply } : {}),
     reply
   });
   return { handler, createRun, bindChannel, unbindChannel, stopRun, canManageBinding, reply };
@@ -169,6 +171,16 @@ describe("createLarkMessageHandler", () => {
 
   it("does not duplicate the received reply for idempotent replayed run creates", async () => {
     const { handler, reply } = createInteractiveHandler({ result: idempotentReplay });
+
+    const outcome = await handler(message);
+
+    expect(outcome.status).toBe("created");
+    expect(outcome.runId).toBe("run_dispatcher");
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it("can suppress the ingress received reply when dispatcher lifecycle callbacks handle acknowledgement", async () => {
+    const { handler, reply } = createInteractiveHandler({ result: runCreated, suppressRunCreatedReply: true });
 
     const outcome = await handler(message);
 

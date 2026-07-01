@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   createCompositeCallbackSink,
+  createCompositeSourceReceiptSink,
   createGitHubCallbackSink,
   createLarkCallbackSink,
+  createLarkSourceReceiptSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
@@ -642,6 +644,98 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("adds a Lark source receipt reaction to the source message", async () => {
+    const requests: unknown[] = [];
+    const sink = createLarkSourceReceiptSink({
+      receivedEmojiType: "OK",
+      client: {
+        async request(payload) {
+          requests.push(payload);
+          return { data: { reaction_id: "reaction_1" } };
+        },
+        im: {}
+      }
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "lark",
+        state: "received",
+        event: {
+          id: "evt_1",
+          source: "lark",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "lark", providerUserId: "ou_123", handle: "ming", organizationId: "tenant_1" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "lark", kind: "message", uri: "lark://tenant/tenant_1/chat/oc_chat/message/om_msg" }],
+          permissions: [
+            { scope: "chat:postMessage", reason: "reply to source thread" },
+            { scope: "im:message.reactions:write_only", reason: "mark the source Lark message as received" }
+          ],
+          callback: {
+            provider: "lark",
+            uri: "lark://im/v1/messages",
+            threadKey: "tenant_1|oc_chat|om_msg"
+          },
+          metadata: { tenantKey: "tenant_1", chatId: "oc_chat", messageId: "om_msg" }
+        }
+      })
+    ).resolves.toEqual({ delivered: true });
+
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "/open-apis/im/v1/messages/om_msg/reactions",
+        data: {
+          reaction_type: {
+            emoji_type: "OK"
+          }
+        }
+      }
+    ]);
+  });
+
+  it("does not add a Lark source receipt reaction for running receipts", async () => {
+    const requests: unknown[] = [];
+    const sink = createLarkSourceReceiptSink({
+      client: {
+        async request(payload) {
+          requests.push(payload);
+          return {};
+        },
+        im: {}
+      }
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "lark",
+        state: "running",
+        event: {
+          id: "evt_1",
+          source: "lark",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "lark", providerUserId: "ou_123", handle: "ming", organizationId: "tenant_1" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "lark", kind: "message", uri: "lark://tenant/tenant_1/chat/oc_chat/message/om_msg" }],
+          callback: {
+            provider: "lark",
+            uri: "lark://im/v1/messages",
+            threadKey: "tenant_1|oc_chat|om_msg"
+          },
+          metadata: { tenantKey: "tenant_1", chatId: "oc_chat", messageId: "om_msg" }
+        }
+      })
+    ).resolves.toEqual({ delivered: false });
+    expect(requests).toEqual([]);
+  });
+
   it("adds Slack source receipt reactions to the source message", async () => {
     const requests: { url: string; authorization: string | null; body: unknown }[] = [];
     const sink = createSlackSourceReceiptSink({
@@ -835,5 +929,48 @@ describe("createGitHubCallbackSink", () => {
     ).resolves.toEqual({ externalMessageId: "msg_1" });
 
     expect(messages).toEqual(["a:slack", "b:slack"]);
+  });
+
+  it("composes source receipt sinks and reports delivered when any sink succeeds", async () => {
+    const seen: string[] = [];
+    const sink = createCompositeSourceReceiptSink([
+      {
+        async deliver(receipt) {
+          seen.push(`a:${receipt.provider}`);
+          return { delivered: false };
+        }
+      },
+      {
+        async deliver(receipt) {
+          seen.push(`b:${receipt.provider}`);
+          return { delivered: true };
+        }
+      }
+    ]);
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "lark",
+        state: "received",
+        event: {
+          id: "evt_1",
+          source: "lark",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "lark", providerUserId: "ou_123", handle: "ming", organizationId: "tenant_1" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "lark", kind: "message", uri: "lark://tenant/tenant_1/chat/oc_chat/message/om_msg" }],
+          callback: {
+            provider: "lark",
+            uri: "lark://im/v1/messages",
+            threadKey: "tenant_1|oc_chat|om_msg"
+          },
+          metadata: { tenantKey: "tenant_1", chatId: "oc_chat", messageId: "om_msg" }
+        }
+      })
+    ).resolves.toEqual({ delivered: true });
+    expect(seen).toEqual(["a:lark", "b:lark"]);
   });
 });

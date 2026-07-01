@@ -2013,6 +2013,90 @@ describe("dispatcher API", () => {
     ]);
   });
 
+  it("delivers Lark received source receipts without posting received cards", async () => {
+    const callbacks: { kind: string }[] = [];
+    const receipts: Array<{ runId: string; provider: string; state: string; chatId: unknown; messageId: unknown }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          callbacks.push({ kind: message.kind });
+        }
+      },
+      sourceReceiptSink: {
+        async deliver(receipt) {
+          receipts.push({
+            runId: receipt.runId,
+            provider: receipt.provider,
+            state: receipt.state,
+            chatId: receipt.event.metadata["chatId"],
+            messageId: receipt.event.metadata["messageId"]
+          });
+          return { delivered: true };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = larkRepoEvent({ id: "evt_lark_receipt", sourceEventId: "EvLarkReceipt" });
+    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt", event }));
+    expect(createResponse.status).toBe(201);
+
+    expect(callbacks).toEqual([]);
+    expect(receipts).toEqual([
+      {
+        runId: "run_lark_receipt",
+        provider: "lark",
+        state: "received",
+        chatId: "oc_chat",
+        messageId: "om_msg"
+      }
+    ]);
+
+    const eventsResponse = await app.request("/v1/runs/run_lark_receipt/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "admission.decided",
+      "run.created",
+      "context_packet.generated",
+      "source_receipt.delivered"
+    ]);
+  });
+
+  it("falls back to a Lark received card when the source receipt is not delivered", async () => {
+    const callbacks: Array<{ kind: string; hasRich?: boolean }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          callbacks.push({ kind: message.kind, ...(message.rich ? { hasRich: true } : {}) });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = larkRepoEvent({ id: "evt_lark_receipt_fallback", sourceEventId: "EvLarkReceiptFallback" });
+    const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt_fallback", event }));
+    expect(createResponse.status).toBe(201);
+    expect(callbacks).toEqual([{ kind: "acknowledgement", hasRich: true }]);
+  });
+
   it("renders Lark callbacks with lightweight acknowledgement while keeping process progress audit-only", async () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
@@ -2113,7 +2197,6 @@ describe("dispatcher API", () => {
       "callback.acknowledgement.delivered",
       "run.claimed",
       "run.running",
-      "callback.progress.suppressed",
       "run.progress",
       "callback.progress.suppressed",
       "run.completed",
@@ -2125,25 +2208,15 @@ describe("dispatcher API", () => {
       importance: "normal",
       message: "Echo executor started"
     });
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")).toHaveLength(2);
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")).toHaveLength(1);
     expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")[0]).toMatchObject({
       visibility: "audit",
       importance: "low",
       payload: {
         provider: "lark",
         reason: "platform_liveness_strategy",
-        requestedStatus: "running",
-        livenessStrategy: "thread_reply"
-      }
-    });
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")[1]).toMatchObject({
-      visibility: "audit",
-      importance: "low",
-      payload: {
-        provider: "lark",
-        reason: "platform_liveness_strategy",
         requestedVisibility: "human",
-        livenessStrategy: "thread_reply"
+        livenessStrategy: "source_receipt"
       }
     });
   });

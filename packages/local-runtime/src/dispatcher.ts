@@ -1,9 +1,11 @@
 import { serve } from "@hono/node-server";
 import {
   createCompositeCallbackSink,
+  createCompositeSourceReceiptSink,
   createDispatcherApp,
   createGitHubCallbackSink,
   createLarkCallbackSink,
+  createLarkSourceReceiptSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
@@ -210,10 +212,21 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
       ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
       ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
-      sourceReceiptSink: createSlackSourceReceiptSink({
-        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
-        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
-      }),
+      sourceReceiptSink: createCompositeSourceReceiptSink([
+        createSlackSourceReceiptSink({
+          ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
+          ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
+        }),
+        createLarkSourceReceiptSink({
+          ...(input.lark
+            ? {
+                appId: input.lark.appId,
+                appSecret: input.lark.appSecret,
+                domain: input.lark.domain
+              }
+            : {})
+        })
+      ]),
       callbackSink: createCompositeCallbackSink([
         createGitHubCallbackSink({
           ...(githubCallbackToken ? { token: githubCallbackToken } : {})

@@ -52,7 +52,7 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
     supportsRichPresentation: true,
     supportsActionReplies: false,
     requiresExplicitAddressing: true,
-    livenessStrategy: "thread_reply"
+    livenessStrategy: "source_receipt"
   },
   telegram: {
     id: "telegram",

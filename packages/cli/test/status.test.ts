@@ -114,7 +114,7 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Capabilities:");
     expect(formatted).toContain("platform Lark / Feishu:");
     expect(formatted).toContain("rich=yes");
-    expect(formatted).toContain("liveness=thread_reply");
+    expect(formatted).toContain("liveness=source_receipt");
     expect(formatted).toContain("executor Echo:");
     expect(formatted).toContain("isolation=none");
     expect(formatted).toContain("secrets=none");
@@ -726,7 +726,7 @@ describe("OpenTag CLI status", () => {
                 provider: "lark",
                 requestedVisibility: "human",
                 reason: "platform_liveness_strategy",
-                livenessStrategy: "thread_reply"
+                livenessStrategy: "source_receipt"
               },
               createdAt: "2026-06-24T00:00:31.000Z"
             }
@@ -763,9 +763,9 @@ describe("OpenTag CLI status", () => {
     });
 
     const formatted = formatRunStatus(summary);
-    expect(formatted).toContain("Provider: lark (thread_reply)");
+    expect(formatted).toContain("Provider: lark (source_receipt)");
     expect(formatted).toContain("Human callbacks: 0; thread noise ratio: 0");
-    expect(formatted).toContain("Progress delivery: source thread uses concise thread replies for liveness.");
+    expect(formatted).toContain("Progress delivery: source thread uses native receipts first; routine progress stays in audit/status.");
     expect(formatted).toContain("Suppressed progress callbacks: 1 (platform_liveness_strategy)");
     expect(formatted).toContain("callback.progress.suppressed - Progress callback suppressed by platform liveness strategy");
   });

@@ -312,6 +312,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
 
   const handler = createLarkMessageHandler({
     agentId: config.agentId,
+    suppressRunCreatedReply: true,
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
     ...(config.defaultRepoBinding ? { defaultRepoBinding: config.defaultRepoBinding } : {}),
     async resolveChannelBinding(input) {

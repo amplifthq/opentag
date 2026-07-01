@@ -1,4 +1,5 @@
 import {
+  addLarkMessageReaction,
   createLarkReplyClient,
   patchLarkMessageCard,
   type LarkCard,
@@ -20,6 +21,7 @@ import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceRecei
 export type FetchLike = typeof fetch;
 
 const DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS = 5_000;
+const DEFAULT_LARK_RECEIVED_REACTION = "OK";
 
 function slackUpdateUriFrom(postMessageUri: string): string {
   return postMessageUri.replace(/\/chat\.postMessage$/, "/chat.update");
@@ -59,6 +61,13 @@ function slackSourceMessageTarget(receipt: SourceReceipt): { channelId: string; 
   const channelId = metadataString(receipt.event.metadata, "channelId");
   const messageTs = metadataString(receipt.event.metadata, "messageTs");
   return channelId && messageTs ? { channelId, messageTs } : null;
+}
+
+function larkSourceMessageTarget(receipt: SourceReceipt): { messageId: string } | null {
+  if (receipt.provider !== "lark" || receipt.state !== "received") return null;
+  const threadKey = receipt.event.callback.threadKey;
+  if (!threadKey) return null;
+  return { messageId: parseLarkThreadKey(threadKey).messageId };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -252,6 +261,37 @@ export function createSlackSourceReceiptSink(input: {
   };
 }
 
+export function createLarkSourceReceiptSink(input: {
+  appId?: string;
+  appSecret?: string;
+  domain?: "lark" | "feishu";
+  client?: LarkReplyClient;
+  receivedEmojiType?: string;
+}): SourceReceiptSink {
+  if (!input.client && Boolean(input.appId) !== Boolean(input.appSecret)) {
+    throw new Error("Lark source receipt sink requires both appId and appSecret (or neither).");
+  }
+
+  const client: LarkReplyClient | undefined =
+    input.client ??
+    (input.appId && input.appSecret
+      ? createLarkReplyClient({ appId: input.appId, appSecret: input.appSecret, ...(input.domain ? { domain: input.domain } : {}) })
+      : undefined);
+  const receivedEmojiType = input.receivedEmojiType ?? DEFAULT_LARK_RECEIVED_REACTION;
+
+  return {
+    async deliver(receipt: SourceReceipt) {
+      const target = larkSourceMessageTarget(receipt);
+      if (!target || !client) return { delivered: false };
+      await addLarkMessageReaction(client, {
+        messageId: target.messageId,
+        emojiType: receivedEmojiType
+      });
+      return { delivered: true };
+    }
+  };
+}
+
 export function createLarkCallbackSink(input: {
   appId?: string;
   appSecret?: string;
@@ -388,6 +428,27 @@ export function createCompositeCallbackSink(sinks: CallbackSink[]): CallbackSink
         throw new AggregateError(failures, "Composite callback delivery failed for every sink.");
       }
       return result;
+    }
+  };
+}
+
+export function createCompositeSourceReceiptSink(sinks: SourceReceiptSink[]): SourceReceiptSink {
+  return {
+    async deliver(receipt: SourceReceipt) {
+      let delivered = false;
+      const failures: unknown[] = [];
+      for (const sink of sinks) {
+        try {
+          const result = await sink.deliver(receipt);
+          delivered ||= result.delivered;
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (!delivered && failures.length > 0) {
+        throw new AggregateError(failures, "Composite source receipt delivery failed for every sink.");
+      }
+      return { delivered };
     }
   };
 }
