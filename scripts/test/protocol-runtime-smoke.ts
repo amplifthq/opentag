@@ -174,6 +174,7 @@ try {
     "callback.acknowledgement.delivered",
     "proposal.snapshot.created",
     "run.completed",
+    "callback.progress.delivered",
     "callback.final.delivered",
     "approval.decision.recorded",
     "apply_plan.created",
@@ -183,7 +184,7 @@ try {
   }
 
   const metrics = await client.getRunMetrics({ runId: "run_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === 3, "GitHub-shaped smoke should deliver ack, final, and thread-action fallback callbacks");
+  assert(metrics.metrics.humanCallbackCount === 4, "GitHub-shaped smoke should deliver ack, progress, final, and thread-action fallback callbacks");
   assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "audit events should exceed human callbacks");
   assert(metrics.metrics.threadNoiseRatio < 1, "thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "metrics should count suggested changes");

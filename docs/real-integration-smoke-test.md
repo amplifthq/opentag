@@ -6,6 +6,7 @@ Use this document when you want to prove that OpenTag works beyond local unit te
 
 - real GitHub App webhook delivery
 - real Slack Events API delivery
+- real Lark card reply and patch delivery
 - real dispatcher and daemon execution
 - real callback messages posted back to the source thread
 - real local Claude Code execution
@@ -34,6 +35,58 @@ The examples below assume:
 - GitHub Probot ingress on `http://localhost:3000`
 - Slack Events ingress on `http://localhost:3040`
 - a pairing token of `dev_pairing_token`
+
+## Lark Message Patch Live Test
+
+Use this script when you need to prove that OpenTag can send one Lark status
+card and then patch that same message for the final callback. It exercises the
+real Lark API through `lark-cli`, but keeps dispatcher state in memory and does
+not require a long-running daemon.
+
+Prerequisites:
+
+- `lark-cli` is installed and available on `PATH`, or `OPENTAG_LARK_CLI` points
+  to the binary.
+- `lark-cli auth status` reports both the user and bot identities as ready.
+- The bot identity can send a message to the current user.
+
+Run:
+
+```bash
+NODE_OPTIONS='--conditions=development' \
+  packages/dispatcher/node_modules/.bin/tsx \
+  scripts/dev/run-lark-message-patch-live-test.ts
+```
+
+By default the script creates a bot-to-user seed message, creates an in-memory
+Lark-shaped run, sends the acknowledgement card as a Lark reply, and completes
+the run so the final callback patches the acknowledgement card in place.
+
+Optional inputs:
+
+```bash
+OPENTAG_LARK_LIVE_REPO=amplifthq/opentag-test
+OPENTAG_LARK_LIVE_CHAT_ID=<existing-chat-id>
+OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID=<existing-source-message-id>
+```
+
+Set both `OPENTAG_LARK_LIVE_CHAT_ID` and
+`OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID` to reuse an existing source message. Set
+neither to let the script create a private seed message.
+
+Expected evidence:
+
+- `ok: true`
+- `createdSeedMessage` shows whether the script created the source message.
+- The acknowledgement delivery has `returnedExternal: true`.
+- The final delivery has `hasExternal: true` and returns the same redacted
+  message id, proving that the final callback patched the first Lark card
+  instead of posting a second final card.
+
+The script intentionally prints only a redacted summary. It must not print app
+secrets, tokens, full message ids, raw request bodies, binding metadata payloads,
+or local workspace paths. Its generated idempotency keys are deliberately short
+because Lark rejects overlong keys with field validation errors.
 
 ## Recommended Local Config
 

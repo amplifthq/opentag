@@ -528,6 +528,8 @@ if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
     exit 1
   fi
 elif ! issue_comments_contain "### Ready to apply" &&
+  ! issue_comments_contain "action ready to apply" &&
+  ! issue_comments_contain "actions ready to apply" &&
   ! issue_comments_contain "### Some actions need setup" &&
   ! issue_comments_contain "### Some actions need attention" &&
   ! issue_comments_contain "### Needs review"; then
