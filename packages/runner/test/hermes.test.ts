@@ -122,6 +122,47 @@ describe("Hermes executor", () => {
     ).resolves.toEqual({ ready: false, reason: "Workspace is not a git checkout: bad cwd" });
   });
 
+  it("inherits a generic agent session profile when no Hermes-specific profile is configured", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joinedArgs = args.join(" ");
+
+        if (command === "git" && args[0] === "checkout") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "hermes" && args.includes("-z")) {
+          return { exitCode: 0, stdout: "done", stderr: "" };
+        }
+        if (command === "git" && joinedArgs === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createHermesExecutor({ runner }).run({
+      runId: "run_1",
+      workspacePath: "/tmp/demo",
+      command: { rawText: "fix this", intent: "fix", args: {} },
+      context: [],
+      sessionProfile: {
+        id: "opentag-slack-T123-C456-acme-demo-U123",
+        template: "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-{actorId}",
+        sourceProvider: "slack",
+        projectTarget: "github:acme/demo"
+      }
+    }, {
+      emit: async () => {}
+    });
+
+    const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
+    expect(hermesCall?.args).toContain("-p");
+    expect(hermesCall?.args).toContain("opentag-slack-T123-C456-acme-demo-U123");
+  });
+
   it("cleans internal artifacts when Hermes exits unsuccessfully", async () => {
     const calls: { command: string; args: string[] }[] = [];
     const runner: CommandRunner = {

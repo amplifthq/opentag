@@ -217,12 +217,34 @@ function defaultPrimaryDecisionForState(state: ActionReceiptState): ActionReceip
 export function actionReceiptHeading(receipts: ActionReceipt[]): string {
   const states = new Set(receipts.map((receipt) => receipt.state));
   if (states.size === 1 && states.has("ready_to_apply")) return "Ready to apply";
-  if (states.has("ready_to_apply") && states.has("needs_setup")) return "Some actions need setup";
-  if (states.has("ready_to_apply") && states.has("unsupported")) return "Some actions need attention";
+  if (states.size > 1) return mixedActionReceiptHeading(receipts);
   if (states.has("needs_setup")) return "Needs setup";
   if (states.has("unsupported")) return "Needs attention";
-  if (states.has("ready_to_apply")) return "Needs review";
   return "Needs approval";
+}
+
+function countedActionPhrase(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? "action" : "actions"} ${count === 1 ? singular : plural}`;
+}
+
+function mixedActionReceiptHeading(receipts: ActionReceipt[]): string {
+  const counts: Record<ActionReceiptState, number> = {
+    ready_to_apply: 0,
+    needs_approval: 0,
+    needs_setup: 0,
+    unsupported: 0
+  };
+  for (const receipt of receipts) {
+    counts[receipt.state] += 1;
+  }
+  return [
+    counts.ready_to_apply > 0 ? countedActionPhrase(counts.ready_to_apply, "ready to apply", "ready to apply") : undefined,
+    counts.needs_setup > 0 ? countedActionPhrase(counts.needs_setup, "needs setup", "need setup") : undefined,
+    counts.needs_approval > 0 ? countedActionPhrase(counts.needs_approval, "needs approval", "need approval") : undefined,
+    counts.unsupported > 0 ? countedActionPhrase(counts.unsupported, "needs attention", "need attention") : undefined
+  ]
+    .filter((phrase): phrase is string => Boolean(phrase))
+    .join(", ");
 }
 
 export function buildActionReceipt(candidate: SuggestedActionCandidate, context: ActionReceiptContext = {}): ActionReceipt {

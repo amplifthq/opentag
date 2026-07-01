@@ -240,6 +240,7 @@ export const RunAdmissionActionSchema = z.enum([
 export const RunAdmissionReasonCodeSchema = z.enum([
   "new_event",
   "duplicate_source_event",
+  "duplicate_source_delivery",
   "active_run_same_thread",
   "active_write_run_same_thread",
   "scope_change_requires_decision",
@@ -426,7 +427,7 @@ export const ResultArtifactSchema = z.object({
 });
 
 export const OpenTagRunResultSchema = z.object({
-  conclusion: z.enum(["success", "failure", "cancelled", "needs_human"]),
+  conclusion: z.enum(["success", "failure", "cancelled", "interrupted", "timed_out", "needs_human"]),
   summary: z.string(),
   changedFiles: z.array(z.string()).optional(),
   createdPullRequestUrl: z.string().url().optional(),
@@ -449,7 +450,7 @@ export const OpenTagRunResultSchema = z.object({
 export const OpenTagRunSchema = z.object({
   id: z.string().min(1),
   eventId: z.string().min(1),
-  status: z.enum(["queued", "assigned", "running", "needs_approval", "succeeded", "failed", "cancelled"]),
+  status: z.enum(["queued", "assigned", "running", "needs_approval", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
   thread: WorkThreadSchema.optional(),
   parentRunId: z.string().min(1).optional(),
   triggeredByAction: ActionHintSchema.optional(),

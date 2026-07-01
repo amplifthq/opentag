@@ -1,0 +1,376 @@
+import { z } from "zod";
+import {
+  actionReceiptHeading,
+  buildActionReceiptsFromResult,
+  type ActionReceipt,
+  type ActionReceiptContext,
+  type ActionReceiptDecision,
+  type ActionReceiptPrimaryDecision,
+  type ActionReceiptState
+} from "./action.js";
+import { OpenTagRunResultSchema, type OpenTagRunResult } from "./schema.js";
+
+export const OpenTagPresentationActionSchema = z.object({
+  index: z.number().int().positive(),
+  proposalId: z.string().min(1).optional(),
+  intentId: z.string().min(1).optional(),
+  title: z.string().min(1),
+  state: z.enum(["ready_to_apply", "needs_approval", "needs_setup", "unsupported"]),
+  targetLabel: z.string().min(1),
+  visibleDecisions: z.array(z.enum(["apply", "approve", "reject", "continue"])),
+  primaryDecision: z.enum(["apply", "continue", "none"]),
+  setupReason: z.string().min(1).optional(),
+  details: z.array(z.string().min(1)).optional(),
+  detailRows: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional()
+});
+
+export const OpenTagRunStatusPresentationSchema = z.object({
+  kind: z.literal("run_status"),
+  runId: z.string().min(1),
+  state: z.enum(["received", "queued", "running", "waiting_for_approval", "completed", "failed", "cancelled", "interrupted", "timed_out"]),
+  message: z.string().min(1).optional(),
+  nextAction: z.string().min(1).optional(),
+  detailVisibility: z.enum(["source_thread", "audit"]).optional()
+});
+
+export const OpenTagDoctorCheckPresentationSchema = z.object({
+  status: z.enum(["ok", "warn", "fail", "unknown"]),
+  name: z.string().min(1),
+  message: z.string().min(1).optional()
+});
+
+export const OpenTagDoctorSummaryPresentationSchema = z.object({
+  kind: z.literal("doctor_summary"),
+  title: z.string().min(1),
+  checks: z.array(OpenTagDoctorCheckPresentationSchema)
+});
+
+export const OpenTagSourceThreadStatusRunSchema = z.object({
+  id: z.string().min(1),
+  status: z.string().min(1),
+  updatedAt: z.string().min(1).optional()
+});
+
+export const OpenTagSourceThreadQueuedFollowUpSchema = z.object({
+  id: z.string().min(1),
+  status: z.string().min(1).optional(),
+  command: z.string().min(1).optional()
+});
+
+export const OpenTagSourceThreadStatusPresentationSchema = z.object({
+  kind: z.literal("source_thread_status"),
+  title: z.string().min(1),
+  sourceContainer: z.string().min(1).optional(),
+  projectTarget: z.string().min(1).optional(),
+  bindingState: z.enum(["bound", "unbound"]),
+  activeRun: OpenTagSourceThreadStatusRunSchema.optional(),
+  queuedFollowUps: z.array(OpenTagSourceThreadQueuedFollowUpSchema),
+  queuedFollowUpsTotal: z.number().int().nonnegative().optional(),
+  currentCommand: z.string().min(1).optional(),
+  nextAction: z.string().min(1),
+  stopHint: z.string().min(1).optional(),
+  detailHint: z.string().min(1).optional()
+});
+
+export const OpenTagActionReceiptPresentationSchema = z.object({
+  kind: z.literal("action_receipt"),
+  title: z.string().min(1),
+  actions: z.array(OpenTagPresentationActionSchema),
+  auditRunId: z.string().min(1).optional()
+});
+
+export const OpenTagFinalSummaryPresentationSchema = z.object({
+  kind: z.literal("final_summary"),
+  outcome: z.string().min(1),
+  summary: z.string().min(1),
+  changedFiles: z.array(z.string().min(1)).optional(),
+  verification: OpenTagRunResultSchema.shape.verification,
+  nextActions: z.array(z.string().min(1)).optional(),
+  actionReceiptTitle: z.string().min(1).optional(),
+  actions: z.array(OpenTagPresentationActionSchema).optional(),
+  auditRunId: z.string().min(1).optional(),
+  result: OpenTagRunResultSchema
+});
+
+export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
+  OpenTagRunStatusPresentationSchema,
+  OpenTagDoctorSummaryPresentationSchema,
+  OpenTagSourceThreadStatusPresentationSchema,
+  OpenTagActionReceiptPresentationSchema,
+  OpenTagFinalSummaryPresentationSchema
+]);
+
+export type OpenTagPresentationAction = z.infer<typeof OpenTagPresentationActionSchema>;
+export type OpenTagRunStatusPresentation = z.infer<typeof OpenTagRunStatusPresentationSchema>;
+export type OpenTagDoctorCheckPresentation = z.infer<typeof OpenTagDoctorCheckPresentationSchema>;
+export type OpenTagDoctorSummaryPresentation = z.infer<typeof OpenTagDoctorSummaryPresentationSchema>;
+export type OpenTagSourceThreadStatusRun = z.infer<typeof OpenTagSourceThreadStatusRunSchema>;
+export type OpenTagSourceThreadQueuedFollowUp = z.infer<typeof OpenTagSourceThreadQueuedFollowUpSchema>;
+export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSourceThreadStatusPresentationSchema>;
+export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
+export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
+export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
+
+function nextActionSummary(result: OpenTagRunResult): string | undefined {
+  if (!result.nextAction) return undefined;
+  if (typeof result.nextAction === "string") return result.nextAction;
+  return result.nextAction.summary;
+}
+
+function presentationActionFromReceipt(receipt: ActionReceipt): OpenTagPresentationAction {
+  const details = presentationActionDetailsFromReceipt(receipt);
+  const detailRows = presentationActionDetailRowsFromReceipt(receipt);
+  return {
+    index: receipt.candidate.index,
+    proposalId: receipt.candidate.proposalId,
+    intentId: receipt.candidate.intent.intentId,
+    title: receipt.candidate.intent.summary,
+    state: receipt.state as ActionReceiptState,
+    targetLabel: receipt.targetLabel,
+    visibleDecisions: receipt.visibleDecisions as ActionReceiptDecision[],
+    primaryDecision: receipt.primaryDecision as ActionReceiptPrimaryDecision,
+    ...(receipt.setupReason ? { setupReason: receipt.setupReason } : {}),
+    ...(details.length ? { details } : {}),
+    ...(detailRows.length ? { detailRows } : {})
+  };
+}
+
+function stringParam(params: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = params?.[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function stringArrayParam(params: Record<string, unknown> | undefined, key: string): string[] {
+  const value = params?.[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function inlineCode(value: string): string {
+  return `\`${value.replace(/`/g, "\\`")}\``;
+}
+
+function listValue(values: string[]): string {
+  return values.join("\n");
+}
+
+function actionDecisionCommand(decision: ActionReceiptDecision, index: number): string {
+  return `${decision} ${index}`;
+}
+
+function renderVerificationParams(params: Record<string, unknown> | undefined): string[] {
+  const value = params?.["verification"];
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+      const command = (item as Record<string, unknown>)["command"];
+      const outcome = (item as Record<string, unknown>)["outcome"];
+      const summary = (item as Record<string, unknown>)["summary"];
+      if (typeof outcome !== "string") return undefined;
+      const prefix = typeof command === "string" && command.length > 0 ? `${inlineCode(command)}: ${outcome}` : outcome;
+      return typeof summary === "string" && summary.length > 0 ? `${prefix} - ${summary}` : prefix;
+    })
+    .filter((line): line is string => Boolean(line));
+}
+
+function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] {
+  const details: string[] = [];
+  const params = receipt.candidate.intent.params;
+  if (receipt.candidate.intent.action === "create_pull_request") {
+    const head = stringParam(params, "head") ?? stringParam(params, "branch");
+    const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
+    const changedFiles = stringArrayParam(params, "changedFiles");
+    if (head || base) details.push(`Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
+    if (changedFiles.length > 0) details.push(`Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
+  }
+  if (receipt.candidate.proposalPreconditions?.length) {
+    details.push(`Preconditions: ${receipt.candidate.proposalPreconditions.length} check(s) in the audit log.`);
+  }
+  return details;
+}
+
+function presentationActionDetailRowsFromReceipt(receipt: ActionReceipt): Array<{ label: string; value: string }> {
+  const candidate = receipt.candidate;
+  const params = candidate.intent.params;
+  const rows: Array<{ label: string; value: string }> = [{ label: "Target", value: receipt.targetLabel }];
+  if (receipt.setupReason) rows.push({ label: "Status", value: receipt.setupReason });
+  if (candidate.intent.action === "create_pull_request") {
+    const title = stringParam(params, "title");
+    const head = stringParam(params, "head") ?? stringParam(params, "branch");
+    const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
+    const changedFiles = stringArrayParam(params, "changedFiles");
+    const risks = stringArrayParam(params, "risks");
+    const verification = renderVerificationParams(params);
+    if (title) rows.push({ label: "Title", value: title });
+    if (head || base) rows.push({ label: "Branch", value: `${inlineCode(head ?? "unknown")} -> ${inlineCode(base ?? "main")}` });
+    if (changedFiles.length > 0) rows.push({ label: "Changed files", value: changedFiles.map(inlineCode).join(", ") });
+    if (verification.length > 0) rows.push({ label: "Verification", value: listValue(verification) });
+    if (risks.length > 0) rows.push({ label: "Risks", value: listValue(risks) });
+  }
+  if (candidate.proposalPreconditions?.length) {
+    rows.push({ label: "Preconditions", value: listValue(candidate.proposalPreconditions) });
+  }
+  return rows;
+}
+
+export function createRunStatusPresentation(input: {
+  runId: string;
+  state: OpenTagRunStatusPresentation["state"];
+  message?: string;
+  nextAction?: string;
+  detailVisibility?: OpenTagRunStatusPresentation["detailVisibility"];
+}): OpenTagRunStatusPresentation {
+  return OpenTagRunStatusPresentationSchema.parse({
+    kind: "run_status",
+    runId: input.runId,
+    state: input.state,
+    ...(input.message ? { message: input.message } : {}),
+    ...(input.nextAction ? { nextAction: input.nextAction } : {}),
+    ...(input.detailVisibility ? { detailVisibility: input.detailVisibility } : {})
+  });
+}
+
+export function createDoctorSummaryPresentation(input: {
+  title?: string;
+  checks: OpenTagDoctorCheckPresentation[];
+}): OpenTagDoctorSummaryPresentation {
+  return OpenTagDoctorSummaryPresentationSchema.parse({
+    kind: "doctor_summary",
+    title: input.title ?? "OpenTag doctor",
+    checks: input.checks.map((check) => ({
+      status: check.status,
+      name: check.name,
+      ...(check.message ? { message: check.message } : {})
+    }))
+  });
+}
+
+export function createSourceThreadStatusPresentation(input: {
+  title?: string;
+  sourceContainer?: string;
+  projectTarget?: string;
+  bindingState: OpenTagSourceThreadStatusPresentation["bindingState"];
+  activeRun?: OpenTagSourceThreadStatusRun;
+  queuedFollowUps?: OpenTagSourceThreadQueuedFollowUp[];
+  queuedFollowUpsTotal?: number;
+  currentCommand?: string;
+  nextAction: string;
+  stopHint?: string;
+  detailHint?: string;
+}): OpenTagSourceThreadStatusPresentation {
+  return OpenTagSourceThreadStatusPresentationSchema.parse({
+    kind: "source_thread_status",
+    title: input.title ?? "OpenTag status",
+    ...(input.sourceContainer ? { sourceContainer: input.sourceContainer } : {}),
+    ...(input.projectTarget ? { projectTarget: input.projectTarget } : {}),
+    bindingState: input.bindingState,
+    ...(input.activeRun ? { activeRun: input.activeRun } : {}),
+    queuedFollowUps: input.queuedFollowUps ?? [],
+    ...(input.queuedFollowUpsTotal !== undefined ? { queuedFollowUpsTotal: input.queuedFollowUpsTotal } : {}),
+    ...(input.currentCommand ? { currentCommand: input.currentCommand } : {}),
+    nextAction: input.nextAction,
+    ...(input.stopHint ? { stopHint: input.stopHint } : {}),
+    ...(input.detailHint ? { detailHint: input.detailHint } : {})
+  });
+}
+
+export function createActionReceiptPresentation(input: {
+  result: OpenTagRunResult;
+  receiptContext?: ActionReceiptContext;
+  auditRunId?: string;
+}): OpenTagActionReceiptPresentation | null {
+  const receipts = buildActionReceiptsFromResult(input.result, input.receiptContext);
+  if (receipts.length === 0) return null;
+  return OpenTagActionReceiptPresentationSchema.parse({
+    kind: "action_receipt",
+    title: actionReceiptHeading(receipts),
+    actions: receipts.map(presentationActionFromReceipt),
+    ...(input.auditRunId ? { auditRunId: input.auditRunId } : {})
+  });
+}
+
+export function createFinalSummaryPresentation(input: {
+  result: OpenTagRunResult;
+  receiptContext?: ActionReceiptContext;
+  auditRunId?: string;
+}): OpenTagFinalSummaryPresentation {
+  const actionReceipt = createActionReceiptPresentation(input);
+  const nextAction = nextActionSummary(input.result);
+  return OpenTagFinalSummaryPresentationSchema.parse({
+    kind: "final_summary",
+    outcome: input.result.conclusion,
+    summary: input.result.summary,
+    ...(input.result.changedFiles?.length ? { changedFiles: input.result.changedFiles } : {}),
+    ...(input.result.verification?.length ? { verification: input.result.verification } : {}),
+    ...(nextAction ? { nextActions: [nextAction] } : {}),
+    ...(actionReceipt ? { actionReceiptTitle: actionReceipt.title, actions: actionReceipt.actions } : {}),
+    ...(input.auditRunId ? { auditRunId: input.auditRunId } : {}),
+    result: input.result
+  });
+}
+
+export function renderOpenTagPresentationPlainText(presentation: OpenTagPresentation): string {
+  if (presentation.kind === "run_status") {
+    return [
+      `Run ${presentation.runId}: ${presentation.state}`,
+      ...(presentation.message ? [`Message: ${presentation.message}`] : []),
+      ...(presentation.nextAction ? [`Next action: ${presentation.nextAction}`] : [])
+    ].join("\n");
+  }
+  if (presentation.kind === "doctor_summary") {
+    return [
+      presentation.title,
+      ...presentation.checks.map((check) => `${check.status.toUpperCase()} ${check.name}${check.message ? `: ${check.message}` : ""}`)
+    ].join("\n");
+  }
+  if (presentation.kind === "source_thread_status") {
+    const queuedTotal = presentation.queuedFollowUpsTotal ?? presentation.queuedFollowUps.length;
+    const queuedOverflow = Math.max(queuedTotal - presentation.queuedFollowUps.length, 0);
+    const queuedIds = presentation.queuedFollowUps.map((followUp) => {
+      const status = followUp.status ? ` (${followUp.status})` : "";
+      const command = followUp.command ? `: ${followUp.command}` : "";
+      return `${followUp.id}${status}${command}`;
+    });
+    const queuedDetail =
+      queuedIds.length > 0 ? ` (${queuedIds.join(", ")}${queuedOverflow > 0 ? `, +${queuedOverflow} more` : ""})` : "";
+    const queuedFollowUps =
+      queuedTotal === 0
+        ? "none"
+        : `${queuedTotal}${queuedDetail}`;
+    const activeRun = presentation.activeRun
+      ? `${presentation.activeRun.id} (${presentation.activeRun.status})${presentation.activeRun.updatedAt ? `, updated ${presentation.activeRun.updatedAt}` : ""}`
+      : "none";
+    return [
+      presentation.title,
+      ...(presentation.sourceContainer ? [`Source container: ${presentation.sourceContainer}`] : []),
+      `Project Target: ${presentation.projectTarget ?? "not bound"}`,
+      `Active run: ${activeRun}`,
+      ...(presentation.currentCommand ? [`Command: ${presentation.currentCommand}`] : []),
+      `Queued follow-ups: ${queuedFollowUps}`,
+      `Next action: ${presentation.nextAction}`,
+      ...(presentation.stopHint ? [`Stop/timeout: ${presentation.stopHint}`] : []),
+      ...(presentation.detailHint ? [`Details: ${presentation.detailHint}`] : [])
+    ].join("\n");
+  }
+  if (presentation.kind === "action_receipt") {
+    const lines = [presentation.title];
+    for (const action of presentation.actions) {
+      lines.push(`${action.index}. ${action.title}`);
+      lines.push(`Target: ${action.targetLabel}`);
+      if (action.setupReason) lines.push(`Status: ${action.setupReason}`);
+      if (action.details?.length) lines.push(...action.details);
+      lines.push(`Actions: ${action.visibleDecisions.map((decision) => actionDecisionCommand(decision, action.index)).join(", ")}`);
+    }
+    if (presentation.auditRunId) lines.push(`Audit: opentag status --run ${presentation.auditRunId}`);
+    return lines.join("\n");
+  }
+  return [
+    `Finished: ${presentation.outcome}`,
+    presentation.summary,
+    ...(presentation.changedFiles?.length ? ["Changed files:", ...presentation.changedFiles.map((file) => `- ${file}`)] : []),
+    ...(presentation.verification?.length ? ["Verification:", ...presentation.verification.map((check) => `- ${check.command}: ${check.outcome}`)] : []),
+    ...(presentation.nextActions?.length ? ["Next actions:", ...presentation.nextActions.map((action) => `- ${action}`)] : []),
+    ...(presentation.auditRunId ? [`Audit: opentag status --run ${presentation.auditRunId}`] : [])
+  ].join("\n");
+}

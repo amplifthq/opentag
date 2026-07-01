@@ -163,10 +163,13 @@ describe("action receipts", () => {
       }
     });
 
-    expect(actionReceiptHeading([ready, setup])).toBe("Some actions need setup");
+    expect(actionReceiptHeading([ready, setup])).toBe("1 action ready to apply, 1 action needs setup");
     expect(actionReceiptHeading([unsupported])).toBe("Needs attention");
-    expect(actionReceiptHeading([ready, unsupported])).toBe("Some actions need attention");
-    expect(actionReceiptHeading([ready, approval])).toBe("Needs review");
+    expect(actionReceiptHeading([ready, unsupported])).toBe("1 action ready to apply, 1 action needs attention");
+    expect(actionReceiptHeading([ready, approval])).toBe("1 action ready to apply, 1 action needs approval");
+    expect(actionReceiptHeading([ready, setup, unsupported])).toBe(
+      "1 action ready to apply, 1 action needs setup, 1 action needs attention"
+    );
   });
 });
 
