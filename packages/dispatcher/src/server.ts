@@ -241,6 +241,24 @@ import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admissio
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
+type DelayedLarkStatusPhase = "queued" | "running" | "progress";
+type DelayedLarkStatusTimer = ReturnType<typeof globalThis.setTimeout>;
+
+export type LarkDelayedStatusCardOptions = {
+  enabled?: boolean;
+  delayMs?: number;
+  minUpdateIntervalMs?: number;
+  now?(): number;
+  setTimeout?(callback: () => void, delayMs: number): DelayedLarkStatusTimer;
+  clearTimeout?(handle: DelayedLarkStatusTimer): void;
+};
+
+type DelayedLarkStatusState = {
+  timer?: DelayedLarkStatusTimer;
+  cardCreated: boolean;
+  lastPhase?: DelayedLarkStatusPhase;
+  lastUpdateAt?: number;
+};
 
 function shouldDeliverRunStatusUpdate(
   presentation: CallbackPresentation,
@@ -251,6 +269,19 @@ function shouldDeliverRunStatusUpdate(
 
 function larkLifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
   return input.provider === "lark" ? `${input.runId}:status` : undefined;
+}
+
+function isTerminalRun(run: OpenTagRun): boolean {
+  return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
+}
+
+function shouldUseDelayedLarkStatusCard(provider: string, options: LarkDelayedStatusCardOptions): boolean {
+  return provider === "lark" && options.enabled !== false;
+}
+
+function safeExecutorLabel(executor: string | undefined): string {
+  if (!executor || !/^[a-z0-9._-]{1,40}$/i.test(executor)) return "the selected agent";
+  return executor;
 }
 
 const CreateRunnerSchema = z.object({
@@ -1664,7 +1695,7 @@ async function deliverAndAudit(input: {
   sink: CallbackSink;
   message: CallbackMessage;
   retry?: CallbackRetryOptions;
-}): Promise<void> {
+}): Promise<boolean> {
   const delivery = await input.repo.enqueueCallbackDelivery({
     runId: input.message.runId,
     kind: input.message.kind,
@@ -1677,7 +1708,7 @@ async function deliverAndAudit(input: {
     ...(input.message.blocks ? { blocks: input.message.blocks } : {}),
     ...(input.message.rich ? { rich: input.message.rich } : {})
   });
-  await deliverCallbackDelivery({
+  return deliverCallbackDelivery({
     repo: input.repo,
     sink: input.sink,
     delivery,
@@ -1839,6 +1870,7 @@ export function createDispatcherApp(input: {
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   callbackRetry?: CallbackRetryOptions;
+  larkStatusCards?: LarkDelayedStatusCardOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
@@ -1851,6 +1883,13 @@ export function createDispatcherApp(input: {
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
   const callbackRetry = input.callbackRetry ?? {};
+  const larkStatusCardOptions = input.larkStatusCards ?? {};
+  const larkStatusCardDelayMs = larkStatusCardOptions.delayMs ?? 10_000;
+  const larkStatusCardMinUpdateIntervalMs = larkStatusCardOptions.minUpdateIntervalMs ?? 5_000;
+  const larkStatusCardNow = larkStatusCardOptions.now ?? (() => Date.now());
+  const setLarkStatusCardTimeout = larkStatusCardOptions.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
+  const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
+  const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const runnerTokens = configuredRunnerTokens(input);
   const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
@@ -1928,6 +1967,173 @@ export function createDispatcherApp(input: {
       message: "Run status callback suppressed by platform liveness strategy; use status or audit for details."
     });
   };
+
+  function delayedLarkStatusMessage(input: { run: OpenTagRun; phase: DelayedLarkStatusPhase }): string {
+    if (input.phase === "queued") return "Waiting for the local runner.";
+    if (input.phase === "progress") return "OpenTag is still working.";
+    return `Running with ${safeExecutorLabel(input.run.executor)}.`;
+  }
+
+  function delayedLarkStatusState(input: { run: OpenTagRun; phase: DelayedLarkStatusPhase }): CallbackRunStatusState {
+    if (input.phase === "queued") return "queued";
+    return "running";
+  }
+
+  async function appendDelayedLarkStatusFailure(input: { runId: string; error: unknown }): Promise<void> {
+    await repo.appendRunEvent({
+      runId: input.runId,
+      type: "callback.progress.failed",
+      payload: {
+        provider: "lark",
+        reason: "delayed_status_card",
+        error: input.error instanceof Error ? input.error.message : String(input.error)
+      },
+      visibility: "audit",
+      importance: "low",
+      message: "Delayed Lark status card update failed."
+    });
+  }
+
+  async function deliverDelayedLarkStatusCard(input: {
+    run: OpenTagRun;
+    event: OpenTagEvent;
+    phase: DelayedLarkStatusPhase;
+    createIfMissing?: boolean;
+  }): Promise<boolean> {
+    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return false;
+    if (!input.event.callback.threadKey) return false;
+    if (isTerminalRun(input.run)) return false;
+
+    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+    if (!statusMessageKey) return false;
+
+    const state = delayedLarkStatusCards.get(input.run.id) ?? { cardCreated: false };
+    delayedLarkStatusCards.set(input.run.id, state);
+
+    if (!input.createIfMissing && !state.cardCreated) return false;
+
+    const now = larkStatusCardNow();
+    const phaseChanged = state.lastPhase !== input.phase;
+    const intervalElapsed = !state.lastUpdateAt || now - state.lastUpdateAt >= larkStatusCardMinUpdateIntervalMs;
+    if (!input.createIfMissing && !phaseChanged && !intervalElapsed) return false;
+
+    const statusPresentation = presentation.runStatusPresentation({
+      runId: input.run.id,
+      state: delayedLarkStatusState({ run: input.run, phase: input.phase }),
+      message: delayedLarkStatusMessage({ run: input.run, phase: input.phase }),
+      nextAction: "Use /status here for active-run and queue state, or wait for the final result.",
+      detailVisibility: "source_thread"
+    });
+    const rendered = presentation.render({
+      provider: input.event.callback.provider,
+      presentation: statusPresentation
+    });
+
+    const delivered = await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: {
+        runId: input.run.id,
+        kind: "progress",
+        provider: input.event.callback.provider,
+        uri: input.event.callback.uri,
+        body: rendered.body,
+        ...(input.event.target.agentId ? { agentId: input.event.target.agentId } : {}),
+        threadKey: input.event.callback.threadKey,
+        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+        ...(rendered.rich ? { rich: rendered.rich } : {}),
+        statusMessageKey
+      }
+    });
+    if (!delivered) return false;
+
+    state.cardCreated = true;
+    state.lastPhase = input.phase;
+    state.lastUpdateAt = now;
+    return true;
+  }
+
+  function scheduleDelayedLarkStatusCard(input: { run: OpenTagRun; event: OpenTagEvent }): void {
+    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return;
+    if (!input.event.callback.threadKey) return;
+    if (larkStatusCardDelayMs < 0) return;
+    const existing = delayedLarkStatusCards.get(input.run.id);
+    if (existing?.timer || existing?.cardCreated) return;
+
+    const state = existing ?? { cardCreated: false };
+    const timer = setLarkStatusCardTimeout(() => {
+      delete state.timer;
+      void (async () => {
+        try {
+          const latestRun = await repo.getRun({ runId: input.run.id });
+          if (!latestRun || isTerminalRun(latestRun.run)) {
+            delayedLarkStatusCards.delete(input.run.id);
+            return;
+          }
+          const phase: DelayedLarkStatusPhase = latestRun.run.status === "queued" ? "queued" : "running";
+          await deliverDelayedLarkStatusCard({
+            run: latestRun.run,
+            event: input.event,
+            phase,
+            createIfMissing: true
+          });
+        } catch (error) {
+          await appendDelayedLarkStatusFailure({ runId: input.run.id, error });
+        }
+      })();
+    }, larkStatusCardDelayMs);
+    if (timer && typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+    state.timer = timer;
+    delayedLarkStatusCards.set(input.run.id, state);
+  }
+
+  function cancelPendingDelayedLarkStatusCard(runId: string): void {
+    const state = delayedLarkStatusCards.get(runId);
+    if (!state?.timer) return;
+    clearLarkStatusCardTimeout(state.timer);
+    delete state.timer;
+  }
+
+  function clearDelayedLarkStatusCard(runId: string): void {
+    cancelPendingDelayedLarkStatusCard(runId);
+    delayedLarkStatusCards.delete(runId);
+  }
+
+  async function patchDelayedLarkStatusCard(input: {
+    run: OpenTagRun;
+    event: OpenTagEvent;
+    phase: DelayedLarkStatusPhase;
+  }): Promise<void> {
+    let state = delayedLarkStatusCards.get(input.run.id);
+    if (!state?.cardCreated) {
+      const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+      const externalMessageId =
+        statusMessageKey && input.event.callback.threadKey
+          ? await repo.findCallbackExternalMessageId({
+              runId: input.run.id,
+              provider: input.event.callback.provider,
+              threadKey: input.event.callback.threadKey,
+              statusMessageKey
+            })
+          : undefined;
+      if (!externalMessageId) return;
+      state = state ?? { cardCreated: true };
+      state.cardCreated = true;
+      delayedLarkStatusCards.set(input.run.id, state);
+    }
+    try {
+      await deliverDelayedLarkStatusCard({
+        run: input.run,
+        event: input.event,
+        phase: input.phase
+      });
+    } catch (error) {
+      await appendDelayedLarkStatusFailure({ runId: input.run.id, error });
+    }
+  }
 
   async function deliverPromotedFollowUpAcknowledgement(input: {
     run: OpenTagRun;
@@ -2482,6 +2688,9 @@ export function createDispatcherApp(input: {
         ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {})
       }
     });
+    if (sourceReceiptDelivery.delivered) {
+      scheduleDelayedLarkStatusCard({ run, event: parsed.event });
+    }
     const shouldDeliverAcknowledgement =
       presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider) ||
       (shouldDeliverSourceReceipt(parsed.event.callback.provider) && !sourceReceiptDelivery.delivered);
@@ -2990,6 +3199,11 @@ export function createDispatcherApp(input: {
     } else if (presentation.shouldDeliverStatusUpdate(provider)) {
       await appendSuppressedRunStatusCallback({ runId, provider, state: "running" });
     }
+    await patchDelayedLarkStatusCard({
+      run: stored.run,
+      event: stored.event,
+      phase: "running"
+    });
     return c.json({ ok: true });
   });
 
@@ -3060,6 +3274,11 @@ export function createDispatcherApp(input: {
         message: "Progress callback suppressed by platform liveness strategy; use status or audit for details."
       });
     }
+    await patchDelayedLarkStatusCard({
+      run: stored.run,
+      event: stored.event,
+      phase: "progress"
+    });
     return c.json({ ok: true });
   });
 
@@ -3085,6 +3304,7 @@ export function createDispatcherApp(input: {
     if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
+    cancelPendingDelayedLarkStatusCard(runId);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
       result: parsed.result,
@@ -3150,6 +3370,7 @@ export function createDispatcherApp(input: {
         ...(finalCallback.rich ? { rich: finalCallback.rich } : {})
       }
     });
+    clearDelayedLarkStatusCard(runId);
     const shouldPromoteFollowUp = parsed.result.conclusion !== "needs_human" && parsed.result.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({

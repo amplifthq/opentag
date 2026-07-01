@@ -272,6 +272,36 @@ describe("createLarkFinalSummaryCard", () => {
     expect(rendered).not.toContain("proposal_pr");
     expect(rendered).not.toContain("intent_create_pr");
   });
+
+  it("keeps long Markdown summaries readable instead of flattening them into one Lark paragraph", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_summary",
+      result: {
+        conclusion: "success",
+        summary: [
+          "Preserved marker: `summary E2E 20260701T101750Z`",
+          "",
+          "**High-Level Summary**",
+          "OpenTag is a local-first, source-thread-native agent invocation system.",
+          "",
+          "**Repo Map**",
+          "- The repo is a `pnpm` TypeScript monorepo with packages under `packages/*`.",
+          "- `@opentag/core` defines protocol types and validation."
+        ].join("\n"),
+        nextAction: "No file changes were detected."
+      }
+    });
+
+    const card = createLarkFinalSummaryCard(presentation);
+    const summaryElements = card.elements.filter((element) => element.tag === "div");
+    const rendered = JSON.stringify(summaryElements);
+
+    expect(rendered).toContain("High-Level Summary");
+    expect(rendered).toContain("Repo Map");
+    expect(rendered).toContain("packages/*");
+    expect(rendered).not.toContain("Preserved marker: summary E2E 20260701T101750Z High-Level Summary");
+    expect(summaryElements.some((element) => element.tag === "div" && element.text.tag === "plain_text" && element.text.content.includes("packages/*"))).toBe(true);
+  });
 });
 
 describe("createLarkTextMessageContent", () => {

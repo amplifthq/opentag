@@ -21,7 +21,7 @@ import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceRecei
 export type FetchLike = typeof fetch;
 
 const DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS = 5_000;
-const DEFAULT_LARK_RECEIVED_REACTION = "OK";
+const DEFAULT_LARK_RECEIVED_REACTION = "Typing";
 
 function slackUpdateUriFrom(postMessageUri: string): string {
   return postMessageUri.replace(/\/chat\.postMessage$/, "/chat.update");

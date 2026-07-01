@@ -27,11 +27,12 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The current public release is `0.3.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The current public release is `0.3.4`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
 The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
 The `0.3.0` release improved CLI setup flexibility, source-thread approval rendering, Slack interactivity, and executor result summaries.
+The `0.3.4` release improves service startup reliability, Lark status updates, final-card readability, and read-only executor result summaries.
 
 For each npm release:
 

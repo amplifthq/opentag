@@ -70,7 +70,7 @@ export function renderLarkRunStatusPresentation(presentation: OpenTagRunStatusPr
     return ["Waiting for your review.", `Run: ${presentation.runId}`, "Review the action receipt in this thread, or use /status here for details."].join("\n");
   }
   if (presentation.state === "running") {
-    return ["OpenTag is working.", `Run: ${presentation.runId}`, "Use /status here for details."].join("\n");
+    return [presentation.message ?? "OpenTag is working.", `Run: ${presentation.runId}`, "Use /status here for details."].join("\n");
   }
   return [
     `OpenTag run ${presentation.state}.`,
@@ -165,8 +165,119 @@ function compactCardText(text: string, maxLength: number): string {
   return `${compact.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
 }
 
+function compactMultilineText(text: string, maxLength: number): string {
+  const compact = text.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+}
+
 function larkMarkdownList(items: string[]): string {
   return items.map((item) => `- ${item}`).join("\n");
+}
+
+function larkSummaryHeading(line: string): string | undefined {
+  const trimmed = line.trim();
+  const markdownHeading = trimmed.match(/^#{1,6}\s+(.+)$/);
+  if (markdownHeading?.[1]) return larkPlain(markdownHeading[1]).trim();
+  const boldHeading = trimmed.match(/^\*\*(.+?)\*\*$/);
+  if (boldHeading?.[1]) return larkPlain(boldHeading[1]).trim();
+  return undefined;
+}
+
+function larkPlainSummaryLine(line: string): string {
+  return larkPlain(line)
+    .replace(/^\s*#{1,6}\s+/, "")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .trimEnd();
+}
+
+function larkSummarySections(summary: string): Array<{ title?: string; content: string }> {
+  const sections: Array<{ title?: string; lines: string[] }> = [];
+  let current: { title?: string; lines: string[] } = { lines: [] };
+
+  function flush(): void {
+    while (current.lines.at(-1) === "") current.lines.pop();
+    const content = current.lines.join("\n").trim();
+    if (current.title || content) {
+      sections.push({ ...(current.title ? { title: current.title } : {}), lines: content ? content.split("\n") : [] });
+    }
+  }
+
+  for (const rawLine of summary.replace(/\r\n/g, "\n").split("\n")) {
+    const trimmed = rawLine.trim();
+    if (trimmed.startsWith("```")) continue;
+
+    const heading = larkSummaryHeading(trimmed);
+    if (heading) {
+      flush();
+      current = { title: heading, lines: [] };
+      continue;
+    }
+
+    if (trimmed.length === 0) {
+      if (current.lines.length > 0 && current.lines.at(-1) !== "") current.lines.push("");
+      continue;
+    }
+
+    current.lines.push(larkPlainSummaryLine(rawLine).trim());
+  }
+  flush();
+
+  return sections.map((section) => ({
+    ...(section.title ? { title: section.title } : {}),
+    content: compactMultilineText(section.lines.join("\n"), 600)
+  }));
+}
+
+function larkFinalSummaryElements(summary: string): LarkCardElement[] {
+  const sections = larkSummarySections(summary);
+  const visibleSections = sections.slice(0, 3);
+  const elements: LarkCardElement[] = [];
+
+  for (const section of visibleSections) {
+    if (section.title) {
+      elements.push({
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content: `**${section.title}**`
+        }
+      });
+    }
+    if (section.content) {
+      elements.push({
+        tag: "div",
+        text: {
+          tag: "plain_text",
+          content: section.content
+        }
+      });
+    }
+  }
+
+  if (sections.length > visibleSections.length) {
+    elements.push({
+      tag: "note",
+      elements: [
+        {
+          tag: "plain_text",
+          content: "Summary preview truncated. Full detail is available in the audit/status output."
+        }
+      ]
+    });
+  }
+
+  return elements.length > 0
+    ? elements
+    : [
+        {
+          tag: "div",
+          text: {
+            tag: "plain_text",
+            content: compactMultilineText(larkPlain(summary), 900)
+          }
+        }
+      ];
 }
 
 function larkActionDecisionLabel(decision: OpenTagPresentationAction["visibleDecisions"][number], index: number): string {
@@ -218,15 +329,7 @@ function larkActionReceiptHeaderTemplate(actions: OpenTagPresentationAction[]): 
 }
 
 export function createLarkFinalSummaryCard(presentation: OpenTagFinalSummaryPresentation): LarkCard {
-  const elements: LarkCardElement[] = [
-    {
-      tag: "div",
-      text: {
-        tag: "lark_md",
-        content: compactCardText(presentation.summary, 900)
-      }
-    }
-  ];
+  const elements: LarkCardElement[] = larkFinalSummaryElements(presentation.summary);
 
   if (presentation.verification?.length) {
     elements.push({ tag: "hr" });

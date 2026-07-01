@@ -84,14 +84,16 @@ OpenTag keeps Lark / Feishu commands Project Target based:
 
 Group chats must @-mention the bot before commands or runs. Direct messages may be more permissive, but they still use Project Target bindings instead of absolute local paths. In group chats, `/bind` and `/unbind confirm` also require a binding-admin allowlist entry (`OPENTAG_LARK_BINDING_ADMIN_OPEN_IDS`, `OPENTAG_LARK_BINDING_ADMIN_USER_IDS`, or `OPENTAG_LARK_BINDING_ADMIN_UNION_IDS`).
 
-For a newly-created run, OpenTag keeps the chat quiet by default: it sends one
-short, updateable status card, updates that card when queue/review state needs
-attention, and patches the final result into the same status card when the
-platform accepts card updates. Routine running/progress updates stay in the
-audit log; use `/status` in the chat or `opentag status --run <run_id>` locally
-for active state and audit detail. If the platform rejects a card update,
-OpenTag keeps the local audit trail as the source of truth and the callback
-delivery can be retried.
+For a newly-created run, OpenTag keeps the chat quiet by default: it marks the
+source message with a lightweight "typing" reaction to show that work started.
+If the run finishes quickly, OpenTag skips the intermediate status card and posts
+only the final result. If the run crosses the delayed-status threshold, OpenTag
+posts one updateable status card, throttles routine progress updates, and patches
+the final result back into that same card when the platform accepts card updates.
+Routine executor details stay in the audit log; use `/status` in the chat or
+`opentag status --run <run_id>` locally for active state and audit detail. If the
+platform rejects the source receipt, OpenTag falls back to a short received card
+so users still get immediate liveness.
 
 ## Test
 
@@ -102,5 +104,6 @@ opentag start
 ```
 
 Then mention or message the Personal Agent from Lark / Feishu. OpenTag should
-send a short status card, run the selected coding agent locally, and later update
-that card with the final result in the same conversation.
+add a lightweight received reaction, run the selected coding agent locally, and
+later post the final result card in the same conversation. Longer runs may also
+show one updateable status card before completion.

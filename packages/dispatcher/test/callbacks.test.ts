@@ -647,7 +647,6 @@ describe("createGitHubCallbackSink", () => {
   it("adds a Lark source receipt reaction to the source message", async () => {
     const requests: unknown[] = [];
     const sink = createLarkSourceReceiptSink({
-      receivedEmojiType: "OK",
       client: {
         async request(payload) {
           requests.push(payload);
@@ -691,7 +690,61 @@ describe("createGitHubCallbackSink", () => {
         url: "/open-apis/im/v1/messages/om_msg/reactions",
         data: {
           reaction_type: {
-            emoji_type: "OK"
+            emoji_type: "Typing"
+          }
+        }
+      }
+    ]);
+  });
+
+  it("allows overriding the Lark source receipt reaction", async () => {
+    const requests: unknown[] = [];
+    const sink = createLarkSourceReceiptSink({
+      receivedEmojiType: "OnIt",
+      client: {
+        async request(payload) {
+          requests.push(payload);
+          return { data: { reaction_id: "reaction_1" } };
+        },
+        im: {}
+      }
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        provider: "lark",
+        state: "received",
+        event: {
+          id: "evt_1",
+          source: "lark",
+          sourceEventId: "Ev123",
+          receivedAt: "2026-06-24T00:00:00.000Z",
+          actor: { provider: "lark", providerUserId: "ou_123", handle: "ming", organizationId: "tenant_1" },
+          target: { mention: "@opentag", agentId: "opentag" },
+          command: { rawText: "fix this", intent: "fix", args: {} },
+          context: [{ provider: "lark", kind: "message", uri: "lark://tenant/tenant_1/chat/oc_chat/message/om_msg" }],
+          permissions: [
+            { scope: "chat:postMessage", reason: "reply to source thread" },
+            { scope: "im:message.reactions:write_only", reason: "mark the source Lark message as received" }
+          ],
+          callback: {
+            provider: "lark",
+            uri: "lark://im/v1/messages",
+            threadKey: "tenant_1|oc_chat|om_msg"
+          },
+          metadata: { tenantKey: "tenant_1", chatId: "oc_chat", messageId: "om_msg" }
+        }
+      })
+    ).resolves.toEqual({ delivered: true });
+
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "/open-apis/im/v1/messages/om_msg/reactions",
+        data: {
+          reaction_type: {
+            emoji_type: "OnIt"
           }
         }
       }

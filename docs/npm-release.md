@@ -9,7 +9,7 @@ Publish all public packages together with the same version. The CLI depends on l
 Current release version:
 
 ```text
-0.3.0
+0.3.4
 ```
 
 Package publish order:

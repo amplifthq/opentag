@@ -37,6 +37,10 @@ function jsonRequest(body: unknown) {
   };
 }
 
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function tokenFingerprint(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -2095,6 +2099,211 @@ describe("dispatcher API", () => {
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt_fallback", event }));
     expect(createResponse.status).toBe(201);
     expect(callbacks).toEqual([{ kind: "acknowledgement", hasRich: true }]);
+  });
+
+  it("does not create a delayed Lark status card when the run finishes before the threshold", async () => {
+    const delivered: Array<{ kind: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      larkStatusCards: { delayMs: 20 },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
+        }
+      },
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
+            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
+            ...(message.rich ? { hasRich: true } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "om_final" };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = larkRepoEvent({ id: "evt_lark_short_status_card", sourceEventId: "EvLarkShortStatusCard" });
+    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_short_status_card", event }))).status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_lark_short_status_card/running", jsonRequest({ executor: "codex" }))).status
+    ).toBe(200);
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_lark_short_status_card/complete", jsonRequest({
+        result: {
+          conclusion: "success",
+          summary: "Done quickly.",
+          verification: [{ command: "echo", outcome: "passed" }]
+        }
+      }))).status
+    ).toBe(200);
+
+    await wait(40);
+
+    expect(delivered).toEqual([
+      {
+        kind: "final",
+        statusMessageKey: "run_lark_short_status_card:status",
+        hasRich: true
+      }
+    ]);
+  });
+
+  it("creates a delayed Lark status card for long runs and patches final into the same message", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      larkStatusCards: { delayMs: 10, minUpdateIntervalMs: 50 },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
+        }
+      },
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
+            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
+            ...(message.rich ? { hasRich: true } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "om_status" };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = larkRepoEvent({ id: "evt_lark_delayed_status_card", sourceEventId: "EvLarkDelayedStatusCard" });
+    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_delayed_status_card", event }))).status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_lark_delayed_status_card/running", jsonRequest({ executor: "codex" }))).status
+    ).toBe(200);
+
+    await wait(30);
+
+    expect(delivered).toEqual([
+      {
+        kind: "progress",
+        body: ["Running with codex.", "Run: run_lark_delayed_status_card", "Use /status here for details."].join("\n"),
+        statusMessageKey: "run_lark_delayed_status_card:status",
+        hasRich: true
+      }
+    ]);
+
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_lark_delayed_status_card/complete", jsonRequest({
+        result: {
+          conclusion: "success",
+          summary: "Done after status.",
+          verification: [{ command: "echo", outcome: "passed" }]
+        }
+      }))).status
+    ).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "progress",
+        body: ["Running with codex.", "Run: run_lark_delayed_status_card", "Use /status here for details."].join("\n"),
+        statusMessageKey: "run_lark_delayed_status_card:status",
+        hasRich: true
+      },
+      {
+        kind: "final",
+        body: expect.stringContaining("Finished with success."),
+        statusMessageKey: "run_lark_delayed_status_card:status",
+        externalMessageId: "om_status",
+        hasRich: true
+      }
+    ]);
+  });
+
+  it("patches delayed Lark progress at phase changes and throttles repeated progress", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      larkStatusCards: { delayMs: 10, minUpdateIntervalMs: 1_000 },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
+        }
+      },
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
+            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
+            ...(message.rich ? { hasRich: true } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "om_status" };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+
+    const event = larkRepoEvent({ id: "evt_lark_progress_status_card", sourceEventId: "EvLarkProgressStatusCard" });
+    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_progress_status_card", event }))).status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/running", jsonRequest({ executor: "codex" }));
+    await wait(30);
+    expect(delivered).toHaveLength(1);
+    await wait(10);
+
+    expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
+      type: "executor.progress",
+      message: "Starting codex exec"
+    }))).status).toBe(200);
+    expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
+      type: "executor.progress",
+      message: "Still working with internal details"
+    }))).status).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "progress",
+        body: ["Running with codex.", "Run: run_lark_progress_status_card", "Use /status here for details."].join("\n"),
+        statusMessageKey: "run_lark_progress_status_card:status",
+        hasRich: true
+      },
+      {
+        kind: "progress",
+        body: ["OpenTag is still working.", "Run: run_lark_progress_status_card", "Use /status here for details."].join("\n"),
+        statusMessageKey: "run_lark_progress_status_card:status",
+        externalMessageId: "om_status",
+        hasRich: true
+      }
+    ]);
+    expect(delivered.map((delivery) => delivery.body).join("\n")).not.toContain("Still working with internal details");
   });
 
   it("renders Lark callbacks with lightweight acknowledgement while keeping process progress audit-only", async () => {

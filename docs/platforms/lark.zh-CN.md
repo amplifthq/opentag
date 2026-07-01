@@ -83,12 +83,13 @@ OpenTag 在 Lark/飞书里的命令都围绕 Project Target，而不是本机绝
 
 群聊里必须先 @ 机器人，命令或任务才会生效。私聊可以更宽松，但仍然通过 Project Target 绑定工作，不接受本机绝对路径。群聊里的 `/bind` 和 `/unbind confirm` 还需要命令发送者命中绑定管理员 allowlist：`OPENTAG_LARK_BINDING_ADMIN_OPEN_IDS`、`OPENTAG_LARK_BINDING_ADMIN_USER_IDS` 或 `OPENTAG_LARK_BINDING_ADMIN_UNION_IDS`。
 
-新 run 创建后，OpenTag 默认会尽量减少刷屏：先发一条很短、可更新的状态卡；
-如果任务被排队或等待审批，会更新这张卡；平台接受 card update 时，最终结果也会
-patch 回同一张状态卡。普通 running/progress 更新默认留在 audit log 里，不刷进会话。
-要看 active 状态和 audit detail，用聊天里的 `/status` 或本机的
-`opentag status --run <run_id>`。如果平台拒绝更新卡片，OpenTag 仍以本机 audit
-timeline 作为事实来源，并允许 callback delivery 重试。
+新 run 创建后，OpenTag 默认会尽量减少刷屏：先在源消息上加一个轻量的“正在输入”
+reaction，表示已经开始处理。如果任务很快完成，就不创建中间状态卡，只发送最终
+结果；如果任务超过 delayed-status 阈值，OpenTag 才会创建一张可更新状态卡，节流
+普通 progress 更新，并在平台接受 card update 时把最终结果 patch 回同一张卡。普通
+executor 细节默认留在 audit log 里，不刷进会话。要看 active 状态和 audit detail，
+用聊天里的 `/status` 或本机的 `opentag status --run <run_id>`。如果平台拒绝 source
+receipt，OpenTag 会 fallback 到简短 received 卡片，避免用户完全没有即时反馈。
 
 ## 测试
 
@@ -98,4 +99,4 @@ timeline 作为事实来源，并允许 callback delivery 重试。
 opentag start
 ```
 
-然后在 Lark/飞书里向个人代理应用发消息，或在群聊里 @ 它。OpenTag 应该会先发简短状态卡，在本机运行你选择的编码代理，然后回到同一个会话里更新这张卡为最终结果。
+然后在 Lark/飞书里向个人代理应用发消息，或在群聊里 @ 它。OpenTag 应该会先添加轻量 received reaction，在本机运行你选择的编码代理，然后回到同一个会话里发送最终结果卡片。较长任务可能会在完成前显示一张可更新状态卡。

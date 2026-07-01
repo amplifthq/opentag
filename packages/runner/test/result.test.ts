@@ -42,6 +42,66 @@ describe("createExecutorRunResult", () => {
     expect(pullRequestBody).not.toMatch(/gh\s+pr\s+create/i);
   });
 
+  it("preserves no-change answer text before a structured executor report", () => {
+    const result = createExecutorRunResult({
+      executorName: "Codex",
+      runId: "run_1",
+      branchName: "opentag/run_1",
+      output: [
+        "OpenTag is a local-first source-thread callback system. It connects chat or issue events to a local coding agent, runs work in an isolated checkout, and posts concise results back to the originating thread.",
+        "",
+        EXECUTOR_REPORT_START,
+        JSON.stringify({
+          changes: [],
+          verification: [
+            {
+              command: "git status --short --branch",
+              outcome: "passed",
+              summary: "Confirmed the checkout remained clean after read-only inspection."
+            }
+          ],
+          risks: []
+        }),
+        EXECUTOR_REPORT_END
+      ].join("\n"),
+      changedFiles: []
+    });
+
+    expect(result.summary).toContain("OpenTag is a local-first source-thread callback system.");
+    expect(result.summary).toContain("Verified:");
+    expect(result.summary).toContain("git status --short --branch");
+    expect(result.summary).not.toContain(EXECUTOR_REPORT_START);
+    expect(result.summary).not.toContain(EXECUTOR_REPORT_END);
+  });
+
+  it("drops a leading partial line when a long no-change answer is truncated before the executor report", () => {
+    const result = createExecutorRunResult({
+      executorName: "Codex",
+      runId: "run_1",
+      branchName: "opentag/run_1",
+      output: [
+        `${"OpenTag policy handoff ".repeat(260)}source-thread decisions apply/reject/continue.`,
+        "",
+        "**Repository Shape**",
+        "This is a PNPM workspace with packages, apps, docs, and examples.",
+        "",
+        EXECUTOR_REPORT_START,
+        JSON.stringify({
+          changes: [],
+          verification: [{ command: "git status --short", outcome: "passed", summary: "No file changes." }],
+          risks: []
+        }),
+        EXECUTOR_REPORT_END
+      ].join("\n"),
+      changedFiles: []
+    });
+
+    expect(result.summary).toContain("**Repository Shape**");
+    expect(result.summary).toContain("This is a PNPM workspace");
+    expect(result.summary).not.toContain("apply/reject/continue");
+    expect(result.summary.trimStart().startsWith("**Repository Shape**")).toBe(true);
+  });
+
   it("removes executor source-control handoff instructions from user-visible summaries", () => {
     const result = createExecutorRunResult({
       executorName: "Claude Code",

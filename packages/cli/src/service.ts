@@ -58,6 +58,7 @@ export type ServiceDependencies = {
   logger?: Pick<Console, "log">;
   nodePath?: string;
   platform?: NodeJS.Platform;
+  sleep?: (ms: number) => Promise<void>;
   uid?: number;
 };
 
@@ -93,6 +94,16 @@ const serviceHardeningEnvKeys = [
   "OPENTAG_RATE_LIMIT_MAX_REQUESTS",
   "OPENTAG_RATE_LIMIT_DISABLED"
 ] as const;
+
+const launchAgentCliPath = [
+  "/opt/homebrew/bin",
+  "/opt/homebrew/sbin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/sbin",
+  "/sbin"
+].join(":");
 
 function loggerFrom(dependencies: ServiceDependencies): Pick<Console, "log"> {
   return dependencies.logger ?? console;
@@ -233,10 +244,48 @@ function assertMacOS(dependencies: ServiceDependencies): void {
 function runLaunchctlOrThrow(dependencies: ServiceDependencies, args: string[], action: string): CommandResult {
   const result = launchctlRunner(dependencies)(args);
   if (result.status !== 0) {
-    const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+    const detail = launchctlDetail(result);
     throw new Error(`${action} failed${detail ? `: ${detail}` : "."}`);
   }
   return result;
+}
+
+function launchctlDetail(result: CommandResult): string {
+  return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+}
+
+function printLaunchdService(dependencies: ServiceDependencies): CommandResult {
+  return launchctlRunner(dependencies)(["print", launchdServiceTarget(dependencies)]);
+}
+
+function sleepFrom(dependencies: ServiceDependencies): (ms: number) => Promise<void> {
+  return dependencies.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+}
+
+async function waitForLaunchdLoaded(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const intervalMs = input.intervalMs ?? 100;
+  const deadline = Date.now() + (input.timeoutMs ?? 1_500);
+  while (true) {
+    if (printLaunchdService(dependencies).status === 0) return true;
+    if (Date.now() >= deadline) return false;
+    await sleepFrom(dependencies)(intervalMs);
+  }
+}
+
+async function waitForLaunchdUnloaded(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const intervalMs = input.intervalMs ?? 100;
+  const deadline = Date.now() + (input.timeoutMs ?? 1_500);
+  while (true) {
+    if (printLaunchdService(dependencies).status !== 0) return true;
+    if (Date.now() >= deadline) return false;
+    await sleepFrom(dependencies)(intervalMs);
+  }
 }
 
 function serviceWorkingDirectory(configPath: string): string {
@@ -325,6 +374,7 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
 function launchAgentEnvironment(options: ServiceCommandOptions, paths: ServicePaths): Record<string, string> {
   return {
     OPENTAG_CONFIG_PATH: paths.configPath,
+    PATH: launchAgentCliPath,
     ...serviceHardeningEnvironment(options)
   };
 }
@@ -367,13 +417,17 @@ export function startService(options: ServiceCommandOptions = {}, dependencies: 
   const launchctl = launchctlRunner(dependencies);
   const bootstrap = launchctl(["bootstrap", launchdDomain(dependencies), paths.plistPath]);
   if (bootstrap.status !== 0) {
-    const print = launchctl(["print", launchdServiceTarget(dependencies)]);
+    const print = printLaunchdService(dependencies);
     if (print.status !== 0) {
-      const detail = [bootstrap.stderr.trim(), bootstrap.stdout.trim()].filter(Boolean).join("\n");
+      const detail = launchctlDetail(bootstrap);
       throw new Error(`launchctl bootstrap failed${detail ? `: ${detail}` : "."}`);
     }
   }
-  runLaunchctlOrThrow(dependencies, ["kickstart", "-k", launchdServiceTarget(dependencies)], "launchctl kickstart");
+  const kickstart = launchctl(["kickstart", "-k", launchdServiceTarget(dependencies)]);
+  if (kickstart.status !== 0 && printLaunchdService(dependencies).status !== 0) {
+    const detail = launchctlDetail(kickstart);
+    throw new Error(`launchctl kickstart failed${detail ? `: ${detail}` : "."}`);
+  }
   return paths;
 }
 
@@ -383,10 +437,11 @@ export function stopService(options: ServiceCommandOptions = {}, dependencies: S
   if (!installed(paths)) return paths;
   const launchctl = launchctlRunner(dependencies);
   const first = launchctl(["bootout", launchdServiceTarget(dependencies)]);
-  if (first.status !== 0 && !isNotLoaded(first)) {
+  if (first.status !== 0) {
     const second = launchctl(["bootout", launchdDomain(dependencies), paths.plistPath]);
     if (second.status !== 0 && !isNotLoaded(second)) {
-      const detail = [second.stderr.trim(), first.stderr.trim(), second.stdout.trim(), first.stdout.trim()].filter(Boolean).join("\n");
+      const firstDetail = isNotLoaded(first) ? "" : launchctlDetail(first);
+      const detail = [launchctlDetail(second), firstDetail].filter(Boolean).join("\n");
       throw new Error(`launchctl bootout failed${detail ? `: ${detail}` : "."}`);
     }
   }
@@ -673,6 +728,9 @@ export async function runServiceInstallCommand(options: ServiceCommandOptions, d
 
 export async function runServiceStartCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   const paths = startService(options, dependencies);
+  if (!(await waitForLaunchdLoaded(dependencies))) {
+    throw new Error("OpenTag service start did not leave launchd loaded. Run `opentag service status` and `opentag service logs` for details.");
+  }
   loggerFrom(dependencies).log(`OpenTag service started: ${paths.label}`);
 }
 
@@ -683,7 +741,16 @@ export async function runServiceStopCommand(options: ServiceCommandOptions, depe
 
 export async function runServiceRestartCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   stopService(options, dependencies);
-  const paths = startService(options, dependencies);
+  await waitForLaunchdUnloaded(dependencies, { timeoutMs: 1_000 });
+  let paths = startService(options, dependencies);
+  let loaded = await waitForLaunchdLoaded(dependencies, { timeoutMs: 500 });
+  if (!loaded) {
+    paths = startService(options, dependencies);
+    loaded = await waitForLaunchdLoaded(dependencies);
+  }
+  if (!loaded) {
+    throw new Error("OpenTag service restart did not leave launchd loaded. Run `opentag service status` and `opentag service logs` for details.");
+  }
   loggerFrom(dependencies).log(`OpenTag service restarted: ${paths.label}`);
 }
 

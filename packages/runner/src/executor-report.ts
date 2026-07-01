@@ -22,6 +22,7 @@ export type ExecutorReport = {
 export function executorReportPromptLines(): string[] {
   return [
     "End with this exact machine-readable OpenTag executor report block. Put it last.",
+    "If the user asked a read-only question or summary request, put the user-facing answer before this block; this block is only completion metadata.",
     "Replace every example value with the actual result. Use changes: [] if no files changed.",
     "Use verification: [] if no checks ran. Use verification outcome exactly one of: passed, failed, not_run.",
     EXECUTOR_REPORT_START,

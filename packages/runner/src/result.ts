@@ -1,5 +1,5 @@
 import type { OpenTagRunResult } from "@opentag/core";
-import { parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
+import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
 
@@ -31,7 +31,24 @@ function cleanOrFallbackExecutorSummary(input: {
   output: string;
   changedFiles: string[];
 }): string {
-  const rawSummary = input.output.slice(-MAX_EXECUTOR_SUMMARY_LENGTH).replace(/\r\n/g, "\n");
+  const summary = cleanExecutorSummaryText(input.output);
+  if (summary) return summary;
+
+  if (input.changedFiles.length === 0) {
+    return `${input.executorName} completed without file changes.`;
+  }
+
+  return `${input.executorName} changed ${input.changedFiles.length} file(s). Changed files: ${input.changedFiles.join(", ")}.`;
+}
+
+function cleanExecutorSummaryText(output: string): string | undefined {
+  const normalizedOutput = output.replace(/\r\n/g, "\n");
+  const sliceStart = Math.max(0, normalizedOutput.length - MAX_EXECUTOR_SUMMARY_LENGTH);
+  let rawSummary = normalizedOutput.slice(sliceStart);
+  if (sliceStart > 0 && normalizedOutput[sliceStart - 1] !== "\n") {
+    const firstCompleteLine = rawSummary.indexOf("\n");
+    rawSummary = firstCompleteLine >= 0 ? rawSummary.slice(firstCompleteLine + 1) : "";
+  }
   const filteredLines: string[] = [];
 
   for (const rawLine of rawSummary.split("\n")) {
@@ -52,13 +69,29 @@ function cleanOrFallbackExecutorSummary(input: {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  if (summary.length > 0) return summary;
+  return summary.length > 0 ? summary : undefined;
+}
 
-  if (input.changedFiles.length === 0) {
-    return `${input.executorName} completed without file changes.`;
-  }
+function executorAnswerBeforeReport(output: string): string | undefined {
+  const startIndex = output.lastIndexOf(EXECUTOR_REPORT_START);
+  if (startIndex < 0) return undefined;
+  return cleanExecutorSummaryText(output.slice(0, startIndex));
+}
 
-  return `${input.executorName} changed ${input.changedFiles.length} file(s). Changed files: ${input.changedFiles.join(", ")}.`;
+function summaryWithExecutorAnswer(input: {
+  executorName: string;
+  output: string;
+  changedFiles: string[];
+  report: NonNullable<ReturnType<typeof parseExecutorReport>>;
+}): string {
+  const reportSummary = renderExecutorReportSummary(input);
+  if (input.changedFiles.length > 0 || input.report.changes.length > 0) return reportSummary;
+
+  const answer = executorAnswerBeforeReport(input.output);
+  if (!answer || answer === reportSummary) return reportSummary;
+
+  const hasReportDetails = Boolean(input.report.verification?.length || input.report.risks?.length);
+  return hasReportDetails ? [answer, "", reportSummary].join("\n") : answer;
 }
 
 export function createExecutorRunResult(input: {
@@ -72,7 +105,7 @@ export function createExecutorRunResult(input: {
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
   const report = parseExecutorReport(input.output);
-  const summary = report ? renderExecutorReportSummary({ ...input, report }) : cleanOrFallbackExecutorSummary(input);
+  const summary = report ? summaryWithExecutorAnswer({ ...input, report }) : cleanOrFallbackExecutorSummary(input);
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [

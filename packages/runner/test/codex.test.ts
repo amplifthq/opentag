@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCodexExecutor } from "../src/codex.js";
 import type { CommandRunner } from "../src/command.js";
+import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-report.js";
 import { branchNameForRun, commitRunChanges, parseChangedFiles, worktreePathForRun } from "../src/git.js";
 
 afterEach(() => {
@@ -116,6 +117,7 @@ describe("Codex executor", () => {
     expect(codexExecCall?.input).toContain("OpenTag owns the source-control handoff after you finish.");
     expect(codexExecCall?.input).toContain("Do not run, request, or recommend git add, git commit, git push, or gh pr create.");
     expect(codexExecCall?.input).toContain("OpenTag will publish the run branch and expose pull-request creation as a suggested action.");
+    expect(codexExecCall?.input).toContain("If the user asked a read-only question or summary request, put the user-facing answer before this block");
     expect(codexExecCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_START");
     expect(codexExecCall?.input).toContain('"outcome": "passed"');
     expect(codexExecCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_END");
@@ -202,6 +204,68 @@ describe("Codex executor", () => {
     expect(result.changedFiles).toEqual([]);
     expect(result.artifacts).toEqual([]);
     expect(result.nextAction).toBe("No file changes were detected.");
+  });
+
+  it("preserves Codex read-only answers when the executor report has no file changes", async () => {
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "remove") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "branch -D opentag/run_readonly") {
+          return { exitCode: 0, stdout: "Deleted branch opentag/run_readonly\n", stderr: "" };
+        }
+        if (command === "codex" && args[0] === "exec") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "This repository implements OpenTag, a local-first bridge from source threads to local coding agents.",
+              "",
+              EXECUTOR_REPORT_START,
+              JSON.stringify({
+                changes: [],
+                verification: [
+                  {
+                    command: "git status --short --branch",
+                    outcome: "passed",
+                    summary: "Confirmed the checkout stayed clean."
+                  }
+                ],
+                risks: []
+              }),
+              EXECUTOR_REPORT_END
+            ].join("\n"),
+            stderr: ""
+          };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    const result = await createCodexExecutor({ runner }).run(
+      {
+        runId: "run_readonly",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "Summarize this repo at a high level. Do not modify files.", intent: "unknown", args: {} },
+        context: [],
+        permissions: [{ scope: "repo:read", reason: "read-only summary" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    expect(result.changedFiles).toEqual([]);
+    expect(result.summary).toContain("This repository implements OpenTag");
+    expect(result.summary).toContain("Verified:");
+    expect(result.summary).toContain("git status --short --branch");
+    expect(result.summary).not.toContain(EXECUTOR_REPORT_START);
   });
 
   it("refuses to run when the workspace has uncommitted changes", async () => {

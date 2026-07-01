@@ -11,6 +11,7 @@ import {
   getServiceStatus,
   getServiceStatusWithRuntimeReadiness,
   installService,
+  runServiceRestartCommand,
   runServiceStatusCommand,
   servicePaths,
   type CommandResult
@@ -186,6 +187,84 @@ describe("OpenTag CLI service", () => {
     expect(plist).toContain(`<string>${configPath}</string>`);
     expect(plist).toContain(`<string>${paths.stdoutPath}</string>`);
     expect(plist).toContain(`<string>${paths.stderrPath}</string>`);
+  });
+
+  it("installs the LaunchAgent with a conservative CLI PATH for executor binaries", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    const paths = installService(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        nodePath: "/usr/local/bin/node",
+        cliEntry: "/opt/opentag/dist/index.js",
+        uid: 501,
+        launchctl: () => {
+          throw new Error("install should not call launchctl");
+        }
+      }
+    );
+
+    const plist = readFileSync(paths.plistPath, "utf8");
+    expect(plist).toContain("<key>PATH</key>");
+    expect(plist).toContain("<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>");
+    expect(plist).not.toContain(".codex/tmp");
+  });
+
+  it("restarts cleanly when service-target bootout and kickstart report stale launchd state", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+
+    const calls: string[] = [];
+    const logs: string[] = [];
+    let loaded = true;
+    await runServiceRestartCommand(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        uid: 501,
+        launchctl(args) {
+          calls.push(args.join(" "));
+          if (args[0] === "bootout" && args.length === 2) {
+            return { status: 1, stdout: "", stderr: "No such process" };
+          }
+          if (args[0] === "bootout" && args.length === 3) {
+            loaded = false;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args[0] === "bootstrap") {
+            loaded = true;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (args[0] === "kickstart") {
+            return { status: 1, stdout: "", stderr: "service is not loaded" };
+          }
+          if (args[0] === "print") {
+            return loaded
+              ? { status: 0, stdout: "service = im.opentag.agent", stderr: "" }
+              : { status: 1, stdout: "", stderr: "service is not loaded" };
+          }
+          return { status: 1, stdout: "", stderr: `unexpected launchctl ${args.join(" ")}` };
+        },
+        logger: { log: (message) => logs.push(message) }
+      }
+    );
+
+    expect(calls).toEqual([
+      "bootout gui/501/im.opentag.agent",
+      `bootout gui/501 ${servicePaths({ config: configPath }, { homeDir: home }).plistPath}`,
+      "print gui/501/im.opentag.agent",
+      `bootstrap gui/501 ${servicePaths({ config: configPath }, { homeDir: home }).plistPath}`,
+      "kickstart -k gui/501/im.opentag.agent",
+      "print gui/501/im.opentag.agent",
+      "print gui/501/im.opentag.agent"
+    ]);
+    expect(logs).toEqual(["OpenTag service restarted: im.opentag.agent"]);
   });
 
   it("persists only explicit non-secret dispatcher hardening env in the LaunchAgent", () => {

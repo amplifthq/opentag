@@ -1,6 +1,6 @@
 {
   "name": "@opentag/dispatcher",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Embeddable OpenTag dispatcher Hono app and callback sinks.",
   "type": "module",
   "engines": {
