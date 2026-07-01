@@ -1,9 +1,12 @@
 import {
-  actionReceiptHeading,
-  buildActionReceiptsFromResult,
-  type ActionReceipt,
   type ActionReceiptContext,
   type ActionReceiptDecision,
+  type OpenTagActionReceiptPresentation,
+  type OpenTagDoctorSummaryPresentation,
+  type OpenTagFinalSummaryPresentation,
+  type OpenTagPresentationAction,
+  type OpenTagSourceThreadStatusPresentation,
+  createFinalSummaryPresentation,
   type OpenTagRunResult
 } from "@opentag/core";
 
@@ -68,7 +71,7 @@ export type SlackReactionPayload = {
   name: string;
 };
 
-export type SlackSourceReceiptState = "received";
+export type SlackSourceReceiptState = "received" | "running";
 
 const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
 
@@ -123,6 +126,10 @@ export function markdownToSlackMrkdwn(text: string): string {
   return links.reduce((output, link, index) => output.replace(`\u0000SLACK_LINK_${index}\u0000`, link), converted);
 }
 
+function markdownToSlackActionDetail(text: string): string {
+  return markdownToSlackMrkdwn(text).replace(/-&gt;/g, "->");
+}
+
 export function renderSlackAcknowledgement(runId: string): string {
   void runId;
   return "Working on it.";
@@ -130,6 +137,7 @@ export function renderSlackAcknowledgement(runId: string): string {
 
 export function slackSourceReceiptReactionName(state: SlackSourceReceiptState): string {
   if (state === "received") return "eyes";
+  if (state === "running") return "hourglass_flowing_sand";
   return "eyes";
 }
 
@@ -139,61 +147,6 @@ export function createSlackReactionPayload(input: { channelId: string; messageTs
     timestamp: input.messageTs,
     name: input.name
   };
-}
-
-function nextActionSummary(result: OpenTagRunResult): string | undefined {
-  if (!result.nextAction) return undefined;
-  if (typeof result.nextAction === "string") return result.nextAction;
-  return result.nextAction.summary;
-}
-
-function stringParam(params: Record<string, unknown> | undefined, key: string): string | undefined {
-  const value = params?.[key];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function stringArrayParam(params: Record<string, unknown> | undefined, key: string): string[] {
-  const value = params?.[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
-}
-
-function renderVerificationParams(params: Record<string, unknown> | undefined): string[] {
-  const value = params?.["verification"];
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
-      const command = (item as Record<string, unknown>)["command"];
-      const outcome = (item as Record<string, unknown>)["outcome"];
-      return typeof command === "string" && typeof outcome === "string" ? `   - \`${command}\`: ${outcome}` : undefined;
-    })
-    .filter((line): line is string => Boolean(line));
-}
-
-function renderSuggestedActionDetails(params: Record<string, unknown> | undefined, action: string): string[] {
-  if (action !== "create_pull_request") return [];
-  const lines: string[] = [];
-  const title = stringParam(params, "title");
-  const head = stringParam(params, "head") ?? stringParam(params, "branch");
-  const base = stringParam(params, "base") ?? stringParam(params, "baseBranch");
-  const changedFiles = stringArrayParam(params, "changedFiles");
-  const risks = stringArrayParam(params, "risks");
-  const verification = renderVerificationParams(params);
-  if (title) lines.push(`   Title: ${markdownToSlackMrkdwn(title)}`);
-  if (head || base) lines.push(`   Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
-  if (changedFiles.length > 0) lines.push(`   Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
-  if (risks.length > 0) {
-    lines.push("   Risks:");
-    for (const risk of risks) {
-      lines.push(`   - ${markdownToSlackMrkdwn(risk)}`);
-    }
-  }
-  if (verification.length > 0) {
-    lines.push("   Verification:");
-    lines.push(...verification);
-  }
-  return lines;
 }
 
 function truncateSlackText(text: string, maxLength: number): string {
@@ -222,44 +175,134 @@ function compactNextAction(nextAction: string): string {
   return truncateSlackText(nextAction, 180);
 }
 
-function renderSuggestedActionCandidateLines(receipt: ActionReceipt): string[] {
-  const candidate = receipt.candidate;
-  const lines = [`${candidate.index}. *${markdownToSlackMrkdwn(candidate.intent.summary)}*`];
-  lines.push(`Target: ${markdownToSlackMrkdwn(receipt.targetLabel)}`);
-  if (receipt.setupReason) {
-    lines.push(`Status: ${markdownToSlackMrkdwn(receipt.setupReason)}`);
+function resultForFinalSummaryPresentation(result: OpenTagRunResult): OpenTagRunResult {
+  if (!result.suggestedChanges) return result;
+  const visibleSuggestedChanges = result.suggestedChanges.filter((snapshot) => snapshot.intents.length > 0);
+  if (visibleSuggestedChanges.length === result.suggestedChanges.length) return result;
+  const { suggestedChanges: _suggestedChanges, ...withoutSuggestedChanges } = result;
+  return visibleSuggestedChanges.length > 0 ? { ...withoutSuggestedChanges, suggestedChanges: visibleSuggestedChanges } : withoutSuggestedChanges;
+}
+
+function slackSection(text: string): SlackTextBlock {
+  return {
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text
+    }
+  };
+}
+
+function slackContext(text: string): SlackContextBlock {
+  return {
+    type: "context",
+    elements: [{ type: "mrkdwn", text }]
+  };
+}
+
+function slackCheckStatusLabel(status: OpenTagDoctorSummaryPresentation["checks"][number]["status"]): string {
+  if (status === "ok") return "OK";
+  if (status === "warn") return "WARN";
+  if (status === "fail") return "FAIL";
+  return "UNKNOWN";
+}
+
+function slackStatusActiveRun(presentation: OpenTagSourceThreadStatusPresentation): string {
+  if (!presentation.activeRun) return "none";
+  return `${presentation.activeRun.id} (${presentation.activeRun.status})${presentation.activeRun.updatedAt ? `, updated ${presentation.activeRun.updatedAt}` : ""}`;
+}
+
+function slackStatusQueuedFollowUps(presentation: OpenTagSourceThreadStatusPresentation): string {
+  const total = presentation.queuedFollowUpsTotal ?? presentation.queuedFollowUps.length;
+  if (total === 0) return "none";
+  const visible = presentation.queuedFollowUps.map((followUp) => {
+    const status = followUp.status ? ` (${followUp.status})` : "";
+    const command = followUp.command ? `: ${markdownToSlackMrkdwn(truncateSlackText(followUp.command, 120))}` : "";
+    return `${followUp.id}${status}${command}`;
+  });
+  const remaining = Math.max(total - visible.length, 0);
+  return `${total}${visible.length ? ` (${visible.join(", ")}${remaining > 0 ? `, +${remaining} more` : ""})` : ""}`;
+}
+
+function renderPresentationActionLines(action: OpenTagPresentationAction): string[] {
+  const lines = [`${action.index}. *${markdownToSlackMrkdwn(action.title)}*`];
+  lines.push(`Target: ${markdownToSlackMrkdwn(action.targetLabel)}`);
+  if (action.setupReason) {
+    lines.push(`Status: ${markdownToSlackMrkdwn(action.setupReason)}`);
   }
-  const details = renderSuggestedActionDetails(candidate.intent.params, candidate.intent.action)
-    .filter((line) => line.trim().startsWith("Branch:") || line.trim().startsWith("Changed files:"))
-    .map((line) => line.replace(/^\s+/, ""));
-  lines.push(...details);
-  if (candidate.proposalPreconditions?.length) {
-    lines.push(`Preconditions: ${candidate.proposalPreconditions.length} check(s) in the audit log.`);
+  if (action.details?.length) {
+    lines.push(...action.details.map(markdownToSlackActionDetail));
   }
   return lines;
 }
 
-function renderSuggestedActionsMarkdown(result: OpenTagRunResult, options: SlackRenderOptions = {}): string[] {
-  const receipts = buildActionReceiptsFromResult(result, options.receiptContext);
-  if (receipts.length === 0) return [];
+type SlackActionReceiptGroup = {
+  state: OpenTagPresentationAction["state"];
+  title: string;
+  actions: OpenTagPresentationAction[];
+};
 
-  const heading = actionReceiptHeading(receipts);
-  const lines = [`*${heading}*`, "Choose an action in this thread. Details stay in the OpenTag audit log."];
-  const visibleReceipts = receipts.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
-  for (const receipt of visibleReceipts) {
-    lines.push("", ...renderSuggestedActionCandidateLines(receipt));
+const ACTION_RECEIPT_GROUP_ORDER: Array<OpenTagPresentationAction["state"]> = [
+  "ready_to_apply",
+  "needs_setup",
+  "needs_approval",
+  "unsupported"
+];
+
+function actionReceiptGroupTitle(state: OpenTagPresentationAction["state"]): string {
+  if (state === "ready_to_apply") return "Ready to apply";
+  if (state === "needs_setup") return "Needs setup";
+  if (state === "unsupported") return "Needs attention";
+  return "Needs approval";
+}
+
+function actionReceiptGroups(actions: OpenTagPresentationAction[]): SlackActionReceiptGroup[] {
+  return ACTION_RECEIPT_GROUP_ORDER.flatMap((state) => {
+    const groupedActions = actions.filter((action) => action.state === state);
+    return groupedActions.length > 0
+      ? [
+          {
+            state,
+            title: actionReceiptGroupTitle(state),
+            actions: groupedActions
+          }
+        ]
+      : [];
+  });
+}
+
+function renderActionReceiptMarkdownLines(input: { title: string; actions: OpenTagPresentationAction[] }): string[] {
+  if (input.actions.length === 0) return [];
+
+  const visibleActions = input.actions.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+  const groups = actionReceiptGroups(visibleActions);
+  const showGroupHeadings = groups.length > 1;
+  const lines = [`*${input.title}*`, "", "Choose an action in this thread. Details stay in the OpenTag audit log."];
+  for (const group of groups) {
+    if (showGroupHeadings) {
+      lines.push("", `*${group.title}*`);
+    }
+    for (const action of group.actions) {
+      lines.push("", ...renderPresentationActionLines(action));
+    }
   }
 
-  const remainingCount = receipts.length - visibleReceipts.length;
+  const remainingCount = input.actions.length - visibleActions.length;
   if (remainingCount > 0) {
-    lines.push("", `Showing first ${visibleReceipts.length} of ${receipts.length} actions. Reply with an action number for the rest.`);
+    lines.push("", `Showing first ${visibleActions.length} of ${input.actions.length} actions. Reply with an action number for the rest.`);
   }
   lines.push("", "Use the buttons below, or reply with the matching command.");
   return lines;
 }
 
-function createSuggestedActionButton(receipt: ActionReceipt, decision: ActionReceiptDecision): SlackButtonElement {
-  const index = receipt.candidate.index;
+function renderSuggestedActionsMarkdown(presentation: OpenTagFinalSummaryPresentation): string[] {
+  const actions = presentation.actions ?? [];
+  if (actions.length === 0 || !presentation.actionReceiptTitle) return [];
+  return renderActionReceiptMarkdownLines({ title: presentation.actionReceiptTitle, actions });
+}
+
+function createSuggestedActionButton(action: OpenTagPresentationAction & { proposalId: string; intentId: string }, decision: ActionReceiptDecision): SlackButtonElement {
+  const index = action.index;
   const labels: Record<ActionReceiptDecision, string> = {
     apply: `Apply ${index}`,
     approve: "Approve only",
@@ -273,60 +316,146 @@ function createSuggestedActionButton(receipt: ActionReceipt, decision: ActionRec
     value: buildSlackSuggestedActionButtonValue({
       version: 1,
       command: `${decision} ${index}`,
-      proposalId: receipt.candidate.proposalId,
-      intentId: receipt.candidate.intent.intentId
+      proposalId: action.proposalId,
+      intentId: action.intentId
     }),
     ...(decision === "apply" ? { style: "primary" as const } : {}),
     ...(decision === "reject" ? { style: "danger" as const } : {})
   };
 }
 
-function createSuggestedActionButtons(receipt: ActionReceipt): SlackButtonElement[] {
-  return receipt.visibleDecisions.map((decision) => createSuggestedActionButton(receipt, decision));
+function actionHasInteractiveIdentity(action: OpenTagPresentationAction): action is OpenTagPresentationAction & { proposalId: string; intentId: string } {
+  return Boolean(action.proposalId && action.intentId);
+}
+
+function createSuggestedActionButtons(action: OpenTagPresentationAction): SlackButtonElement[] {
+  if (!actionHasInteractiveIdentity(action)) return [];
+  return action.visibleDecisions.map((decision) => createSuggestedActionButton(action, decision));
+}
+
+function createSlackActionReceiptBlockSet(input: {
+  title: string;
+  actions: OpenTagPresentationAction[];
+  auditRunId?: string;
+  includeDivider?: boolean;
+}): SlackBlock[] {
+  const blocks: SlackBlock[] = [];
+  if (input.includeDivider) blocks.push({ type: "divider" });
+  blocks.push(
+    slackSection(`*${markdownToSlackMrkdwn(input.title)}*\n\nChoose an action in this thread. Details stay in the OpenTag audit log.`)
+  );
+
+  const visibleActions = input.actions.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
+  const groups = actionReceiptGroups(visibleActions);
+  const showGroupHeadings = groups.length > 1;
+  for (const group of groups) {
+    if (showGroupHeadings) {
+      blocks.push(slackSection(`*${markdownToSlackMrkdwn(group.title)}*`));
+    }
+    for (const action of group.actions) {
+      blocks.push(slackSection(renderPresentationActionLines(action).join("\n")));
+      const buttons = createSuggestedActionButtons(action);
+      if (buttons.length === 0) continue;
+      blocks.push({
+        type: "actions",
+        block_id: `opentag_actions_${action.index}`,
+        elements: buttons
+      });
+    }
+  }
+
+  const remainingCount = input.actions.length - visibleActions.length;
+  if (remainingCount > 0) {
+    blocks.push(slackSection(`Showing first ${visibleActions.length} of ${input.actions.length} actions. Reply with an action number for the rest.`));
+  }
+
+  if (input.auditRunId) {
+    blocks.push(slackContext(markdownToSlackMrkdwn(`Audit: \`opentag status --run ${input.auditRunId}\``)));
+  }
+
+  return blocks;
+}
+
+export function renderSlackActionReceiptPresentation(presentation: OpenTagActionReceiptPresentation): string {
+  const lines = renderActionReceiptMarkdownLines({ title: presentation.title, actions: presentation.actions });
+  if (presentation.auditRunId) {
+    lines.push("", markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``));
+  }
+  return lines.join("\n");
+}
+
+export function createSlackActionReceiptBlocks(presentation: OpenTagActionReceiptPresentation): SlackBlock[] {
+  return createSlackActionReceiptBlockSet({
+    title: presentation.title,
+    actions: presentation.actions,
+    ...(presentation.auditRunId ? { auditRunId: presentation.auditRunId } : {})
+  });
 }
 
 export function renderSlackFinalResult(result: OpenTagRunResult, options: SlackRenderOptions = {}): string {
-  const lines = [`*Finished: ${result.conclusion}.*`, markdownToSlackMrkdwn(compactSlackSummary(result.summary))];
+  return renderSlackFinalSummaryPresentation(
+    createFinalSummaryPresentation({
+      result: resultForFinalSummaryPresentation(result),
+      ...(options.receiptContext ? { receiptContext: options.receiptContext } : {}),
+      ...(options.auditRunId ? { auditRunId: options.auditRunId } : {})
+    })
+  );
+}
 
-  if (result.verification?.length) {
+export function renderSlackFinalSummaryPresentation(presentation: OpenTagFinalSummaryPresentation): string {
+  const lines = [`*Finished: ${presentation.outcome}.*`, markdownToSlackMrkdwn(compactSlackSummary(presentation.summary))];
+
+  if (presentation.verification?.length) {
     lines.push(
-      `Verified: ${result.verification
+      `Verified: ${presentation.verification
         .slice(0, 3)
         .map((check) => `\`${markdownToSlackMrkdwn(check.command)}\` ${markdownToSlackMrkdwn(check.outcome)}`)
         .join(", ")}`
     );
   }
 
-  const suggestedActions = renderSuggestedActionsMarkdown(result, options);
-  const nextAction = nextActionSummary(result);
-  if (nextAction && suggestedActions.length === 0) {
-    lines.push(`Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`);
+  const suggestedActions = renderSuggestedActionsMarkdown(presentation);
+  if (presentation.nextActions?.length && suggestedActions.length === 0) {
+    lines.push(`Next: ${markdownToSlackMrkdwn(compactNextAction(presentation.nextActions[0] ?? ""))}`);
   }
   if (suggestedActions.length > 0) {
     lines.push("", ...suggestedActions);
+  }
+  if (presentation.auditRunId) {
+    lines.push("", markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``));
   }
 
   return lines.join("\n");
 }
 
 export function createSlackFinalResultBlocks(result: OpenTagRunResult, options: SlackRenderOptions = {}): SlackBlock[] {
+  return createSlackFinalSummaryBlocks(
+    createFinalSummaryPresentation({
+      result: resultForFinalSummaryPresentation(result),
+      ...(options.receiptContext ? { receiptContext: options.receiptContext } : {}),
+      ...(options.auditRunId ? { auditRunId: options.auditRunId } : {})
+    })
+  );
+}
+
+export function createSlackFinalSummaryBlocks(presentation: OpenTagFinalSummaryPresentation): SlackBlock[] {
   const blocks: SlackBlock[] = [
     {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Finished: ${result.conclusion}.*\n${markdownToSlackMrkdwn(compactSlackSummary(result.summary))}`
+        text: `*Finished: ${presentation.outcome}.*\n${markdownToSlackMrkdwn(compactSlackSummary(presentation.summary))}`
       }
     }
   ];
 
-  if (result.verification?.length) {
+  if (presentation.verification?.length) {
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
         text: `Verified: ${markdownToSlackMrkdwn(
-          result.verification
+          presentation.verification
             .slice(0, 3)
             .map((check) => `\`${check.command}\` ${check.outcome}`)
             .join(", ")
@@ -335,67 +464,92 @@ export function createSlackFinalResultBlocks(result: OpenTagRunResult, options: 
     });
   }
 
-  const nextAction = nextActionSummary(result);
-  const receipts = buildActionReceiptsFromResult(result, options.receiptContext);
-  if (nextAction && receipts.length === 0) {
+  const actions = presentation.actions ?? [];
+  if (presentation.nextActions?.length && actions.length === 0) {
     blocks.push({
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `Next: ${markdownToSlackMrkdwn(compactNextAction(nextAction))}`
+        text: `Next: ${markdownToSlackMrkdwn(compactNextAction(presentation.nextActions[0] ?? ""))}`
       }
     });
   }
 
-  if (receipts.length > 0) {
-    const heading = actionReceiptHeading(receipts);
-    blocks.push({ type: "divider" });
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: `*${heading}*\nChoose an action in this thread. Details stay in the OpenTag audit log.`
-      }
-    });
-    const visibleReceipts = receipts.slice(0, MAX_SLACK_SUGGESTED_ACTION_CANDIDATES);
-    for (const receipt of visibleReceipts) {
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: renderSuggestedActionCandidateLines(receipt).join("\n")
-        }
-      });
-      blocks.push({
-        type: "actions",
-        block_id: `opentag_actions_${receipt.candidate.index}`,
-        elements: createSuggestedActionButtons(receipt)
-      });
-    }
-    const remainingCount = receipts.length - visibleReceipts.length;
-    if (remainingCount > 0) {
-      blocks.push({
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `Showing first ${visibleReceipts.length} of ${receipts.length} actions. Reply with an action number for the rest.`
-        }
-      });
-    }
+  if (actions.length > 0 && presentation.actionReceiptTitle) {
+    blocks.push(...createSlackActionReceiptBlockSet({ title: presentation.actionReceiptTitle, actions, includeDivider: true }));
   }
 
-  if (options.auditRunId) {
+  if (presentation.auditRunId) {
     blocks.push({
       type: "context",
       elements: [
         {
           type: "mrkdwn",
-          text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${options.auditRunId}\``)
+          text: markdownToSlackMrkdwn(`Audit: \`opentag status --run ${presentation.auditRunId}\``)
         }
       ]
     });
   }
 
+  return blocks;
+}
+
+export function createSlackDoctorSummaryBlocks(presentation: OpenTagDoctorSummaryPresentation): SlackBlock[] {
+  const blocks: SlackBlock[] = [slackSection(`*${markdownToSlackMrkdwn(presentation.title)}*`)];
+  if (presentation.checks.length === 0) {
+    blocks.push(slackContext("No readiness checks were reported."));
+    return blocks;
+  }
+
+  for (const check of presentation.checks.slice(0, 10)) {
+    blocks.push(
+      slackSection(
+        `*${slackCheckStatusLabel(check.status)} ${markdownToSlackMrkdwn(check.name)}*${check.message ? `\n${markdownToSlackMrkdwn(check.message)}` : ""}`
+      )
+    );
+  }
+  if (presentation.checks.length > 10) {
+    blocks.push(slackContext(`Showing first 10 of ${presentation.checks.length} readiness checks. Use \`opentag doctor\` locally for full detail.`));
+  }
+  return blocks;
+}
+
+export function createSlackSourceThreadStatusBlocks(presentation: OpenTagSourceThreadStatusPresentation): SlackBlock[] {
+  const blocks: SlackBlock[] = [
+    slackSection(`*${markdownToSlackMrkdwn(presentation.title)}*`),
+    slackContext(
+      [
+        presentation.sourceContainer ? `Source: \`${presentation.sourceContainer}\`` : undefined,
+        `Project Target: \`${presentation.projectTarget ?? "not bound"}\``
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join(" | ")
+    ),
+    slackSection(
+      [
+        `*Active run:* ${markdownToSlackMrkdwn(slackStatusActiveRun(presentation))}`,
+        presentation.currentCommand ? `*Command:* ${markdownToSlackMrkdwn(presentation.currentCommand)}` : undefined,
+        `*Queued follow-ups:* ${markdownToSlackMrkdwn(slackStatusQueuedFollowUps(presentation))}`,
+        `*Next action:* ${markdownToSlackMrkdwn(presentation.nextAction)}`
+      ]
+        .filter((line): line is string => Boolean(line))
+        .join("\n")
+    )
+  ];
+
+  if (presentation.stopHint || presentation.detailHint) {
+    blocks.push(
+      slackContext(
+        [
+          presentation.stopHint ? `Stop/timeout: ${presentation.stopHint}` : undefined,
+          presentation.detailHint ? `Details: ${presentation.detailHint}` : undefined
+        ]
+          .filter((line): line is string => Boolean(line))
+          .map(markdownToSlackMrkdwn)
+          .join(" | ")
+      )
+    );
+  }
   return blocks;
 }
 

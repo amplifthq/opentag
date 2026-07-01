@@ -1,4 +1,12 @@
-import { createLarkReplyClient, type LarkReplyClient, parseLarkThreadKey, replyLarkMessage } from "@opentag/lark";
+import {
+  createLarkReplyClient,
+  patchLarkMessageCard,
+  type LarkCard,
+  type LarkReplyClient,
+  parseLarkThreadKey,
+  replyLarkMessage,
+  updateLarkTextMessage
+} from "@opentag/lark";
 import {
   createSlackPostMessagePayload,
   createSlackReactionPayload,
@@ -7,7 +15,7 @@ import {
   slackSourceReceiptReactionName
 } from "@opentag/slack";
 import { createTelegramSendMessageDraftPayload, createTelegramSendMessagePayload, parseTelegramThreadKey } from "@opentag/telegram";
-import type { CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
+import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
 
@@ -262,7 +270,7 @@ export function createLarkCallbackSink(input: {
       : undefined);
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "lark") return;
       // A lark run was accepted, so a missing client/threadKey is a real failure, not a silent success.
       if (!client) {
@@ -271,8 +279,27 @@ export function createLarkCallbackSink(input: {
       if (!message.threadKey) {
         throw new Error("Lark callback message is missing threadKey.");
       }
+      if (message.externalMessageId) {
+        if (message.rich?.provider === "lark") {
+          await patchLarkMessageCard(client, {
+            messageId: message.externalMessageId,
+            card: message.rich.payload as LarkCard
+          });
+        } else {
+          await updateLarkTextMessage(client, {
+            messageId: message.externalMessageId,
+            text: message.body
+          });
+        }
+        return { externalMessageId: message.externalMessageId };
+      }
       const { messageId } = parseLarkThreadKey(message.threadKey);
-      await replyLarkMessage(client, { messageId, text: message.body });
+      const reply = await replyLarkMessage(client, {
+        messageId,
+        text: message.body,
+        ...(message.rich?.provider === "lark" ? { card: message.rich.payload as LarkCard } : {})
+      });
+      return reply.messageId ? { externalMessageId: reply.messageId } : undefined;
     }
   };
 }
@@ -342,10 +369,15 @@ export function createTelegramCallbackSink(input: {
 
 export function createCompositeCallbackSink(sinks: CallbackSink[]): CallbackSink {
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      let result: CallbackDeliveryResult | undefined;
       for (const sink of sinks) {
-        await sink.deliver(message);
+        const delivered = await sink.deliver(message);
+        if (delivered?.externalMessageId && !result?.externalMessageId) {
+          result = { externalMessageId: delivered.externalMessageId };
+        }
       }
+      return result;
     }
   };
 }

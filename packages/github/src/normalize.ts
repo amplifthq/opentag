@@ -15,6 +15,8 @@ export type GitHubIssueCommentInput = {
   private: boolean;
   receivedAt: string;
   installationId?: number;
+  deliveryId?: string;
+  signatureVerified?: boolean;
 };
 
 export type GitHubPullRequestReviewCommentInput = {
@@ -31,6 +33,8 @@ export type GitHubPullRequestReviewCommentInput = {
   private: boolean;
   receivedAt: string;
   installationId?: number;
+  deliveryId?: string;
+  signatureVerified?: boolean;
 };
 
 function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
@@ -200,6 +204,10 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       repo: input.repo,
       issueNumber: input.issueNumber,
       ...commandMetadata(command),
+      ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+      ...(typeof input.signatureVerified === "boolean"
+        ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+        : {}),
       ...(typeof input.installationId === "number" ? { installationId: input.installationId } : {})
     }
   };
@@ -266,6 +274,10 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       repo: input.repo,
       pullRequestNumber: input.pullRequestNumber,
       ...commandMetadata(command),
+      ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+      ...(typeof input.signatureVerified === "boolean"
+        ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+        : {}),
       ...(typeof input.installationId === "number" ? { installationId: input.installationId } : {})
     }
   };

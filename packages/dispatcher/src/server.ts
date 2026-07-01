@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
@@ -27,7 +27,12 @@ import {
   OpenTagRunResultSchema,
   PolicyRuleSchema,
   RunEventImportanceSchema,
-  RunEventVisibilitySchema
+  RunEventVisibilitySchema,
+  DEFAULT_MAX_REQUEST_BODY_BYTES,
+  RequestBodyTooLargeError,
+  platformCapabilityForProvider,
+  readRequestTextWithLimit,
+  shouldDeliverSourceReceipt
 } from "@opentag/core";
 import {
   applyGitHubIssueMutationOperation,
@@ -46,20 +51,57 @@ import { z } from "zod";
 
 /**
  * Parse and validate a request body, mapping ONLY request-body parse failures to
- * HTTP 400. Malformed JSON (SyntaxError from c.req.json()) and request-schema
- * validation failures (ZodError from schema.parse()) are tagged as HTTPException
- * with status 400 so the global onError handler can return them as client errors
- * without masking unrelated internal ZodError/SyntaxError as 400s. Any other
- * error is rethrown unchanged and falls through to a 500.
+ * HTTP client errors. Oversized bodies return 413, malformed JSON returns 400,
+ * and request-schema validation failures return 400 so the global onError
+ * handler can return them to the client without masking unrelated internal
+ * ZodError/SyntaxError as 400s. Any other error is rethrown unchanged and falls
+ * through to a 500.
  */
-async function parseBody<S extends z.ZodTypeAny>(c: Context, schema: S): Promise<z.infer<S>> {
+export type DispatcherRateLimitOptions = {
+  windowMs: number;
+  maxRequests: number;
+  now?(): number;
+};
+
+type DispatcherRateLimitBucket = {
+  count: number;
+  resetAt: number;
+};
+
+class RequestBodyRejectedError extends Error {
+  readonly reason: "invalid_json_body" | "invalid_request_body";
+  readonly publicError: string;
+
+  constructor(input: { reason: "invalid_json_body" | "invalid_request_body"; publicError?: string }) {
+    super(input.reason);
+    this.name = "RequestBodyRejectedError";
+    this.reason = input.reason;
+    this.publicError = input.publicError ?? input.reason;
+  }
+}
+
+function requestBodyTooLarge(c: Context, maxBytes: number): HTTPException {
+  return new HTTPException(413, {
+    res: c.json({ error: "request_body_too_large", maxBytes }, 413)
+  });
+}
+
+async function parseBody<S extends z.ZodTypeAny>(
+  c: Context,
+  schema: S,
+  options: { maxBytes?: number; invalidBodyError?: string } = {}
+): Promise<z.infer<S>> {
   let json: unknown;
   try {
-    json = await c.req.json();
+    const rawBody = await readRequestTextWithLimit(c.req.raw, { maxBytes: options.maxBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES });
+    json = JSON.parse(rawBody);
   } catch (err) {
+    if (err instanceof RequestBodyTooLargeError) throw requestBodyTooLarge(c, err.maxBytes);
+    if (err instanceof HTTPException) throw err;
     if (err instanceof SyntaxError) {
       throw new HTTPException(400, {
-        res: c.json({ error: "invalid_json_body" }, 400)
+        res: c.json({ error: "invalid_json_body" }, 400),
+        cause: new RequestBodyRejectedError({ reason: "invalid_json_body" })
       });
     }
     throw err;
@@ -67,14 +109,146 @@ async function parseBody<S extends z.ZodTypeAny>(c: Context, schema: S): Promise
 
   const result = schema.safeParse(json);
   if (!result.success) {
+    const publicError = options.invalidBodyError ?? "invalid_request_body";
     throw new HTTPException(400, {
-      res: c.json({ error: "invalid_request_body", issues: result.error.issues }, 400)
+      res: c.json({ error: publicError, issues: result.error.issues }, 400),
+      cause: new RequestBodyRejectedError({ reason: "invalid_request_body", publicError })
     });
   }
   return result.data;
 }
+
+function normalizeRateLimitedEndpoint(method: string, path: string): string {
+  return `${method.toUpperCase()} ${path}`
+    .replace(/^([A-Z]+) \/v1\/runners\/[^/]+\/runs\/[^/]+/, "$1 /v1/runners/:runnerId/runs/:runId")
+    .replace(/^([A-Z]+) \/v1\/runners\/[^/]+/, "$1 /v1/runners/:runnerId")
+    .replace(/^([A-Z]+) \/v1\/repo-bindings\/[^/]+\/[^/]+\/[^/]+/, "$1 /v1/repo-bindings/:provider/:owner/:repo")
+    .replace(/^([A-Z]+) \/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+/, "$1 /v1/channel-bindings/:provider/:accountId/:conversationId")
+    .replace(/^([A-Z]+) \/v1\/slack-channel-bindings\/[^/]+\/[^/]+/, "$1 /v1/slack-channel-bindings/:teamId/:channelId")
+    .replace(/^([A-Z]+) \/v1\/follow-up-requests\/[^/]+/, "$1 /v1/follow-up-requests/:id")
+    .replace(/^([A-Z]+) \/v1\/proposals\/[^/]+/, "$1 /v1/proposals/:proposalId")
+    .replace(/^([A-Z]+) \/v1\/approvals\/[^/]+/, "$1 /v1/approvals/:approvalDecisionId")
+    .replace(/^([A-Z]+) \/v1\/apply-plans\/[^/]+/, "$1 /v1/apply-plans/:applyPlanId")
+    .replace(/^([A-Z]+) \/v1\/runs\/[^/]+/, "$1 /v1/runs/:runId");
+}
+
+function rateLimitRunnerId(path: string): string {
+  return path.match(/^\/v1\/runners\/([^/]+)/)?.[1] ?? "none";
+}
+
+function rateLimitSourcePlatform(path: string): string {
+  const channelProvider = path.match(/^\/v1\/channel-bindings\/([^/]+)/)?.[1];
+  if (channelProvider) return channelProvider;
+  const repoProvider = path.match(/^\/v1\/repo-bindings\/([^/]+)/)?.[1];
+  if (repoProvider) return repoProvider;
+  if (path.startsWith("/v1/slack-channel-bindings/")) return "slack";
+  return "unknown";
+}
+
+function safeDecodeRateLimitSegment(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function rateLimitTenant(path: string): string {
+  const channel = path.match(/^\/v1\/channel-bindings\/([^/]+)\/([^/]+)/);
+  if (channel) {
+    const provider = safeDecodeRateLimitSegment(channel[1]) ?? "unknown";
+    const accountId = safeDecodeRateLimitSegment(channel[2]) ?? "unknown";
+    return `${provider}:${accountId}`;
+  }
+
+  const legacySlack = path.match(/^\/v1\/slack-channel-bindings\/([^/]+)/);
+  if (legacySlack) return `slack:${safeDecodeRateLimitSegment(legacySlack[1]) ?? "unknown"}`;
+
+  const repo = path.match(/^\/v1\/repo-bindings\/([^/]+)\/([^/]+)/);
+  if (repo) {
+    const provider = safeDecodeRateLimitSegment(repo[1]) ?? "unknown";
+    const owner = safeDecodeRateLimitSegment(repo[2]) ?? "unknown";
+    return `${provider}:${owner}`;
+  }
+
+  return "unknown";
+}
+
+function rateLimitTokenFingerprint(authorization: string | null): string {
+  if (!authorization) return "none";
+  return createHash("sha256").update(authorization).digest("hex").slice(0, 16);
+}
+
+function rawTokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function rateLimitKey(c: Context): string {
+  const path = new URL(c.req.url).pathname;
+  return [
+    `token=${rateLimitTokenFingerprint(c.req.raw.headers.get("authorization"))}`,
+    `runner=${rateLimitRunnerId(path)}`,
+    `source=${rateLimitSourcePlatform(path)}`,
+    `tenant=${rateLimitTenant(path)}`,
+    `endpoint=${normalizeRateLimitedEndpoint(c.req.method, path)}`
+  ].join("|");
+}
+
+function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions) {
+  if (!Number.isFinite(options.windowMs) || options.windowMs <= 0) {
+    throw new Error("rateLimit.windowMs must be a positive number.");
+  }
+  if (!Number.isFinite(options.maxRequests) || options.maxRequests <= 0) {
+    throw new Error("rateLimit.maxRequests must be a positive number.");
+  }
+
+  const buckets = new Map<string, DispatcherRateLimitBucket>();
+  const now = options.now ?? (() => Date.now());
+
+  return async (c: Context, next: () => Promise<void>) => {
+    const currentTime = now();
+    const key = rateLimitKey(c);
+    const existing = buckets.get(key);
+    const bucket =
+      existing && existing.resetAt > currentTime
+        ? existing
+        : { count: 0, resetAt: currentTime + options.windowMs };
+
+    if (bucket.count >= options.maxRequests) {
+      const retryAfterMs = Math.max(0, bucket.resetAt - currentTime);
+      c.header("retry-after", String(Math.ceil(retryAfterMs / 1000)));
+      return c.json(
+        {
+          error: "rate_limited",
+          retryAfterMs,
+          maxRequests: options.maxRequests,
+          windowMs: options.windowMs
+        },
+        429
+      );
+    }
+
+    bucket.count += 1;
+    buckets.set(key, bucket);
+    await next();
+  };
+}
 import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
+
+type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
+
+function shouldDeliverRunStatusUpdate(
+  presentation: CallbackPresentation,
+  input: { provider: string; state: CallbackRunStatusState }
+): boolean {
+  return presentation.shouldDeliverRunStatusUpdate?.(input) ?? presentation.shouldDeliverStatusUpdate(input.provider);
+}
+
+function larkLifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
+  return input.provider === "lark" ? `${input.runId}:status` : undefined;
+}
 
 const CreateRunnerSchema = z.object({
   runnerId: z.string().min(1),
@@ -122,12 +296,37 @@ const CreateRunSchema = z.object({
   event: OpenTagEventSchema
 });
 
+const RecordControlPlaneEventSchema = z.object({
+  type: z.string().min(1),
+  severity: z.enum(["info", "warn", "error"]).optional(),
+  subject: z.string().min(1).optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+  createdAt: z.string().datetime().optional()
+});
+
+const PruneSourceDeliveriesSchema = z.object({
+  olderThan: z.string().datetime(),
+  limit: z.number().int().positive().max(100_000).optional()
+});
+
 const PromoteFollowUpRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
 const CompleteRunSchema = z.object({
-  result: OpenTagRunResultSchema
+  result: OpenTagRunResultSchema,
+  idempotencyKey: z.string().min(1).max(256).optional()
+});
+
+const MarkRunningSchema = z.object({
+  executor: z.string().min(1),
+  runTimeoutMs: z.number().int().positive().optional(),
+  idempotencyKey: z.string().min(1).max(256).optional()
+});
+
+const CancelRunSchema = z.object({
+  reason: z.string().min(1).optional(),
+  requestedBy: z.string().min(1).optional()
 });
 
 const ApprovalDecisionInputSchema = z.object({
@@ -174,13 +373,40 @@ const ChildRunInputSchema = z.object({
   sourceApplyPlanId: z.string().min(1).optional()
 });
 
+const CHILD_EVENT_METADATA_REPLAY_KEYS = [
+  "sourceDeliveryId",
+  "webhookDeliveryId",
+  "deliveryId",
+  "githubDeliveryId",
+  "githubDeliveryGuid",
+  "slackEventId",
+  "larkEventId",
+  "signatureState",
+  "signatureVerified",
+  "verifiedSignature",
+  "webhookSignatureVerified",
+  "githubSignatureVerified"
+] as const;
+
 const ProgressSchema = z.object({
   type: z.string().min(1).optional(),
   message: z.string().min(1),
   at: z.string().datetime().optional(),
   visibility: RunEventVisibilitySchema.optional(),
-  importance: RunEventImportanceSchema.optional()
+  importance: RunEventImportanceSchema.optional(),
+  idempotencyKey: z.string().min(1).max(256).optional()
 });
+
+function childEventMetadata(parentMetadata: OpenTagEvent["metadata"], metadata?: Record<string, unknown>): Record<string, unknown> {
+  const sanitized = { ...parentMetadata };
+  for (const key of CHILD_EVENT_METADATA_REPLAY_KEYS) {
+    delete sanitized[key];
+  }
+  return {
+    ...sanitized,
+    ...(metadata ?? {})
+  };
+}
 
 function childEventFromParent(input: {
   parentEvent: OpenTagEvent;
@@ -206,10 +432,7 @@ function childEventFromParent(input: {
         actionKind: input.actionKind
       }
     },
-    metadata: {
-      ...input.parentEvent.metadata,
-      ...(input.metadata ?? {})
-    },
+    metadata: childEventMetadata(input.parentEvent.metadata, input.metadata),
     permissions: input.permissions ?? input.parentEvent.permissions
   };
 }
@@ -235,6 +458,30 @@ function metadataIssueNumber(metadata: Record<string, unknown> | undefined): str
 function metadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function sourceContainerMetadata(input: { provider: string; accountId: string; conversationId: string }): Record<string, string> {
+  if (input.provider === "lark") {
+    return { tenantKey: input.accountId, chatId: input.conversationId };
+  }
+  if (input.provider === "slack") {
+    return { teamId: input.accountId, channelId: input.conversationId };
+  }
+  if (input.provider === "telegram") {
+    return { botId: input.accountId, chatId: input.conversationId };
+  }
+  return { accountId: input.accountId, conversationId: input.conversationId };
+}
+
+function latestRunTimeoutMs(events: Array<{ type: string; payload: unknown }>): number | undefined {
+  for (const event of [...events].reverse()) {
+    if (event.type !== "run.running" || !event.payload || typeof event.payload !== "object") continue;
+    const runTimeoutMs = (event.payload as { runTimeoutMs?: unknown }).runTimeoutMs;
+    if (typeof runTimeoutMs === "number" && Number.isInteger(runTimeoutMs) && runTimeoutMs > 0) {
+      return runTimeoutMs;
+    }
+  }
+  return undefined;
 }
 
 function githubIssueWorkItemExternalId(metadata: Record<string, unknown> | undefined): string | undefined {
@@ -1187,14 +1434,23 @@ export type CallbackMessage = {
   agentId?: string;
   threadKey?: string;
   statusMessageKey?: string;
+  externalMessageId?: string;
   blocks?: SlackBlock[];
+  rich?: {
+    provider: string;
+    payload: unknown;
+  };
+};
+
+export type CallbackDeliveryResult = {
+  externalMessageId?: string;
 };
 
 export type CallbackSink = {
-  deliver(message: CallbackMessage): Promise<void>;
+  deliver(message: CallbackMessage): Promise<void | CallbackDeliveryResult>;
 };
 
-export type SourceReceiptState = "received";
+export type SourceReceiptState = "received" | "running";
 
 export type SourceReceiptDelivery = {
   delivered: boolean;
@@ -1327,7 +1583,17 @@ async function deliverCallbackDelivery(input: {
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
   try {
-    await input.sink.deliver({
+    const externalMessageId =
+      input.delivery.externalMessageId ??
+      (input.delivery.statusMessageKey
+        ? await input.repo.findCallbackExternalMessageId({
+            runId: input.delivery.runId,
+            provider: input.delivery.provider,
+            ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
+            statusMessageKey: input.delivery.statusMessageKey
+          })
+        : undefined);
+    const deliveryResult = await input.sink.deliver({
       runId: input.delivery.runId,
       kind: input.delivery.kind,
       provider: input.delivery.provider,
@@ -1336,15 +1602,23 @@ async function deliverCallbackDelivery(input: {
       ...(input.delivery.threadKey ? { threadKey: input.delivery.threadKey } : {}),
       ...(input.delivery.agentId ? { agentId: input.delivery.agentId } : {}),
       ...(input.delivery.statusMessageKey ? { statusMessageKey: input.delivery.statusMessageKey } : {}),
-      ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {})
+      ...(externalMessageId ? { externalMessageId } : {}),
+      ...(input.delivery.blocks ? { blocks: input.delivery.blocks as SlackBlock[] } : {}),
+      ...(input.delivery.rich ? { rich: input.delivery.rich as NonNullable<CallbackMessage["rich"]> } : {})
     });
-    await input.repo.markCallbackDelivered({ deliveryId: input.delivery.id });
+    const deliveredExternalMessageId = deliveryResult?.externalMessageId ?? externalMessageId;
+    await input.repo.markCallbackDelivered({
+      deliveryId: input.delivery.id,
+      ...(deliveredExternalMessageId ? { externalMessageId: deliveredExternalMessageId } : {})
+    });
     return true;
   } catch (error) {
+    const maxAttempts = input.retry?.maxAttempts ?? 5;
     const nextAttemptAt = nextCallbackAttemptAt({ attempts: input.delivery.attempts, ...(input.retry ?? {}) });
     await input.repo.markCallbackFailed({
       deliveryId: input.delivery.id,
       error: error instanceof Error ? error.message : String(error),
+      maxAttempts,
       ...(nextAttemptAt ? { nextAttemptAt } : {})
     });
     return false;
@@ -1396,7 +1670,8 @@ async function deliverAndAudit(input: {
     ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
     ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
     ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
-    ...(input.message.blocks ? { blocks: input.message.blocks } : {})
+    ...(input.message.blocks ? { blocks: input.message.blocks } : {}),
+    ...(input.message.rich ? { rich: input.message.rich } : {})
   });
   await deliverCallbackDelivery({
     repo: input.repo,
@@ -1443,9 +1718,110 @@ async function deliverSourceReceiptBestEffort(input: {
   }
 }
 
-function isAuthorized(request: Request, pairingToken: string | undefined): boolean {
-  if (!pairingToken) return true;
-  return request.headers.get("authorization") === `Bearer ${pairingToken}`;
+type DispatcherAuthScope = "pairing" | "runner_runtime" | "runner_operator";
+type DispatcherAuthResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: "invalid_pairing_token" | "invalid_runner_token" | "invalid_dispatcher_token" | "runner_token_revoked";
+      message?: string;
+    };
+
+function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
+  if (method !== "POST") return false;
+  if (/^\/v1\/runners\/[^/]+\/claim$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete)$/.test(path)) return true;
+  return /^\/v1\/runs\/[^/]+\/(running|progress|complete)$/.test(path);
+}
+
+function isRunnerOperatorEndpoint(method: string, path: string): boolean {
+  if (method === "GET") {
+    if (path === "/v1/control-plane-alerts") return true;
+    if (/^\/v1\/runners\/[^/]+$/.test(path)) return true;
+    if (/^\/v1\/repo-bindings\/[^/]+\/[^/]+\/[^/]+$/.test(path)) return true;
+    if (/^\/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+(?:\/status)?$/.test(path)) return true;
+    return /^\/v1\/runs\/[^/]+(?:\/events|\/metrics)?$/.test(path);
+  }
+  if (method !== "POST") return false;
+  if (path === "/v1/source-deliveries/prune") return true;
+  if (/^\/v1\/runs\/[^/]+\/cancel$/.test(path)) return true;
+  return /^\/v1\/channel-bindings\/[^/]+\/[^/]+\/[^/]+\/cancel-active-run$/.test(path);
+}
+
+function dispatcherAuthScope(request: Request): DispatcherAuthScope {
+  const path = new URL(request.url).pathname;
+  const method = request.method.toUpperCase();
+  if (isRunnerRuntimeEndpoint(method, path)) return "runner_runtime";
+  if (isRunnerOperatorEndpoint(method, path)) return "runner_operator";
+  return "pairing";
+}
+
+function authMatches(request: Request, token: string | undefined): boolean {
+  return Boolean(token) && request.headers.get("authorization") === `Bearer ${token}`;
+}
+
+function bearerToken(request: Request): string | undefined {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return undefined;
+  return authorization.slice("Bearer ".length);
+}
+
+function configuredRunnerTokens(input: { runnerToken?: string; runnerTokens?: string[] }): string[] {
+  return [...new Set([input.runnerToken, ...(input.runnerTokens ?? [])].map((token) => token?.trim()).filter((token): token is string => Boolean(token)))];
+}
+
+function normalizeRevokedRunnerTokenFingerprints(fingerprints: string[] | undefined): Set<string> {
+  return new Set((fingerprints ?? []).map((fingerprint) => fingerprint.trim().toLowerCase()).filter(Boolean));
+}
+
+function authMatchesAny(request: Request, tokens: string[]): boolean {
+  return tokens.some((token) => authMatches(request, token));
+}
+
+function requestUsesRevokedRunnerToken(input: { request: Request; revokedRunnerTokenFingerprints: Set<string> }): boolean {
+  const token = bearerToken(input.request);
+  if (!token) return false;
+  return input.revokedRunnerTokenFingerprints.has(rawTokenFingerprint(token).toLowerCase());
+}
+
+function revokedRunnerTokenResult(): DispatcherAuthResult {
+  return {
+    ok: false,
+    reason: "runner_token_revoked",
+    message: "Runner token has been revoked or expired. Pair again or update daemon.runnerToken before retrying."
+  };
+}
+
+function authorizeDispatcherRequest(input: {
+  request: Request;
+  pairingToken: string | undefined;
+  runnerTokens: string[];
+  revokedRunnerTokenFingerprints: Set<string>;
+}): DispatcherAuthResult {
+  if (!input.pairingToken && input.runnerTokens.length === 0) return { ok: true };
+
+  const scope = dispatcherAuthScope(input.request);
+  const pairingMatches = authMatches(input.request, input.pairingToken);
+  const runnerMatches = authMatchesAny(input.request, input.runnerTokens);
+  const revokedRunnerToken = requestUsesRevokedRunnerToken({
+    request: input.request,
+    revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints
+  });
+
+  if (scope === "pairing") {
+    return pairingMatches ? { ok: true } : { ok: false, reason: "invalid_pairing_token" };
+  }
+
+  if (scope === "runner_runtime") {
+    if (input.runnerTokens.length > 0) {
+      if (revokedRunnerToken) return revokedRunnerTokenResult();
+      return runnerMatches ? { ok: true } : { ok: false, reason: "invalid_runner_token" };
+    }
+    return pairingMatches ? { ok: true } : { ok: false, reason: "invalid_pairing_token" };
+  }
+
+  if (revokedRunnerToken) return revokedRunnerTokenResult();
+  return runnerMatches || pairingMatches ? { ok: true } : { ok: false, reason: "invalid_dispatcher_token" };
 }
 
 export function createDispatcherApp(input: {
@@ -1453,10 +1829,15 @@ export function createDispatcherApp(input: {
   callbackSink?: CallbackSink;
   sourceReceiptSink?: SourceReceiptSink;
   pairingToken?: string;
+  runnerToken?: string;
+  runnerTokens?: string[];
+  revokedRunnerTokenFingerprints?: string[];
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   callbackRetry?: CallbackRetryOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
+  maxRequestBodyBytes?: number;
+  rateLimit?: DispatcherRateLimitOptions | false;
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
@@ -1466,6 +1847,164 @@ export function createDispatcherApp(input: {
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
   const callbackRetry = input.callbackRetry ?? {};
+  const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const runnerTokens = configuredRunnerTokens(input);
+  const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
+  const requestEndpoint = (c: Context) => normalizeRateLimitedEndpoint(c.req.method, new URL(c.req.url).pathname);
+  const recordControlPlaneEvent = async (input: {
+    type: string;
+    severity?: "info" | "warn" | "error" | undefined;
+    subject?: string | undefined;
+    payload?: Record<string, unknown> | undefined;
+    createdAt?: string | undefined;
+  }) => {
+    await repo.appendControlPlaneEvent({
+      type: input.type,
+      ...(input.severity ? { severity: input.severity } : {}),
+      ...(input.subject ? { subject: input.subject } : {}),
+      ...(input.payload ? { payload: input.payload } : {}),
+      ...(input.createdAt ? { createdAt: input.createdAt } : {})
+    });
+  };
+  const parseDispatcherBody = async <S extends z.ZodTypeAny>(
+    c: Context,
+    schema: S,
+    options: { invalidBodyError?: string } = {}
+  ): Promise<z.infer<S>> => {
+    try {
+      return await parseBody(c, schema, { maxBytes: maxRequestBodyBytes, ...options });
+    } catch (err) {
+      if (err instanceof HTTPException && err.status === 413) {
+        await recordControlPlaneEvent({
+          type: "security.request_body_rejected",
+          severity: "warn",
+          subject: requestEndpoint(c),
+          payload: {
+            reason: "request_body_too_large",
+            endpoint: requestEndpoint(c),
+            maxBytes: maxRequestBodyBytes,
+            contentLength: c.req.raw.headers.get("content-length") ?? null
+          }
+        });
+      }
+      if (err instanceof HTTPException && err.status === 400 && err.cause instanceof RequestBodyRejectedError) {
+        await recordControlPlaneEvent({
+          type: "security.request_body_rejected",
+          severity: "warn",
+          subject: requestEndpoint(c),
+          payload: {
+            reason: err.cause.reason,
+            error: err.cause.publicError,
+            endpoint: requestEndpoint(c),
+            contentLength: c.req.raw.headers.get("content-length") ?? null
+          }
+        });
+      }
+      throw err;
+    }
+  };
+
+  const appendSuppressedRunStatusCallback = async (input: {
+    runId: string;
+    provider: string;
+    state: CallbackRunStatusState;
+  }): Promise<void> => {
+    const capability = platformCapabilityForProvider(input.provider);
+    await repo.appendRunEvent({
+      runId: input.runId,
+      type: "callback.progress.suppressed",
+      payload: {
+        provider: input.provider,
+        reason: "platform_liveness_strategy",
+        requestedStatus: input.state,
+        livenessStrategy: capability?.livenessStrategy ?? "unknown"
+      },
+      visibility: "audit",
+      importance: "low",
+      message: "Run status callback suppressed by platform liveness strategy; use status or audit for details."
+    });
+  };
+
+  async function deliverPromotedFollowUpAcknowledgement(input: {
+    run: OpenTagRun;
+    event: OpenTagEvent;
+  }): Promise<void> {
+    if (!presentation.shouldDeliverAcknowledgement(input.event.callback.provider)) return;
+    const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: input.run.id });
+    const acknowledgement = presentation.render({
+      provider: input.event.callback.provider,
+      presentation: acknowledgementPresentation
+    });
+    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+    await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: {
+        runId: input.run.id,
+        kind: "acknowledgement",
+        provider: input.event.callback.provider,
+        uri: input.event.callback.uri,
+        body: acknowledgement.body,
+        ...(input.event.target.agentId ? { agentId: input.event.target.agentId } : {}),
+        ...(input.event.callback.threadKey ? { threadKey: input.event.callback.threadKey } : {}),
+        ...(statusMessageKey ? { statusMessageKey } : {}),
+        ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
+        ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
+      }
+    });
+  }
+
+  async function promoteFollowUpRequest(input: {
+    followUpRequestId: string;
+    runId: string;
+  }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }> {
+    const promoted = await repo.createRunFromFollowUpRequest(input);
+    await deliverPromotedFollowUpAcknowledgement({
+      run: promoted.run,
+      event: promoted.followUpRequest.event
+    });
+    return promoted;
+  }
+
+  async function promoteNextFollowUpAfterTerminalRun(input: {
+    activeRunId: string;
+  }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun } | null> {
+    const [next] = await repo.listQueuedFollowUpsForActiveRun({ activeRunId: input.activeRunId });
+    if (!next) return null;
+
+    try {
+      const promoted = await promoteFollowUpRequest({
+        followUpRequestId: next.id,
+        runId: `run_${randomUUID()}`
+      });
+      await repo.appendRunEvent({
+        runId: input.activeRunId,
+        type: "follow_up_request.auto_promoted",
+        payload: {
+          followUpRequestId: promoted.followUpRequest.id,
+          createdRunId: promoted.run.id
+        },
+        visibility: "audit",
+        importance: "normal",
+        message: `Promoted queued follow-up ${promoted.followUpRequest.id} into run ${promoted.run.id}.`
+      });
+      return promoted;
+    } catch (error) {
+      await repo.appendRunEvent({
+        runId: input.activeRunId,
+        type: "follow_up_request.auto_promote_failed",
+        payload: {
+          followUpRequestId: next.id,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        visibility: "audit",
+        importance: "high",
+        message: `Could not auto-promote queued follow-up ${next.id}.`
+      });
+      return null;
+    }
+  }
   const admission = createAdmissionRuntime({
     repo,
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {})
@@ -1473,16 +2012,104 @@ export function createDispatcherApp(input: {
 
   app.get("/healthz", (c) => c.json({ ok: true }));
 
+  if (input.rateLimit) {
+    app.use("/v1/*", createDispatcherRateLimitMiddleware(input.rateLimit));
+  }
+
   app.use("/v1/*", async (c, next) => {
-    if (!isAuthorized(c.req.raw, input.pairingToken)) {
-      return c.json({ error: "unauthorized" }, 401);
+    const authorization = authorizeDispatcherRequest({
+      request: c.req.raw,
+      pairingToken: input.pairingToken,
+      runnerTokens,
+      revokedRunnerTokenFingerprints
+    });
+    if (!authorization.ok) {
+      await recordControlPlaneEvent({
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: requestEndpoint(c),
+        payload: {
+          reason: authorization.reason,
+          endpoint: requestEndpoint(c),
+          hasAuthorization: Boolean(c.req.raw.headers.get("authorization")),
+          tokenFingerprint: rateLimitTokenFingerprint(c.req.raw.headers.get("authorization"))
+        }
+      });
+      return c.json(
+        {
+          error: "unauthorized",
+          reason: authorization.reason,
+          ...(authorization.message ? { message: authorization.message } : {})
+        },
+        401
+      );
     }
     await next();
   });
 
+  app.get("/v1/control-plane-events", async (c) => {
+    const limitValue = Number(c.req.query("limit") ?? 100);
+    const limit = Number.isFinite(limitValue) ? Math.max(1, Math.min(500, Math.floor(limitValue))) : 100;
+    const eventQuery: { limit: number; type?: string; severity?: "info" | "warn" | "error" } = { limit };
+    const type = c.req.query("type");
+    const severity = c.req.query("severity");
+    if (type) eventQuery.type = type;
+    if (severity === "info" || severity === "warn" || severity === "error") eventQuery.severity = severity;
+    const events = await repo.listControlPlaneEvents(eventQuery);
+    return c.json({ events });
+  });
+
+  app.post("/v1/control-plane-events", async (c) => {
+    const parsed = await parseDispatcherBody(c, RecordControlPlaneEventSchema);
+    await recordControlPlaneEvent(parsed);
+    return c.json({ ok: true }, 201);
+  });
+
+  app.get("/v1/control-plane-alerts", async (c) => {
+    const limitValue = Number(c.req.query("limit") ?? 5_000);
+    const limit = Number.isFinite(limitValue) ? Math.max(1, Math.min(10_000, Math.floor(limitValue))) : 5_000;
+    const since = c.req.query("since");
+    const alerts = await repo.summarizeControlPlaneAlerts({
+      limit,
+      ...(since ? { since } : {})
+    });
+    return c.json({ alerts });
+  });
+
+  app.post("/v1/source-deliveries/prune", async (c) => {
+    const parsed = await parseDispatcherBody(c, PruneSourceDeliveriesSchema);
+    const pruneInput = {
+      olderThan: parsed.olderThan,
+      ...(parsed.limit !== undefined ? { limit: parsed.limit } : {})
+    };
+    const result = await repo.pruneSourceDeliveries(pruneInput);
+    await recordControlPlaneEvent({
+      type: "maintenance.source_deliveries_pruned",
+      severity: "info",
+      subject: "source_deliveries",
+      payload: {
+        olderThan: parsed.olderThan,
+        limit: parsed.limit ?? null,
+        scanned: result.scanned,
+        pruned: result.pruned,
+        retainedActive: result.retainedActive
+      }
+    });
+    return c.json({ result });
+  });
+
   app.post("/v1/runners", async (c) => {
-    const parsed = await parseBody(c, CreateRunnerSchema);
+    const parsed = await parseDispatcherBody(c, CreateRunnerSchema);
     await repo.registerRunner(parsed);
+    await recordControlPlaneEvent({
+      type: "runner.registered",
+      severity: "info",
+      subject: parsed.runnerId,
+      payload: {
+        runnerId: parsed.runnerId,
+        name: parsed.name
+      }
+    });
     return c.json({ ok: true }, 201);
   });
 
@@ -1493,7 +2120,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings", async (c) => {
-    const parsed = await parseBody(c, CreateRepoBindingSchema);
+    const parsed = await parseDispatcherBody(c, CreateRepoBindingSchema);
     await repo.createRepoBinding({
       provider: parsed.provider,
       owner: parsed.owner,
@@ -1502,6 +2129,20 @@ export function createDispatcherApp(input: {
       ...(parsed.workspacePath ? { workspacePath: parsed.workspacePath } : {}),
       ...(parsed.defaultExecutor ? { defaultExecutor: parsed.defaultExecutor } : {}),
       ...(parsed.allowedActors?.length ? { allowedActors: parsed.allowedActors } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "binding.repository.upserted",
+      severity: "info",
+      subject: `${parsed.provider}:${parsed.owner}/${parsed.repo}`,
+      payload: {
+        provider: parsed.provider,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        runnerId: parsed.runnerId,
+        hasWorkspacePath: Boolean(parsed.workspacePath),
+        ...(parsed.defaultExecutor ? { defaultExecutor: parsed.defaultExecutor } : {}),
+        allowedActorsCount: parsed.allowedActors?.length ?? 0
+      }
     });
     return c.json({ ok: true }, 201);
   });
@@ -1517,12 +2158,31 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings/:provider/:owner/:repo/policy-rules", async (c) => {
-    const parsed = await parseBody(c, UpsertPolicyRuleSchema);
+    const parsed = await parseDispatcherBody(c, UpsertPolicyRuleSchema);
+    const provider = c.req.param("provider");
+    const owner = c.req.param("owner");
+    const repoName = c.req.param("repo");
     const rule = await repo.upsertRepoPolicyRule({
-      provider: c.req.param("provider"),
-      owner: c.req.param("owner"),
-      repo: c.req.param("repo"),
+      provider,
+      owner,
+      repo: repoName,
       rule: parsed.rule
+    });
+    await recordControlPlaneEvent({
+      type: "binding.repository.policy_rule.upserted",
+      severity: "info",
+      subject: `${provider}:${owner}/${repoName}:${rule.id}`,
+      payload: {
+        provider,
+        owner,
+        repo: repoName,
+        ruleId: rule.id,
+        scope: rule.scope,
+        effect: rule.effect,
+        ...(rule.capabilityId ? { capabilityId: rule.capabilityId } : {}),
+        ...(rule.mutationDomain ? { mutationDomain: rule.mutationDomain } : {}),
+        hasReason: Boolean(rule.reason)
+      }
     });
     return c.json({ rule }, 201);
   });
@@ -1537,12 +2197,31 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/repo-bindings/:provider/:owner/:repo/mutation-mappings", async (c) => {
-    const parsed = await parseBody(c, UpsertMutationMappingSchema);
+    const parsed = await parseDispatcherBody(c, UpsertMutationMappingSchema);
+    const provider = c.req.param("provider");
+    const owner = c.req.param("owner");
+    const repoName = c.req.param("repo");
     const mapping = await repo.upsertRepoMutationMapping({
-      provider: c.req.param("provider"),
-      owner: c.req.param("owner"),
-      repo: c.req.param("repo"),
+      provider,
+      owner,
+      repo: repoName,
       mapping: parsed.mapping
+    });
+    await recordControlPlaneEvent({
+      type: "binding.repository.mutation_mapping.upserted",
+      severity: "info",
+      subject: `${provider}:${owner}/${repoName}:${mapping.id}`,
+      payload: {
+        provider,
+        owner,
+        repo: repoName,
+        mappingId: mapping.id,
+        adapter: mapping.adapter,
+        domain: mapping.domain,
+        strategy: mapping.strategy,
+        valueCount: Object.keys(mapping.values).length,
+        hasDescription: Boolean(mapping.description)
+      }
     });
     return c.json({ mapping }, 201);
   });
@@ -1573,7 +2252,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/channel-bindings", async (c) => {
-    const parsed = await parseBody(c, CreateChannelBindingSchema);
+    const parsed = await parseDispatcherBody(c, CreateChannelBindingSchema);
     await repo.upsertChannelBinding({
       provider: parsed.provider,
       accountId: parsed.accountId,
@@ -1582,6 +2261,20 @@ export function createDispatcherApp(input: {
       owner: parsed.owner,
       repo: parsed.repo,
       ...(parsed.metadata ? { metadata: parsed.metadata } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "binding.channel.upserted",
+      severity: "info",
+      subject: `${parsed.provider}:${parsed.accountId}/${parsed.conversationId}`,
+      payload: {
+        provider: parsed.provider,
+        accountId: parsed.accountId,
+        conversationId: parsed.conversationId,
+        repoProvider: parsed.repoProvider,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        hasMetadata: Boolean(parsed.metadata)
+      }
     });
     return c.json({ ok: true }, 201);
   });
@@ -1596,9 +2289,97 @@ export function createDispatcherApp(input: {
     return c.json({ binding });
   });
 
+  app.get("/v1/channel-bindings/:provider/:accountId/:conversationId/status", async (c) => {
+    const provider = c.req.param("provider");
+    const accountId = c.req.param("accountId");
+    const conversationId = c.req.param("conversationId");
+    const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
+    if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const active = await repo.findCancelableRunForSourceContainer({
+      source: provider,
+      repoProvider: binding.repoProvider,
+      owner: binding.owner,
+      repo: binding.repo,
+      metadata: sourceContainerMetadata({ provider, accountId, conversationId })
+    });
+    const queuedFollowUps = active ? await repo.listQueuedFollowUpsForActiveRun({ activeRunId: active.run.id }) : [];
+    const runTimeoutMs = active ? latestRunTimeoutMs(await repo.listRunEvents({ runId: active.run.id })) : undefined;
+    return c.json({
+      binding,
+      ...(active ? { activeRun: active.run, activeEvent: active.event } : {}),
+      ...(runTimeoutMs ? { runTimeoutPolicy: { hardTimeoutMs: runTimeoutMs } } : {}),
+      queuedFollowUps
+    });
+  });
+
+  app.delete("/v1/channel-bindings/:provider/:accountId/:conversationId", async (c) => {
+    const provider = c.req.param("provider");
+    const accountId = c.req.param("accountId");
+    const conversationId = c.req.param("conversationId");
+    const deleted = await repo.deleteChannelBinding({
+      provider,
+      accountId,
+      conversationId
+    });
+    if (!deleted) return c.json({ error: "channel_binding_not_found" }, 404);
+    await recordControlPlaneEvent({
+      type: "binding.channel.deleted",
+      severity: "info",
+      subject: `${provider}:${accountId}/${conversationId}`,
+      payload: {
+        provider,
+        accountId,
+        conversationId
+      }
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/v1/channel-bindings/:provider/:accountId/:conversationId/cancel-active-run", async (c) => {
+    const provider = c.req.param("provider");
+    const accountId = c.req.param("accountId");
+    const conversationId = c.req.param("conversationId");
+    const parsed = await parseDispatcherBody(c, CancelRunSchema);
+    const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
+    if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const active = await repo.findCancelableRunForSourceContainer({
+      source: provider,
+      repoProvider: binding.repoProvider,
+      owner: binding.owner,
+      repo: binding.repo,
+      metadata: sourceContainerMetadata({ provider, accountId, conversationId })
+    });
+    if (!active) return c.json({ error: "active_run_not_found" }, 404);
+    const outcome = await repo.cancelRun({
+      runId: active.run.id,
+      ...(parsed.reason ? { reason: parsed.reason } : {}),
+      ...(parsed.requestedBy ? { requestedBy: parsed.requestedBy } : {})
+    });
+    if (outcome.outcome === "not_found") return c.json({ error: "run_not_found" }, 404);
+    if (outcome.outcome === "already_terminal") {
+      return c.json({ error: "run_already_terminal", run: outcome.run }, 409);
+    }
+    return c.json({ outcome: "cancelled", run: outcome.run });
+  });
+
   app.post("/v1/slack-channel-bindings", async (c) => {
-    const parsed = await parseBody(c, CreateSlackChannelBindingSchema);
+    const parsed = await parseDispatcherBody(c, CreateSlackChannelBindingSchema);
     await repo.createSlackChannelBinding(parsed);
+    await recordControlPlaneEvent({
+      type: "binding.channel.upserted",
+      severity: "info",
+      subject: `slack:${parsed.teamId}/${parsed.channelId}`,
+      payload: {
+        provider: "slack",
+        accountId: parsed.teamId,
+        conversationId: parsed.channelId,
+        repoProvider: parsed.repoProvider ?? "github",
+        owner: parsed.owner,
+        repo: parsed.repo,
+        compatibilityEndpoint: "/v1/slack-channel-bindings",
+        hasMetadata: false
+      }
+    });
     return c.json({ ok: true }, 201);
   });
 
@@ -1612,33 +2393,65 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runs", async (c) => {
-    const parsed = await parseBody(c, CreateRunSchema);
+    const parsed = await parseDispatcherBody(c, CreateRunSchema);
     const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
 
     if (admitted.outcome === "needs_human_decision") {
+      const projectTarget = projectTargetRefFromEvent(parsed.event);
+      await recordControlPlaneEvent({
+        type: "admission.needs_human_decision",
+        severity: ["repo_context_missing", "repo_not_bound"].includes(admitted.decision.reasonCode) ? "warn" : "info",
+        subject: parsed.runId,
+        payload: {
+          runId: parsed.runId,
+          decision: admitted.decision,
+          source: parsed.event.source,
+          sourceEventId: parsed.event.sourceEventId,
+          projectTarget: projectTarget ? `${projectTarget.provider}:${projectTarget.owner}/${projectTarget.repo}` : null
+        }
+      });
       return c.json({ decision: admitted.decision }, 202);
     }
 
     if (admitted.outcome === "drop_duplicate") {
-      await repo.appendRunEvent({
-        runId: admitted.run.id,
-        type: "admission.decided",
-        payload: admitted.decision,
-        visibility: "audit",
-        importance: "normal",
-        message: admitted.decision.reason
-      });
-      await repo.appendRunEvent({
-        runId: admitted.run.id,
-        type: "run.create_idempotent_replay",
-        payload: { requestedRunId: parsed.runId, eventId: parsed.event.id },
-        visibility: "audit",
-        importance: "low"
-      });
-      return c.json({ decision: admitted.decision, run: admitted.run, idempotentReplay: true }, 200);
+      const replay = await repo.createRun({ id: parsed.runId, event: parsed.event });
+      const decision = replay.created ? admitted.decision : replay.replayDecision;
+      return c.json({ decision, run: replay.run, idempotentReplay: true }, 200);
     }
 
     if (admitted.outcome === "follow_up_queued") {
+      const event = admitted.followUpRequest.event;
+      const activeRunId = admitted.followUpRequest.activeRunId;
+      if (activeRunId && shouldDeliverRunStatusUpdate(presentation, { provider: event.callback.provider, state: "queued" })) {
+        const queuedPresentation = presentation.runStatusPresentation({
+          runId: activeRunId,
+          state: "queued",
+          message: `Queued follow-up ${admitted.followUpRequest.id} behind the active run.`,
+          nextAction: "Wait for the active run final reply, send another follow-up to queue more context, or request cancellation with /stop.",
+          detailVisibility: "source_thread"
+        });
+        const queued = presentation.render({
+          provider: event.callback.provider,
+          presentation: queuedPresentation
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: activeRunId,
+            kind: "progress",
+            provider: event.callback.provider,
+            uri: event.callback.uri,
+            body: queued.body,
+            ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
+            ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {}),
+            ...(queued.blocks?.length ? { blocks: queued.blocks } : {}),
+            ...(queued.rich ? { rich: queued.rich } : {}),
+            statusMessageKey: `${activeRunId}:status`
+          }
+        });
+      }
       return c.json({ decision: admitted.decision, followUpRequest: admitted.followUpRequest }, 202);
     }
 
@@ -1646,13 +2459,7 @@ export function createDispatcherApp(input: {
     if (!createdRun.created) {
       return c.json(
         {
-          decision: {
-            ...admitted.decision,
-            action: "drop_duplicate",
-            reason: "Source event already created a run.",
-            reasonCode: "duplicate_source_event",
-            activeRunId: createdRun.run.id
-          },
+          decision: createdRun.replayDecision,
           run: createdRun.run,
           idempotentReplay: true
         },
@@ -1673,8 +2480,14 @@ export function createDispatcherApp(input: {
     });
     const shouldDeliverAcknowledgement =
       presentation.shouldDeliverAcknowledgement(parsed.event.callback.provider) ||
-      (parsed.event.callback.provider === "slack" && !sourceReceiptDelivery.delivered);
+      (shouldDeliverSourceReceipt(parsed.event.callback.provider) && !sourceReceiptDelivery.delivered);
     if (shouldDeliverAcknowledgement) {
+      const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
+      const acknowledgement = presentation.render({
+        provider: parsed.event.callback.provider,
+        presentation: acknowledgementPresentation
+      });
+      const statusMessageKey = larkLifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -1684,9 +2497,12 @@ export function createDispatcherApp(input: {
           kind: "acknowledgement",
           provider: parsed.event.callback.provider,
           uri: parsed.event.callback.uri,
-          body: presentation.acknowledgement({ provider: parsed.event.callback.provider, runId: run.id }),
+          body: acknowledgement.body,
           ...(parsed.event.target.agentId ? { agentId: parsed.event.target.agentId } : {}),
-          ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {})
+          ...(parsed.event.callback.threadKey ? { threadKey: parsed.event.callback.threadKey } : {}),
+          ...(statusMessageKey ? { statusMessageKey } : {}),
+          ...(acknowledgement.blocks?.length ? { blocks: acknowledgement.blocks } : {}),
+          ...(acknowledgement.rich ? { rich: acknowledgement.rich } : {})
         }
       });
     }
@@ -1694,7 +2510,7 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/thread-actions", async (c) => {
-    const parsed = await parseBody(c, ThreadActionInputSchema);
+    const parsed = await parseDispatcherBody(c, ThreadActionInputSchema);
     const command = parseThreadActionCommand(parsed.rawText);
     if (!command) {
       return c.json({ outcome: "ignored", reason: "not_action_command" }, 202);
@@ -2068,10 +2884,10 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/follow-up-requests/:id/create-run", async (c) => {
-    const parsed = await parseBody(c, PromoteFollowUpRequestSchema);
+    const parsed = await parseDispatcherBody(c, PromoteFollowUpRequestSchema);
     let promoted;
     try {
-      promoted = await repo.createRunFromFollowUpRequest({
+      promoted = await promoteFollowUpRequest({
         followUpRequestId: c.req.param("id"),
         runId: parsed.runId
       });
@@ -2086,23 +2902,6 @@ export function createDispatcherApp(input: {
       throw error;
     }
     const followUpRequest = promoted.followUpRequest;
-    const event = followUpRequest.event;
-    if (presentation.shouldDeliverAcknowledgement(event.callback.provider)) {
-      await deliverAndAudit({
-        repo,
-        sink: callbackSink,
-        retry: callbackRetry,
-        message: {
-          runId: promoted.run.id,
-          kind: "acknowledgement",
-          provider: event.callback.provider,
-          uri: event.callback.uri,
-          body: presentation.acknowledgement({ provider: event.callback.provider, runId: promoted.run.id }),
-          ...(event.target.agentId ? { agentId: event.target.agentId } : {}),
-          ...(event.callback.threadKey ? { threadKey: event.callback.threadKey } : {})
-        }
-      });
-    }
     return c.json({ followUpRequest, run: promoted.run }, 201);
   });
 
@@ -2126,13 +2925,67 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/running", async (c) => {
-    const body = await parseBody(c, z.object({ executor: z.string().min(1) }));
-    const ok = await repo.markRunning({
-      runId: c.req.param("runId"),
+    const runId = c.req.param("runId");
+    const body = await parseDispatcherBody(c, MarkRunningSchema);
+    const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
+    const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const runningOutcome = await repo.markRunning({
+      runId,
       runnerId: c.req.param("runnerId"),
-      executor: body.executor
+      executor: body.executor,
+      ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
     });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (runningOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (runningOutcome === "duplicate") return c.json({ ok: true, replayed: true });
+    const stored = await repo.getRun({ runId });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const provider = stored.event.callback.provider;
+    if (shouldDeliverSourceReceipt(provider)) {
+      await deliverSourceReceiptBestEffort({
+        repo,
+        sink: sourceReceiptSink,
+        receipt: {
+          runId,
+          provider,
+          state: "running",
+          event: stored.event,
+          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {})
+        }
+      });
+    }
+    if (shouldDeliverRunStatusUpdate(presentation, { provider, state: "running" })) {
+      const runningPresentation = presentation.runStatusPresentation({
+        runId,
+        state: "running",
+        message: `Running with ${body.executor}.`,
+        nextAction: "Wait for the final reply, send a follow-up to queue more context, or request cancellation with /stop.",
+        detailVisibility: "source_thread"
+      });
+      const running = presentation.render({
+        provider,
+        presentation: runningPresentation
+      });
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId,
+          kind: "progress",
+          provider,
+          uri: stored.event.callback.uri,
+          body: running.body,
+          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
+          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+          ...(running.blocks?.length ? { blocks: running.blocks } : {}),
+          ...(running.rich ? { rich: running.rich } : {}),
+          statusMessageKey: `${runId}:status`
+        }
+      });
+    } else if (presentation.shouldDeliverStatusUpdate(provider)) {
+      await appendSuppressedRunStatusCallback({ runId, provider, state: "running" });
+    }
     return c.json({ ok: true });
   });
 
@@ -2145,20 +2998,31 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runners/:runnerId/runs/:runId/progress", async (c) => {
     const runId = c.req.param("runId");
-    const body = await parseBody(c, ProgressSchema);
-    const ok = await repo.recordProgress({
+    const body = await parseDispatcherBody(c, ProgressSchema);
+    const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
+    const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
       message: body.message,
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {}),
       ...(body.visibility ? { visibility: body.visibility } : {}),
-      ...(body.importance ? { importance: body.importance } : {})
+      ...(body.importance ? { importance: body.importance } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
     });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-    if (presentation.shouldDeliverProgress(stored.event.callback.provider)) {
+    const progressVisibility = body.visibility ?? "audit";
+    const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
+    if (progressVisibility === "human" && shouldDeliverProgress) {
+      const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
+      const progress = presentation.render({
+        provider: stored.event.callback.provider,
+        presentation: progressPresentation
+      });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -2168,11 +3032,28 @@ export function createDispatcherApp(input: {
           kind: "progress",
           provider: stored.event.callback.provider,
           uri: stored.event.callback.uri,
-          body: presentation.progress({ provider: stored.event.callback.provider, runId, message: body.message }),
+          body: progress.body,
           ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+          ...(progress.blocks?.length ? { blocks: progress.blocks } : {}),
+          ...(progress.rich ? { rich: progress.rich } : {}),
           statusMessageKey: `${runId}:status`
         }
+      });
+    } else if (progressVisibility === "human") {
+      const capability = platformCapabilityForProvider(stored.event.callback.provider);
+      await repo.appendRunEvent({
+        runId,
+        type: "callback.progress.suppressed",
+        payload: {
+          provider: stored.event.callback.provider,
+          reason: "platform_liveness_strategy",
+          requestedVisibility: progressVisibility,
+          livenessStrategy: capability?.livenessStrategy ?? "unknown"
+        },
+        visibility: "audit",
+        importance: "low",
+        message: "Progress callback suppressed by platform liveness strategy; use status or audit for details."
       });
     }
     return c.json({ ok: true });
@@ -2187,9 +3068,17 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runners/:runnerId/runs/:runId/complete", async (c) => {
     const runId = c.req.param("runId");
-    const parsed = await parseBody(c, CompleteRunSchema);
-    const ok = await repo.completeRun({ runId, runnerId: c.req.param("runnerId"), result: parsed.result });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    const parsed = await parseDispatcherBody(c, CompleteRunSchema);
+    const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
+    const idempotencyKey = parsed.idempotencyKey?.trim() || headerIdempotencyKey;
+    const outcome = await repo.completeRun({
+      runId,
+      runnerId: c.req.param("runnerId"),
+      result: parsed.result,
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    });
+    if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const receiptContext = await actionReceiptContextForFinal({
@@ -2197,12 +3086,50 @@ export function createDispatcherApp(input: {
       result: parsed.result,
       ...(input.githubApply ? { githubApply: input.githubApply } : {})
     });
-    const finalPresentation = presentation.final({
-      provider: stored.event.callback.provider,
+    if (
+      parsed.result.conclusion === "needs_human" &&
+      shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
+    ) {
+      const waitingPresentation = presentation.runStatusPresentation({
+        runId,
+        state: "waiting_for_approval",
+        message: "Waiting for approval.",
+        nextAction: "Review the source-thread action receipt, then approve, reject, apply, or continue from the source thread.",
+        detailVisibility: "source_thread"
+      });
+      const waiting = presentation.render({
+        provider: stored.event.callback.provider,
+        presentation: waitingPresentation
+      });
+      await deliverAndAudit({
+        repo,
+        sink: callbackSink,
+        retry: callbackRetry,
+        message: {
+          runId,
+          kind: "progress",
+          provider: stored.event.callback.provider,
+          uri: stored.event.callback.uri,
+          body: waiting.body,
+          ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
+          ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+          ...(waiting.blocks?.length ? { blocks: waiting.blocks } : {}),
+          ...(waiting.rich ? { rich: waiting.rich } : {}),
+          statusMessageKey: `${runId}:status`
+        }
+      });
+    }
+    const finalPresentation = presentation.finalPresentation({
       result: parsed.result,
       runId,
       receiptContext
     });
+    const finalCallback = presentation.render({
+      provider: stored.event.callback.provider,
+      presentation: finalPresentation,
+      receiptContext
+    });
+    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
     await deliverAndAudit({
       repo,
       sink: callbackSink,
@@ -2212,13 +3139,27 @@ export function createDispatcherApp(input: {
         kind: "final",
         provider: stored.event.callback.provider,
         uri: stored.event.callback.uri,
-        body: finalPresentation.body,
+        body: finalCallback.body,
         ...(stored.event.target.agentId ? { agentId: stored.event.target.agentId } : {}),
         ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
-        ...(finalPresentation.blocks?.length ? { blocks: finalPresentation.blocks } : {})
+        ...(statusMessageKey ? { statusMessageKey } : {}),
+        ...(finalCallback.blocks?.length ? { blocks: finalCallback.blocks } : {}),
+        ...(finalCallback.rich ? { rich: finalCallback.rich } : {})
       }
     });
-    return c.json({ ok: true });
+    const shouldPromoteFollowUp = parsed.result.conclusion !== "needs_human" && parsed.result.conclusion !== "cancelled";
+    const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
+    return c.json({
+      ok: true,
+      ...(promotedFollowUp
+        ? {
+            promotedFollowUp: {
+              followUpRequest: promotedFollowUp.followUpRequest,
+              run: promotedFollowUp.run
+            }
+          }
+        : {})
+    });
   });
 
   app.get("/v1/proposals/:proposalId", async (c) => {
@@ -2241,18 +3182,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/proposals/:proposalId/approvals", async (c) => {
     const proposalId = c.req.param("proposalId");
-    let rawBody: unknown;
-    try {
-      rawBody = await c.req.json();
-    } catch (err) {
-      if (err instanceof SyntaxError) {
-        return c.json({ error: "invalid_json_body" }, 400);
-      }
-      throw err;
-    }
-    const parsedBody = ApprovalDecisionInputSchema.safeParse(rawBody);
-    if (!parsedBody.success) return c.json({ error: "invalid_approval_decision" }, 400);
-    const body = parsedBody.data;
+    const body = await parseDispatcherBody(c, ApprovalDecisionInputSchema, { invalidBodyError: "invalid_approval_decision" });
     const decision = await repo.recordApprovalDecision({
       id: body.id ?? `approval_${proposalId}_${Date.now()}`,
       proposalId,
@@ -2276,7 +3206,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/proposals/:proposalId/apply-plans", async (c) => {
     const proposalId = c.req.param("proposalId");
-    const body = await parseBody(c, ApplyPlanInputSchema);
+    const body = await parseDispatcherBody(c, ApplyPlanInputSchema);
     let executableTarget:
       | {
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
@@ -2379,7 +3309,7 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runs/:runId/child-runs", async (c) => {
     const parentRunId = c.req.param("runId");
-    const body = await parseBody(c, ChildRunInputSchema);
+    const body = await parseDispatcherBody(c, ChildRunInputSchema);
     const parent = await repo.getRun({ runId: parentRunId });
     if (!parent) return c.json({ error: "parent_run_not_found" }, 404);
     const receivedAt = new Date().toISOString();
@@ -2407,6 +3337,20 @@ export function createDispatcherApp(input: {
     return c.json(stored);
   });
 
+  app.post("/v1/runs/:runId/cancel", async (c) => {
+    const parsed = await parseDispatcherBody(c, CancelRunSchema);
+    const outcome = await repo.cancelRun({
+      runId: c.req.param("runId"),
+      ...(parsed.reason ? { reason: parsed.reason } : {}),
+      ...(parsed.requestedBy ? { requestedBy: parsed.requestedBy } : {})
+    });
+    if (outcome.outcome === "not_found") return c.json({ error: "run_not_found" }, 404);
+    if (outcome.outcome === "already_terminal") {
+      return c.json({ error: "run_already_terminal", run: outcome.run }, 409);
+    }
+    return c.json({ outcome: "cancelled", run: outcome.run });
+  });
+
   app.get("/v1/runs/:runId/metrics", async (c) => {
     const runId = c.req.param("runId");
     const stored = await repo.getRun({ runId });
@@ -2422,7 +3366,7 @@ export function createDispatcherApp(input: {
 
   app.onError((err, c) => {
     // Preserve explicit HTTP errors raised by handlers/middleware. Request-body
-    // parse failures are surfaced as tagged HTTPException(400) by parseBody(),
+    // parse failures are surfaced as tagged HTTPException(4xx) by parseBody(),
     // so they are returned to the client here. Crucially, we no longer map raw
     // ZodError/SyntaxError to 400 globally: an internal ZodError (e.g. a store
     // repository validating a DB row) or a SyntaxError from an internal

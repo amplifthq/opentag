@@ -30,6 +30,31 @@ function githubIssueWorkItem(issueNumber: number) {
   };
 }
 
+function larkEvent(input: { id: string; sourceEventId: string; owner?: string; repo?: string; chatId?: string }): Parameters<ReturnType<typeof createOpenTagRepository>["createRun"]>[0]["event"] {
+  const owner = input.owner ?? "acme";
+  const repo = input.repo ?? "demo";
+  const chatId = input.chatId ?? "oc_chat";
+  return {
+    id: input.id,
+    source: "lark",
+    sourceEventId: input.sourceEventId,
+    receivedAt: "2026-06-24T00:00:00.000Z",
+    actor: { provider: "lark", providerUserId: "ou_sender", handle: "ming" },
+    target: { mention: "@opentag", agentId: "opentag" },
+    command: { rawText: "fix this", intent: "fix", args: {} },
+    context: [],
+    permissions: [{ scope: "chat:postMessage", reason: "reply in source chat" }],
+    callback: { provider: "lark", uri: "lark://im/v1/messages", threadKey: `tenant_1|${chatId}|om_msg` },
+    metadata: {
+      tenantKey: "tenant_1",
+      chatId,
+      repoProvider: "github",
+      owner,
+      repo
+    }
+  };
+}
+
 describe("OpenTag repository", () => {
   it("creates and claims a run once", async () => {
     const sqlite = new Database(":memory:");
@@ -121,6 +146,196 @@ describe("OpenTag repository", () => {
     });
   });
 
+  it("cancels a queued run and prevents late successful completion from overriding it", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Local Runner" });
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1"
+    });
+    await repo.createRun({
+      id: "run_cancel",
+      event: {
+        id: "evt_cancel",
+        source: "github",
+        sourceEventId: "comment_cancel",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: githubIssueContext(1),
+        workItem: githubIssueWorkItem(1),
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+
+    await expect(repo.cancelRun({ runId: "run_cancel", requestedBy: "lark:ou_sender" })).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_cancel",
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+    await expect(
+      repo.completeRun({
+        runId: "run_cancel",
+        result: { conclusion: "success", summary: "late success" }
+      })
+    ).resolves.toBe("not_found");
+    await expect(repo.getRun({ runId: "run_cancel" })).resolves.toMatchObject({
+      run: {
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+    const events = await repo.listRunEvents({ runId: "run_cancel" });
+    expect(events.map((event) => event.type)).toContain("run.cancel_requested");
+    expect(events.find((event) => event.type === "run.cancel_requested")?.payload).toMatchObject({
+      terminalReason: "cancelled_by_user",
+      terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
+      requestedBy: "lark:ou_sender"
+    });
+  });
+
+  it("records timed_out as a terminal run status and prevents late success from overriding it", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({
+      id: "run_timeout",
+      event: {
+        id: "evt_timeout",
+        source: "github",
+        sourceEventId: "comment_timeout",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: githubIssueContext(1),
+        workItem: githubIssueWorkItem(1),
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+    await repo.markRunning({ runId: "run_timeout", executor: "echo" });
+
+    await expect(
+      repo.completeRun({
+        runId: "run_timeout",
+        result: {
+          conclusion: "timed_out",
+          summary: "Echo exceeded the configured hard timeout of 5ms."
+        }
+      })
+    ).resolves.toBe("completed");
+    await expect(
+      repo.completeRun({
+        runId: "run_timeout",
+        result: { conclusion: "success", summary: "late success" }
+      })
+    ).resolves.toBe("not_found");
+    await expect(repo.getRun({ runId: "run_timeout" })).resolves.toMatchObject({
+      run: {
+        status: "timed_out",
+        result: { conclusion: "timed_out" }
+      }
+    });
+  });
+
+  it("records interrupted as a terminal run status and prevents late success from overriding it", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({
+      id: "run_interrupted",
+      event: {
+        id: "evt_interrupted",
+        source: "github",
+        sourceEventId: "comment_interrupted",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: githubIssueContext(1),
+        workItem: githubIssueWorkItem(1),
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+    await repo.markRunning({ runId: "run_interrupted", executor: "external-agent" });
+
+    await expect(
+      repo.completeRun({
+        runId: "run_interrupted",
+        result: {
+          conclusion: "interrupted",
+          summary: "External agent session ended before finalization."
+        }
+      })
+    ).resolves.toBe("completed");
+    await expect(
+      repo.completeRun({
+        runId: "run_interrupted",
+        result: { conclusion: "success", summary: "late success" }
+      })
+    ).resolves.toBe("not_found");
+    await expect(repo.getRun({ runId: "run_interrupted" })).resolves.toMatchObject({
+      run: {
+        status: "interrupted",
+        result: { conclusion: "interrupted" }
+      }
+    });
+  });
+
+  it("finds a cancelable run by source container and Project Target", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({
+      id: "run_lark_active",
+      event: larkEvent({ id: "evt_lark_active", sourceEventId: "msg_lark_active" })
+    });
+    await repo.markRunning({ runId: "run_lark_active", executor: "echo" });
+
+    await expect(
+      repo.findCancelableRunForSourceContainer({
+        source: "lark",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata: { tenantKey: "tenant_1", chatId: "oc_chat" }
+      })
+    ).resolves.toMatchObject({
+      run: { id: "run_lark_active", status: "running" }
+    });
+    await expect(
+      repo.findCancelableRunForSourceContainer({
+        source: "lark",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata: { tenantKey: "tenant_1", chatId: "other_chat" }
+      })
+    ).resolves.toBeNull();
+  });
+
   it("keeps same-name local Project Targets distinct by local path identity", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -198,6 +413,10 @@ describe("OpenTag repository", () => {
     const repo = createOpenTagRepository(db);
 
     await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
+      runnerId: "runner_1",
+      heartbeatAt: expect.any(String)
+    });
     await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
     await repo.createRun({
       id: "run_heartbeat",
@@ -216,8 +435,16 @@ describe("OpenTag repository", () => {
       }
     });
     await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
+      runnerId: "runner_1",
+      heartbeatAt: expect.any(String)
+    });
 
     await expect(repo.heartbeat({ runId: "run_heartbeat", runnerId: "runner_1" })).resolves.toBe(true);
+    await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
+      runnerId: "runner_1",
+      heartbeatAt: expect.any(String)
+    });
     const events = await repo.listRunEvents({ runId: "run_heartbeat" });
     expect(events.map((event) => event.type)).toContain("run.heartbeat");
     const heartbeatEvent = events.find((event) => event.type === "run.heartbeat");
@@ -282,6 +509,41 @@ describe("OpenTag repository", () => {
       repo: "demo",
       metadata: { title: "Ops chat" }
     });
+  });
+
+  it("deletes generic channel bindings without touching repo bindings", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1"
+    });
+    await repo.upsertChannelBinding({
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "oc_chat",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+
+    await expect(
+      repo.deleteChannelBinding({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" })
+    ).resolves.toBe(true);
+    await expect(
+      repo.getChannelBinding({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" })
+    ).resolves.toBeNull();
+    await expect(repo.getRepoBinding({ provider: "github", owner: "acme", repo: "demo" })).resolves.toMatchObject({
+      runnerId: "runner_1"
+    });
+    await expect(
+      repo.deleteChannelBinding({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" })
+    ).resolves.toBe(false);
   });
 
   it("ignores malformed channel binding metadata instead of throwing", async () => {
@@ -410,6 +672,78 @@ describe("OpenTag repository", () => {
     expect(second).toEqual([]);
   });
 
+  it("deduplicates equivalent callback deliveries before sending", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const first = await repo.enqueueCallbackDelivery({
+      runId: "run_callback_dedupe",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant|chat|message",
+      statusMessageKey: "run_callback_dedupe:final",
+      body: "Done.",
+      rich: { provider: "lark", payload: { header: { title: "Done" } } }
+    });
+    const second = await repo.enqueueCallbackDelivery({
+      runId: "run_callback_dedupe",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant|chat|message",
+      statusMessageKey: "run_callback_dedupe:final",
+      body: "Done.",
+      rich: { provider: "lark", payload: { header: { title: "Done" } } }
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(first.idempotencyKey).toBe(second.idempotencyKey);
+    const pending = await repo.claimPendingCallbackDeliveries({ limit: 10 });
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.rich).toEqual({ provider: "lark", payload: { header: { title: "Done" } } });
+    const events = await repo.listRunEvents({ runId: "run_callback_dedupe" });
+    expect(events.map((event) => event.type)).toEqual(["callback.final.queued", "callback.final.duplicate"]);
+    expect(events.at(-1)?.message).toBe("Duplicate callback delivery suppressed.");
+  });
+
+  it("records external callback message ids for status updates", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const delivery = await repo.enqueueCallbackDelivery({
+      runId: "run_callback_external_id",
+      kind: "acknowledgement",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant|chat|message",
+      statusMessageKey: "run_callback_external_id:status",
+      body: "Received."
+    });
+    await repo.markCallbackDelivered({ deliveryId: delivery.id, externalMessageId: "om_status" });
+
+    await expect(
+      repo.findCallbackExternalMessageId({
+        runId: "run_callback_external_id",
+        provider: "lark",
+        threadKey: "tenant|chat|message",
+        statusMessageKey: "run_callback_external_id:status"
+      })
+    ).resolves.toBe("om_status");
+
+    const events = await repo.listRunEvents({ runId: "run_callback_external_id" });
+    expect(events.at(-1)).toMatchObject({
+      type: "callback.acknowledgement.delivered",
+      payload: expect.objectContaining({
+        externalMessageId: "om_status"
+      })
+    });
+  });
+
   it("reclaims stale delivering rows and respects retry backoff for failed deliveries", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -458,6 +792,258 @@ describe("OpenTag repository", () => {
     expect(staleReclaimed[0]?.attempts).toBe(1);
   });
 
+  it("records a callback suppression audit event when the retry budget is exhausted", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.enqueueCallbackDelivery({
+      runId: "run_callback_storm_guard",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant|chat|message",
+      statusMessageKey: "run_callback_storm_guard:final",
+      body: "Done."
+    });
+
+    const claimed = await repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 });
+    expect(claimed).toHaveLength(1);
+    await repo.markCallbackFailed({
+      deliveryId: claimed[0]!.id,
+      error: "rate_limited",
+      maxAttempts: 1
+    });
+
+    await expect(repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 })).resolves.toEqual([]);
+
+    const events = await repo.listRunEvents({ runId: "run_callback_storm_guard" });
+    expect(events.map((event) => event.type)).toEqual(["callback.final.queued", "callback.final.failed", "callback.final.suppressed"]);
+    expect(events.at(-1)).toMatchObject({
+      visibility: "audit",
+      importance: "high",
+      message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms."
+    });
+  });
+
+  it("records control-plane events that are not tied to a run", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.appendControlPlaneEvent({
+      type: "security.auth_failed",
+      severity: "warn",
+      subject: "GET /v1/runners/:runnerId",
+      payload: { reason: "invalid_pairing_token", tokenFingerprint: "abc123" },
+      createdAt: "2026-06-24T00:00:00.000Z"
+    });
+    await repo.appendControlPlaneEvent({
+      type: "admission.needs_human_decision",
+      severity: "info",
+      subject: "run_1",
+      payload: { reasonCode: "repo_not_bound" },
+      createdAt: "2026-06-24T00:00:01.000Z"
+    });
+
+    await expect(repo.listControlPlaneEvents()).resolves.toMatchObject([
+      {
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: "GET /v1/runners/:runnerId",
+        payload: { reason: "invalid_pairing_token", tokenFingerprint: "abc123" }
+      },
+      {
+        type: "admission.needs_human_decision",
+        severity: "info",
+        subject: "run_1",
+        payload: { reasonCode: "repo_not_bound" }
+      }
+    ]);
+    await expect(repo.listControlPlaneEvents({ type: "security.auth_failed" })).resolves.toMatchObject([
+      { type: "security.auth_failed", severity: "warn" }
+    ]);
+    await expect(repo.listControlPlaneEvents({ severity: "info" })).resolves.toMatchObject([
+      { type: "admission.needs_human_decision", severity: "info" }
+    ]);
+  });
+
+  it("summarizes repeated control-plane events into alert candidates", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.appendControlPlaneEvent({
+      type: "security.auth_failed",
+      severity: "warn",
+      subject: "GET /v1/runners/:runnerId",
+      payload: { tokenFingerprint: "old" },
+      createdAt: "2026-06-23T23:59:59.000Z"
+    });
+    for (let index = 0; index < 3; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: "GET /v1/runners/:runnerId",
+        payload: { tokenFingerprint: "token_a" },
+        createdAt: `2026-06-24T00:00:0${index}.000Z`
+      });
+    }
+    for (let index = 0; index < 2; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.request_body_rejected",
+        severity: "warn",
+        subject: "POST /v1/runs",
+        payload: { endpoint: "POST /v1/runs", reason: "request_body_too_large" },
+        createdAt: `2026-06-24T00:01:0${index}.000Z`
+      });
+    }
+    for (let index = 0; index < 2; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.request_body_rejected",
+        severity: "warn",
+        subject: "slack:POST /slack/events",
+        payload: { provider: "slack", endpoint: "POST /slack/events", reason: "invalid_request_body" },
+        createdAt: `2026-06-24T00:01:1${index}.000Z`
+      });
+    }
+    for (let index = 0; index < 2; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "admission.needs_human_decision",
+        severity: "warn",
+        subject: `run_unbound_${index}`,
+        payload: { projectTarget: "github:acme/demo", decision: { reasonCode: "repo_not_bound" } },
+        createdAt: `2026-06-24T00:02:0${index}.000Z`
+      });
+    }
+    for (let index = 0; index < 3; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.signature_failed",
+        severity: "warn",
+        subject: "github:POST /github/webhooks",
+        payload: { provider: "github", endpoint: "POST /github/webhooks", reason: "invalid_signature" },
+        createdAt: `2026-06-24T00:03:0${index}.000Z`
+      });
+    }
+    await repo.appendControlPlaneEvent({
+      type: "security.token_misuse",
+      severity: "warn",
+      subject: "slack:app_token",
+      payload: { provider: "slack", tokenKind: "app_token", reason: "token_revoked" },
+      createdAt: "2026-06-24T00:04:00.000Z"
+    });
+    await repo.registerRunner({ runnerId: "runner_1", name: "Local Runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    for (let index = 0; index < 3; index += 1) {
+      await repo.createRun({
+        id: `run_claim_${index}`,
+        event: larkEvent({
+          id: `evt_claim_${index}`,
+          sourceEventId: `msg_claim_${index}`
+        })
+      });
+      await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toBeTruthy();
+    }
+
+    const alerts = await repo.summarizeControlPlaneAlerts({
+      since: "2026-06-24T00:00:00.000Z",
+      thresholds: { abnormal_runner_claim_rate: 3 }
+    });
+    expect(alerts).toHaveLength(7);
+    expect(alerts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "repeated_auth_failures",
+          eventType: "security.auth_failed",
+          count: 3,
+          threshold: 3,
+          subject: "token_a"
+        }),
+        expect.objectContaining({
+          type: "repeated_large_payload_rejections",
+          eventType: "security.request_body_rejected",
+          count: 2,
+          threshold: 2,
+          subject: "POST /v1/runs"
+        }),
+        expect.objectContaining({
+          type: "repeated_invalid_request_body",
+          eventType: "security.request_body_rejected",
+          count: 2,
+          threshold: 2,
+          subject: "POST /slack/events"
+        }),
+        expect.objectContaining({
+          type: "repeated_unknown_project_targets",
+          eventType: "admission.needs_human_decision",
+          count: 2,
+          threshold: 2,
+          subject: "github:acme/demo"
+        }),
+        expect.objectContaining({
+          type: "repeated_signature_failures",
+          eventType: "security.signature_failed",
+          count: 3,
+          threshold: 3,
+          subject: "github:POST /github/webhooks"
+        }),
+        expect.objectContaining({
+          type: "token_misuse",
+          eventType: "security.token_misuse",
+          count: 1,
+          threshold: 1,
+          subject: "slack:app_token"
+        }),
+        expect.objectContaining({
+          type: "abnormal_runner_claim_rate",
+          eventType: "run.claimed",
+          count: 3,
+          threshold: 3,
+          subject: "runner_1"
+        })
+      ])
+    );
+  });
+
+  it("summarizes alert candidates from the most recent event window", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    for (let index = 0; index < 3; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: "GET /v1/runners/:runnerId",
+        payload: { tokenFingerprint: "old_token" },
+        createdAt: `2026-06-24T00:00:0${index}.000Z`
+      });
+    }
+    for (let index = 0; index < 3; index += 1) {
+      await repo.appendControlPlaneEvent({
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: "GET /v1/runners/:runnerId",
+        payload: { tokenFingerprint: "recent_token" },
+        createdAt: `2026-06-24T00:01:0${index}.000Z`
+      });
+    }
+
+    await expect(repo.summarizeControlPlaneAlerts({ limit: 3 })).resolves.toEqual([
+      expect.objectContaining({
+        type: "repeated_auth_failures",
+        count: 3,
+        subject: "recent_token",
+        firstSeenAt: "2026-06-24T00:01:00.000Z",
+        lastSeenAt: "2026-06-24T00:01:02.000Z"
+      })
+    ]);
+  });
+
   it("replays createRun idempotently for the same source event", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -489,6 +1075,308 @@ describe("OpenTag repository", () => {
     const events = await repo.listRunEvents({ runId: "run_duplicate_1" });
     expect(events.map((event) => event.type)).toContain("admission.decided");
     expect(events.map((event) => event.type)).toContain("run.create_idempotent_replay");
+    expect(events.find((event) => event.type === "run.create_idempotent_replay")?.payload).toMatchObject({
+      eventId: "evt_duplicate",
+      requestedRunId: "run_duplicate_2",
+      provenance: {
+        source: "github",
+        sourceEventId: "comment_duplicate",
+        sourceDeliveryId: null,
+        signatureState: "unknown",
+        projectTarget: { ref: "github:acme/demo", provider: "github", owner: "acme", repo: "demo" },
+        admissionDecision: {
+          action: "drop_duplicate",
+          reasonCode: "duplicate_source_event",
+          eventId: "evt_duplicate",
+          activeRunId: "run_duplicate_1"
+        },
+        expectedRunnerId: null
+      }
+    });
+  });
+
+  it("replays createRun idempotently for the same source delivery id", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const baseEvent = {
+      id: "evt_delivery_1",
+      source: "github" as const,
+      sourceEventId: "comment_delivery_1",
+      receivedAt: "2026-06-24T00:00:00.000Z",
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: { owner: "acme", repo: "demo", sourceDeliveryId: "delivery_replay_1", webhookSignatureVerified: true }
+    };
+
+    const first = await repo.createRun({ id: "run_delivery_1", event: baseEvent });
+    const replay = await repo.createRun({
+      id: "run_delivery_2",
+      event: {
+        ...baseEvent,
+        id: "evt_delivery_2",
+        sourceEventId: "comment_delivery_2"
+      }
+    });
+
+    expect(first.created).toBe(true);
+    expect(replay.created).toBe(false);
+    expect(replay.run.id).toBe("run_delivery_1");
+    expect(replay.replayKind).toBe("source_delivery");
+    expect(replay.replayDecision.reasonCode).toBe("duplicate_source_delivery");
+    await expect(repo.getRun({ runId: "run_delivery_2" })).resolves.toBeNull();
+
+    const events = await repo.listRunEvents({ runId: "run_delivery_1" });
+    expect(events.find((event) => event.type === "run.create_idempotent_replay")?.payload).toMatchObject({
+      eventId: "evt_delivery_2",
+      requestedRunId: "run_delivery_2",
+      replayKey: { kind: "source_delivery", source: "github", deliveryId: "delivery_replay_1" },
+      provenance: {
+        source: "github",
+        sourceEventId: "comment_delivery_2",
+        sourceDeliveryId: "delivery_replay_1",
+        signatureState: "verified",
+        admissionDecision: {
+          action: "drop_duplicate",
+          reasonCode: "duplicate_source_delivery",
+          eventId: "evt_delivery_2",
+          activeRunId: "run_delivery_1"
+        }
+      }
+    });
+  });
+
+  it("prunes stale source delivery replay keys only after the associated run is terminal", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const eventWithDelivery = (input: {
+      id: string;
+      sourceEventId: string;
+      deliveryId: string;
+    }): Parameters<typeof repo.createRun>[0]["event"] => ({
+      id: input.id,
+      source: "github",
+      sourceEventId: input.sourceEventId,
+      receivedAt: "2026-06-24T00:00:00.000Z",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix", args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+      callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: {
+        owner: "acme",
+        repo: "demo",
+        sourceDeliveryId: input.deliveryId,
+        webhookSignatureVerified: true
+      }
+    });
+
+    await repo.createRun({
+      id: "run_terminal_delivery",
+      event: eventWithDelivery({
+        id: "evt_terminal_delivery",
+        sourceEventId: "comment_terminal_delivery",
+        deliveryId: "delivery_terminal"
+      })
+    });
+    await repo.completeRun({
+      runId: "run_terminal_delivery",
+      result: { conclusion: "success", summary: "done" }
+    });
+
+    await repo.createRun({
+      id: "run_active_delivery",
+      event: eventWithDelivery({
+        id: "evt_active_delivery",
+        sourceEventId: "comment_active_delivery",
+        deliveryId: "delivery_active"
+      })
+    });
+    await repo.createRun({
+      id: "run_fresh_delivery",
+      event: eventWithDelivery({
+        id: "evt_fresh_delivery",
+        sourceEventId: "comment_fresh_delivery",
+        deliveryId: "delivery_fresh"
+      })
+    });
+    await repo.completeRun({
+      runId: "run_fresh_delivery",
+      result: { conclusion: "success", summary: "fresh" }
+    });
+
+    sqlite
+      .prepare("UPDATE source_deliveries SET created_at = ? WHERE delivery_id IN (?, ?)")
+      .run("2026-06-24T00:00:00.000Z", "delivery_terminal", "delivery_active");
+
+    await expect(repo.pruneSourceDeliveries({ olderThan: "2026-06-25T00:00:00.000Z" })).resolves.toEqual({
+      scanned: 2,
+      pruned: 1,
+      retainedActive: 1
+    });
+
+    await expect(
+      repo.createRun({
+        id: "run_terminal_delivery_after_prune",
+        event: eventWithDelivery({
+          id: "evt_terminal_delivery_after_prune",
+          sourceEventId: "comment_terminal_delivery_after_prune",
+          deliveryId: "delivery_terminal"
+        })
+      })
+    ).resolves.toMatchObject({ created: true, run: { id: "run_terminal_delivery_after_prune" } });
+
+    await expect(
+      repo.createRun({
+        id: "run_active_delivery_replay",
+        event: eventWithDelivery({
+          id: "evt_active_delivery_replay",
+          sourceEventId: "comment_active_delivery_replay",
+          deliveryId: "delivery_active"
+        })
+      })
+    ).resolves.toMatchObject({
+      created: false,
+      replayKind: "source_delivery",
+      run: { id: "run_active_delivery" }
+    });
+  });
+
+  it("rejects invalid source delivery retention cutoffs", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await expect(repo.pruneSourceDeliveries({ olderThan: "not-a-timestamp", limit: Number.NaN })).rejects.toThrow(
+      "olderThan must be a valid timestamp."
+    );
+  });
+
+  it("deduplicates runner running retries by idempotency key", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({
+      id: "run_running_replay",
+      event: {
+        id: "evt_running_replay",
+        source: "github",
+        sourceEventId: "comment_running_replay",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "run echo", intent: "run", args: {} },
+        context: [],
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: { owner: "acme", repo: "demo" }
+      }
+    });
+
+    await expect(
+      repo.markRunning({
+        runId: "run_running_replay",
+        executor: "echo",
+        runTimeoutMs: 30_000,
+        idempotencyKey: "runner_1:run_running_replay:running"
+      })
+    ).resolves.toBe("running");
+    await expect(
+      repo.markRunning({
+        runId: "run_running_replay",
+        executor: "codex",
+        runTimeoutMs: 60_000,
+        idempotencyKey: "runner_1:run_running_replay:running"
+      })
+    ).resolves.toBe("duplicate");
+
+    await expect(repo.getRun({ runId: "run_running_replay" })).resolves.toMatchObject({
+      run: {
+        status: "running",
+        executor: "echo"
+      }
+    });
+    const events = await repo.listRunEvents({ runId: "run_running_replay" });
+    expect(events.filter((event) => event.type === "run.running")).toEqual([
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          executor: "echo",
+          runTimeoutMs: 30_000,
+          idempotencyKey: "runner_1:run_running_replay:running"
+        })
+      })
+    ]);
+    expect(JSON.stringify(events)).not.toContain("codex");
+    expect(JSON.stringify(events)).not.toContain("60000");
+  });
+
+  it("records run provenance on creation for hosted relay auditability", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRepoBinding({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    });
+
+    const event = {
+      id: "evt_provenance",
+      source: "github" as const,
+      sourceEventId: "comment_provenance",
+      receivedAt: "2026-06-24T00:00:00.000Z",
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: [],
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        sourceDeliveryId: "delivery_123",
+        webhookSignatureVerified: true
+      }
+    };
+
+    await repo.createRun({ id: "run_provenance", event });
+
+    const events = await repo.listRunEvents({ runId: "run_provenance" });
+    expect(events.find((runEvent) => runEvent.type === "run.created")?.payload).toMatchObject({
+      eventId: "evt_provenance",
+      provenance: {
+        source: "github",
+        sourceEventId: "comment_provenance",
+        sourceDeliveryId: "delivery_123",
+        signatureState: "verified",
+        projectTarget: { ref: "github:acme/demo", provider: "github", owner: "acme", repo: "demo" },
+        admissionDecision: {
+          action: "start",
+          reasonCode: "new_event",
+          eventId: "evt_provenance"
+        },
+        expectedRunnerId: "runner_1"
+      }
+    });
   });
 
   it("preserves the generated context packet snapshot even if event derivation changes later", async () => {
@@ -583,6 +1471,62 @@ describe("OpenTag repository", () => {
     expect(events[3]).toMatchObject({ visibility: "audit", importance: "high", message: "done" });
   });
 
+  it("deduplicates completed results by idempotency key", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.createRun({
+      id: "run_completion_replay",
+      event: {
+        id: "evt_completion_replay",
+        source: "github",
+        sourceEventId: "comment_completion_replay",
+        receivedAt: "2026-06-24T00:00:00.000Z",
+        actor: { provider: "github", providerUserId: "42" },
+        target: { mention: "@opentag", agentId: "opentag" },
+        command: { rawText: "run echo", intent: "run", args: {} },
+        context: [],
+        permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
+        callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
+        metadata: {}
+      }
+    });
+
+    await expect(
+      repo.completeRun({
+        runId: "run_completion_replay",
+        result: { conclusion: "success", summary: "done" },
+        idempotencyKey: "runner_1:run_completion_replay:complete:1"
+      })
+    ).resolves.toBe("completed");
+    await expect(
+      repo.completeRun({
+        runId: "run_completion_replay",
+        result: { conclusion: "failure", summary: "retry should not replace result" },
+        idempotencyKey: "runner_1:run_completion_replay:complete:1"
+      })
+    ).resolves.toBe("duplicate");
+
+    await expect(repo.getRun({ runId: "run_completion_replay" })).resolves.toMatchObject({
+      run: {
+        status: "succeeded",
+        result: { conclusion: "success", summary: "done" }
+      }
+    });
+    const events = await repo.listRunEvents({ runId: "run_completion_replay" });
+    expect(events.filter((event) => event.type === "run.completed")).toEqual([
+      expect.objectContaining({
+        message: "done",
+        payload: expect.objectContaining({
+          idempotencyKey: "runner_1:run_completion_replay:complete:1"
+        })
+      })
+    ]);
+    expect(JSON.stringify(events)).not.toContain("retry should not replace result");
+  });
+
   it("does not write completion artifacts for missing runs", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -627,6 +1571,42 @@ describe("OpenTag repository", () => {
       expect.objectContaining({
         createdAt: "2026-06-24T00:00:01.000Z",
         payload: expect.objectContaining({ at: "2026-06-24T00:00:01.000Z" })
+      })
+    ]);
+  });
+
+  it("deduplicates runner progress events by idempotency key", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await expect(
+      repo.recordProgress({
+        runId: "run_progress_replay",
+        message: "external hook progress",
+        type: "ingest.hermes.post_llm_call",
+        at: "2026-06-24T00:00:01.000Z",
+        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+      })
+    ).resolves.toBe("recorded");
+    await expect(
+      repo.recordProgress({
+        runId: "run_progress_replay",
+        message: "external hook progress duplicate",
+        type: "ingest.hermes.post_llm_call",
+        at: "2026-06-24T00:00:02.000Z",
+        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+      })
+    ).resolves.toBe("duplicate");
+
+    await expect(repo.listRunEvents({ runId: "run_progress_replay" })).resolves.toEqual([
+      expect.objectContaining({
+        type: "run.progress",
+        message: "external hook progress",
+        payload: expect.objectContaining({
+          idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+        })
       })
     ]);
   });

@@ -21,6 +21,7 @@ export type SlackAppMentionInput = {
   agentId?: string;
   botUserId?: string;
   callbackUri?: string;
+  signatureVerified?: boolean;
   binding: SlackChannelBinding;
 };
 
@@ -213,8 +214,13 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       teamId: input.teamId,
       channelId: input.channelId,
       messageTs: input.ts,
+      sourceDeliveryId: input.eventId,
+      slackEventId: input.eventId,
       ...(input.appId ? { slackAppId: input.appId } : {}),
       ...(input.botUserId ? { slackBotUserId: input.botUserId } : {}),
+      ...(typeof input.signatureVerified === "boolean"
+        ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+        : {}),
       ...commandMetadata(command),
       repoProvider: input.binding.repoProvider ?? "github",
       owner: input.binding.owner,

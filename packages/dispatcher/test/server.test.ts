@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp } from "../src/server.js";
 
 const validEvent = {
@@ -33,6 +35,10 @@ function jsonRequest(body: unknown) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
   };
+}
+
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
 }
 
 function githubIssueEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
@@ -107,6 +113,37 @@ function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: s
   };
 }
 
+function larkRepoEvent(input: { id: string; sourceEventId: string; chatId?: string; messageId?: string }) {
+  const chatId = input.chatId ?? "oc_chat";
+  const messageId = input.messageId ?? "om_msg";
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "lark",
+    sourceEventId: input.sourceEventId,
+    actor: { provider: "lark", providerUserId: "ou_sender", handle: "ming", organizationId: "tenant_1" },
+    context: [{ provider: "lark", kind: "message", uri: `lark://tenant/tenant_1/chat/${chatId}/message/${messageId}`, visibility: "organization" }],
+    permissions: [
+      { scope: "chat:postMessage", reason: "reply in source chat" },
+      { scope: "runner:local", reason: "execute on local daemon" },
+      { scope: "repo:write", reason: "modify the mapped repository" }
+    ],
+    callback: {
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: `tenant_1|${chatId}|${messageId}`
+    },
+    metadata: {
+      tenantKey: "tenant_1",
+      chatId,
+      messageId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }
+  };
+}
+
 async function seedCompletedProposal(input: {
   app: ReturnType<typeof createDispatcherApp>;
   runId: string;
@@ -153,6 +190,573 @@ describe("dispatcher API", () => {
       body: JSON.stringify({ runnerId: "runner_1", name: "Local Runner" })
     });
     expect(allowed.status).toBe(201);
+
+    const audit = await app.request("/v1/control-plane-events?type=security.auth_failed", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(audit.status).toBe(200);
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "security.auth_failed",
+        severity: "warn",
+        subject: "POST /v1/runners",
+        payload: expect.objectContaining({
+          reason: "invalid_pairing_token",
+          endpoint: "POST /v1/runners",
+          hasAuthorization: false,
+          tokenFingerprint: "none"
+        })
+      })
+    ]);
+    expect(JSON.stringify(events)).not.toContain("pair_test");
+  });
+
+  it("separates pairing-token admin calls from runner-token runtime calls", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test", runnerToken: "runner_test" });
+    const pairJson = (body: unknown) => ({
+      ...jsonRequest(body),
+      headers: { "content-type": "application/json", authorization: "Bearer pair_test" }
+    });
+    const runnerJson = (body: unknown) => ({
+      ...jsonRequest(body),
+      headers: { "content-type": "application/json", authorization: "Bearer runner_test" }
+    });
+    const runnerAuth = { authorization: "Bearer runner_test" };
+
+    const runnerCannotRegister = await app.request("/v1/runners", runnerJson({ runnerId: "runner_1", name: "Local Runner" }));
+    expect(runnerCannotRegister.status).toBe(401);
+
+    const register = await app.request("/v1/runners", pairJson({ runnerId: "runner_1", name: "Local Runner" }));
+    expect(register.status).toBe(201);
+
+    const bind = await app.request("/v1/repo-bindings", pairJson({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    expect(bind.status).toBe(201);
+
+    const runnerCanReadRegistration = await app.request("/v1/runners/runner_1", { headers: runnerAuth });
+    expect(runnerCanReadRegistration.status).toBe(200);
+    const runnerCanReadBinding = await app.request("/v1/repo-bindings/github/acme/demo", { headers: runnerAuth });
+    expect(runnerCanReadBinding.status).toBe(200);
+
+    const runnerCannotCreateRun = await app.request("/v1/runs", runnerJson({ runId: "run_scope", event: validEvent }));
+    expect(runnerCannotCreateRun.status).toBe(401);
+
+    const createRun = await app.request("/v1/runs", pairJson({ runId: "run_scope", event: validEvent }));
+    expect(createRun.status).toBe(201);
+
+    const pairCannotClaimWhenRunnerTokenIsConfigured = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(pairCannotClaimWhenRunnerTokenIsConfigured.status).toBe(401);
+    await expect(pairCannotClaimWhenRunnerTokenIsConfigured.json()).resolves.toMatchObject({
+      error: "unauthorized",
+      reason: "invalid_runner_token"
+    });
+
+    const claim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: runnerAuth
+    });
+    expect(claim.status).toBe(200);
+
+    const runnerCanReadRun = await app.request("/v1/runs/run_scope", { headers: runnerAuth });
+    expect(runnerCanReadRun.status).toBe(200);
+    const runnerCanReadAlerts = await app.request("/v1/control-plane-alerts", { headers: runnerAuth });
+    expect(runnerCanReadAlerts.status).toBe(200);
+
+    const audit = await app.request("/v1/control-plane-events?type=security.auth_failed", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    const { events } = await audit.json();
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          subject: "POST /v1/runners",
+          payload: expect.objectContaining({ reason: "invalid_pairing_token" })
+        }),
+        expect.objectContaining({
+          subject: "POST /v1/runners/:runnerId/claim",
+          payload: expect.objectContaining({ reason: "invalid_runner_token" })
+        })
+      ])
+    );
+    expect(JSON.stringify(events)).not.toContain("runner_test");
+    expect(JSON.stringify(events)).not.toContain("pair_test");
+  });
+
+  it("allows runner-operator auth to prune source delivery replay keys and audit metrics", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test", runnerToken: "runner_test" });
+    const body = {
+      olderThan: "2026-06-24T00:00:00.000Z",
+      limit: 25
+    };
+
+    const denied = await app.request("/v1/source-deliveries/prune", jsonRequest(body));
+    expect(denied.status).toBe(401);
+
+    const pruned = await app.request("/v1/source-deliveries/prune", {
+      ...jsonRequest(body),
+      headers: { "content-type": "application/json", authorization: "Bearer runner_test" }
+    });
+    expect(pruned.status).toBe(200);
+    await expect(pruned.json()).resolves.toEqual({
+      result: {
+        scanned: 0,
+        pruned: 0,
+        retainedActive: 0
+      }
+    });
+
+    const invalid = await app.request("/v1/source-deliveries/prune", {
+      ...jsonRequest({ olderThan: "not-a-date" }),
+      headers: { "content-type": "application/json", authorization: "Bearer runner_test" }
+    });
+    expect(invalid.status).toBe(400);
+
+    const audit = await app.request("/v1/control-plane-events?type=maintenance.source_deliveries_pruned", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "maintenance.source_deliveries_pruned",
+        severity: "info",
+        subject: "source_deliveries",
+        payload: expect.objectContaining({
+          olderThan: "2026-06-24T00:00:00.000Z",
+          limit: 25,
+          scanned: 0,
+          pruned: 0,
+          retainedActive: 0
+        })
+      })
+    ]);
+    expect(JSON.stringify(events)).not.toContain("runner_test");
+  });
+
+  it("records management audit events for runner registration and binding changes without local paths", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/alice/repos/demo",
+        defaultExecutor: "echo",
+        allowedActors: ["octocat"]
+      })
+    );
+    await app.request(
+      "/v1/channel-bindings",
+      jsonRequest({
+        provider: "telegram",
+        accountId: "bot_123",
+        conversationId: "chat_456",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata: { title: "Ops chat" }
+      })
+    );
+    await app.request(
+      "/v1/slack-channel-bindings",
+      jsonRequest({
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    await app.request("/v1/channel-bindings/telegram/bot_123/chat_456", { method: "DELETE" });
+
+    const audit = await app.request("/v1/control-plane-events?limit=20");
+    const { events } = await audit.json();
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "runner.registered",
+          subject: "runner_1",
+          payload: {
+            runnerId: "runner_1",
+            name: "Local Runner"
+          }
+        }),
+        expect.objectContaining({
+          type: "binding.repository.upserted",
+          subject: "github:acme/demo",
+          payload: {
+            provider: "github",
+            owner: "acme",
+            repo: "demo",
+            runnerId: "runner_1",
+            hasWorkspacePath: true,
+            defaultExecutor: "echo",
+            allowedActorsCount: 1
+          }
+        }),
+        expect.objectContaining({
+          type: "binding.channel.upserted",
+          subject: "telegram:bot_123/chat_456",
+          payload: {
+            provider: "telegram",
+            accountId: "bot_123",
+            conversationId: "chat_456",
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo",
+            hasMetadata: true
+          }
+        }),
+        expect.objectContaining({
+          type: "binding.channel.upserted",
+          subject: "slack:T123/C123",
+          payload: expect.objectContaining({
+            provider: "slack",
+            accountId: "T123",
+            conversationId: "C123",
+            compatibilityEndpoint: "/v1/slack-channel-bindings"
+          })
+        }),
+        expect.objectContaining({
+          type: "binding.channel.deleted",
+          subject: "telegram:bot_123/chat_456",
+          payload: {
+            provider: "telegram",
+            accountId: "bot_123",
+            conversationId: "chat_456"
+          }
+        })
+      ])
+    );
+    expect(JSON.stringify(events)).not.toContain("/Users/alice/repos/demo");
+  });
+
+  it("accepts multiple runner tokens during a rotation window", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_test",
+      runnerToken: "runner_new",
+      runnerTokens: ["runner_old"]
+    });
+    const pairJson = (body: unknown) => ({
+      ...jsonRequest(body),
+      headers: { "content-type": "application/json", authorization: "Bearer pair_test" }
+    });
+
+    await app.request("/v1/runners", pairJson({ runnerId: "runner_1", name: "Local Runner" }));
+    const oldTokenClaim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer runner_old" }
+    });
+    expect(oldTokenClaim.status).toBe(204);
+
+    const newTokenClaim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer runner_new" }
+    });
+    expect(newTokenClaim.status).toBe(204);
+  });
+
+  it("fails closed when a runner token fingerprint is revoked", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_test",
+      runnerToken: "runner_new",
+      runnerTokens: ["runner_old"],
+      revokedRunnerTokenFingerprints: [tokenFingerprint("runner_old")]
+    });
+    const pairJson = (body: unknown) => ({
+      ...jsonRequest(body),
+      headers: { "content-type": "application/json", authorization: "Bearer pair_test" }
+    });
+
+    await app.request("/v1/runners", pairJson({ runnerId: "runner_1", name: "Local Runner" }));
+    const revokedClaim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer runner_old" }
+    });
+    expect(revokedClaim.status).toBe(401);
+    await expect(revokedClaim.json()).resolves.toMatchObject({
+      error: "unauthorized",
+      reason: "runner_token_revoked",
+      message: expect.stringContaining("Pair again")
+    });
+
+    const currentClaim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer runner_new" }
+    });
+    expect(currentClaim.status).toBe(204);
+
+    const audit = await app.request("/v1/control-plane-events?type=security.auth_failed", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        subject: "POST /v1/runners/:runnerId/claim",
+        payload: expect.objectContaining({ reason: "runner_token_revoked" })
+      })
+    ]);
+    expect(JSON.stringify(events)).not.toContain("runner_old");
+    expect(JSON.stringify(events)).not.toContain(tokenFingerprint("runner_old"));
+  });
+
+  it("summarizes repeated control-plane security events as alerts", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
+
+    for (let index = 0; index < 3; index += 1) {
+      const denied = await app.request("/v1/runners/runner_1", {
+        headers: { authorization: "Bearer wrong_secret" }
+      });
+      expect(denied.status).toBe(401);
+    }
+
+    const alertsResponse = await app.request("/v1/control-plane-alerts", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(alertsResponse.status).toBe(200);
+    const { alerts } = await alertsResponse.json();
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        type: "repeated_auth_failures",
+        severity: "warn",
+        eventType: "security.auth_failed",
+        count: 3,
+        threshold: 3,
+        subject: expect.not.stringContaining("wrong_secret"),
+        reason: "Repeated dispatcher authorization failures were observed."
+      })
+    ]);
+    expect(JSON.stringify(alerts)).not.toContain("wrong_secret");
+  });
+
+  it("records ingress signature failures as control-plane events and alert candidates", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
+
+    for (let index = 0; index < 3; index += 1) {
+      const response = await app.request("/v1/control-plane-events", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer pair_test" },
+        body: JSON.stringify({
+          type: "security.signature_failed",
+          severity: "warn",
+          subject: "github:POST /github/webhooks",
+          payload: {
+            provider: "github",
+            endpoint: "POST /github/webhooks",
+            reason: "invalid_signature"
+          }
+        })
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const eventsResponse = await app.request("/v1/control-plane-events?type=security.signature_failed", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(eventsResponse.status).toBe(200);
+    const { events } = await eventsResponse.json();
+    expect(events).toHaveLength(3);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "security.signature_failed",
+          severity: "warn",
+          subject: "github:POST /github/webhooks",
+          payload: expect.objectContaining({ provider: "github", reason: "invalid_signature" })
+        })
+      ])
+    );
+
+    const alertsResponse = await app.request("/v1/control-plane-alerts", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(alertsResponse.status).toBe(200);
+    await expect(alertsResponse.json()).resolves.toMatchObject({
+      alerts: [
+        {
+          type: "repeated_signature_failures",
+          eventType: "security.signature_failed",
+          count: 3,
+          threshold: 3,
+          subject: "github:POST /github/webhooks"
+        }
+      ]
+    });
+  });
+
+  it("summarizes terminal token misuse as an immediate alert candidate", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
+
+    const response = await app.request("/v1/control-plane-events", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer pair_test" },
+      body: JSON.stringify({
+        type: "security.token_misuse",
+        severity: "warn",
+        subject: "slack:app_token",
+        payload: {
+          provider: "slack",
+          endpoint: "apps.connections.open",
+          reason: "token_revoked",
+          tokenKind: "app_token",
+          mode: "socket_mode",
+          tokenFingerprint: "sha256:abc123"
+        }
+      })
+    });
+    expect(response.status).toBe(201);
+
+    const alertsResponse = await app.request("/v1/control-plane-alerts", {
+      headers: { authorization: "Bearer pair_test" }
+    });
+    expect(alertsResponse.status).toBe(200);
+    const { alerts } = await alertsResponse.json();
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        type: "token_misuse",
+        severity: "warn",
+        eventType: "security.token_misuse",
+        count: 1,
+        threshold: 1,
+        subject: "slack:app_token",
+        reason: "A platform or relay token failed with a terminal authentication or configuration error."
+      })
+    ]);
+    expect(JSON.stringify(alerts)).not.toContain("xapp-");
+  });
+
+  it("summarizes high runner claim volume as an alert candidate", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const registerResponse = await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
+    expect(registerResponse.status).toBe(201);
+    const bindingResponse = await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1"
+    }));
+    expect(bindingResponse.status).toBe(201);
+
+    for (let index = 0; index < 10; index += 1) {
+      const createResponse = await app.request("/v1/runs", jsonRequest({
+        runId: `run_claim_alert_${index}`,
+        event: githubIssueEvent({
+          id: `evt_claim_alert_${index}`,
+          sourceEventId: `comment_claim_alert_${index}`
+        })
+      }));
+      expect(createResponse.status).toBe(201);
+      const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      expect(claimResponse.status).toBe(200);
+      const completeResponse = await app.request(`/v1/runners/runner_1/runs/run_claim_alert_${index}/complete`, jsonRequest({
+        result: { conclusion: "success", summary: "Claimed and completed." }
+      }));
+      expect(completeResponse.status).toBe(200);
+    }
+
+    const alertsResponse = await app.request("/v1/control-plane-alerts");
+    expect(alertsResponse.status).toBe(200);
+    const { alerts } = await alertsResponse.json();
+    expect(alerts).toEqual([
+      expect.objectContaining({
+        type: "abnormal_runner_claim_rate",
+        severity: "warn",
+        eventType: "run.claimed",
+        count: 10,
+        threshold: 10,
+        subject: "runner_1",
+        reason: "Runner claim volume exceeded the local alert threshold."
+      })
+    ]);
+  });
+
+  it("rate limits by relay token fingerprint and endpoint when enabled", async () => {
+    let now = 1_000;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      rateLimit: {
+        windowMs: 1_000,
+        maxRequests: 1,
+        now: () => now
+      }
+    });
+
+    const first = await app.request("/v1/runners/runner_1", {
+      headers: { authorization: "Bearer token_a" }
+    });
+    expect(first.status).toBe(404);
+
+    const second = await app.request("/v1/runners/runner_1", {
+      headers: { authorization: "Bearer token_a" }
+    });
+    expect(second.status).toBe(429);
+    expect(second.headers.get("retry-after")).toBe("1");
+    await expect(second.json()).resolves.toEqual({
+      error: "rate_limited",
+      retryAfterMs: 1_000,
+      maxRequests: 1,
+      windowMs: 1_000
+    });
+
+    const otherToken = await app.request("/v1/runners/runner_1", {
+      headers: { authorization: "Bearer token_b" }
+    });
+    expect(otherToken.status).toBe(404);
+
+    now = 2_001;
+    const afterReset = await app.request("/v1/runners/runner_1", {
+      headers: { authorization: "Bearer token_a" }
+    });
+    expect(afterReset.status).toBe(404);
+  });
+
+  it("keeps rate-limit buckets separate by runner id, source platform, and tenant", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      rateLimit: {
+        windowMs: 1_000,
+        maxRequests: 1,
+        now: () => 10_000
+      }
+    });
+
+    const firstRunnerClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(firstRunnerClaim.status).toBe(204);
+    const secondRunnerClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(secondRunnerClaim.status).toBe(429);
+    const otherRunnerClaim = await app.request("/v1/runners/runner_2/claim", { method: "POST" });
+    expect(otherRunnerClaim.status).toBe(204);
+
+    const firstGitHubBindingLookup = await app.request("/v1/repo-bindings/github/acme/demo");
+    expect(firstGitHubBindingLookup.status).toBe(404);
+    const secondGitHubBindingLookup = await app.request("/v1/repo-bindings/github/acme/demo");
+    expect(secondGitHubBindingLookup.status).toBe(429);
+    const otherGitHubOwnerLookup = await app.request("/v1/repo-bindings/github/other/demo");
+    expect(otherGitHubOwnerLookup.status).toBe(404);
+    const slackBindingLookup = await app.request("/v1/repo-bindings/slack/acme/demo");
+    expect(slackBindingLookup.status).toBe(404);
+
+    const firstLarkChannelLookup = await app.request("/v1/channel-bindings/lark/tenant_1/chat_1/status");
+    expect(firstLarkChannelLookup.status).toBe(404);
+    const sameLarkTenantLookup = await app.request("/v1/channel-bindings/lark/tenant_1/chat_2/status");
+    expect(sameLarkTenantLookup.status).toBe(429);
+    const otherLarkTenantLookup = await app.request("/v1/channel-bindings/lark/tenant_2/chat_1/status");
+    expect(otherLarkTenantLookup.status).toBe(404);
   });
 
   it("creates and claims an echo run", async () => {
@@ -198,6 +802,61 @@ describe("dispatcher API", () => {
     expect(binding.binding).toMatchObject({ runnerId: "runner_1", workspacePath: "/Users/test/demo" });
   });
 
+  it("records dispatcher-created run provenance for relay auditability", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        runId: "run_provenance_http",
+        event: {
+          ...validEvent,
+          id: "evt_provenance_http",
+          sourceEventId: "comment_provenance_http",
+          metadata: {
+            ...validEvent.metadata,
+            sourceDeliveryId: "delivery_123",
+            webhookSignatureVerified: true
+          }
+        }
+      })
+    });
+    expect(createResponse.status).toBe(201);
+
+    const eventsResponse = await app.request("/v1/runs/run_provenance_http/events");
+    const { events } = await eventsResponse.json();
+    expect(events.find((event: { type: string }) => event.type === "run.created")?.payload).toMatchObject({
+      eventId: "evt_provenance_http",
+      provenance: {
+        source: "github",
+        sourceEventId: "comment_provenance_http",
+        sourceDeliveryId: "delivery_123",
+        signatureState: "verified",
+        projectTarget: { ref: "github:acme/demo", provider: "github", owner: "acme", repo: "demo" },
+        admissionDecision: {
+          action: "start",
+          reasonCode: "new_event",
+          eventId: "evt_provenance_http"
+        },
+        expectedRunnerId: "runner_1"
+      }
+    });
+  });
+
   it("returns the existing run for a replayed source event", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 
@@ -238,7 +897,19 @@ describe("dispatcher API", () => {
   });
 
   it("queues same-thread work as a durable follow-up when a run is already active", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+        }
+      }
+    });
 
     await app.request("/v1/repo-bindings", {
       method: "POST",
@@ -289,6 +960,17 @@ describe("dispatcher API", () => {
         status: "queued"
       }
     });
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        body: "OpenTag picked this up. Run: `run_active_1`"
+      },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_active_1`: Queued follow-up follow_up_1 behind the active run.",
+        statusMessageKey: "run_active_1:status"
+      }
+    ]);
 
     const getFollowUp = await app.request("/v1/follow-up-requests/follow_up_1");
     expect(getFollowUp.status).toBe(200);
@@ -316,6 +998,189 @@ describe("dispatcher API", () => {
         parentRunId: "run_active_1"
       }
     });
+  });
+
+  it("auto-promotes the next queued follow-up after a terminal runner completion", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+
+    const first = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_auto_promote_active",
+        event: githubIssueEvent({ id: "evt_auto_promote_active", sourceEventId: "comment_auto_promote_active" })
+      })
+    );
+    expect(first.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const firstFollowUp = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "follow_up_auto_1",
+        event: githubIssueEvent({ id: "evt_follow_up_auto_1", sourceEventId: "comment_follow_up_auto_1" })
+      })
+    );
+    expect(firstFollowUp.status).toBe(202);
+
+    const secondFollowUp = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "follow_up_auto_2",
+        event: githubIssueEvent({ id: "evt_follow_up_auto_2", sourceEventId: "comment_follow_up_auto_2" })
+      })
+    );
+    expect(secondFollowUp.status).toBe(202);
+
+    const complete = await app.request(
+      "/v1/runners/runner_1/runs/run_auto_promote_active/complete",
+      jsonRequest({
+        result: { conclusion: "success", summary: "Finished active run." }
+      })
+    );
+    expect(complete.status).toBe(200);
+    const completeJson = await complete.json();
+    expect(completeJson).toMatchObject({
+      ok: true,
+      promotedFollowUp: {
+        followUpRequest: {
+          id: "follow_up_auto_1",
+          status: "promoted"
+        },
+        run: {
+          parentRunId: "run_auto_promote_active"
+        }
+      }
+    });
+    const promotedRunId = completeJson.promotedFollowUp.run.id;
+    expect(promotedRunId).toMatch(/^run_/);
+    expect(completeJson.promotedFollowUp.followUpRequest.createdRunId).toBe(promotedRunId);
+
+    await expect((await app.request("/v1/follow-up-requests/follow_up_auto_1")).json()).resolves.toMatchObject({
+      followUpRequest: { id: "follow_up_auto_1", status: "promoted", createdRunId: promotedRunId }
+    });
+    await expect((await app.request("/v1/follow-up-requests/follow_up_auto_2")).json()).resolves.toMatchObject({
+      followUpRequest: { id: "follow_up_auto_2", status: "queued" }
+    });
+
+    const claimPromoted = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(claimPromoted.status).toBe(200);
+    await expect(claimPromoted.json()).resolves.toMatchObject({
+      run: { id: promotedRunId, parentRunId: "run_auto_promote_active" }
+    });
+
+    const eventsResponse = await app.request("/v1/runs/run_auto_promote_active/events");
+    const { events } = await eventsResponse.json();
+    expect(events.find((event: { type: string }) => event.type === "follow_up_request.auto_promoted")).toMatchObject({
+      payload: {
+        followUpRequestId: "follow_up_auto_1",
+        createdRunId: promotedRunId
+      }
+    });
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        body: "OpenTag picked this up. Run: `run_auto_promote_active`"
+      },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_auto_promote_active`: Queued follow-up follow_up_auto_1 behind the active run.",
+        statusMessageKey: "run_auto_promote_active:status"
+      },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_auto_promote_active`: Queued follow-up follow_up_auto_2 behind the active run.",
+        statusMessageKey: "run_auto_promote_active:status"
+      },
+      {
+        kind: "final",
+        body: expect.stringContaining("Finished active run.")
+      },
+      {
+        kind: "acknowledgement",
+        body: `OpenTag picked this up. Run: \`${promotedRunId}\``
+      }
+    ]);
+  });
+
+  it("does not send queued text callbacks for source-receipt liveness providers", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      sourceReceiptSink: {
+        async deliver() {
+          return { delivered: true };
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+
+    const first = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_slack_active_1",
+        event: slackRepoEvent({ id: "evt_slack_active_1", sourceEventId: "slack_active_1", threadKey: "T123|C123|1710000000.000100" })
+      })
+    );
+    expect(first.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const second = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "follow_up_slack_1",
+        event: slackRepoEvent({ id: "evt_slack_follow_up_1", sourceEventId: "slack_follow_up_1", threadKey: "T123|C123|1710000000.000100" })
+      })
+    );
+    expect(second.status).toBe(202);
+    await expect(second.json()).resolves.toMatchObject({
+      followUpRequest: {
+        id: "follow_up_slack_1",
+        status: "queued",
+        activeRunId: "run_slack_active_1"
+      }
+    });
+    expect(delivered.filter((message) => message.kind === "progress")).toEqual([]);
   });
 
   it("stores and returns repo policy rules", async () => {
@@ -368,7 +1233,77 @@ describe("dispatcher API", () => {
     });
   });
 
-  it("delivers acknowledgement, progress, and final callback messages with audit events", async () => {
+  it("records management audit events for repo policy and mutation mapping changes without rule details", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request(
+      "/v1/repo-bindings/github/acme/demo/policy-rules",
+      jsonRequest({
+        rule: {
+          id: "repo_allows_labels",
+          scope: "work_context_owner_container",
+          effect: "allow",
+          capabilityId: "set_labels",
+          reason: "Internal audit detail that should not be copied into control-plane event payloads."
+        }
+      })
+    );
+    await app.request(
+      "/v1/repo-bindings/github/acme/demo/mutation-mappings",
+      jsonRequest({
+        mapping: {
+          id: "github_status_labels",
+          adapter: "github",
+          domain: "status",
+          strategy: "label",
+          values: { blocked: "status/blocked-internal-label" },
+          description: "Internal mapping detail that should stay in the mapping record."
+        }
+      })
+    );
+
+    const audit = await app.request("/v1/control-plane-events?limit=20");
+    const { events } = await audit.json();
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "binding.repository.policy_rule.upserted",
+          subject: "github:acme/demo:repo_allows_labels",
+          payload: {
+            provider: "github",
+            owner: "acme",
+            repo: "demo",
+            ruleId: "repo_allows_labels",
+            scope: "work_context_owner_container",
+            effect: "allow",
+            capabilityId: "set_labels",
+            hasReason: true
+          }
+        }),
+        expect.objectContaining({
+          type: "binding.repository.mutation_mapping.upserted",
+          subject: "github:acme/demo:github_status_labels",
+          payload: {
+            provider: "github",
+            owner: "acme",
+            repo: "demo",
+            mappingId: "github_status_labels",
+            adapter: "github",
+            domain: "status",
+            strategy: "label",
+            valueCount: 1,
+            hasDescription: true
+          }
+        })
+      ])
+    );
+    const serializedEvents = JSON.stringify(events);
+    expect(serializedEvents).not.toContain("Internal audit detail");
+    expect(serializedEvents).not.toContain("status/blocked-internal-label");
+    expect(serializedEvents).not.toContain("Internal mapping detail");
+  });
+
+  it("delivers acknowledgement, human progress, and final callback messages with audit events", async () => {
     const delivered: { kind: string; body: string; blocks?: unknown[] }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -402,7 +1337,7 @@ describe("dispatcher API", () => {
     await app.request("/v1/runners/runner_1/runs/run_2/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z" })
+      body: JSON.stringify({ type: "executor.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
     });
     const completeResponse = await app.request("/v1/runners/runner_1/runs/run_2/complete", {
       method: "POST",
@@ -438,7 +1373,7 @@ describe("dispatcher API", () => {
       "callback.final.delivered"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
-      visibility: "audit",
+      visibility: "human",
       importance: "normal",
       message: "running tests"
     });
@@ -454,6 +1389,129 @@ describe("dispatcher API", () => {
       visibility: "human",
       importance: "high"
     });
+  });
+
+  it("keeps default audit progress out of source-thread callbacks", async () => {
+    const delivered: { kind: string; body: string }[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo",
+        allowedActors: ["octocat"]
+      })
+    });
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_audit_progress", event: { ...validEvent, id: "evt_audit_progress", sourceEventId: "comment_audit_progress" } })
+    });
+    expect(createResponse.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const progressResponse = await app.request("/v1/runners/runner_1/runs/run_audit_progress/progress", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "executor.progress", message: "internal tool detail", at: "2026-06-24T00:00:01.000Z" })
+    });
+    expect(progressResponse.status).toBe(200);
+
+    expect(delivered).toEqual([{ kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_audit_progress`" }]);
+
+    const eventsResponse = await app.request("/v1/runs/run_audit_progress/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).toEqual([
+      "admission.decided",
+      "run.created",
+      "context_packet.generated",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.delivered",
+      "run.claimed",
+      "run.progress"
+    ]);
+    expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
+      visibility: "audit",
+      importance: "normal",
+      message: "internal tool detail"
+    });
+  });
+
+  it("keeps hook-ingest progress aliases audit-only by default", async () => {
+    const delivered: { kind: string; body: string }[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo",
+      allowedActors: ["ou_sender"]
+    }));
+    const createResponse = await app.request("/v1/runs", jsonRequest({
+      runId: "run_hook_ingest_progress",
+      event: larkRepoEvent({ id: "evt_hook_ingest_progress", sourceEventId: "msg_hook_ingest_progress" })
+    }));
+    expect(createResponse.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const progressBody = {
+      type: "ingest.hermes.post_llm_call",
+      message: "Hermes post_llm_call completed.",
+      at: "2026-06-24T00:00:01.000Z",
+      idempotencyKey: "hermes:run_hook_ingest_progress:progress:post_llm_call"
+    };
+    const progressResponse = await app.request(
+      "/v1/runners/runner_1/runs/run_hook_ingest_progress/progress",
+      jsonRequest(progressBody)
+    );
+    const replayResponse = await app.request(
+      "/v1/runners/runner_1/runs/run_hook_ingest_progress/progress",
+      jsonRequest({ ...progressBody, message: "retry should stay invisible" })
+    );
+    expect(progressResponse.status).toBe(200);
+    expect(replayResponse.status).toBe(200);
+    await expect(replayResponse.json()).resolves.toEqual({ ok: true, replayed: true });
+
+    expect(delivered.filter((message) => message.kind === "progress")).toEqual([]);
+
+    const eventsResponse = await app.request("/v1/runs/run_hook_ingest_progress/events");
+    const { events } = await eventsResponse.json();
+    const progressEvents = events.filter((event: { type: string }) => event.type === "run.progress");
+    expect(progressEvents).toHaveLength(1);
+    expect(progressEvents[0]).toMatchObject({
+      visibility: "audit",
+      importance: "normal",
+      message: "Hermes post_llm_call completed.",
+      payload: expect.objectContaining({
+        type: "ingest.hermes.post_llm_call",
+        idempotencyKey: "hermes:run_hook_ingest_progress:progress:post_llm_call"
+      })
+    });
+    expect(events.some((event: { type: string }) => event.type.startsWith("callback.progress."))).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("retry should stay invisible");
   });
 
   it("requires runner-scoped progress and completion after claim", async () => {
@@ -539,6 +1597,77 @@ describe("dispatcher API", () => {
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("admission.decided");
     expect(events.map((event: { type: string }) => event.type)).toContain("run.create_idempotent_replay");
+  });
+
+  it("replays duplicate source delivery ids even when event ids differ", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/runners", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runnerId: "runner_1", name: "Runner One" })
+    });
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+
+    const first = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_delivery_a",
+        event: {
+          ...validEvent,
+          id: "evt_delivery_a",
+          sourceEventId: "comment_delivery_a",
+          metadata: { ...validEvent.metadata, sourceDeliveryId: "delivery_replay_1", webhookSignatureVerified: true }
+        }
+      })
+    );
+    expect(first.status).toBe(201);
+
+    const replay = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_delivery_b",
+        event: {
+          ...validEvent,
+          id: "evt_delivery_b",
+          sourceEventId: "comment_delivery_b",
+          metadata: { ...validEvent.metadata, sourceDeliveryId: "delivery_replay_1", webhookSignatureVerified: true }
+        }
+      })
+    );
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      decision: {
+        action: "drop_duplicate",
+        reasonCode: "duplicate_source_delivery",
+        activeRunId: "run_delivery_a"
+      },
+      run: { id: "run_delivery_a" },
+      idempotentReplay: true
+    });
+
+    const eventsResponse = await app.request("/v1/runs/run_delivery_a/events");
+    const { events } = await eventsResponse.json();
+    expect(events.find((event: { type: string }) => event.type === "run.create_idempotent_replay")?.payload).toMatchObject({
+      replayKey: { kind: "source_delivery", source: "github", deliveryId: "delivery_replay_1" },
+      provenance: {
+        sourceEventId: "comment_delivery_b",
+        sourceDeliveryId: "delivery_replay_1",
+        signatureState: "verified",
+        admissionDecision: { reasonCode: "duplicate_source_delivery" }
+      }
+    });
   });
 
   it("returns 404 when promoting a missing follow-up request", async () => {
@@ -671,7 +1800,7 @@ describe("dispatcher API", () => {
     expect(delivered).toEqual([
       {
         kind: "final",
-        body: "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed",
+        body: "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed\n\nAudit: `opentag status --run run_slack_1`",
         blocks: [
           {
             type: "section",
@@ -722,7 +1851,7 @@ describe("dispatcher API", () => {
     });
   });
 
-  it("delivers Slack source receipts without posting text acknowledgements", async () => {
+  it("delivers Slack received and running source receipts without posting text acknowledgements", async () => {
     const callbacks: { kind: string }[] = [];
     const receipts: Array<{ runId: string; provider: string; state: string; agentId?: string; channelId: unknown; messageTs: unknown }> = [];
     const app = createDispatcherApp({
@@ -760,6 +1889,11 @@ describe("dispatcher API", () => {
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt", event }));
     expect(createResponse.status).toBe(201);
 
+    const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(claimResponse.status).toBe(200);
+    const runningResponse = await app.request("/v1/runners/runner_1/runs/run_slack_receipt/running", jsonRequest({ executor: "echo" }));
+    expect(runningResponse.status).toBe(200);
+
     const replayResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_replay", event }));
     expect(replayResponse.status).toBe(200);
 
@@ -769,6 +1903,14 @@ describe("dispatcher API", () => {
         runId: "run_slack_receipt",
         provider: "slack",
         state: "received",
+        agentId: "opentag",
+        channelId: "C123",
+        messageTs: "1710000000.000100"
+      },
+      {
+        runId: "run_slack_receipt",
+        provider: "slack",
+        state: "running",
         agentId: "opentag",
         channelId: "C123",
         messageTs: "1710000000.000100"
@@ -782,17 +1924,38 @@ describe("dispatcher API", () => {
       "run.created",
       "context_packet.generated",
       "source_receipt.delivered",
+      "run.claimed",
+      "run.running",
+      "source_receipt.delivered",
       "admission.decided",
       "run.create_idempotent_replay"
     ]);
-    expect(events.find((event: { type: string }) => event.type === "source_receipt.delivered")).toMatchObject({
-      visibility: "audit",
-      importance: "low",
-      payload: {
-        provider: "slack",
-        state: "received"
+    expect(
+      events
+        .filter((event: { type: string }) => event.type === "source_receipt.delivered")
+        .map((event: { visibility: string; importance: string; payload: { provider: string; state: string } }) => ({
+          visibility: event.visibility,
+          importance: event.importance,
+          payload: event.payload
+        }))
+    ).toEqual([
+      {
+        visibility: "audit",
+        importance: "low",
+        payload: {
+          provider: "slack",
+          state: "received"
+        }
+      },
+      {
+        visibility: "audit",
+        importance: "low",
+        payload: {
+          provider: "slack",
+          state: "running"
+        }
       }
-    });
+    ]);
   });
 
   it("falls back to a Slack text acknowledgement when the source receipt is not delivered", async () => {
@@ -831,7 +1994,7 @@ describe("dispatcher API", () => {
     ]);
   });
 
-  it("renders Lark final callbacks as plain text while keeping acknowledgement and progress audit-only", async () => {
+  it("renders Lark callbacks with lightweight acknowledgement while keeping process progress audit-only", async () => {
     const delivered: { kind: string; body: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -877,10 +2040,21 @@ describe("dispatcher API", () => {
     expect(createResponse.status).toBe(201);
 
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const runningResponse = await app.request("/v1/runners/runner_1/runs/run_lark_1/running", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ executor: "echo" })
+    });
+    expect(runningResponse.status).toBe(200);
     const progressResponse = await app.request("/v1/runners/runner_1/runs/run_lark_1/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "Echo executor started", at: "2026-06-24T00:00:01.000Z" })
+      body: JSON.stringify({
+        type: "executor.progress",
+        message: "Echo executor started",
+        at: "2026-06-24T00:00:01.000Z",
+        visibility: "human"
+      })
     });
     expect(progressResponse.status).toBe(200);
 
@@ -899,8 +2073,14 @@ describe("dispatcher API", () => {
 
     expect(delivered).toEqual([
       {
+        kind: "acknowledgement",
+        body: ["Received. OpenTag is working.", "Run: run_lark_1", "Use /status here for queue state; audit locally with opentag status --run run_lark_1."].join(
+          "\n"
+        )
+      },
+      {
         kind: "final",
-        body: "Finished with success.\n\nEchoed OpenTag command: introduce yourself\n\nVerification\n- echo: passed"
+        body: "Finished with success.\n\nEchoed OpenTag command: introduce yourself\n\nVerification\n- echo: passed\n\nAudit: opentag status --run run_lark_1"
       }
     ]);
 
@@ -910,17 +2090,128 @@ describe("dispatcher API", () => {
       "admission.decided",
       "run.created",
       "context_packet.generated",
+      "callback.acknowledgement.queued",
+      "callback.acknowledgement.delivered",
       "run.claimed",
+      "run.running",
+      "callback.progress.suppressed",
       "run.progress",
+      "callback.progress.suppressed",
       "run.completed",
       "callback.final.queued",
       "callback.final.delivered"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
-      visibility: "audit",
+      visibility: "human",
       importance: "normal",
       message: "Echo executor started"
     });
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")).toHaveLength(2);
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")[0]).toMatchObject({
+      visibility: "audit",
+      importance: "low",
+      payload: {
+        provider: "lark",
+        reason: "platform_liveness_strategy",
+        requestedStatus: "running",
+        livenessStrategy: "thread_reply"
+      }
+    });
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")[1]).toMatchObject({
+      visibility: "audit",
+      importance: "low",
+      payload: {
+        provider: "lark",
+        reason: "platform_liveness_strategy",
+        requestedVisibility: "human",
+        livenessStrategy: "thread_reply"
+      }
+    });
+  });
+
+  it("reuses the first Lark status message id when delivering the final card", async () => {
+    const delivered: Array<{
+      kind: string;
+      statusMessageKey?: string;
+      externalMessageId?: string;
+      hasRich?: boolean;
+    }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
+            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
+            ...(message.rich ? { hasRich: true } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "om_status" };
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    });
+
+    const larkEvent = {
+      ...validEvent,
+      id: "evt_lark_status_card",
+      source: "lark",
+      sourceEventId: "EvLarkStatusCard",
+      actor: { provider: "lark", providerUserId: "ou_123", handle: "Felix", organizationId: "tenant_123" },
+      permissions: [{ scope: "chat:postMessage", reason: "reply in thread" }],
+      callback: {
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tk_123|oc_chat|om_msg"
+      }
+    };
+
+    const createResponse = await app.request("/v1/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ runId: "run_lark_status_card", event: larkEvent })
+    });
+    expect(createResponse.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const completeResponse = await app.request("/v1/runners/runner_1/runs/run_lark_status_card/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        result: {
+          conclusion: "success",
+          summary: "Done.",
+          verification: [{ command: "echo", outcome: "passed" }]
+        }
+      })
+    });
+    expect(completeResponse.status).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        statusMessageKey: "run_lark_status_card:status",
+        hasRich: true
+      },
+      {
+        kind: "final",
+        statusMessageKey: "run_lark_status_card:status",
+        externalMessageId: "om_status",
+        hasRich: true
+      }
+    ]);
   });
 
   it("records proposal approval decisions and creates apply plans", async () => {
@@ -1495,11 +2786,16 @@ describe("dispatcher API", () => {
 
   it("adds a stable statusMessageKey when progress callbacks are delivered", async () => {
     const delivered: Array<{ kind: string; statusMessageKey?: string }> = [];
+    const defaultPresentation = createDefaultCallbackPresentation();
     const app = createDispatcherApp({
       databasePath: ":memory:",
       presentation: {
+        ...defaultPresentation,
         shouldDeliverAcknowledgement() {
           return true;
+        },
+        shouldDeliverStatusUpdate(provider) {
+          return provider === "slack";
         },
         shouldDeliverProgress(provider) {
           return provider === "slack";
@@ -1512,6 +2808,18 @@ describe("dispatcher API", () => {
         },
         final() {
           return { body: "final" };
+        },
+        render(input) {
+          if (input.presentation.kind === "run_status" && input.presentation.state === "received") {
+            return { body: `ack ${input.presentation.runId}` };
+          }
+          if (input.presentation.kind === "run_status") {
+            return { body: `progress ${input.presentation.message ?? input.presentation.state}` };
+          }
+          if (input.presentation.kind === "final_summary") {
+            return { body: "final" };
+          }
+          return defaultPresentation.render(input);
         }
       },
       callbackSink: {
@@ -1563,7 +2871,7 @@ describe("dispatcher API", () => {
     const progressResponse = await app.request("/v1/runners/runner_1/runs/run_status_key/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "working", at: "2026-06-24T00:00:01.000Z" })
+      body: JSON.stringify({ type: "executor.progress", message: "working", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
     });
     expect(progressResponse.status).toBe(200);
 
@@ -1571,6 +2879,319 @@ describe("dispatcher API", () => {
       { kind: "acknowledgement" },
       { kind: "progress", statusMessageKey: "run_status_key:status" }
     ]);
+  });
+
+  it("delivers a running liveness status when a status-update provider starts executing", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+
+    const response = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_liveness_running",
+        event: githubIssueEvent({ id: "evt_liveness_running", sourceEventId: "comment_liveness_running" })
+      })
+    );
+    expect(response.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const runningResponse = await app.request(
+      "/v1/runners/runner_1/runs/run_liveness_running/running",
+      jsonRequest({ executor: "echo" })
+    );
+    expect(runningResponse.status).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        body: "OpenTag picked this up. Run: `run_liveness_running`"
+      },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_liveness_running`: Running with echo.",
+        statusMessageKey: "run_liveness_running:status"
+      }
+    ]);
+  });
+
+  it("deduplicates runner running retries by idempotency key before liveness delivery", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+    const response = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_running_replay",
+        event: githubIssueEvent({ id: "evt_running_replay", sourceEventId: "comment_running_replay" })
+      })
+    );
+    expect(response.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const body = {
+      executor: "echo",
+      runTimeoutMs: 30_000,
+      idempotencyKey: "runner_1:run_running_replay:running"
+    };
+    const first = await app.request("/v1/runners/runner_1/runs/run_running_replay/running", jsonRequest(body));
+    const replay = await app.request("/v1/runners/runner_1/runs/run_running_replay/running", jsonRequest({ ...body, executor: "codex" }));
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({ ok: true, replayed: true });
+
+    expect(delivered).toEqual([
+      { kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_running_replay`" },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_running_replay`: Running with echo.",
+        statusMessageKey: "run_running_replay:status"
+      }
+    ]);
+    const eventsResponse = await app.request("/v1/runs/run_running_replay/events");
+    const { events } = await eventsResponse.json();
+    expect(events.filter((event: { type: string }) => event.type === "run.running")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(1);
+    expect(events.find((event: { type: string }) => event.type === "run.running")).toMatchObject({
+      payload: expect.objectContaining({
+        executor: "echo",
+        runTimeoutMs: 30_000,
+        idempotencyKey: "runner_1:run_running_replay:running"
+      })
+    });
+    expect(JSON.stringify(events)).not.toContain("codex");
+  });
+
+  it("delivers a waiting-for-approval liveness status before a needs_human final callback", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+
+    const response = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_waiting_approval",
+        event: githubIssueEvent({ id: "evt_waiting_approval", sourceEventId: "comment_waiting_approval" })
+      })
+    );
+    expect(response.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const completeResponse = await app.request(
+      "/v1/runners/runner_1/runs/run_waiting_approval/complete",
+      jsonRequest({
+        result: {
+          conclusion: "needs_human",
+          summary: "Prepared approval request.",
+          nextAction: "Approve or reject the proposed action."
+        }
+      })
+    );
+    expect(completeResponse.status).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        body: "OpenTag picked this up. Run: `run_waiting_approval`"
+      },
+      {
+        kind: "progress",
+        body: "OpenTag progress for `run_waiting_approval`: Waiting for approval.",
+        statusMessageKey: "run_waiting_approval:status"
+      },
+      {
+        kind: "final",
+        body: expect.stringContaining("OpenTag finished with **needs_human**.")
+      }
+    ]);
+  });
+
+  it("deduplicates runner progress retries by idempotency key before callback delivery", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const defaultPresentation = createDefaultCallbackPresentation();
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      presentation: {
+        ...defaultPresentation,
+        shouldDeliverStatusUpdate(provider) {
+          return provider === "github";
+        },
+        shouldDeliverProgress(provider) {
+          return provider === "github";
+        }
+      },
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const createResponse = await app.request("/v1/runs", jsonRequest({
+      runId: "run_progress_replay",
+      event: { ...validEvent, id: "evt_progress_replay", sourceEventId: "comment_progress_replay" }
+    }));
+    expect(createResponse.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const body = {
+      type: "executor.progress",
+      message: "working",
+      at: "2026-06-24T00:00:01.000Z",
+      visibility: "human",
+      idempotencyKey: "runner_1:run_progress_replay:progress:1"
+    };
+    const first = await app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest(body));
+    const replay = await app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({ ...body, message: "working retry" }));
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({ ok: true, replayed: true });
+
+    expect(delivered).toEqual([
+      { kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_progress_replay`" },
+      { kind: "progress", body: "OpenTag progress for `run_progress_replay`: working" }
+    ]);
+    const eventsResponse = await app.request("/v1/runs/run_progress_replay/events");
+    const { events } = await eventsResponse.json();
+    expect(events.filter((event: { type: string }) => event.type === "run.progress")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(1);
+    expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
+      payload: expect.objectContaining({ idempotencyKey: "runner_1:run_progress_replay:progress:1" })
+    });
+    expect(JSON.stringify(events)).not.toContain("working retry");
+  });
+
+  it("deduplicates runner completion retries by idempotency key before final callback delivery", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const createResponse = await app.request("/v1/runs", jsonRequest({
+      runId: "run_complete_replay",
+      event: { ...validEvent, id: "evt_complete_replay", sourceEventId: "comment_complete_replay" }
+    }));
+    expect(createResponse.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+
+    const first = await app.request("/v1/runners/runner_1/runs/run_complete_replay/complete", jsonRequest({
+      result: { conclusion: "success", summary: "done" },
+      idempotencyKey: "runner_1:run_complete_replay:complete:1"
+    }));
+    const replay = await app.request("/v1/runners/runner_1/runs/run_complete_replay/complete", jsonRequest({
+      result: { conclusion: "failure", summary: "retry should not replace result" },
+      idempotencyKey: "runner_1:run_complete_replay:complete:1"
+    }));
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual({ ok: true, replayed: true });
+
+    expect(delivered).toEqual([
+      { kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_complete_replay`" },
+      { kind: "final", body: "OpenTag finished with **success**.\n\ndone" }
+    ]);
+    const getResponse = await app.request("/v1/runs/run_complete_replay");
+    await expect(getResponse.json()).resolves.toMatchObject({
+      run: {
+        status: "succeeded",
+        result: { conclusion: "success", summary: "done" }
+      }
+    });
+    const eventsResponse = await app.request("/v1/runs/run_complete_replay/events");
+    const { events } = await eventsResponse.json();
+    expect(events.filter((event: { type: string }) => event.type === "run.completed")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "callback.final.delivered")).toHaveLength(1);
+    expect(events.find((event: { type: string }) => event.type === "run.completed")).toMatchObject({
+      payload: expect.objectContaining({ idempotencyKey: "runner_1:run_complete_replay:complete:1" })
+    });
+    expect(JSON.stringify(events)).not.toContain("retry should not replace result");
   });
 
   it("rejects runs for repositories without an explicit binding", async () => {
@@ -1589,6 +3210,25 @@ describe("dispatcher API", () => {
         reasonCode: "repo_not_bound"
       }
     });
+    const audit = await app.request("/v1/control-plane-events?type=admission.needs_human_decision");
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "admission.needs_human_decision",
+        severity: "warn",
+        subject: "run_unbound",
+        payload: expect.objectContaining({
+          runId: "run_unbound",
+          source: "github",
+          sourceEventId: "comment_1",
+          projectTarget: "github:acme/demo",
+          decision: expect.objectContaining({
+            action: "needs_human_decision",
+            reasonCode: "repo_not_bound"
+          })
+        })
+      })
+    ]);
   });
 
   it("rejects write-capable runs from actors outside the repo binding allowlist", async () => {
@@ -1691,6 +3331,14 @@ describe("dispatcher API", () => {
     const response = await app.request("/v1/runners/runner_1/runs/run_heartbeat/heartbeat", { method: "POST" });
     expect(response.status).toBe(200);
 
+    const runnerResponse = await app.request("/v1/runners/runner_1");
+    await expect(runnerResponse.json()).resolves.toMatchObject({
+      runner: {
+        runnerId: "runner_1",
+        heartbeatAt: expect.any(String)
+      }
+    });
+
     const eventsResponse = await app.request("/v1/runs/run_heartbeat/events");
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("run.heartbeat");
@@ -1761,6 +3409,204 @@ describe("dispatcher API", () => {
       owner: "acme",
       repo: "demo",
       metadata: { title: "Ops chat" }
+    });
+  });
+
+  it("deletes generic channel bindings", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/channel-bindings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        provider: "lark",
+        accountId: "tenant_1",
+        conversationId: "oc_chat",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    });
+
+    const deleted = await app.request("/v1/channel-bindings/lark/tenant_1/oc_chat", { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+
+    const get = await app.request("/v1/channel-bindings/lark/tenant_1/oc_chat");
+    expect(get.status).toBe(404);
+
+    const deleteAgain = await app.request("/v1/channel-bindings/lark/tenant_1/oc_chat", { method: "DELETE" });
+    expect(deleteAgain.status).toBe(404);
+  });
+
+  it("cancels the active run for a bound source container", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "oc_chat",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_lark_cancel",
+      event: larkRepoEvent({ id: "evt_lark_cancel", sourceEventId: "msg_lark_cancel" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_lark_cancel/running", jsonRequest({ executor: "echo" }));
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_lark_cancel",
+      event: larkRepoEvent({ id: "evt_lark_cancel_follow_up", sourceEventId: "msg_lark_cancel_follow_up" })
+    }));
+    expect(followUp.status).toBe(202);
+
+    const cancel = await app.request("/v1/channel-bindings/lark/tenant_1/oc_chat/cancel-active-run", jsonRequest({
+      reason: "Stop requested from Lark.",
+      requestedBy: "lark:ou_sender"
+    }));
+    expect(cancel.status).toBe(200);
+    await expect(cancel.json()).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_lark_cancel",
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+
+    const lateComplete = await app.request("/v1/runners/runner_1/runs/run_lark_cancel/complete", jsonRequest({
+      result: { conclusion: "success", summary: "late success" }
+    }));
+    expect(lateComplete.status).toBe(404);
+
+    const stored = await app.request("/v1/runs/run_lark_cancel");
+    await expect(stored.json()).resolves.toMatchObject({
+      run: {
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+
+    const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_lark_cancel");
+    await expect(queuedFollowUp.json()).resolves.toMatchObject({
+      followUpRequest: {
+        id: "follow_up_lark_cancel",
+        status: "queued"
+      }
+    });
+  });
+
+  it("reports active run and queued follow-ups for a bound source container", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "oc_chat",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_lark_status",
+      event: larkRepoEvent({ id: "evt_lark_status", sourceEventId: "msg_lark_status", messageId: "om_thread" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_lark_status/running", jsonRequest({ executor: "echo", runTimeoutMs: 30_000 }));
+
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_lark_status",
+      event: larkRepoEvent({ id: "evt_lark_status_follow_up", sourceEventId: "msg_lark_status_follow_up", messageId: "om_thread" })
+    }));
+    expect(followUp.status).toBe(202);
+
+    const status = await app.request("/v1/channel-bindings/lark/tenant_1/oc_chat/status");
+
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      binding: {
+        provider: "lark",
+        accountId: "tenant_1",
+        conversationId: "oc_chat",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      },
+      activeRun: {
+        id: "run_lark_status",
+        status: "running"
+      },
+      runTimeoutPolicy: {
+        hardTimeoutMs: 30_000
+      },
+      queuedFollowUps: [
+        {
+          id: "follow_up_lark_status",
+          activeRunId: "run_lark_status",
+          status: "queued"
+        }
+      ]
+    });
+  });
+
+  it("cancels a run by id", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_cancel_by_id",
+      event: githubIssueEvent({ id: "evt_cancel_by_id", sourceEventId: "comment_cancel_by_id" })
+    }));
+    expect(create.status).toBe(201);
+
+    const cancel = await app.request("/v1/runs/run_cancel_by_id/cancel", jsonRequest({ reason: "Stop requested." }));
+    expect(cancel.status).toBe(200);
+    await expect(cancel.json()).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: { id: "run_cancel_by_id", status: "cancelled" }
+    });
+
+    const cancelAgain = await app.request("/v1/runs/run_cancel_by_id/cancel", jsonRequest({ reason: "Stop again." }));
+    expect(cancelAgain.status).toBe(409);
+    await expect(cancelAgain.json()).resolves.toMatchObject({ error: "run_already_terminal" });
+
+    const events = await app.request("/v1/runs/run_cancel_by_id/events");
+    await expect(events.json()).resolves.toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "run.cancel_requested",
+          payload: expect.objectContaining({
+            terminalReason: "cancelled_by_user",
+            terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups."
+          })
+        })
+      ])
     });
   });
 
@@ -2714,6 +4560,88 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("does not replay Slack source delivery ids when creating action fallback child runs", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const parentEvent = slackRepoEvent({
+      id: "evt_thread_slack_fallback_delivery",
+      sourceEventId: "slack_thread_fallback_delivery",
+      threadKey: "T123|C123|1710000000.000100"
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_slack_fallback_delivery",
+      event: {
+        ...parentEvent,
+        metadata: {
+          ...parentEvent.metadata,
+          sourceDeliveryId: "EvSlackFallbackDelivery",
+          slackEventId: "EvSlackFallbackDelivery"
+        }
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_slack_fallback_delivery",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Ask for review.",
+          intents: [
+            {
+              intentId: "intent_slack_fallback_delivery",
+              domain: "review",
+              action: "request_review",
+              summary: "Ask a human to review the result.",
+              params: { surface: "slack" }
+            }
+          ]
+        }
+      ]
+    });
+    await app.request("/v1/slack-channel-bindings", jsonRequest({
+      teamId: "T123",
+      channelId: "C123",
+      owner: "acme",
+      repo: "demo"
+    }));
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100"
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      run: {
+        parentRunId: "run_thread_slack_fallback_delivery",
+        sourceProposalId: "proposal_thread_slack_fallback_delivery"
+      }
+    });
+    expect(body.run.id).not.toBe("run_thread_slack_fallback_delivery");
+    expect(body.run.sourceApplyPlanId).toBe(body.plan.id);
+
+    const parentEvents = await app.request("/v1/runs/run_thread_slack_fallback_delivery/events");
+    const { events } = await parentEvents.json();
+    expect(events.map((event: { type: string }) => event.type)).toContain("run.child_created");
+
+    const child = await app.request(`/v1/runs/${body.run.id}`);
+    expect(child.status).toBe(200);
+    const stored = await child.json();
+    expect(stored.event.id).toBe(`evt_${body.run.id}`);
+    expect(stored.event.sourceEventId).toContain(body.run.id);
+    expect(stored.event.metadata).toMatchObject({
+      parentRunId: "run_thread_slack_fallback_delivery",
+      sourceProposalId: "proposal_thread_slack_fallback_delivery",
+      sourceApplyPlanId: body.plan.id
+    });
+    expect(stored.event.metadata).not.toHaveProperty("sourceDeliveryId");
+    expect(stored.event.metadata).not.toHaveProperty("slackEventId");
+  });
+
   it("does not reuse a provided approval id for a different selected action", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     await seedCompletedProposal({
@@ -3505,6 +5433,20 @@ describe("dispatcher API", () => {
     expect(response.status).toBe(400);
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toBe("invalid_json_body");
+    const audit = await app.request("/v1/control-plane-events?type=security.request_body_rejected");
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "security.request_body_rejected",
+        severity: "warn",
+        subject: "POST /v1/runners",
+        payload: expect.objectContaining({
+          reason: "invalid_json_body",
+          error: "invalid_json_body",
+          endpoint: "POST /v1/runners"
+        })
+      })
+    ]);
   });
 
   it("returns 400 for a body that fails schema validation", async () => {
@@ -3515,6 +5457,56 @@ describe("dispatcher API", () => {
     expect(response.status).toBe(400);
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toBe("invalid_request_body");
+    const audit = await app.request("/v1/control-plane-events?type=security.request_body_rejected");
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "security.request_body_rejected",
+        severity: "warn",
+        subject: "POST /v1/runners",
+        payload: expect.objectContaining({
+          reason: "invalid_request_body",
+          error: "invalid_request_body",
+          endpoint: "POST /v1/runners"
+        })
+      })
+    ]);
+  });
+
+  it("returns 413 before validation when a request body is too large", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", maxRequestBodyBytes: 24 });
+
+    const response = await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: "request_body_too_large", maxBytes: 24 });
+    const audit = await app.request("/v1/control-plane-events?type=security.request_body_rejected");
+    const { events } = await audit.json();
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "security.request_body_rejected",
+        severity: "warn",
+        subject: "POST /v1/runners",
+        payload: expect.objectContaining({
+          reason: "request_body_too_large",
+          endpoint: "POST /v1/runners",
+          maxBytes: 24
+        })
+      })
+    ]);
+  });
+
+  it("applies the request body size limit to approval endpoints", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", maxRequestBodyBytes: 24 });
+
+    const response = await app.request("/v1/proposals/proposal_1/approvals", jsonRequest({
+      approvedIntentIds: ["intent_1"],
+      approvedBy: "octocat",
+      reason: "This reason intentionally exceeds the tiny test request body limit."
+    }));
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: "request_body_too_large", maxBytes: 24 });
   });
 
   it("does not mask an internal ZodError as a 400 (yields 500)", async () => {

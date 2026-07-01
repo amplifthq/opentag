@@ -13,16 +13,41 @@ function positivePort(value: string | undefined, fallback: number): number {
   return port;
 }
 
+function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function csvList(value: string | undefined): string[] | undefined {
+  const items = value
+    ?.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items?.length ? items : undefined;
+}
+
 function sharedConfigFromEnv(env: NodeJS.ProcessEnv) {
   const dispatcherUrl = env.OPENTAG_DISPATCHER_URL;
   if (!dispatcherUrl) {
     throw new Error("OPENTAG_DISPATCHER_URL is required");
   }
+  const botToken = env.OPENTAG_SLACK_BOT_TOKEN ?? env.SLACK_BOT_TOKEN;
+  const runTimeoutMs = positiveIntegerFromEnv("OPENTAG_RUN_TIMEOUT_MS", env.OPENTAG_RUN_TIMEOUT_MS);
+  const maxRequestBodyBytes = positiveIntegerFromEnv("OPENTAG_MAX_REQUEST_BODY_BYTES", env.OPENTAG_MAX_REQUEST_BODY_BYTES);
+  const bindingAdminUserIds = csvList(env.OPENTAG_SLACK_BINDING_ADMIN_USER_IDS);
   return {
     dispatcherUrl,
     agentId: env.OPENTAG_SLACK_AGENT_ID ?? "opentag",
     ...(env.OPENTAG_DISPATCHER_TOKEN ? { dispatcherToken: env.OPENTAG_DISPATCHER_TOKEN } : {}),
     ...(env.OPENTAG_SLACK_APP_ID ? { appId: env.OPENTAG_SLACK_APP_ID } : {}),
+    ...(botToken ? { botToken } : {}),
+    ...(bindingAdminUserIds ? { bindingAdminUserIds } : {}),
+    ...(runTimeoutMs ? { runTimeoutMs } : {}),
+    ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     ...(env.OPENTAG_SLACK_POST_MESSAGE_URL ? { callbackUri: env.OPENTAG_SLACK_POST_MESSAGE_URL } : {})
   };
 }
