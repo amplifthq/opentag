@@ -245,7 +245,6 @@ Slack 自服务命令仍然围绕 Project Target：
 这些命令不接受本机绝对 checkout 路径。本机路径只应该留在 runner config 和 allowlist 里，不应该写进 Slack 历史。Slack channel 的绑定变更还要求发送者的 Slack user id 出现在 `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`；否则应从本机配置或 dispatcher API 更新绑定。详细过程和 audit 数据默认留在本机；需要更深排查时用 `opentag status --run <run_id>` 或 `opentag service status`。
 
 当 OpenTag 发出 suggested actions 时，先看 receipt state。如果显示 **Ready to apply**，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
-
 如果 receipt 显示 **Needs setup**，OpenTag 会显示 **Continue** 或 setup hint，而不是把 **Apply 1** 当成主路径。想让 Slack receipt 直接创建 PR，需要先配置 GitHub repository target。
 
 如果 suggested action 按钮能看到，但点击后 Slack 提示失败，优先检查 **Interactivity & Shortcuts**：

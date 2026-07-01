@@ -245,7 +245,6 @@ Slack self-service commands stay Project Target based:
 These commands do not accept absolute local checkout paths. Local paths belong in runner config and allowlists, not in Slack history. Channel binding changes also require the sender's Slack user id to be listed in `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`; otherwise update bindings from local config or the dispatcher API. Detailed process and audit data stay local; use `opentag status --run <run_id>` or `opentag service status` for deeper inspection.
 
 When OpenTag posts suggested actions, follow the receipt state. If it says **Ready to apply**, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
-
 If the receipt says **Needs setup**, OpenTag will show **Continue** or a setup hint instead of presenting **Apply 1** as the primary path. Configure GitHub as a repository target before expecting Slack receipts to create PRs directly.
 
 If suggested action buttons are visible but clicking them shows an error in Slack, re-check **Interactivity & Shortcuts**:

@@ -35,6 +35,23 @@ describe("ProjectTargetRef", () => {
     });
   });
 
+  it("resolves a gitlab event with nested owner + leaf repo", () => {
+    expect(
+      projectTargetRefFromEvent({
+        metadata: { repoProvider: "gitlab", owner: "acme/team", repo: "demo" }
+      })
+    ).toEqual({
+      provider: "gitlab",
+      owner: "acme/team",
+      repo: "demo"
+    });
+  });
+
+  it("returns null for a gitlab event missing owner or repo", () => {
+    expect(projectTargetRefFromEvent({ metadata: { repoProvider: "gitlab", owner: "acme/team" } })).toBeNull();
+    expect(projectTargetRefFromEvent({ metadata: { repoProvider: "gitlab", repo: "demo" } })).toBeNull();
+  });
+
   it("returns null when event metadata does not name a project target", () => {
     expect(projectTargetRefFromEvent({ metadata: { owner: "acme" } })).toBeNull();
     expect(projectTargetRefFromEvent({ metadata: { repo: "demo" } })).toBeNull();

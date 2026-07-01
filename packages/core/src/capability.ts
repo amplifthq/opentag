@@ -1,4 +1,4 @@
-export type OpenTagPlatformId = "github" | "slack" | "lark" | "telegram";
+export type OpenTagPlatformId = "github" | "gitlab" | "slack" | "lark" | "telegram";
 
 export type PlatformLivenessStrategy = "source_receipt" | "status_update" | "thread_reply" | "pull_status";
 
@@ -23,6 +23,16 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
     supportsActionReplies: true,
     requiresExplicitAddressing: true,
     livenessStrategy: "status_update"
+  },
+  gitlab: {
+    id: "gitlab",
+    receivesEvents: true,
+    repliesToSourceThread: true,
+    supportsStatusUpdates: false,
+    supportsRichPresentation: false,
+    supportsActionReplies: true,
+    requiresExplicitAddressing: true,
+    livenessStrategy: "thread_reply"
   },
   slack: {
     id: "slack",
@@ -57,7 +67,7 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
 };
 
 export function isOpenTagPlatformId(value: string): value is OpenTagPlatformId {
-  return value === "github" || value === "slack" || value === "lark" || value === "telegram";
+  return value === "github" || value === "gitlab" || value === "slack" || value === "lark" || value === "telegram";
 }
 
 export function platformCapabilityForProvider(provider: string): PlatformCapabilityDescriptor | undefined {
