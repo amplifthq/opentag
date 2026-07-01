@@ -57,11 +57,16 @@ For a dry run:
 corepack pnpm release:publish -- --dry-run
 ```
 
-If npm asks for a two-factor one-time password, rerun with:
+If npm asks for a two-factor one-time password, do not pass `--otp` by default for OpenTag releases.
+Refresh the local npm browser login instead, then rerun the normal publish command:
 
 ```bash
-corepack pnpm release:publish -- --otp 123456
+npm login --auth-type=web
+npm whoami
+corepack pnpm release:publish
 ```
+
+If npm still requires a per-publish one-time password after a fresh browser login, stop and publish from a trusted interactive terminal or adjust the npm account/session policy. Do not paste one-time passwords into shared logs or release automation.
 
 ## User install check
 
