@@ -1,7 +1,13 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
-import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
+import {
+  DEFAULT_MAX_REQUEST_BODY_BYTES,
+  RequestBodyTooLargeError,
+  parseThreadActionCommand,
+  readRequestTextWithLimit,
+  type OpenTagEvent
+} from "@opentag/core";
 import { Hono } from "hono";
 import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
 
@@ -55,6 +61,13 @@ export type GitHubWebhookAppInput = {
   webhookPath?: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  recordControlPlaneEvent?(event: {
+    type: string;
+    severity?: "info" | "warn" | "error";
+    subject?: string;
+    payload?: Record<string, unknown>;
+  }): Promise<void>;
+  maxRequestBodyBytes?: number;
   now(): string;
 };
 
@@ -65,6 +78,7 @@ export type GitHubIngressConfig = {
   port?: number;
   hostname?: string;
   webhookPath?: string;
+  maxRequestBodyBytes?: number;
 };
 
 export type GitHubIngressHandle = {
@@ -90,6 +104,60 @@ export function verifyGitHubSignature(input: {
   return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer);
 }
 
+async function recordGitHubSignatureFailure(input: {
+  recordControlPlaneEvent?: GitHubWebhookAppInput["recordControlPlaneEvent"];
+  webhookPath: string;
+  reason: "missing_signature_header" | "invalid_signature";
+  deliveryId?: string;
+  hasSignature: boolean;
+}): Promise<void> {
+  try {
+    await input.recordControlPlaneEvent?.({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: `github:POST ${input.webhookPath}`,
+      payload: {
+        provider: "github",
+        endpoint: `POST ${input.webhookPath}`,
+        reason: input.reason,
+        ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
+        hasSignature: input.hasSignature
+      }
+    });
+  } catch {
+    // Signature rejection should not turn into a 5xx if audit reporting is unavailable.
+  }
+}
+
+async function recordGitHubRequestBodyRejected(input: {
+  recordControlPlaneEvent?: GitHubWebhookAppInput["recordControlPlaneEvent"];
+  webhookPath: string;
+  reason: "request_body_too_large" | "invalid_json_body" | "invalid_request_body";
+  maxBytes?: number;
+  contentLength: string | null;
+  deliveryId?: string;
+  eventName?: string;
+}): Promise<void> {
+  try {
+    await input.recordControlPlaneEvent?.({
+      type: "security.request_body_rejected",
+      severity: "warn",
+      subject: `github:POST ${input.webhookPath}`,
+      payload: {
+        provider: "github",
+        endpoint: `POST ${input.webhookPath}`,
+        reason: input.reason,
+        ...(input.maxBytes !== undefined ? { maxBytes: input.maxBytes } : {}),
+        contentLength: input.contentLength,
+        ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
+        ...(input.eventName ? { githubEvent: input.eventName } : {})
+      }
+    });
+  } catch {
+    // Oversized-payload rejection should still fail closed if audit reporting is unavailable.
+  }
+}
+
 function parseJsonPayload(rawBody: string): unknown {
   try {
     return JSON.parse(rawBody);
@@ -98,11 +166,70 @@ function parseJsonPayload(rawBody: string): unknown {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasGitHubActor(value: unknown): value is GitHubActor {
+  return isRecord(value) && typeof value.id === "number" && typeof value.login === "string";
+}
+
+function hasGitHubRepository(value: unknown): value is GitHubRepository {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    typeof value.private === "boolean" &&
+    isRecord(value.owner) &&
+    typeof value.owner.login === "string"
+  );
+}
+
+function hasGitHubInstallation(value: unknown): value is { id: number } {
+  return isRecord(value) && typeof value.id === "number";
+}
+
+function isGitHubIssueCommentPayload(value: unknown): value is GitHubIssueCommentPayload {
+  return (
+    isRecord(value) &&
+    (value.action === undefined || typeof value.action === "string") &&
+    isRecord(value.comment) &&
+    typeof value.comment.id === "number" &&
+    typeof value.comment.body === "string" &&
+    typeof value.comment.html_url === "string" &&
+    isRecord(value.issue) &&
+    typeof value.issue.html_url === "string" &&
+    typeof value.issue.comments_url === "string" &&
+    typeof value.issue.number === "number" &&
+    hasGitHubRepository(value.repository) &&
+    hasGitHubActor(value.sender) &&
+    (value.installation === undefined || hasGitHubInstallation(value.installation))
+  );
+}
+
+function isGitHubPullRequestReviewCommentPayload(value: unknown): value is GitHubPullRequestReviewCommentPayload {
+  return (
+    isRecord(value) &&
+    (value.action === undefined || typeof value.action === "string") &&
+    isRecord(value.comment) &&
+    typeof value.comment.id === "number" &&
+    typeof value.comment.body === "string" &&
+    typeof value.comment.html_url === "string" &&
+    isRecord(value.pull_request) &&
+    typeof value.pull_request.html_url === "string" &&
+    typeof value.pull_request.number === "number" &&
+    hasGitHubRepository(value.repository) &&
+    hasGitHubActor(value.sender) &&
+    (value.installation === undefined || hasGitHubInstallation(value.installation))
+  );
+}
+
 async function handleIssueCommentCreated(input: {
   payload: GitHubIssueCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
   now(): string;
+  deliveryId?: string;
+  signatureVerified?: boolean;
 }): Promise<void> {
   if (input.payload.action && input.payload.action !== "created") return;
   if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
@@ -124,7 +251,11 @@ async function handleIssueCommentCreated(input: {
         owner: input.payload.repository.owner.login,
         repo: input.payload.repository.name,
         issueNumber: input.payload.issue.number,
-        commentUrl: input.payload.comment.html_url
+        commentUrl: input.payload.comment.html_url,
+        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+        ...(typeof input.signatureVerified === "boolean"
+          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+          : {})
       }
     });
     return;
@@ -143,6 +274,8 @@ async function handleIssueCommentCreated(input: {
     actorLogin: input.payload.sender.login,
     private: input.payload.repository.private,
     receivedAt: input.now(),
+    ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
+    ...(typeof input.signatureVerified === "boolean" ? { signatureVerified: input.signatureVerified } : {}),
     ...(input.payload.installation ? { installationId: input.payload.installation.id } : {})
   });
 
@@ -156,6 +289,8 @@ async function handlePullRequestReviewCommentCreated(input: {
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
   now(): string;
+  deliveryId?: string;
+  signatureVerified?: boolean;
 }): Promise<void> {
   if (input.payload.action && input.payload.action !== "created") return;
   const owner = input.payload.repository.owner.login;
@@ -179,7 +314,11 @@ async function handlePullRequestReviewCommentCreated(input: {
         owner,
         repo,
         pullRequestNumber: input.payload.pull_request.number,
-        commentUrl: input.payload.comment.html_url
+        commentUrl: input.payload.comment.html_url,
+        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+        ...(typeof input.signatureVerified === "boolean"
+          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+          : {})
       }
     });
     return;
@@ -198,6 +337,8 @@ async function handlePullRequestReviewCommentCreated(input: {
     actorLogin: input.payload.sender.login,
     private: input.payload.repository.private,
     receivedAt: input.now(),
+    ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
+    ...(typeof input.signatureVerified === "boolean" ? { signatureVerified: input.signatureVerified } : {}),
     ...(input.payload.installation ? { installationId: input.payload.installation.id } : {})
   });
 
@@ -209,6 +350,7 @@ async function handlePullRequestReviewCommentCreated(input: {
 export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
   const app = new Hono();
   const webhookPath = input.webhookPath ?? "/github/webhooks";
+  const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   if (!webhookPath.startsWith("/")) {
     throw new Error("GitHub webhook path must start with /.");
   }
@@ -216,16 +358,56 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
   app.post(webhookPath, async (c) => {
     const signature = c.req.header("x-hub-signature-256");
     if (!signature) {
+      await recordGitHubSignatureFailure({
+        recordControlPlaneEvent: input.recordControlPlaneEvent,
+        webhookPath,
+        reason: "missing_signature_header",
+        ...(c.req.header("x-github-delivery") ? { deliveryId: c.req.header("x-github-delivery")! } : {}),
+        hasSignature: false
+      });
       return c.json({ error: "missing_signature_header" }, 401);
     }
-    const rawBody = await c.req.text();
+    let rawBody: string;
+    try {
+      rawBody = await readRequestTextWithLimit(c.req.raw, { maxBytes: maxRequestBodyBytes });
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        await recordGitHubRequestBodyRejected({
+          recordControlPlaneEvent: input.recordControlPlaneEvent,
+          webhookPath,
+          reason: "request_body_too_large",
+          maxBytes: error.maxBytes,
+          contentLength: c.req.raw.headers.get("content-length"),
+          ...(c.req.header("x-github-delivery") ? { deliveryId: c.req.header("x-github-delivery")! } : {}),
+          ...(c.req.header("x-github-event") ? { eventName: c.req.header("x-github-event")! } : {})
+        });
+        return c.json({ error: "request_body_too_large", maxBytes: error.maxBytes }, 413);
+      }
+      throw error;
+    }
     if (!verifyGitHubSignature({ webhookSecret: input.webhookSecret, rawBody, signature })) {
+      await recordGitHubSignatureFailure({
+        recordControlPlaneEvent: input.recordControlPlaneEvent,
+        webhookPath,
+        reason: "invalid_signature",
+        ...(c.req.header("x-github-delivery") ? { deliveryId: c.req.header("x-github-delivery")! } : {}),
+        hasSignature: true
+      });
       return c.json({ error: "invalid_signature" }, 401);
     }
 
+    const deliveryId = c.req.header("x-github-delivery");
     const eventName = c.req.header("x-github-event");
     const payload = parseJsonPayload(rawBody);
     if (!payload || typeof payload !== "object") {
+      await recordGitHubRequestBodyRejected({
+        recordControlPlaneEvent: input.recordControlPlaneEvent,
+        webhookPath,
+        reason: "invalid_json_body",
+        contentLength: c.req.raw.headers.get("content-length"),
+        ...(deliveryId ? { deliveryId } : {}),
+        ...(eventName ? { eventName } : {})
+      });
       return c.json({ error: "invalid_json" }, 400);
     }
 
@@ -233,20 +415,46 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
       return c.json({ ok: true });
     }
     if (eventName === "issue_comment") {
+      if (!isGitHubIssueCommentPayload(payload)) {
+        await recordGitHubRequestBodyRejected({
+          recordControlPlaneEvent: input.recordControlPlaneEvent,
+          webhookPath,
+          reason: "invalid_request_body",
+          contentLength: c.req.raw.headers.get("content-length"),
+          ...(deliveryId ? { deliveryId } : {}),
+          eventName
+        });
+        return c.json({ error: "invalid_request_body" }, 400);
+      }
       await handleIssueCommentCreated({
-        payload: payload as GitHubIssueCommentPayload,
+        payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
-        now: input.now
+        now: input.now,
+        ...(deliveryId ? { deliveryId } : {}),
+        signatureVerified: true
       });
       return c.json({ ok: true });
     }
     if (eventName === "pull_request_review_comment") {
+      if (!isGitHubPullRequestReviewCommentPayload(payload)) {
+        await recordGitHubRequestBodyRejected({
+          recordControlPlaneEvent: input.recordControlPlaneEvent,
+          webhookPath,
+          reason: "invalid_request_body",
+          contentLength: c.req.raw.headers.get("content-length"),
+          ...(deliveryId ? { deliveryId } : {}),
+          eventName
+        });
+        return c.json({ error: "invalid_request_body" }, 400);
+      }
       await handlePullRequestReviewCommentCreated({
-        payload: payload as GitHubPullRequestReviewCommentPayload,
+        payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
-        now: input.now
+        now: input.now,
+        ...(deliveryId ? { deliveryId } : {}),
+        signatureVerified: true
       });
       return c.json({ ok: true });
     }
@@ -269,6 +477,7 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
     fetch: createGitHubWebhookApp({
       webhookSecret: config.webhookSecret,
       webhookPath,
+      ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
       async createRun(event) {
         const runId = `run_${randomUUID()}`;
         const created = await dispatcherClient.createRun({ runId, event });
@@ -276,6 +485,9 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
       },
       async submitThreadAction(action) {
         await dispatcherClient.submitThreadAction(action);
+      },
+      async recordControlPlaneEvent(event) {
+        await dispatcherClient.recordControlPlaneEvent(event);
       },
       now: () => new Date().toISOString()
     }).fetch,

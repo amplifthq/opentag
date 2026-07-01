@@ -33,9 +33,9 @@ The script prompts for:
 
 - Project Target path, which is the local codebase this agent should work on
 - executor: `codex`, `claude-code`, or `echo`
-- Lark domain: `lark` or `feishu`, only when no saved app exists
 - Lark app setup: `scan` or `manual`, only when no saved app exists
-- a QR scan when using `scan` for the first time
+- a QR scan when using `scan` for the first time; the link may start on the Feishu bootstrap page, and OpenTag saves the real tenant returned by Lark / Feishu
+- Lark / Feishu tenant: `feishu` or `lark`, only when using `manual`; pass `--tenant lark` for an existing Lark global app
 - `LARK_APP_ID` and `LARK_APP_SECRET` only when using `manual`
 - `LARK_BOT_OPEN_ID` only when group chat support cannot be detected automatically
 
@@ -104,6 +104,27 @@ starting the script to attach a GitHub repository identity to the Project Target
 
 1. The terminal shows the local daemon claiming and running the task.
 2. Lark replies with the agent's final result.
+
+## Useful In-Chat Checks
+
+After the bot is connected, you can inspect the source-container state from
+Lark without exposing local paths or secrets:
+
+```text
+@OpenTag /status
+@OpenTag /doctor
+@OpenTag /stop
+```
+
+- `/status` shows the bound Project Target, active run, queued follow-ups, and
+  the next safe action.
+- `/doctor` shows a redacted source-container readiness summary. It confirms
+  whether the dispatcher can read runtime state for this chat, then points local
+  service, connector, executor, and heartbeat checks back to
+  `opentag service status`.
+- `/stop [run_id]` requests cancellation for the active chat run or the
+  specified run. OpenTag records cancellation separately from successful
+  completion.
 
 ## Current Limits
 

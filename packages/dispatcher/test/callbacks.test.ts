@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createCompositeCallbackSink,
   createGitHubCallbackSink,
+  createLarkCallbackSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
@@ -506,6 +507,141 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("sends Lark rich callbacks as interactive cards", async () => {
+    const replies: unknown[] = [];
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply(payload) {
+              replies.push(payload);
+            }
+          }
+        }
+      }
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant_1|oc_chat|om_msg",
+      body: "Finished with success.",
+      rich: {
+        provider: "lark",
+        payload: {
+          config: { wide_screen_mode: true },
+          header: {
+            template: "green",
+            title: { tag: "plain_text", content: "Finished: success" }
+          },
+          elements: [{ tag: "div", text: { tag: "lark_md", content: "Done." } }]
+        }
+      }
+    });
+
+    expect(replies).toEqual([
+      {
+        path: { message_id: "om_msg" },
+        data: {
+          msg_type: "interactive",
+          reply_in_thread: true,
+          content: JSON.stringify({
+            config: { wide_screen_mode: true },
+            header: {
+              template: "green",
+              title: { tag: "plain_text", content: "Finished: success" }
+            },
+            elements: [{ tag: "div", text: { tag: "lark_md", content: "Done." } }]
+          })
+        }
+      }
+    ]);
+  });
+
+  it("patches an existing Lark status card when an external message id is provided", async () => {
+    const replies: unknown[] = [];
+    const patches: unknown[] = [];
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply(payload) {
+              replies.push(payload);
+              return { data: { message_id: "om_status" } };
+            },
+            async patch(payload) {
+              patches.push(payload);
+            }
+          }
+        }
+      }
+    });
+
+    const first = await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant_1|oc_chat|om_source",
+      statusMessageKey: "run_1:status",
+      body: "Received.",
+      rich: {
+        provider: "lark",
+        payload: {
+          config: { wide_screen_mode: true, update_multi: true },
+          header: {
+            template: "blue",
+            title: { tag: "plain_text", content: "OpenTag" }
+          },
+          elements: [{ tag: "div", text: { tag: "lark_md", content: "Working." } }]
+        }
+      }
+    });
+
+    const second = await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant_1|oc_chat|om_source",
+      statusMessageKey: "run_1:status",
+      externalMessageId: first?.externalMessageId,
+      body: "Finished.",
+      rich: {
+        provider: "lark",
+        payload: {
+          config: { wide_screen_mode: true, update_multi: true },
+          header: {
+            template: "green",
+            title: { tag: "plain_text", content: "Finished" }
+          },
+          elements: [{ tag: "div", text: { tag: "lark_md", content: "Done." } }]
+        }
+      }
+    });
+
+    expect(first).toEqual({ externalMessageId: "om_status" });
+    expect(second).toEqual({ externalMessageId: "om_status" });
+    expect(replies).toHaveLength(1);
+    expect(patches).toEqual([
+      {
+        path: { message_id: "om_status" },
+        data: {
+          content: JSON.stringify({
+            config: { wide_screen_mode: true, update_multi: true },
+            header: {
+              template: "green",
+              title: { tag: "plain_text", content: "Finished" }
+            },
+            elements: [{ tag: "div", text: { tag: "lark_md", content: "Done." } }]
+          })
+        }
+      }
+    ]);
+  });
+
   it("adds Slack source receipt reactions to the source message", async () => {
     const requests: { url: string; authorization: string | null; body: unknown }[] = [];
     const sink = createSlackSourceReceiptSink({
@@ -667,6 +803,36 @@ describe("createGitHubCallbackSink", () => {
       uri: "https://slack.com/api/chat.postMessage",
       body: "progress"
     });
+
+    expect(messages).toEqual(["a:slack", "b:slack"]);
+  });
+
+  it("keeps a successful composite delivery when a later sink fails", async () => {
+    const messages: string[] = [];
+    const sink = createCompositeCallbackSink([
+      {
+        async deliver(message) {
+          messages.push(`a:${message.provider}`);
+          return { externalMessageId: "msg_1" };
+        }
+      },
+      {
+        async deliver(message) {
+          messages.push(`b:${message.provider}`);
+          throw new Error("secondary sink failed");
+        }
+      }
+    ]);
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        body: "final"
+      })
+    ).resolves.toEqual({ externalMessageId: "msg_1" });
 
     expect(messages).toEqual(["a:slack", "b:slack"]);
   });

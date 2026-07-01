@@ -28,7 +28,8 @@ const config: OpenTagDaemonConfig = {
   allowAutoCreatePullRequest: true,
   pairingToken: "pairing_test",
   pollIntervalMs: 1000,
-  heartbeatIntervalMs: 15000
+  heartbeatIntervalMs: 15000,
+  runTimeoutMs: 30_000
 };
 
 describe("opentagd runtime helpers", () => {
@@ -63,6 +64,7 @@ describe("opentagd runtime helpers", () => {
     expect(input.pullRequestOptions).toEqual({ githubToken: "ghs_test", preparePullRequestBranch: true, allowAutoCreatePullRequest: true });
     expect(input.pollIntervalMs).toBe(1000);
     expect(input.heartbeatIntervalMs).toBe(15000);
+    expect(input.runTimeoutMs).toBe(30_000);
     expect(input.client).toEqual({
       claim: expect.any(Function),
       markRunning: expect.any(Function),

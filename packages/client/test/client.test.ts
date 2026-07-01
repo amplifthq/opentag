@@ -108,6 +108,357 @@ describe("@opentag/client", () => {
     );
   });
 
+  it("sends runner hard timeout policy when marking a run as running", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true });
+      }
+    });
+
+    await client.markRunning({
+      runnerId: "runner_1",
+      runId: "run_1",
+      executor: "echo",
+      runTimeoutMs: 30_000,
+      idempotencyKey: "runner_1:run_1:running"
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runners/runner_1/runs/run_1/running");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      executor: "echo",
+      runTimeoutMs: 30_000,
+      idempotencyKey: "runner_1:run_1:running"
+    });
+  });
+
+  it("sends runner progress idempotency keys to the dispatcher", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true });
+      }
+    });
+
+    await client.progress({
+      runnerId: "runner_1",
+      runId: "run_1",
+      type: "ingest.hermes.post_llm_call",
+      message: "LLM call completed.",
+      at: "2026-06-24T00:00:01.000Z",
+      visibility: "audit",
+      idempotencyKey: "hermes:run_1:post_llm_call:1"
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runners/runner_1/runs/run_1/progress");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      type: "ingest.hermes.post_llm_call",
+      message: "LLM call completed.",
+      at: "2026-06-24T00:00:01.000Z",
+      visibility: "audit",
+      idempotencyKey: "hermes:run_1:post_llm_call:1"
+    });
+  });
+
+  it("sends runner completion idempotency keys to the dispatcher", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true });
+      }
+    });
+
+    await client.complete({
+      runnerId: "runner_1",
+      runId: "run_1",
+      result: { conclusion: "success", summary: "done" },
+      idempotencyKey: "hermes:run_1:complete:agent_end"
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runners/runner_1/runs/run_1/complete");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      result: { conclusion: "success", summary: "done" },
+      idempotencyKey: "hermes:run_1:complete:agent_end"
+    });
+  });
+
+  it("deletes channel bindings through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return new Response(null, { status: 204 });
+      }
+    });
+
+    await client.unbindChannel({ provider: "lark", accountId: "tenant 1", conversationId: "oc/chat" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant%201/oc%2Fchat");
+    expect(requests[0]?.init?.method).toBe("DELETE");
+    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+  });
+
+  it("reads channel runtime status through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          binding: {
+            provider: "lark",
+            accountId: "tenant_1",
+            conversationId: "oc_chat",
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          },
+          activeRun: {
+            id: "run_active",
+            eventId: "evt_active",
+            status: "running",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            updatedAt: "2026-06-24T00:00:01.000Z"
+          },
+          activeEvent: event,
+          runTimeoutPolicy: { hardTimeoutMs: 30_000 },
+          queuedFollowUps: [
+            {
+              id: "follow_up_1",
+              sourceEventId: "evt_follow_up",
+              conversationKey: "lark:tenant_1|oc_chat|om_msg",
+              activeRunId: "run_active",
+              event,
+              decision: {
+                action: "queue_follow_up",
+                reason: "A run is already active for this thread.",
+                reasonCode: "active_run_same_thread",
+                decidedAt: "2026-06-24T00:00:02.000Z",
+                activeRunId: "run_active",
+                eventId: "evt_follow_up"
+              },
+              status: "queued",
+              createdAt: "2026-06-24T00:00:02.000Z",
+              updatedAt: "2026-06-24T00:00:02.000Z"
+            }
+          ]
+        });
+      }
+    });
+
+    const status = await client.getChannelRuntimeStatus({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat/status");
+    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+    expect(status.activeRun?.id).toBe("run_active");
+    expect(status.runTimeoutPolicy).toEqual({ hardTimeoutMs: 30_000 });
+    expect(status.queuedFollowUps.map((followUp) => followUp.id)).toEqual(["follow_up_1"]);
+  });
+
+  it("reads control-plane alert candidates through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          alerts: [
+            {
+              id: "repeated_auth_failures:security.auth_failed:token_a",
+              type: "repeated_auth_failures",
+              severity: "warn",
+              eventType: "security.auth_failed",
+              count: 3,
+              threshold: 3,
+              firstSeenAt: "2026-06-24T00:00:00.000Z",
+              lastSeenAt: "2026-06-24T00:00:02.000Z",
+              subject: "token_a",
+              reason: "Repeated dispatcher authorization failures were observed.",
+              nextAction: "Check runner credentials."
+            }
+          ]
+        });
+      }
+    });
+
+    await expect(client.listControlPlaneAlerts({ limit: 25 })).resolves.toMatchObject({
+      alerts: [
+        {
+          type: "repeated_auth_failures",
+          subject: "token_a",
+          count: 3,
+          threshold: 3
+        }
+      ]
+    });
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/control-plane-alerts?limit=25");
+    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+  });
+
+  it("records control-plane events through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true }, 201);
+      }
+    });
+
+    await client.recordControlPlaneEvent({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: "github:POST /github/webhooks",
+      payload: { provider: "github", reason: "invalid_signature" }
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/control-plane-events");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: "github:POST /github/webhooks",
+      payload: { provider: "github", reason: "invalid_signature" }
+    });
+  });
+
+  it("prunes source delivery replay keys through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "runner_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          result: {
+            scanned: 3,
+            pruned: 2,
+            retainedActive: 1
+          }
+        });
+      }
+    });
+
+    await expect(
+      client.pruneSourceDeliveries({
+        olderThan: "2026-06-24T00:00:00.000Z",
+        limit: 50
+      })
+    ).resolves.toEqual({
+      scanned: 3,
+      pruned: 2,
+      retainedActive: 1
+    });
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/source-deliveries/prune");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer runner_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      olderThan: "2026-06-24T00:00:00.000Z",
+      limit: 50
+    });
+  });
+
+  it("requests run cancellation through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          outcome: "cancelled",
+          run: {
+            id: "run_1",
+            eventId: "evt_1",
+            status: "cancelled",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            updatedAt: "2026-06-24T00:00:00.000Z",
+            result: { conclusion: "cancelled", summary: "Stop requested." }
+          }
+        });
+      }
+    });
+
+    await expect(client.cancelRun({ runId: "run_1", reason: "Stop requested.", requestedBy: "lark:ou_sender" })).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: { id: "run_1", status: "cancelled" }
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/runs/run_1/cancel");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
+      reason: "Stop requested.",
+      requestedBy: "lark:ou_sender"
+    });
+  });
+
+  it("requests active channel run cancellation through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          outcome: "cancelled",
+          run: {
+            id: "run_active",
+            eventId: "evt_active",
+            status: "cancelled",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            updatedAt: "2026-06-24T00:00:00.000Z",
+            result: { conclusion: "cancelled", summary: "Stop requested." }
+          }
+        });
+      }
+    });
+
+    await client.cancelActiveChannelRun({
+      provider: "lark",
+      accountId: "tenant 1",
+      conversationId: "oc/chat",
+      reason: "Stop requested."
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant%201/oc%2Fchat/cancel-active-run");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({ reason: "Stop requested." });
+  });
+
   it("parses follow-up queued run responses", async () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",

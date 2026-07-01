@@ -28,8 +28,8 @@ function sourceLabel(source: SavedLarkCredentials["source"], language: CliLangua
 export function formatLarkPersonalAgentSummary(input: LarkPersonalAgentSummaryInput, language: CliLanguage): string {
   const parts = [
     domainLabel(input.domain),
-    `App ID ${shortId(input.appId)}`,
-    input.botOpenId ? `Bot Open ID ${shortId(input.botOpenId)}` : undefined,
+    `${language === "zh-CN" ? "应用 ID" : "App ID"} ${shortId(input.appId)}`,
+    input.botOpenId ? `${language === "zh-CN" ? "机器人 Open ID" : "Bot Open ID"} ${shortId(input.botOpenId)}` : undefined,
     input.source
       ? language === "zh-CN"
         ? `来源: ${sourceLabel(input.source, language)}`

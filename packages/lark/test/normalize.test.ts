@@ -65,6 +65,8 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.repoProvider).toBe("github");
     expect(event?.metadata.chatId).toBe("oc_chat");
     expect(event?.metadata.tenantKey).toBe("tk_123");
+    expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
+    expect(event?.metadata.larkEventId).toBe("evt_1");
   });
 
   it("returns null when the command is empty after stripping", () => {

@@ -73,6 +73,37 @@ export const runEvents = sqliteTable(
   })
 );
 
+export const sourceDeliveries = sqliteTable(
+  "source_deliveries",
+  {
+    source: text("source").notNull(),
+    deliveryId: text("delivery_id").notNull(),
+    runId: text("run_id").notNull(),
+    eventId: text("event_id").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.source, table.deliveryId] }),
+    runIdx: index("source_deliveries_run_idx").on(table.runId)
+  })
+);
+
+export const controlPlaneEvents = sqliteTable(
+  "control_plane_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    type: text("type").notNull(),
+    severity: text("severity").notNull(),
+    subject: text("subject"),
+    payloadJson: text("payload_json").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    typeIdx: index("control_plane_events_type_idx").on(table.type),
+    severityIdx: index("control_plane_events_severity_idx").on(table.severity)
+  })
+);
+
 export const suggestedChanges = sqliteTable("suggested_changes", {
   proposalId: text("proposal_id").primaryKey(),
   runId: text("run_id").notNull(),
@@ -182,6 +213,7 @@ export const callbackDeliveries = sqliteTable(
     uri: text("uri").notNull(),
     body: text("body").notNull(),
     threadKey: text("thread_key"),
+    idempotencyKey: text("idempotency_key"),
     metadataJson: text("metadata_json"),
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
@@ -192,7 +224,8 @@ export const callbackDeliveries = sqliteTable(
   },
   (table) => ({
     callbackRunIdx: index("callback_deliveries_run_idx").on(table.runId),
-    callbackStatusIdx: index("callback_deliveries_status_idx").on(table.status)
+    callbackStatusIdx: index("callback_deliveries_status_idx").on(table.status),
+    callbackIdempotencyIdx: uniqueIndex("callback_deliveries_idempotency_key_idx").on(table.idempotencyKey)
   })
 );
 
@@ -236,6 +269,28 @@ export function migrateSchema(sqlite: Database.Database): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id);
+    CREATE TABLE IF NOT EXISTS source_deliveries (
+      source TEXT NOT NULL,
+      delivery_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (source, delivery_id)
+    );
+    CREATE INDEX IF NOT EXISTS source_deliveries_run_idx
+      ON source_deliveries(run_id);
+    CREATE TABLE IF NOT EXISTS control_plane_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      subject TEXT,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS control_plane_events_type_idx
+      ON control_plane_events(type);
+    CREATE INDEX IF NOT EXISTS control_plane_events_severity_idx
+      ON control_plane_events(severity);
     CREATE TABLE IF NOT EXISTS suggested_changes (
       proposal_id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
@@ -317,6 +372,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       uri TEXT NOT NULL,
       body TEXT NOT NULL,
       thread_key TEXT,
+      idempotency_key TEXT,
       metadata_json TEXT,
       status TEXT NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0,
@@ -329,6 +385,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON callback_deliveries(run_id);
     CREATE INDEX IF NOT EXISTS callback_deliveries_status_idx
       ON callback_deliveries(status);
+    CREATE UNIQUE INDEX IF NOT EXISTS callback_deliveries_idempotency_key_idx
+      ON callback_deliveries(idempotency_key);
     CREATE TABLE IF NOT EXISTS follow_up_requests (
       id TEXT PRIMARY KEY,
       source_event_id TEXT NOT NULL,
@@ -435,6 +493,29 @@ export function migrateSchema(sqlite: Database.Database): void {
     sqlite.exec("ALTER TABLE run_events ADD COLUMN message TEXT");
   }
   sqlite.exec("CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS source_deliveries (
+      source TEXT NOT NULL,
+      delivery_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (source, delivery_id)
+    );
+  `);
+  sqlite.exec("CREATE INDEX IF NOT EXISTS source_deliveries_run_idx ON source_deliveries(run_id)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS control_plane_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      subject TEXT,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec("CREATE INDEX IF NOT EXISTS control_plane_events_type_idx ON control_plane_events(type)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS control_plane_events_severity_idx ON control_plane_events(severity)");
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS repo_policy_rules_repo_id_idx ON repo_policy_rules(provider, owner, repo, id)");
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS repo_mutation_mappings_repo_id_idx ON repo_mutation_mappings(provider, owner, repo, id)");
   const callbackColumns = sqlite.prepare("PRAGMA table_info(callback_deliveries)").all() as { name: string }[];
@@ -445,6 +526,10 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!callbackColumnNames.has("metadata_json")) {
     sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN metadata_json TEXT");
   }
+  if (!callbackColumnNames.has("idempotency_key")) {
+    sqlite.exec("ALTER TABLE callback_deliveries ADD COLUMN idempotency_key TEXT");
+  }
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS callback_deliveries_idempotency_key_idx ON callback_deliveries(idempotency_key)");
   const legacySlackTable = sqlite
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'slack_channel_bindings'")
     .get() as { name: string } | undefined;

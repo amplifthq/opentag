@@ -1,4 +1,5 @@
 import WebSocket, { type RawData } from "ws";
+import { createOpenTagClient, type RecordControlPlaneEventInput } from "@opentag/client";
 import { createSlackDispatcherEventProcessorInput, type SlackDispatcherEventConfig } from "./dispatcher-events.js";
 import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventProcessorInput, type SlackIngressPayload } from "./events.js";
 
@@ -24,14 +25,14 @@ const TERMINAL_SLACK_ERROR_CODES = [
 ] as const;
 
 /**
- * Returns true when the error from opening the Socket Mode connection is a
- * terminal auth/config failure that must propagate (reject startup) instead of
- * being retried. The Slack error code is embedded in the thrown Error message by
- * {@link openSlackSocketUrl} (e.g. "...connection failed: invalid_auth").
+ * Returns the terminal Slack auth/config error code that must propagate instead
+ * of being retried. The Slack error code is embedded in the thrown Error
+ * message by {@link openSlackSocketUrl} (e.g. "...connection failed:
+ * invalid_auth").
  */
-function isTerminalSlackAuthError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return TERMINAL_SLACK_ERROR_CODES.some((code) => error.message.includes(code));
+function terminalSlackAuthErrorCode(error: unknown): (typeof TERMINAL_SLACK_ERROR_CODES)[number] | null {
+  if (!(error instanceof Error)) return null;
+  return TERMINAL_SLACK_ERROR_CODES.find((code) => error.message.includes(code)) ?? null;
 }
 
 export type SlackSocketModeEnvelope = {
@@ -44,6 +45,7 @@ export type SlackSocketModeEnvelope = {
 export type SlackSocketModeAppInput = {
   appToken: string;
   slackApp: SlackAppRuntimeConfig;
+  recordControlPlaneEvent?(event: RecordControlPlaneEventInput): Promise<void>;
 } & SlackEventProcessorInput;
 
 export type SlackSocketModeIngressConfig = SlackDispatcherEventConfig & {
@@ -51,6 +53,7 @@ export type SlackSocketModeIngressConfig = SlackDispatcherEventConfig & {
   agentId?: string;
   appId?: string;
   callbackUri?: string;
+  botToken?: string;
 };
 
 export type SlackSocketModeIngressHandle = {
@@ -137,6 +140,32 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function recordSlackSocketTokenMisuse(input: {
+  recordControlPlaneEvent?: SlackSocketModeAppInput["recordControlPlaneEvent"];
+  slackApp: SlackAppRuntimeConfig;
+  reason: (typeof TERMINAL_SLACK_ERROR_CODES)[number];
+}): Promise<void> {
+  try {
+    await input.recordControlPlaneEvent?.({
+      type: "security.token_misuse",
+      severity: "warn",
+      subject: "slack:app_token",
+      payload: {
+        provider: "slack",
+        endpoint: "apps.connections.open",
+        reason: input.reason,
+        tokenKind: "app_token",
+        mode: "socket_mode",
+        agentId: input.slackApp.agentId,
+        ...(input.slackApp.appId ? { appId: input.slackApp.appId } : {})
+      }
+    });
+  } catch {
+    // Token misuse reporting is best-effort: startup should still fail with the
+    // original Slack auth/config error instead of masking it behind audit I/O.
+  }
+}
+
 export function startSlackSocketModeApp(
   input: SlackSocketModeAppInput,
   dependencies: SlackSocketModeDependencies = {}
@@ -197,9 +226,15 @@ export function startSlackSocketModeApp(
         // will never succeed on retry, so we must NOT swallow it: rethrow so
         // startPromise rejects and startup fails loudly instead of looping
         // forever against Slack's API.
-        if (isTerminalSlackAuthError(error)) {
+        const terminalErrorCode = terminalSlackAuthErrorCode(error);
+        if (terminalErrorCode) {
           if (!closed) {
             logError("[slack] terminal Socket Mode auth/config error, aborting:", error);
+            await recordSlackSocketTokenMisuse({
+              recordControlPlaneEvent: input.recordControlPlaneEvent,
+              slackApp: input.slackApp,
+              reason: terminalErrorCode
+            });
           }
           throw error;
         }
@@ -232,6 +267,11 @@ export function startSlackSocketModeIngress(
   config: SlackSocketModeIngressConfig,
   dependencies: SlackSocketModeDependencies = {}
 ): SlackSocketModeIngressHandle {
+  const dispatcherClient = createOpenTagClient({
+    dispatcherUrl: config.dispatcherUrl,
+    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {}),
+    fetchImpl: config.fetchImpl ?? fetch
+  });
   return startSlackSocketModeApp(
     {
       appToken: config.appToken,
@@ -239,6 +279,9 @@ export function startSlackSocketModeIngress(
         agentId: config.agentId ?? "opentag",
         ...(config.appId ? { appId: config.appId } : {}),
         ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
+      },
+      async recordControlPlaneEvent(event) {
+        await dispatcherClient.recordControlPlaneEvent(event);
       },
       ...createSlackDispatcherEventProcessorInput(config)
     },

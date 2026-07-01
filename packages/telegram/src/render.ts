@@ -1,10 +1,8 @@
-import type { OpenTagRunResult } from "@opentag/core";
+import { createFinalSummaryPresentation, type OpenTagFinalSummaryPresentation, type OpenTagRunResult } from "@opentag/core";
 
-function nextActionSummary(result: OpenTagRunResult): string | undefined {
-  if (!result.nextAction) return undefined;
-  if (typeof result.nextAction === "string") return result.nextAction;
-  return result.nextAction.summary;
-}
+export type TelegramRenderOptions = {
+  auditRunId?: string;
+};
 
 export function renderTelegramAcknowledgement(runId: string): string {
   return `I picked this up: ${runId}`;
@@ -18,19 +16,30 @@ export function renderTelegramProgress(message: string): string {
   return "Working...";
 }
 
-export function renderTelegramFinalResult(result: OpenTagRunResult): string {
-  const lines = [`Finished with ${result.conclusion}.`, "", result.summary];
+export function renderTelegramFinalResult(result: OpenTagRunResult, options: TelegramRenderOptions = {}): string {
+  return renderTelegramFinalSummaryPresentation(
+    createFinalSummaryPresentation({
+      result,
+      ...(options.auditRunId ? { auditRunId: options.auditRunId } : {})
+    })
+  );
+}
 
-  if (result.verification?.length) {
+export function renderTelegramFinalSummaryPresentation(presentation: OpenTagFinalSummaryPresentation): string {
+  const lines = [`Finished with ${presentation.outcome}.`, "", presentation.summary];
+
+  if (presentation.verification?.length) {
     lines.push("", "Verification:");
-    for (const check of result.verification) {
+    for (const check of presentation.verification) {
       lines.push(`- ${check.command}: ${check.outcome}`);
     }
   }
 
-  const nextAction = nextActionSummary(result);
-  if (nextAction) {
-    lines.push("", `Next action: ${nextAction}`);
+  if (presentation.nextActions?.length) {
+    lines.push("", `Next action: ${presentation.nextActions[0]}`);
+  }
+  if (presentation.auditRunId) {
+    lines.push("", `Audit: opentag status --run ${presentation.auditRunId}`);
   }
 
   return lines.join("\n");

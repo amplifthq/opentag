@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 
@@ -10,6 +11,79 @@ const ExecutorSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 
+const SecretRefSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("env"),
+      name: z.string().trim().min(1)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("file"),
+      path: z.string().trim().min(1)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("keychain"),
+      service: z.string().trim().min(1),
+      account: z.string().trim().min(1)
+    })
+    .strict()
+]);
+
+export type SecretRef = z.infer<typeof SecretRefSchema>;
+export type KeychainSecretRef = Extract<SecretRef, { kind: "keychain" }>;
+
+type ExecFileSyncLike = (file: string, args: readonly string[], options: { encoding: "utf8" }) => string | Buffer;
+
+function requireResolvedSecret(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Secret ${label} resolved to an empty value.`);
+  }
+  return trimmed;
+}
+
+export function readKeychainSecret(ref: KeychainSecretRef, execFileSyncImpl: ExecFileSyncLike = execFileSync): string {
+  let value: string | Buffer;
+  try {
+    value = execFileSyncImpl(
+      "/usr/bin/security",
+      ["find-generic-password", "-w", "-s", ref.service, "-a", ref.account],
+      { encoding: "utf8" }
+    );
+  } catch {
+    throw new Error(`Secret keychain ref ${ref.service}/${ref.account} could not be resolved.`);
+  }
+  return requireResolvedSecret(String(value), `keychain ref ${ref.service}/${ref.account}`);
+}
+
+function resolveSecretRef(ref: SecretRef): string {
+  if (ref.kind === "env") {
+    const value = process.env[ref.name];
+    if (!value) {
+      throw new Error(`Secret env ref ${ref.name} is not set.`);
+    }
+    return requireResolvedSecret(value, `env ref ${ref.name}`);
+  }
+  if (ref.kind === "file") {
+    let value: string;
+    try {
+      value = readFileSync(ref.path, "utf8");
+    } catch {
+      throw new Error(`Secret file ref ${ref.path} could not be resolved.`);
+    }
+    return requireResolvedSecret(value, `file ref ${ref.path}`);
+  }
+  return readKeychainSecret(ref);
+}
+
+const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transform((value) => {
+  return typeof value === "string" ? value : resolveSecretRef(value);
+});
+
 const ClaudeCodeExecutorConfigSchema = z.object({
   command: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
@@ -19,6 +93,11 @@ const ClaudeCodeExecutorConfigSchema = z.object({
 
 const HermesExecutorConfigSchema = z.object({
   command: z.string().trim().min(1).optional(),
+  profile: z.string().trim().min(1).optional(),
+  profileTemplate: z.string().trim().min(1).optional()
+});
+
+const AgentSessionProfileConfigSchema = z.object({
   profile: z.string().trim().min(1).optional(),
   profileTemplate: z.string().trim().min(1).optional()
 });
@@ -77,20 +156,26 @@ export const OpenTagDaemonConfigSchema = z.object({
   larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
   claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
   hermes: HermesExecutorConfigSchema.optional(),
+  agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
   security: RunnerSecurityPolicySchema.optional(),
-  githubToken: z.string().min(1).optional(),
-  githubApplyToken: z.string().min(1).nullable().optional(),
+  githubToken: SecretStringSchema.optional(),
+  githubApplyToken: SecretStringSchema.nullable().optional(),
   preparePullRequestBranch: z.boolean().optional(),
   allowAutoCreatePullRequest: z.boolean().optional(),
-  pairingToken: z.string().min(1).optional(),
+  runnerToken: SecretStringSchema.optional(),
+  runnerTokens: z.array(SecretStringSchema).optional(),
+  revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
+  pairingToken: SecretStringSchema.optional(),
   pollIntervalMs: PositiveIntegerSchema.default(5000),
-  heartbeatIntervalMs: PositiveIntegerSchema.default(15000)
+  heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
+  runTimeoutMs: PositiveIntegerSchema.optional()
 });
 
 export type RepositoryBindingConfig = z.infer<typeof RepositoryBindingConfigSchema>;
 export type ChannelBindingConfig = z.infer<typeof ChannelBindingConfigSchema>;
 export type SlackChannelBindingConfig = z.infer<typeof SlackChannelBindingConfigSchema>;
 export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSchema>;
+export type AgentSessionProfileConfig = z.infer<typeof AgentSessionProfileConfigSchema>;
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
 
 function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
@@ -151,6 +236,7 @@ export type InitConfigInput = {
   runnerId?: string;
   dispatcherUrl?: string;
   pairingToken?: string;
+  runnerToken?: string;
   owner: string;
   repo: string;
   checkoutPath: string;
@@ -166,6 +252,22 @@ function parseNumberFromEnv(name: string): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+function stringListFromJsonEnv(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${name} must be a JSON array of strings.`);
+  }
+  const values = parsed.map((value, index) => {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new Error(`${name}[${index}] must be a non-empty string.`);
+    }
+    return value.trim();
+  });
+  return values.length ? values : undefined;
 }
 
 function formatPath(path: Array<string | number>): string {
@@ -186,11 +288,16 @@ export function parseDaemonConfig(value: unknown): OpenTagDaemonConfig {
   return parsed;
 }
 
+export function runnerDispatcherToken(config: Pick<OpenTagDaemonConfig, "runnerToken" | "pairingToken">): string | undefined {
+  return config.runnerToken ?? config.pairingToken;
+}
+
 export function createInitialConfig(input: InitConfigInput): OpenTagDaemonConfig {
   return parseDaemonConfig({
     runnerId: input.runnerId ?? "runner_local",
     dispatcherUrl: input.dispatcherUrl ?? "http://localhost:3030",
     ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
+    ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     repositories: [
       {
         provider: "github",
@@ -236,6 +343,8 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
   const checkoutPath = process.env.OPENTAG_WORKSPACE_PATH;
   const repositoryProvider = process.env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
   const claudePermissionMode = claudePermissionModeFromEnv(process.env.OPENTAG_CLAUDE_PERMISSION_MODE);
+  const runnerTokens = stringListFromJsonEnv("OPENTAG_RUNNER_TOKENS_JSON");
+  const revokedRunnerTokenFingerprints = stringListFromJsonEnv("OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON");
   const repositories =
     owner && repo && checkoutPath
       ? [
@@ -307,6 +416,14 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
           }
         }
       : {}),
+    ...(process.env.OPENTAG_AGENT_PROFILE || process.env.OPENTAG_AGENT_PROFILE_TEMPLATE
+      ? {
+          agentSessionProfile: {
+            ...(process.env.OPENTAG_AGENT_PROFILE ? { profile: process.env.OPENTAG_AGENT_PROFILE } : {}),
+            ...(process.env.OPENTAG_AGENT_PROFILE_TEMPLATE ? { profileTemplate: process.env.OPENTAG_AGENT_PROFILE_TEMPLATE } : {})
+          }
+        }
+      : {}),
     ...(process.env.OPENTAG_SECURITY_MODE ||
     process.env.OPENTAG_ALLOWED_WORKSPACE_ROOT ||
     process.env.OPENTAG_ALLOW_UNSAFE_PROMPTS ||
@@ -337,10 +454,14 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
     ...(process.env.OPENTAG_PREPARE_PR_BRANCH ? { preparePullRequestBranch: process.env.OPENTAG_PREPARE_PR_BRANCH === "true" } : {}),
     ...(process.env.OPENTAG_ALLOW_AUTO_CREATE_PR ? { allowAutoCreatePullRequest: process.env.OPENTAG_ALLOW_AUTO_CREATE_PR === "true" } : {}),
     ...(process.env.OPENTAG_PAIRING_TOKEN ? { pairingToken: process.env.OPENTAG_PAIRING_TOKEN } : {}),
+    ...(process.env.OPENTAG_RUNNER_TOKEN ? { runnerToken: process.env.OPENTAG_RUNNER_TOKEN } : {}),
+    ...(runnerTokens ? { runnerTokens } : {}),
+    ...(revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints } : {}),
     ...(process.env.OPENTAG_POLL_INTERVAL_MS ? { pollIntervalMs: parseNumberFromEnv("OPENTAG_POLL_INTERVAL_MS") } : {}),
     ...(process.env.OPENTAG_HEARTBEAT_INTERVAL_MS
       ? { heartbeatIntervalMs: parseNumberFromEnv("OPENTAG_HEARTBEAT_INTERVAL_MS") }
-      : {})
+      : {}),
+    ...(process.env.OPENTAG_RUN_TIMEOUT_MS ? { runTimeoutMs: parseNumberFromEnv("OPENTAG_RUN_TIMEOUT_MS") } : {})
   };
   return parseDaemonConfig(config);
 }

@@ -1,14 +1,39 @@
 import * as lark from "@larksuiteoapi/node-sdk";
-import { createLarkTextMessageContent } from "./render.js";
+import { createLarkInteractiveMessageContent, createLarkTextMessageContent, type LarkCard } from "./render.js";
+
+type LarkReplyPayload = {
+  path: { message_id: string };
+  data: { content: string; msg_type: string; reply_in_thread?: boolean; uuid?: string };
+};
+
+type LarkPatchPayload = {
+  path: { message_id: string };
+  data: { content: string };
+};
+
+type LarkUpdatePayload = {
+  path: { message_id: string };
+  data: { content: string; msg_type: string };
+};
+
+type LarkMessageMethod = "reply" | "patch" | "update";
+
+type LarkMessageApi = {
+  reply?: (payload?: LarkReplyPayload) => Promise<unknown>;
+  patch?: (payload?: LarkPatchPayload) => Promise<unknown>;
+  update?: (payload?: LarkUpdatePayload) => Promise<unknown>;
+};
+
+export type LarkReplyResult = {
+  messageId?: string;
+};
 
 // Minimal client surface OpenTag uses; lark.Client satisfies it structurally.
 export type LarkReplyClient = {
   im: {
-    message: {
-      reply(payload: {
-        path: { message_id: string };
-        data: { content: string; msg_type: string; reply_in_thread?: boolean; uuid?: string };
-      }): Promise<unknown>;
+    message?: LarkMessageApi;
+    v1?: {
+      message?: LarkMessageApi;
     };
   };
 };
@@ -21,9 +46,60 @@ export function createLarkReplyClient(input: { appId: string; appSecret: string;
   });
 }
 
-export async function replyLarkMessage(client: LarkReplyClient, input: { messageId: string; text: string }): Promise<void> {
-  await client.im.message.reply({
+function larkMessageApi(client: LarkReplyClient, method: LarkMessageMethod): LarkMessageApi {
+  const legacyApi = client.im.message;
+  if (legacyApi?.[method]) return legacyApi;
+  const v1Api = client.im.v1?.message;
+  if (v1Api?.[method]) return v1Api;
+  throw new Error(`Lark client does not support message.${method}.`);
+}
+
+function larkReplyMessageId(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") return undefined;
+  const data = "data" in response ? (response as { data?: unknown }).data : undefined;
+  if (data && typeof data === "object" && "message_id" in data) {
+    const value = (data as { message_id?: unknown }).message_id;
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  if ("message_id" in response) {
+    const value = (response as { message_id?: unknown }).message_id;
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+export async function replyLarkMessage(client: LarkReplyClient, input: { messageId: string; text: string; card?: LarkCard }): Promise<LarkReplyResult> {
+  const reply = larkMessageApi(client, "reply").reply;
+  if (!reply) throw new Error("Lark client does not support message.reply.");
+  const response = await reply({
     path: { message_id: input.messageId },
-    data: { content: createLarkTextMessageContent(input.text), msg_type: "text", reply_in_thread: true }
+    data: input.card
+      ? { content: createLarkInteractiveMessageContent(input.card), msg_type: "interactive", reply_in_thread: true }
+      : { content: createLarkTextMessageContent(input.text), msg_type: "text", reply_in_thread: true }
+  });
+  const messageId = larkReplyMessageId(response);
+  return messageId ? { messageId } : {};
+}
+
+export async function patchLarkMessageCard(client: LarkReplyClient, input: { messageId: string; card: LarkCard }): Promise<void> {
+  const patch = larkMessageApi(client, "patch").patch;
+  if (!patch) throw new Error("Lark client does not support message.patch.");
+  await patch({
+    path: { message_id: input.messageId },
+    data: {
+      content: createLarkInteractiveMessageContent(input.card)
+    }
+  });
+}
+
+export async function updateLarkTextMessage(client: LarkReplyClient, input: { messageId: string; text: string }): Promise<void> {
+  const update = larkMessageApi(client, "update").update;
+  if (!update) throw new Error("Lark client does not support message.update.");
+  await update({
+    path: { message_id: input.messageId },
+    data: {
+      msg_type: "text",
+      content: createLarkTextMessageContent(input.text)
+    }
   });
 }

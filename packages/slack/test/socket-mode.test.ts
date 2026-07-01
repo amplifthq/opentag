@@ -221,6 +221,325 @@ describe("Slack Socket Mode", () => {
     expect(socket.closeCalled).toBe(true);
   });
 
+  it("processes self-service doctor commands through Socket Mode without creating a run", async () => {
+    const socket = new FakeWebSocket();
+    let socketCreated = false;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const reply = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, url: "wss://slack.example/socket" })) as unknown as typeof fetch;
+    const handle = startSlackSocketModeApp(
+      {
+        appToken: "xapp-token",
+        slackApp: {
+          agentId: "opentag",
+          appId: "A123"
+        },
+        async resolveChannelBinding() {
+          return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+        },
+        createRun,
+        reply,
+        now: () => "2024-06-24T00:00:00.000Z"
+      },
+      {
+        fetchImpl,
+        reconnectDelayMs: 1,
+        createWebSocket(url) {
+          expect(url).toBe("wss://slack.example/socket");
+          socketCreated = true;
+          return socket as unknown as WebSocket;
+        },
+        log() {},
+        logError() {}
+      }
+    );
+
+    await eventually(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await eventually(() => expect(socketCreated).toBe(true));
+    await Promise.resolve();
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "envelope_doctor_1",
+          payload: {
+            type: "event_callback",
+            api_app_id: "A123",
+            team_id: "T123",
+            event_id: "EvDoctor",
+            event_time: 1719187200,
+            authorizations: [{ user_id: "U_APP" }],
+            event: {
+              type: "app_mention",
+              user: "U456",
+              text: "<@U_APP> /doctor",
+              ts: "1719187200.000100",
+              channel: "C123"
+            }
+          }
+        })
+      )
+    );
+
+    await eventually(() => expect(reply).toHaveBeenCalledOnce());
+    expect(createRun).not.toHaveBeenCalled();
+    expect(socket.sent).toEqual([JSON.stringify({ envelope_id: "envelope_doctor_1" })]);
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: "1719187200.000100",
+      text: expect.stringContaining("OpenTag doctor (redacted):"),
+      blocks: expect.arrayContaining([
+        expect.objectContaining({
+          type: "section",
+          text: expect.objectContaining({ text: "*OpenTag doctor (redacted):*" })
+        })
+      ])
+    });
+
+    await handle.close();
+    expect(socket.closeCalled).toBe(true);
+  });
+
+  it("processes self-service stop commands through Socket Mode without creating a run", async () => {
+    const socket = new FakeWebSocket();
+    let socketCreated = false;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const stopRun = vi.fn(async () => ({ outcome: "not_found" as const }));
+    const reply = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, url: "wss://slack.example/socket" })) as unknown as typeof fetch;
+    const handle = startSlackSocketModeApp(
+      {
+        appToken: "xapp-token",
+        slackApp: {
+          agentId: "opentag",
+          appId: "A123"
+        },
+        async resolveChannelBinding() {
+          return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+        },
+        createRun,
+        stopRun,
+        reply,
+        now: () => "2024-06-24T00:00:00.000Z"
+      },
+      {
+        fetchImpl,
+        reconnectDelayMs: 1,
+        createWebSocket(url) {
+          expect(url).toBe("wss://slack.example/socket");
+          socketCreated = true;
+          return socket as unknown as WebSocket;
+        },
+        log() {},
+        logError() {}
+      }
+    );
+
+    await eventually(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await eventually(() => expect(socketCreated).toBe(true));
+    await Promise.resolve();
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "envelope_stop_1",
+          payload: {
+            type: "event_callback",
+            api_app_id: "A123",
+            team_id: "T123",
+            event_id: "EvStop",
+            event_time: 1719187200,
+            authorizations: [{ user_id: "U_APP" }],
+            event: {
+              type: "app_mention",
+              user: "U456",
+              text: "<@U_APP> /stop",
+              ts: "1719187200.000100",
+              channel: "C123"
+            }
+          }
+        })
+      )
+    );
+
+    await eventually(() => expect(stopRun).toHaveBeenCalledOnce());
+    expect(createRun).not.toHaveBeenCalled();
+    expect(socket.sent).toEqual([JSON.stringify({ envelope_id: "envelope_stop_1" })]);
+    expect(stopRun).toHaveBeenCalledWith({
+      teamId: "T123",
+      channelId: "C123",
+      requestedBy: "slack:U456"
+    });
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: "1719187200.000100",
+      text: "No active run was found for this Slack channel and Project Target."
+    });
+
+    await handle.close();
+    expect(socket.closeCalled).toBe(true);
+  });
+
+  it("requires explicit confirmation before unbinding a Slack channel through Socket Mode", async () => {
+    const socket = new FakeWebSocket();
+    let socketCreated = false;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const unbindChannel = vi.fn(async () => {});
+    const reply = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, url: "wss://slack.example/socket" })) as unknown as typeof fetch;
+    const handle = startSlackSocketModeApp(
+      {
+        appToken: "xapp-token",
+        slackApp: {
+          agentId: "opentag",
+          appId: "A123"
+        },
+        async resolveChannelBinding() {
+          return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+        },
+        createRun,
+        canManageBinding: vi.fn(async () => true),
+        unbindChannel,
+        reply,
+        now: () => "2024-06-24T00:00:00.000Z"
+      },
+      {
+        fetchImpl,
+        reconnectDelayMs: 1,
+        createWebSocket(url) {
+          expect(url).toBe("wss://slack.example/socket");
+          socketCreated = true;
+          return socket as unknown as WebSocket;
+        },
+        log() {},
+        logError() {}
+      }
+    );
+
+    await eventually(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await eventually(() => expect(socketCreated).toBe(true));
+    await Promise.resolve();
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "envelope_unbind_usage_1",
+          payload: {
+            type: "event_callback",
+            api_app_id: "A123",
+            team_id: "T123",
+            event_id: "EvUnbindUsage",
+            event_time: 1719187200,
+            authorizations: [{ user_id: "U_APP" }],
+            event: {
+              type: "app_mention",
+              user: "U456",
+              text: "<@U_APP> /unbind",
+              ts: "1719187200.000100",
+              channel: "C123"
+            }
+          }
+        })
+      )
+    );
+
+    await eventually(() => expect(reply).toHaveBeenCalledOnce());
+    expect(createRun).not.toHaveBeenCalled();
+    expect(unbindChannel).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: "1719187200.000100",
+      text: expect.stringContaining("/unbind confirm")
+    });
+
+    await handle.close();
+    expect(socket.closeCalled).toBe(true);
+  });
+
+  it("unbinds a Slack channel after explicit confirmation through Socket Mode", async () => {
+    const socket = new FakeWebSocket();
+    let socketCreated = false;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const unbindChannel = vi.fn(async () => {});
+    const reply = vi.fn(async () => {});
+    const fetchImpl = vi.fn(async () => Response.json({ ok: true, url: "wss://slack.example/socket" })) as unknown as typeof fetch;
+    const handle = startSlackSocketModeApp(
+      {
+        appToken: "xapp-token",
+        slackApp: {
+          agentId: "opentag",
+          appId: "A123"
+        },
+        async resolveChannelBinding() {
+          return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+        },
+        createRun,
+        canManageBinding: vi.fn(async () => true),
+        unbindChannel,
+        reply,
+        now: () => "2024-06-24T00:00:00.000Z"
+      },
+      {
+        fetchImpl,
+        reconnectDelayMs: 1,
+        createWebSocket(url) {
+          expect(url).toBe("wss://slack.example/socket");
+          socketCreated = true;
+          return socket as unknown as WebSocket;
+        },
+        log() {},
+        logError() {}
+      }
+    );
+
+    await eventually(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    await eventually(() => expect(socketCreated).toBe(true));
+    await Promise.resolve();
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "events_api",
+          envelope_id: "envelope_unbind_1",
+          payload: {
+            type: "event_callback",
+            api_app_id: "A123",
+            team_id: "T123",
+            event_id: "EvUnbind",
+            event_time: 1719187200,
+            authorizations: [{ user_id: "U_APP" }],
+            event: {
+              type: "app_mention",
+              user: "U456",
+              text: "<@U_APP> /unbind confirm",
+              ts: "1719187200.000100",
+              channel: "C123"
+            }
+          }
+        })
+      )
+    );
+
+    await eventually(() => expect(unbindChannel).toHaveBeenCalledOnce());
+    expect(createRun).not.toHaveBeenCalled();
+    expect(socket.sent).toEqual([JSON.stringify({ envelope_id: "envelope_unbind_1" })]);
+    expect(unbindChannel).toHaveBeenCalledWith({
+      teamId: "T123",
+      channelId: "C123"
+    });
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: "1719187200.000100",
+      text: expect.stringContaining("Disconnected this Slack channel from Project Target github:acme/demo")
+    });
+
+    await handle.close();
+    expect(socket.closeCalled).toBe(true);
+  });
+
   it("retries after a transient apps.connections.open failure instead of rejecting the start promise", async () => {
     const socket = new FakeWebSocket();
     let socketCreated = false;
@@ -274,6 +593,7 @@ describe("Slack Socket Mode", () => {
 
   it("rejects the start promise on a terminal auth error instead of retrying forever", async () => {
     let socketCreated = false;
+    const recordControlPlaneEvent = vi.fn(async () => {});
     // Slack returns a terminal auth failure. Retrying would loop forever against
     // the API, so startPromise must reject and the open must not be reattempted.
     const fetchImpl = vi.fn(async () => Response.json({ ok: false, error: "invalid_auth" })) as unknown as typeof fetch;
@@ -289,6 +609,7 @@ describe("Slack Socket Mode", () => {
           return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
         },
         createRun: vi.fn(async () => ({ runId: "run_1" })),
+        recordControlPlaneEvent,
         now: () => "2024-06-24T00:00:00.000Z"
       },
       {
@@ -308,6 +629,21 @@ describe("Slack Socket Mode", () => {
     // no socket is ever created.
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(socketCreated).toBe(false);
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.token_misuse",
+      severity: "warn",
+      subject: "slack:app_token",
+      payload: {
+        provider: "slack",
+        endpoint: "apps.connections.open",
+        reason: "invalid_auth",
+        tokenKind: "app_token",
+        mode: "socket_mode",
+        agentId: "opentag",
+        appId: "A123"
+      }
+    });
+    expect(JSON.stringify(recordControlPlaneEvent.mock.calls)).not.toContain("xapp-bad-token");
 
     // close() must remain safe to call even after a rejected startPromise.
     await expect(handle.close()).resolves.toBeUndefined();

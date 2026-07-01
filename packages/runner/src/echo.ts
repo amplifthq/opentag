@@ -8,6 +8,32 @@ export function createEchoExecutor(): ExecutorAdapter {
   return {
     id: "echo",
     displayName: "Echo Executor",
+    capability: {
+      id: "echo",
+      invocation: "spawn",
+      supportsProfile: false,
+      supportsStreaming: false,
+      supportsCancel: false,
+      supportsHookCompletion: false,
+      progressEvents: "audit",
+      approvalMode: "opentag_policy",
+      contextAccess: ["context_packet", "context_pointers"],
+      promptAssembly: "opentag",
+      writeAccess: "none",
+      conversationAccess: "request",
+      promptMutation: "none",
+      rawContextAccess: false,
+      writeActionAccess: "none",
+      workspaceIsolation: "none",
+      requiredSecrets: [],
+      completionSignals: [
+        {
+          type: "process_exit",
+          required: true,
+          description: "The in-process echo executor returns a structured result immediately."
+        }
+      ]
+    },
     async canRun() {
       return { ready: true };
     },

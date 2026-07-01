@@ -57,6 +57,7 @@ program
   .option("--runner-id <id>", "Runner id", "runner_local")
   .option("--dispatcher-url <url>", "Dispatcher URL", "http://localhost:3030")
   .option("--pairing-token <token>", "Dispatcher pairing token")
+  .option("--runner-token <token>", "Runner-scoped dispatcher token for claim/progress/completion")
   .option("--executor <executor>", "Default executor: echo, codex, claude-code, or hermes", "echo")
   .option("--base-branch <branch>", "Base branch for PR creation", "main")
   .option("--push-remote <remote>", "Git remote for PR branches", "origin")
@@ -70,6 +71,7 @@ program
     runnerId: string;
     dispatcherUrl: string;
     pairingToken?: string;
+    runnerToken?: string;
     executor: "echo" | "codex" | "claude-code" | "hermes";
     baseBranch: string;
     pushRemote: string;
@@ -84,6 +86,7 @@ program
         runnerId: options.runnerId,
         dispatcherUrl: options.dispatcherUrl,
         ...(options.pairingToken ? { pairingToken: options.pairingToken } : {}),
+        ...(options.runnerToken ? { runnerToken: options.runnerToken } : {}),
         executor: options.executor,
         baseBranch: options.baseBranch,
         pushRemote: options.pushRemote,

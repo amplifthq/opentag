@@ -340,6 +340,20 @@ describe("Agent Work Protocol schemas", () => {
     expect(decision.activeRunId).toBe("run_existing");
   });
 
+  it("accepts source delivery replay admission decisions", () => {
+    const decision = RunAdmissionDecisionSchema.parse({
+      action: "drop_duplicate",
+      reason: "Source delivery already created a run.",
+      reasonCode: "duplicate_source_delivery",
+      decidedAt: "2026-06-25T00:00:00.000Z",
+      activeRunId: "run_existing",
+      eventId: "evt_replayed_delivery"
+    });
+
+    expect(decision.reasonCode).toBe("duplicate_source_delivery");
+    expect(decision.activeRunId).toBe("run_existing");
+  });
+
   it("models capability contracts and policy resolution separately from platform permissions", () => {
     const capability = CapabilityContractSchema.parse({
       id: "create_pr",
@@ -464,6 +478,40 @@ describe("Agent Work Protocol schemas", () => {
 
     expect(typeof structured.nextAction).toBe("object");
     expect(legacy.nextAction).toBe("Review the branch.");
+  });
+
+  it("models timed out runs as a distinct terminal outcome", () => {
+    const run = OpenTagRunSchema.parse({
+      id: "run_timeout",
+      eventId: "evt_timeout",
+      status: "timed_out",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      updatedAt: "2026-06-24T00:01:00.000Z",
+      result: {
+        conclusion: "timed_out",
+        summary: "Executor exceeded the configured hard timeout."
+      }
+    });
+
+    expect(run.status).toBe("timed_out");
+    expect(run.result?.conclusion).toBe("timed_out");
+  });
+
+  it("models interrupted runs as a distinct terminal outcome", () => {
+    const run = OpenTagRunSchema.parse({
+      id: "run_interrupted",
+      eventId: "evt_interrupted",
+      status: "interrupted",
+      createdAt: "2026-06-24T00:00:00.000Z",
+      updatedAt: "2026-06-24T00:01:00.000Z",
+      result: {
+        conclusion: "interrupted",
+        summary: "External agent session ended before finalization."
+      }
+    });
+
+    expect(run.status).toBe("interrupted");
+    expect(run.result?.conclusion).toBe("interrupted");
   });
 
   it("adds optional run lineage without changing the existing run contract", () => {

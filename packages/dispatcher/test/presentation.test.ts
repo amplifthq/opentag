@@ -1,23 +1,35 @@
 import { describe, expect, it } from "vitest";
+import { createActionReceiptPresentation, createDoctorSummaryPresentation, createSourceThreadStatusPresentation } from "@opentag/core";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 
 describe("default callback presentation", () => {
-  it("keeps chat acknowledgements quiet where thread noise matters", () => {
+  it("uses platform liveness capability to decide callback acknowledgements", () => {
     const presentation = createDefaultCallbackPresentation();
 
-    expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
+    expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("telegram")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("github")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("custom")).toBe(true);
   });
 
-  it("keeps chat progress audit-only while allowing GitHub and Telegram progress delivery", () => {
+  it("uses platform liveness capability to decide callback status and progress delivery", () => {
     const presentation = createDefaultCallbackPresentation();
+
+    expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(false);
+    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("telegram")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("github")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("custom")).toBe(true);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "running" })).toBe(false);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "queued" })).toBe(true);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "github", state: "running" })).toBe(true);
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
     expect(presentation.shouldDeliverProgress("lark")).toBe(false);
-    expect(presentation.shouldDeliverProgress("telegram")).toBe(true);
+    expect(presentation.shouldDeliverProgress("telegram")).toBe(false);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
+    expect(presentation.shouldDeliverProgress("custom")).toBe(true);
   });
 
   it("renders GitHub and Slack with provider-specific markup", () => {
@@ -30,6 +42,9 @@ describe("default callback presentation", () => {
 
     expect(presentation.acknowledgement({ provider: "github", runId: "run_1" })).toBe("OpenTag picked this up. Run: `run_1`");
     expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe("Working on it.");
+    expect(presentation.acknowledgement({ provider: "lark", runId: "run_1" })).toBe(
+      ["Received. OpenTag is working.", "Run: run_1", "Use /status here for queue state; audit locally with opentag status --run run_1."].join("\n")
+    );
     expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe("I picked this up: run_1");
     expect(presentation.final({ provider: "github", result })).toEqual({
       body: "OpenTag finished with **success**.\n\ndone\n\nVerification:\n- `echo`: passed"
@@ -56,6 +71,251 @@ describe("default callback presentation", () => {
     expect(presentation.final({ provider: "telegram", result })).toEqual({
       body: "Finished with success.\n\ndone\n\nVerification:\n- echo: passed"
     });
+    expect(presentation.final({ provider: "lark", result })).toMatchObject({
+      body: "Finished with success.\n\ndone\n\nVerification\n- echo: passed",
+      rich: {
+        provider: "lark",
+        payload: {
+          header: {
+            template: "green",
+            title: { content: "Finished: success" }
+          }
+        }
+      }
+    });
+  });
+
+  it("produces semantic presentations before provider rendering", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const acknowledgement = presentation.acknowledgementPresentation({ runId: "run_1" });
+    const final = presentation.finalPresentation({
+      runId: "run_1",
+      result: {
+        conclusion: "success" as const,
+        summary: "done"
+      }
+    });
+
+    expect(acknowledgement).toMatchObject({
+      kind: "run_status",
+      runId: "run_1",
+      state: "received",
+      detailVisibility: "source_thread"
+    });
+    expect(final).toMatchObject({
+      kind: "final_summary",
+      outcome: "success",
+      summary: "done",
+      auditRunId: "run_1"
+    });
+    expect(presentation.render({ provider: "github", presentation: acknowledgement }).body).toBe("OpenTag picked this up. Run: `run_1`");
+    expect(presentation.render({ provider: "slack", presentation: final }).body).toBe(
+      "*Finished: success.*\ndone\n\nAudit: `opentag status --run run_1`"
+    );
+  });
+
+  it("renders lightweight run-status liveness states through semantic presentations", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const queued = presentation.runStatusPresentation({
+      runId: "run_queued",
+      state: "queued",
+      message: "Queued behind an active run.",
+      nextAction: "Use /status for queue details.",
+      detailVisibility: "source_thread"
+    });
+    const waiting = presentation.runStatusPresentation({
+      runId: "run_waiting",
+      state: "waiting_for_approval",
+      message: "Waiting for approval.",
+      nextAction: "Approve or reject in the source thread.",
+      detailVisibility: "source_thread"
+    });
+
+    expect(queued).toMatchObject({
+      kind: "run_status",
+      runId: "run_queued",
+      state: "queued",
+      detailVisibility: "source_thread"
+    });
+    expect(presentation.render({ provider: "github", presentation: queued }).body).toBe(
+      "OpenTag progress for `run_queued`: Queued behind an active run."
+    );
+    expect(presentation.render({ provider: "lark", presentation: queued }).body).toBe(
+      ["Queued behind an active run.", "Run: run_queued", "Use /status here for queue details."].join("\n")
+    );
+    expect(presentation.runStatus({ provider: "github", runId: "run_running", state: "running", message: "Running with codex." })).toEqual({
+      body: "OpenTag progress for `run_running`: Running with codex."
+    });
+    expect(presentation.render({ provider: "telegram", presentation: waiting }).body).toBe("Working...");
+  });
+
+  it("renders doctor summaries through semantic fallback and provider-native UI where supported", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const doctor = createDoctorSummaryPresentation({
+      title: "OpenTag doctor (redacted)",
+      checks: [
+        { status: "ok", name: "dispatcher", message: "reachable" },
+        { status: "warn", name: "runner registration", message: "runner_not_found" },
+        { status: "fail", name: "executor", message: "codex missing" }
+      ]
+    });
+
+    const fallback = [
+      "OpenTag doctor (redacted)",
+      "OK dispatcher: reachable",
+      "WARN runner registration: runner_not_found",
+      "FAIL executor: codex missing"
+    ].join("\n");
+
+    expect(presentation.render({ provider: "github", presentation: doctor })).toEqual({ body: fallback });
+    expect(presentation.render({ provider: "telegram", presentation: doctor })).toEqual({ body: fallback });
+    expect(presentation.render({ provider: "custom", presentation: doctor })).toEqual({ body: fallback });
+    const slackDoctor = presentation.render({ provider: "slack", presentation: doctor });
+    expect(slackDoctor.body).toBe(fallback);
+    expect(slackDoctor.blocks?.[0]).toMatchObject({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*OpenTag doctor (redacted)*"
+      }
+    });
+    expect(JSON.stringify(slackDoctor.blocks)).toContain("codex missing");
+    expect(presentation.render({ provider: "lark", presentation: doctor })).toMatchObject({
+      body: fallback,
+      rich: {
+        provider: "lark",
+        payload: {
+          header: {
+            title: { content: "OpenTag doctor (redacted)" }
+          }
+        }
+      }
+    });
+  });
+
+  it("renders source-thread status as rich Slack and Lark status cards with plain-text fallback", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const status = createSourceThreadStatusPresentation({
+      sourceContainer: "slack:T123/C456",
+      projectTarget: "github:acme/demo",
+      bindingState: "bound",
+      activeRun: {
+        id: "run_active",
+        status: "running",
+        updatedAt: "2026-06-24T00:00:00.000Z"
+      },
+      queuedFollowUps: [
+        {
+          id: "follow_up_1",
+          status: "queued",
+          command: "label this bug"
+        }
+      ],
+      queuedFollowUpsTotal: 1,
+      currentCommand: "fix this flaky test",
+      nextAction: "wait for the final reply, send a follow-up, or request cancellation with /stop.",
+      stopHint: "cancellation is explicit and is not reported as successful completion.",
+      detailHint: "use `opentag status --run run_active` locally for audit detail."
+    });
+    const fallback = [
+      "OpenTag status",
+      "Source container: slack:T123/C456",
+      "Project Target: github:acme/demo",
+      "Active run: run_active (running), updated 2026-06-24T00:00:00.000Z",
+      "Command: fix this flaky test",
+      "Queued follow-ups: 1 (follow_up_1 (queued): label this bug)",
+      "Next action: wait for the final reply, send a follow-up, or request cancellation with /stop.",
+      "Stop/timeout: cancellation is explicit and is not reported as successful completion.",
+      "Details: use `opentag status --run run_active` locally for audit detail."
+    ].join("\n");
+
+    expect(presentation.render({ provider: "github", presentation: status })).toEqual({ body: fallback });
+    expect(presentation.render({ provider: "custom", presentation: status })).toEqual({ body: fallback });
+    const slackStatus = presentation.render({ provider: "slack", presentation: status });
+    expect(slackStatus.body).toBe(fallback);
+    expect(slackStatus.blocks?.[0]).toMatchObject({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*OpenTag status*"
+      }
+    });
+    expect(JSON.stringify(slackStatus.blocks)).toContain("label this bug");
+    expect(presentation.render({ provider: "lark", presentation: status })).toMatchObject({
+      body: fallback,
+      rich: {
+        provider: "lark",
+        payload: {
+          header: {
+            title: { content: "OpenTag status" }
+          }
+        }
+      }
+    });
+    expect(JSON.stringify(presentation.render({ provider: "lark", presentation: status }).rich)).toContain("label this bug");
+  });
+
+  it("renders standalone action receipts as Slack and Lark native UI with plain-text fallback", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const receipt = createActionReceiptPresentation({
+      auditRunId: "run_action_receipt",
+      result: {
+        conclusion: "needs_human" as const,
+        summary: "Prepared a proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_1",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Move issue forward.",
+            intents: [
+              {
+                intentId: "intent_label_1",
+                domain: "labels",
+                action: "add_label",
+                summary: "Add the bug label.",
+                params: { label: "bug" }
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_label_1: { state: "ready_to_apply" as const }
+        }
+      }
+    });
+    if (!receipt) throw new Error("expected action receipt presentation");
+
+    const fallback = [
+      "Ready to apply",
+      "1. Add the bug label.",
+      "Target: GitHub labels",
+      "Actions: apply 1, reject 1",
+      "Audit: opentag status --run run_action_receipt"
+    ].join("\n");
+
+    expect(presentation.render({ provider: "github", presentation: receipt })).toEqual({ body: fallback });
+    expect(presentation.render({ provider: "custom", presentation: receipt })).toEqual({ body: fallback });
+
+    const slack = presentation.render({ provider: "slack", presentation: receipt });
+    expect(slack.body).toContain("*Ready to apply*");
+    expect(slack.body).toContain("Audit: `opentag status --run run_action_receipt`");
+    expect(JSON.stringify(slack.blocks)).toContain("opentag:apply:1");
+    expect(JSON.stringify(slack.blocks)).toContain("opentag:reject:1");
+
+    const lark = presentation.render({ provider: "lark", presentation: receipt });
+    expect(lark.body).toContain("Ready to apply");
+    expect(lark.body).toContain("Audit: opentag status --run run_action_receipt");
+    expect(lark.rich).toMatchObject({
+      provider: "lark",
+      payload: {
+        header: {
+          title: { content: "Ready to apply" }
+        }
+      }
+    });
+    expect(JSON.stringify(lark.rich)).toContain("Apply now: apply 1");
   });
 
   it("renders Telegram progress as concise conversational states", () => {
@@ -153,7 +413,7 @@ describe("default callback presentation", () => {
 
     const slack = presentation.final({ provider: "slack", result, runId: "run_receipt_1", receiptContext });
     expect(slack.body).toContain("*Ready to apply*");
-    expect(slack.body).not.toContain("opentag status --run");
+    expect(slack.body).toContain("Audit: `opentag status --run run_receipt_1`");
     expect(slack.body).toContain("1. *Add the bug label.*");
     expect(slack.body).toContain("Target: GitHub labels");
     expect(slack.body).not.toContain("Proposal:");
@@ -169,6 +429,13 @@ describe("default callback presentation", () => {
       type: "context",
       elements: [{ type: "mrkdwn", text: "Audit: `opentag status --run run_receipt_1`" }]
     });
+
+    const lark = presentation.final({ provider: "lark", result, runId: "run_receipt_1", receiptContext });
+    expect(lark.body).toContain("Audit: opentag status --run run_receipt_1");
+    expect(JSON.stringify(lark.rich)).toContain("Audit: opentag status --run run_receipt_1");
+
+    const telegram = presentation.final({ provider: "telegram", result, runId: "run_receipt_1", receiptContext });
+    expect(telegram.body).toContain("Audit: opentag status --run run_receipt_1");
   });
 
   it("renders create PR suggested actions with PR-specific details", () => {

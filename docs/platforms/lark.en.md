@@ -18,7 +18,7 @@ The easiest setup path is:
 Create a new Personal Agent
 ```
 
-OpenTag shows a QR code. Scan it with Lark or Feishu, finish creating the Personal Agent app, and keep the terminal open. OpenTag continues automatically after the app is created.
+OpenTag shows a QR code. The setup link may start on the Feishu bootstrap page; if you scan with a Lark global tenant, the platform can switch after scan. Finish creating the Personal Agent app and keep the terminal open. OpenTag continues automatically after the app is created and saves the real Lark / Feishu tenant returned by the platform.
 
 Use this path unless you already manage a self-built Lark / Feishu app.
 
@@ -30,7 +30,7 @@ If OpenTag has already saved a Personal Agent on this machine, setup shows:
 Use saved Personal Agent
 ```
 
-The CLI also shows safe details such as domain, App ID prefix, Bot Open ID prefix, and where the saved config came from. Secrets are not printed.
+The CLI also shows safe details such as tenant, App ID prefix, Bot Open ID prefix, and where the saved config came from. Secrets are not printed.
 
 Choose this when you want to reuse the existing app.
 
@@ -41,6 +41,7 @@ Choose manual setup only when you already have a self-built app.
 OpenTag asks for:
 
 ```text
+Lark / Feishu tenant
 Lark App ID
 Lark App Secret
 Lark Bot Open ID (optional)
@@ -56,15 +57,41 @@ You can find App ID and App Secret in the Lark / Feishu developer console:
 4. Copy **App ID** and **App Secret** into OpenTag.
 
 The app must support bot messages and long-connection events. If you are not sure, use the QR scan path instead.
+OpenTag verifies saved and manually entered app credentials with the provider
+before writing them into the active CLI config, so stale app secrets fail during
+setup instead of later at service start.
 
-## Domain
+## Tenant
 
-OpenTag asks which domain to use:
+OpenTag asks which tenant the existing app belongs to:
 
 - `Lark` for larksuite.com tenants
 - `Feishu` for feishu.cn tenants
 
 Pick the one that matches the app you created.
+
+For non-interactive setup with an existing app, pass `--tenant feishu` or `--tenant lark`. If you omit `--tenant` in manual setup, OpenTag defaults to `feishu`.
+
+## In-Chat Commands
+
+OpenTag keeps Lark / Feishu commands Project Target based:
+
+- `/bind <owner>/<repo>` or `/bind <provider>:<owner>/<repo>` connects the current chat to a Project Target.
+- `/unbind confirm` disconnects the current chat from its Project Target; it does not delete local checkout config, repository bindings, or allowlists.
+- `/status` shows the bound Project Target, the current active run when one exists, queued follow-ups, and safe next actions.
+- `/doctor` shows a redacted readiness summary. Secrets and local paths are not printed in the chat.
+- `/stop [run_id]` requests cancellation for the active chat run or the specified run. OpenTag does not treat a stop request as a successful completion.
+
+Group chats must @-mention the bot before commands or runs. Direct messages may be more permissive, but they still use Project Target bindings instead of absolute local paths. In group chats, `/bind` and `/unbind confirm` also require a binding-admin allowlist entry (`OPENTAG_LARK_BINDING_ADMIN_OPEN_IDS`, `OPENTAG_LARK_BINDING_ADMIN_USER_IDS`, or `OPENTAG_LARK_BINDING_ADMIN_UNION_IDS`).
+
+For a newly-created run, OpenTag keeps the chat quiet by default: it sends one
+short, updateable status card, updates that card when queue/review state needs
+attention, and patches the final result into the same status card when the
+platform accepts card updates. Routine running/progress updates stay in the
+audit log; use `/status` in the chat or `opentag status --run <run_id>` locally
+for active state and audit detail. If the platform rejects a card update,
+OpenTag keeps the local audit trail as the source of truth and the callback
+delivery can be retried.
 
 ## Test
 
@@ -74,4 +101,6 @@ After setup, start OpenTag:
 opentag start
 ```
 
-Then mention or message the Personal Agent from Lark / Feishu. OpenTag should receive the message, run the selected coding agent locally, and reply in the same conversation.
+Then mention or message the Personal Agent from Lark / Feishu. OpenTag should
+send a short status card, run the selected coding agent locally, and later update
+that card with the final result in the same conversation.

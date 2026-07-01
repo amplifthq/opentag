@@ -255,7 +255,8 @@ Slack copy guidelines:
 
 - use `Ready to apply` instead of `Suggested actions` only when every visible
   action is marked executable by dispatcher capability and preflight context;
-- use `Some actions need setup` or `Needs review` for mixed-state receipts;
+- use counted mixed-state headings such as `1 action ready to apply, 2 actions
+  need setup` when visible actions have different readiness states;
 - use `Needs approval` when execution is blocked on human authority;
 - use `Needs setup` when adapter credentials or scopes are missing;
 - hide `Apply` unless the dispatcher has confirmed a direct adapter path for

@@ -252,7 +252,7 @@ if (typeof value === "string") process.stdout.write(value);
 register_lark_personal_agent() {
   (
     cd "$ROOT_DIR/apps/lark-events"
-    node scripts/register-personal-agent.cjs "$LARK_DOMAIN"
+    node scripts/register-personal-agent.cjs
   )
 }
 
@@ -413,19 +413,10 @@ elif [[ -n "$SAVED_LARK_APP_ID" || -n "$SAVED_LARK_APP_SECRET" ]]; then
   fi
 fi
 
-if [[ -z "$LARK_CONFIG_SOURCE" ]]; then
-  LARK_DOMAIN="$(read_with_default "Lark domain (lark or feishu)" "${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}")"
-  case "$LARK_DOMAIN" in
-    lark|feishu)
-      ;;
-    *)
-      fail "Lark domain must be lark or feishu."
-      ;;
-  esac
-fi
-
-case "$LARK_DOMAIN" in
+case "${LARK_DOMAIN:-}" in
   lark|feishu)
+    ;;
+  "")
     ;;
   *)
     fail "Lark domain must be lark or feishu."
@@ -435,9 +426,16 @@ esac
 if [[ -n "$LARK_CONFIG_SOURCE" ]]; then
   :
 else
-  LARK_SETUP_MODE="$(read_with_default "Lark app setup (scan or manual)" "${EXPLICIT_LARK_SETUP:-scan}")"
+  DEFAULT_LARK_SETUP_MODE="${EXPLICIT_LARK_SETUP:-scan}"
+  if [[ -n "${LARK_DOMAIN:-}" && -z "$EXPLICIT_LARK_SETUP" ]]; then
+    DEFAULT_LARK_SETUP_MODE="manual"
+  fi
+  LARK_SETUP_MODE="$(read_with_default "Lark app setup (scan or manual)" "$DEFAULT_LARK_SETUP_MODE")"
   case "$LARK_SETUP_MODE" in
     scan)
+      if [[ -n "${LARK_DOMAIN:-}" ]]; then
+        fail "LARK_DOMAIN is detected during scan setup. Use OPENTAG_LARK_APP_SETUP=manual with LARK_DOMAIN for an existing app."
+      fi
       REGISTRATION_JSON="$(register_lark_personal_agent)"
       LARK_APP_ID="$(json_field appId)"
       LARK_APP_SECRET="$(json_field appSecret)"
@@ -451,6 +449,14 @@ else
       fi
       ;;
     manual)
+      LARK_DOMAIN="$(read_with_default "Lark / Feishu tenant (lark or feishu)" "${LARK_DOMAIN:-${SAVED_LARK_DOMAIN:-lark}}")"
+      case "$LARK_DOMAIN" in
+        lark|feishu)
+          ;;
+        *)
+          fail "Lark domain must be lark or feishu."
+          ;;
+      esac
       LARK_APP_ID="$(read_with_default "LARK_APP_ID" "${LARK_APP_ID:-}")"
       LARK_APP_SECRET="$(read_secret_with_default "LARK_APP_SECRET" "${LARK_APP_SECRET:-}")"
       ;;
@@ -463,6 +469,14 @@ fi
 
 [[ -n "$LARK_APP_ID" ]] || fail "LARK_APP_ID is required."
 [[ -n "$LARK_APP_SECRET" ]] || fail "LARK_APP_SECRET is required."
+[[ -n "$LARK_DOMAIN" ]] || fail "LARK_DOMAIN is required."
+case "$LARK_DOMAIN" in
+  lark|feishu)
+    ;;
+  *)
+    fail "Lark domain must be lark or feishu."
+    ;;
+esac
 
 if [[ "$LARK_CONFIG_SOURCE" == "saved" ]]; then
   LARK_BOT_OPEN_ID="${LARK_BOT_OPEN_ID:-$SAVED_LARK_BOT_OPEN_ID}"

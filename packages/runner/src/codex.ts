@@ -56,6 +56,40 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
   return {
     id: "codex",
     displayName: "Codex Executor",
+    capability: {
+      id: "codex",
+      invocation: "spawn",
+      supportsProfile: false,
+      supportsStreaming: false,
+      supportsCancel: false,
+      supportsHookCompletion: false,
+      progressEvents: "audit",
+      approvalMode: "opentag_policy",
+      contextAccess: ["context_packet", "context_pointers", "workspace"],
+      promptAssembly: "executor_adapter",
+      writeAccess: "workspace",
+      conversationAccess: "request",
+      promptMutation: "none",
+      rawContextAccess: false,
+      writeActionAccess: "none",
+      workspaceIsolation: "worktree",
+      requiredSecrets: [
+        {
+          id: "openai_api_key",
+          label: "OpenAI API key",
+          required: false,
+          env: "OPENAI_API_KEY",
+          description: "Needed when the local Codex CLI is configured to authenticate from environment."
+        }
+      ],
+      completionSignals: [
+        {
+          type: "process_exit",
+          required: true,
+          description: "OpenTag treats a successful `codex exec` process exit as the normal completion signal."
+        }
+      ]
+    },
     async canRun(input) {
       const codexVersion = await runner.run(codexCommand, ["--version"], { cwd: input.workspacePath });
       if (codexVersion.exitCode !== 0) {

@@ -7,7 +7,11 @@ import {
   defaultStateDirectory,
   parseCliConfig,
   readCliConfig,
+  readKeychainSecret,
+  readRedactedCliConfig,
   redactedCliConfig,
+  relayUrlFromConfig,
+  runtimeModeFromConfig,
   writeCliConfigAtomic,
   type OpenTagCliConfig
 } from "../src/config.js";
@@ -60,6 +64,38 @@ describe("OpenTag CLI config", () => {
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 
+  it("parses explicit relay runtime without dropping daemon fields", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      runtime: {
+        mode: "relay",
+        relayUrl: "https://example.up.railway.app",
+        relayProvider: "railway"
+      },
+      daemon: {
+        ...source.daemon,
+        dispatcherUrl: "https://example.up.railway.app"
+      }
+    });
+
+    expect(runtimeModeFromConfig(parsed)).toBe("relay");
+    expect(relayUrlFromConfig(parsed)).toBe("https://example.up.railway.app");
+    expect(parsed.daemon.runnerId).toBe(source.daemon.runnerId);
+    expect(parsed.daemon.repositories).toEqual(source.daemon.repositories);
+  });
+
+  it("treats legacy configs without runtime as local mode", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      runtime: undefined
+    });
+
+    expect(runtimeModeFromConfig(parsed)).toBe("local");
+    expect(relayUrlFromConfig(parsed)).toBeUndefined();
+  });
+
   it("does not chmod an existing custom config directory", () => {
     const parent = tempDir();
     chmodSync(parent, 0o755);
@@ -109,11 +145,222 @@ describe("OpenTag CLI config", () => {
   it("redacts secrets in config output", () => {
     const source = config();
     source.daemon.githubApplyToken = "apply_secret";
+    source.daemon.runnerToken = "runner_secret";
+    source.daemon.runnerTokens = ["runner_old_secret"];
     const redacted = redactedCliConfig(source);
 
     expect(JSON.stringify(redacted)).toContain("[REDACTED]");
     expect(JSON.stringify(redacted)).not.toContain("secret_test");
     expect(JSON.stringify(redacted)).not.toContain("apply_secret");
+    expect(JSON.stringify(redacted)).not.toContain("runner_secret");
+    expect(JSON.stringify(redacted)).not.toContain("runner_old_secret");
+  });
+
+  it("resolves env secret refs when reading runtime config", () => {
+    const previous = process.env.OPENTAG_TEST_LARK_SECRET;
+    process.env.OPENTAG_TEST_LARK_SECRET = "secret_from_env";
+    try {
+      const source = config();
+      const parsed = parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "env", name: "OPENTAG_TEST_LARK_SECRET" }
+          }
+        }
+      });
+
+      expect(parsed.platforms.lark?.appSecret).toBe("secret_from_env");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENTAG_TEST_LARK_SECRET;
+      } else {
+        process.env.OPENTAG_TEST_LARK_SECRET = previous;
+      }
+    }
+  });
+
+  it("resolves file secret refs when reading runtime config", () => {
+    const secretPath = join(tempDir(), "lark-secret.txt");
+    writeFileSync(secretPath, "secret_from_file\n", { mode: 0o600 });
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      platforms: {
+        ...source.platforms,
+        lark: {
+          ...source.platforms.lark!,
+          appSecret: { kind: "file", path: secretPath }
+        }
+      }
+    });
+
+    expect(parsed.platforms.lark?.appSecret).toBe("secret_from_file");
+  });
+
+  it("rejects file secret refs that cannot resolve to a non-empty value", () => {
+    const emptySecretPath = join(tempDir(), "empty-lark-secret.txt");
+    writeFileSync(emptySecretPath, "\n", { mode: 0o600 });
+    const missingSecretPath = join(tempDir(), "missing-lark-secret.txt");
+    const source = config();
+
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "file", path: emptySecretPath }
+          }
+        }
+      })
+    ).toThrow(`Secret file ref ${emptySecretPath} resolved to an empty value.`);
+
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "file", path: missingSecretPath }
+          }
+        }
+      })
+    ).toThrow(`Secret file ref ${missingSecretPath} could not be resolved.`);
+  });
+
+  it("resolves keychain secret refs through the macOS security command", () => {
+    const calls: Array<{ args: readonly string[]; file: string; options: { encoding: "utf8" } }> = [];
+    const value = readKeychainSecret({ kind: "keychain", service: "opentag", account: "lark-app-secret" }, (file, args, options) => {
+      calls.push({ args, file, options });
+      return "secret_from_keychain\n";
+    });
+
+    expect(value).toBe("secret_from_keychain");
+    expect(calls).toEqual([
+      {
+        file: "/usr/bin/security",
+        args: ["find-generic-password", "-w", "-s", "opentag", "-a", "lark-app-secret"],
+        options: { encoding: "utf8" }
+      }
+    ]);
+  });
+
+  it("rejects keychain secret refs that resolve to an empty value", () => {
+    expect(() =>
+      readKeychainSecret({ kind: "keychain", service: "opentag", account: "lark-app-secret" }, () => "\n")
+    ).toThrow("Secret keychain ref opentag/lark-app-secret resolved to an empty value.");
+  });
+
+  it("includes macOS keychain guidance when keychain lookup fails", () => {
+    expect(() =>
+      readKeychainSecret({ kind: "keychain", service: "opentag", account: "lark-app-secret" }, () => {
+        throw new Error("security command unavailable");
+      })
+    ).toThrow(
+      "Secret keychain ref opentag/lark-app-secret could not be resolved via macOS Keychain (/usr/bin/security). Keychain SecretRefs are only supported on macOS. security command unavailable"
+    );
+  });
+
+  it("shows secret refs without resolving them in redacted config output", () => {
+    const path = join(tempDir(), "config.json");
+    const source = config();
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "env", name: "OPENTAG_LARK_APP_SECRET" }
+          }
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    const redacted = readRedactedCliConfig(path) as { platforms: { lark: { appSecret: string } } };
+
+    expect(redacted.platforms.lark.appSecret).toBe("[env:OPENTAG_LARK_APP_SECRET]");
+    expect(JSON.stringify(redacted)).not.toContain("secret_test");
+  });
+
+  it("shows runner token secret refs without resolving them in redacted config output", () => {
+    const path = join(tempDir(), "config.json");
+    const source = config();
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...source,
+        daemon: {
+          ...source.daemon,
+          runnerToken: { kind: "env", name: "OPENTAG_RUNNER_TOKEN" },
+          runnerTokens: [{ kind: "env", name: "OPENTAG_OLD_RUNNER_TOKEN" }]
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    const redacted = readRedactedCliConfig(path) as { daemon: { runnerToken: string; runnerTokens: string[] } };
+
+    expect(redacted.daemon.runnerToken).toBe("[env:OPENTAG_RUNNER_TOKEN]");
+    expect(redacted.daemon.runnerTokens).toEqual(["[env:OPENTAG_OLD_RUNNER_TOKEN]"]);
+    expect(JSON.stringify(redacted)).not.toContain("runner_secret");
+  });
+
+  it("shows file secret refs without resolving them in redacted config output", () => {
+    const path = join(tempDir(), "config.json");
+    const secretPath = join(tempDir(), "lark-secret.txt");
+    writeFileSync(secretPath, "secret_from_file\n", { mode: 0o600 });
+    const source = config();
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "file", path: secretPath }
+          }
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    const redacted = readRedactedCliConfig(path) as { platforms: { lark: { appSecret: string } } };
+
+    expect(redacted.platforms.lark.appSecret).toBe(`[file:${secretPath}]`);
+    expect(JSON.stringify(redacted)).not.toContain("secret_from_file");
+  });
+
+  it("shows keychain secret refs without resolving them in redacted config output", () => {
+    const path = join(tempDir(), "config.json");
+    const source = config();
+    writeFileSync(
+      path,
+      `${JSON.stringify({
+        ...source,
+        platforms: {
+          ...source.platforms,
+          lark: {
+            ...source.platforms.lark!,
+            appSecret: { kind: "keychain", service: "opentag", account: "lark-app-secret" }
+          }
+        }
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    const redacted = readRedactedCliConfig(path) as { platforms: { lark: { appSecret: string } } };
+
+    expect(redacted.platforms.lark.appSecret).toBe("[keychain:opentag/lark-app-secret]");
+    expect(JSON.stringify(redacted)).not.toContain("secret_test");
   });
 
   it("keeps an explicit null GitHub apply token visible in redacted config output", () => {
@@ -152,6 +399,38 @@ describe("OpenTag CLI config", () => {
         daemon: {
           ...config().daemon,
           hermes: {
+            profileTemplate: "   "
+          }
+        }
+      })
+    ).toThrow();
+  });
+
+  it("normalizes generic agent session profile daemon config strings", () => {
+    const parsed = parseCliConfig({
+      ...config(),
+      daemon: {
+        ...config().daemon,
+        agentSessionProfile: {
+          profile: " opentag-fixed ",
+          profileTemplate: " opentag-{provider}-{projectTarget}-{actorId} "
+        }
+      }
+    });
+
+    expect(parsed.daemon.agentSessionProfile).toEqual({
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
+    });
+  });
+
+  it("rejects whitespace-only generic agent session profile daemon config strings", () => {
+    expect(() =>
+      parseCliConfig({
+        ...config(),
+        daemon: {
+          ...config().daemon,
+          agentSessionProfile: {
             profileTemplate: "   "
           }
         }

@@ -47,6 +47,40 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
   return {
     id: "claude-code",
     displayName: "Claude Code Executor",
+    capability: {
+      id: "claude-code",
+      invocation: "spawn",
+      supportsProfile: false,
+      supportsStreaming: false,
+      supportsCancel: false,
+      supportsHookCompletion: false,
+      progressEvents: "audit",
+      approvalMode: "opentag_policy",
+      contextAccess: ["context_packet", "context_pointers", "workspace"],
+      promptAssembly: "executor_adapter",
+      writeAccess: "workspace",
+      conversationAccess: "request",
+      promptMutation: "none",
+      rawContextAccess: false,
+      writeActionAccess: "none",
+      workspaceIsolation: "branch",
+      requiredSecrets: [
+        {
+          id: "anthropic_api_key",
+          label: "Anthropic API key",
+          required: false,
+          env: "ANTHROPIC_API_KEY",
+          description: "Needed when the local Claude Code CLI is configured to authenticate from environment."
+        }
+      ],
+      completionSignals: [
+        {
+          type: "process_exit",
+          required: true,
+          description: "OpenTag treats a successful `claude --print` process exit as the normal completion signal."
+        }
+      ]
+    },
     async canRun(input) {
       try {
         const claudeVersion = await runner.run(claudeCommand, ["--version"], { cwd: input.workspacePath });

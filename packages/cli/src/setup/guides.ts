@@ -22,7 +22,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
   if (language === "zh-CN") {
     switch (platform) {
       case "lark":
-        return ["推荐直接扫码创建 Personal Agent", "手动配置时需要 Lark App ID 和 App Secret"];
+        return ["Lark 推荐手动配置自建应用", "飞书可以扫码创建个人代理应用", "手动配置时需要应用 ID 和应用密钥"];
       case "slack":
         return ["推荐本地使用 Socket Mode", "Socket Mode 需要 Slack App-Level Token 和 Bot User OAuth Token", "Events API 需要 Slack Signing Secret 和公网 Request URL", "开启 Interactivity & Shortcuts 以支持 Apply 1 按钮", "Slack bot scopes 需要 app_mentions:read、chat:write、reactions:write、channels:history", "订阅 bot events: app_mention、message.channels", "Slack Team ID", "Slack Channel ID", "测试前需要把 Slack app 邀请进目标 channel"];
       case "github":
@@ -36,7 +36,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
 
   switch (platform) {
     case "lark":
-      return ["QR scan is the recommended path", "manual setup needs a Lark App ID and App Secret"];
+      return ["Manual setup is recommended for Lark", "Feishu can use QR-created Personal Agent", "manual setup needs an App ID and App Secret"];
     case "slack":
       return ["Socket Mode is recommended for local OpenTag", "Socket Mode needs a Slack App-Level Token and Bot User OAuth Token", "Events API needs a Slack Signing Secret and public Request URL", "Enable Interactivity & Shortcuts for Apply 1 buttons", "Slack bot scopes need app_mentions:read, chat:write, reactions:write, channels:history", "Subscribe to bot events: app_mention, message.channels", "Slack Team ID", "Slack Channel ID", "Invite the Slack app to the target channel before testing"];
     case "github":
@@ -133,13 +133,13 @@ export function formatLarkManualCredentialHelp(language: CliLanguage, domain: La
   const websocketDocs = domain === "feishu" ? OFFICIAL_SETUP_LINKS.feishuWebSocketDocs : OFFICIAL_SETUP_LINKS.larkWebSocketDocs;
   if (language === "zh-CN") {
     return [
-      "手动 Lark / 飞书凭据在哪里拿:",
+      "手动 Lark/飞书凭据在哪里拿:",
       `- 开发者后台: ${consoleUrl}`,
-      "- App ID / App Secret: 打开你的应用，进入 Credentials & Basic Info / 凭证与基础信息",
-      "- 事件接收方式: 使用长连接 / WebSocket",
+      "- 应用 ID 和应用密钥: 打开你的应用，进入凭证与基础信息（Credentials & Basic Info）",
+      "- 事件接收方式: 使用长连接（WebSocket）",
       `- 长连接官方文档: ${websocketDocs}`,
       "",
-      "如果你没有自建应用，建议返回选择扫码创建 Personal Agent。"
+      "如果你没有自建应用，建议返回选择扫码创建个人代理应用。"
     ].join("\n");
   }
 

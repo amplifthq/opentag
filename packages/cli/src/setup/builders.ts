@@ -104,6 +104,9 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       databasePath,
       worktreeRoot
     },
+    runtime: {
+      mode: "local"
+    },
     daemon: {
       runnerId: "runner_local",
       dispatcherUrl: "http://localhost:3030",
@@ -115,6 +118,14 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               ...(input.hermes.command ? { command: input.hermes.command } : {}),
               ...(input.hermes.profile ? { profile: input.hermes.profile } : {}),
               ...(input.hermes.profileTemplate ? { profileTemplate: input.hermes.profileTemplate } : {})
+            }
+          }
+        : {}),
+      ...(input.agentSessionProfile
+        ? {
+            agentSessionProfile: {
+              ...(input.agentSessionProfile.profile ? { profile: input.agentSessionProfile.profile } : {}),
+              ...(input.agentSessionProfile.profileTemplate ? { profileTemplate: input.agentSessionProfile.profileTemplate } : {})
             }
           }
         : {}),

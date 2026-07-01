@@ -65,10 +65,13 @@ function makeHandler(opts?: {
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   createRun?: ReturnType<typeof vi.fn>;
   bindChannel?: ReturnType<typeof vi.fn>;
+  canManageBinding?: Parameters<typeof createLarkMessageHandler>[0]["canManageBinding"] | null;
   reply?: ReturnType<typeof vi.fn>;
 }) {
   const createRun = opts?.createRun ?? vi.fn(async (event: OpenTagEvent) => runCreated(event));
   const bindChannel = opts?.bindChannel ?? vi.fn(async () => {});
+  const canManageBinding =
+    opts?.canManageBinding === null ? undefined : vi.fn(opts?.canManageBinding ?? (async () => true));
   const reply = opts?.reply ?? vi.fn(async () => {});
   const handler = createLarkMessageHandler({
     agentId: "opentag",
@@ -77,9 +80,10 @@ function makeHandler(opts?: {
     resolveChannelBinding: async () => (opts && "binding" in opts ? (opts.binding ?? null) : binding),
     createRun,
     bindChannel,
+    ...(canManageBinding ? { canManageBinding } : {}),
     reply
   });
-  return { handler, createRun, bindChannel, reply };
+  return { handler, createRun, bindChannel, canManageBinding, reply };
 }
 
 describe("createLarkMessageHandler", () => {
@@ -118,9 +122,18 @@ describe("createLarkMessageHandler", () => {
   });
 
   it("binds the chat via /bind owner/repo and confirms in-thread", async () => {
-    const { handler, bindChannel, reply, createRun } = makeHandler();
+    const { handler, bindChannel, canManageBinding, reply, createRun } = makeHandler();
     const outcome = await handler(messageEvent({ text: "@_user_1 /bind amplifthq/opentag" }));
     expect(outcome.status).toBe("bound");
+    expect(canManageBinding).toHaveBeenCalledWith({
+      action: "bind",
+      tenantKey: "tk_123",
+      chatId: "oc_chat",
+      chatType: "group",
+      senderOpenId: "ou_user",
+      messageId: "om_msg",
+      eventId: "evt_1"
+    });
     expect(bindChannel).toHaveBeenCalledWith({
       tenantKey: "tk_123",
       chatId: "oc_chat",
@@ -130,6 +143,17 @@ describe("createLarkMessageHandler", () => {
     });
     expect(reply).toHaveBeenCalledTimes(1);
     expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("denies group /bind by default before changing the Project Target", async () => {
+    const { handler, bindChannel, reply, createRun } = makeHandler({ canManageBinding: null });
+
+    const outcome = await handler(messageEvent({ text: "@_user_1 /bind amplifthq/opentag" }));
+
+    expect(outcome.status).toBe("ignored_bind_unauthorized");
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(reply.mock.calls[0]?.[0].text).toContain("Only an authorized Lark binding manager");
   });
 
   it("accepts an explicit provider prefix in /bind", async () => {
@@ -187,7 +211,10 @@ describe("createLarkMessageHandler", () => {
       owner: "amplifthq",
       repo: "opentag"
     });
-    expect(reply).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      messageId: "om_msg",
+      text: expect.stringContaining("Received. Run: run_1.")
+    });
     const event = createRun.mock.calls[0]?.[0];
     expect(event?.metadata).toMatchObject({ repoProvider: "github", owner: "amplifthq", repo: "opentag" });
   });

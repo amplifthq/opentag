@@ -19,6 +19,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const hermes = config.daemon.hermes;
+  const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
   const savedLarkCredentials = savedLarkCredentialsFromCliConfig(config);
   const bindingMethod = defaultBindingMethod(config);
@@ -31,6 +32,8 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
     ...(hermes?.profile ? { hermesProfile: hermes.profile } : {}),
     ...(hermes?.profileTemplate ? { hermesProfileTemplate: hermes.profileTemplate } : {}),
+    ...(agentSessionProfile?.profile ? { agentProfile: agentSessionProfile.profile } : {}),
+    ...(agentSessionProfile?.profileTemplate ? { agentProfileTemplate: agentSessionProfile.profileTemplate } : {}),
     ...(lastSetup?.larkSetupMethod ? { larkSetupMethod: lastSetup.larkSetupMethod } : {}),
     ...(lastSetup?.larkDomain ? { larkDomain: lastSetup.larkDomain } : lark?.domain ? { larkDomain: lark.domain } : {}),
     ...(bindingMethod ? { bindingMethod } : {}),

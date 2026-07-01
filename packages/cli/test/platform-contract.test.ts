@@ -456,7 +456,7 @@ describe("CLI platform contract smoke", () => {
     expect(threadActionResults[0]).toMatchObject({
       outcome: "child_run_created",
       plan: { adapter: "slack" },
-      run: { status: "queued" }
+      run: { id: expect.any(String) }
     });
     await eventually(() =>
       expect(delivered.some((message) => message.kind === "final" && message.body.includes("Adapter slack is not directly executable yet"))).toBe(true)

@@ -166,7 +166,7 @@ describe("opentagd", () => {
 
     expect(didWork).toBe(true);
     expect(calls).toEqual([
-      "complete:run_1:needs_human:No local workspace mapping is configured for this run's repository."
+      "complete:run_1:needs_human:This run targets github:acme/demo, which is not in this runner's local Project Target allowlist."
     ]);
   });
 
@@ -258,8 +258,8 @@ describe("opentagd", () => {
         async claim() {
           return { run, event };
         },
-        async markRunning(runId, executor) {
-          calls.push(`running:${runId}:${executor}`);
+        async markRunning(runId, executor, options) {
+          calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
         },
         async heartbeat(runId) {
           calls.push(`heartbeat:${runId}`);
@@ -275,6 +275,110 @@ describe("opentagd", () => {
 
     expect(calls.some((call) => call === "heartbeat:run_1")).toBe(true);
     expect(calls.at(-1)).toBe("complete:run_1:success:done");
+  });
+
+  it("cancels the executor when the control plane no longer claims the run for this runner", async () => {
+    const calls: string[] = [];
+    const cancel = vi.fn(async () => {
+      calls.push("executor.cancel");
+    });
+
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run() {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            return { conclusion: "success", summary: "late success" };
+          },
+          cancel
+        }
+      },
+      heartbeatIntervalMs: 5,
+      client: {
+        async claim() {
+          return { run, event };
+        },
+        async markRunning(runId, executor, options) {
+          calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
+        },
+        async heartbeat() {
+          calls.push("heartbeat.cancelled");
+          throw new Error('heartbeat failed: 404 {"error":"run_not_claimed_by_runner"}');
+        },
+        async progress() {
+          calls.push("progress");
+        },
+        async complete() {
+          calls.push("complete");
+          throw new Error("should not complete after cancellation");
+        }
+      }
+    });
+
+    expect(cancel).toHaveBeenCalledWith("run_1");
+    expect(calls).toContain("heartbeat.cancelled");
+    expect(calls).not.toContain("complete");
+  });
+
+  it("completes the run as timed out and cancels the executor when the hard timeout fires", async () => {
+    const calls: string[] = [];
+    const cancel = vi.fn(async () => {
+      calls.push("executor.cancel");
+    });
+
+    await runOneDaemonIteration({
+      runnerId: "runner_1",
+      repositories: [{ provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" }],
+      executors: {
+        echo: {
+          id: "echo",
+          displayName: "Echo",
+          async canRun() {
+            return { ready: true };
+          },
+          async run() {
+            await new Promise(() => {
+              // Leave the executor pending; the daemon timeout must end the run.
+            });
+            return { conclusion: "success", summary: "late success" };
+          },
+          cancel
+        }
+      },
+      heartbeatIntervalMs: 0,
+      runTimeoutMs: 5,
+      client: {
+        async claim() {
+          return { run, event };
+        },
+        async markRunning(runId, executor, options) {
+          calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
+        },
+        async heartbeat() {
+          throw new Error("should not run");
+        },
+        async progress() {
+          calls.push("progress");
+        },
+        async complete(runId, result) {
+          calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
+        }
+      }
+    });
+
+    expect(cancel).toHaveBeenCalledWith("run_1");
+    expect(calls).toEqual([
+      "running:run_1:echo:5",
+      "executor.cancel",
+      "complete:run_1:timed_out:Echo exceeded the configured hard timeout of 5ms."
+    ]);
   });
 
   it("completes the run as failed when the executor throws after markRunning", async () => {

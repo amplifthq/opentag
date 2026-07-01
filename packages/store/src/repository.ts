@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ApprovalDecisionSchema,
   ApplyIntentOutcomeSchema,
@@ -12,6 +13,7 @@ import {
   PolicyRuleSchema,
   ProposalLineageSchema,
   preflightMutationIntent,
+  formatProjectTargetRef,
   projectTargetRefFromEvent,
   protocolRunFieldsFromEvent,
   RunAdmissionDecisionSchema,
@@ -28,24 +30,27 @@ import {
   type OpenTagRun,
   type OpenTagRunResult,
   type PolicyRule,
+  type ProjectTargetRef,
   type ProposalLineage,
   type RunAdmissionDecision,
   type RunEventImportance,
   type RunEventVisibility,
   type SuggestedChangesSnapshot
 } from "@opentag/core";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
   approvalDecisions,
   channelBindings,
+  controlPlaneEvents,
   repoBindings,
   repoMutationMappings,
   repoPolicyRules,
   callbackDeliveries,
   followUpRequests,
   runEvents,
+  sourceDeliveries,
   runners,
   runs,
   suggestedChanges
@@ -79,9 +84,12 @@ export type CallbackDelivery = {
   uri: string;
   body: string;
   threadKey?: string;
+  idempotencyKey?: string;
   agentId?: string;
   statusMessageKey?: string;
+  externalMessageId?: string;
   blocks?: unknown[];
+  rich?: unknown;
   status: CallbackDeliveryStatus;
   attempts: number;
   lastError?: string;
@@ -135,6 +143,18 @@ export type StoredSuggestedChangesInConversation = StoredSuggestedChangesSnapsho
   event: OpenTagEvent;
 };
 
+type RunSignatureState = "verified" | "unverified" | "unknown";
+
+type RunProvenance = {
+  source: string;
+  sourceEventId: string;
+  sourceDeliveryId: string | null;
+  signatureState: RunSignatureState;
+  projectTarget: (ProjectTargetRef & { ref: string }) | null;
+  admissionDecision: Pick<RunAdmissionDecision, "action" | "reasonCode" | "eventId" | "activeRunId">;
+  expectedRunnerId: string | null;
+};
+
 export type ApplyOutcomeCounts = {
   applied: number;
   skipped: number;
@@ -143,9 +163,27 @@ export type ApplyOutcomeCounts = {
   unsupported: number;
 };
 
-export type CreateRunResult = {
-  run: OpenTagRun;
-  created: boolean;
+export type CreateRunResult =
+  | {
+      run: OpenTagRun;
+      created: true;
+    }
+  | {
+      run: OpenTagRun;
+      created: false;
+      replayKind: "source_event" | "source_delivery";
+      replayDecision: RunAdmissionDecision;
+    };
+
+export type CancelRunOutcome =
+  | { outcome: "cancelled"; run: OpenTagRun; event: OpenTagEvent }
+  | { outcome: "already_terminal"; run: OpenTagRun; event: OpenTagEvent }
+  | { outcome: "not_found" };
+
+export type SourceDeliveryPruneResult = {
+  scanned: number;
+  pruned: number;
+  retainedActive: number;
 };
 
 export type FollowUpRequest = {
@@ -195,6 +233,42 @@ export type OpenTagAggregateMetrics = {
   staleIntentCount: number;
 };
 
+export type RecordProgressOutcome = "recorded" | "duplicate" | "not_found";
+export type MarkRunningOutcome = "running" | "duplicate" | "not_found";
+export type CompleteRunOutcome = "completed" | "duplicate" | "not_found";
+
+export type ControlPlaneEventSeverity = "info" | "warn" | "error";
+
+export type ControlPlaneEvent = {
+  id: number;
+  type: string;
+  severity: ControlPlaneEventSeverity;
+  subject?: string;
+  payload: unknown;
+  createdAt: string;
+};
+
+export type ControlPlaneAlert = {
+  id: string;
+  type:
+    | "repeated_auth_failures"
+    | "repeated_signature_failures"
+    | "token_misuse"
+    | "repeated_large_payload_rejections"
+    | "repeated_invalid_request_body"
+    | "repeated_unknown_project_targets"
+    | "abnormal_runner_claim_rate";
+  severity: ControlPlaneEventSeverity;
+  eventType: string;
+  count: number;
+  threshold: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  subject?: string;
+  reason: string;
+  nextAction: string;
+};
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -230,11 +304,33 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   };
 }
 
+function terminalRunStatus(status: string): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "timed_out";
+}
+
+function sourceContainerMetadataMatches(input: {
+  event: OpenTagEvent;
+  source: string;
+  metadata: Record<string, string>;
+}): boolean {
+  if (input.event.source !== input.source) return false;
+  return Object.entries(input.metadata).every(([key, value]) => input.event.metadata[key] === value);
+}
+
+type CallbackDeliveryMetadata = {
+  agentId?: string;
+  statusMessageKey?: string;
+  externalMessageId?: string;
+  blocks?: unknown[];
+  rich?: unknown;
+};
+
+function callbackDeliveryMetadataFromJson(metadataJson: string | null): CallbackDeliveryMetadata | undefined {
+  return metadataJson && typeof metadataJson === "string" ? (JSON.parse(metadataJson) as CallbackDeliveryMetadata) : undefined;
+}
+
 function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): CallbackDelivery {
-  const metadata =
-    row.metadataJson && typeof row.metadataJson === "string"
-      ? (JSON.parse(row.metadataJson) as { agentId?: string; statusMessageKey?: string; blocks?: unknown[] })
-      : undefined;
+  const metadata = callbackDeliveryMetadataFromJson(row.metadataJson);
   return {
     id: row.id,
     runId: row.runId,
@@ -243,9 +339,12 @@ function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): C
     uri: row.uri,
     body: row.body,
     ...(row.threadKey ? { threadKey: row.threadKey } : {}),
+    ...(row.idempotencyKey ? { idempotencyKey: row.idempotencyKey } : {}),
     ...(metadata?.agentId ? { agentId: metadata.agentId } : {}),
     ...(metadata?.statusMessageKey ? { statusMessageKey: metadata.statusMessageKey } : {}),
+    ...(metadata?.externalMessageId ? { externalMessageId: metadata.externalMessageId } : {}),
     ...(metadata?.blocks ? { blocks: metadata.blocks } : {}),
+    ...(metadata && "rich" in metadata ? { rich: metadata.rich } : {}),
     status: row.status as CallbackDeliveryStatus,
     attempts: row.attempts,
     ...(row.lastError ? { lastError: row.lastError } : {}),
@@ -253,6 +352,33 @@ function callbackDeliveryFromRow(row: typeof callbackDeliveries.$inferSelect): C
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
+}
+
+function callbackBodyHash(input: { body: string; blocks?: unknown[]; rich?: unknown }): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ body: input.body, blocks: input.blocks ?? [], rich: input.rich ?? null }))
+    .digest("hex");
+}
+
+function callbackIdempotencyKey(input: {
+  runId: string;
+  kind: CallbackDeliveryKind;
+  provider: CallbackDeliveryProvider;
+  uri: string;
+  body: string;
+  threadKey?: string;
+  statusMessageKey?: string;
+  blocks?: unknown[];
+  rich?: unknown;
+}): string {
+  return [
+    input.runId,
+    input.provider,
+    input.threadKey ?? input.uri,
+    input.kind,
+    input.statusMessageKey ?? "",
+    callbackBodyHash({ body: input.body, ...(input.blocks ? { blocks: input.blocks } : {}), ...(input.rich !== undefined ? { rich: input.rich } : {}) })
+  ].join("|");
 }
 
 function followUpRequestFromRow(row: typeof followUpRequests.$inferSelect): FollowUpRequest {
@@ -289,6 +415,81 @@ function recordFromJson(value: string | null): Record<string, unknown> | undefin
   } catch {
     return undefined;
   }
+}
+
+function metadataString(metadata: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return null;
+}
+
+function metadataBoolean(metadata: Record<string, unknown>, keys: string[]): boolean | null {
+  for (const key of keys) {
+    const value = metadata[key];
+    if (typeof value === "boolean") return value;
+  }
+  return null;
+}
+
+function signatureStateFromEvent(event: OpenTagEvent): RunSignatureState {
+  const explicitState = metadataString(event.metadata, ["signatureState", "webhookSignatureState"]);
+  if (explicitState === "verified" || explicitState === "unverified" || explicitState === "unknown") return explicitState;
+
+  const verified = metadataBoolean(event.metadata, [
+    "signatureVerified",
+    "verifiedSignature",
+    "webhookSignatureVerified",
+    "githubSignatureVerified"
+  ]);
+  if (verified === true) return "verified";
+  if (verified === false) return "unverified";
+  return "unknown";
+}
+
+function sourceDeliveryIdFromEvent(event: OpenTagEvent): string | null {
+  return metadataString(event.metadata, [
+    "sourceDeliveryId",
+    "webhookDeliveryId",
+    "deliveryId",
+    "githubDeliveryId",
+    "githubDeliveryGuid",
+    "slackEventId",
+    "larkEventId"
+  ]);
+}
+
+function projectTargetProvenance(ref: ProjectTargetRef | null): RunProvenance["projectTarget"] {
+  if (!ref) return null;
+  return {
+    ref: formatProjectTargetRef(ref),
+    ...ref
+  };
+}
+
+function runProvenance(input: {
+  event: OpenTagEvent;
+  projectTarget: ProjectTargetRef | null;
+  admissionDecision: RunAdmissionDecision;
+  expectedRunnerId: string | null;
+}): RunProvenance {
+  return {
+    source: input.event.source,
+    sourceEventId: input.event.sourceEventId,
+    sourceDeliveryId: sourceDeliveryIdFromEvent(input.event),
+    signatureState: signatureStateFromEvent(input.event),
+    projectTarget: projectTargetProvenance(input.projectTarget),
+    admissionDecision: {
+      action: input.admissionDecision.action,
+      reasonCode: input.admissionDecision.reasonCode,
+      ...(input.admissionDecision.eventId ? { eventId: input.admissionDecision.eventId } : {}),
+      ...(input.admissionDecision.activeRunId ? { activeRunId: input.admissionDecision.activeRunId } : {})
+    },
+    expectedRunnerId: input.expectedRunnerId
+  };
 }
 
 function channelBindingFromRow(row: typeof channelBindings.$inferSelect): ChannelBinding {
@@ -405,6 +606,127 @@ function recordFromUnknown(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+function payloadString(payload: unknown, path: string[]): string | null {
+  let current = payload;
+  for (const segment of path) {
+    const record = recordFromUnknown(current);
+    if (!record) return null;
+    current = record[segment];
+  }
+  return typeof current === "string" && current.trim().length > 0 ? current : null;
+}
+
+function controlPlaneAlertSubject(event: ControlPlaneEvent): string {
+  if (event.type === "run.claimed") {
+    return payloadString(event.payload, ["runnerId"]) ?? event.subject ?? "unknown-runner";
+  }
+  if (event.type === "security.auth_failed") {
+    return payloadString(event.payload, ["tokenFingerprint"]) ?? event.subject ?? "unknown-token";
+  }
+  if (event.type === "security.token_misuse") {
+    const provider = payloadString(event.payload, ["provider"]);
+    const tokenKind = payloadString(event.payload, ["tokenKind"]);
+    if (provider && tokenKind) return `${provider}:${tokenKind}`;
+    return event.subject ?? "unknown-token";
+  }
+  if (event.type === "security.signature_failed") {
+    const provider = payloadString(event.payload, ["provider"]);
+    const endpoint = payloadString(event.payload, ["endpoint"]);
+    if (provider && endpoint) return `${provider}:${endpoint}`;
+    return event.subject ?? "unknown-signature-source";
+  }
+  if (event.type === "security.request_body_rejected") {
+    return payloadString(event.payload, ["endpoint"]) ?? event.subject ?? "unknown-endpoint";
+  }
+  if (event.type === "admission.needs_human_decision") {
+    const reasonCode = payloadString(event.payload, ["decision", "reasonCode"]) ?? payloadString(event.payload, ["reasonCode"]);
+    if (reasonCode === "repo_not_bound" || reasonCode === "repo_context_missing") {
+      return payloadString(event.payload, ["projectTarget"]) ?? reasonCode;
+    }
+  }
+  return event.subject ?? event.type;
+}
+
+function controlPlaneAlertKind(event: ControlPlaneEvent): ControlPlaneAlert["type"] | null {
+  if (event.type === "run.claimed") return "abnormal_runner_claim_rate";
+  if (event.type === "security.auth_failed") return "repeated_auth_failures";
+  if (event.type === "security.token_misuse") return "token_misuse";
+  if (event.type === "security.signature_failed") return "repeated_signature_failures";
+  if (event.type === "security.request_body_rejected") {
+    return payloadString(event.payload, ["reason"]) === "request_body_too_large"
+      ? "repeated_large_payload_rejections"
+      : "repeated_invalid_request_body";
+  }
+  if (event.type === "admission.needs_human_decision") {
+    const reasonCode = payloadString(event.payload, ["decision", "reasonCode"]) ?? payloadString(event.payload, ["reasonCode"]);
+    if (reasonCode === "repo_not_bound" || reasonCode === "repo_context_missing") return "repeated_unknown_project_targets";
+  }
+  return null;
+}
+
+function controlPlaneAlertMetadata(kind: ControlPlaneAlert["type"]): Pick<ControlPlaneAlert, "reason" | "nextAction" | "severity"> {
+  if (kind === "repeated_auth_failures") {
+    return {
+      severity: "warn",
+      reason: "Repeated dispatcher authorization failures were observed.",
+      nextAction: "Check for token misuse, stale runner configuration, or a leaked/rotated pairing token."
+    };
+  }
+  if (kind === "token_misuse") {
+    return {
+      severity: "warn",
+      reason: "A platform or relay token failed with a terminal authentication or configuration error.",
+      nextAction: "Rotate or replace the affected token, then restart or re-pair the ingress or runner that owns it."
+    };
+  }
+  if (kind === "repeated_large_payload_rejections") {
+    return {
+      severity: "warn",
+      reason: "Repeated oversized dispatcher request bodies were rejected.",
+      nextAction: "Check source ingress payload size, request body limits, and whether a client is retrying an invalid payload."
+    };
+  }
+  if (kind === "repeated_invalid_request_body") {
+    return {
+      severity: "warn",
+      reason: "Repeated malformed or schema-invalid request bodies were rejected.",
+      nextAction: "Check source webhook payload shape, client versions, and whether unsigned or incompatible traffic is hitting the endpoint."
+    };
+  }
+  if (kind === "repeated_signature_failures") {
+    return {
+      severity: "warn",
+      reason: "Repeated source webhook signature verification failures were observed.",
+      nextAction: "Check the source webhook secret, signing configuration, endpoint URL, and whether unsigned traffic is hitting the ingress."
+    };
+  }
+  if (kind === "abnormal_runner_claim_rate") {
+    return {
+      severity: "warn",
+      reason: "Runner claim volume exceeded the local alert threshold.",
+      nextAction: "Check for runaway runner loops, token misuse, or an unexpected burst of queued runs for this runner."
+    };
+  }
+  return {
+    severity: "warn",
+    reason: "Repeated source events resolved to missing or unbound Project Targets.",
+    nextAction: "Verify source metadata, Project Target bindings, and runner allowlists before retrying."
+  };
+}
+
+function controlPlaneAlertThreshold(kind: ControlPlaneAlert["type"], thresholds?: Partial<Record<ControlPlaneAlert["type"], number>>): number {
+  return (
+    thresholds?.[kind] ??
+    (kind === "token_misuse"
+      ? 1
+      : kind === "repeated_auth_failures" || kind === "repeated_signature_failures"
+        ? 3
+        : kind === "abnormal_runner_claim_rate"
+          ? 10
+          : 2)
+  );
+}
+
 function metricsFromEvents(runId: string, events: OpenTagAuditEvent[]): OpenTagRunMetrics {
   const latestApplyPlans = new Map<string, ApplyPlan>();
   for (const event of events) {
@@ -482,6 +804,23 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  async function repoBindingRunnerId(projectTarget: ProjectTargetRef | null): Promise<string | null> {
+    if (!projectTarget) return null;
+    const row = await db
+      .select()
+      .from(repoBindings)
+      .where(
+        and(
+          eq(repoBindings.provider, projectTarget.provider),
+          eq(repoBindings.owner, projectTarget.owner),
+          eq(repoBindings.repo, projectTarget.repo)
+        )
+      )
+      .limit(1)
+      .get();
+    return row?.runnerId ?? null;
+  }
+
   async function appendRunEvent(input: {
     runId: string;
     type: string;
@@ -500,6 +839,67 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       payloadJson: JSON.stringify(input.payload),
       createdAt: input.createdAt ?? nowIso()
     });
+  }
+
+  async function recordCreateRunReplay(input: {
+    runRow: typeof runs.$inferSelect;
+    requestedRunId: string;
+    event: OpenTagEvent;
+    projectTarget: ProjectTargetRef | null;
+    expectedRunnerId: string | null;
+    replayKind: "source_event" | "source_delivery";
+    sourceDeliveryId?: string | null;
+    createdAt: string;
+  }): Promise<Extract<CreateRunResult, { created: false }>> {
+    const reason =
+      input.replayKind === "source_delivery"
+        ? "Source delivery already created a run."
+        : "Source event already created a run.";
+    const reasonCode = input.replayKind === "source_delivery" ? "duplicate_source_delivery" : "duplicate_source_event";
+    const replayDecision = RunAdmissionDecisionSchema.parse({
+      action: "drop_duplicate",
+      reason,
+      reasonCode,
+      decidedAt: input.createdAt,
+      activeRunId: input.runRow.id,
+      eventId: input.event.id
+    });
+    await appendRunEvent({
+      runId: input.runRow.id,
+      type: "admission.decided",
+      payload: replayDecision,
+      visibility: "audit",
+      importance: "normal",
+      message: replayDecision.reason,
+      createdAt: input.createdAt
+    });
+    await appendRunEvent({
+      runId: input.runRow.id,
+      type: "run.create_idempotent_replay",
+      payload: {
+        requestedRunId: input.requestedRunId,
+        eventId: input.event.id,
+        replayKey:
+          input.replayKind === "source_delivery"
+            ? { kind: "source_delivery", source: input.event.source, deliveryId: input.sourceDeliveryId }
+            : { kind: "source_event", eventId: input.event.id },
+        provenance: runProvenance({
+          event: input.event,
+          projectTarget: input.projectTarget,
+          admissionDecision: replayDecision,
+          expectedRunnerId: input.expectedRunnerId
+        })
+      },
+      visibility: "audit",
+      importance: "low",
+      createdAt: input.createdAt
+    });
+    return {
+      run: runFromRow(input.runRow),
+      created: false,
+      replayKind: input.replayKind,
+      replayDecision
+    };
   }
 
   type CreateApplyPlanInput = {
@@ -666,6 +1066,90 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
+    async findCancelableRunForSourceContainer(input: {
+      source: string;
+      repoProvider: string;
+      owner: string;
+      repo: string;
+      metadata: Record<string, string>;
+    }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
+      const rows = await db
+        .select()
+        .from(runs)
+        .where(
+          and(
+            eq(runs.repoProvider, input.repoProvider),
+            eq(runs.repoOwner, input.owner),
+            eq(runs.repoName, input.repo),
+            inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])
+          )
+        )
+        .orderBy(asc(runs.createdAt));
+      for (const row of rows) {
+        const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
+        if (sourceContainerMetadataMatches({ event, source: input.source, metadata: input.metadata })) {
+          return { run: runFromRow(row), event };
+        }
+      }
+      return null;
+    },
+
+    async cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunOutcome> {
+      const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+      if (!row) return { outcome: "not_found" };
+      const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
+      const existingRun = runFromRow(row);
+      if (terminalRunStatus(row.status)) {
+        return { outcome: "already_terminal", run: existingRun, event };
+      }
+
+      const updatedAt = nowIso();
+      const result: OpenTagRunResult = {
+        conclusion: "cancelled",
+        summary: input.reason ?? "Cancellation was requested by a human.",
+        nextAction: "OpenTag will not treat this stop request as a successful completion."
+      };
+      await db
+        .update(runs)
+        .set({
+          status: "cancelled",
+          resultJson: JSON.stringify(result),
+          assignedRunnerId: null,
+          leasedAt: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          updatedAt
+        })
+        .where(eq(runs.id, input.runId));
+      await appendRunEvent({
+        runId: input.runId,
+        type: "run.cancel_requested",
+        payload: {
+          previousStatus: row.status,
+          previousRunnerId: row.assignedRunnerId,
+          terminalReason: "cancelled_by_user",
+          terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
+          ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}),
+          reason: result.summary
+        },
+        visibility: "audit",
+        importance: "high",
+        message: result.summary,
+        createdAt: updatedAt
+      });
+      return {
+        outcome: "cancelled",
+        run: {
+          ...existingRun,
+          status: "cancelled",
+          assignedRunnerId: undefined,
+          updatedAt,
+          result
+        },
+        event
+      };
+    },
+
     async createFollowUpRequest(input: {
       id: string;
       event: OpenTagEvent;
@@ -708,6 +1192,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async getFollowUpRequest(input: { id: string }): Promise<FollowUpRequest | null> {
       const row = await db.select().from(followUpRequests).where(eq(followUpRequests.id, input.id)).limit(1).get();
       return row ? followUpRequestFromRow(row) : null;
+    },
+
+    async listQueuedFollowUpsForActiveRun(input: { activeRunId: string }): Promise<FollowUpRequest[]> {
+      const rows = await db
+        .select()
+        .from(followUpRequests)
+        .where(and(eq(followUpRequests.activeRunId, input.activeRunId), eq(followUpRequests.status, "queued")))
+        .orderBy(asc(followUpRequests.createdAt));
+      return rows.map(followUpRequestFromRow);
     },
 
     async createRunFromFollowUpRequest(input: { followUpRequestId: string; runId: string }): Promise<{ followUpRequest: FollowUpRequest; run: OpenTagRun }> {
@@ -776,7 +1269,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async registerRunner(input: { runnerId: string; name: string }): Promise<void> {
       const createdAt = nowIso();
-      await db.insert(runners).values({ runnerId: input.runnerId, name: input.name, createdAt }).onConflictDoNothing();
+      await db
+        .insert(runners)
+        .values({ runnerId: input.runnerId, name: input.name, createdAt, heartbeatAt: createdAt })
+        .onConflictDoUpdate({
+          target: runners.runnerId,
+          set: {
+            name: input.name,
+            heartbeatAt: createdAt
+          }
+        });
     },
 
     async getRunner(input: { runnerId: string }): Promise<RunnerRegistration | null> {
@@ -906,6 +1408,36 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         });
     },
 
+    async deleteChannelBinding(input: {
+      provider: string;
+      accountId: string;
+      conversationId: string;
+    }): Promise<boolean> {
+      const existing = await db
+        .select()
+        .from(channelBindings)
+        .where(
+          and(
+            eq(channelBindings.provider, input.provider),
+            eq(channelBindings.accountId, input.accountId),
+            eq(channelBindings.conversationId, input.conversationId)
+          )
+        )
+        .limit(1)
+        .get();
+      if (!existing) return false;
+      await db
+        .delete(channelBindings)
+        .where(
+          and(
+            eq(channelBindings.provider, input.provider),
+            eq(channelBindings.accountId, input.accountId),
+            eq(channelBindings.conversationId, input.conversationId)
+          )
+        );
+      return true;
+    },
+
     async createSlackChannelBinding(input: SlackChannelBinding): Promise<void> {
       const repoProvider = input.repoProvider ?? "github";
       await db
@@ -943,6 +1475,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const createdAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
       const repoKey = projectTargetRefFromEvent(event);
+      const expectedRunnerId = await repoBindingRunnerId(repoKey);
+      const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
+      if (sourceDeliveryId) {
+        const existingDelivery = await db
+          .select()
+          .from(sourceDeliveries)
+          .where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, sourceDeliveryId)))
+          .limit(1)
+          .get();
+        if (existingDelivery) {
+          const existingByDelivery = await db.select().from(runs).where(eq(runs.id, existingDelivery.runId)).limit(1).get();
+          if (existingByDelivery) {
+            return recordCreateRunReplay({
+              runRow: existingByDelivery,
+              requestedRunId: input.id,
+              event,
+              projectTarget: repoKey,
+              expectedRunnerId,
+              replayKind: "source_delivery",
+              sourceDeliveryId,
+              createdAt
+            });
+          }
+        }
+      }
       const insertResult = await db
         .insert(runs)
         .values({
@@ -969,32 +1526,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (!existingBySourceEvent) {
           throw new Error(`Run already exists for event ${event.id}, but it could not be loaded`);
         }
-        const replayDecision = RunAdmissionDecisionSchema.parse({
-          action: "drop_duplicate",
-          reason: "Source event already created a run.",
-          reasonCode: "duplicate_source_event",
-          decidedAt: createdAt,
-          activeRunId: existingBySourceEvent.id,
-          eventId: event.id
-        });
-        await appendRunEvent({
-          runId: existingBySourceEvent.id,
-          type: "admission.decided",
-          payload: replayDecision,
-          visibility: "audit",
-          importance: "normal",
-          message: replayDecision.reason,
+        return recordCreateRunReplay({
+          runRow: existingBySourceEvent,
+          requestedRunId: input.id,
+          event,
+          projectTarget: repoKey,
+          expectedRunnerId,
+          replayKind: "source_event",
+          sourceDeliveryId,
           createdAt
         });
-        await appendRunEvent({
-          runId: existingBySourceEvent.id,
-          type: "run.create_idempotent_replay",
-          payload: { requestedRunId: input.id, eventId: event.id },
-          visibility: "audit",
-          importance: "low",
-          createdAt
-        });
-        return { run: runFromRow(existingBySourceEvent), created: false };
       }
       const createDecision = RunAdmissionDecisionSchema.parse({
         action: "start",
@@ -1003,6 +1544,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         decidedAt: createdAt,
         eventId: event.id
       });
+      if (sourceDeliveryId) {
+        await db
+          .insert(sourceDeliveries)
+          .values({
+            source: event.source,
+            deliveryId: sourceDeliveryId,
+            runId: input.id,
+            eventId: event.id,
+            createdAt
+          })
+          .onConflictDoNothing({ target: [sourceDeliveries.source, sourceDeliveries.deliveryId] });
+      }
       await appendRunEvent({
         runId: input.id,
         type: "admission.decided",
@@ -1015,7 +1568,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await appendRunEvent({
         runId: input.id,
         type: "run.created",
-        payload: { eventId: event.id },
+        payload: {
+          eventId: event.id,
+          provenance: runProvenance({
+            event,
+            projectTarget: repoKey,
+            admissionDecision: createDecision,
+            expectedRunnerId
+          })
+        },
         visibility: "audit",
         importance: "low",
         createdAt
@@ -1066,8 +1627,45 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
+    async pruneSourceDeliveries(input: { olderThan: string; limit?: number }): Promise<SourceDeliveryPruneResult> {
+      const cutoff = new Date(input.olderThan);
+      if (!Number.isFinite(cutoff.getTime())) {
+        throw new Error("olderThan must be a valid timestamp.");
+      }
+      const requestedLimit = input.limit ?? 1_000;
+      const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.floor(requestedLimit)) : 1_000;
+      const rows = await db
+        .select()
+        .from(sourceDeliveries)
+        .where(lt(sourceDeliveries.createdAt, cutoff.toISOString()))
+        .orderBy(asc(sourceDeliveries.createdAt))
+        .limit(limit);
+
+      let pruned = 0;
+      let retainedActive = 0;
+      for (const row of rows) {
+        const runRow = await db.select({ status: runs.status }).from(runs).where(eq(runs.id, row.runId)).limit(1).get();
+        if (runRow && !terminalRunStatus(runRow.status)) {
+          retainedActive += 1;
+          continue;
+        }
+        const result = await db
+          .delete(sourceDeliveries)
+          .where(and(eq(sourceDeliveries.source, row.source), eq(sourceDeliveries.deliveryId, row.deliveryId)));
+        pruned += result.changes;
+      }
+
+      return {
+        scanned: rows.length,
+        pruned,
+        retainedActive
+      };
+    },
+
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
       const now = new Date();
+      const runnerHeartbeatAt = nowIso();
+      await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
       const activeRows = await db
         .select()
         .from(runs)
@@ -1237,6 +1835,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!row) return false;
       const leaseSeconds = input.leaseSeconds ?? 60;
       const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
+      await db.update(runners).set({ heartbeatAt: updatedAt }).where(eq(runners.runnerId, input.runnerId));
       await db
         .update(runs)
         .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
@@ -1252,31 +1851,50 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return true;
     },
 
-    async markRunning(input: { runId: string; executor: string; runnerId?: string }): Promise<boolean> {
+    async markRunning(input: {
+      runId: string;
+      executor: string;
+      runnerId?: string;
+      runTimeoutMs?: number;
+      idempotencyKey?: string;
+    }): Promise<MarkRunningOutcome> {
       const updatedAt = nowIso();
       const conditions = [eq(runs.id, input.runId)];
       if (input.runnerId) {
         conditions.push(eq(runs.assignedRunnerId, input.runnerId));
+      }
+      if (input.idempotencyKey) {
+        const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
+        for (const event of existing) {
+          if (event.type !== "run.running") continue;
+          const payload = recordFromJson(event.payloadJson);
+          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+        }
       }
       const updateResult = await db
         .update(runs)
         .set({ status: "running", executor: input.executor, updatedAt })
         .where(and(...conditions));
       if (updateResult.changes === 0) {
-        return false;
+        return "not_found";
       }
       await appendRunEvent({
         runId: input.runId,
         type: "run.running",
-        payload: input.runnerId ? { runnerId: input.runnerId, executor: input.executor } : { executor: input.executor },
+        payload: {
+          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+          executor: input.executor,
+          ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {})
+        },
         visibility: "audit",
         importance: "normal",
         createdAt: updatedAt
       });
-      return true;
+      return "running";
     },
 
-    async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string }): Promise<boolean> {
+    async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string; idempotencyKey?: string }): Promise<CompleteRunOutcome> {
       const result = OpenTagRunResultSchema.parse(input.result);
       const updatedAt = nowIso();
       const status =
@@ -1284,16 +1902,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? "succeeded"
           : result.conclusion === "cancelled"
             ? "cancelled"
-            : result.conclusion === "needs_human"
-              ? "needs_approval"
-              : "failed";
+            : result.conclusion === "interrupted"
+              ? "interrupted"
+              : result.conclusion === "timed_out"
+                ? "timed_out"
+                : result.conclusion === "needs_human"
+                  ? "needs_approval"
+                  : "failed";
       const runRow = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!runRow) {
-        if (input.runnerId) return false;
+        if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
       }
+      if (input.idempotencyKey) {
+        const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
+        for (const event of existing) {
+          if (event.type !== "run.completed") continue;
+          const payload = recordFromJson(event.payloadJson);
+          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+        }
+      }
+      if (terminalRunStatus(runRow.status)) {
+        return "not_found";
+      }
       if (input.runnerId && runRow.assignedRunnerId !== input.runnerId) {
-        return false;
+        return "not_found";
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
       await db
@@ -1343,7 +1976,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       await appendRunEvent({
         runId: input.runId,
         type: "run.completed",
-        payload: result,
+        payload: {
+          ...result,
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+        },
         visibility: "audit",
         importance: "high",
         message: result.summary,
@@ -1363,7 +1999,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           createdAt: updatedAt
         });
       }
-      return true;
+      return "completed";
     },
 
     async getSuggestedChanges(input: { proposalId: string }): Promise<StoredSuggestedChangesSnapshot | null> {
@@ -1618,7 +2254,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       visibility?: RunEventVisibility;
       importance?: RunEventImportance;
       runnerId?: string;
-    }): Promise<boolean> {
+      idempotencyKey?: string;
+    }): Promise<RecordProgressOutcome> {
       if (input.runnerId) {
         const row = await db
           .select()
@@ -1626,13 +2263,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
           .limit(1)
           .get();
-        if (!row) return false;
+        if (!row) return "not_found";
+      }
+      if (input.idempotencyKey) {
+        const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
+        for (const event of existing) {
+          if (event.type !== "run.progress") continue;
+          const payload = recordFromJson(event.payloadJson);
+          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+        }
       }
       await appendRunEvent({
         runId: input.runId,
         type: "run.progress",
         payload: {
           ...(input.runnerId ? { runnerId: input.runnerId } : {}),
+          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
           type: input.type ?? "progress",
           message: input.message,
           at: input.at ?? nowIso()
@@ -1642,7 +2288,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         message: input.message,
         createdAt: input.at ?? nowIso()
       });
-      return true;
+      return "recorded";
     },
 
     async getRun(input: { runId: string }): Promise<ClaimedOpenTagRun | null> {
@@ -1668,6 +2314,120 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }));
     },
 
+    async appendControlPlaneEvent(input: {
+      type: string;
+      severity?: ControlPlaneEventSeverity;
+      subject?: string;
+      payload?: unknown;
+      createdAt?: string;
+    }): Promise<void> {
+      await db.insert(controlPlaneEvents).values({
+        type: input.type,
+        severity: input.severity ?? "info",
+        subject: input.subject ?? null,
+        payloadJson: JSON.stringify(input.payload ?? {}),
+        createdAt: input.createdAt ?? nowIso()
+      });
+    },
+
+    async listControlPlaneEvents(input: { limit?: number; type?: string; severity?: ControlPlaneEventSeverity } = {}): Promise<ControlPlaneEvent[]> {
+      const conditions = [
+        ...(input.type ? [eq(controlPlaneEvents.type, input.type)] : []),
+        ...(input.severity ? [eq(controlPlaneEvents.severity, input.severity)] : [])
+      ];
+      const rows = await db
+        .select()
+        .from(controlPlaneEvents)
+        .where(conditions.length > 0 ? and(...conditions) : undefined)
+        .orderBy(asc(controlPlaneEvents.id))
+        .limit(input.limit ?? 100);
+      return rows.map((row) => ({
+        id: row.id,
+        type: row.type,
+        severity: row.severity as ControlPlaneEventSeverity,
+        ...(row.subject ? { subject: row.subject } : {}),
+        payload: JSON.parse(row.payloadJson) as unknown,
+        createdAt: row.createdAt
+      }));
+    },
+
+    async summarizeControlPlaneAlerts(input: {
+      since?: string;
+      limit?: number;
+      thresholds?: Partial<Record<ControlPlaneAlert["type"], number>>;
+    } = {}): Promise<ControlPlaneAlert[]> {
+      const limit = input.limit ?? 5_000;
+      const rows = await db
+        .select()
+        .from(controlPlaneEvents)
+        .orderBy(desc(controlPlaneEvents.id))
+        .limit(limit);
+      const claimRows = await db
+        .select()
+        .from(runEvents)
+        .where(eq(runEvents.type, "run.claimed"))
+        .orderBy(desc(runEvents.id))
+        .limit(limit);
+      const groups = new Map<string, { kind: ControlPlaneAlert["type"]; eventType: string; subject: string; events: ControlPlaneEvent[] }>();
+
+      function addEvent(event: ControlPlaneEvent) {
+        if (input.since && event.createdAt < input.since) return;
+        const kind = controlPlaneAlertKind(event);
+        if (!kind) return;
+        const subject = controlPlaneAlertSubject(event);
+        const key = `${kind}|${event.type}|${subject}`;
+        const group = groups.get(key) ?? { kind, eventType: event.type, subject, events: [] };
+        group.events.push(event);
+        groups.set(key, group);
+      }
+
+      for (const row of rows.reverse()) {
+        addEvent({
+          id: row.id,
+          type: row.type,
+          severity: row.severity as ControlPlaneEventSeverity,
+          ...(row.subject ? { subject: row.subject } : {}),
+          payload: JSON.parse(row.payloadJson) as unknown,
+          createdAt: row.createdAt
+        });
+      }
+      for (const row of claimRows.reverse()) {
+        addEvent({
+          id: row.id,
+          type: row.type,
+          severity: "info",
+          subject: row.runId,
+          payload: JSON.parse(row.payloadJson) as unknown,
+          createdAt: row.createdAt
+        });
+      }
+
+      return [...groups.values()]
+        .flatMap((group): ControlPlaneAlert[] => {
+          const threshold = controlPlaneAlertThreshold(group.kind, input.thresholds);
+          if (group.events.length < threshold) return [];
+          const metadata = controlPlaneAlertMetadata(group.kind);
+          const first = group.events[0]!;
+          const last = group.events.at(-1)!;
+          return [
+            {
+              id: `${group.kind}:${group.eventType}:${group.subject}`,
+              type: group.kind,
+              severity: metadata.severity,
+              eventType: group.eventType,
+              count: group.events.length,
+              threshold,
+              firstSeenAt: first.createdAt,
+              lastSeenAt: last.createdAt,
+              subject: group.subject,
+              reason: metadata.reason,
+              nextAction: metadata.nextAction
+            }
+          ];
+        })
+        .sort((left, right) => right.count - left.count || left.id.localeCompare(right.id));
+    },
+
     async enqueueCallbackDelivery(input: {
       runId: string;
       kind: CallbackDeliveryKind;
@@ -1678,8 +2438,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       agentId?: string;
       statusMessageKey?: string;
       blocks?: unknown[];
+      rich?: unknown;
     }): Promise<CallbackDelivery> {
       const createdAt = nowIso();
+      const idempotencyKey = callbackIdempotencyKey(input);
       const rows = await db
         .insert(callbackDeliveries)
         .values({
@@ -1689,18 +2451,34 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           uri: input.uri,
           body: input.body,
           threadKey: input.threadKey ?? null,
+          idempotencyKey,
           metadataJson: JSON.stringify({
             ...(input.agentId ? { agentId: input.agentId } : {}),
             ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
-            ...(input.blocks ? { blocks: input.blocks } : {})
+            ...(input.blocks ? { blocks: input.blocks } : {}),
+            ...(input.rich !== undefined ? { rich: input.rich } : {})
           }),
           status: "pending",
           createdAt,
           updatedAt: createdAt
         })
+        .onConflictDoNothing({ target: callbackDeliveries.idempotencyKey })
         .returning();
       const row = rows[0];
-      if (!row) throw new Error("callback delivery was not created");
+      if (!row) {
+        const existing = await db.select().from(callbackDeliveries).where(eq(callbackDeliveries.idempotencyKey, idempotencyKey)).limit(1).get();
+        if (!existing) throw new Error("callback delivery was not created");
+        await appendRunEvent({
+          runId: input.runId,
+          type: `callback.${input.kind}.duplicate`,
+          payload: callbackDeliveryFromRow(existing),
+          visibility: "audit",
+          importance: "normal",
+          message: "Duplicate callback delivery suppressed.",
+          createdAt
+        });
+        return callbackDeliveryFromRow(existing);
+      }
       await appendRunEvent({
         runId: input.runId,
         type: `callback.${input.kind}.queued`,
@@ -1712,7 +2490,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return callbackDeliveryFromRow(row);
     },
 
-    async markCallbackDelivered(input: { deliveryId: number }): Promise<void> {
+    async markCallbackDelivered(input: { deliveryId: number; externalMessageId?: string }): Promise<void> {
       const updatedAt = nowIso();
       const row = await db
         .select()
@@ -1721,14 +2499,20 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!row) return;
+      const metadata = callbackDeliveryMetadataFromJson(row.metadataJson) ?? {};
+      const metadataJson = JSON.stringify({
+        ...metadata,
+        ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {})
+      });
       await db
         .update(callbackDeliveries)
-        .set({ status: "delivered", attempts: row.attempts + 1, lastError: null, nextAttemptAt: null, updatedAt })
+        .set({ status: "delivered", attempts: row.attempts + 1, lastError: null, nextAttemptAt: null, metadataJson, updatedAt })
         .where(eq(callbackDeliveries.id, input.deliveryId));
+      const deliveredRow = { ...row, metadataJson };
       await appendRunEvent({
         runId: row.runId,
         type: `callback.${row.kind}.delivered`,
-        payload: { ...callbackDeliveryFromRow(row), status: "delivered", attempts: row.attempts + 1, updatedAt },
+        payload: { ...callbackDeliveryFromRow(deliveredRow), status: "delivered", attempts: row.attempts + 1, updatedAt },
         visibility: "human",
         importance: row.kind === "final" ? "high" : "normal",
         message: row.body,
@@ -1736,7 +2520,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
-    async markCallbackFailed(input: { deliveryId: number; error: string; nextAttemptAt?: string }): Promise<void> {
+    async findCallbackExternalMessageId(input: {
+      runId: string;
+      provider: CallbackDeliveryProvider;
+      threadKey?: string;
+      statusMessageKey: string;
+    }): Promise<string | undefined> {
+      const rows = await db
+        .select()
+        .from(callbackDeliveries)
+        .where(and(eq(callbackDeliveries.runId, input.runId), eq(callbackDeliveries.provider, input.provider), eq(callbackDeliveries.status, "delivered")))
+        .orderBy(desc(callbackDeliveries.updatedAt), desc(callbackDeliveries.id));
+
+      for (const row of rows) {
+        const delivery = callbackDeliveryFromRow(row);
+        if (delivery.statusMessageKey !== input.statusMessageKey) continue;
+        if ((delivery.threadKey ?? undefined) !== input.threadKey) continue;
+        if (delivery.externalMessageId) return delivery.externalMessageId;
+      }
+      return undefined;
+    },
+
+    async markCallbackFailed(input: { deliveryId: number; error: string; nextAttemptAt?: string; maxAttempts?: number }): Promise<void> {
       const updatedAt = nowIso();
       const row = await db
         .select()
@@ -1745,9 +2550,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!row) return;
+      const attempts = row.attempts + 1;
       await db
         .update(callbackDeliveries)
-        .set({ status: "failed", attempts: row.attempts + 1, lastError: input.error, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
+        .set({ status: "failed", attempts, lastError: input.error, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
         .where(eq(callbackDeliveries.id, input.deliveryId));
       await appendRunEvent({
         runId: row.runId,
@@ -1755,7 +2561,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         payload: {
           ...callbackDeliveryFromRow(row),
           status: "failed",
-          attempts: row.attempts + 1,
+          attempts,
           lastError: input.error,
           ...(input.nextAttemptAt ? { nextAttemptAt: input.nextAttemptAt } : {}),
           updatedAt
@@ -1764,6 +2570,24 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         importance: "normal",
         createdAt: updatedAt
       });
+      if (input.maxAttempts !== undefined && attempts >= input.maxAttempts && !input.nextAttemptAt) {
+        await appendRunEvent({
+          runId: row.runId,
+          type: `callback.${row.kind}.suppressed`,
+          payload: {
+            ...callbackDeliveryFromRow(row),
+            status: "failed",
+            attempts,
+            maxAttempts: input.maxAttempts,
+            lastError: input.error,
+            updatedAt
+          },
+          visibility: "audit",
+          importance: "high",
+          message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms.",
+          createdAt: updatedAt
+        });
+      }
     },
 
     async listPendingCallbackDeliveries(input: { limit: number; now?: Date; maxAttempts?: number }): Promise<CallbackDelivery[]> {

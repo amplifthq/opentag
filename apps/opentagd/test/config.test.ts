@@ -29,12 +29,16 @@ describe("opentagd config", () => {
     const config = createInitialConfig({
       owner: "acme",
       repo: "demo",
-      checkoutPath: "/tmp/demo"
+      checkoutPath: "/tmp/demo",
+      pairingToken: "pairing_token",
+      runnerToken: "runner_token"
     });
 
     expect(config).toMatchObject({
       runnerId: "runner_local",
       dispatcherUrl: "http://localhost:3030",
+      pairingToken: "pairing_token",
+      runnerToken: "runner_token",
       repositories: [
         {
           provider: "github",
@@ -114,6 +118,22 @@ describe("opentagd config", () => {
     });
   });
 
+  it("loads generic agent session profile settings from env", () => {
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
+    process.env.OPENTAG_AGENT_PROFILE = "opentag-fixed";
+    process.env.OPENTAG_AGENT_PROFILE_TEMPLATE = "opentag-{provider}-{projectTarget}-{actorId}";
+
+    const config = loadConfigFromEnv();
+
+    expect(config.agentSessionProfile).toEqual({
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
+    });
+  });
+
   it("defaults Slack channel bindings to github repoProvider", () => {
     const parsed = parseDaemonConfig({
       dispatcherUrl: "http://localhost:3030",
@@ -168,6 +188,18 @@ describe("opentagd config", () => {
 
     expect(config.githubToken).toBe("ghs_test");
     expect(config.preparePullRequestBranch).toBe(true);
+  });
+
+  it("loads the hard run timeout from env", () => {
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
+    process.env.OPENTAG_RUN_TIMEOUT_MS = "30000";
+
+    const config = loadConfigFromEnv();
+
+    expect(config.runTimeoutMs).toBe(30_000);
   });
 
   it("parses generic channel bindings through the validated schema", () => {

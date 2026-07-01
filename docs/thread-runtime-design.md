@@ -347,8 +347,14 @@ credential mode handling remain future work.
 - a stable read API;
 - a promotion path into a later run.
 
-What remains future work is richer acknowledgement copy, auto-promotion policy,
-and thread-aware prioritization across multiple queued follow-ups.
+OpenTag now auto-promotes the first queued follow-up after the active run
+reaches a natural terminal completion. Manual `/stop` cancellation does not
+start the next queued item automatically, because a human stop request may mean
+"pause this source thread" rather than "skip to the next item."
+
+What remains future work is richer acknowledgement copy, configurable
+auto-promotion policy, and thread-aware prioritization across multiple queued
+follow-ups.
 
 ### Active-Run Input
 
@@ -378,6 +384,8 @@ events already provide.
 7. Executors now receive optional `contextPacket`, and Codex / Claude Code prompts prefer packet summary, facts, and exclusions.
 8. Same-thread active runs now queue durable follow-up requests that can later be promoted into runs.
 9. `needs_human_decision` now has a stable API response shape.
+10. Natural terminal completion now auto-promotes the first queued follow-up,
+    while explicit human cancellation leaves queued follow-ups paused.
 
 ## Tests To Add
 
@@ -392,7 +400,7 @@ events already provide.
 - Codex and Claude Code prompt builders include packet summary, facts, and
   exclusions when a packet exists.
 - Same-thread active runs return durable follow-up requests that can be viewed
-  and promoted into runs.
+  with a safe command summary and promoted into runs.
 - Old runs without a context packet still execute from raw context pointers.
 
 ## Decision Frame

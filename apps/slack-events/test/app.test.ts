@@ -88,6 +88,381 @@ describe("Slack events app", () => {
     const [event] = createRun.mock.calls[0] ?? [];
     expect(event.target.agentId).toBe("gemini");
     expect(event.metadata.repoProvider).toBe("gitlab");
+    expect(event.metadata).toMatchObject({
+      sourceDeliveryId: "Ev123",
+      slackEventId: "Ev123",
+      webhookSignatureVerified: true,
+      signatureState: "verified"
+    });
+  });
+
+  it("replies to /status app mentions without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvStatus",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /status",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "status" });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("OpenTag status:"),
+      blocks: expect.arrayContaining([
+        expect.objectContaining({
+          type: "section",
+          text: expect.objectContaining({ text: "*OpenTag status:*" })
+        })
+      ])
+    });
+  });
+
+  it("binds a Slack channel from /bind without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const bindChannel = vi.fn(async () => {});
+    const canManageBinding = vi.fn(async () => true);
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvBind",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /bind github:acme/demo",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      createRun,
+      bindChannel,
+      canManageBinding,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind" });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(canManageBinding).toHaveBeenCalledWith({
+      action: "bind",
+      teamId: "T123",
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      userId: "U456",
+      eventId: "EvBind",
+      appId: "A_GEMINI"
+    });
+    expect(bindChannel).toHaveBeenCalledWith({
+      teamId: "T123",
+      channelId: "C123",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("Connected this Slack channel to Project Target github:acme/demo.")
+    });
+  });
+
+  it("denies Slack /bind by default before changing the Project Target", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const bindChannel = vi.fn(async () => {});
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvBindDenied",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /bind github:acme/demo",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      createRun,
+      bindChannel,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unauthorized: true });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("Only an authorized Slack binding manager")
+    });
+  });
+
+  it("replies with usage for malformed /bind and does not create a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const bindChannel = vi.fn(async () => {});
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvBindUsage",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /bind /Users/alice/project",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      createRun,
+      bindChannel,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", usage: true });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("Project Targets never use absolute local paths.")
+    });
+  });
+
+  it("does not turn /bind into a run when channel binding is unavailable", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvBindUnavailable",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /bind acme/demo",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      createRun,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unavailable: true });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("Slack channel binding from source threads is not configured.")
+    });
+  });
+
+  it("requests cancellation for /stop app mentions without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const stopRun = vi.fn(async () => ({ outcome: "cancelled" as const, runId: "run_active" }));
+    const reply = vi.fn(async () => {});
+    const rawBody = JSON.stringify({
+      type: "event_callback",
+      api_app_id: "A_GEMINI",
+      team_id: "T123",
+      event_id: "EvStop",
+      event_time: Number(currentTimestamp),
+      authorizations: [{ user_id: "U_APP" }],
+      event: {
+        type: "app_mention",
+        user: "U456",
+        text: "<@U_APP> /stop run_active",
+        ts: `${currentTimestamp}.000100`,
+        channel: "C123"
+      }
+    });
+    const timestamp = currentTimestamp;
+    const app = createSlackEventsApp({
+      slackApps: [{ appId: "A_GEMINI", signingSecret: "secret", agentId: "gemini" }],
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      stopRun,
+      reply,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      selfService: "stop",
+      outcome: "cancelled",
+      runId: "run_active"
+    });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(stopRun).toHaveBeenCalledWith({
+      teamId: "T123",
+      channelId: "C123",
+      runId: "run_active",
+      requestedBy: "slack:U456"
+    });
+    expect(reply).toHaveBeenCalledWith({
+      channelId: "C123",
+      threadTs: `${currentTimestamp}.000100`,
+      text: expect.stringContaining("Cancellation requested for run run_active.")
+    });
   });
 
   it("submits source-thread action replies from plain Slack messages", async () => {
@@ -162,8 +537,12 @@ describe("Slack events app", () => {
         teamId: "T123",
         channelId: "C123",
         messageTs: `${currentTimestamp}.000200`,
+        sourceDeliveryId: "EvAction",
+        slackEventId: "EvAction",
         slackAppId: "A_GEMINI",
         slackBotUserId: "U_APP",
+        webhookSignatureVerified: true,
+        signatureState: "verified",
         repoProvider: "github",
         owner: "acme",
         repo: "demo"
@@ -497,15 +876,19 @@ describe("Slack events app", () => {
     await expect(response.json()).resolves.toEqual({ error: "invalid_json" });
   });
 
-  it("rejects invalid Slack signatures", async () => {
+  it("rejects oversized Events API bodies before parsing payloads", async () => {
+    const rawBody = JSON.stringify({ type: "url_verification", challenge: "abc123" });
+    const timestamp = currentTimestamp;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const recordControlPlaneEvent = vi.fn(async () => {});
     const app = createSlackEventsApp({
       slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
       async resolveChannelBinding() {
         return null;
       },
-      async createRun() {
-        return { runId: "run_1" };
-      },
+      createRun,
+      recordControlPlaneEvent,
+      maxRequestBodyBytes: 8,
       now: () => now,
       clock: currentClock
     });
@@ -514,17 +897,124 @@ describe("Slack events app", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-slack-request-timestamp": "1710000000",
+        "content-length": String(Buffer.byteLength(rawBody)),
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({ error: "request_body_too_large", maxBytes: 8 });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.request_body_rejected",
+      severity: "warn",
+      subject: "slack:POST /slack/events",
+      payload: {
+        provider: "slack",
+        endpoint: "POST /slack/events",
+        reason: "request_body_too_large",
+        maxBytes: 8,
+        contentLength: String(Buffer.byteLength(rawBody))
+      }
+    });
+  });
+
+  it("returns 400 for payloads that do not match the consumed Slack schema", async () => {
+    const rawBody = JSON.stringify({ type: "event_callback", event: "not-an-object" });
+    const timestamp = currentTimestamp;
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const recordControlPlaneEvent = vi.fn(async () => {});
+    const app = createSlackEventsApp({
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      createRun,
+      recordControlPlaneEvent,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({
+          signingSecret: "secret",
+          timestamp,
+          rawBody
+        })
+      },
+      body: rawBody
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_request_body" });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.request_body_rejected",
+      severity: "warn",
+      subject: "slack:POST /slack/events",
+      payload: {
+        provider: "slack",
+        endpoint: "POST /slack/events",
+        reason: "invalid_request_body",
+        contentLength: null
+      }
+    });
+  });
+
+  it("rejects invalid Slack signatures", async () => {
+    const recordControlPlaneEvent = vi.fn(async () => {});
+    const app = createSlackEventsApp({
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      async createRun() {
+        return { runId: "run_1" };
+      },
+      recordControlPlaneEvent,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-slack-request-timestamp": currentTimestamp,
         "x-slack-signature": "v0=bad"
       },
       body: JSON.stringify({ type: "url_verification", challenge: "abc123" })
     });
 
     expect(response.status).toBe(401);
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: "slack:POST /slack/events",
+      payload: {
+        provider: "slack",
+        endpoint: "POST /slack/events",
+        reason: "invalid_signature",
+        hasSignature: true,
+        hasTimestamp: true
+      }
+    });
+    expect(JSON.stringify(recordControlPlaneEvent.mock.calls)).not.toContain("v0=bad");
   });
 
   it("rejects stale Slack timestamps", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const recordControlPlaneEvent = vi.fn(async () => {});
     const rawBody = JSON.stringify({
       type: "event_callback",
       api_app_id: "A_GEMINI",
@@ -547,6 +1037,7 @@ describe("Slack events app", () => {
         return { teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" };
       },
       createRun,
+      recordControlPlaneEvent,
       now: () => now,
       clock: () => (Number(currentTimestamp) + 301) * 1000
     });
@@ -568,6 +1059,55 @@ describe("Slack events app", () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: "stale_signature_timestamp" });
     expect(createRun).not.toHaveBeenCalled();
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: "slack:POST /slack/events",
+      payload: {
+        provider: "slack",
+        endpoint: "POST /slack/events",
+        reason: "stale_signature_timestamp",
+        hasSignature: true,
+        hasTimestamp: true
+      }
+    });
+  });
+
+  it("records missing Slack signature headers before rejecting requests", async () => {
+    const recordControlPlaneEvent = vi.fn(async () => {});
+    const app = createSlackEventsApp({
+      slackApps: [{ signingSecret: "secret", agentId: "opentag" }],
+      async resolveChannelBinding() {
+        return null;
+      },
+      async createRun() {
+        return { runId: "run_1" };
+      },
+      recordControlPlaneEvent,
+      now: () => now,
+      clock: currentClock
+    });
+
+    const response = await app.request("/slack/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "url_verification", challenge: "abc123" })
+    });
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "missing_signature_headers" });
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith({
+      type: "security.signature_failed",
+      severity: "warn",
+      subject: "slack:POST /slack/events",
+      payload: {
+        provider: "slack",
+        endpoint: "POST /slack/events",
+        reason: "missing_signature_headers",
+        hasSignature: false,
+        hasTimestamp: false
+      }
+    });
   });
 
   it("validates timestamp age with a five minute default tolerance", () => {

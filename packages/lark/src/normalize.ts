@@ -175,6 +175,8 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       chatId: input.chatId,
       messageId: input.messageId,
       chatType: input.chatType,
+      sourceDeliveryId: input.eventId,
+      larkEventId: input.eventId,
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...commandMetadata(command),

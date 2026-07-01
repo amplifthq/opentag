@@ -3,6 +3,7 @@ import { assertCommandSucceeded, nodeCommandRunner, type CommandResult, type Com
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
+import { resolveAgentSessionProfile } from "./session-profile.js";
 
 export type HermesExecutorOptions = {
   runner?: CommandRunner;
@@ -40,29 +41,6 @@ function buildPrompt(input: {
   ].join("\n");
 }
 
-function metadataString(metadata: Record<string, unknown> | undefined, key: string): string {
-  const value = metadata?.[key];
-  if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return "";
-}
-
-function sanitizeProfile(profile: string): string {
-  return profile.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-}
-
-function resolveProfile(input: {
-  profile?: string | undefined;
-  profileTemplate?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-}): string | undefined {
-  if (!input.profileTemplate) return input.profile;
-
-  const profile = input.profileTemplate.replace(/\{([^}]+)\}/g, (_match, key: string) => metadataString(input.metadata, key));
-  const sanitized = sanitizeProfile(profile);
-  return sanitized || input.profile;
-}
-
 export function createHermesExecutor(options: HermesExecutorOptions = {}): ExecutorAdapter {
   const runner = options.runner ?? nodeCommandRunner;
   const hermesCommand = options.hermesCommand ?? "hermes";
@@ -70,6 +48,32 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
   return {
     id: "hermes",
     displayName: "Hermes Executor",
+    capability: {
+      id: "hermes",
+      invocation: "spawn",
+      supportsProfile: true,
+      supportsStreaming: false,
+      supportsCancel: false,
+      supportsHookCompletion: false,
+      progressEvents: "audit",
+      approvalMode: "opentag_policy",
+      contextAccess: ["context_packet", "context_pointers", "workspace"],
+      promptAssembly: "executor_adapter",
+      writeAccess: "workspace",
+      conversationAccess: "request",
+      promptMutation: "none",
+      rawContextAccess: false,
+      writeActionAccess: "none",
+      workspaceIsolation: "branch",
+      requiredSecrets: [],
+      completionSignals: [
+        {
+          type: "process_exit",
+          required: true,
+          description: "OpenTag treats a successful `hermes -z` process exit as the normal completion signal."
+        }
+      ]
+    },
     async canRun(input) {
       try {
         const hermesVersion = await runner.run(hermesCommand, ["--version"], { cwd: input.workspacePath });
@@ -123,13 +127,17 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
         contextPacket: input.contextPacket
       });
 
-      const profile = resolveProfile({
-        profile: options.profile,
-        profileTemplate: options.profileTemplate,
-        metadata: input.metadata
+      const profile = resolveAgentSessionProfile({
+        ...(options.profile ? { profile: options.profile } : {}),
+        ...(options.profileTemplate ? { profileTemplate: options.profileTemplate } : {}),
+        metadata: {
+          ...(input.metadata ?? {}),
+          runId: input.runId
+        },
+        ...(input.sessionProfile ? { fallback: input.sessionProfile } : {})
       });
 
-      const args = [...(profile ? ["-p", profile] : []), "-z", prompt];
+      const args = [...(profile ? ["-p", profile.id] : []), "-z", prompt];
 
       let hermesResult: CommandResult | undefined;
       try {
