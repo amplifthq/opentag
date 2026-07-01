@@ -1,6 +1,6 @@
 {
   "name": "@opentag/cli",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "OpenTag command line interface.",
   "type": "module",
   "engines": {

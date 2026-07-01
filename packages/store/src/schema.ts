@@ -385,8 +385,6 @@ export function migrateSchema(sqlite: Database.Database): void {
       ON callback_deliveries(run_id);
     CREATE INDEX IF NOT EXISTS callback_deliveries_status_idx
       ON callback_deliveries(status);
-    CREATE UNIQUE INDEX IF NOT EXISTS callback_deliveries_idempotency_key_idx
-      ON callback_deliveries(idempotency_key);
     CREATE TABLE IF NOT EXISTS follow_up_requests (
       id TEXT PRIMARY KEY,
       source_event_id TEXT NOT NULL,

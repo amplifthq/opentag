@@ -1,6 +1,6 @@
 {
   "name": "@opentag/core",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Core OpenTag protocol schemas, types, JSON Schema, and mention parsing.",
   "type": "module",
   "engines": {

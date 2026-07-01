@@ -56,6 +56,32 @@ function larkEvent(input: { id: string; sourceEventId: string; owner?: string; r
 }
 
 describe("OpenTag repository", () => {
+  it("migrates legacy callback deliveries before creating the idempotency index", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE callback_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        uri TEXT NOT NULL,
+        body TEXT NOT NULL,
+        thread_key TEXT,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const columns = sqlite.prepare("PRAGMA table_info(callback_deliveries)").all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain("idempotency_key");
+    const indexes = sqlite.prepare("PRAGMA index_list(callback_deliveries)").all() as { name: string }[];
+    expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
+  });
+
   it("creates and claims a run once", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
