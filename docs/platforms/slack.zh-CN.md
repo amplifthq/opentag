@@ -24,7 +24,7 @@ Suggested action 按钮依赖 Slack Block Kit interactivity。需要在 Slack ap
 
 ## 推荐：本地 Socket Mode
 
-如果你想让这台电脑上的 `opentag start` 直接接收 Slack mention，选这个模式。
+如果你想让这台电脑上的本地 OpenTag runtime 直接接收 Slack mention，选这个模式。
 
 ### 你需要准备什么
 
@@ -218,11 +218,13 @@ https://app.slack.com/client/T0123456789/C0123456789
 
 ## 测试
 
-setup 完成后启动 OpenTag：
+setup 完成后，先确认 OpenTag 正在运行：
 
 ```bash
-opentag start
+opentag service status
 ```
+
+如果你选择的是前台终端模式，或者当前平台暂不支持后台 service，就改用 `opentag start`，并保持这个终端打开。
 
 然后在绑定的 Slack channel 里 mention 这个 app：
 

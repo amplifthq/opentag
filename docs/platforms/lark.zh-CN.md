@@ -93,10 +93,12 @@ receipt，OpenTag 会 fallback 到简短 received 卡片，避免用户完全没
 
 ## 测试
 
-设置完成后启动 OpenTag：
+设置完成后，先确认 OpenTag 正在运行：
 
 ```bash
-opentag start
+opentag service status
 ```
+
+如果你选择的是前台终端模式，或者当前平台暂不支持后台 service，就改用 `opentag start`，并保持这个终端打开。
 
 然后在 Lark/飞书里向个人代理应用发消息，或在群聊里 @ 它。OpenTag 应该会先添加轻量 received reaction，在本机运行你选择的编码代理，然后回到同一个会话里发送最终结果卡片。较长任务可能会在完成前显示一张可更新状态卡。

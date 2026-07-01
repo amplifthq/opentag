@@ -93,11 +93,14 @@ Do not grant webhook administration permission unless you specifically want a fu
 
 ## 3. Create A Public Tunnel
 
-Start OpenTag:
+Make sure OpenTag is running:
 
 ```bash
-opentag start
+opentag service status
 ```
+
+If you chose terminal mode, or if background service mode is unsupported on your
+platform, run `opentag start` instead and keep that terminal open.
 
 Then expose the GitHub listener with a tunnel, for example:
 
@@ -141,7 +144,7 @@ After saving, GitHub shows recent deliveries for this webhook. If OpenTag does n
 
 ## Test
 
-After setup, `opentag start`, and webhook creation, comment on an issue or pull request review thread:
+After setup, OpenTag startup, and webhook creation, comment on an issue or pull request review thread:
 
 ```text
 @opentag investigate this

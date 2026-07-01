@@ -46,22 +46,26 @@ OpenTag treats the thread where a request starts as the approval surface for age
 Requires Node.js 20 or newer.
 
 ```bash
-npm install -g @opentag/cli
+npm install -g @opentag/cli@latest
 opentag setup
 ```
 
-No global install:
+No global install for one-off terminal-mode checks:
 
 ```bash
 npx @opentag/cli setup
 ```
 
-`opentag setup` is the main entry point. It asks four practical questions:
+For background service mode, prefer the global install above so the service definition points at a stable CLI path instead of an `npx` temporary location.
 
-1. Where should OpenTag listen?
-2. Which coding agent should OpenTag use?
-3. Which local project should OpenTag work on?
-4. Which platform credentials should OpenTag save?
+`opentag setup` is the main entry point. It walks through the practical choices needed to run OpenTag locally:
+
+1. Which language should the CLI use?
+2. Where should OpenTag listen?
+3. Which coding agent should OpenTag use?
+4. Which local project should OpenTag work on?
+5. Which platform credentials should OpenTag save?
+6. How should OpenTag keep running?
 
 After setup saves the config, choose how OpenTag should run:
 
@@ -97,7 +101,7 @@ Use the published OpenTag CLI. Please:
 2. Install or run the published OpenTag CLI.
 3. Run opentag setup and help me choose Slack, GitHub, or Lark / Feishu, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
-5. When setup asks whether to start OpenTag, start it. If we skip that or need to restart later, use opentag start. Then verify the setup with opentag status or opentag doctor.
+5. When setup asks how OpenTag should run, choose the recommended background service option. Then verify with opentag service status and opentag doctor. If service mode is unsupported or I choose terminal mode, use opentag start and keep that terminal open.
 
 Do not invent credentials or secrets. Ask me before entering any token, app ID, channel ID, repository, or project path.
 ```
@@ -116,16 +120,22 @@ OpenTag also has an experimental Telegram adapter, but CLI setup is not ready fo
 
 ## What Runs Locally
 
-`opentag setup` can start the local foreground process for you at the end. `opentag setup --service` installs and starts the background service on macOS or Linux. Both modes start:
+`opentag setup` can install and start the recommended background service, run OpenTag in the current terminal, or save config without starting. `opentag setup --service` skips the final prompt and installs plus starts the background service on macOS or Linux. Both service and terminal modes start:
 
 - a local dispatcher
 - a local runner for the project you selected
 - the selected platform listener
 
-Stop it with:
+Stop terminal mode with:
 
 ```text
 Ctrl-C
+```
+
+Stop background service mode with:
+
+```bash
+opentag service stop
 ```
 
 OpenTag stores local config here:
@@ -163,8 +173,11 @@ OpenTag's CLI path is local-first.
 | --- | --- |
 | `opentag setup` | Create or update local OpenTag config, then offer to start it |
 | `opentag setup --service` | Create or update local OpenTag config, then install and start the background service |
-| `opentag start` | Manually start or restart the local OpenTag stack |
+| `opentag start` | Start the local OpenTag stack in the current terminal |
+| `opentag service start` | Start the installed background service |
+| `opentag service stop` | Stop the installed background service |
 | `opentag service status` | Show background service status and runtime readiness |
+| `opentag service logs` | Show recent background service logs |
 | `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
 | `opentag doctor` | Run deeper setup checks |

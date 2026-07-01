@@ -97,13 +97,16 @@ so users still get immediate liveness.
 
 ## Test
 
-After setup, start OpenTag:
+After setup, make sure OpenTag is running:
 
 ```bash
-opentag start
+opentag service status
 ```
 
-Then mention or message the Personal Agent from Lark / Feishu. OpenTag should
-add a lightweight received reaction, run the selected coding agent locally, and
-later post the final result card in the same conversation. Longer runs may also
-show one updateable status card before completion.
+If you chose terminal mode, or if background service mode is unsupported on your
+platform, run `opentag start` instead and keep that terminal open.
+
+Then mention or message the Personal Agent from Lark / Feishu. OpenTag should add
+a lightweight received reaction, run the selected coding agent locally, and later
+post the final result card in the same conversation. Longer runs may also show
+one updateable status card before completion.

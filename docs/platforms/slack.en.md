@@ -24,7 +24,7 @@ Suggested action buttons use Slack Block Kit interactivity. Enable **Interactivi
 
 ## Recommended: Local Socket Mode
 
-Choose this mode when you want `opentag start` on your computer to receive Slack mentions directly.
+Choose this mode when you want the local OpenTag runtime on your computer to receive Slack mentions directly.
 
 ### What You Need
 
@@ -218,11 +218,14 @@ Use your app's actual display name if you renamed it.
 
 ## Test
 
-After setup, start OpenTag:
+After setup, make sure OpenTag is running:
 
 ```bash
-opentag start
+opentag service status
 ```
+
+If you chose terminal mode, or if background service mode is unsupported on your
+platform, run `opentag start` instead and keep that terminal open.
 
 Then mention the app in the bound channel:
 

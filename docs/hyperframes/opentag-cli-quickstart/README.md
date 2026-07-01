@@ -6,10 +6,10 @@ This is a short tutorial video source for the published OpenTag CLI.
 
 1. Install the CLI.
 2. Run `opentag setup`.
-3. Start the local stack with `opentag start`.
+3. Choose the recommended background service option and verify it with `opentag service status`.
 4. Mention OpenTag from Lark, Slack, or GitHub.
 5. Approve important follow-up actions with `apply 1`.
-6. Point viewers back to `npm install -g @opentag/cli`, `opentag setup`, and `opentag start`.
+6. Point viewers back to `npm install -g @opentag/cli@latest`, `opentag setup`, and `opentag service status`. Mention `opentag start` as the terminal-mode fallback.
 
 The composition intentionally avoids deep architecture details. Its job is to teach the first usable loop.
 

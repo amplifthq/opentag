@@ -5,15 +5,15 @@ OpenTag CLI for setting up and running a local OpenTag stack.
 ## Install
 
 ```bash
-npm install -g @opentag/cli
+npm install -g @opentag/cli@latest
 ```
 
 Then run:
 
 ```bash
 opentag setup
+opentag service status
 opentag doctor
-opentag start
 ```
 
 `opentag setup` walks through the local configuration:
@@ -23,13 +23,19 @@ opentag start
 - Choose a coding agent: Codex, Claude Code, or Echo for local testing.
 - Configure platform credentials.
 - Bind the selected project.
-- Optionally start OpenTag immediately.
+- Choose how OpenTag should run.
+
+The recommended setup option keeps OpenTag running after the terminal closes. It installs and starts a background service on macOS and Linux. If background service mode is unsupported or you choose terminal mode, use `opentag start` and keep that terminal open.
 
 ## Commands
 
 ```bash
 opentag setup
 opentag start
+opentag service start
+opentag service stop
+opentag service status
+opentag service logs
 opentag status
 opentag doctor
 opentag config path
@@ -71,6 +77,8 @@ npx @opentag/cli doctor
 npx @opentag/cli setup
 npx @opentag/cli start
 ```
+
+For background service mode, install the CLI globally first so the generated service definition points at a stable CLI path instead of an `npx` temporary location.
 
 ## Local Development
 
