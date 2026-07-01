@@ -501,4 +501,16 @@ describe("OpenTag CLI service", () => {
     expect(logs).not.toContain("one\ntwo\nthree");
     expect(logs).toContain("err-one\nerr-two");
   });
+
+  it("does not load the beginning of oversized service logs", () => {
+    const home = tempDir();
+    const paths = servicePaths({}, { homeDir: home });
+    mkdirSync(paths.logsDir, { recursive: true });
+    writeFileSync(paths.stdoutPath, `old-start-marker\n${"x".repeat(1024 * 1024 + 32)}\nnear-end\nlast\n`);
+
+    const logs = formatServiceLogs({ lines: 10 }, { homeDir: home });
+
+    expect(logs).toContain("near-end\nlast");
+    expect(logs).not.toContain("old-start-marker");
+  });
 });

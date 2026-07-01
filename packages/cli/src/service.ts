@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -620,10 +620,25 @@ function tailFile(path: string, lines: number): string {
   if (!existsSync(path)) {
     return "(log file does not exist yet)";
   }
-  const content = readFileSync(path, "utf8");
-  const entries = content.split(/\r?\n/);
-  if (entries.at(-1) === "") entries.pop();
-  return entries.slice(-lines).join("\n") || "(log file is empty)";
+  const maxReadBytes = 1024 * 1024;
+  const fd = openSync(path, "r");
+  let content = "";
+  try {
+    const stats = fstatSync(fd);
+    const bytesToRead = Math.min(stats.size, maxReadBytes);
+    const position = stats.size - bytesToRead;
+    const buffer = Buffer.alloc(bytesToRead);
+    const bytesRead = readSync(fd, buffer, 0, bytesToRead, position);
+    content = buffer.subarray(0, bytesRead).toString("utf8");
+    const entries = content.split(/\r?\n/);
+    if (entries.at(-1) === "") entries.pop();
+    if (position > 0 && entries.length > 1) {
+      entries.shift();
+    }
+    return entries.slice(-lines).join("\n") || "(log file is empty)";
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function formatServiceLogs(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): string {

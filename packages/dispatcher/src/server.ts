@@ -1800,13 +1800,15 @@ function authorizeDispatcherRequest(input: {
 }): DispatcherAuthResult {
   if (!input.pairingToken && input.runnerTokens.length === 0) return { ok: true };
 
-  const scope = dispatcherAuthScope(input.request);
-  const pairingMatches = authMatches(input.request, input.pairingToken);
-  const runnerMatches = authMatchesAny(input.request, input.runnerTokens);
   const revokedRunnerToken = requestUsesRevokedRunnerToken({
     request: input.request,
     revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints
   });
+  if (revokedRunnerToken) return revokedRunnerTokenResult();
+
+  const scope = dispatcherAuthScope(input.request);
+  const pairingMatches = authMatches(input.request, input.pairingToken);
+  const runnerMatches = authMatchesAny(input.request, input.runnerTokens);
 
   if (scope === "pairing") {
     return pairingMatches ? { ok: true } : { ok: false, reason: "invalid_pairing_token" };
@@ -1814,13 +1816,11 @@ function authorizeDispatcherRequest(input: {
 
   if (scope === "runner_runtime") {
     if (input.runnerTokens.length > 0) {
-      if (revokedRunnerToken) return revokedRunnerTokenResult();
       return runnerMatches ? { ok: true } : { ok: false, reason: "invalid_runner_token" };
     }
     return pairingMatches ? { ok: true } : { ok: false, reason: "invalid_pairing_token" };
   }
 
-  if (revokedRunnerToken) return revokedRunnerTokenResult();
   return runnerMatches || pairingMatches ? { ok: true } : { ok: false, reason: "invalid_dispatcher_token" };
 }
 

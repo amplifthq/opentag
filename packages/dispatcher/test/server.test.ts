@@ -514,6 +514,25 @@ describe("dispatcher API", () => {
     expect(JSON.stringify(events)).not.toContain(tokenFingerprint("runner_old"));
   });
 
+  it("rejects a revoked pairing token before runner-runtime fallback auth", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_test",
+      revokedRunnerTokenFingerprints: [tokenFingerprint("pair_test")]
+    });
+
+    const claim = await app.request("/v1/runners/runner_1/claim", {
+      method: "POST",
+      headers: { authorization: "Bearer pair_test" }
+    });
+
+    expect(claim.status).toBe(401);
+    await expect(claim.json()).resolves.toMatchObject({
+      error: "unauthorized",
+      reason: "runner_token_revoked"
+    });
+  });
+
   it("summarizes repeated control-plane security events as alerts", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_test" });
 
