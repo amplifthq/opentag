@@ -65,6 +65,7 @@ export type SetupCommandOptions = {
   force?: boolean;
   yes?: boolean;
   start?: boolean;
+  service?: boolean;
 };
 
 export type SetupFlowDependencies = {

@@ -84,6 +84,7 @@ program
   .option("--force", "Overwrite an existing config")
   .option("--start", "Start OpenTag immediately after setup")
   .option("--no-start", "Do not ask to start OpenTag after setup")
+  .option("--service", "Install and start OpenTag as a background service after setup")
   .option("-y, --yes", "Skip setup confirmation")
   .action(runCliAction(runSetupCommand));
 
@@ -152,12 +153,12 @@ const serviceCommand = program.command("service").description("Install and contr
 
 serviceCommand
   .command("install")
-  .description("Install the OpenTag user LaunchAgent")
+  .description("Install the OpenTag background service")
   .option("--config <path>", "Config file path")
-  .option("--max-request-body-bytes <bytes>", "Persist dispatcher request body limit in the LaunchAgent")
-  .option("--rate-limit-window-ms <ms>", "Persist dispatcher rate-limit window in the LaunchAgent")
-  .option("--rate-limit-max-requests <n>", "Persist dispatcher rate-limit max requests in the LaunchAgent")
-  .option("--rate-limit-disabled", "Persist an explicit disabled dispatcher rate-limit state in the LaunchAgent")
+  .option("--max-request-body-bytes <bytes>", "Persist dispatcher request body limit in the service definition")
+  .option("--rate-limit-window-ms <ms>", "Persist dispatcher rate-limit window in the service definition")
+  .option("--rate-limit-max-requests <n>", "Persist dispatcher rate-limit max requests in the service definition")
+  .option("--rate-limit-disabled", "Persist an explicit disabled dispatcher rate-limit state in the service definition")
   .action(runCliAction(runServiceInstallCommand));
 
 serviceCommand

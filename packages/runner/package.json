@@ -1,6 +1,6 @@
 {
   "name": "@opentag/runner",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Executor contracts and built-in runner adapters for OpenTag.",
   "type": "module",
   "engines": {

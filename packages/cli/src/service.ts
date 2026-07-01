@@ -59,6 +59,7 @@ export type ServiceDependencies = {
   nodePath?: string;
   platform?: NodeJS.Platform;
   sleep?: (ms: number) => Promise<void>;
+  systemctl?: (args: string[]) => CommandResult;
   uid?: number;
 };
 
@@ -69,11 +70,14 @@ export type ServicePaths = {
   plistPath: string;
   stderrPath: string;
   stdoutPath: string;
+  unitPath: string;
 };
+
+export type ServiceController = "launchd" | "systemd" | "unsupported";
 
 export type ServiceStatusSummary = ServicePaths & {
   autostart: "enabled" | "disabled" | "unknown";
-  controller: "launchd" | "unsupported";
+  controller: ServiceController;
   installed: boolean;
   relayUrl?: string;
   relaySecurity: string[];
@@ -105,6 +109,20 @@ const launchAgentCliPath = [
   "/sbin"
 ].join(":");
 
+function linuxServiceCliPath(home: string): string {
+  return [
+    join(home, ".local", "bin"),
+    join(home, ".npm-global", "bin"),
+    join(home, ".bun", "bin"),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/local/sbin",
+    "/usr/sbin",
+    "/sbin"
+  ].join(":");
+}
+
 function loggerFrom(dependencies: ServiceDependencies): Pick<Console, "log"> {
   return dependencies.logger ?? console;
 }
@@ -121,6 +139,16 @@ function uidFrom(dependencies: ServiceDependencies): number {
   return dependencies.uid ?? (typeof process.getuid === "function" ? process.getuid() : 0);
 }
 
+export function serviceControllerForPlatform(platform: NodeJS.Platform = process.platform): ServiceController {
+  if (platform === "darwin") return "launchd";
+  if (platform === "linux") return "systemd";
+  return "unsupported";
+}
+
+function serviceControllerFrom(dependencies: ServiceDependencies): ServiceController {
+  return serviceControllerForPlatform(platformFrom(dependencies));
+}
+
 export function servicePaths(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
   const home = homeFrom(dependencies);
   const env = dependencies.env ?? process.env;
@@ -133,7 +161,8 @@ export function servicePaths(options: ServiceCommandOptions = {}, dependencies: 
     logsDir,
     plistPath: join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`),
     stdoutPath: join(logsDir, "opentag.log"),
-    stderrPath: join(logsDir, "opentag.err.log")
+    stderrPath: join(logsDir, "opentag.err.log"),
+    unitPath: join(home, ".config", "systemd", "user", `${SERVICE_LABEL}.service`)
   };
 }
 
@@ -211,10 +240,62 @@ export function buildLaunchAgentPlist(input: {
   ].join("\n");
 }
 
+function systemdQuote(value: string): string {
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("$", "\\$").replaceAll("%", "%%")}"`;
+}
+
+function systemdPathValue(value: string): string {
+  return value.replaceAll("%", "%%");
+}
+
+export function buildSystemdUserService(input: {
+  environment?: Record<string, string>;
+  execStart: string[];
+  label: string;
+  stderrPath: string;
+  stdoutPath: string;
+  workingDirectory: string;
+}): string {
+  const environment = Object.entries(input.environment ?? {}).map(
+    ([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`
+  );
+  return [
+    "[Unit]",
+    "Description=OpenTag local agent",
+    "After=network.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    `WorkingDirectory=${systemdQuote(input.workingDirectory)}`,
+    ...environment,
+    `ExecStart=${input.execStart.map(systemdQuote).join(" ")}`,
+    "Restart=always",
+    "RestartSec=3",
+    `StandardOutput=append:${systemdPathValue(input.stdoutPath)}`,
+    `StandardError=append:${systemdPathValue(input.stderrPath)}`,
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    ""
+  ].join("\n");
+}
+
 function launchctlRunner(dependencies: ServiceDependencies): (args: string[]) => CommandResult {
   if (dependencies.launchctl) return dependencies.launchctl;
   return (args: string[]) => {
     const result = spawnSync("launchctl", args, { encoding: "utf8" });
+    return {
+      status: result.status ?? 1,
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? ""
+    };
+  };
+}
+
+function systemctlRunner(dependencies: ServiceDependencies): (args: string[]) => CommandResult {
+  if (dependencies.systemctl) return dependencies.systemctl;
+  return (args: string[]) => {
+    const result = spawnSync("systemctl", ["--user", ...args], { encoding: "utf8" });
     return {
       status: result.status ?? 1,
       stdout: result.stdout ?? "",
@@ -232,13 +313,15 @@ function launchdServiceTarget(dependencies: ServiceDependencies): string {
 }
 
 function unsupportedMessage(): string {
-  return "OpenTag service management is not supported yet on this platform. Use `opentag start` in the foreground for now.";
+  return "OpenTag service management is supported on macOS and Linux only. Use `opentag start` in the foreground on this platform.";
 }
 
-function assertMacOS(dependencies: ServiceDependencies): void {
-  if (platformFrom(dependencies) !== "darwin") {
+function assertSupportedServiceController(dependencies: ServiceDependencies): ServiceController {
+  const controller = serviceControllerFrom(dependencies);
+  if (controller === "unsupported") {
     throw new Error(unsupportedMessage());
   }
+  return controller;
 }
 
 function runLaunchctlOrThrow(dependencies: ServiceDependencies, args: string[], action: string): CommandResult {
@@ -254,8 +337,29 @@ function launchctlDetail(result: CommandResult): string {
   return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
 }
 
+function systemctlDetail(result: CommandResult): string {
+  return [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+}
+
+function runSystemctlOrThrow(dependencies: ServiceDependencies, args: string[], action: string): CommandResult {
+  const result = systemctlRunner(dependencies)(args);
+  if (result.status !== 0) {
+    const detail = systemctlDetail(result);
+    throw new Error(`${action} failed${detail ? `: ${detail}` : "."}`);
+  }
+  return result;
+}
+
 function printLaunchdService(dependencies: ServiceDependencies): CommandResult {
   return launchctlRunner(dependencies)(["print", launchdServiceTarget(dependencies)]);
+}
+
+function systemdUnitName(): string {
+  return `${SERVICE_LABEL}.service`;
+}
+
+function printSystemdService(dependencies: ServiceDependencies): CommandResult {
+  return systemctlRunner(dependencies)(["is-active", systemdUnitName()]);
 }
 
 function sleepFrom(dependencies: ServiceDependencies): (ms: number) => Promise<void> {
@@ -286,6 +390,54 @@ async function waitForLaunchdUnloaded(
     if (Date.now() >= deadline) return false;
     await sleepFrom(dependencies)(intervalMs);
   }
+}
+
+async function waitForSystemdActive(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const intervalMs = input.intervalMs ?? 100;
+  const deadline = Date.now() + (input.timeoutMs ?? 1_500);
+  while (true) {
+    const result = printSystemdService(dependencies);
+    if (result.status === 0 && result.stdout.trim() === "active") return true;
+    if (Date.now() >= deadline) return false;
+    await sleepFrom(dependencies)(intervalMs);
+  }
+}
+
+async function waitForSystemdInactive(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const intervalMs = input.intervalMs ?? 100;
+  const deadline = Date.now() + (input.timeoutMs ?? 1_500);
+  while (true) {
+    const result = printSystemdService(dependencies);
+    if (result.status !== 0 || result.stdout.trim() !== "active") return true;
+    if (Date.now() >= deadline) return false;
+    await sleepFrom(dependencies)(intervalMs);
+  }
+}
+
+async function waitForServiceLoaded(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const controller = serviceControllerFrom(dependencies);
+  if (controller === "launchd") return waitForLaunchdLoaded(dependencies, input);
+  if (controller === "systemd") return waitForSystemdActive(dependencies, input);
+  return false;
+}
+
+async function waitForServiceUnloaded(
+  dependencies: ServiceDependencies,
+  input: { intervalMs?: number; timeoutMs?: number } = {}
+): Promise<boolean> {
+  const controller = serviceControllerFrom(dependencies);
+  if (controller === "launchd") return waitForLaunchdUnloaded(dependencies, input);
+  if (controller === "systemd") return waitForSystemdInactive(dependencies, input);
+  return true;
 }
 
 function serviceWorkingDirectory(configPath: string): string {
@@ -371,36 +523,58 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
   return lines.length > 1 ? lines : [...lines, "  none configured"];
 }
 
-function launchAgentEnvironment(options: ServiceCommandOptions, paths: ServicePaths): Record<string, string> {
+function serviceCliPath(dependencies: ServiceDependencies): string {
+  const controller = serviceControllerFrom(dependencies);
+  return controller === "systemd" ? linuxServiceCliPath(homeFrom(dependencies)) : launchAgentCliPath;
+}
+
+function serviceEnvironment(options: ServiceCommandOptions, paths: ServicePaths, dependencies: ServiceDependencies): Record<string, string> {
   return {
     OPENTAG_CONFIG_PATH: paths.configPath,
-    PATH: launchAgentCliPath,
+    PATH: serviceCliPath(dependencies),
     ...serviceHardeningEnvironment(options)
   };
 }
 
 export function installService(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
+  const controller = assertSupportedServiceController(dependencies);
   const paths = servicePaths(options, dependencies);
   const workingDirectory = serviceWorkingDirectory(paths.configPath);
-  mkdirSync(dirname(paths.plistPath), { recursive: true });
   ensurePrivateDirectory(paths.logsDir);
-  const plist = buildLaunchAgentPlist({
+  if (controller === "launchd") {
+    mkdirSync(dirname(paths.plistPath), { recursive: true });
+    const plist = buildLaunchAgentPlist({
+      label: paths.label,
+      programArguments: serviceProgramArguments(options, dependencies),
+      runAtLoad: true,
+      keepAlive: true,
+      stdoutPath: paths.stdoutPath,
+      stderrPath: paths.stderrPath,
+      workingDirectory,
+      environment: serviceEnvironment(options, paths, dependencies)
+    });
+    writeFileSync(paths.plistPath, plist, { mode: 0o644 });
+    return paths;
+  }
+  mkdirSync(dirname(paths.unitPath), { recursive: true });
+  const unit = buildSystemdUserService({
     label: paths.label,
-    programArguments: serviceProgramArguments(options, dependencies),
-    runAtLoad: true,
-    keepAlive: true,
+    execStart: serviceProgramArguments(options, dependencies),
     stdoutPath: paths.stdoutPath,
     stderrPath: paths.stderrPath,
     workingDirectory,
-    environment: launchAgentEnvironment(options, paths)
+    environment: serviceEnvironment(options, paths, dependencies)
   });
-  writeFileSync(paths.plistPath, plist, { mode: 0o644 });
+  writeFileSync(paths.unitPath, unit, { mode: 0o644 });
+  runSystemctlOrThrow(dependencies, ["daemon-reload"], "systemctl --user daemon-reload");
+  runSystemctlOrThrow(dependencies, ["enable", systemdUnitName()], "systemctl --user enable");
   return paths;
 }
 
-function installed(paths: ServicePaths): boolean {
-  return existsSync(paths.plistPath);
+function installed(paths: ServicePaths, controller: ServiceController): boolean {
+  if (controller === "launchd") return existsSync(paths.plistPath);
+  if (controller === "systemd") return existsSync(paths.unitPath);
+  return false;
 }
 
 function isNotLoaded(result: CommandResult): boolean {
@@ -408,11 +582,21 @@ function isNotLoaded(result: CommandResult): boolean {
   return text.includes("no such process") || text.includes("could not find service") || text.includes("service is not loaded");
 }
 
+function isSystemdNotLoaded(result: CommandResult): boolean {
+  const text = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return text.includes("could not be found") || text.includes("not loaded") || text.includes("not-found") || text.includes("no such");
+}
+
 export function startService(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
+  const controller = assertSupportedServiceController(dependencies);
   const paths = servicePaths(options, dependencies);
-  if (!installed(paths)) {
+  if (!installed(paths, controller)) {
     throw new Error(`OpenTag service is not installed. Run \`opentag service install --config ${paths.configPath}\` first.`);
+  }
+  if (controller === "systemd") {
+    runSystemctlOrThrow(dependencies, ["daemon-reload"], "systemctl --user daemon-reload");
+    runSystemctlOrThrow(dependencies, ["start", systemdUnitName()], "systemctl --user start");
+    return paths;
   }
   const launchctl = launchctlRunner(dependencies);
   const bootstrap = launchctl(["bootstrap", launchdDomain(dependencies), paths.plistPath]);
@@ -432,9 +616,17 @@ export function startService(options: ServiceCommandOptions = {}, dependencies: 
 }
 
 export function stopService(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
+  const controller = assertSupportedServiceController(dependencies);
   const paths = servicePaths(options, dependencies);
-  if (!installed(paths)) return paths;
+  if (!installed(paths, controller)) return paths;
+  if (controller === "systemd") {
+    const result = systemctlRunner(dependencies)(["stop", systemdUnitName()]);
+    if (result.status !== 0 && !isSystemdNotLoaded(result)) {
+      const detail = systemctlDetail(result);
+      throw new Error(`systemctl --user stop failed${detail ? `: ${detail}` : "."}`);
+    }
+    return paths;
+  }
   const launchctl = launchctlRunner(dependencies);
   const first = launchctl(["bootout", launchdServiceTarget(dependencies)]);
   if (first.status !== 0) {
@@ -449,23 +641,42 @@ export function stopService(options: ServiceCommandOptions = {}, dependencies: S
 }
 
 export function uninstallService(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
+  const controller = assertSupportedServiceController(dependencies);
   const paths = stopService(options, dependencies);
-  rmSync(paths.plistPath, { force: true });
+  if (controller === "launchd") {
+    rmSync(paths.plistPath, { force: true });
+    return paths;
+  }
+  const disabled = systemctlRunner(dependencies)(["disable", systemdUnitName()]);
+  if (disabled.status !== 0 && !isSystemdNotLoaded(disabled)) {
+    const detail = systemctlDetail(disabled);
+    throw new Error(`systemctl --user disable failed${detail ? `: ${detail}` : "."}`);
+  }
+  rmSync(paths.unitPath, { force: true });
+  runSystemctlOrThrow(dependencies, ["daemon-reload"], "systemctl --user daemon-reload");
   return paths;
 }
 
 export function enableServiceAutostart(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
-  const paths = installed(servicePaths(options, dependencies)) ? servicePaths(options, dependencies) : installService(options, dependencies);
+  const controller = assertSupportedServiceController(dependencies);
+  const candidate = servicePaths(options, dependencies);
+  const paths = installed(candidate, controller) ? candidate : installService(options, dependencies);
+  if (controller === "systemd") {
+    runSystemctlOrThrow(dependencies, ["enable", systemdUnitName()], "systemctl --user enable");
+    return paths;
+  }
   runLaunchctlOrThrow(dependencies, ["enable", launchdServiceTarget(dependencies)], "launchctl enable");
   return paths;
 }
 
 export function disableServiceAutostart(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServicePaths {
-  assertMacOS(dependencies);
+  const controller = assertSupportedServiceController(dependencies);
   const paths = servicePaths(options, dependencies);
-  if (installed(paths)) {
+  if (installed(paths, controller)) {
+    if (controller === "systemd") {
+      runSystemctlOrThrow(dependencies, ["disable", systemdUnitName()], "systemctl --user disable");
+      return paths;
+    }
     runLaunchctlOrThrow(dependencies, ["disable", launchdServiceTarget(dependencies)], "launchctl disable");
   }
   return paths;
@@ -473,7 +684,15 @@ export function disableServiceAutostart(options: ServiceCommandOptions = {}, dep
 
 function serviceAutostart(paths: ServicePaths, dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
   if (!isInstalled) return "disabled";
-  if (platformFrom(dependencies) !== "darwin") return "unknown";
+  const controller = serviceControllerFrom(dependencies);
+  if (controller === "systemd") {
+    const result = systemctlRunner(dependencies)(["is-enabled", systemdUnitName()]);
+    const text = `${result.stdout}\n${result.stderr}`.trim().toLowerCase();
+    if (result.status === 0 && text.includes("enabled")) return "enabled";
+    if (text.includes("disabled") || text.includes("not-found") || text.includes("could not be found")) return "disabled";
+    return "unknown";
+  }
+  if (controller !== "launchd") return "unknown";
   const result = launchctlRunner(dependencies)(["print-disabled", launchdDomain(dependencies)]);
   if (result.status !== 0) return "unknown";
   const escapedLabel = SERVICE_LABEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -486,12 +705,15 @@ function serviceAutostart(paths: ServicePaths, dependencies: ServiceDependencies
 
 export function getServiceStatus(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServiceStatusSummary {
   const paths = servicePaths(options, dependencies);
-  const controller = platformFrom(dependencies) === "darwin" ? "launchd" : "unsupported";
-  const isInstalled = installed(paths);
+  const controller = serviceControllerFrom(dependencies);
+  const isInstalled = installed(paths, controller);
   let running: ServiceStatusSummary["running"] = isInstalled ? "stopped" : "unknown";
   if (controller === "launchd" && isInstalled) {
     const result = launchctlRunner(dependencies)(["print", launchdServiceTarget(dependencies)]);
     running = result.status === 0 ? "running" : "stopped";
+  } else if (controller === "systemd" && isInstalled) {
+    const result = systemctlRunner(dependencies)(["is-active", systemdUnitName()]);
+    running = result.status === 0 && result.stdout.trim() === "active" ? "running" : "stopped";
   }
 
   let runtimeMode: ServiceStatusSummary["runtimeMode"] = "unknown";
@@ -548,12 +770,43 @@ function readLaunchAgentEnvironment(paths: ServicePaths): Record<string, string>
   );
 }
 
+function unescapeSystemdQuotedValue(value: string): string {
+  return value
+    .replaceAll("%%", "%")
+    .replaceAll('\\"', '"')
+    .replaceAll("\\$", "$")
+    .replaceAll("\\\\", "\\");
+}
+
+function readSystemdEnvironment(paths: ServicePaths): Record<string, string> {
+  if (!existsSync(paths.unitPath)) return {};
+  const unit = readFileSync(paths.unitPath, "utf8");
+  return Object.fromEntries(
+    unit.split(/\r?\n/).flatMap((line) => {
+      const match = line.match(/^Environment=(?:"((?:\\.|[^"])*)"|(.+))$/);
+      const raw = match?.[1] ?? match?.[2];
+      if (!raw) return [];
+      const value = unescapeSystemdQuotedValue(raw);
+      const separator = value.indexOf("=");
+      if (separator <= 0) return [];
+      return [[value.slice(0, separator), value.slice(separator + 1)]];
+    })
+  );
+}
+
+function readServiceEnvironment(paths: ServicePaths): Record<string, string> {
+  return {
+    ...readLaunchAgentEnvironment(paths),
+    ...readSystemdEnvironment(paths)
+  };
+}
+
 function formatServiceHardening(paths: ServicePaths): string[] {
-  const environment = readLaunchAgentEnvironment(paths);
+  const environment = readServiceEnvironment(paths);
   const configured = serviceHardeningEnvKeys
     .filter((key) => environment[key])
     .map((key) => `  ${key}=${environment[key]}`);
-  return ["Service Hardening:", ...(configured.length ? configured : ["  dispatcher hardening env not configured in LaunchAgent"])];
+  return ["Service Hardening:", ...(configured.length ? configured : ["  dispatcher hardening env not configured in service definition"])];
 }
 
 function doctorCounts(checks: DoctorCheck[]): { fail: number; warn: number } {
@@ -653,6 +906,12 @@ export async function getServiceStatusWithRuntimeReadiness(
 }
 
 export function formatServiceStatus(summary: ServiceStatusSummary): string {
+  const definitionLine =
+    summary.controller === "launchd"
+      ? `LaunchAgent: ${summary.plistPath}`
+      : summary.controller === "systemd"
+        ? `Systemd unit: ${summary.unitPath}`
+        : undefined;
   return [
     `Controller: ${summary.controller}`,
     `Installed: ${summary.installed ? "yes" : "no"}`,
@@ -668,7 +927,7 @@ export function formatServiceStatus(summary: ServiceStatusSummary): string {
     ...summary.secrets,
     ...summary.capabilities,
     ...summary.serviceHardening,
-    `LaunchAgent: ${summary.plistPath}`,
+    ...(definitionLine ? [definitionLine] : []),
     `Stdout log: ${summary.stdoutPath}`,
     `Stderr log: ${summary.stderrPath}`,
     ...(summary.controller === "unsupported" ? [unsupportedMessage()] : [])
@@ -722,14 +981,24 @@ export function formatServiceLogs(options: ServiceCommandOptions = {}, dependenc
 
 export async function runServiceInstallCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   const paths = installService(options, dependencies);
-  loggerFrom(dependencies).log(`OpenTag service installed: ${paths.plistPath}`);
+  const controller = serviceControllerFrom(dependencies);
+  loggerFrom(dependencies).log(`OpenTag service installed: ${controller === "systemd" ? paths.unitPath : paths.plistPath}`);
   loggerFrom(dependencies).log("It will start at login. Run `opentag service start` to start it now.");
+}
+
+export async function installAndStartService(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): Promise<ServicePaths> {
+  installService(options, dependencies);
+  const paths = startService(options, dependencies);
+  if (!(await waitForServiceLoaded(dependencies))) {
+    throw new Error("OpenTag service start did not leave the service manager running. Run `opentag service status` and `opentag service logs` for details.");
+  }
+  return paths;
 }
 
 export async function runServiceStartCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   const paths = startService(options, dependencies);
-  if (!(await waitForLaunchdLoaded(dependencies))) {
-    throw new Error("OpenTag service start did not leave launchd loaded. Run `opentag service status` and `opentag service logs` for details.");
+  if (!(await waitForServiceLoaded(dependencies))) {
+    throw new Error("OpenTag service start did not leave the service manager running. Run `opentag service status` and `opentag service logs` for details.");
   }
   loggerFrom(dependencies).log(`OpenTag service started: ${paths.label}`);
 }
@@ -741,22 +1010,23 @@ export async function runServiceStopCommand(options: ServiceCommandOptions, depe
 
 export async function runServiceRestartCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   stopService(options, dependencies);
-  await waitForLaunchdUnloaded(dependencies, { timeoutMs: 1_000 });
+  await waitForServiceUnloaded(dependencies, { timeoutMs: 1_000 });
   let paths = startService(options, dependencies);
-  let loaded = await waitForLaunchdLoaded(dependencies, { timeoutMs: 500 });
+  let loaded = await waitForServiceLoaded(dependencies, { timeoutMs: 500 });
   if (!loaded) {
     paths = startService(options, dependencies);
-    loaded = await waitForLaunchdLoaded(dependencies);
+    loaded = await waitForServiceLoaded(dependencies);
   }
   if (!loaded) {
-    throw new Error("OpenTag service restart did not leave launchd loaded. Run `opentag service status` and `opentag service logs` for details.");
+    throw new Error("OpenTag service restart did not leave the service manager running. Run `opentag service status` and `opentag service logs` for details.");
   }
   loggerFrom(dependencies).log(`OpenTag service restarted: ${paths.label}`);
 }
 
 export async function runServiceUninstallCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {
   const paths = uninstallService(options, dependencies);
-  loggerFrom(dependencies).log(`OpenTag service uninstalled: ${paths.plistPath}`);
+  const controller = serviceControllerFrom(dependencies);
+  loggerFrom(dependencies).log(`OpenTag service uninstalled: ${controller === "systemd" ? paths.unitPath : paths.plistPath}`);
 }
 
 export async function runServiceStatusCommand(options: ServiceCommandOptions, dependencies: ServiceDependencies = {}): Promise<void> {

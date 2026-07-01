@@ -469,9 +469,11 @@ describe("OpenTag CLI setup", () => {
     expect(completeNote).not.toContain("path_");
   });
 
-  it("starts OpenTag directly after interactive setup when confirmed", async () => {
+  it("defaults interactive setup to the background service run mode", async () => {
     const configPath = join(tempDir(), "config.json");
     const startOpenTag = vi.fn(async () => undefined);
+    const startOpenTagService = vi.fn(async () => undefined);
+    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
 
     await runSetupCommand(
       {
@@ -485,12 +487,249 @@ describe("OpenTag CLI setup", () => {
         force: true
       },
       {
-        prompts: testPrompts(),
-        startOpenTag
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "How should OpenTag run?") {
+              runModePrompts.push({
+                message: input.message,
+                initialValue: input.initialValue,
+                labels: input.options.map((option) => option.label)
+              });
+            }
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        }),
+        startOpenTag,
+        startOpenTagService
+      }
+    );
+
+    expect(startOpenTag).not.toHaveBeenCalled();
+    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
+    expect(runModePrompts).toEqual([
+      {
+        message: "How should OpenTag run?",
+        initialValue: "service",
+        labels: [
+          "Keep running after I close this terminal (recommended)",
+          "Run only in this terminal",
+          "Do not start now"
+        ]
+      }
+    ]);
+  });
+
+  it("uses user-facing Chinese labels for the setup run mode prompt", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTagService = vi.fn(async () => undefined);
+    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "zh-CN",
+        executor: "echo",
+        larkSetup: "manual",
+        tenant: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true
+      },
+      {
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "OpenTag 要如何运行？") {
+              runModePrompts.push({
+                message: input.message,
+                initialValue: input.initialValue,
+                labels: input.options.map((option) => option.label)
+              });
+            }
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        }),
+        startOpenTagService
+      }
+    );
+
+    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
+    expect(runModePrompts).toEqual([
+      {
+        message: "OpenTag 要如何运行？",
+        initialValue: "service",
+        labels: ["关闭这个终端后继续运行（推荐）", "只在当前终端里运行", "暂时不启动"]
+      }
+    ]);
+  });
+
+  it("defaults unsupported service platforms to terminal run mode", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTag = vi.fn(async () => undefined);
+    const startOpenTagService = vi.fn(async () => undefined);
+    const runModePrompts: Array<{ message: string; initialValue?: string; labels: string[] }> = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        tenant: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true
+      },
+      {
+        platform: "win32",
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "How should OpenTag run?") {
+              runModePrompts.push({
+                message: input.message,
+                initialValue: input.initialValue,
+                labels: input.options.map((option) => option.label)
+              });
+            }
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        }),
+        startOpenTag,
+        startOpenTagService
       }
     );
 
     expect(startOpenTag).toHaveBeenCalledWith({ config: configPath });
+    expect(startOpenTagService).not.toHaveBeenCalled();
+    expect(runModePrompts).toEqual([
+      {
+        message: "How should OpenTag run?",
+        initialValue: "terminal",
+        labels: ["Run only in this terminal", "Do not start now"]
+      }
+    ]);
+  });
+
+  it("starts OpenTag directly after interactive setup when terminal mode is selected", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTag = vi.fn(async () => undefined);
+    const startOpenTagService = vi.fn(async () => undefined);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        tenant: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true
+      },
+      {
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "How should OpenTag run?") return "terminal";
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        }),
+        startOpenTag,
+        startOpenTagService
+      }
+    );
+
+    expect(startOpenTag).toHaveBeenCalledWith({ config: configPath });
+    expect(startOpenTagService).not.toHaveBeenCalled();
+  });
+
+  it("does not start OpenTag after setup when later mode is selected", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTag = vi.fn(async () => undefined);
+    const startOpenTagService = vi.fn(async () => undefined);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        tenant: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        force: true
+      },
+      {
+        prompts: testPrompts({
+          async select(input) {
+            if (input.message === "How should OpenTag run?") return "later";
+            return input.initialValue ?? input.options[0]!.value;
+          }
+        }),
+        startOpenTag,
+        startOpenTagService
+      }
+    );
+
+    expect(startOpenTag).not.toHaveBeenCalled();
+    expect(startOpenTagService).not.toHaveBeenCalled();
+  });
+
+  it("installs and starts the background service after setup when requested", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const startOpenTag = vi.fn(async () => undefined);
+    const startOpenTagService = vi.fn(async () => undefined);
+    const confirmMessages: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        executor: "echo",
+        larkSetup: "manual",
+        tenant: "lark",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
+        service: true,
+        force: true
+      },
+      {
+        prompts: testPrompts({
+          async confirm(input) {
+            confirmMessages.push(input.message);
+            return true;
+          }
+        }),
+        startOpenTag,
+        startOpenTagService
+      }
+    );
+
+    expect(startOpenTag).not.toHaveBeenCalled();
+    expect(startOpenTagService).toHaveBeenCalledWith({ config: configPath });
+    expect(confirmMessages).toContain("Write this OpenTag config?");
+    expect(confirmMessages).not.toContain("Start OpenTag now?");
+  });
+
+  it("rejects conflicting foreground and service setup start modes", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          executor: "echo",
+          larkSetup: "manual",
+          tenant: "lark",
+          larkAppId: "cli_manual",
+          larkAppSecret: "secret_manual",
+          service: true,
+          start: false,
+          force: true
+        },
+        {
+          prompts: testPrompts()
+        }
+      )
+    ).rejects.toThrow("--service cannot be combined with --start or --no-start.");
   });
 
   it("labels Echo as dev/test only in the coding agent prompt", async () => {

@@ -6,13 +6,16 @@ import { describe, expect, it, vi } from "vitest";
 import { writeCliConfigAtomic, type OpenTagCliConfig } from "../src/config.js";
 import {
   buildLaunchAgentPlist,
+  buildSystemdUserService,
   formatServiceLogs,
   formatServiceStatus,
   getServiceStatus,
   getServiceStatusWithRuntimeReadiness,
+  installAndStartService,
   installService,
   runServiceRestartCommand,
   runServiceStatusCommand,
+  serviceControllerForPlatform,
   servicePaths,
   type CommandResult
 } from "../src/service.js";
@@ -163,6 +166,34 @@ describe("OpenTag CLI service", () => {
     expect(plist).toContain("<key>WorkingDirectory</key>");
   });
 
+  it("generates a systemd user service unit with service run arguments and log paths", () => {
+    const unit = buildSystemdUserService({
+      environment: {
+        OPENTAG_CONFIG_PATH: "/tmp/config.json",
+        OPENTAG_MAX_REQUEST_BODY_BYTES: "4096",
+        PATH: "/usr/local/bin:/usr/bin:/bin"
+      },
+      execStart: ["/usr/local/bin/node", "/opt/opentag/dist/index.js", "service", "run", "--mode", "background"],
+      label: "im.opentag.agent",
+      stderrPath: "/tmp/opentag.err.log",
+      stdoutPath: "/tmp/opentag.log",
+      workingDirectory: "/home/mingyoo/opentag"
+    });
+
+    expect(unit).toContain("[Unit]");
+    expect(unit).toContain("Description=OpenTag local agent");
+    expect(unit).toContain("[Service]");
+    expect(unit).toContain('WorkingDirectory="/home/mingyoo/opentag"');
+    expect(unit).toContain('ExecStart="/usr/local/bin/node" "/opt/opentag/dist/index.js" "service" "run" "--mode" "background"');
+    expect(unit).toContain('Environment="OPENTAG_CONFIG_PATH=/tmp/config.json"');
+    expect(unit).toContain('Environment="OPENTAG_MAX_REQUEST_BODY_BYTES=4096"');
+    expect(unit).toContain("Restart=always");
+    expect(unit).toContain("StandardOutput=append:/tmp/opentag.log");
+    expect(unit).toContain("StandardError=append:/tmp/opentag.err.log");
+    expect(unit).toContain("[Install]");
+    expect(unit).toContain("WantedBy=default.target");
+  });
+
   it("installs the macOS LaunchAgent plist without starting launchctl", () => {
     const home = tempDir();
     const configPath = configPathIn(home);
@@ -187,6 +218,69 @@ describe("OpenTag CLI service", () => {
     expect(plist).toContain(`<string>${configPath}</string>`);
     expect(plist).toContain(`<string>${paths.stdoutPath}</string>`);
     expect(plist).toContain(`<string>${paths.stderrPath}</string>`);
+  });
+
+  it("installs and starts the LaunchAgent for setup service mode", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    const calls: string[] = [];
+
+    const paths = await installAndStartService(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        nodePath: "/usr/local/bin/node",
+        cliEntry: "/opt/opentag/dist/index.js",
+        uid: 501,
+        launchctl(args) {
+          calls.push(args.join(" "));
+          return { status: 0, stdout: "service = im.opentag.agent", stderr: "" };
+        },
+        sleep: async () => undefined
+      }
+    );
+
+    const plist = readFileSync(paths.plistPath, "utf8");
+    expect(plist).toContain("<string>/opt/opentag/dist/index.js</string>");
+    expect(calls).toContain(`bootstrap gui/501 ${paths.plistPath}`);
+    expect(calls).toContain("kickstart -k gui/501/im.opentag.agent");
+    expect(calls).toContain("print gui/501/im.opentag.agent");
+  });
+
+  it("installs and starts the Linux systemd user service for setup service mode", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    const calls: string[] = [];
+
+    const paths = await installAndStartService(
+      { config: configPath },
+      {
+        platform: "linux",
+        homeDir: home,
+        nodePath: "/usr/local/bin/node",
+        cliEntry: "/opt/opentag/dist/index.js",
+        systemctl(args) {
+          calls.push(args.join(" "));
+          if (args[0] === "is-active") return { status: 0, stdout: "active\n", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        sleep: async () => undefined
+      }
+    );
+
+    const unit = readFileSync(paths.unitPath, "utf8");
+    expect(unit).toContain('ExecStart="/usr/local/bin/node" "/opt/opentag/dist/index.js" "service" "run" "--mode" "background" "--config"');
+    expect(unit).toContain(`"${configPath}"`);
+    expect(calls).toEqual([
+      "daemon-reload",
+      "enable im.opentag.agent.service",
+      "daemon-reload",
+      "start im.opentag.agent.service",
+      "is-active im.opentag.agent.service"
+    ]);
   });
 
   it("installs the LaunchAgent with a conservative CLI PATH for executor binaries", () => {
@@ -571,12 +665,57 @@ describe("OpenTag CLI service", () => {
     expect(lines.join("\n")).toContain("OpenTag runtime: ready");
   });
 
-  it("reports unsupported service management without crashing on non-macOS", () => {
+  it("reports Linux systemd user service status", async () => {
     const home = tempDir();
-    const summary = getServiceStatus({}, { platform: "linux", homeDir: home });
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    await installAndStartService(
+      { config: configPath },
+      {
+        platform: "linux",
+        homeDir: home,
+        systemctl(args) {
+          if (args[0] === "is-active") return { status: 0, stdout: "active\n", stderr: "" };
+          if (args[0] === "is-enabled") return { status: 0, stdout: "enabled\n", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        sleep: async () => undefined
+      }
+    );
+
+    const summary = getServiceStatus(
+      { config: configPath },
+      {
+        platform: "linux",
+        homeDir: home,
+        systemctl(args) {
+          if (args[0] === "is-active") return { status: 0, stdout: "active\n", stderr: "" };
+          if (args[0] === "is-enabled") return { status: 0, stdout: "enabled\n", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        }
+      }
+    );
+
+    expect(summary.controller).toBe("systemd");
+    expect(summary.installed).toBe(true);
+    expect(summary.running).toBe("running");
+    expect(summary.autostart).toBe("enabled");
+    expect(formatServiceStatus(summary)).toContain("Controller: systemd");
+    expect(formatServiceStatus(summary)).toContain("Systemd unit:");
+  });
+
+  it("reports unsupported service management without crashing on unsupported platforms", () => {
+    const home = tempDir();
+    const summary = getServiceStatus({}, { platform: "win32", homeDir: home });
 
     expect(summary.controller).toBe("unsupported");
-    expect(formatServiceStatus(summary)).toContain("service management is not supported yet");
+    expect(formatServiceStatus(summary)).toContain("service management is supported on macOS and Linux only");
+  });
+
+  it("maps service controllers by platform", () => {
+    expect(serviceControllerForPlatform("darwin")).toBe("launchd");
+    expect(serviceControllerForPlatform("linux")).toBe("systemd");
+    expect(serviceControllerForPlatform("win32")).toBe("unsupported");
   });
 
   it("includes relay security checks in service status", () => {

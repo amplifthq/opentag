@@ -48,14 +48,12 @@ Requires Node.js 20 or newer.
 ```bash
 npm install -g @opentag/cli
 opentag setup
-opentag doctor
 ```
 
 No global install:
 
 ```bash
 npx @opentag/cli setup
-npx @opentag/cli doctor
 ```
 
 `opentag setup` is the main entry point. It asks four practical questions:
@@ -65,7 +63,19 @@ npx @opentag/cli doctor
 3. Which local project should OpenTag work on?
 4. Which platform credentials should OpenTag save?
 
-After setup saves the config, it asks whether to start OpenTag now. If you skip that prompt or stop OpenTag later, run `opentag start` manually.
+After setup saves the config, choose how OpenTag should run:
+
+1. Keep running after I close this terminal (recommended)
+2. Run only in this terminal
+3. Do not start now
+
+For scripted setup, use `--service` to choose the recommended background mode without the final prompt:
+
+```bash
+opentag setup --service
+```
+
+`--service` installs and starts the local background service after setup. Background service mode uses LaunchAgent on macOS and `systemd --user` on Linux; on other platforms, use terminal mode with `opentag start` for now. If you skip startup or stop OpenTag later, run `opentag start` manually for terminal mode or `opentag service start` for background mode.
 
 Once OpenTag is running, mention it from the connected platform:
 
@@ -106,7 +116,7 @@ OpenTag also has an experimental Telegram adapter, but CLI setup is not ready fo
 
 ## What Runs Locally
 
-`opentag setup` can start the local foreground process for you at the end. `opentag start` is the manual start or restart command. It starts:
+`opentag setup` can start the local foreground process for you at the end. `opentag setup --service` installs and starts the background service on macOS or Linux. Both modes start:
 
 - a local dispatcher
 - a local runner for the project you selected
@@ -152,7 +162,9 @@ OpenTag's CLI path is local-first.
 | Command | What it does |
 | --- | --- |
 | `opentag setup` | Create or update local OpenTag config, then offer to start it |
+| `opentag setup --service` | Create or update local OpenTag config, then install and start the background service |
 | `opentag start` | Manually start or restart the local OpenTag stack |
+| `opentag service status` | Show background service status and runtime readiness |
 | `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
 | `opentag doctor` | Run deeper setup checks |
@@ -217,7 +229,7 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.3.4`. The npm package family is published under the `@opentag` scope.
+Current public release: `v0.3.5`. The npm package family is published under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
