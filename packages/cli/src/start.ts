@@ -4,6 +4,7 @@ import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle 
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
   createDaemonRuntimeInput,
+  dispatcherRuntimeHardeningInputFromEnv,
   normalizeChannelBindings,
   serveDaemon,
   startDispatcher,
@@ -17,13 +18,46 @@ import {
   type SlackSocketModeIngressConfig,
   type SlackSocketModeIngressHandle
 } from "@opentag/slack";
-import { defaultConfigPath, ensurePrivateDirectory, readCliConfig, type OpenTagCliConfig } from "./config.js";
+import {
+  defaultConfigPath,
+  ensurePrivateDirectory,
+  readCliConfig,
+  relayUrlFromConfig,
+  runtimeModeFromConfig,
+  type OpenTagCliConfig
+} from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
+import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
 
 export type StartCommandOptions = {
   config?: string;
+  background?: boolean;
+};
+
+type Logger = Pick<Console, "log">;
+
+export type StartRuntimeDependencies = {
+  assertStartPortsAvailable?: typeof assertStartPortsAvailable;
+  bootstrapDispatcher?: typeof bootstrapLocalDispatcher;
+  env?: NodeJS.ProcessEnv;
+  logger?: Logger;
+  serveDaemon?: typeof serveDaemon;
+  startDispatcher?: typeof startDispatcher;
+  startGitHubIngress?: typeof startGitHubIngress;
+  startLarkIngress?: typeof startLarkIngress;
+  startSlackIngress?: typeof startSlackIngress;
+  startSlackSocketModeIngress?: typeof startSlackSocketModeIngress;
+  waitForDispatcher?: typeof waitForDispatcher;
+};
+
+export type StartFromConfigInput = {
+  config: OpenTagCliConfig;
+  configPath: string;
+  dependencies?: StartRuntimeDependencies;
+  listenForProcessSignals?: boolean;
+  signal?: AbortSignal;
 };
 
 export type BootstrapClient = {
@@ -79,6 +113,19 @@ function requireGitHubConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
 
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
   return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github);
+}
+
+function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function maxRequestBodyBytesFromEnv(env?: NodeJS.ProcessEnv): number | undefined {
+  return positiveIntegerFromEnv("OPENTAG_MAX_REQUEST_BODY_BYTES", env?.OPENTAG_MAX_REQUEST_BODY_BYTES);
 }
 
 type LocalPortCheck = {
@@ -171,7 +218,10 @@ export async function assertStartPortsAvailable(config: OpenTagCliConfig): Promi
   }
 }
 
-export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): LocalDispatcherRuntimeInput {
+export function dispatcherRuntimeInputFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv } = {}
+): LocalDispatcherRuntimeInput {
   if (!hasStartablePlatform(config)) {
     throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, or GitHub.");
   }
@@ -189,7 +239,13 @@ export function dispatcherRuntimeInputFromCliConfig(config: OpenTagCliConfig): L
   return {
     port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),
     databasePath: config.state.databasePath,
+    ...dispatcherRuntimeHardeningInputFromEnv(input.env ?? process.env),
     ...(config.daemon.pairingToken ? { pairingToken: config.daemon.pairingToken } : {}),
+    ...(config.daemon.runnerToken ? { runnerToken: config.daemon.runnerToken } : {}),
+    ...(config.daemon.runnerTokens ? { runnerTokens: config.daemon.runnerTokens } : {}),
+    ...(config.daemon.revokedRunnerTokenFingerprints
+      ? { revokedRunnerTokenFingerprints: config.daemon.revokedRunnerTokenFingerprints }
+      : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
     ...(config.daemon.githubToken ? { githubCallbackToken: config.daemon.githubToken } : {}),
     ...(config.daemon.githubApplyToken !== undefined
@@ -233,6 +289,7 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     agentId: DEFAULT_AGENT_ID,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
+    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(defaultRepoBinding ? { defaultRepoBinding } : {})
   };
 }
@@ -242,16 +299,23 @@ function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "even
   return slack.mode ?? "events_api";
 }
 
-export function slackIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackEventsApiIngressConfig {
+export function slackIngressConfigFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv } = {}
+): SlackEventsApiIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.signingSecret) {
     throw new Error("Slack Events API mode requires platforms.slack.signingSecret.");
   }
+  const maxRequestBodyBytes = maxRequestBodyBytesFromEnv(input.env);
   return {
     signingSecret: slack.signingSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    botToken: slack.botToken,
     ...(slack.appId ? { appId: slack.appId } : {}),
+    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
+    ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     ...(slack.port ? { port: slack.port } : {})
   };
 }
@@ -265,16 +329,23 @@ export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConf
     appToken: slack.appToken,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    botToken: slack.botToken,
+    ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(slack.appId ? { appId: slack.appId } : {})
   };
 }
 
-export function githubIngressConfigFromCliConfig(config: OpenTagCliConfig): GitHubIngressConfig {
+export function githubIngressConfigFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv } = {}
+): GitHubIngressConfig {
   const github = requireGitHubConfig(config);
+  const maxRequestBodyBytes = maxRequestBodyBytesFromEnv(input.env);
   return {
     webhookSecret: github.webhookSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
     ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})
   };
@@ -352,104 +423,227 @@ export function shouldRethrowAbortReason(input: { shutdownRequested: boolean; re
   return !input.shutdownRequested && input.reason instanceof Error;
 }
 
-export async function runStartCommand(options: StartCommandOptions): Promise<void> {
-  const configPath = options.config ?? defaultConfigPath();
-  const config = readCliConfig(configPath);
-
-  ensurePrivateDirectory(config.state.directory);
-  ensurePrivateDirectory(config.state.worktreeRoot);
-  await assertStartPortsAvailable(config);
-
-  const abortController = new AbortController();
-  const dispatcher = startDispatcher(dispatcherRuntimeInputFromCliConfig(config));
-  const ingresses: PlatformIngressHandle[] = [];
-  let shutdownRequested = false;
-
-  const onSignal = () => {
-    shutdownRequested = true;
-    abortController.abort();
+function defaultStartDependencies(dependencies: StartRuntimeDependencies = {}) {
+  return {
+    assertStartPortsAvailable: dependencies.assertStartPortsAvailable ?? assertStartPortsAvailable,
+    bootstrapDispatcher: dependencies.bootstrapDispatcher ?? bootstrapLocalDispatcher,
+    env: dependencies.env ?? process.env,
+    logger: dependencies.logger ?? console,
+    serveDaemon: dependencies.serveDaemon ?? serveDaemon,
+    startDispatcher: dependencies.startDispatcher ?? startDispatcher,
+    startGitHubIngress: dependencies.startGitHubIngress ?? startGitHubIngress,
+    startLarkIngress: dependencies.startLarkIngress ?? startLarkIngress,
+    startSlackIngress: dependencies.startSlackIngress ?? startSlackIngress,
+    startSlackSocketModeIngress: dependencies.startSlackSocketModeIngress ?? startSlackSocketModeIngress,
+    waitForDispatcher: dependencies.waitForDispatcher ?? waitForDispatcher
   };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
+}
+
+function addAbortHandlers(input: StartFromConfigInput, abortController: AbortController): {
+  shutdownRequested(): boolean;
+  dispose(): void;
+} {
+  let shutdownRequested = false;
+  const abortGracefully = (reason?: unknown) => {
+    shutdownRequested = true;
+    if (!abortController.signal.aborted) {
+      abortController.abort(reason);
+    }
+  };
+
+  const onProcessSignal = () => abortGracefully();
+  const onExternalAbort = () => abortGracefully(input.signal?.reason);
+
+  if (input.listenForProcessSignals !== false) {
+    process.once("SIGINT", onProcessSignal);
+    process.once("SIGTERM", onProcessSignal);
+  }
+  if (input.signal) {
+    if (input.signal.aborted) {
+      onExternalAbort();
+    } else {
+      input.signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+
+  return {
+    shutdownRequested: () => shutdownRequested,
+    dispose() {
+      if (input.listenForProcessSignals !== false) {
+        process.off("SIGINT", onProcessSignal);
+        process.off("SIGTERM", onProcessSignal);
+      }
+      input.signal?.removeEventListener("abort", onExternalAbort);
+    }
+  };
+}
+
+function abortOnSubsystemFailure(promise: Promise<void>, abortController: AbortController): void {
+  promise.catch((error: unknown) => {
+    if (!abortController.signal.aborted) {
+      abortController.abort(error);
+    }
+  });
+}
+
+function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
+  const unsupported = [
+    ...(config.platforms.lark ? ["Lark / Feishu"] : []),
+    ...(config.platforms.slack ? ["Slack"] : [])
+  ];
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Relay mode currently supports GitHub-backed ingress only. ${unsupported.join(", ")} configs still require local mode.`
+    );
+  }
+}
+
+export function githubRelayWebhookUrl(config: OpenTagCliConfig): string {
+  const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
+  return `${relayUrl.replace(/\/$/, "")}/github/webhooks`;
+}
+
+async function startLocalMode(input: StartFromConfigInput, abortController: AbortController, shutdownRequested: () => boolean): Promise<void> {
+  const dependencies = defaultStartDependencies(input.dependencies);
+  const logger = dependencies.logger;
+  const config = input.config;
+  const env = dependencies.env ?? process.env;
+  const ingresses: PlatformIngressHandle[] = [];
+  const dispatcher = dependencies.startDispatcher(dispatcherRuntimeInputFromCliConfig(config, { env }));
 
   try {
-    await waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
-    await bootstrapLocalDispatcher(config);
+    await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
+    await dependencies.bootstrapDispatcher(config);
 
-    const daemonPromise = serveDaemon({
+    const daemonPromise = dependencies.serveDaemon({
       ...createDaemonRuntimeInput(config.daemon),
       signal: abortController.signal
     });
+    abortOnSubsystemFailure(daemonPromise, abortController);
+
     if (config.platforms.lark) {
-      const handle = startLarkIngress(larkIngressConfigFromCliConfig(config));
+      const handle = dependencies.startLarkIngress(larkIngressConfigFromCliConfig(config));
       ingresses.push({ platform: "lark", handle });
-      handle.startPromise.catch((error: unknown) => {
-        if (!abortController.signal.aborted) {
-          abortController.abort(error);
-        }
-      });
+      abortOnSubsystemFailure(handle.startPromise, abortController);
     }
     if (config.platforms.slack) {
       if (slackModeFromCliConfig(config) === "socket_mode") {
-        const handle = startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config));
+        const handle = dependencies.startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config));
         ingresses.push({ platform: "slack", mode: "socket_mode", handle });
-        handle.startPromise.catch((error: unknown) => {
-          if (!abortController.signal.aborted) {
-            abortController.abort(error);
-          }
-        });
+        abortOnSubsystemFailure(handle.startPromise, abortController);
       } else {
-        const handle = startSlackIngress(slackIngressConfigFromCliConfig(config));
+        const handle = dependencies.startSlackIngress(slackIngressConfigFromCliConfig(config, { env }));
         ingresses.push({ platform: "slack", mode: "events_api", url: handle.url, handle });
       }
     }
     if (config.platforms.github) {
-      const handle = startGitHubIngress(githubIngressConfigFromCliConfig(config));
+      const handle = dependencies.startGitHubIngress(githubIngressConfigFromCliConfig(config, { env }));
       ingresses.push({ platform: "github", url: handle.url, webhookPath: handle.webhookPath, handle });
     }
-    daemonPromise.catch((error: unknown) => {
-      if (!abortController.signal.aborted) {
-        abortController.abort(error);
-      }
-    });
 
-    console.log("OpenTag is running.");
-    console.log(`Config: ${configPath}`);
-    console.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
+    logger.log("OpenTag is running.");
+    logger.log(`Config: ${input.configPath}`);
+    logger.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
         const slack = config.platforms.slack!;
         if (ingress.mode === "socket_mode") {
-          console.log("Slack: using Socket Mode");
-          console.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
-          console.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
+          logger.log("Slack: using Socket Mode");
+          logger.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
+          logger.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
         } else {
-          console.log(`Slack Events: ${ingress.url}/slack/events`);
-          console.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
-          console.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
+          logger.log(`Slack Events: ${ingress.url}/slack/events`);
+          logger.log(`Slack channel binding: ${slack.teamId}/${slack.channelId}`);
+          logger.log("Before testing, invite the Slack app to that channel with /invite @your app name.");
         }
       } else if (ingress.platform === "github") {
         const github = config.platforms.github!;
-        console.log(`GitHub local webhook: ${githubLocalWebhookUrl({ port: github.port, webhookPath: ingress.webhookPath })}`);
-        console.log(`GitHub Payload URL: ${githubPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
-        console.log(`GitHub settings: ${githubWebhooksSettingsUrl(github)}`);
-        console.log(`Tunnel example: ngrok http ${github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}`);
+        logger.log(`GitHub local webhook: ${githubLocalWebhookUrl({ port: github.port, webhookPath: ingress.webhookPath })}`);
+        logger.log(`GitHub Payload URL: ${githubPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
+        logger.log(`GitHub settings: ${githubWebhooksSettingsUrl(github)}`);
+        logger.log(`Tunnel example: ngrok http ${github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}`);
       } else {
-        console.log("Lark / Feishu: connected through Personal Agent long connection");
+        logger.log("Lark / Feishu: connected through Personal Agent long connection");
       }
     }
-    console.log("Press Ctrl-C to stop.");
+    logger.log("Press Ctrl-C to stop.");
 
     await waitForAbort(abortController.signal);
     const reason = abortController.signal.reason;
-    if (shouldRethrowAbortReason({ shutdownRequested, reason })) {
+    if (shouldRethrowAbortReason({ shutdownRequested: shutdownRequested(), reason })) {
       throw reason;
     }
   } finally {
-    process.off("SIGINT", onSignal);
-    process.off("SIGTERM", onSignal);
     abortController.abort();
     await Promise.allSettled([...ingresses].reverse().map((ingress) => ingress.handle.close()));
     await dispatcher.close();
   }
+}
+
+async function startRelayMode(input: StartFromConfigInput, abortController: AbortController, shutdownRequested: () => boolean): Promise<void> {
+  const dependencies = defaultStartDependencies(input.dependencies);
+  const logger = dependencies.logger;
+  const config = input.config;
+  assertRelayModePlatformsSupported(config);
+  const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
+  assertRelayTransportAllowed(relayUrl);
+
+  await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
+  await dependencies.bootstrapDispatcher(config);
+
+  try {
+    const daemonPromise = dependencies.serveDaemon({
+      ...createDaemonRuntimeInput(config.daemon),
+      signal: abortController.signal
+    });
+    abortOnSubsystemFailure(daemonPromise, abortController);
+
+    logger.log("OpenTag is running in relay mode.");
+    logger.log(`Config: ${input.configPath}`);
+    logger.log(`Relay: ${relayUrl}`);
+    logger.log(relayTrustWarning(relayUrl));
+    logger.log("Local dispatcher: disabled");
+    logger.log(`Runner: ${config.daemon.runnerId}`);
+    if (config.platforms.github) {
+      logger.log(`GitHub webhook URL: ${githubRelayWebhookUrl(config)}`);
+      logger.log("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
+    }
+    logger.log("Press Ctrl-C to stop.");
+
+    await waitForAbort(abortController.signal);
+    const reason = abortController.signal.reason;
+    if (shouldRethrowAbortReason({ shutdownRequested: shutdownRequested(), reason })) {
+      throw reason;
+    }
+  } finally {
+    abortController.abort();
+  }
+}
+
+export async function startFromConfig(input: StartFromConfigInput): Promise<void> {
+  ensurePrivateDirectory(input.config.state.directory);
+  ensurePrivateDirectory(input.config.state.worktreeRoot);
+
+  const dependencies = defaultStartDependencies(input.dependencies);
+  if (runtimeModeFromConfig(input.config) === "local") {
+    await dependencies.assertStartPortsAvailable(input.config);
+  }
+
+  const abortController = new AbortController();
+  const abortHandlers = addAbortHandlers(input, abortController);
+  try {
+    if (runtimeModeFromConfig(input.config) === "relay") {
+      await startRelayMode(input, abortController, abortHandlers.shutdownRequested);
+      return;
+    }
+    await startLocalMode(input, abortController, abortHandlers.shutdownRequested);
+  } finally {
+    abortHandlers.dispose();
+  }
+}
+
+export async function runStartCommand(options: StartCommandOptions): Promise<void> {
+  const configPath = options.config ?? defaultConfigPath();
+  const config = readCliConfig(configPath);
+  await startFromConfig({ config, configPath });
 }

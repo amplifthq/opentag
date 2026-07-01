@@ -1,11 +1,18 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseDaemonConfig } from "../src/config.js";
+import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
 
 const baseRepository = {
   owner: "acme",
   repo: "widgets",
   checkoutPath: "/tmp/acme-widgets"
 };
+
+function tempDir(): string {
+  return mkdtempSync(join(tmpdir(), "opentag-local-runtime-test-"));
+}
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
@@ -80,5 +87,215 @@ describe("parseDaemonConfig Hermes config", () => {
         }
       })
     ).toThrow();
+  });
+});
+
+describe("parseDaemonConfig agent session profile", () => {
+  it("trims generic agent session profile config strings", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository, defaultExecutor: "codex" }],
+      agentSessionProfile: {
+        profile: " opentag-fixed ",
+        profileTemplate: " opentag-{provider}-{projectTarget}-{actorId} "
+      }
+    });
+
+    expect(config.agentSessionProfile).toEqual({
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
+    });
+  });
+
+  it("rejects whitespace-only generic agent session profile config strings", () => {
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository, defaultExecutor: "codex" }],
+        agentSessionProfile: {
+          profileTemplate: "   "
+        }
+      })
+    ).toThrow();
+  });
+});
+
+describe("parseDaemonConfig run timeout", () => {
+  it("accepts an explicit hard run timeout", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository }],
+      runTimeoutMs: 30_000
+    });
+
+    expect(config.runTimeoutMs).toBe(30_000);
+  });
+
+  it("rejects non-positive hard run timeouts", () => {
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        runTimeoutMs: 0
+      })
+    ).toThrow();
+  });
+});
+
+describe("parseDaemonConfig secret refs", () => {
+  it("resolves env and file secret refs for direct daemon configs", () => {
+    const previousPairingToken = process.env.OPENTAG_TEST_PAIRING_TOKEN;
+    const previousRunnerToken = process.env.OPENTAG_TEST_RUNNER_TOKEN;
+    const previousOldRunnerToken = process.env.OPENTAG_TEST_OLD_RUNNER_TOKEN;
+    const previousApplyToken = process.env.OPENTAG_TEST_APPLY_TOKEN;
+    const secretPath = join(tempDir(), "github-token.txt");
+    writeFileSync(secretPath, "ghp_from_file\n", { mode: 0o600 });
+    process.env.OPENTAG_TEST_PAIRING_TOKEN = "pairing_from_env";
+    process.env.OPENTAG_TEST_RUNNER_TOKEN = "runner_from_env";
+    process.env.OPENTAG_TEST_OLD_RUNNER_TOKEN = "runner_old_from_env";
+    process.env.OPENTAG_TEST_APPLY_TOKEN = "apply_from_env";
+    try {
+      const config = parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        pairingToken: { kind: "env", name: "OPENTAG_TEST_PAIRING_TOKEN" },
+        runnerToken: { kind: "env", name: "OPENTAG_TEST_RUNNER_TOKEN" },
+        runnerTokens: [{ kind: "env", name: "OPENTAG_TEST_OLD_RUNNER_TOKEN" }],
+        revokedRunnerTokenFingerprints: ["abc123"],
+        githubToken: { kind: "file", path: secretPath },
+        githubApplyToken: { kind: "env", name: "OPENTAG_TEST_APPLY_TOKEN" }
+      });
+
+      expect(config.pairingToken).toBe("pairing_from_env");
+      expect(config.runnerToken).toBe("runner_from_env");
+      expect(config.runnerTokens).toEqual(["runner_old_from_env"]);
+      expect(config.revokedRunnerTokenFingerprints).toEqual(["abc123"]);
+      expect(runnerDispatcherToken(config)).toBe("runner_from_env");
+      expect(config.githubToken).toBe("ghp_from_file");
+      expect(config.githubApplyToken).toBe("apply_from_env");
+    } finally {
+      if (previousPairingToken === undefined) {
+        delete process.env.OPENTAG_TEST_PAIRING_TOKEN;
+      } else {
+        process.env.OPENTAG_TEST_PAIRING_TOKEN = previousPairingToken;
+      }
+      if (previousRunnerToken === undefined) {
+        delete process.env.OPENTAG_TEST_RUNNER_TOKEN;
+      } else {
+        process.env.OPENTAG_TEST_RUNNER_TOKEN = previousRunnerToken;
+      }
+      if (previousOldRunnerToken === undefined) {
+        delete process.env.OPENTAG_TEST_OLD_RUNNER_TOKEN;
+      } else {
+        process.env.OPENTAG_TEST_OLD_RUNNER_TOKEN = previousOldRunnerToken;
+      }
+      if (previousApplyToken === undefined) {
+        delete process.env.OPENTAG_TEST_APPLY_TOKEN;
+      } else {
+        process.env.OPENTAG_TEST_APPLY_TOKEN = previousApplyToken;
+      }
+    }
+  });
+
+  it("keeps null GitHub apply token while resolving other secret refs", () => {
+    const previousPairingToken = process.env.OPENTAG_TEST_PAIRING_TOKEN;
+    process.env.OPENTAG_TEST_PAIRING_TOKEN = "pairing_from_env";
+    try {
+      const config = parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        pairingToken: { kind: "env", name: "OPENTAG_TEST_PAIRING_TOKEN" },
+        githubApplyToken: null
+      });
+
+      expect(config.pairingToken).toBe("pairing_from_env");
+      expect(config.githubApplyToken).toBeNull();
+    } finally {
+      if (previousPairingToken === undefined) {
+        delete process.env.OPENTAG_TEST_PAIRING_TOKEN;
+      } else {
+        process.env.OPENTAG_TEST_PAIRING_TOKEN = previousPairingToken;
+      }
+    }
+  });
+
+  it("falls back to the legacy pairing token for runner calls", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository }],
+      pairingToken: "legacy_pairing"
+    });
+
+    expect(runnerDispatcherToken(config)).toBe("legacy_pairing");
+  });
+
+  it("loads runner token rotation and revocation lists from env", () => {
+    const previous = {
+      OPENTAG_CONFIG_PATH: process.env.OPENTAG_CONFIG_PATH,
+      OPENTAG_RUNNER_TOKENS_JSON: process.env.OPENTAG_RUNNER_TOKENS_JSON,
+      OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON: process.env.OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON
+    };
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_RUNNER_TOKENS_JSON = JSON.stringify(["runner_old"]);
+    process.env.OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON = JSON.stringify(["abc123"]);
+    try {
+      const config = loadConfigFromEnv();
+
+      expect(config.runnerTokens).toEqual(["runner_old"]);
+      expect(config.revokedRunnerTokenFingerprints).toEqual(["abc123"]);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
+  it("resolves keychain secret refs through the macOS security command", () => {
+    const calls: Array<{ args: readonly string[]; file: string; options: { encoding: "utf8" } }> = [];
+    const value = readKeychainSecret({ kind: "keychain", service: "opentag", account: "pairing-token" }, (file, args, options) => {
+      calls.push({ args, file, options });
+      return "pairing_from_keychain\n";
+    });
+
+    expect(value).toBe("pairing_from_keychain");
+    expect(calls).toEqual([
+      {
+        file: "/usr/bin/security",
+        args: ["find-generic-password", "-w", "-s", "opentag", "-a", "pairing-token"],
+        options: { encoding: "utf8" }
+      }
+    ]);
+  });
+
+  it("rejects secret refs that cannot resolve to a non-empty value", () => {
+    const emptySecretPath = join(tempDir(), "empty-token.txt");
+    const missingSecretPath = join(tempDir(), "missing-token.txt");
+    writeFileSync(emptySecretPath, "\n", { mode: 0o600 });
+
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        pairingToken: { kind: "file", path: emptySecretPath }
+      })
+    ).toThrow(`Secret file ref ${emptySecretPath} resolved to an empty value.`);
+
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        pairingToken: { kind: "file", path: missingSecretPath }
+      })
+    ).toThrow(`Secret file ref ${missingSecretPath} could not be resolved.`);
+
+    expect(() => readKeychainSecret({ kind: "keychain", service: "opentag", account: "pairing-token" }, () => "\n")).toThrow(
+      "Secret keychain ref opentag/pairing-token resolved to an empty value."
+    );
+  });
+
+  it("fails when an env secret ref is not set", () => {
+    delete process.env.OPENTAG_TEST_MISSING_SECRET;
+
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository }],
+        pairingToken: { kind: "env", name: "OPENTAG_TEST_MISSING_SECRET" }
+      })
+    ).toThrow("Secret env ref OPENTAG_TEST_MISSING_SECRET is not set.");
   });
 });

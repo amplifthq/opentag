@@ -46,6 +46,11 @@ export type HermesSetupInput = {
   profileTemplate?: string;
 };
 
+export type AgentSessionProfileSetupInput = {
+  profile?: string;
+  profileTemplate?: string;
+};
+
 export type OpenTagSetupInput = {
   language: CliLanguage;
   platform: PlatformId;
@@ -56,6 +61,7 @@ export type OpenTagSetupInput = {
   slack?: SlackSetupInput;
   github?: GitHubSetupInput;
   hermes?: HermesSetupInput;
+  agentSessionProfile?: AgentSessionProfileSetupInput;
 };
 
 export type SetupDefaults = Partial<{
@@ -79,5 +85,7 @@ export type SetupDefaults = Partial<{
   hermesCommand: string;
   hermesProfile: string;
   hermesProfileTemplate: string;
+  agentProfile: string;
+  agentProfileTemplate: string;
   savedLarkCredentials: SavedLarkCredentials;
 }>;

@@ -86,8 +86,7 @@ describe("opentagd local integration", () => {
     expect(stored.run.result?.summary).toBe("Echoed OpenTag command: summarize this");
     expect(delivered).toEqual([
       "acknowledgement:OpenTag picked this up. Run: `run_integration`",
-      "progress:OpenTag progress for `run_integration`: Echo executor started for run_integration",
-      "progress:OpenTag progress for `run_integration`: Echo executor completed for run_integration",
+      "progress:OpenTag progress for `run_integration`: Running with echo.",
       "final:OpenTag finished with **success**.\n\nEchoed OpenTag command: summarize this\n\nVerification:\n- `echo`: passed\n\nNext action: No external state change is suggested for the echo executor result."
     ]);
 
@@ -100,15 +99,17 @@ describe("opentagd local integration", () => {
       "callback.acknowledgement.delivered",
       "run.claimed",
       "run.running",
-      "run.progress",
       "callback.progress.queued",
       "callback.progress.delivered",
       "run.progress",
-      "callback.progress.queued",
-      "callback.progress.delivered",
+      "run.progress",
       "run.completed",
       "callback.final.queued",
       "callback.final.delivered"
+    ]);
+    expect(events.filter((item) => (item as { type: string }).type === "run.progress")).toEqual([
+      expect.objectContaining({ visibility: "audit", message: "Echo executor started for run_integration" }),
+      expect.objectContaining({ visibility: "audit", message: "Echo executor completed for run_integration" })
     ]);
   });
 
@@ -191,12 +192,15 @@ describe("opentagd local integration", () => {
       "callback.acknowledgement.delivered",
       "run.claimed",
       "run.progress",
+      "run.completed",
       "callback.progress.queued",
       "callback.progress.delivered",
-      "run.completed",
       "callback.final.queued",
       "callback.final.delivered"
     ]);
+    expect(events.find((item) => (item as { type: string }).type === "run.progress")).toMatchObject({
+      visibility: "audit"
+    });
     expect(delivered.at(-1)?.toLowerCase()).toContain("needs_human");
   });
 });

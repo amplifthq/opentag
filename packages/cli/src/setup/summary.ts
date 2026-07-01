@@ -1,4 +1,5 @@
 import { executorLabel } from "../catalogs/executors.js";
+import { formatConfiguredCapabilities } from "../catalogs/capabilities.js";
 import { platformById } from "../catalogs/platforms.js";
 import type { CliLanguage } from "../catalogs/languages.js";
 import type { OpenTagCliConfig } from "../config.js";
@@ -13,8 +14,8 @@ function yesNo(value: boolean, language: CliLanguage): string {
 
 function larkSetupDescription(method: LarkSetupMethod, language: CliLanguage): string {
   if (language === "zh-CN") {
-    if (method === "saved") return "使用已保存的 Personal Agent";
-    return method === "scan" ? "创建新的 Personal Agent" : "手动填写";
+    if (method === "saved") return "使用已保存的个人代理应用";
+    return method === "scan" ? "创建新的个人代理应用" : "手动填写";
   }
   if (method === "saved") return "Saved Personal Agent";
   return method === "scan" ? "Create new Personal Agent" : "Manual credentials";
@@ -28,7 +29,7 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           "请确认 OpenTag 配置：",
           `配置文件: ${configPath}`,
           `平台: ${platform.label}`,
-          `Coding agent: ${executorLabel(input.executor)}`,
+          `编码代理: ${executorLabel(input.executor)}`,
           `项目路径: ${input.projectPath}`
         ]
       : [
@@ -40,6 +41,10 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
         ];
 
   const platformLines: string[] = [];
+  const capabilityLines = formatConfiguredCapabilities({
+    platforms: [input.platform],
+    executors: [input.executor]
+  });
   if (input.lark) {
     const larkPersonalAgent = formatLarkPersonalAgentSummary(
       {
@@ -52,14 +57,14 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
       ...(input.language === "zh-CN"
         ? [
             `Lark 连接方式: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
-            `Personal Agent: ${larkPersonalAgent}`,
-            `Lark 域名: ${input.lark.domain}`,
+            `个人代理应用: ${larkPersonalAgent}`,
+            `Lark/飞书租户: ${input.lark.domain}`,
             `默认绑定当前项目: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
           ]
         : [
             `Lark setup: ${larkSetupDescription(input.lark.setupMethod, input.language)}`,
             `Personal Agent: ${larkPersonalAgent}`,
-            `Lark domain: ${input.lark.domain}`,
+            `Lark / Feishu tenant: ${input.lark.domain}`,
             `Default project binding: ${yesNo(input.lark.bindingMethod === "default_project", input.language)}`
           ])
     );
@@ -111,7 +116,19 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           ])
     );
   }
-  const lines = [...commonLines, ...platformLines];
+  const sessionProfileLines =
+    input.agentSessionProfile && (input.agentSessionProfile.profile || input.agentSessionProfile.profileTemplate)
+      ? input.language === "zh-CN"
+        ? [
+            input.agentSessionProfile.profile ? `Agent 会话 profile: ${input.agentSessionProfile.profile}` : undefined,
+            input.agentSessionProfile.profileTemplate ? `Agent 会话 profile 模板: ${input.agentSessionProfile.profileTemplate}` : undefined
+          ]
+        : [
+            input.agentSessionProfile.profile ? `Agent session profile: ${input.agentSessionProfile.profile}` : undefined,
+            input.agentSessionProfile.profileTemplate ? `Agent session profile template: ${input.agentSessionProfile.profileTemplate}` : undefined
+          ]
+      : [];
+  const lines = [...commonLines, ...capabilityLines, ...platformLines, ...sessionProfileLines.filter((line): line is string => Boolean(line))];
   return lines.join("\n");
 }
 

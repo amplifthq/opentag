@@ -25,6 +25,11 @@ export type RegisteredLarkPersonalAgent = {
   botName?: string;
 };
 
+export type LarkCredentialValidationResult = {
+  botOpenId: string;
+  botName: string;
+};
+
 type LarkRegisterAppResult = {
   client_id: string;
   client_secret: string;
@@ -59,8 +64,11 @@ export type LarkPersonalAgentRegistrationDependencies = {
   sleep?(ms: number): Promise<void>;
 };
 
+export type LarkCredentialValidationDependencies = {
+  createBotInfoClient?(input: { appId: string; appSecret: string; domain: LarkDomain }): BotInfoClient;
+};
+
 export type RegisterLarkPersonalAgentInput = {
-  domain?: LarkDomain;
   signal?: AbortSignal;
   onQrCode(info: LarkRegistrationQrCodeInfo): void;
   onStatus?(info: LarkRegistrationStatusInfo): void;
@@ -79,10 +87,10 @@ function sdkDomainFor(domain: LarkDomain): lark.Domain {
   return domain === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark;
 }
 
-function registrationDomainFromUserInfo(requestedDomain: LarkDomain, userInfo: LarkRegisterAppResult["user_info"]): LarkDomain {
+function registrationDomainFromUserInfo(userInfo: LarkRegisterAppResult["user_info"]): LarkDomain {
   if (userInfo?.tenant_brand === "lark") return "lark";
   if (userInfo?.tenant_brand === "feishu") return "feishu";
-  return requestedDomain;
+  return "feishu";
 }
 
 function createDefaultBotInfoClient(input: { appId: string; appSecret: string; domain: LarkDomain }): BotInfoClient {
@@ -103,6 +111,29 @@ function botInfoFromResponse(response: unknown): { botOpenId: string; botName: s
     botOpenId: bot.open_id,
     botName: bot.app_name || bot.name || "OpenTag"
   };
+}
+
+export async function validateLarkCredentials(
+  input: { appId: string; appSecret: string; domain: LarkDomain },
+  dependencies: LarkCredentialValidationDependencies = {}
+): Promise<LarkCredentialValidationResult> {
+  const client = (dependencies.createBotInfoClient ?? createDefaultBotInfoClient)(input);
+  let response: unknown;
+  try {
+    response = await client.request({
+      url: "/open-apis/bot/v3/info",
+      method: "GET"
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Lark credentials could not be verified: ${reason}`);
+  }
+
+  const botIdentity = botInfoFromResponse(response);
+  if (!botIdentity) {
+    throw new Error("Lark credentials could not be verified: bot/v3/info response did not include bot.open_id.");
+  }
+  return botIdentity;
 }
 
 async function fetchBotIdentity(
@@ -148,12 +179,13 @@ export async function registerLarkPersonalAgent(
   input: RegisterLarkPersonalAgentInput,
   dependencies: LarkPersonalAgentRegistrationDependencies = {}
 ): Promise<RegisteredLarkPersonalAgent> {
-  const requestedDomain = input.domain ?? "lark";
   let detectedDomain: LarkDomain | undefined;
 
   const registerApp = dependencies.registerApp ?? lark.registerApp;
   const registrationOptions = {
-    // The Personal Agent registration flow starts on Feishu and switches to Lark after scan when needed.
+    // QR registration does not preselect a tenant. The SDK starts on the Feishu
+    // bootstrap host and can switch polling to Lark when it detects an
+    // international tenant; the created app's actual tenant is persisted below.
     domain: accountDomainFor("feishu"),
     larkDomain: accountDomainFor("lark"),
     source: REGISTRATION_SOURCE,
@@ -186,7 +218,7 @@ export async function registerLarkPersonalAgent(
     ...(input.signal ? { signal: input.signal } : {})
   });
 
-  const domain = detectedDomain ?? registrationDomainFromUserInfo(requestedDomain, registration.user_info);
+  const domain = detectedDomain ?? registrationDomainFromUserInfo(registration.user_info);
   const botIdentity = await fetchBotIdentity(
     {
       appId: registration.client_id,

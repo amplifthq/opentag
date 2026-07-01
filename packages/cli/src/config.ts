@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -20,6 +21,94 @@ const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 const OptionalPortSchema = z.number().int().min(1).max(65535).optional();
+
+const SecretRefSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("env"),
+      name: z.string().trim().min(1)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("file"),
+      path: z.string().trim().min(1)
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("keychain"),
+      service: z.string().trim().min(1),
+      account: z.string().trim().min(1)
+    })
+    .strict()
+]);
+
+export type SecretRef = z.infer<typeof SecretRefSchema>;
+export type KeychainSecretRef = Extract<SecretRef, { kind: "keychain" }>;
+
+type ExecFileSyncLike = (file: string, args: readonly string[], options: { encoding: "utf8" }) => string | Buffer;
+
+function requireResolvedSecret(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error(`Secret ${label} resolved to an empty value.`);
+  }
+  return trimmed;
+}
+
+export function readKeychainSecret(ref: KeychainSecretRef, execFileSyncImpl: ExecFileSyncLike = execFileSync): string {
+  let value: string | Buffer;
+  try {
+    value = execFileSyncImpl(
+      "/usr/bin/security",
+      ["find-generic-password", "-w", "-s", ref.service, "-a", ref.account],
+      { encoding: "utf8" }
+    );
+  } catch {
+    throw new Error(`Secret keychain ref ${ref.service}/${ref.account} could not be resolved.`);
+  }
+  return requireResolvedSecret(String(value), `keychain ref ${ref.service}/${ref.account}`);
+}
+
+function resolveSecretRef(ref: SecretRef): string {
+  if (ref.kind === "env") {
+    const value = process.env[ref.name];
+    if (!value) {
+      throw new Error(`Secret env ref ${ref.name} is not set.`);
+    }
+    return requireResolvedSecret(value, `env ref ${ref.name}`);
+  }
+  if (ref.kind === "file") {
+    let value: string;
+    try {
+      value = readFileSync(ref.path, "utf8");
+    } catch {
+      throw new Error(`Secret file ref ${ref.path} could not be resolved.`);
+    }
+    return requireResolvedSecret(value, `file ref ${ref.path}`);
+  }
+  return readKeychainSecret(ref);
+}
+
+const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transform((value) => {
+  return typeof value === "string" ? value : resolveSecretRef(value);
+});
+
+const RuntimeConfigSchema = z.discriminatedUnion("mode", [
+  z
+    .object({
+      mode: z.literal("local")
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("relay"),
+      relayUrl: z.string().url(),
+      relayProvider: z.string().min(1).optional()
+    })
+    .strict()
+]);
 
 const RepositoryBindingSchema = z
   .object({
@@ -64,6 +153,13 @@ const HermesSchema = z
   })
   .strict();
 
+const AgentSessionProfileSchema = z
+  .object({
+    profile: z.string().trim().min(1).optional(),
+    profileTemplate: z.string().trim().min(1).optional()
+  })
+  .strict();
+
 const SecuritySchema = z
   .object({
     mode: z.enum(["enforce", "audit", "off"]).optional(),
@@ -81,21 +177,26 @@ const DaemonConfigSchema = z
     channelBindings: z.array(ChannelBindingSchema).optional(),
     claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),
+    agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),
-    githubToken: z.string().min(1).optional(),
-    githubApplyToken: z.string().min(1).nullable().optional(),
+    githubToken: SecretStringSchema.optional(),
+    githubApplyToken: SecretStringSchema.nullable().optional(),
     preparePullRequestBranch: z.boolean().optional(),
     allowAutoCreatePullRequest: z.boolean().optional(),
-    pairingToken: z.string().min(1),
+    runnerToken: SecretStringSchema.optional(),
+    runnerTokens: z.array(SecretStringSchema).optional(),
+    revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
+    pairingToken: SecretStringSchema,
     pollIntervalMs: PositiveIntegerSchema,
-    heartbeatIntervalMs: PositiveIntegerSchema
+    heartbeatIntervalMs: PositiveIntegerSchema,
+    runTimeoutMs: PositiveIntegerSchema.optional()
   })
   .strict();
 
 const LarkPlatformSchema = z
   .object({
     appId: z.string().min(1),
-    appSecret: z.string().min(1),
+    appSecret: SecretStringSchema,
     domain: z.enum(["lark", "feishu"]),
     botOpenId: z.string().min(1).optional(),
     defaultProjectBinding: z.boolean().optional()
@@ -105,9 +206,9 @@ const LarkPlatformSchema = z
 const SlackPlatformSchema = z
   .object({
     mode: SlackModeSchema.optional(),
-    appToken: z.string().min(1).optional(),
-    signingSecret: z.string().min(1).optional(),
-    botToken: z.string().min(1),
+    appToken: SecretStringSchema.optional(),
+    signingSecret: SecretStringSchema.optional(),
+    botToken: SecretStringSchema,
     teamId: z.string().min(1),
     channelId: z.string().min(1),
     appId: z.string().min(1).optional(),
@@ -135,7 +236,7 @@ const SlackPlatformSchema = z
 
 const GitHubPlatformSchema = z
   .object({
-    webhookSecret: z.string().min(1),
+    webhookSecret: SecretStringSchema,
     owner: z.string().min(1),
     repo: z.string().min(1),
     webhookPath: z.string().min(1).optional(),
@@ -178,6 +279,7 @@ export const OpenTagCliConfigSchema = z
         worktreeRoot: z.string().min(1)
       })
       .strict(),
+    runtime: RuntimeConfigSchema.optional(),
     preferences: PreferencesSchema.optional(),
     daemon: DaemonConfigSchema,
     platforms: z
@@ -199,6 +301,7 @@ export type OpenTagCliLastSetup = NonNullable<OpenTagCliPreferences["lastSetup"]
 export type OpenTagCliLanguage = CliLanguage;
 export type OpenTagCliPlatform = PlatformId;
 export type OpenTagCliExecutor = string;
+export type OpenTagRuntimeMode = NonNullable<OpenTagCliConfig["runtime"]>["mode"];
 
 export type PathEnvironment = Partial<
   Record<"OPENTAG_CONFIG_PATH" | "OPENTAG_CONFIG_HOME" | "OPENTAG_STATE_DIR" | "XDG_CONFIG_HOME" | "XDG_STATE_HOME", string>
@@ -240,6 +343,18 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
   };
 }
 
+export function runnerDispatcherToken(config: Pick<OpenTagDaemonConfig, "runnerToken" | "pairingToken">): string | undefined {
+  return config.runnerToken ?? config.pairingToken;
+}
+
+export function runtimeModeFromConfig(config: OpenTagCliConfig): OpenTagRuntimeMode {
+  return config.runtime?.mode ?? "local";
+}
+
+export function relayUrlFromConfig(config: OpenTagCliConfig): string | undefined {
+  return config.runtime?.mode === "relay" ? config.runtime.relayUrl : undefined;
+}
+
 export function readCliConfig(path = defaultConfigPath()): OpenTagCliConfig {
   assertPrivateConfigFile(path);
   return parseCliConfig(JSON.parse(readFileSync(path, "utf8")));
@@ -274,14 +389,42 @@ export function assertPrivateConfigFile(path: string): void {
   }
 }
 
+function redactSecretValue(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const ref = value as { account?: unknown; kind?: unknown; name?: unknown; path?: unknown; service?: unknown };
+    if (ref.kind === "env" && typeof ref.name === "string") {
+      return `[env:${ref.name}]`;
+    }
+    if (ref.kind === "file" && typeof ref.path === "string") {
+      return `[file:${ref.path}]`;
+    }
+    if (ref.kind === "keychain" && typeof ref.service === "string" && typeof ref.account === "string") {
+      return `[keychain:${ref.service}/${ref.account}]`;
+    }
+  }
+  return "[REDACTED]";
+}
+
 function redactValue(key: string, value: unknown): unknown {
+  if (key === "runnerTokens" && Array.isArray(value)) {
+    return value.map((entry) => redactSecretValue(entry));
+  }
   if (
-    ["appSecret", "appToken", "botToken", "githubToken", "githubApplyToken", "pairingToken", "signingSecret", "webhookSecret"].includes(
-      key
-    )
+    [
+      "appSecret",
+      "appToken",
+      "botToken",
+      "githubToken",
+      "githubApplyToken",
+      "runnerToken",
+      "runnerTokens",
+      "pairingToken",
+      "signingSecret",
+      "webhookSecret"
+    ].includes(key)
   ) {
-    if (value === null || value === undefined) return value;
-    return "[REDACTED]";
+    return redactSecretValue(value);
   }
   if (Array.isArray(value)) {
     return value.map((entry) => redactValue("", entry));
@@ -294,4 +437,13 @@ function redactValue(key: string, value: unknown): unknown {
 
 export function redactedCliConfig(config: OpenTagCliConfig): unknown {
   return redactValue("", config);
+}
+
+export function redactedCliConfigValue(value: unknown): unknown {
+  return redactValue("", value);
+}
+
+export function readRedactedCliConfig(path = defaultConfigPath()): unknown {
+  assertPrivateConfigFile(path);
+  return redactedCliConfigValue(JSON.parse(readFileSync(path, "utf8")));
 }

@@ -8,11 +8,15 @@ import {
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
 } from "@opentag/dispatcher";
+import type { DispatcherRateLimitOptions } from "@opentag/dispatcher";
 
 export type LocalDispatcherRuntimeInput = {
   port: number;
   databasePath: string;
   pairingToken?: string;
+  runnerToken?: string;
+  runnerTokens?: string[];
+  revokedRunnerTokenFingerprints?: string[];
   /**
    * Backward-compatible GitHub token. When specific callback/apply tokens are
    * omitted, this token is used for both callback delivery and direct apply.
@@ -29,7 +33,11 @@ export type LocalDispatcherRuntimeInput = {
   slackBotTokensByAgentId?: Record<string, string>;
   telegramBotToken?: string;
   telegramBotTokensByAgentId?: Record<string, string>;
+  maxRequestBodyBytes?: number;
+  rateLimit?: DispatcherRateLimitOptions | false;
 };
+
+export type DispatcherRuntimeHardeningInput = Pick<LocalDispatcherRuntimeInput, "maxRequestBodyBytes" | "rateLimit">;
 
 export type LocalDispatcherHandle = {
   url: string;
@@ -65,10 +73,71 @@ function parseAgentTokenMap(name: string, raw: string | undefined): Record<strin
   }
 }
 
+function parseStringList(name: string, raw: string | undefined): string[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      throw new Error("Value is not a JSON array");
+    }
+    const values = parsed.map((value, index) => {
+      if (typeof value !== "string" || !value.trim()) {
+        throw new Error(`Entry ${index} must be a non-empty string`);
+      }
+      return value.trim();
+    });
+    return values.length ? values : undefined;
+  } catch (error) {
+    throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function larkDomainFromEnv(value: string | undefined): "lark" | "feishu" | undefined {
   if (value === undefined) return undefined;
   if (value === "lark" || value === "feishu") return value;
   throw new Error("LARK_DOMAIN must be either lark or feishu");
+}
+
+function parsePositiveIntegerEnv(name: string, raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer, received ${raw}`);
+  }
+  return value;
+}
+
+function parseBooleanEnv(name: string, raw: string | undefined): boolean | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`${name} must be either true or false, received ${raw}`);
+}
+
+function rateLimitFromEnv(env: NodeJS.ProcessEnv): DispatcherRateLimitOptions | false | undefined {
+  const disabled = parseBooleanEnv("OPENTAG_RATE_LIMIT_DISABLED", env.OPENTAG_RATE_LIMIT_DISABLED);
+  const windowMs = parsePositiveIntegerEnv("OPENTAG_RATE_LIMIT_WINDOW_MS", env.OPENTAG_RATE_LIMIT_WINDOW_MS);
+  const maxRequests = parsePositiveIntegerEnv("OPENTAG_RATE_LIMIT_MAX_REQUESTS", env.OPENTAG_RATE_LIMIT_MAX_REQUESTS);
+  if (disabled === true) {
+    if (windowMs !== undefined || maxRequests !== undefined) {
+      throw new Error("OPENTAG_RATE_LIMIT_DISABLED cannot be true when OPENTAG_RATE_LIMIT_WINDOW_MS or OPENTAG_RATE_LIMIT_MAX_REQUESTS is set.");
+    }
+    return false;
+  }
+  if (windowMs === undefined && maxRequests === undefined) return undefined;
+  if (windowMs === undefined || maxRequests === undefined) {
+    throw new Error("OPENTAG_RATE_LIMIT_WINDOW_MS and OPENTAG_RATE_LIMIT_MAX_REQUESTS must be configured together.");
+  }
+  return { windowMs, maxRequests };
+}
+
+export function dispatcherRuntimeHardeningInputFromEnv(env: NodeJS.ProcessEnv): DispatcherRuntimeHardeningInput {
+  const maxRequestBodyBytes = parsePositiveIntegerEnv("OPENTAG_MAX_REQUEST_BODY_BYTES", env.OPENTAG_MAX_REQUEST_BODY_BYTES);
+  const rateLimit = rateLimitFromEnv(env);
+  return {
+    ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
+    ...(rateLimit !== undefined ? { rateLimit } : {})
+  };
 }
 
 export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDispatcherRuntimeInput {
@@ -82,10 +151,16 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     throw new Error("LARK_APP_ID and LARK_APP_SECRET must be configured together.");
   }
   const slackBotTokensByAgentId = parseAgentTokenMap("OPENTAG_SLACK_BOT_TOKENS_JSON", env.OPENTAG_SLACK_BOT_TOKENS_JSON);
+  const runnerTokens = parseStringList("OPENTAG_RUNNER_TOKENS_JSON", env.OPENTAG_RUNNER_TOKENS_JSON);
+  const revokedRunnerTokenFingerprints = parseStringList(
+    "OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON",
+    env.OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON
+  );
   const telegramBotTokensByAgentId = parseAgentTokenMap(
     "OPENTAG_TELEGRAM_BOT_TOKENS_JSON",
     env.OPENTAG_TELEGRAM_BOT_TOKENS_JSON
   );
+  const hardening = dispatcherRuntimeHardeningInputFromEnv(env);
 
   const githubApplyToken =
     env.OPENTAG_GITHUB_APPLY_DISABLED === "true"
@@ -98,6 +173,9 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     port,
     databasePath: env.OPENTAG_DATABASE_PATH ?? "opentag.db",
     ...(env.OPENTAG_PAIRING_TOKEN ? { pairingToken: env.OPENTAG_PAIRING_TOKEN } : {}),
+    ...(env.OPENTAG_RUNNER_TOKEN ? { runnerToken: env.OPENTAG_RUNNER_TOKEN } : {}),
+    ...(runnerTokens ? { runnerTokens } : {}),
+    ...(revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints } : {}),
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
@@ -113,7 +191,8 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_SLACK_BOT_TOKEN ? { slackBotToken: env.OPENTAG_SLACK_BOT_TOKEN } : {}),
     ...(slackBotTokensByAgentId ? { slackBotTokensByAgentId } : {}),
     ...(env.OPENTAG_TELEGRAM_BOT_TOKEN ? { telegramBotToken: env.OPENTAG_TELEGRAM_BOT_TOKEN } : {}),
-    ...(telegramBotTokensByAgentId ? { telegramBotTokensByAgentId } : {})
+    ...(telegramBotTokensByAgentId ? { telegramBotTokensByAgentId } : {}),
+    ...hardening
   };
 }
 
@@ -125,6 +204,11 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     fetch: createDispatcherApp({
       databasePath: input.databasePath,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
+      ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
+      ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
+      ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
+      ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
+      ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
       ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
       sourceReceiptSink: createSlackSourceReceiptSink({
         ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),

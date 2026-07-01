@@ -5,7 +5,7 @@
   "packageManager": "pnpm@9.15.0",
   "license": "MIT",
   "scripts": {
-    "build": "corepack pnpm -r build",
+    "build": "corepack pnpm -r --workspace-concurrency=1 build",
     "test": "vitest run",
     "typecheck": "tsc -b",
     "lint": "corepack pnpm -r lint",

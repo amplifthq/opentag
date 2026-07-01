@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerLarkPersonalAgent } from "../src/registration.js";
+import { registerLarkPersonalAgent, validateLarkCredentials } from "../src/registration.js";
 
 describe("Lark Personal Agent registration", () => {
   it("registers a Personal Agent and fetches the bot identity", async () => {
@@ -20,7 +20,6 @@ describe("Lark Personal Agent registration", () => {
 
     const result = await registerLarkPersonalAgent(
       {
-        domain: "feishu",
         onQrCode(info) {
           qrCodes.push(info.url);
         },
@@ -39,6 +38,8 @@ describe("Lark Personal Agent registration", () => {
 
     expect(registerApp).toHaveBeenCalledWith(
       expect.objectContaining({
+        domain: "accounts.feishu.cn",
+        larkDomain: "accounts.larksuite.com",
         createOnly: true,
         source: "opentag",
         addons: expect.objectContaining({
@@ -66,7 +67,6 @@ describe("Lark Personal Agent registration", () => {
 
     const result = await registerLarkPersonalAgent(
       {
-        domain: "lark",
         onQrCode() {},
         onWarning(message) {
           warnings.push(message);
@@ -97,5 +97,107 @@ describe("Lark Personal Agent registration", () => {
       domain: "lark"
     });
     expect(warnings[0]).toContain("could not fetch the Lark bot open_id");
+  });
+
+  it("starts Lark registrations through the SDK's Feishu bootstrap domain", async () => {
+    const registerApp = vi.fn(async () => ({
+      client_id: "cli_test",
+      client_secret: "secret_test",
+      user_info: { tenant_brand: "lark" as const }
+    }));
+
+    await registerLarkPersonalAgent(
+      {
+        onQrCode() {}
+      },
+      {
+        registerApp,
+        createBotInfoClient() {
+          return {
+            async request() {
+              return { bot: { open_id: "ou_bot" } };
+            }
+          };
+        },
+        sleep: vi.fn()
+      }
+    );
+
+    expect(registerApp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        domain: "accounts.feishu.cn",
+        larkDomain: "accounts.larksuite.com"
+      })
+    );
+  });
+
+  it("falls back to Feishu when registration does not report a tenant", async () => {
+    const result = await registerLarkPersonalAgent(
+      {
+        onQrCode() {}
+      },
+      {
+        async registerApp() {
+          return {
+            client_id: "cli_test",
+            client_secret: "secret_test"
+          };
+        },
+        createBotInfoClient() {
+          return {
+            async request() {
+              return { bot: { open_id: "ou_bot" } };
+            }
+          };
+        },
+        sleep: vi.fn()
+      }
+    );
+
+    expect(result.domain).toBe("feishu");
+  });
+
+  it("validates manual credentials by fetching bot identity", async () => {
+    const request = vi.fn(async () => ({ data: { bot: { open_id: "ou_bot", name: "OpenTag" } } }));
+
+    await expect(
+      validateLarkCredentials(
+        {
+          appId: "cli_test",
+          appSecret: "secret_test",
+          domain: "lark"
+        },
+        {
+          createBotInfoClient() {
+            return { request };
+          }
+        }
+      )
+    ).resolves.toEqual({
+      botOpenId: "ou_bot",
+      botName: "OpenTag"
+    });
+    expect(request).toHaveBeenCalledWith({ url: "/open-apis/bot/v3/info", method: "GET" });
+  });
+
+  it("rejects manual credentials when bot identity cannot be verified", async () => {
+    await expect(
+      validateLarkCredentials(
+        {
+          appId: "cli_test",
+          appSecret: "bad_secret",
+          domain: "feishu"
+        },
+        {
+          createBotInfoClient() {
+            return {
+              async request() {
+                throw new Error("invalid app secret");
+              }
+            };
+          }
+        }
+      )
+    ).rejects.toThrow("Lark credentials could not be verified");
   });
 });

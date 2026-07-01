@@ -16,6 +16,7 @@ export type { SetupCommandOptions };
 export type SetupCommandDependencies = Partial<Omit<SetupFlowDependencies, "prompts" | "scanLarkPersonalAgent">> & {
   prompts?: SetupFlowDependencies["prompts"];
   scanLarkPersonalAgent?: SetupFlowDependencies["scanLarkPersonalAgent"];
+  validateLarkCredentials?: SetupFlowDependencies["validateLarkCredentials"];
   startOpenTag?(options: StartCommandOptions): Promise<void>;
 };
 
@@ -42,6 +43,7 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
   const setupInput = await collectSetupInput(options, configPath, {
     prompts,
     scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent ?? scanLarkPersonalAgent,
+    ...(dependencies.validateLarkCredentials ? { validateLarkCredentials: dependencies.validateLarkCredentials } : {}),
     ...(dependencies.cwd ? { cwd: dependencies.cwd } : {}),
     ...(dependencies.env ? { env: dependencies.env } : {}),
     ...(dependencies.defaults ? { defaults: dependencies.defaults } : {})

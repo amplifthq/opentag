@@ -94,11 +94,11 @@ When helping a Codex user install or configure OpenTag, collect these non-secret
 - Platform: Slack, GitHub, or Lark / Feishu.
 - Coding agent: Codex, Claude Code, or Echo, using local detection from `opentag executors` when available.
 - Local project: the current working directory as the recommended option, plus a free-form path option inside askhuman for another path.
-- Platform mode choices that are not credentials, such as Slack Socket Mode vs Events API, Lark / Feishu domain, Lark scan vs manual setup, and default project binding vs bind later.
+- Platform mode choices that are not credentials, such as Slack Socket Mode vs Events API, Lark / Feishu tenant for manual app setup, Lark scan vs manual setup, and default project binding vs bind later.
 
 If the run is still in Codex Default mode, first look for an actual runtime-provided Plan-mode transition. If none exists, stop and report that the current Codex host cannot render askhuman from Default mode. Do not claim a Plan-mode handoff is complete, do not ask the user to switch modes, do not present a plain-text fallback for the same choices, do not run `opentag setup`, and do not continue with guessed defaults.
 
-After the user chooses, run `opentag setup` with matching flags, for example `--platform`, `--executor`, `--project`, `--slack-mode`, `--lark-domain`, `--lark-setup`, and `--binding`. Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path.
+After the user chooses, run `opentag setup` with matching flags, for example `--platform`, `--executor`, `--project`, `--slack-mode`, `--tenant`, `--lark-setup`, and `--binding`. Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path.
 
 ## Setup Workflow
 

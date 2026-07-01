@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatSavedLarkCredentialsHint } from "../src/platforms/lark/display.js";
 import { runSetupCommand } from "../src/setup.js";
 import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
@@ -63,6 +63,10 @@ describe("saved Lark Personal Agent display", () => {
         force: true
       },
       {
+        validateLarkCredentials: vi.fn(async () => ({
+          botOpenId: "ou_abcdef1234567890",
+          botName: "OpenTag"
+        })),
         prompts: testPrompts({
           note(message) {
             notes.push(message);
@@ -100,7 +104,7 @@ describe("saved Lark Personal Agent display", () => {
       "zh-CN"
     );
 
-    expect(hint).toBe("Lark | App ID cli_12...abcdef | Bot Open ID ou_abc...567890 | 来源: OpenTag 配置");
+    expect(hint).toBe("Lark | 应用 ID cli_12...abcdef | 机器人 Open ID ou_abc...567890 | 来源: OpenTag 配置");
     expect(hint).not.toContain("secret_should_not_render");
   });
 });

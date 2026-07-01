@@ -1,12 +1,21 @@
-import { projectTargetRefFromEvent, type OpenTagEvent, type OpenTagRun, type OpenTagRunResult } from "@opentag/core";
+import {
+  formatProjectTargetRef,
+  projectTargetRefFromEvent,
+  type OpenTagEvent,
+  type OpenTagRun,
+  type OpenTagRunResult,
+  type ProjectTargetRef
+} from "@opentag/core";
 import {
   assessRunnerSecurity,
   formatSecurityAssessment,
+  createAgentSessionProfileForEvent,
+  resolveAgentSessionProfile,
   type ExecutorAdapter,
   type RunnerSecurityPolicy,
   worktreePathForRun
 } from "@opentag/runner";
-import type { RepositoryBindingConfig } from "./config.js";
+import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
 export type ClaimedRun = {
@@ -16,7 +25,7 @@ export type ClaimedRun = {
 
 export type DaemonClient = {
   claim(): Promise<ClaimedRun | null>;
-  markRunning(runId: string, executor: string): Promise<void>;
+  markRunning(runId: string, executor: string, options?: { runTimeoutMs?: number; idempotencyKey?: string }): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   progress(runId: string, input: { type: string; message: string; at: string }): Promise<void>;
   complete(runId: string, result: OpenTagRunResult): Promise<void>;
@@ -40,6 +49,44 @@ export function resolveWorkspacePath(event: OpenTagEvent, repositories: Reposito
   return resolveRepositoryBinding(event, repositories)?.checkoutPath ?? null;
 }
 
+function claimedProjectTargetFailure(input: {
+  event: OpenTagEvent;
+  projectTargetRef: ProjectTargetRef | null;
+  repositories: RepositoryBindingConfig[];
+}): OpenTagRunResult | null {
+  if (!input.projectTargetRef) {
+    return {
+      conclusion: "needs_human",
+      summary: "No Project Target metadata is configured for this run.",
+      nextAction: "Reject this run or replay it from a source that includes repoProvider, owner, and repo metadata."
+    };
+  }
+
+  if (input.event.source === "github" && input.projectTargetRef.provider !== "github") {
+    return {
+      conclusion: "needs_human",
+      summary: `GitHub source events must target a GitHub Project Target, received ${formatProjectTargetRef(input.projectTargetRef)}.`,
+      nextAction: "Verify the relay is preserving GitHub webhook metadata before allowing this run."
+    };
+  }
+
+  const allowed = input.repositories.some(
+    (repository) =>
+      repository.provider === input.projectTargetRef?.provider &&
+      repository.owner === input.projectTargetRef.owner &&
+      repository.repo === input.projectTargetRef.repo
+  );
+  if (!allowed) {
+    return {
+      conclusion: "needs_human",
+      summary: `This run targets ${formatProjectTargetRef(input.projectTargetRef)}, which is not in this runner's local Project Target allowlist.`,
+      nextAction: "Update the local OpenTag config only if this relay and Project Target are trusted."
+    };
+  }
+
+  return null;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -50,6 +97,30 @@ function failedRunResult(stage: string, error: unknown): OpenTagRunResult {
     summary: `${stage} failed: ${errorMessage(error)}`
   };
 }
+
+function formatDurationMs(ms: number): string {
+  if (ms % 60_000 === 0) return `${ms / 60_000} minute(s)`;
+  if (ms % 1_000 === 0) return `${ms / 1_000} second(s)`;
+  return `${ms}ms`;
+}
+
+function timedOutRunResult(input: { executorName: string; timeoutMs: number }): OpenTagRunResult {
+  return {
+    conclusion: "timed_out",
+    summary: `${input.executorName} exceeded the configured hard timeout of ${formatDurationMs(input.timeoutMs)}.`,
+    nextAction: "OpenTag requested executor cancellation. Check the local audit/status output before retrying or continuing manually."
+  };
+}
+
+function runNoLongerClaimed(error: unknown): boolean {
+  const message = errorMessage(error);
+  return message.includes("run_not_claimed_by_runner") || message.includes("run_not_found");
+}
+
+type ExecutorRunOutcome =
+  | { kind: "result"; result: OpenTagRunResult }
+  | { kind: "error"; error: unknown }
+  | { kind: "timeout" };
 
 function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
   return {
@@ -96,11 +167,23 @@ export async function runOneDaemonIteration(input: {
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
+  runTimeoutMs?: number;
+  agentSessionProfile?: AgentSessionProfileConfig;
   client: DaemonClient;
 }): Promise<boolean> {
   const claimed = await input.client.claim();
   if (!claimed) return false;
 
+  const projectTargetRef = projectTargetRefFromEvent(claimed.event);
+  const claimedTargetFailure = claimedProjectTargetFailure({
+    event: claimed.event,
+    projectTargetRef,
+    repositories: input.repositories
+  });
+  if (claimedTargetFailure) {
+    await input.client.complete(claimed.run.id, claimedTargetFailure);
+    return true;
+  }
   const binding = resolveRepositoryBinding(claimed.event, input.repositories);
   if (!binding) {
     await input.client.complete(claimed.run.id, {
@@ -119,6 +202,24 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
   const metadata = executorMetadata(claimed.event);
+  const fallbackSessionProfile = createAgentSessionProfileForEvent({
+    runId: claimed.run.id,
+    event: claimed.event,
+    metadata
+  });
+  const sessionProfile = input.agentSessionProfile
+    ? resolveAgentSessionProfile({
+        ...(input.agentSessionProfile.profile ? { profile: input.agentSessionProfile.profile } : {}),
+        ...(input.agentSessionProfile.profileTemplate ? { profileTemplate: input.agentSessionProfile.profileTemplate } : {}),
+        metadata: {
+          ...metadata,
+          runId: claimed.run.id
+        },
+        ...(projectTargetRef ? { projectTargetRef } : {}),
+        actorId: claimed.event.actor.providerUserId,
+        ...(fallbackSessionProfile ? { fallback: fallbackSessionProfile } : {})
+      })
+    : fallbackSessionProfile;
 
   const executionPath =
     executorId === "codex"
@@ -164,6 +265,7 @@ export async function runOneDaemonIteration(input: {
       ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
       permissions: claimed.event.permissions,
       metadata,
+      ...(sessionProfile ? { sessionProfile } : {}),
       ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
       ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
       ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
@@ -181,28 +283,45 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
-  await input.client.markRunning(claimed.run.id, executor.id);
+  const runId = claimed.run.id;
+  const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
+  const runTimeoutMs = input.runTimeoutMs;
+  await input.client.markRunning(runId, activeExecutor.id, {
+    idempotencyKey: `${input.runnerId}:${runId}:running`,
+    ...(runTimeoutMs ? { runTimeoutMs } : {})
+  });
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  let cancellationDetected = false;
+  let cancelPromise: Promise<void> | undefined;
+  function requestExecutorCancel(error: unknown): void {
+    if (!runNoLongerClaimed(error)) {
+      console.warn(`OpenTag heartbeat failed for ${runId}:`, error);
+      return;
+    }
+    cancellationDetected = true;
+    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
+      console.warn(`OpenTag executor cancellation failed for ${runId}:`, cancelError);
+    });
+  }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
-      void input.client.heartbeat(claimed.run.id).catch((error: unknown) => {
-        console.warn(`OpenTag heartbeat failed for ${claimed.run.id}:`, error);
-      });
+      void input.client.heartbeat(runId).catch(requestExecutorCancel);
     }, heartbeatIntervalMs);
   }
 
-  let executorResult: OpenTagRunResult;
-  try {
-    executorResult = await executor.run(
+  const executorRunPromise: Promise<ExecutorRunOutcome> = activeExecutor
+    .run(
       {
-        runId: claimed.run.id,
+        runId,
         workspacePath: binding.checkoutPath,
         command: claimed.event.command,
         context: claimed.event.context,
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
         metadata,
+        ...(sessionProfile ? { sessionProfile } : {}),
         ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
         ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
         ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
@@ -210,21 +329,84 @@ export async function runOneDaemonIteration(input: {
       {
         emit: async (event) => {
           console.log(`[${event.type}] ${event.message}`);
-          await input.client.progress(claimed.run.id, {
-            type: event.type,
-            message: event.message,
-            at: event.at
-          });
+          try {
+            await input.client.progress(runId, {
+              type: event.type,
+              message: event.message,
+              at: event.at
+            });
+          } catch (error) {
+            if (runNoLongerClaimed(error)) {
+              requestExecutorCancel(error);
+              return;
+            }
+            throw error;
+          }
         }
       }
+    )
+    .then(
+      (result) => ({ kind: "result", result }) as const,
+      (error: unknown) => ({ kind: "error", error }) as const
     );
-  } catch (error) {
-    await input.client.complete(claimed.run.id, failedRunResult(executor.displayName, error));
-    return true;
+
+  const timeoutPromise =
+    runTimeoutMs && runTimeoutMs > 0
+      ? new Promise<ExecutorRunOutcome>((resolve) => {
+          timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), runTimeoutMs);
+        })
+      : undefined;
+
+  let executorOutcome: ExecutorRunOutcome;
+  try {
+    executorOutcome = await (timeoutPromise ? Promise.race([executorRunPromise, timeoutPromise]) : executorRunPromise);
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 
+  if (executorOutcome.kind === "timeout") {
+    if (cancellationDetected) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
+    cancellationDetected = true;
+    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
+      console.warn(`OpenTag executor cancellation failed after timeout for ${runId}:`, cancelError);
+    });
+    await cancelPromise;
+    try {
+      await input.client.complete(runId, timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }));
+    } catch (completeError) {
+      if (runNoLongerClaimed(completeError)) {
+        return true;
+      }
+      throw completeError;
+    }
+    return true;
+  }
+
+  if (executorOutcome.kind === "error") {
+    if (cancellationDetected) {
+      if (cancelPromise) await cancelPromise;
+      return true;
+    }
+    try {
+      await input.client.complete(runId, failedRunResult(activeExecutor.displayName, executorOutcome.error));
+    } catch (completeError) {
+      if (runNoLongerClaimed(completeError)) {
+        return true;
+      }
+      throw completeError;
+    }
+    return true;
+  }
+  if (cancelPromise) await cancelPromise;
+  if (cancellationDetected) {
+    return true;
+  }
+
+  const executorResult = executorOutcome.result;
   let result: OpenTagRunResult;
   try {
     result = await maybeCreatePullRequest({
@@ -238,7 +420,14 @@ export async function runOneDaemonIteration(input: {
   } catch (error) {
     result = pullRequestPreparationFailureResult(executorResult, error);
   }
-  await input.client.complete(claimed.run.id, result);
+  try {
+    await input.client.complete(runId, result);
+  } catch (error) {
+    if (runNoLongerClaimed(error)) {
+      return true;
+    }
+    throw error;
+  }
   return true;
 }
 
@@ -267,6 +456,8 @@ export async function serveDaemon(input: {
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
+  runTimeoutMs?: number;
+  agentSessionProfile?: AgentSessionProfileConfig;
   pollIntervalMs?: number;
   signal?: AbortSignal;
   client: DaemonClient;
@@ -281,6 +472,8 @@ export async function serveDaemon(input: {
         ...(input.security ? { security: input.security } : {}),
         ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
         ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
+        ...(input.runTimeoutMs !== undefined ? { runTimeoutMs: input.runTimeoutMs } : {}),
+        ...(input.agentSessionProfile ? { agentSessionProfile: input.agentSessionProfile } : {}),
         client: input.client
       });
       if (!didWork) {

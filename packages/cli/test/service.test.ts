@@ -1,0 +1,504 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { writeCliConfigAtomic, type OpenTagCliConfig } from "../src/config.js";
+import {
+  buildLaunchAgentPlist,
+  formatServiceLogs,
+  formatServiceStatus,
+  getServiceStatus,
+  getServiceStatusWithRuntimeReadiness,
+  installService,
+  runServiceStatusCommand,
+  servicePaths,
+  type CommandResult
+} from "../src/service.js";
+import { createSetupConfig } from "../src/setup.js";
+
+function tempDir(): string {
+  return mkdtempSync(join(tmpdir(), "opentag-cli-test-"));
+}
+
+function configPathIn(home: string): string {
+  return join(home, ".config", "opentag", "config.json");
+}
+
+function tokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function writeConfig(path: string, mutate?: (config: OpenTagCliConfig) => void): void {
+  const projectPath = tempDir();
+  const config = createSetupConfig({
+    language: "en",
+    platform: "github",
+    projectPath,
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    github: {
+      token: "ghp_token",
+      webhookSecret: "github_webhook_secret",
+      owner: "acme",
+      repo: "demo",
+      webhookPath: "/github/webhooks",
+      autoCreatePullRequest: false,
+      port: 3050
+    }
+  });
+  mutate?.(config);
+  writeCliConfigAtomic(path, config);
+}
+
+function writeRelayConfig(path: string): void {
+  const projectPath = tempDir();
+  const config = createSetupConfig({
+    language: "en",
+    platform: "github",
+    projectPath,
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    github: {
+      token: "ghp_token",
+      webhookSecret: "github_webhook_secret",
+      owner: "acme",
+      repo: "demo",
+      webhookPath: "/github/webhooks",
+      autoCreatePullRequest: false,
+      port: 3050
+    }
+  });
+  config.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  config.daemon.dispatcherUrl = "https://relay.example";
+  writeCliConfigAtomic(path, config);
+}
+
+function launchctl(status: number): (args: string[]) => CommandResult {
+  return () => ({
+    status,
+    stdout: "",
+    stderr: status === 0 ? "" : "service is not loaded"
+  });
+}
+
+const doctorCommandRunner = {
+  async run(command: string, args: string[]) {
+    if (command === "git" && args.join(" ") === "rev-parse --is-inside-work-tree") {
+      return { exitCode: 0, stdout: "true\n", stderr: "" };
+    }
+    return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+  }
+};
+
+function runtimeFetch(input: { runnerMissing?: boolean; heartbeatAt?: string | null } = {}): { fetchImpl: typeof fetch; requests: string[] } {
+  const requests: string[] = [];
+  const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+    const href = String(url);
+    requests.push(href);
+    if (href.endsWith("/healthz")) {
+      return Response.json({ ok: true });
+    }
+    if (href.endsWith("/v1/runners/runner_local")) {
+      return input.runnerMissing
+        ? Response.json({ error: "runner_not_found" }, { status: 404 })
+        : Response.json({
+            runner: {
+              runnerId: "runner_local",
+              name: "runner_local",
+              createdAt: "2026-06-24T00:00:00.000Z",
+              ...(input.heartbeatAt !== null ? { heartbeatAt: input.heartbeatAt ?? new Date().toISOString() } : {})
+            }
+          });
+    }
+    if (href.includes("/v1/repo-bindings/")) {
+      return Response.json({
+        binding: {
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_local",
+          workspacePath: "/tmp/demo",
+          defaultExecutor: "echo"
+        }
+      });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, requests };
+}
+
+describe("OpenTag CLI service", () => {
+  it("generates a LaunchAgent plist with service run arguments and log paths", () => {
+    const plist = buildLaunchAgentPlist({
+      label: "im.opentag.agent",
+      programArguments: ["/usr/local/bin/node", "/opt/opentag/dist/index.js", "service", "run", "--mode", "background"],
+      runAtLoad: true,
+      keepAlive: true,
+      stdoutPath: "/tmp/opentag.log",
+      stderrPath: "/tmp/opentag.err.log",
+      workingDirectory: "/Users/mingyoo/repos/opentag",
+      environment: {
+        OPENTAG_CONFIG_PATH: "/tmp/config.json"
+      }
+    });
+
+    expect(plist).toContain("<key>Label</key>");
+    expect(plist).toContain("<string>im.opentag.agent</string>");
+    expect(plist).toContain("<key>ProgramArguments</key>");
+    expect(plist).toContain("<string>service</string>");
+    expect(plist).toContain("<string>run</string>");
+    expect(plist).toContain("<key>RunAtLoad</key>");
+    expect(plist).toContain("<true/>");
+    expect(plist).toContain("<key>KeepAlive</key>");
+    expect(plist).toContain("<key>StandardOutPath</key>");
+    expect(plist).toContain("/tmp/opentag.log");
+    expect(plist).toContain("<key>StandardErrorPath</key>");
+    expect(plist).toContain("/tmp/opentag.err.log");
+    expect(plist).toContain("<key>WorkingDirectory</key>");
+  });
+
+  it("installs the macOS LaunchAgent plist without starting launchctl", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    const paths = installService(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        nodePath: "/usr/local/bin/node",
+        cliEntry: "/opt/opentag/dist/index.js",
+        uid: 501,
+        launchctl: () => {
+          throw new Error("install should not call launchctl");
+        }
+      }
+    );
+
+    const plist = readFileSync(paths.plistPath, "utf8");
+    expect(plist).toContain("<string>/usr/local/bin/node</string>");
+    expect(plist).toContain("<string>/opt/opentag/dist/index.js</string>");
+    expect(plist).toContain(`<string>${configPath}</string>`);
+    expect(plist).toContain(`<string>${paths.stdoutPath}</string>`);
+    expect(plist).toContain(`<string>${paths.stderrPath}</string>`);
+  });
+
+  it("persists only explicit non-secret dispatcher hardening env in the LaunchAgent", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    const paths = installService(
+      {
+        config: configPath,
+        maxRequestBodyBytes: "4096",
+        rateLimitWindowMs: "60000",
+        rateLimitMaxRequests: "120"
+      },
+      {
+        platform: "darwin",
+        homeDir: home,
+        nodePath: "/usr/local/bin/node",
+        cliEntry: "/opt/opentag/dist/index.js",
+        uid: 501,
+        launchctl: () => {
+          throw new Error("install should not call launchctl");
+        }
+      }
+    );
+
+    const plist = readFileSync(paths.plistPath, "utf8");
+    expect(plist).toContain("<key>OPENTAG_CONFIG_PATH</key>");
+    expect(plist).toContain("<key>OPENTAG_MAX_REQUEST_BODY_BYTES</key>");
+    expect(plist).toContain("<string>4096</string>");
+    expect(plist).toContain("<key>OPENTAG_RATE_LIMIT_WINDOW_MS</key>");
+    expect(plist).toContain("<string>60000</string>");
+    expect(plist).toContain("<key>OPENTAG_RATE_LIMIT_MAX_REQUESTS</key>");
+    expect(plist).toContain("<string>120</string>");
+    expect(plist).not.toContain("OPENTAG_PAIRING_TOKEN");
+    expect(plist).not.toContain("github_webhook_secret");
+
+    const formatted = formatServiceStatus(
+      getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
+    );
+    expect(formatted).toContain("Service Hardening:");
+    expect(formatted).toContain("OPENTAG_MAX_REQUEST_BODY_BYTES=4096");
+    expect(formatted).toContain("OPENTAG_RATE_LIMIT_WINDOW_MS=60000");
+    expect(formatted).toContain("OPENTAG_RATE_LIMIT_MAX_REQUESTS=120");
+  });
+
+  it("validates service dispatcher hardening options before writing the LaunchAgent", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+
+    expect(() =>
+      installService({ config: configPath, rateLimitWindowMs: "60000" }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
+    ).toThrow("OPENTAG_RATE_LIMIT_WINDOW_MS and OPENTAG_RATE_LIMIT_MAX_REQUESTS must be configured together");
+
+    expect(() =>
+      installService(
+        {
+          config: configPath,
+          rateLimitDisabled: true,
+          rateLimitWindowMs: "60000",
+          rateLimitMaxRequests: "120"
+        },
+        { platform: "darwin", homeDir: home, launchctl: launchctl(0) }
+      )
+    ).toThrow("OPENTAG_RATE_LIMIT_DISABLED cannot be true");
+  });
+
+  it("formats service status for installed and not installed launchd services", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+
+    const missing = getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(1) });
+    expect(missing.installed).toBe(false);
+    expect(formatServiceStatus(missing)).toContain("Installed: no");
+
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const running = getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    expect(running.installed).toBe(true);
+    expect(running.running).toBe("running");
+    expect(formatServiceStatus(running)).toContain("Controller: launchd");
+    expect(formatServiceStatus(running)).toContain("Runtime: local");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: unverified");
+    expect(formatServiceStatus(running)).toContain("Connectors:");
+    expect(formatServiceStatus(running)).toContain(
+      "github: ingress=repository_webhook path=/github/webhooks port=3050, callback=ready (daemon.githubToken), apply=ready, target=github:acme/demo"
+    );
+    expect(formatServiceStatus(running)).toContain("Secrets:");
+    expect(formatServiceStatus(running)).toContain("daemon.pairingToken: inline (redacted)");
+    expect(formatServiceStatus(running)).toContain("daemon.runnerToken: daemon.pairingToken fallback");
+    expect(formatServiceStatus(running)).toContain("daemon.githubToken: inline (redacted)");
+    expect(formatServiceStatus(running)).toContain("daemon.githubApplyToken: daemon.githubToken fallback");
+    expect(formatServiceStatus(running)).toContain("platforms.github.webhookSecret: inline (redacted)");
+    expect(formatServiceStatus(running)).not.toContain("github_webhook_secret");
+    expect(formatServiceStatus(running)).toContain("Capabilities:");
+    expect(formatServiceStatus(running)).toContain("platform GitHub:");
+    expect(formatServiceStatus(running)).toContain("liveness=status_update");
+    expect(formatServiceStatus(running)).toContain("executor Echo:");
+    expect(formatServiceStatus(running)).toContain("isolation=none");
+    expect(formatServiceStatus(running)).toContain("completion=process_exit");
+  });
+
+  it("summarizes platform connector readiness without printing secret values", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath, (config) => {
+      config.platforms.slack = {
+        mode: "events_api",
+        signingSecret: "slack_signing_secret",
+        botToken: "xoxb_secret",
+        teamId: "T123",
+        channelId: "C456",
+        port: 3060
+      };
+      config.platforms.lark = {
+        appId: "cli_lark",
+        appSecret: "lark_secret",
+        domain: "lark",
+        botOpenId: "ou_bot"
+      };
+    });
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+
+    const formatted = formatServiceStatus(
+      getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
+    );
+
+    expect(formatted).toContain("Connectors:");
+    expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), callback=ready (botToken), source=T123/C456");
+    expect(formatted).toContain("lark: ingress=long_connection domain=lark ready (appId/appSecret), callback=ready (appId/appSecret)");
+    expect(formatted).toContain("addressing=bot_open_id configured");
+    expect(formatted).not.toContain("slack_signing_secret");
+    expect(formatted).not.toContain("xoxb_secret");
+    expect(formatted).not.toContain("lark_secret");
+  });
+
+  it("marks a running service ready only after dispatcher health succeeds", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const { fetchImpl, requests } = runtimeFetch();
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
+    );
+
+    expect(requests).toEqual([
+      "http://localhost:3030/healthz",
+      "http://localhost:3030/healthz",
+      "http://localhost:3030/v1/runners/runner_local",
+      expect.stringContaining("http://localhost:3030/v1/repo-bindings/"),
+      "http://localhost:3030/v1/repo-bindings/github/acme/demo"
+    ]);
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("ready");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: ready (dispatcher healthz ok; doctor checks ok");
+  });
+
+  it("marks a launchd-running service degraded when doctor checks fail", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const { fetchImpl } = runtimeFetch({ runnerMissing: true });
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
+    );
+
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("degraded");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: degraded (doctor checks degraded (1 fail, 0 warn))");
+    expect(formatServiceStatus(running)).toContain("Runtime Checks:");
+    expect(formatServiceStatus(running)).toContain("FAIL runner registration:");
+  });
+
+  it("marks a launchd-running service stale when runner heartbeat is old", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const { fetchImpl } = runtimeFetch({ heartbeatAt: "2000-01-01T00:00:00.000Z" });
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
+    );
+
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("stale_heartbeat");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: stale_heartbeat (stale; last heartbeat 2000-01-01T00:00:00.000Z");
+    expect(formatServiceStatus(running)).toContain("WARN runner heartbeat: stale;");
+  });
+
+  it("marks a launchd-running service starting when no runner heartbeat is visible yet", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const { fetchImpl } = runtimeFetch({ heartbeatAt: null });
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
+    );
+
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("starting");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: starting (no heartbeat observed yet");
+  });
+
+  it("marks a launchd-running service degraded when the current runner token is revoked", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath, (config) => {
+      config.daemon.runnerToken = "runner_token";
+      config.daemon.revokedRunnerTokenFingerprints = [tokenFingerprint("runner_token")];
+    });
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const { fetchImpl } = runtimeFetch();
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, commandRunner: doctorCommandRunner }
+    );
+
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("degraded");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: degraded (doctor checks degraded (1 fail, 0 warn))");
+    expect(formatServiceStatus(running)).toContain("FAIL runner token revocation: Current daemon.runnerToken fingerprint is revoked");
+  });
+
+  it("marks a launchd-running service unreachable when dispatcher health fails", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("offline");
+    }) as unknown as typeof fetch;
+
+    const running = await getServiceStatusWithRuntimeReadiness(
+      { config: configPath },
+      { platform: "darwin", homeDir: home, launchctl: launchctl(0), fetchImpl, healthTimeoutMs: 5 }
+    );
+
+    expect(running.running).toBe("running");
+    expect(running.runtimeReadiness).toBe("unreachable");
+    expect(formatServiceStatus(running)).toContain("OpenTag runtime: unreachable (dispatcher healthz failed (http://localhost:3030))");
+  });
+
+  it("uses runtime readiness probing in the service status command", async () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+    const lines: string[] = [];
+
+    await runServiceStatusCommand(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        launchctl: launchctl(0),
+        fetchImpl: runtimeFetch().fetchImpl,
+        commandRunner: doctorCommandRunner,
+        logger: { log: (message) => lines.push(message) }
+      }
+    );
+
+    expect(lines.join("\n")).toContain("Running: running");
+    expect(lines.join("\n")).toContain("OpenTag runtime: ready");
+  });
+
+  it("reports unsupported service management without crashing on non-macOS", () => {
+    const home = tempDir();
+    const summary = getServiceStatus({}, { platform: "linux", homeDir: home });
+
+    expect(summary.controller).toBe("unsupported");
+    expect(formatServiceStatus(summary)).toContain("service management is not supported yet");
+  });
+
+  it("includes relay security checks in service status", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeRelayConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+
+    const formatted = formatServiceStatus(
+      getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
+    );
+
+    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Relay Security:");
+    expect(formatted).toContain("OK relay transport: HTTPS is enabled.");
+    expect(formatted).toContain("WARN relay trust: Use only a relay you operate or trust");
+    expect(formatted).toContain("WARN relay token scope: This self-hosted MVP still uses the daemon pairing token for registration and runner calls");
+  });
+
+  it("prints recent stdout and stderr logs", () => {
+    const home = tempDir();
+    const paths = servicePaths({}, { homeDir: home });
+    mkdirSync(paths.logsDir, { recursive: true });
+    writeFileSync(paths.stdoutPath, "one\ntwo\nthree\n");
+    writeFileSync(paths.stderrPath, "err-one\nerr-two\n");
+
+    const logs = formatServiceLogs({ lines: 2 }, { homeDir: home });
+
+    expect(logs).toContain("two\nthree");
+    expect(logs).not.toContain("one\ntwo\nthree");
+    expect(logs).toContain("err-one\nerr-two");
+  });
+});

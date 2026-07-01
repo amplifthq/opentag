@@ -13,6 +13,8 @@ import {
   shouldRethrowAbortReason,
   slackIngressConfigFromCliConfig,
   slackSocketModeIngressConfigFromCliConfig,
+  startFromConfig,
+  type StartRuntimeDependencies,
   waitForDispatcher
 } from "../src/start.js";
 
@@ -119,15 +121,27 @@ function hangingFetch(): typeof fetch {
   }) as unknown as typeof fetch;
 }
 
+function abortedSignal(): AbortSignal {
+  const controller = new AbortController();
+  controller.abort();
+  return controller.signal;
+}
+
 describe("OpenTag CLI start wiring", () => {
   it("derives dispatcher input with the Lark callback sink credentials", () => {
     const built = config();
+    built.daemon.runnerToken = "runner_token";
+    built.daemon.runnerTokens = ["runner_old"];
+    built.daemon.revokedRunnerTokenFingerprints = ["abc123"];
     const dispatcher = dispatcherRuntimeInputFromCliConfig(built);
 
     expect(dispatcher).toMatchObject({
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
+      runnerToken: "runner_token",
+      runnerTokens: ["runner_old"],
+      revokedRunnerTokenFingerprints: ["abc123"],
       lark: {
         appId: "cli_test",
         appSecret: "secret_test",
@@ -136,8 +150,33 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("adds dispatcher hardening env to the local dispatcher without overriding config authority", () => {
+    const built = config();
+    built.daemon.pairingToken = "config_pairing_token";
+    const dispatcher = dispatcherRuntimeInputFromCliConfig(built, {
+      env: {
+        OPENTAG_PAIRING_TOKEN: "env_pairing_token",
+        OPENTAG_MAX_REQUEST_BODY_BYTES: "4096",
+        OPENTAG_RATE_LIMIT_WINDOW_MS: "60000",
+        OPENTAG_RATE_LIMIT_MAX_REQUESTS: "120"
+      }
+    });
+
+    expect(dispatcher).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: "config_pairing_token",
+      maxRequestBodyBytes: 4096,
+      rateLimit: {
+        windowMs: 60000,
+        maxRequests: 120
+      }
+    });
+  });
+
   it("derives dispatcher and ingress input for Slack without Lark", () => {
     const built = slackConfig();
+    built.daemon.runTimeoutMs = 30_000;
 
     expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
       port: 3030,
@@ -149,12 +188,27 @@ describe("OpenTag CLI start wiring", () => {
       signingSecret: "slack_signing_secret",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
-      appId: "A123"
+      botToken: "xoxb-token",
+      appId: "A123",
+      runTimeoutMs: 30_000
+    });
+  });
+
+  it("passes the service request body limit to Slack Events API ingress", () => {
+    const built = slackConfig();
+
+    expect(
+      slackIngressConfigFromCliConfig(built, {
+        env: { OPENTAG_MAX_REQUEST_BODY_BYTES: "8192" }
+      })
+    ).toMatchObject({
+      maxRequestBodyBytes: 8192
     });
   });
 
   it("derives Slack Socket Mode input without requiring a public Events URL", () => {
     const built = slackSocketModeConfig();
+    built.daemon.runTimeoutMs = 30_000;
 
     expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
       slackBotToken: "xoxb-token"
@@ -163,7 +217,9 @@ describe("OpenTag CLI start wiring", () => {
       appToken: "xapp-token",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
-      appId: "A123"
+      botToken: "xoxb-token",
+      appId: "A123",
+      runTimeoutMs: 30_000
     });
   });
 
@@ -183,6 +239,18 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       webhookPath: "/github/webhooks"
+    });
+  });
+
+  it("passes the service request body limit to GitHub webhook ingress", () => {
+    const built = githubConfig();
+
+    expect(
+      githubIngressConfigFromCliConfig(built, {
+        env: { OPENTAG_MAX_REQUEST_BODY_BYTES: "8192" }
+      })
+    ).toMatchObject({
+      maxRequestBodyBytes: 8192
     });
   });
 
@@ -233,6 +301,7 @@ describe("OpenTag CLI start wiring", () => {
 
   it("derives Lark ingress config with a default repo binding for one Project Target", () => {
     const built = config();
+    built.daemon.runTimeoutMs = 30_000;
     const ingress = larkIngressConfigFromCliConfig(built);
     const repository = built.daemon.repositories[0]!;
 
@@ -243,6 +312,7 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherToken: built.daemon.pairingToken,
       agentId: "opentag",
       botOpenId: "ou_bot",
+      runTimeoutMs: 30_000,
       defaultRepoBinding: {
         repoProvider: repository.provider,
         owner: repository.owner,
@@ -289,6 +359,174 @@ describe("OpenTag CLI start wiring", () => {
       `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
       "channel:lark:tenant_1/chat_1"
     ]);
+  });
+
+  it("starts relay mode without local dispatcher, local port checks, or GitHub ingress", async () => {
+    const built = githubConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:3030",
+      server: {},
+      async close() {
+        calls.push("dispatcher.close");
+      }
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {
+          calls.push("ports");
+        },
+        startDispatcher() {
+          calls.push("dispatcher");
+          return dispatcherHandle;
+        },
+        startGitHubIngress() {
+          calls.push("github-ingress");
+          throw new Error("GitHub ingress should not start in relay mode");
+        },
+        async waitForDispatcher() {
+          calls.push("wait");
+        },
+        async bootstrapDispatcher() {
+          calls.push("bootstrap");
+        },
+        async serveDaemon() {
+          calls.push("daemon");
+        },
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
+    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("Local dispatcher: disabled");
+    expect(logs.join("\n")).toContain("Security: only pair with a relay you operate or trust");
+    expect(logs.join("\n")).toContain("GitHub webhook URL: https://relay.example/github/webhooks");
+    expect(logs.join("\n")).toContain("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
+  });
+
+  it("refuses public HTTP relay configs before connecting", async () => {
+    const built = githubConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "http://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "http://relay.example";
+    const calls: string[] = [];
+
+    await expect(
+      startFromConfig({
+        config: built,
+        configPath: "/tmp/opentag/config.json",
+        signal: abortedSignal(),
+        listenForProcessSignals: false,
+        dependencies: {
+          async waitForDispatcher() {
+            calls.push("wait");
+          },
+          logger: {
+            log() {}
+          }
+        }
+      })
+    ).rejects.toThrow("Relay URL must use HTTPS unless it points to localhost for local testing.");
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps local mode on the local dispatcher and platform ingress path", async () => {
+    const built = config();
+    const calls: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:3030",
+      server: {},
+      async close() {
+        calls.push("dispatcher.close");
+      }
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {
+          calls.push("ports");
+        },
+        startDispatcher() {
+          calls.push("dispatcher");
+          return dispatcherHandle;
+        },
+        async waitForDispatcher() {
+          calls.push("wait");
+        },
+        async bootstrapDispatcher() {
+          calls.push("bootstrap");
+        },
+        async serveDaemon() {
+          calls.push("daemon");
+        },
+        startLarkIngress() {
+          calls.push("lark-ingress");
+          return {
+            startPromise: new Promise<void>(() => {}),
+            async close() {
+              calls.push("lark.close");
+            }
+          };
+        },
+        logger: {
+          log() {}
+        }
+      }
+    });
+
+    expect(calls.slice(0, 2)).toEqual(["ports", "dispatcher"]);
+    expect(calls).toEqual(expect.arrayContaining(["wait", "bootstrap", "daemon", "lark-ingress", "lark.close", "dispatcher.close"]));
+  });
+
+  it("fails clearly for relay mode platform ingress that is not supported in the MVP", async () => {
+    const built = config();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+
+    await expect(
+      startFromConfig({
+        config: built,
+        configPath: "/tmp/opentag/config.json",
+        signal: abortedSignal(),
+        listenForProcessSignals: false,
+        dependencies: {
+          async waitForDispatcher() {
+            throw new Error("health should not run before platform validation");
+          },
+          logger: {
+            log() {}
+          }
+        }
+      })
+    ).rejects.toThrow("Relay mode currently supports GitHub-backed ingress only.");
   });
 
   it("waits for dispatcher health instead of assuming the port is ready", async () => {

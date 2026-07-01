@@ -16,11 +16,6 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parseDomain(value) {
-  if (value === "lark" || value === "feishu") return value;
-  throw new Error("Lark domain must be lark or feishu.");
-}
-
 function accountDomainFor(domain) {
   return domain === "feishu" ? "accounts.feishu.cn" : "accounts.larksuite.com";
 }
@@ -29,10 +24,10 @@ function sdkDomainFor(domain) {
   return domain === "feishu" ? lark.Domain.Feishu : lark.Domain.Lark;
 }
 
-function registrationDomainFromUserInfo(requestedDomain, userInfo) {
+function registrationDomainFromUserInfo(userInfo) {
   if (userInfo?.tenant_brand === "lark") return "lark";
   if (userInfo?.tenant_brand === "feishu") return "feishu";
-  return requestedDomain;
+  return "feishu";
 }
 
 function printQrCode(info) {
@@ -86,7 +81,6 @@ async function fetchBotIdentity(input) {
 }
 
 async function main() {
-  const requestedDomain = parseDomain(process.argv[2] || process.env.LARK_DOMAIN || "lark");
   let detectedDomain;
 
   const registration = await lark.registerApp({
@@ -120,7 +114,7 @@ async function main() {
     }
   });
 
-  const domain = detectedDomain ?? registrationDomainFromUserInfo(requestedDomain, registration.user_info);
+  const domain = detectedDomain ?? registrationDomainFromUserInfo(registration.user_info);
   const botIdentity = await fetchBotIdentity({
     appId: registration.client_id,
     appSecret: registration.client_secret,

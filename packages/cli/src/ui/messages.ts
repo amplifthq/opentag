@@ -40,7 +40,7 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     executorCustomHint: "Currently configured custom executor",
     projectPath: "Which project should OpenTag use?",
     larkSetup: "How should OpenTag connect to Lark / Feishu?",
-    larkDomain: "Which Lark domain should OpenTag use?",
+    larkDomain: "Which Lark / Feishu tenant is this existing app for?",
     larkAppId: "Lark App ID",
     larkAppSecret: "Lark App Secret",
     larkBotOpenId: "Lark Bot Open ID (optional)",
@@ -66,14 +66,14 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     intro: "OpenTag 设置",
     language: "Language / 语言",
     platform: "OpenTag 要监听哪个平台？",
-    executor: "OpenTag 要使用哪个 coding agent？",
+    executor: "OpenTag 要使用哪个编码代理？",
     executorCustomHint: "当前配置的自定义执行器",
     projectPath: "OpenTag 要使用哪个项目？",
-    larkSetup: "OpenTag 要如何连接 Lark / 飞书？",
-    larkDomain: "OpenTag 要使用哪个 Lark 域名？",
-    larkAppId: "Lark App ID",
-    larkAppSecret: "Lark App Secret",
-    larkBotOpenId: "Lark Bot Open ID（可选）",
+    larkSetup: "OpenTag 要如何连接 Lark/飞书？",
+    larkDomain: "这个已有应用属于哪个 Lark/飞书租户？",
+    larkAppId: "Lark 应用 ID",
+    larkAppSecret: "Lark 应用密钥",
+    larkBotOpenId: "Lark 机器人 Open ID（可选）",
     slackMode: "OpenTag 要如何连接 Slack？",
     slackAppToken: "Slack App-Level Token",
     slackSigningSecret: "Slack Signing Secret",
@@ -100,20 +100,20 @@ export function t(language: CliLanguage, key: MessageKey): string {
 
 export function larkSetupLabel(language: CliLanguage, method: LarkSetupMethod): string {
   if (language === "zh-CN") {
-    if (method === "saved") return "使用已保存的 Personal Agent";
-    return method === "scan" ? "创建新的 Personal Agent" : "手动填写 App ID / Secret";
+    if (method === "saved") return "使用已保存的个人代理应用";
+    return method === "scan" ? "扫码创建个人代理应用（保存平台返回的真实租户）" : "手动填写 Lark/飞书应用凭据";
   }
   if (method === "saved") return "Use saved Personal Agent";
-  return method === "scan" ? "Create a new Personal Agent" : "Manual credentials";
+  return method === "scan" ? "Create Personal Agent by QR (save returned tenant)" : "Manual Lark / Feishu credentials";
 }
 
 export function larkSetupHint(language: CliLanguage, method: LarkSetupMethod): string {
   if (language === "zh-CN") {
     if (method === "saved") return "推荐，不需要重新扫码";
-    return method === "scan" ? "没有已保存配置时使用" : "已有自建应用时使用";
+    return method === "scan" ? "链接可能从飞书 bootstrap 开始，最终保存真实 Lark/飞书租户" : "使用已有自建应用，并手动选择租户";
   }
   if (method === "saved") return "Recommended; no new scan";
-  return method === "scan" ? "Use when no saved app exists" : "Use an existing app";
+  return method === "scan" ? "May start on Feishu bootstrap; saves the real returned tenant" : "Use an existing app and choose its tenant";
 }
 
 export function slackModeLabel(language: CliLanguage, mode: SlackSetupMode): string {

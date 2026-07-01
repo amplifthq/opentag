@@ -153,10 +153,11 @@ OpenTag's CLI path is local-first.
 | --- | --- |
 | `opentag setup` | Create or update local OpenTag config, then offer to start it |
 | `opentag start` | Manually start or restart the local OpenTag stack |
-| `opentag status` | Show local config and runtime status |
+| `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
+| `opentag cancel` | Request cancellation for a run or the active run in a source container |
 | `opentag doctor` | Run deeper setup checks |
-| `opentag platforms` | List platform setup support |
-| `opentag executors` | List available coding agents |
+| `opentag platforms` | List platform setup support and runtime capabilities |
+| `opentag executors` | List available coding agents and runtime capabilities |
 | `opentag config path` | Print the local config path |
 | `opentag config show` | Print redacted local config |
 

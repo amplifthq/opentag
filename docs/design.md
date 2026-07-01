@@ -50,7 +50,7 @@ The first release combines a fast open-source launch with one real MVP:
 - A GitHub App MVP powered by Probot at the edge.
 - An extremely thin hosted dispatcher for public webhook ingress, run persistence, runner lease claiming, and callback coordination.
 - A local runner daemon that can receive or poll for OpenTag runs.
-- At least one executor adapter for a coding agent, initially Claude Code, Codex, Hermes, or OpenClaw.
+- At least one executor adapter for a coding agent, plus a smoke-test executor.
 - A callback adapter that posts status and final results back to GitHub.
 
 The first release should not attempt to support every workspace, every agent, every permission model, or every deployment shape.
@@ -72,7 +72,7 @@ The first release should not attempt to support every workspace, every agent, ev
 - Local-first execution: the runner can live on the user's machine so repo access, credentials, build tools, and private context stay local.
 - Auditable by default: every run records who asked, what context was provided, what permissions were granted, which executor ran, and where the result was posted.
 - Small reversible permissions: each tagged run receives a narrow grant instead of inheriting broad ambient authority.
-- Adapter neutrality: Claude Code, Codex, Hermes, OpenClaw, Mastra workflows, and custom agents should all be possible executors.
+- Adapter neutrality: built-in, local CLI, hook-ingest, workflow, and custom agent runtimes should all be possible executors.
 
 ## System Shape
 
@@ -107,13 +107,326 @@ OpenTag Local Daemon
         |
         v
 Executor
-  Claude Code / Codex / Hermes / OpenClaw / custom
+  built-in / local CLI / hook-ingest / custom
         |
         v
 Callback Adapter
   GitHub status comment / PR / summary
   Slack thread reply
 ```
+
+## Runtime Readiness And Interaction Model
+
+The next runtime hardening track should treat service health, credentials,
+platform capability, executor capability, source-thread commands, callback
+safety, and user-visible status as one product model instead of separate
+features. OpenTag should make it obvious whether a request can be accepted,
+executed, stopped, and reported back before a powerful local runner starts work.
+
+```text
+Source Thread
+  Slack / Lark / Feishu / GitHub
+        |
+        v
+Project Target + Admission
+  actor, target, permissions, binding, capability
+        |
+        v
+Run Lifecycle
+  active run, follow-up queue, duplicate guard, stop, timeout
+        |
+        v
+Executor Runtime
+  spawn, hook ingest, session profile, workspace isolation
+        |
+        v
+Presentation
+  concise callback, action receipt, status card, audit detail
+        |
+        v
+Readiness Plane
+  service health, secret refs, platform capability, executor capability
+```
+
+### Readiness Plane
+
+OpenTag needs a first-class readiness model that can be used by `setup`,
+`doctor`, `status`, `service status`, source-thread `/doctor`, and future UI
+surfaces. A process can be managed by the OS and still be unusable; a credential
+can be present and still be invalid; a provider can support plain replies but
+not rich cards or message updates. The readiness plane should report those
+differences directly.
+
+Readiness checks should be grouped into four families:
+
+- `ServiceCapability`: whether the OS controller is installed/running, whether
+  the OpenTag runtime has a recent heartbeat, whether connectors are connected,
+  and whether callback delivery is ready.
+- `CredentialCapability`: where each secret comes from, whether the reference
+  is resolvable, whether the credential has been verified against the provider,
+  and whether it is safe to display only as a redacted reference.
+- `PlatformCapability`: whether a platform can receive events, reply in the
+  source thread, update a status message, render rich presentation, receive
+  action replies, and enforce mention/addressing rules.
+- `ExecutorCapability`: whether an executor exists, can run in the target
+  workspace, supports session profiles, supports cancellation, supports
+  streaming or hook completion, and requires any additional credentials.
+
+Manual Lark or Feishu credentials should be verified before OpenTag writes them
+to local configuration. A partial or invalid app ID/secret pair should fail
+during setup instead of creating a configuration that only fails later at
+service start.
+
+Secrets should not depend only on `chmod 600`. Local file permissions remain a
+useful baseline, but config should allow secret references:
+
+```ts
+type SecretRef =
+  | { kind: "env"; name: string }
+  | { kind: "keychain"; service: string; account: string }
+  | { kind: "file"; path: string };
+```
+
+The CLI can still support inline local secrets for early development, but
+status output, config printing, logs, and source-thread diagnostics must render
+the reference and verification state rather than the secret value.
+
+`opentag service status` should distinguish controller state from runtime
+readiness. A healthy launchd job is only one layer. The command should report at
+least:
+
+- `controller`: unsupported, installed, running, or stopped.
+- `runtime`: ready, starting, degraded, stale heartbeat, or unreachable.
+- `connectors`: per-platform connection and callback readiness.
+- `executor`: selected executor availability and important capability gaps.
+- `secrets`: redacted references plus verification status.
+
+### Project Target Self-Service
+
+Source-thread self-service should reinforce the Project Target model. A chat,
+channel, or thread can bind to a project target such as
+`github:owner/repo`; it should not bind directly to an absolute local checkout
+path. Local paths belong in local runner configuration and allowlists, not in
+group chat history.
+
+The initial command set should stay small and safe:
+
+- `/bind <owner>/<repo>` or `/bind <provider>:<owner>/<repo>` connects the
+  current source container to a Project Target.
+- `/status` shows the current Project Target, active run, pending follow-ups,
+  and the next safe action.
+- `/help` shows supported commands and platform-specific addressing rules.
+- `/doctor` shows a redacted readiness summary for this source container.
+- `/stop [run_id]` requests cancellation for the active run in this scope.
+- `/unbind` disconnects the source container from its Project Target after an
+  explicit confirmation or admin-capable authorization check.
+
+Group chats should require explicit addressing before they trigger a run or
+mutate a binding. Direct messages may be more permissive, but they still must
+respect Project Target binding and actor policy.
+
+When a source container is unbound, OpenTag should guide the user toward an
+explicit binding instead of silently creating rooms, silently choosing a target,
+or replaying old messages into a new project context. Project room proposals can
+be a helpful onboarding flow, but the user should choose the target and the
+binding should start from that point forward.
+
+### Run Scope, Queueing, Stop, And Timeout
+
+Run admission, duplicate protection, follow-up queueing, cancellation, and
+timeout behavior should be scoped consistently. The scope should be:
+
+```ts
+type RunScope = {
+  projectTarget: string;
+  sourceProvider: string;
+  sourceThreadKey: string;
+};
+```
+
+Within a `RunScope`, OpenTag should maintain at most one active run. New work in
+the same scope should become a durable follow-up unless the incoming event is a
+duplicate replay. This gives users predictable behavior:
+
+- duplicate source events reuse the existing run and record an audit event.
+- same-thread follow-ups are queued behind the active run.
+- natural terminal completion promotes the next queued follow-up, while
+  explicit human stop leaves queued follow-ups paused until a later promotion.
+- status surfaces show the active run and queued follow-ups, including a safe
+  command summary for queued requests when one is available.
+- cancellation acts on the active run unless a run ID is supplied.
+- timeout policy is visible before and during execution.
+
+Callback and reply delivery need duplicate-storm safety. Delivery should use
+idempotency keys at enqueue time, not only at provider-send time. A reasonable
+key is based on run ID, provider, thread key, callback kind, status message key,
+and body hash. Repeated failures or repeated equivalent messages should trip a
+circuit breaker that records audit detail but stops flooding the human thread.
+
+Run completion status should distinguish:
+
+- `completed`: the executor finished successfully.
+- `failed`: execution or verification failed.
+- `cancelled_by_user`: a human requested stop and OpenTag acknowledged it.
+- `interrupted`: the process/session ended without a normal completion signal.
+- `timed_out`: idle or hard timeout policy ended the run.
+
+`/stop` should not be treated as a successful completion signal. If the selected
+executor supports cancellation, OpenTag should call it. If it does not, OpenTag
+should mark the run as cancellation-requested, suppress further nonessential
+human callbacks, and report whether the underlying process may continue outside
+OpenTag's control.
+
+### Presentation Model
+
+OpenTag should produce semantic presentation objects before rendering
+provider-specific messages. Provider adapters can then choose plain text, rich
+cards, message updates, reactions, or thread replies based on capability.
+
+```ts
+type OpenTagPresentation =
+  | { kind: "run_status"; runId: string; state: string; nextAction?: string }
+  | { kind: "action_receipt"; title: string; actions: SourceThreadAction[] }
+  | { kind: "doctor_summary"; checks: ReadinessCheck[] }
+  | { kind: "final_summary"; outcome: string; changedFiles?: string[]; nextActions?: string[]; auditRunId?: string };
+```
+
+Default source-thread output should stay concise. A normal run should produce a
+light acknowledgement when useful, a clear final summary, and explicit next
+actions. Internal executor steps, tool traces, and detailed process messages
+belong in audit/status surfaces by default, not in the human thread.
+
+Richer cards should improve readability without changing the trust boundary.
+They are appropriate for:
+
+- final summaries.
+- readiness or doctor summaries.
+- active-run and queue status.
+- source-thread action receipts.
+
+They should not become a default stream of internal agent process messages.
+Detailed progress can be pulled through `/status`, `opentag status`, logs, or
+the audit timeline. If an executor or hook requests human-visible progress but
+the platform liveness strategy keeps that source thread quiet, OpenTag should
+record an audit-visible suppression event with the provider strategy and reason
+instead of silently dropping the callback. `opentag status --run` should surface
+that liveness strategy, callback delivery state, source receipt delivery state,
+and any suppressed progress callbacks so quiet provider behavior is explainable
+during debugging.
+Final-summary renderers should preserve the audit/status pointer in both rich
+native UI and plain text fallback, so every provider has a source-thread-visible
+path back to local audit detail without exposing internal process messages by
+default.
+
+OpenTag should support lightweight liveness where the platform allows it. A
+provider may show "received", "queued", "running", or "waiting for approval"
+through typing indicators, reactions, message updates, or short status cards.
+The capability catalog decides which mechanism is available, and callback
+renderers should consume that shared catalog instead of hard-coding provider
+names. Current liveness strategies are:
+
+- `status_update`: deliver callback run-status messages when the provider can
+  keep them concise or updatable.
+- `source_receipt`: use a native receipt/reaction path first, with text
+  acknowledgement only as fallback. Receipt-capable platforms can represent
+  low-noise states such as `received` and `running` without posting executor
+  progress into the human thread.
+- `thread_reply`: use a short source-thread reply because the provider has no
+  better liveness primitive.
+- `pull_status`: keep the thread quiet by default and make users pull detail
+  through `/status`, `opentag status`, logs, or audit.
+
+### Executor Runtime Capability
+
+The executor adapter contract should grow from a process wrapper into a runtime
+capability contract. OpenTag still routes work to executor targets, but each
+executor must declare enough behavior for setup, doctor, service status, stop,
+and completion handling to be honest.
+
+```ts
+type ExecutorCapability = {
+  id: string;
+  invocation: "spawn" | "hook_ingest" | "hybrid";
+  supportsProfile: boolean;
+  supportsStreaming: boolean;
+  supportsCancel: boolean;
+  supportsHookCompletion: boolean;
+  progressEvents: "none" | "audit" | "human";
+  approvalMode: "none" | "opentag_policy" | "executor_managed";
+  contextAccess: Array<"context_packet" | "context_pointers" | "workspace">;
+  promptAssembly: "opentag" | "executor_adapter" | "external_runtime";
+  writeAccess: "none" | "workspace" | "external";
+  conversationAccess: "none" | "request" | "thread_transcript";
+  promptMutation: "none" | "append" | "replace";
+  rawContextAccess: boolean;
+  writeActionAccess: "none" | "propose" | "execute";
+  workspaceIsolation: "none" | "branch" | "worktree" | "external";
+  requiredSecrets: SecretRefRequirement[];
+  completionSignals: CompletionSignalDescriptor[];
+};
+```
+
+Spawn-based executors remain the simplest path: OpenTag creates an isolated
+branch or worktree, starts the command with bounded context, captures output,
+and reports a structured result. Hook-ingest executors let an external local
+agent runtime report progress or final completion back to OpenTag through a
+local authenticated channel. Hybrid executors may use both.
+
+Hook ingest should be local-first and explicitly authenticated. A future
+`opentag ingest` command or loopback endpoint can accept normalized progress and
+completion events, but it should require a local token or secret reference and
+should map external event names into OpenTag's own lifecycle vocabulary.
+Templates should expose both a runnable local shell shape and a machine-readable
+manifest that declares event mappings, terminal semantics, idempotency keys, and
+hook permission boundaries.
+Executor progress declarations should describe where process updates are safe to
+show by default. Built-in local executors use audit-visible progress, keeping
+source threads concise while still making status and diagnostics useful.
+Approval declarations should make it clear whether OpenTag policy controls
+write boundaries or whether an external runtime manages its own approval loop.
+Context, prompt, and write-access declarations make plugin-like executor trust
+boundaries explicit: a source-thread user should be able to tell whether an
+executor reads only the curated context packet, also sees raw context pointers,
+can inspect the local workspace, assembles its own prompt, or can write back to
+workspace or external systems.
+Conversation, prompt-mutation, raw-context, and write-action gates should stay
+separate from workspace write access. A future external runtime might be allowed
+to read only the triggering request but not the full source-thread transcript,
+append diagnostic context without replacing OpenTag policy prompt text, see only
+curated context rather than raw provider payloads, and propose source-thread
+actions without executing them directly.
+
+Session/profile identity should become executor-neutral. A run may need a
+stable agent session profile derived from source provider, source thread,
+Project Target, and actor policy. That profile controls tool access, memory,
+configuration, and session behavior for the executor, without exposing local
+paths or secrets to the source thread.
+
+### Implementation Order
+
+The hardening path should start with safety and observability before deeper
+runtime integrations:
+
+1. Verify manual Lark/Feishu credentials before saving them.
+2. Add `SecretRef` support for env, file, and local secret-manager references;
+   keep redaction consistent in config, logs, status, and source-thread
+   diagnostics.
+3. Split service status into controller state and runtime readiness.
+4. Add the minimal platform and executor capability catalog needed by setup,
+   doctor, status, and service status.
+5. Add callback delivery idempotency and duplicate-storm protection.
+6. Improve source-thread `/help`, `/status`, and `/doctor` around Project
+   Target binding, active runs, queued follow-ups, and safe next actions.
+7. Add `/stop` and explicit timeout UX on top of executor cancellation
+   capability.
+8. Promote callback rendering into a semantic presentation model with rich-card
+   adapters where supported and plain-text fallback everywhere.
+9. Generalize agent session profiles across executors.
+10. Add authenticated local hook ingest for external agent runtimes after the
+    lifecycle and readiness model is stable. Start with local CLI templates that
+    map source-specific hook names into OpenTag lifecycle semantics; native
+    plugins can come later once the capability and presentation contracts are
+    stable.
 
 ## Package Boundaries
 
@@ -581,25 +894,33 @@ Rejected alternative:
 
 - Direct Octokit for v0. Octokit gives more control and may be better for a future custom edge gateway, but it requires more webhook and app-auth wiring before OpenTag has proven the core flow.
 
-### Mastra As Optional Orchestrator
+### Optional Orchestration Layer
 
-Mastra can be useful for workflows, agent abstractions, memory, observability, and model routing, but it should not define the OpenTag protocol.
+Workflow engines, agent abstractions, memory systems, observability layers, and
+model-routing libraries should remain optional implementation details. They
+must not define the OpenTag protocol or leak provider-native concepts into
+shared schemas.
 
-V0 should only introduce Mastra if it materially reduces implementation time for run orchestration. Otherwise, a lightweight TypeScript orchestrator is preferable until the domain model stabilizes.
+V0 should only introduce a dedicated orchestration layer if it materially
+reduces implementation time for run orchestration. Otherwise, lightweight
+TypeScript primitives are preferable until the domain model stabilizes.
 
-### Agent-Native As Design Inspiration
+### Shared Action Surface
 
-Builder.io Agent Native is useful as a reference for shared actions and app-native agent interactions. OpenTag can borrow the idea that actions should be reusable across UI, HTTP, MCP, CLI, and agents.
+OpenTag actions should be reusable across UI, HTTP, MCP, CLI, and agents
+without making any one app-native action framework a required dependency.
 
-Do not make Agent Native a required dependency for v0.
+### Cloud Demo Option
 
-### Eve As Cloud Demo Option
-
-Vercel Eve could accelerate a Slack-flavored cloud demo, especially for teams already on Vercel. It should be treated as an optional adapter path, not the core.
+A cloud demo can be useful for showing the workspace mention loop, especially
+for chat-first teams. It should be treated as an optional adapter path, not the
+core product shape.
 
 ### Executor Adapters
 
-Claude Code, Codex, Hermes, and OpenClaw are best treated as executor targets. OpenTag can route a run to one of these executors, but OpenTag should not become a remote-control wrapper for any single agent runtime.
+Specific coding agents are best treated as executor targets. OpenTag can route a
+run to an approved executor, but OpenTag should not become a remote-control
+wrapper for any single agent runtime.
 
 ## Permissions And Trust
 
@@ -694,7 +1015,7 @@ Good copy:
 
 ```text
 OpenTag is the open mention layer for agents.
-Tag Claude Code, Codex, Hermes, OpenClaw, or your own local runner from GitHub or Slack.
+Tag approved coding agents or your own local runner from GitHub or Slack.
 ```
 
 ```text
@@ -759,7 +1080,7 @@ Success:
 
 Deliverables:
 
-- Claude Code, Codex, Hermes, or OpenClaw adapter.
+- first real coding-agent adapter.
 - worktree or branch isolation.
 - final summary capture.
 - changed-file detection.
@@ -784,11 +1105,11 @@ Success:
 
 ## Resolved V0 Decisions
 
-- First real executor: Codex, with echo retained as the smoke-test executor.
+- First real executor: a local coding-agent adapter, with echo retained as the smoke-test executor.
 - First public demo: local CLI/HTTP replay, while the Probot GitHub App path remains implemented for real installations.
 - Minimum write approval model: write-capable work is constrained to an isolated branch plus pull request; direct writes to the target branch are not part of v0.
 - Protocol schema: TypeScript/Zod schemas are the source of truth and `@opentag/core` exports public JSON Schema definitions for `OpenTagEvent`, `OpenTagRun`, and `OpenTagRunResult`.
-- Orchestration framework: no Mastra dependency in v0; use lightweight TypeScript primitives until workflows justify a dedicated framework.
+- Orchestration framework: no required workflow dependency in v0; use lightweight TypeScript primitives until workflows justify a dedicated framework.
 
 ## Recommended First Implementation Decision
 

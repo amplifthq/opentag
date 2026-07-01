@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import type { LarkDomain, RegisteredLarkPersonalAgent } from "@opentag/lark";
+import { validateLarkCredentials, type LarkDomain, type RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
   defaultExecutorId,
   detectExecutors,
@@ -28,6 +28,7 @@ type LarkCredentialInput = {
   appId: string;
   appSecret: string;
   botOpenId?: string;
+  domain: LarkDomain;
 };
 
 export type SetupCommandOptions = {
@@ -39,7 +40,7 @@ export type SetupCommandOptions = {
   larkSetup?: string;
   larkAppId?: string;
   larkAppSecret?: string;
-  larkDomain?: string;
+  tenant?: string;
   larkBotOpenId?: string;
   slackMode?: string;
   slackAppToken?: string;
@@ -58,6 +59,8 @@ export type SetupCommandOptions = {
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
+  agentProfile?: string;
+  agentProfileTemplate?: string;
   binding?: string;
   force?: boolean;
   yes?: boolean;
@@ -68,7 +71,8 @@ export type SetupFlowDependencies = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   prompts: PromptAdapter;
-  scanLarkPersonalAgent(input: { domain: LarkDomain }): Promise<RegisteredLarkPersonalAgent>;
+  scanLarkPersonalAgent(input: { language: CliLanguage }): Promise<RegisteredLarkPersonalAgent>;
+  validateLarkCredentials?(input: { appId: string; appSecret: string; domain: LarkDomain }): Promise<{ botOpenId: string; botName: string }>;
   defaults?: SetupDefaults;
 };
 
@@ -77,9 +81,9 @@ function parseLarkSetupMethod(value: string): LarkSetupMethod {
   throw new Error("Lark setup method must be saved, scan, or manual.");
 }
 
-function parseLarkDomain(value: string): LarkDomain {
+function parseLarkTenant(value: string): LarkDomain {
   if (value === "lark" || value === "feishu") return value;
-  throw new Error("Lark domain must be lark or feishu.");
+  throw new Error("Tenant must be feishu or lark.");
 }
 
 function parseSlackSetupMode(value: string): SlackSetupMode {
@@ -182,6 +186,18 @@ function collectHermesSetup(options: SetupCommandOptions, defaults: SetupDefault
   };
 }
 
+function collectAgentSessionProfileSetup(options: SetupCommandOptions, defaults: SetupDefaults) {
+  const explicitProfile = optionalTrimmed(options.agentProfile);
+  const explicitProfileTemplate = optionalTrimmed(options.agentProfileTemplate);
+  const profile = explicitProfileTemplate ? explicitProfile : explicitProfile ?? defaults.agentProfile;
+  const profileTemplate = explicitProfileTemplate ?? (explicitProfile ? undefined : defaults.agentProfileTemplate);
+  if (!profile && !profileTemplate) return undefined;
+  return {
+    ...(profile ? { profile } : {}),
+    ...(profileTemplate ? { profileTemplate } : {})
+  };
+}
+
 function generateGitHubWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
@@ -244,11 +260,11 @@ function formatPlatformStatusForSetup(language: CliLanguage, status: (typeof PLA
   if (language === "zh-CN") {
     switch (status) {
       case "setup_ready":
-        return "这个 setup 向导现在可配置";
+        return "当前设置向导可配置";
       case "setup_pending":
-        return "适配器已有，setup 向导待接入";
+        return "适配器已有，设置向导待接入";
       case "experimental_setup_pending":
-        return "实验适配器，setup 向导待接入";
+        return "实验适配器，设置向导待接入";
     }
   }
   return formatPlatformStatus(status);
@@ -257,7 +273,7 @@ function formatPlatformStatusForSetup(language: CliLanguage, status: (typeof PLA
 function formatPlatformsForSetup(language: CliLanguage): string {
   const lines = PLATFORM_CATALOG.map((platform) => `- ${platform.label}: ${formatPlatformStatusForSetup(language, platform.status)}`);
   if (language === "zh-CN") {
-    return ["这个 setup 向导当前可配置的平台：", ...lines].join("\n");
+    return ["当前设置向导可配置的平台：", ...lines].join("\n");
   }
   return ["This setup wizard can configure:", ...lines].join("\n");
 }
@@ -270,7 +286,7 @@ function formatExecutorHint(input: {
   selectedByDefault: boolean;
 }): string {
   if (input.executor.devOnly) {
-    const echoHint = input.language === "zh-CN" ? "开发测试用，不会调用真实 coding agent" : "dev/test only; no real coding agent";
+    const echoHint = input.language === "zh-CN" ? "开发测试用，不会调用真实编码代理" : "dev/test only; no real coding agent";
     return input.current ? `${input.language === "zh-CN" ? "当前选择，" : "current, "}${echoHint}` : echoHint;
   }
 
@@ -406,16 +422,20 @@ async function collectLarkSetupMethod(
     if (setupMethod === "saved" && !savedLarkCredentials) {
       throw new Error("No saved Lark Personal Agent config was found. Use --lark-setup scan or --lark-setup manual.");
     }
+    if (setupMethod === "scan" && options.tenant) {
+      throw new Error("Tenant is detected during scan setup. Use --lark-setup manual --tenant <feishu|lark> for an existing app.");
+    }
     return setupMethod;
   }
-  if (hasManualLarkCredentials(options)) {
+  if (hasManualLarkCredentials(options) || options.tenant) {
     return "manual";
   }
   const methods: LarkSetupMethod[] = savedLarkCredentials ? ["saved", "scan", "manual"] : ["scan", "manual"];
   const previous = defaults.larkSetupMethod && methods.includes(defaults.larkSetupMethod) ? defaults.larkSetupMethod : undefined;
+  const defaultSetupMethod = savedLarkCredentials ? "saved" : "scan";
   return prompts.select({
     message: t(language, "larkSetup"),
-    initialValue: savedLarkCredentials ? "saved" : previous ?? "scan",
+    initialValue: savedLarkCredentials ? "saved" : previous ?? defaultSetupMethod,
     options: methods.map((method) => ({
       value: method,
       label: larkSetupLabel(language, method),
@@ -441,15 +461,18 @@ async function collectLarkDomain(
     }
     return savedLarkCredentials.domain;
   }
-  if (options.larkDomain) {
-    return parseLarkDomain(options.larkDomain);
+  if (setupMethod === "scan") {
+    throw new Error("Tenant is detected during scan setup.");
+  }
+  if (options.tenant) {
+    return parseLarkTenant(options.tenant);
   }
   return prompts.select({
     message: t(language, "larkDomain"),
-    initialValue: defaults.larkDomain ?? "lark",
+    initialValue: defaults.larkDomain ?? "feishu",
     options: [
-      { value: "lark", label: "Lark", hint: "larksuite.com" },
-      { value: "feishu", label: "Feishu", hint: "feishu.cn" }
+      { value: "feishu", label: "Feishu", hint: "feishu.cn" },
+      { value: "lark", label: "Lark", hint: "larksuite.com" }
     ]
   });
 }
@@ -459,46 +482,59 @@ async function collectLarkCredentials(input: {
   prompts: PromptAdapter;
   language: CliLanguage;
   setupMethod: LarkSetupMethod;
-  domain: LarkDomain;
+  domain?: LarkDomain;
   savedLarkCredentials?: SavedLarkCredentials;
-  scanLarkPersonalAgent(input: { domain: LarkDomain }): Promise<RegisteredLarkPersonalAgent>;
+  scanLarkPersonalAgent(input: { language: CliLanguage }): Promise<RegisteredLarkPersonalAgent>;
+  validateLarkCredentials(input: { appId: string; appSecret: string; domain: LarkDomain }): Promise<{ botOpenId: string; botName: string }>;
 }): Promise<LarkCredentialInput> {
   if (input.setupMethod === "saved") {
     if (!input.savedLarkCredentials) {
       throw new Error("No saved Lark Personal Agent config was found.");
     }
+    const validation = await input.validateLarkCredentials({
+      appId: input.savedLarkCredentials.appId,
+      appSecret: input.savedLarkCredentials.appSecret,
+      domain: input.savedLarkCredentials.domain
+    });
     return {
       appId: input.savedLarkCredentials.appId,
       appSecret: input.savedLarkCredentials.appSecret,
-      ...(input.savedLarkCredentials.botOpenId ? { botOpenId: input.savedLarkCredentials.botOpenId } : {})
+      domain: input.savedLarkCredentials.domain,
+      botOpenId: validation.botOpenId
     };
   }
 
   if (input.setupMethod === "scan") {
     assertNoManualLarkCredentialFlags(input.options);
-    const registered = await input.scanLarkPersonalAgent({ domain: input.domain });
+    const registered = await input.scanLarkPersonalAgent({ language: input.language });
     return {
       appId: registered.appId,
       appSecret: registered.appSecret,
+      domain: registered.domain,
       ...(registered.botOpenId ? { botOpenId: registered.botOpenId } : {})
     };
   }
 
+  if (!input.domain) {
+    throw new Error("Tenant is required for manual setup.");
+  }
   assertCompleteManualLarkCredentials(input.options);
   if (!hasCompleteManualLarkCredentials(input.options)) {
     input.prompts.note(formatLarkManualCredentialHelp(input.language, input.domain));
   }
-  const appId = nonEmpty(input.options.larkAppId ?? (await input.prompts.text({ message: t(input.language, "larkAppId") })), "Lark App ID");
+  const appIdLabel = input.language === "zh-CN" ? "Lark 应用 ID" : "Lark App ID";
+  const appSecretLabel = input.language === "zh-CN" ? "Lark 应用密钥" : "Lark App Secret";
+  const appId = nonEmpty(input.options.larkAppId ?? (await input.prompts.text({ message: t(input.language, "larkAppId") })), appIdLabel);
   const appSecret = nonEmpty(
     input.options.larkAppSecret ??
       (await input.prompts.password({
         message: t(input.language, "larkAppSecret"),
         validate(value) {
-          if (!value.trim()) return "Lark App Secret is required.";
+          if (!value.trim()) return input.language === "zh-CN" ? "Lark 应用密钥不能为空。" : "Lark App Secret is required.";
           return undefined;
         }
       })),
-    "Lark App Secret"
+    appSecretLabel
   );
   const botOpenIdInput =
     input.options.larkBotOpenId ??
@@ -509,10 +545,16 @@ async function collectLarkCredentials(input: {
           placeholder: "ou_..."
         }));
   const botOpenId = optionalTrimmed(botOpenIdInput);
+  const validation = await input.validateLarkCredentials({
+    appId,
+    appSecret,
+    domain: input.domain
+  });
   return {
     appId,
     appSecret,
-    ...(botOpenId ? { botOpenId } : {})
+    domain: input.domain,
+    botOpenId: botOpenId ?? validation.botOpenId
   };
 }
 
@@ -734,6 +776,7 @@ export async function collectSetupInput(
   const platform = await collectPlatform(options, defaults, prompts, language);
   const executor = await collectExecutor(options, defaults, prompts, language, dependencies.env);
   const hermesSetup = collectHermesSetup(options, defaults, executor);
+  const agentSessionProfile = collectAgentSessionProfileSetup(options, defaults);
   const projectPath = await collectProjectPath(options, defaults, prompts, language, cwd);
   const resolvedProjectPath = projectPath.trim() || cwd;
   const savedLarkCredentials =
@@ -743,24 +786,32 @@ export async function collectSetupInput(
   const larkSetupMethod =
     platform === "lark" ? await collectLarkSetupMethod(options, defaults, prompts, language, savedLarkCredentials) : undefined;
   const larkDomain =
-    platform === "lark" && larkSetupMethod
+    platform === "lark" && larkSetupMethod && larkSetupMethod !== "scan"
       ? await collectLarkDomain(options, defaults, prompts, language, larkSetupMethod, savedLarkCredentials)
       : undefined;
   const larkCredentials =
-    platform === "lark" && larkSetupMethod && larkDomain
+    platform === "lark" && larkSetupMethod
       ? await collectLarkCredentials({
           options,
           prompts,
           language,
           setupMethod: larkSetupMethod,
-          domain: larkDomain,
+          ...(larkDomain ? { domain: larkDomain } : {}),
           ...(savedLarkCredentials ? { savedLarkCredentials } : {}),
-          scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent
+          scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent,
+          validateLarkCredentials: dependencies.validateLarkCredentials ?? validateLarkCredentials
         })
       : undefined;
   const larkBindingMethod = platform === "lark" ? await collectBindingMethod(options, defaults, prompts, language, "lark") : undefined;
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const larkPersistedCredentials = larkCredentials
+    ? {
+        appId: larkCredentials.appId,
+        appSecret: larkCredentials.appSecret,
+        ...(larkCredentials.botOpenId ? { botOpenId: larkCredentials.botOpenId } : {})
+      }
+    : undefined;
 
   const setupInput: OpenTagSetupInput = {
     language,
@@ -768,11 +819,12 @@ export async function collectSetupInput(
     projectPath: resolvedProjectPath,
     executor,
     ...(hermesSetup ? { hermes: hermesSetup } : {}),
-    ...(larkCredentials && larkDomain && larkSetupMethod && larkBindingMethod
+    ...(agentSessionProfile ? { agentSessionProfile } : {}),
+    ...(larkPersistedCredentials && larkCredentials && larkSetupMethod && larkBindingMethod
       ? {
           lark: {
-            ...larkCredentials,
-            domain: larkDomain,
+            ...larkPersistedCredentials,
+            domain: larkCredentials.domain,
             setupMethod: larkSetupMethod,
             bindingMethod: larkBindingMethod,
             ...(larkSetupMethod === "saved" && savedLarkCredentials ? { savedCredentialsSource: savedLarkCredentials.source } : {})

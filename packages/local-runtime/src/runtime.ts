@@ -1,6 +1,6 @@
 import { createDispatcherClient } from "@opentag/client";
 import { createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, createHermesExecutor, type RunnerSecurityPolicy } from "@opentag/runner";
-import type { OpenTagDaemonConfig } from "./config.js";
+import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
 
@@ -42,10 +42,11 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
+  const token = runnerDispatcherToken(config);
   return createDispatcherClient({
     dispatcherUrl: config.dispatcherUrl,
     runnerId: config.runnerId,
-    ...(config.pairingToken ? { pairingToken: config.pairingToken } : {})
+    ...(token ? { pairingToken: token } : {})
   });
 }
 
@@ -72,6 +73,8 @@ export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
     ...(security ? { security } : {}),
     ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
+    ...(config.runTimeoutMs ? { runTimeoutMs: config.runTimeoutMs } : {}),
+    ...(config.agentSessionProfile ? { agentSessionProfile: config.agentSessionProfile } : {}),
     ...(config.pollIntervalMs ? { pollIntervalMs: config.pollIntervalMs } : {}),
     client: createDaemonClient(config)
   };

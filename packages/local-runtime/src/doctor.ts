@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
+import { formatProjectTargetRef } from "@opentag/core";
+import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter, type ExecutorCapabilityContract } from "@opentag/runner";
 import { createOpenTagClient } from "@opentag/client";
-import { normalizeChannelBindings } from "./config.js";
+import { normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
 import type { OpenTagDaemonConfig, RepositoryBindingConfig } from "./config.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "fail";
@@ -18,9 +20,78 @@ function check(status: DoctorCheckStatus, name: string, message: string): Doctor
   return { name, status, message };
 }
 
+function yesNo(value: boolean): "yes" | "no" {
+  return value ? "yes" : "no";
+}
+
+function formatExecutorCapability(capability: ExecutorCapabilityContract): string {
+  const secrets = capability.requiredSecrets.length ? capability.requiredSecrets.map((secret) => secret.id).join(",") : "none";
+  const completion = capability.completionSignals.map((signal) => signal.type).join(",");
+  const context = capability.contextAccess.length ? capability.contextAccess.join(",") : "none";
+  return [
+    `invocation=${capability.invocation}`,
+    `profile=${yesNo(capability.supportsProfile)}`,
+    `streaming=${yesNo(capability.supportsStreaming)}`,
+    `cancel=${yesNo(capability.supportsCancel)}`,
+    `hook_completion=${yesNo(capability.supportsHookCompletion)}`,
+    `progress=${capability.progressEvents}`,
+    `approval=${capability.approvalMode}`,
+    `context=${context}`,
+    `prompt=${capability.promptAssembly}`,
+    `write=${capability.writeAccess}`,
+    `conversation=${capability.conversationAccess}`,
+    `prompt_mutation=${capability.promptMutation}`,
+    `raw_context=${yesNo(capability.rawContextAccess)}`,
+    `write_actions=${capability.writeActionAccess}`,
+    `isolation=${capability.workspaceIsolation}`,
+    `secrets=${secrets}`,
+    `completion=${completion}`
+  ].join(", ");
+}
+
+function envSecretConfigured(env: Record<string, string | undefined>, name: string): boolean {
+  return Boolean(env[name]?.trim());
+}
+
+function executorSecretReference(secret: ExecutorCapabilityContract["requiredSecrets"][number]): string {
+  return secret.env ? `env ${secret.env}` : "an executor-specific secret reference";
+}
+
+function checkExecutorSecretRequirements(input: {
+  capability: ExecutorCapabilityContract;
+  env: Record<string, string | undefined>;
+}): DoctorCheck[] {
+  return input.capability.requiredSecrets.map((secret) => {
+    const reference = executorSecretReference(secret);
+    const configured = secret.env ? envSecretConfigured(input.env, secret.env) : false;
+    if (configured) {
+      return check(
+        "ok",
+        `${input.capability.id} secret ${secret.id}`,
+        `${secret.label} configured via ${reference} (${secret.required ? "required" : "optional"}).`
+      );
+    }
+    if (secret.required) {
+      return check(
+        "fail",
+        `${input.capability.id} secret ${secret.id}`,
+        `${secret.label} is required but ${reference} is not configured.${secret.description ? ` ${secret.description}` : ""}`
+      );
+    }
+    return check(
+      "ok",
+      `${input.capability.id} secret ${secret.id}`,
+      `${secret.label} is optional and not configured via ${reference}; executor may use local login/config.`
+    );
+  });
+}
+
 // Codex accepts built-in tiers (e.g. flex, fast), legacy request values (e.g. priority),
 // and catalog-provided tier IDs. OpenTag should not maintain a closed allowlist here.
 const CODEX_DEPRECATED_SERVICE_TIERS = new Set(["default"]);
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 15_000;
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const MIN_RUNNER_HEARTBEAT_STALE_MS = 30_000;
 
 function defaultCodexConfigPath(): string {
   return join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "config.toml");
@@ -34,6 +105,134 @@ function parseCodexServiceTiers(configText: string): string[] {
 
 function shouldCheckCodexConfig(config: OpenTagDaemonConfig): boolean {
   return config.repositories.some((repository) => repository.defaultExecutor === "codex");
+}
+
+function checkRunnerApiAuth(config: OpenTagDaemonConfig): DoctorCheck {
+  if (config.runnerToken) {
+    return check(
+      "ok",
+      "hook ingest auth",
+      "Runner-scoped dispatcher token is configured separately from the pairing token for claim/progress/completion and local hook ingest."
+    );
+  }
+  return config.pairingToken
+    ? check(
+        "ok",
+        "hook ingest auth",
+        "Legacy daemon pairing token is configured for runner calls and local hook ingest; configure runnerToken to reduce relay credential blast radius."
+      )
+    : check(
+        "warn",
+        "hook ingest auth",
+        "No runner-scoped dispatcher token is configured; runner endpoints and local hook ingest are not protected."
+      );
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms % 60_000 === 0) return `${ms / 60_000} minute(s)`;
+  if (ms % 1_000 === 0) return `${ms / 1_000} second(s)`;
+  return `${ms}ms`;
+}
+
+function repositoryTargetLabel(repository: RepositoryBindingConfig): string {
+  return formatProjectTargetRef({
+    provider: repository.provider,
+    owner: repository.owner,
+    repo: repository.repo
+  });
+}
+
+function runnerHeartbeatStaleAfterMs(config: OpenTagDaemonConfig): number {
+  return Math.max(
+    config.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS,
+    config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
+    MIN_RUNNER_HEARTBEAT_STALE_MS / 3
+  ) * 3;
+}
+
+function checkRunnerHeartbeat(input: {
+  heartbeatAt?: string;
+  config: OpenTagDaemonConfig;
+  now?: Date;
+}): DoctorCheck {
+  if (!input.heartbeatAt) {
+    return check(
+      "warn",
+      "runner heartbeat",
+      "no heartbeat observed yet; the runner may be starting or the dispatcher may not expose runner heartbeat metadata."
+    );
+  }
+
+  const heartbeatTime = Date.parse(input.heartbeatAt);
+  if (!Number.isFinite(heartbeatTime)) {
+    return check("warn", "runner heartbeat", `invalid heartbeat timestamp: ${input.heartbeatAt}`);
+  }
+
+  const now = input.now?.getTime() ?? Date.now();
+  const ageMs = Math.max(0, now - heartbeatTime);
+  const staleAfterMs = runnerHeartbeatStaleAfterMs(input.config);
+  if (ageMs > staleAfterMs) {
+    return check(
+      "warn",
+      "runner heartbeat",
+      `stale; last heartbeat ${input.heartbeatAt} (${formatDurationMs(ageMs)} ago, stale after ${formatDurationMs(staleAfterMs)})`
+    );
+  }
+
+  return check("ok", "runner heartbeat", `fresh; last heartbeat ${input.heartbeatAt}`);
+}
+
+function runnerTokenFingerprint(token: string): string {
+  return createHash("sha256").update(token).digest("hex").toLowerCase();
+}
+
+function normalizedRevokedFingerprints(config: OpenTagDaemonConfig): Set<string> {
+  return new Set((config.revokedRunnerTokenFingerprints ?? []).map((fingerprint) => fingerprint.trim().toLowerCase()).filter(Boolean));
+}
+
+function checkRunnerTokenRotation(config: OpenTagDaemonConfig): DoctorCheck[] {
+  const checks: DoctorCheck[] = [];
+  const rotationCount = config.runnerTokens?.length ?? 0;
+  const revoked = normalizedRevokedFingerprints(config);
+
+  if (rotationCount > 0) {
+    checks.push(
+      config.runnerToken
+        ? check("ok", "runner token rotation", `${rotationCount} additional runner token(s) configured for the rotation window.`)
+        : check(
+            "warn",
+            "runner token rotation",
+            "Additional runner tokens are configured, but daemon.runnerToken is missing; configure the current runner token before relying on rotation."
+          )
+    );
+  }
+
+  if (revoked.size > 0) {
+    const currentTokenRevoked = config.runnerToken ? revoked.has(runnerTokenFingerprint(config.runnerToken)) : false;
+    const rotationTokenFingerprints = new Set((config.runnerTokens ?? []).map(runnerTokenFingerprint));
+    const rotationTokenRevokedCount = [...rotationTokenFingerprints].filter((fingerprint) => revoked.has(fingerprint)).length;
+    checks.push(
+      currentTokenRevoked
+        ? check(
+            "fail",
+            "runner token revocation",
+            "Current daemon.runnerToken fingerprint is revoked; pair again or update daemon.runnerToken before starting the runner."
+          )
+        : rotationTokenRevokedCount > 0
+          ? check(
+              "fail",
+              "runner token revocation",
+              `${rotationTokenRevokedCount} daemon.runnerTokens fingerprint(s) are revoked; remove revoked rotation tokens before relying on rotation.`
+            )
+        : check(
+            "ok",
+            "runner token revocation",
+            `${revoked.size} revoked runner token fingerprint(s) configured; revoked tokens fail closed without printing token values.`
+          )
+    );
+  }
+
+  return checks;
 }
 
 function checkCodexConfig(configPath = defaultCodexConfigPath()): DoctorCheck {
@@ -69,27 +268,29 @@ async function checkGitCheckout(input: {
   repository: RepositoryBindingConfig;
   executor?: ExecutorAdapter;
   commandRunner: CommandRunner;
+  env: Record<string, string | undefined>;
 }): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
+  const target = repositoryTargetLabel(input.repository);
   if (!existsSync(input.repository.checkoutPath)) {
-    return [check("fail", `${input.repository.owner}/${input.repository.repo} checkout`, `Path does not exist: ${input.repository.checkoutPath}`)];
+    return [check("fail", `${target} checkout`, "Configured workspace path does not exist (hasWorkspacePath=yes).")];
   }
-  checks.push(check("ok", `${input.repository.owner}/${input.repository.repo} checkout`, input.repository.checkoutPath));
+  checks.push(check("ok", `${target} checkout`, "Workspace path configured (hasWorkspacePath=yes)."));
 
   try {
     const gitRepo = await input.commandRunner.run("git", ["rev-parse", "--is-inside-work-tree"], {
       cwd: input.repository.checkoutPath
     });
     if (gitRepo.exitCode !== 0 || gitRepo.stdout.trim() !== "true") {
-      checks.push(check("fail", `${input.repository.owner}/${input.repository.repo} git repo`, gitRepo.stderr || gitRepo.stdout || "Not a git repository."));
+      checks.push(check("fail", `${target} git repo`, gitRepo.stderr || gitRepo.stdout || "Not a git repository."));
       return checks;
     }
-    checks.push(check("ok", `${input.repository.owner}/${input.repository.repo} git repo`, "Git checkout detected"));
+    checks.push(check("ok", `${target} git repo`, "Git checkout detected"));
   } catch (error) {
     checks.push(
       check(
         "fail",
-        `${input.repository.owner}/${input.repository.repo} git repo`,
+        `${target} git repo`,
         error instanceof Error ? error.message : String(error)
       )
     );
@@ -100,6 +301,18 @@ async function checkGitCheckout(input: {
   if (!executor) {
     checks.push(check("fail", `${input.repository.defaultExecutor} executor`, "No local executor is configured with this id."));
     return checks;
+  }
+  checks.push(
+    executor.capability
+      ? check("ok", `${input.repository.defaultExecutor} capability`, formatExecutorCapability(executor.capability))
+      : check(
+          "warn",
+          `${input.repository.defaultExecutor} capability`,
+          "Executor does not declare a capability contract; readiness may be incomplete."
+        )
+  );
+  if (executor.capability) {
+    checks.push(...checkExecutorSecretRequirements({ capability: executor.capability, env: input.env }));
   }
   try {
     const readiness = await executor.canRun({
@@ -134,12 +347,16 @@ export async function runDoctor(input: {
   fetchImpl?: typeof fetch;
   commandRunner?: CommandRunner;
   codexConfigPath?: string;
+  now?: Date;
+  env?: Record<string, string | undefined>;
 }): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const commandRunner = input.commandRunner ?? nodeCommandRunner;
+  const env = input.env ?? process.env;
+  const token = runnerDispatcherToken(input.config);
   const client = createOpenTagClient({
     dispatcherUrl: input.config.dispatcherUrl,
-    ...(input.config.pairingToken ? { pairingToken: input.config.pairingToken } : {}),
+    ...(token ? { pairingToken: token } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
 
@@ -153,10 +370,20 @@ export async function runDoctor(input: {
   try {
     const { runner } = await client.getRunner({ runnerId: input.config.runnerId });
     checks.push(check("ok", "runner registration", `${runner.runnerId} (${runner.name})`));
+    checks.push(
+      checkRunnerHeartbeat({
+        ...(runner.heartbeatAt ? { heartbeatAt: runner.heartbeatAt } : {}),
+        config: input.config,
+        ...(input.now ? { now: input.now } : {})
+      })
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     checks.push(check(message.includes("runner_not_found") ? "fail" : "warn", "runner registration", message));
   }
+
+  checks.push(checkRunnerApiAuth(input.config));
+  checks.push(...checkRunnerTokenRotation(input.config));
 
   if (!input.config.repositories.length) {
     checks.push(check("fail", "repository config", "No repositories are configured."));
@@ -171,6 +398,7 @@ export async function runDoctor(input: {
       ...(await checkGitCheckout({
         repository,
         commandRunner,
+        env,
         ...(input.executors[repository.defaultExecutor] ? { executor: input.executors[repository.defaultExecutor] } : {})
       }))
     );

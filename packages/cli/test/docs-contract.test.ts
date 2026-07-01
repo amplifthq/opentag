@@ -51,14 +51,14 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
-    expect(skill).toContain("Lark / Feishu domain");
+    expect(skill).toContain("Lark / Feishu tenant for manual app setup");
     expect(skill).toContain("Lark scan vs manual setup");
     expect(skill).toContain("default project binding vs bind later");
     expect(skill).toContain("--platform");
     expect(skill).toContain("--executor");
     expect(skill).toContain("--project");
     expect(skill).toContain("--slack-mode");
-    expect(skill).toContain("--lark-domain");
+    expect(skill).toContain("--tenant");
     expect(skill).toContain("--lark-setup");
     expect(skill).toContain("--binding");
     expect(skill).toContain(

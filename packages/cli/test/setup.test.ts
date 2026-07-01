@@ -1,9 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { readCliConfig } from "../src/config.js";
-import { runSetupCommand } from "../src/setup.js";
+import { runSetupCommand as runSetupCommandRaw, type SetupCommandDependencies, type SetupCommandOptions } from "../src/setup.js";
 import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
 
 function tempDir(): string {
@@ -31,28 +31,32 @@ function testPrompts(overrides: Partial<PromptAdapter> = {}): PromptAdapter {
   };
 }
 
+function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
+  return runSetupCommandRaw(options, {
+    validateLarkCredentials: vi.fn(async () => ({ botOpenId: "ou_verified_bot", botName: "OpenTag" })),
+    ...dependencies
+  });
+}
+
 describe("OpenTag CLI setup", () => {
-  it("uses Lark scan setup by default instead of prompting for manual credentials", async () => {
+  it("defaults manual Lark credentials to the Feishu tenant", async () => {
     const projectPath = tempDir();
     const configPath = join(tempDir(), "config.json");
     const prompts = testPrompts({
       text: vi.fn(async (input) => input.initialValue ?? ""),
-      password: vi.fn(async () => {
-        throw new Error("Unexpected manual credential prompt");
-      })
+      password: vi.fn(async () => "secret_manual")
     });
-    const scanLarkPersonalAgent = vi.fn(async () => ({
-      appId: "cli_scan",
-      appSecret: "secret_scan",
-      domain: "lark" as const,
-      botOpenId: "ou_bot"
-    }));
+    const scanLarkPersonalAgent = vi.fn(async () => {
+      throw new Error("Unexpected Lark scan");
+    });
 
     await runSetupCommand(
       {
         config: configPath,
         project: projectPath,
         executor: "echo",
+        larkAppId: "cli_manual",
+        larkAppSecret: "secret_manual",
         start: false,
         force: true
       },
@@ -62,7 +66,107 @@ describe("OpenTag CLI setup", () => {
       }
     );
 
-    expect(scanLarkPersonalAgent).toHaveBeenCalledWith({ domain: "lark" });
+    expect(scanLarkPersonalAgent).not.toHaveBeenCalled();
+    expect(readCliConfig(configPath).platforms.lark).toEqual({
+      appId: "cli_manual",
+      appSecret: "secret_manual",
+      domain: "feishu",
+      botOpenId: "ou_verified_bot",
+      defaultProjectBinding: true
+    });
+    expect(readCliConfig(configPath).preferences?.lastSetup).toMatchObject({
+      platforms: ["lark"],
+      executor: "echo",
+      larkSetupMethod: "manual",
+      bindingMethod: "default_project"
+    });
+  });
+
+  it("rejects preselected tenant for scan setup", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          executor: "echo",
+          larkSetup: "scan",
+          tenant: "lark",
+          start: false,
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          scanLarkPersonalAgent: vi.fn(async () => ({
+            appId: "cli_scan",
+            appSecret: "secret_scan",
+            domain: "lark" as const
+          }))
+        }
+      )
+    ).rejects.toThrow("Tenant is detected during scan setup");
+  });
+
+  it("persists the domain returned by scanned Feishu registration", async () => {
+    const projectPath = tempDir();
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        larkSetup: "scan",
+        start: false,
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts(),
+        scanLarkPersonalAgent: vi.fn(async () => ({
+          appId: "cli_scan",
+          appSecret: "secret_scan",
+          domain: "feishu" as const,
+          botOpenId: "ou_bot"
+        }))
+      }
+    );
+
+    expect(readCliConfig(configPath).platforms.lark).toEqual({
+      appId: "cli_scan",
+      appSecret: "secret_scan",
+      domain: "feishu",
+      botOpenId: "ou_bot",
+      defaultProjectBinding: true
+    });
+    expect(readCliConfig(configPath).preferences?.lastSetup?.larkDomain).toBe("feishu");
+  });
+
+  it("persists the domain returned by scanned Lark registration", async () => {
+    const projectPath = tempDir();
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        larkSetup: "scan",
+        start: false,
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts(),
+        scanLarkPersonalAgent: vi.fn(async () => ({
+          appId: "cli_scan",
+          appSecret: "secret_scan",
+          domain: "lark" as const,
+          botOpenId: "ou_bot"
+        }))
+      }
+    );
+
     expect(readCliConfig(configPath).platforms.lark).toEqual({
       appId: "cli_scan",
       appSecret: "secret_scan",
@@ -70,12 +174,7 @@ describe("OpenTag CLI setup", () => {
       botOpenId: "ou_bot",
       defaultProjectBinding: true
     });
-    expect(readCliConfig(configPath).preferences?.lastSetup).toMatchObject({
-      platforms: ["lark"],
-      executor: "echo",
-      larkSetupMethod: "scan",
-      bindingMethod: "default_project"
-    });
+    expect(readCliConfig(configPath).preferences?.lastSetup?.larkDomain).toBe("lark");
   });
 
   it("normalizes a saved built-in executor before reusing setup defaults", async () => {
@@ -88,7 +187,7 @@ describe("OpenTag CLI setup", () => {
         project: projectPath,
         platform: "lark",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         force: true,
@@ -128,7 +227,7 @@ describe("OpenTag CLI setup", () => {
       project: tempDir(),
       executor: "echo",
       larkSetup: "manual",
-      larkDomain: "feishu",
+      tenant: "feishu",
       larkAppId: "cli_manual",
       larkAppSecret: "secret_manual",
       larkBotOpenId: "ou_manual_bot",
@@ -146,6 +245,34 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
+  it("does not save manual Lark credentials when provider verification fails", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await expect(
+      runSetupCommand(
+        {
+          config: configPath,
+          project: tempDir(),
+          executor: "echo",
+          larkSetup: "manual",
+          tenant: "lark",
+          larkAppId: "cli_manual",
+          larkAppSecret: "bad_secret",
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          validateLarkCredentials: vi.fn(async () => {
+            throw new Error("Lark credentials could not be verified: invalid app secret");
+          })
+        }
+      )
+    ).rejects.toThrow("Lark credentials could not be verified");
+
+    expect(existsSync(configPath)).toBe(false);
+  });
+
   it("shows official Lark console links before manual credential prompts", async () => {
     const configPath = join(tempDir(), "config.json");
     const notes: string[] = [];
@@ -154,7 +281,7 @@ describe("OpenTag CLI setup", () => {
         notes.push(message);
       },
       text: vi.fn(async (input) => {
-        return input.message.includes("App ID") ? "cli_manual" : "";
+        return input.message.includes("App ID") || input.message.includes("应用 ID") ? "cli_manual" : "";
       }),
       password: vi.fn(async () => "secret_manual")
     });
@@ -165,7 +292,7 @@ describe("OpenTag CLI setup", () => {
         project: tempDir(),
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "feishu",
+        tenant: "feishu",
         start: false,
         force: true
       },
@@ -174,6 +301,10 @@ describe("OpenTag CLI setup", () => {
 
     expect(notes.join("\n")).toContain("https://open.feishu.cn/app");
     expect(notes.join("\n")).toContain("https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN");
+    expect(notes.join("\n")).toContain("Capabilities:");
+    expect(notes.join("\n")).toContain("platform Lark / Feishu:");
+    expect(notes.join("\n")).toContain("liveness=thread_reply");
+    expect(notes.join("\n")).toContain("executor Echo:");
   });
 
   it("does not prompt for optional Lark bot open id when manual credentials are provided", async () => {
@@ -190,7 +321,7 @@ describe("OpenTag CLI setup", () => {
         project: tempDir(),
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         force: true,
@@ -203,6 +334,7 @@ describe("OpenTag CLI setup", () => {
       appId: "cli_manual",
       appSecret: "secret_manual",
       domain: "lark",
+      botOpenId: "ou_verified_bot",
       defaultProjectBinding: true
     });
   });
@@ -226,6 +358,10 @@ describe("OpenTag CLI setup", () => {
     const scanLarkPersonalAgent = vi.fn(async () => {
       throw new Error("Unexpected Lark scan");
     });
+    const validateLarkCredentials = vi.fn(async () => ({
+      botOpenId: "ou_verified_saved_bot",
+      botName: "OpenTag Saved"
+    }));
 
     await runSetupCommand(
       {
@@ -237,19 +373,63 @@ describe("OpenTag CLI setup", () => {
       },
       {
         prompts: testPrompts(),
-        scanLarkPersonalAgent
+        scanLarkPersonalAgent,
+        validateLarkCredentials
       }
     );
 
     expect(scanLarkPersonalAgent).not.toHaveBeenCalled();
+    expect(validateLarkCredentials).toHaveBeenCalledWith({
+      appId: "legacy_app",
+      appSecret: "legacy_secret",
+      domain: "feishu"
+    });
     expect(readCliConfig(configPath).platforms.lark).toEqual({
       appId: "legacy_app",
       appSecret: "legacy_secret",
       domain: "feishu",
-      botOpenId: "ou_legacy_bot",
+      botOpenId: "ou_verified_saved_bot",
       defaultProjectBinding: true
     });
     expect(readCliConfig(configPath).preferences?.lastSetup?.larkSetupMethod).toBe("saved");
+  });
+
+  it("does not save stale saved Lark credentials when provider verification fails", async () => {
+    const projectPath = tempDir();
+    const configPath = join(tempDir(), "config.json");
+    const legacyDirectory = join(projectPath, ".opentag", "lark");
+    mkdirSync(legacyDirectory, { recursive: true });
+    const legacyConfigPath = join(legacyDirectory, "lark.local.json");
+    writeFileSync(
+      legacyConfigPath,
+      `${JSON.stringify({
+        appId: "legacy_app",
+        appSecret: "stale_secret",
+        domain: "lark",
+        botOpenId: "ou_stale_bot"
+      })}\n`
+    );
+    chmodSync(legacyConfigPath, 0o600);
+
+    await expect(
+      runSetupCommand(
+        {
+          config: configPath,
+          project: projectPath,
+          executor: "echo",
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          validateLarkCredentials: vi.fn(async () => {
+            throw new Error("Lark credentials could not be verified: token expired");
+          })
+        }
+      )
+    ).rejects.toThrow("Lark credentials could not be verified");
+
+    expect(existsSync(configPath)).toBe(false);
   });
 
   it("summarizes the saved project path instead of the internal Project Target id", async () => {
@@ -263,7 +443,7 @@ describe("OpenTag CLI setup", () => {
         project: projectPath,
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         start: false,
@@ -295,7 +475,7 @@ describe("OpenTag CLI setup", () => {
         project: tempDir(),
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         force: true
@@ -320,7 +500,7 @@ describe("OpenTag CLI setup", () => {
         language: "en",
         platform: "lark",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         binding: "default_project",
@@ -354,7 +534,7 @@ describe("OpenTag CLI setup", () => {
         executor: "claude-code",
         language: "zh-CN",
         larkSetup: "manual",
-        larkDomain: "feishu",
+        tenant: "feishu",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         binding: "bind_later",
@@ -378,7 +558,7 @@ describe("OpenTag CLI setup", () => {
             return input.initialValue ?? input.options[0]!.value;
           },
           async text(input) {
-            if (input.message === "Lark App ID") return "cli_manual";
+            if (input.message === "Lark App ID" || input.message === "Lark 应用 ID") return "cli_manual";
             return input.initialValue ?? "";
           },
           async password() {
@@ -451,7 +631,7 @@ describe("OpenTag CLI setup", () => {
         project: tempDir(),
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         force: true,
@@ -480,7 +660,7 @@ describe("OpenTag CLI setup", () => {
         project: tempDir(),
         executor: "echo",
         larkSetup: "manual",
-        larkDomain: "lark",
+        tenant: "lark",
         larkAppId: "cli_manual",
         larkAppSecret: "secret_manual",
         force: true,
@@ -516,7 +696,7 @@ describe("OpenTag CLI setup", () => {
         scanLarkPersonalAgent: vi.fn(async () => ({
           appId: "cli_scan",
           appSecret: "secret_scan",
-          domain: "lark" as const
+          domain: "feishu" as const
         }))
       }
     );
@@ -532,7 +712,7 @@ describe("OpenTag CLI setup", () => {
           project: join(tempDir(), "missing"),
           executor: "echo",
           larkSetup: "manual",
-          larkDomain: "lark",
+          tenant: "lark",
           larkAppId: "cli_manual",
           larkAppSecret: "secret_manual",
           force: true,
@@ -701,6 +881,69 @@ describe("OpenTag CLI setup", () => {
       command: "custom-hermes",
       profile: "opentag-fixed",
       profileTemplate: "opentag-{provider}-{owner}-{repo}"
+    });
+  });
+
+  it("writes generic agent session profile options into daemon config", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        platform: "github",
+        executor: "codex",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        agentProfileTemplate: "opentag-{provider}-{projectTarget}-{actorId}",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.daemon.repositories[0]?.defaultExecutor).toBe("codex");
+    expect(config.daemon.agentSessionProfile).toEqual({
+      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
+    });
+  });
+
+  it("does not keep an inherited generic fixed agent profile when a profileTemplate is explicitly provided", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "codex",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        agentProfile: "opentag-fixed",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        platform: "github",
+        executor: "codex",
+        githubRepository: "acme/demo",
+        githubToken: "ghp_test",
+        agentProfileTemplate: "opentag-{provider}-{projectTarget}-{actorId}",
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    expect(readCliConfig(configPath).daemon.agentSessionProfile).toEqual({
+      profileTemplate: "opentag-{provider}-{projectTarget}-{actorId}"
     });
   });
 
