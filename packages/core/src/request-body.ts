@@ -1,4 +1,5 @@
 export const DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+export const DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS = 10_000;
 
 export class RequestBodyTooLargeError extends Error {
   readonly maxBytes: number;
@@ -14,11 +15,48 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
+export class RequestBodyReadTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(input: { timeoutMs: number }) {
+    super(`Request body read timed out after ${input.timeoutMs}ms.`);
+    this.name = "RequestBodyReadTimeoutError";
+    this.timeoutMs = input.timeoutMs;
+  }
+}
+
+async function readChunkWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  remainingMs: number,
+  configuredTimeoutMs: number
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (remainingMs <= 0) {
+    await reader.cancel();
+    throw new RequestBodyReadTimeoutError({ timeoutMs: configuredTimeoutMs });
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          void reader.cancel();
+          reject(new RequestBodyReadTimeoutError({ timeoutMs: configuredTimeoutMs }));
+        }, remainingMs);
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 export async function readRequestTextWithLimit(
   request: Request,
-  input: { maxBytes?: number } = {}
+  input: { maxBytes?: number; timeoutMs?: number } = {}
 ): Promise<string> {
   const maxBytes = input.maxBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const timeoutMs = input.timeoutMs ?? DEFAULT_REQUEST_BODY_READ_TIMEOUT_MS;
+  const deadlineAt = Date.now() + timeoutMs;
   const contentLength = request.headers.get("content-length");
   if (contentLength) {
     const parsedLength = Number(contentLength);
@@ -35,7 +73,7 @@ export async function readRequestTextWithLimit(
   let totalBytes = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readChunkWithTimeout(reader, deadlineAt - Date.now(), timeoutMs);
       if (done) break;
       if (!value) continue;
       totalBytes += value.byteLength;

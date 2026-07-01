@@ -371,11 +371,21 @@ export function createCompositeCallbackSink(sinks: CallbackSink[]): CallbackSink
   return {
     async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       let result: CallbackDeliveryResult | undefined;
+      let delivered = false;
+      const failures: unknown[] = [];
       for (const sink of sinks) {
-        const delivered = await sink.deliver(message);
-        if (delivered?.externalMessageId && !result?.externalMessageId) {
-          result = { externalMessageId: delivered.externalMessageId };
+        try {
+          const deliveredResult = await sink.deliver(message);
+          delivered = true;
+          if (deliveredResult?.externalMessageId && !result?.externalMessageId) {
+            result = { externalMessageId: deliveredResult.externalMessageId };
+          }
+        } catch (error) {
+          failures.push(error);
         }
+      }
+      if (!delivered && failures.length > 0) {
+        throw new AggregateError(failures, "Composite callback delivery failed for every sink.");
       }
       return result;
     }

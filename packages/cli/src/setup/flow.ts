@@ -461,6 +461,8 @@ async function collectLarkDomain(
     }
     return savedLarkCredentials.domain;
   }
+  // Defensive fallback: collectSetupInput skips domain collection for scan,
+  // because the platform returns the real tenant after registration.
   if (setupMethod === "scan") {
     throw new Error("Tenant is detected during scan setup.");
   }
@@ -491,16 +493,24 @@ async function collectLarkCredentials(input: {
     if (!input.savedLarkCredentials) {
       throw new Error("No saved Lark Personal Agent config was found.");
     }
-    const validation = await input.validateLarkCredentials({
-      appId: input.savedLarkCredentials.appId,
-      appSecret: input.savedLarkCredentials.appSecret,
-      domain: input.savedLarkCredentials.domain
-    });
+    let botOpenId = input.savedLarkCredentials.botOpenId;
+    try {
+      const validation = await input.validateLarkCredentials({
+        appId: input.savedLarkCredentials.appId,
+        appSecret: input.savedLarkCredentials.appSecret,
+        domain: input.savedLarkCredentials.domain
+      });
+      botOpenId = validation.botOpenId;
+    } catch {
+      input.prompts.note(
+        "Saved Lark / Feishu credentials could not be verified live; using the saved local config."
+      );
+    }
     return {
       appId: input.savedLarkCredentials.appId,
       appSecret: input.savedLarkCredentials.appSecret,
       domain: input.savedLarkCredentials.domain,
-      botOpenId: validation.botOpenId
+      ...(botOpenId ? { botOpenId } : {})
     };
   }
 
@@ -550,11 +560,14 @@ async function collectLarkCredentials(input: {
     appSecret,
     domain: input.domain
   });
+  if (botOpenId && botOpenId !== validation.botOpenId) {
+    input.prompts.note("The provided Lark bot Open ID differed from live validation; using the verified bot Open ID.");
+  }
   return {
     appId,
     appSecret,
     domain: input.domain,
-    botOpenId: botOpenId ?? validation.botOpenId
+    botOpenId: validation.botOpenId
   };
 }
 

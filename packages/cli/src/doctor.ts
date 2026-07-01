@@ -53,19 +53,22 @@ export function formatCliDoctorChecks(checks: DoctorCheck[]): string {
 
 export async function runDoctorCommand(options: DoctorCommandOptions): Promise<void> {
   const configPath = options.config ?? defaultConfigPath();
-  const secretConfig = readRedactedCliConfig(configPath);
   let config: ReturnType<typeof readCliConfig>;
+  let secretConfig: unknown;
   try {
+    secretConfig = readRedactedCliConfig(configPath);
     config = readCliConfig(configPath);
   } catch (error) {
     const checks: DoctorCheck[] = [
-      credentialSourcesCheck(secretConfig),
       {
         status: "fail",
         name: "credential resolution",
         message: error instanceof Error ? error.message : String(error)
       }
     ];
+    if (secretConfig !== undefined) {
+      checks.unshift(credentialSourcesCheck(secretConfig));
+    }
     console.log(formatCliDoctorChecks(checks));
     process.exitCode = 1;
     return;

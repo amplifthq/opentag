@@ -35,6 +35,16 @@ function handleError(error: unknown): never {
   process.exit(1);
 }
 
+function runCliAction<T extends unknown[]>(handler: (...args: T) => Promise<void> | void): (...args: T) => Promise<void> {
+  return async (...args: T) => {
+    try {
+      await handler(...args);
+    } catch (error) {
+      handleError(error);
+    }
+  };
+}
+
 program.name(process.env.OPENTAG_CLI_NAME?.trim() || "opentag").description("OpenTag CLI");
 
 program
@@ -75,13 +85,7 @@ program
   .option("--start", "Start OpenTag immediately after setup")
   .option("--no-start", "Do not ask to start OpenTag after setup")
   .option("-y, --yes", "Skip setup confirmation")
-  .action(async (options) => {
-    try {
-      await runSetupCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runSetupCommand));
 
 program
   .command("pair")
@@ -89,25 +93,13 @@ program
   .option("--config <path>", "Config file path")
   .option("--relay <url>", "Remote relay dispatcher URL")
   .option("--no-register", "Update config without registering runner and project targets")
-  .action(async (options) => {
-    try {
-      await runPairCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runPairCommand));
 
 program
   .command("start")
   .description("Start the local OpenTag stack")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runStartCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runStartCommand));
 
 program
   .command("status")
@@ -115,13 +107,7 @@ program
   .option("--config <path>", "Config file path")
   .option("--run <runId>", "Show audit details for one run")
   .option("--channel <provider:account/conversation>", "Show active run and queued follow-ups for one source container")
-  .action(async (options) => {
-    try {
-      await runStatusCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runStatusCommand));
 
 program
   .command("cancel")
@@ -131,25 +117,13 @@ program
   .option("--channel <provider:account/conversation>", "Cancel the active run for one source container")
   .option("--reason <reason>", "Audit reason for cancellation")
   .option("--requested-by <actor>", "Audit actor requesting cancellation")
-  .action(async (options) => {
-    try {
-      await runCancelCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runCancelCommand));
 
 program
   .command("doctor")
   .description("Check dispatcher, bindings, checkouts, and executors")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runDoctorCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runDoctorCommand));
 
 program
   .command("ingest")
@@ -164,13 +138,7 @@ program
   .option("--result-json <json>", "Complete run with an OpenTagRunResult JSON object")
   .option("--conclusion <conclusion>", "Completion conclusion when --result-json is omitted")
   .option("--summary <summary>", "Completion summary when --result-json is omitted")
-  .action(async (options) => {
-    try {
-      await runIngestCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runIngestCommand));
 
 program
   .command("ingest-template")
@@ -178,13 +146,7 @@ program
   .option("--source <source>", "External agent runtime source label")
   .option("--command <command>", "OpenTag CLI command to use in the template")
   .option("--format <format>", "Template format: shell or manifest")
-  .action(async (options) => {
-    try {
-      await runIngestTemplateCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runIngestTemplateCommand));
 
 const serviceCommand = program.command("service").description("Install and control the OpenTag background service");
 
@@ -196,86 +158,44 @@ serviceCommand
   .option("--rate-limit-window-ms <ms>", "Persist dispatcher rate-limit window in the LaunchAgent")
   .option("--rate-limit-max-requests <n>", "Persist dispatcher rate-limit max requests in the LaunchAgent")
   .option("--rate-limit-disabled", "Persist an explicit disabled dispatcher rate-limit state in the LaunchAgent")
-  .action(async (options) => {
-    try {
-      await runServiceInstallCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceInstallCommand));
 
 serviceCommand
   .command("start")
   .description("Start the OpenTag background service")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceStartCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceStartCommand));
 
 serviceCommand
   .command("stop")
   .description("Stop the OpenTag background service")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceStopCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceStopCommand));
 
 serviceCommand
   .command("restart")
   .description("Restart the OpenTag background service")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceRestartCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceRestartCommand));
 
 serviceCommand
   .command("status")
   .description("Show the OpenTag background service status")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceStatusCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceStatusCommand));
 
 serviceCommand
   .command("logs")
   .description("Show recent OpenTag background service logs")
   .option("--config <path>", "Config file path")
   .option("--lines <n>", "Number of lines per log file")
-  .action(async (options) => {
-    try {
-      await runServiceLogsCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceLogsCommand));
 
 serviceCommand
   .command("uninstall")
   .description("Uninstall the OpenTag background service")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceUninstallCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceUninstallCommand));
 
 const autostartCommand = serviceCommand.command("autostart").description("Control OpenTag service login autostart");
 
@@ -283,38 +203,20 @@ autostartCommand
   .command("enable")
   .description("Enable OpenTag service login autostart")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceAutostartEnableCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceAutostartEnableCommand));
 
 autostartCommand
   .command("disable")
   .description("Disable OpenTag service login autostart")
   .option("--config <path>", "Config file path")
-  .action(async (options) => {
-    try {
-      await runServiceAutostartDisableCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceAutostartDisableCommand));
 
 serviceCommand
   .command("run", { hidden: true })
   .description("Run the OpenTag service payload")
   .option("--config <path>", "Config file path")
   .option("--mode <mode>", "Service run mode", "background")
-  .action(async (options) => {
-    try {
-      await runServiceRunCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runServiceRunCommand));
 
 program
   .command("platforms")
@@ -338,13 +240,7 @@ maintenanceCommand
   .option("--config <path>", "Config file path")
   .requiredOption("--older-than <timestamp>", "Prune delivery replay keys created before this ISO timestamp")
   .option("--limit <n>", "Maximum delivery replay keys to scan")
-  .action(async (options) => {
-    try {
-      await runMaintenancePruneSourceDeliveriesCommand(options);
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction(runMaintenancePruneSourceDeliveriesCommand));
 
 const configCommand = program.command("config").description("Inspect OpenTag config");
 
@@ -359,12 +255,8 @@ configCommand
   .command("show")
   .description("Print the OpenTag config with secrets redacted")
   .option("--config <path>", "Config file path")
-  .action((options) => {
-    try {
-      console.log(JSON.stringify(readRedactedCliConfig(options.config ?? defaultConfigPath()), null, 2));
-    } catch (error) {
-      handleError(error);
-    }
-  });
+  .action(runCliAction((options) => {
+    console.log(JSON.stringify(readRedactedCliConfig(options.config ?? defaultConfigPath()), null, 2));
+  }));
 
 await program.parseAsync(process.argv);

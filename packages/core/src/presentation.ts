@@ -371,6 +371,18 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     ...(presentation.changedFiles?.length ? ["Changed files:", ...presentation.changedFiles.map((file) => `- ${file}`)] : []),
     ...(presentation.verification?.length ? ["Verification:", ...presentation.verification.map((check) => `- ${check.command}: ${check.outcome}`)] : []),
     ...(presentation.nextActions?.length ? ["Next actions:", ...presentation.nextActions.map((action) => `- ${action}`)] : []),
+    ...(presentation.actions?.length
+      ? [
+          presentation.actionReceiptTitle ?? "Suggested actions",
+          ...presentation.actions.flatMap((action) => [
+            `${action.index}. ${action.title}`,
+            `Target: ${action.targetLabel}`,
+            ...(action.setupReason ? [`Status: ${action.setupReason}`] : []),
+            ...(action.details?.length ? action.details : []),
+            `Actions: ${action.visibleDecisions.map((decision) => actionDecisionCommand(decision, action.index)).join(", ")}`
+          ])
+        ]
+      : []),
     ...(presentation.auditRunId ? [`Audit: opentag status --run ${presentation.auditRunId}`] : [])
   ].join("\n");
 }

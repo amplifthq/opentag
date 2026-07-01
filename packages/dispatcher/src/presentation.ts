@@ -61,7 +61,7 @@ export type CallbackPresentation = {
   acknowledgementPresentation(input: { runId: string }): OpenTagRunStatusPresentation;
   progressPresentation(input: { runId: string; message: string }): OpenTagRunStatusPresentation;
   finalPresentation(input: { result: OpenTagRunResult; runId?: string; receiptContext?: ActionReceiptContext }): OpenTagFinalSummaryPresentation;
-  render(input: { provider: CallbackProvider; presentation: OpenTagPresentation; receiptContext?: ActionReceiptContext }): PresentedCallbackBody;
+  render(input: { provider: CallbackProvider; presentation: OpenTagPresentation }): PresentedCallbackBody;
   acknowledgement(input: { provider: CallbackProvider; runId: string }): string;
   runStatus(input: {
     provider: CallbackProvider;
@@ -76,7 +76,8 @@ export type CallbackPresentation = {
 };
 
 function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunStatusPresentation): PresentedCallbackBody {
-  if (provider === "lark") {
+  const canRenderRich = supportsRichPresentation(provider);
+  if (canRenderRich && provider === "lark") {
     return {
       body: renderLarkRunStatusPresentation(presentation),
       rich: {
@@ -307,8 +308,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
           result: input.result,
           ...(input.runId ? { runId: input.runId } : {}),
           ...(input.receiptContext ? { receiptContext: input.receiptContext } : {})
-        }),
-        ...(input.receiptContext ? { receiptContext: input.receiptContext } : {})
+        })
       });
     }
   };

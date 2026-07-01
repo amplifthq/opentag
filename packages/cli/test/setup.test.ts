@@ -240,7 +240,7 @@ describe("OpenTag CLI setup", () => {
       appId: "cli_manual",
       appSecret: "secret_manual",
       domain: "feishu",
-      botOpenId: "ou_manual_bot",
+      botOpenId: "ou_verified_bot",
       defaultProjectBinding: false
     });
   });
@@ -394,9 +394,10 @@ describe("OpenTag CLI setup", () => {
     expect(readCliConfig(configPath).preferences?.lastSetup?.larkSetupMethod).toBe("saved");
   });
 
-  it("does not save stale saved Lark credentials when provider verification fails", async () => {
+  it("reuses saved Lark credentials when provider verification is unavailable", async () => {
     const projectPath = tempDir();
     const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
     const legacyDirectory = join(projectPath, ".opentag", "lark");
     mkdirSync(legacyDirectory, { recursive: true });
     const legacyConfigPath = join(legacyDirectory, "lark.local.json");
@@ -411,25 +412,28 @@ describe("OpenTag CLI setup", () => {
     );
     chmodSync(legacyConfigPath, 0o600);
 
-    await expect(
-      runSetupCommand(
-        {
-          config: configPath,
-          project: projectPath,
-          executor: "echo",
-          force: true,
-          yes: true
-        },
-        {
-          prompts: testPrompts(),
-          validateLarkCredentials: vi.fn(async () => {
-            throw new Error("Lark credentials could not be verified: token expired");
-          })
-        }
-      )
-    ).rejects.toThrow("Lark credentials could not be verified");
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        executor: "echo",
+        force: true,
+        yes: true
+      },
+      {
+        prompts: testPrompts({ note: (message) => notes.push(message) }),
+        validateLarkCredentials: vi.fn(async () => {
+          throw new Error("Lark credentials could not be verified: token expired");
+        })
+      }
+    );
 
-    expect(existsSync(configPath)).toBe(false);
+    expect(readCliConfig(configPath).platforms.lark).toMatchObject({
+      appId: "legacy_app",
+      domain: "lark",
+      botOpenId: "ou_stale_bot"
+    });
+    expect(notes.join("\n")).toContain("Saved Lark / Feishu credentials could not be verified live");
   });
 
   it("summarizes the saved project path instead of the internal Project Target id", async () => {

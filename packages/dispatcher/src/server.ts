@@ -208,6 +208,9 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 
   return async (c: Context, next: () => Promise<void>) => {
     const currentTime = now();
+    for (const [bucketKey, bucket] of buckets) {
+      if (bucket.resetAt <= currentTime) buckets.delete(bucketKey);
+    }
     const key = rateLimitKey(c);
     const existing = buckets.get(key);
     const bucket =
@@ -844,20 +847,21 @@ async function preflightGitHubOperation(input: {
   if (input.operation.kind === "create_pull_request") {
     const head = encodeURIComponent(input.operation.head);
     const baseBranch = encodeURIComponent(input.operation.base);
-    return (
-      (await githubPreflight({
+    const [headPreflight, basePreflight] = await Promise.all([
+      githubPreflight({
         ...base,
         path: `/branches/${head}`,
         description: `GitHub branch ${input.operation.head}`,
         notFoundReason: `GitHub branch ${input.operation.head} was not found.`
-      })) ??
-      (await githubPreflight({
+      }),
+      githubPreflight({
         ...base,
         path: `/branches/${baseBranch}`,
         description: `GitHub base branch ${input.operation.base}`,
         notFoundReason: `GitHub base branch ${input.operation.base} was not found.`
-      }))
-    );
+      })
+    ]);
+    return headPreflight ?? basePreflight;
   }
 
   if (input.operation.kind === "request_review") {
@@ -3126,8 +3130,7 @@ export function createDispatcherApp(input: {
     });
     const finalCallback = presentation.render({
       provider: stored.event.callback.provider,
-      presentation: finalPresentation,
-      receiptContext
+      presentation: finalPresentation
     });
     const statusMessageKey = larkLifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
     await deliverAndAudit({

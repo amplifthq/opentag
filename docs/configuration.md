@@ -315,7 +315,7 @@ Common hook aliases are normalized conservatively:
 | `progress`, `agent_progress`, `post_llm_call`, `before_agent_finalize`, `tool_start`, `tool_end` | Adds an audit-visible progress event |
 | `agent_end`, `completed`, `complete`, `final` | Completes the run with `success` unless `--result-json` or `--conclusion` says otherwise |
 | `failed`, `failure`, `agent_failed`, `agent_error`, `error` | Completes the run with `failure` |
-| `cancelled`, `canceled`, `agent_cancelled`, `stop`, `stopped` | Completes the run with `cancelled` |
+| `cancelled`, `agent_cancelled`, `stop`, `stopped` | Completes the run with `cancelled` |
 | `timeout`, `timed_out`, `agent_timeout` | Completes the run with `timed_out` |
 | `interrupted`, `agent_interrupted`, `session_end`, `on_session_end` | Completes the run with `interrupted` |
 

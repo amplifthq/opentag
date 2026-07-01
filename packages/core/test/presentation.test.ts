@@ -86,6 +86,13 @@ describe("OpenTagPresentation", () => {
     ]);
     expect(JSON.stringify(presentation)).not.toContain("button");
     expect(JSON.stringify(presentation)).not.toContain("action_id");
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain("Finished: needs_human");
+    expect(rendered).toContain("Ready to apply");
+    expect(rendered).toContain("1. Add the bug label.");
+    expect(rendered).toContain("Target: GitHub labels");
+    expect(rendered).toContain("Actions: apply 1, reject 1");
+    expect(rendered).toContain("Audit: opentag status --run run_receipt_1");
   });
 
   it("carries provider-neutral action details for native renderers", () => {
@@ -128,6 +135,10 @@ describe("OpenTagPresentation", () => {
         { label: "Preconditions", value: "The branch still exists." }
       ]
     });
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(rendered).toContain("Changed files: `src/demo.ts`");
+    expect(rendered).toContain("Preconditions: 1 check(s) in the audit log.");
     expect(JSON.stringify(presentation)).not.toContain("blocks");
     expect(JSON.stringify(presentation)).not.toContain("action_id");
   });

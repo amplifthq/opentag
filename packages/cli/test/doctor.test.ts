@@ -84,6 +84,16 @@ describe("OpenTag CLI doctor relay checks", () => {
     expect(formatted).toContain("FAIL relay transport: Public relay URLs must use HTTPS.");
   });
 
+  it("reports malformed relay URLs as doctor failures instead of throwing", () => {
+    const malformed = relayConfig("https://relay.example");
+    malformed.runtime = { mode: "relay", relayUrl: "not a url", relayProvider: "custom" };
+    malformed.daemon.dispatcherUrl = "not a url";
+
+    const formatted = formatCliDoctorChecks(appendCliDoctorChecks(malformed, []));
+
+    expect(formatted).toContain("FAIL relay URL: Relay URL is malformed");
+  });
+
   it("reports unresolved SecretRef credentials without printing secret values", async () => {
     const path = join(tempDir(), "config.json");
     const config = relayConfig("https://relay.example");
@@ -113,5 +123,18 @@ describe("OpenTag CLI doctor relay checks", () => {
     expect(output).toContain("FAIL credential resolution: Secret env ref OPENTAG_MISSING_WEBHOOK_SECRET is not set.");
     expect(output).not.toContain("github_webhook_secret");
     expect(output).not.toContain("ghp_token");
+  });
+
+  it("reports config parse failures even when redacted config cannot be loaded", async () => {
+    const path = join(tempDir(), "config.json");
+    writeFileSync(path, "{ not-json\n", { mode: 0o600 });
+
+    await runDoctorCommand({ config: path });
+
+    const output = consoleLogSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(process.exitCode).toBe(1);
+    expect(output).toContain("OpenTag doctor");
+    expect(output).toContain("FAIL credential resolution:");
+    expect(output).not.toContain("OK credential sources:");
   });
 });

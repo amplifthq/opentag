@@ -33,4 +33,22 @@ describe("request body helpers", () => {
       RequestBodyTooLargeError
     );
   });
+
+  it("rejects stalled body reads after the configured timeout", async () => {
+    const request = {
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: () => new Promise<ReadableStreamReadResult<Uint8Array>>(() => {}),
+          cancel: async () => undefined,
+          releaseLock: () => undefined
+        })
+      }
+    } as unknown as Request;
+
+    await expect(readRequestTextWithLimit(request, { maxBytes: 5, timeoutMs: 5 })).rejects.toMatchObject({
+      name: "RequestBodyReadTimeoutError",
+      timeoutMs: 5
+    });
+  });
 });

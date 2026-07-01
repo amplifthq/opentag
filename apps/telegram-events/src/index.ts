@@ -108,7 +108,18 @@ if (telegramBots.length === 0) {
   throw new Error("Configure OPENTAG_TELEGRAM_BOT_ID or OPENTAG_TELEGRAM_BOTS_JSON");
 }
 
+const duplicateTelegramBotIds = telegramBots
+  .map((bot) => bot.botId)
+  .filter((botId, index, botIds) => botIds.indexOf(botId) !== index);
+if (duplicateTelegramBotIds.length > 0) {
+  throw new Error(`Duplicate Telegram botId entries are not allowed: ${[...new Set(duplicateTelegramBotIds)].join(", ")}`);
+}
+
 const telegramBotTokenById = new Map(telegramBots.flatMap((bot) => (bot.botToken ? [[bot.botId, bot.botToken] as const] : [])));
+const telegramSendTimeoutMs = positiveIntegerFromEnv(
+  "OPENTAG_TELEGRAM_SEND_TIMEOUT_MS",
+  process.env.OPENTAG_TELEGRAM_SEND_TIMEOUT_MS
+) ?? 10_000;
 
 function formatProjectTarget(binding: TelegramChannelBinding): string {
   return `${binding.repoProvider ?? "github"}:${binding.owner}/${binding.repo}`;
@@ -290,20 +301,32 @@ serve({
     async reply(input) {
       const botToken = telegramBotTokenById.get(input.botId);
       if (!botToken) return;
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(
-          createTelegramSendMessagePayload({
-            chatId: input.chatId,
-            text: input.text,
-            replyToMessageId: input.messageId,
-            ...(input.messageThreadId ? { messageThreadId: input.messageThreadId } : {})
-          })
-        )
-      });
-      if (!response.ok) {
-        throw new Error(`Telegram self-service reply failed with HTTP ${response.status}`);
+      const abortController = new AbortController();
+      const timeout = setTimeout(() => abortController.abort(), telegramSendTimeoutMs);
+      try {
+        const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: abortController.signal,
+          body: JSON.stringify(
+            createTelegramSendMessagePayload({
+              chatId: input.chatId,
+              text: input.text,
+              replyToMessageId: input.messageId,
+              ...(input.messageThreadId ? { messageThreadId: input.messageThreadId } : {})
+            })
+          )
+        });
+        if (!response.ok) {
+          throw new Error(`Telegram self-service reply failed with HTTP ${response.status}`);
+        }
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          throw new Error(`Telegram self-service reply timed out after ${telegramSendTimeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timeout);
       }
     },
     now: () => new Date().toISOString()

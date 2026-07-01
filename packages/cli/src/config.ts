@@ -65,8 +65,11 @@ export function readKeychainSecret(ref: KeychainSecretRef, execFileSyncImpl: Exe
       ["find-generic-password", "-w", "-s", ref.service, "-a", ref.account],
       { encoding: "utf8" }
     );
-  } catch {
-    throw new Error(`Secret keychain ref ${ref.service}/${ref.account} could not be resolved.`);
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
+    throw new Error(
+      `Secret keychain ref ${ref.service}/${ref.account} could not be resolved via macOS Keychain (/usr/bin/security). Keychain SecretRefs are only supported on macOS.${detail}`
+    );
   }
   return requireResolvedSecret(String(value), `keychain ref ${ref.service}/${ref.account}`);
 }

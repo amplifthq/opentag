@@ -141,6 +141,31 @@ describe("OpenTag CLI pair relay", () => {
     ]);
   });
 
+  it("does not switch config to relay mode when relay registration fails", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const source = githubConfig();
+    writeCliConfigAtomic(configPath, source);
+
+    await expect(
+      runPairCommand(
+        { config: configPath, relay: "https://relay.example" },
+        {
+          fetchImpl: okFetch(),
+          bootstrapClient: {
+            async registerRunner() {
+              throw new Error("registration failed");
+            },
+            async bindRepository() {},
+            async bindChannel() {}
+          }
+        }
+      )
+    ).rejects.toThrow("registration failed");
+
+    expect(readCliConfig(configPath).daemon.dispatcherUrl).toBe(source.daemon.dispatcherUrl);
+    expect(readCliConfig(configPath).runtime).toEqual(source.runtime);
+  });
+
   it("fails before writing config when relay health is unavailable", async () => {
     const configPath = join(tempDir(), "config.json");
     const source = githubConfig();

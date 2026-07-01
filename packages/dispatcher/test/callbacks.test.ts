@@ -806,4 +806,34 @@ describe("createGitHubCallbackSink", () => {
 
     expect(messages).toEqual(["a:slack", "b:slack"]);
   });
+
+  it("keeps a successful composite delivery when a later sink fails", async () => {
+    const messages: string[] = [];
+    const sink = createCompositeCallbackSink([
+      {
+        async deliver(message) {
+          messages.push(`a:${message.provider}`);
+          return { externalMessageId: "msg_1" };
+        }
+      },
+      {
+        async deliver(message) {
+          messages.push(`b:${message.provider}`);
+          throw new Error("secondary sink failed");
+        }
+      }
+    ]);
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        body: "final"
+      })
+    ).resolves.toEqual({ externalMessageId: "msg_1" });
+
+    expect(messages).toEqual(["a:slack", "b:slack"]);
+  });
 });

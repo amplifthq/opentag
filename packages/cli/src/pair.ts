@@ -117,12 +117,13 @@ export async function runPairCommand(options: PairCommandOptions, dependencies: 
   }
 
   const updated = relayConfigFrom({ config, relayUrl });
-  writeCliConfigAtomic(configPath, updated);
 
   const shouldRegister = options.register !== false;
   if (shouldRegister) {
     await bootstrapLocalDispatcher(updated, dependencies.bootstrapClient);
   }
+
+  writeCliConfigAtomic(configPath, updated);
 
   logger.log(
     formatPairRelaySummary({

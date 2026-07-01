@@ -256,6 +256,16 @@ describe("OpenTag CLI config", () => {
     ).toThrow("Secret keychain ref opentag/lark-app-secret resolved to an empty value.");
   });
 
+  it("includes macOS keychain guidance when keychain lookup fails", () => {
+    expect(() =>
+      readKeychainSecret({ kind: "keychain", service: "opentag", account: "lark-app-secret" }, () => {
+        throw new Error("security command unavailable");
+      })
+    ).toThrow(
+      "Secret keychain ref opentag/lark-app-secret could not be resolved via macOS Keychain (/usr/bin/security). Keychain SecretRefs are only supported on macOS. security command unavailable"
+    );
+  });
+
   it("shows secret refs without resolving them in redacted config output", () => {
     const path = join(tempDir(), "config.json");
     const source = config();

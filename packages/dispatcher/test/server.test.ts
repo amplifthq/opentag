@@ -4221,7 +4221,8 @@ describe("dispatcher API", () => {
 
     expect(githubRequests).toEqual([
       "https://api.github.com/repos/acme/demo/issues/1",
-      "https://api.github.com/repos/acme/demo/branches/opentag%2Fmissing-branch"
+      "https://api.github.com/repos/acme/demo/branches/opentag%2Fmissing-branch",
+      "https://api.github.com/repos/acme/demo/branches/main"
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
     expect(finalMessage?.body).toContain("### Needs setup");

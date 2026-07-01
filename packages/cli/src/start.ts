@@ -510,6 +510,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
   const env = dependencies.env ?? process.env;
   const ingresses: PlatformIngressHandle[] = [];
   const dispatcher = dependencies.startDispatcher(dispatcherRuntimeInputFromCliConfig(config, { env }));
+  let originalError: unknown;
 
   try {
     await dependencies.waitForDispatcher({ dispatcherUrl: config.daemon.dispatcherUrl });
@@ -573,10 +574,21 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     if (shouldRethrowAbortReason({ shutdownRequested: shutdownRequested(), reason })) {
       throw reason;
     }
+  } catch (error) {
+    originalError = error;
+    throw error;
   } finally {
     abortController.abort();
     await Promise.allSettled([...ingresses].reverse().map((ingress) => ingress.handle.close()));
-    await dispatcher.close();
+    try {
+      await dispatcher.close();
+    } catch (error) {
+      if (originalError !== undefined) {
+        logger.log(`OpenTag dispatcher close failed during shutdown: ${error instanceof Error ? error.message : String(error)}`);
+      } else {
+        throw error;
+      }
+    }
   }
 }
 

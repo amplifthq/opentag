@@ -263,11 +263,13 @@ key is based on run ID, provider, thread key, callback kind, status message key,
 and body hash. Repeated failures or repeated equivalent messages should trip a
 circuit breaker that records audit detail but stops flooding the human thread.
 
-Run completion status should distinguish:
+The core `RunStatus` schema uses `succeeded`, `failed`, `cancelled`,
+`interrupted`, and `timed_out` for terminal run states. Higher-level terminal
+reasons should still distinguish:
 
-- `completed`: the executor finished successfully.
+- `succeeded`: the executor finished successfully.
 - `failed`: execution or verification failed.
-- `cancelled_by_user`: a human requested stop and OpenTag acknowledged it.
+- `cancelled`: a human requested stop and OpenTag acknowledged it.
 - `interrupted`: the process/session ended without a normal completion signal.
 - `timed_out`: idle or hard timeout policy ended the run.
 

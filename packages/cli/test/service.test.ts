@@ -315,7 +315,7 @@ describe("OpenTag CLI service", () => {
 
     expect(formatted).toContain("Connectors:");
     expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), callback=ready (botToken), source=T123/C456");
-    expect(formatted).toContain("lark: ingress=long_connection domain=lark ready (appId/appSecret), callback=ready (appId/appSecret)");
+    expect(formatted).toContain("lark: ingress=long_connection tenant=lark ready (appId/appSecret), callback=ready (appId/appSecret)");
     expect(formatted).toContain("addressing=bot_open_id configured");
     expect(formatted).not.toContain("slack_signing_secret");
     expect(formatted).not.toContain("xoxb_secret");
@@ -344,6 +344,35 @@ describe("OpenTag CLI service", () => {
     expect(running.running).toBe("running");
     expect(running.runtimeReadiness).toBe("ready");
     expect(formatServiceStatus(running)).toContain("OpenTag runtime: ready (dispatcher healthz ok; doctor checks ok");
+  });
+
+  it("reports disabled launchd autostart separately from installation", () => {
+    const home = tempDir();
+    const configPath = configPathIn(home);
+    writeConfig(configPath);
+    installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
+
+    const summary = getServiceStatus(
+      { config: configPath },
+      {
+        platform: "darwin",
+        homeDir: home,
+        launchctl(args) {
+          if (args[0] === "print-disabled") {
+            return {
+              status: 0,
+              stdout: 'disabled services = {\n  "im.opentag.agent" => true\n}\n',
+              stderr: ""
+            };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        }
+      }
+    );
+
+    expect(summary.installed).toBe(true);
+    expect(summary.autostart).toBe("disabled");
+    expect(formatServiceStatus(summary)).toContain("Autostart: disabled");
   });
 
   it("marks a launchd-running service degraded when doctor checks fail", async () => {

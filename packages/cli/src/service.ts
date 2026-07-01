@@ -315,7 +315,7 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     const credentialsReady = configured(lark.appId) && configured(lark.appSecret);
     const addressing = lark.botOpenId ? "bot_open_id configured" : "bot identity may need discovery";
     lines.push(
-      `  lark: ingress=long_connection domain=${lark.domain} ${connectorStatus(credentialsReady, "appId/appSecret")}, callback=${connectorStatus(credentialsReady, "appId/appSecret")}, addressing=${addressing}`
+      `  lark: ingress=long_connection tenant=${lark.domain} ${connectorStatus(credentialsReady, "appId/appSecret")}, callback=${connectorStatus(credentialsReady, "appId/appSecret")}, addressing=${addressing}`
     );
   }
 
@@ -416,6 +416,19 @@ export function disableServiceAutostart(options: ServiceCommandOptions = {}, dep
   return paths;
 }
 
+function serviceAutostart(paths: ServicePaths, dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
+  if (!isInstalled) return "disabled";
+  if (platformFrom(dependencies) !== "darwin") return "unknown";
+  const result = launchctlRunner(dependencies)(["print-disabled", launchdDomain(dependencies)]);
+  if (result.status !== 0) return "unknown";
+  const escapedLabel = SERVICE_LABEL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const disabledEntry = new RegExp(`"${escapedLabel}"\\s*=>\\s*(true|disabled)`).test(result.stdout);
+  if (disabledEntry) return "disabled";
+  const enabledEntry = new RegExp(`"${escapedLabel}"\\s*=>\\s*(false|enabled)`).test(result.stdout);
+  if (enabledEntry) return "enabled";
+  return "enabled";
+}
+
 export function getServiceStatus(options: ServiceCommandOptions = {}, dependencies: ServiceDependencies = {}): ServiceStatusSummary {
   const paths = servicePaths(options, dependencies);
   const controller = platformFrom(dependencies) === "darwin" ? "launchd" : "unsupported";
@@ -461,7 +474,7 @@ export function getServiceStatus(options: ServiceCommandOptions = {}, dependenci
     secrets,
     capabilities,
     serviceHardening: formatServiceHardening(paths),
-    autostart: isInstalled ? "enabled" : "disabled"
+    autostart: serviceAutostart(paths, dependencies, isInstalled)
   };
 }
 

@@ -67,7 +67,7 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
 };
 
 export function isOpenTagPlatformId(value: string): value is OpenTagPlatformId {
-  return value === "github" || value === "gitlab" || value === "slack" || value === "lark" || value === "telegram";
+  return Object.prototype.hasOwnProperty.call(OPEN_TAG_PLATFORM_CAPABILITIES, value);
 }
 
 export function platformCapabilityForProvider(provider: string): PlatformCapabilityDescriptor | undefined {

@@ -28,7 +28,12 @@ export function relayTrustWarning(relayUrl: string): string {
 export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySecurityCheck[] {
   if (runtimeModeFromConfig(config) !== "relay") return [];
   const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
-  const relay = new URL(relayUrl);
+  let relay: URL;
+  try {
+    relay = new URL(relayUrl);
+  } catch {
+    return [{ status: "fail", name: "relay URL", message: "Relay URL is malformed; fix runtime.relayUrl or daemon.dispatcherUrl." }];
+  }
   const checks: RelaySecurityCheck[] = [];
 
   if (relay.protocol === "https:") {
