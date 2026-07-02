@@ -136,6 +136,16 @@ Use daemon security settings to keep executor runs constrained:
 }
 ```
 
+Both built-in coding executors (Codex and Claude Code) run in an isolated git
+worktree with a scrubbed environment: variables that look like secrets
+(tokens, API keys, cloud credentials) are dropped before the executor process
+starts. If your Codex or Claude Code CLI authenticates from an environment
+variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), add it to
+`security.extraSafeEnv`; login-based CLI authentication works without extra
+configuration. Codex runs without a write scope use the read-only sandbox
+(`--sandbox read-only`); write-capable runs use `--full-auto`, which keeps the
+Codex OS sandbox in workspace-write mode.
+
 ## Daemon Config Fields
 
 | Field | Default | Notes |
@@ -398,7 +408,7 @@ for repeatable setups.
 | `OPENTAG_CLAUDE_COMMAND` | `claude` in executor default | Claude Code CLI command |
 | `OPENTAG_CLAUDE_MODEL` | none | Optional Claude model |
 | `OPENTAG_CLAUDE_PERMISSION_MODE` | none | `acceptEdits`, `auto`, `bypassPermissions`, `default`, or `plan` |
-| `OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | `false` | Only for explicitly sandboxed environments |
+| `OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | `false` | Auto-approves every Claude Code tool call. Only for explicitly sandboxed environments; each run emits an audit warning while this is on |
 | `OPENTAG_AGENT_PROFILE` | none | Fixed executor-neutral agent session identity |
 | `OPENTAG_AGENT_PROFILE_TEMPLATE` | derived per run | Executor-neutral profile template; supports tokens such as `{provider}`, `{projectTarget}`, `{accountId}`, `{conversationId}`, `{owner}`, `{repo}`, `{actorId}`, and `{runId}` |
 | `OPENTAG_SECURITY_MODE` | none | `enforce`, `audit`, or `off` |

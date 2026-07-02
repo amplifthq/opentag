@@ -14,6 +14,17 @@
 - Source-thread approvals (`apply`, `approve`, ...) from public GitHub/GitLab
   threads follow the same default: without an `allowedActors` list, only
   actors with write access can approve or apply proposed actions.
+- The Claude Code executor now matches the Codex executor's protections: it
+  runs the pre-execution security assessment, spawns `claude` with a scrubbed
+  environment (secrets-like variables are dropped; add auth variables to
+  `security.extraSafeEnv` if the CLI authenticates from environment), and
+  executes in an isolated git worktree instead of a branch in the main
+  checkout.
+- Codex runs admitted without a write scope now use the read-only sandbox
+  (`--sandbox read-only`) instead of `--full-auto`, so granted permission
+  scopes are enforced at the executor level.
+- Enabling `dangerouslySkipPermissions` for Claude Code now emits an audit
+  warning on every run so the bypass stays visible in the run timeline.
 
 ## v0.3.0 - 2026-06-30
 

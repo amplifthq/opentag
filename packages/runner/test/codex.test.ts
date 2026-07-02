@@ -206,6 +206,42 @@ describe("Codex executor", () => {
     expect(result.nextAction).toBe("No file changes were detected.");
   });
 
+  it("selects the read-only sandbox for runs without a write scope", async () => {
+    const codexExecCalls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && (args[0] === "worktree" || args[0] === "branch")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "codex" && args[0] === "exec") {
+          codexExecCalls.push(args);
+          return { exitCode: 0, stdout: "Summary of the repository.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createCodexExecutor({ runner }).run(
+      {
+        runId: "run_read_sandbox",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "summarize this repo", intent: "unknown", args: {} },
+        context: [],
+        permissions: [{ scope: "repo:read", reason: "read-only summary" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    expect(codexExecCalls[0]).toContain("--sandbox");
+    expect(codexExecCalls[0]).toContain("read-only");
+    expect(codexExecCalls[0]).not.toContain("--full-auto");
+  });
+
   it("preserves Codex read-only answers when the executor report has no file changes", async () => {
     const runner: CommandRunner = {
       async run(command, args) {

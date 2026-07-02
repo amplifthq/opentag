@@ -31,7 +31,8 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(config.claudeCode?.permissionMode ? { permissionMode: config.claudeCode.permissionMode } : {}),
       ...(config.claudeCode?.dangerouslySkipPermissions !== undefined
         ? { dangerouslySkipPermissions: config.claudeCode.dangerouslySkipPermissions }
-        : {})
+        : {}),
+      ...(security ? { security } : {})
     }),
     hermes: createHermesExecutor({
       ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
