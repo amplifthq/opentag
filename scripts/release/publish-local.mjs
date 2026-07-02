@@ -12,6 +12,7 @@ const packageDirs = [
   "runner",
   "store",
   "github",
+  "gitlab",
   "lark",
   "slack",
   "dispatcher",

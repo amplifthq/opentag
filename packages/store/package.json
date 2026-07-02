@@ -1,6 +1,6 @@
 {
   "name": "@opentag/store",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "description": "SQLite and Drizzle persistence primitives for OpenTag runs and leases.",
   "type": "module",
   "engines": {
