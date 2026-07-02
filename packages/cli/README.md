@@ -19,7 +19,7 @@ opentag doctor
 `opentag setup` walks through the local configuration:
 
 - Choose a language.
-- Choose a platform: Lark / Feishu, Slack, or GitHub.
+- Choose a platform: Lark / Feishu, Slack, GitHub, or GitLab.
 - Choose a coding agent: Codex, Claude Code, or Echo for local testing.
 - Configure platform credentials.
 - Bind the selected project.
@@ -61,6 +61,7 @@ The setup wizard links to the matching guide for each platform:
 - Lark / Feishu: `docs/platforms/lark.en.md`
 - Slack: `docs/platforms/slack.en.md`
 - GitHub: `docs/platforms/github.en.md`
+- GitLab: `docs/platforms/gitlab.en.md`
 
 ## Requirements
 

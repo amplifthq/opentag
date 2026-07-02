@@ -106,19 +106,21 @@ ngrok http 3060
 
 ## Relay 模式
 
-relay 模式下，把 GitLab project webhook 指向 relay URL 加 GitLab webhook path：
+GitLab relay 模式适用于你自己运营的 relay，或者已经确认配置了 GitLab webhook 能力的 relay。不要把 GitLab project webhook 指向一个泛用 hosted relay，除非 relay 运营方明确确认 `/gitlab/webhooks` 已启用，并且已经配置匹配的 GitLab secret。没有 relay 侧配置时，请使用本地 `opentag start` 加公网 tunnel。
+
+对于已配置好的 relay，把 GitLab project webhook 指向 relay URL 加 GitLab webhook path：
 
 ```text
 https://<你的 relay 域名>/gitlab/webhooks
 ```
 
-relay 端需要配置：
+自托管或自定义 relay 端需要配置：
 
 - `OPENTAG_GITLAB_WEBHOOK_SECRET`：GitLab 通过 `X-Gitlab-Token` 发送的 shared secret。
 - `OPENTAG_GITLAB_BASE_URL`：自托管 GitLab 需要配置；GitLab.com 可省略。
 - `OPENTAG_GITLAB_TOKEN`：用于 source-thread 回写，以及 `apply 1` 后直接创建 merge request。
 
-当 config 中包含 GitLab 时，`opentag pair --relay <url>` 和 `opentag start` 会打印 GitLab relay webhook URL。
+当 config 中包含 GitLab 时，`opentag pair --relay <url>` 和 `opentag start` 会打印 GitLab relay webhook URL。只有确认 relay 已配置上面的 GitLab 环境变量后，才把这个 URL 当成可用 webhook 地址。
 
 ## 当前范围
 
@@ -126,7 +128,7 @@ relay 端需要配置：
 
 - CLI 中配置 GitLab 项目。
 - 本地 `opentag start` 启动 GitLab webhook ingress。
-- relay 端配置 GitLab webhook secret 后，在 `/gitlab/webhooks` 接收 GitLab webhook。
+- 自托管或自定义 relay 端配置 GitLab token 和 webhook secret 后，在 `/gitlab/webhooks` 接收 GitLab webhook。
 - 通过 `--gitlab-base-url` 支持 GitLab.com 和自托管 GitLab。
 - 监听 issue note 和 merge request note 中的 `@opentag`。
 - 通过 Notes API 回写原始 issue / merge request。
