@@ -1,4 +1,4 @@
-export type OpenTagPlatformId = "github" | "gitlab" | "slack" | "lark" | "telegram";
+export type OpenTagPlatformId = "github" | "gitlab" | "slack" | "lark" | "telegram" | "line";
 
 export type PlatformLivenessStrategy = "source_receipt" | "status_update" | "thread_reply" | "pull_status";
 
@@ -62,6 +62,16 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
     supportsRichPresentation: false,
     supportsActionReplies: false,
     requiresExplicitAddressing: false,
+    livenessStrategy: "thread_reply"
+  },
+  line: {
+    id: "line",
+    receivesEvents: true,
+    repliesToSourceThread: true,
+    supportsStatusUpdates: false,
+    supportsRichPresentation: false,
+    supportsActionReplies: false,
+    requiresExplicitAddressing: true,
     livenessStrategy: "thread_reply"
   }
 };

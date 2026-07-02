@@ -1,0 +1,48 @@
+{
+  "name": "@opentag/line",
+  "version": "0.3.5",
+  "description": "LINE message normalization and callback helpers for OpenTag.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "line",
+    "messaging",
+    "agents",
+    "webhooks"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@line/bot-sdk": "^10.8.0",
+    "@hono/node-server": "^1.13.7",
+    "@opentag/client": "workspace:*",
+    "@opentag/core": "workspace:*",
+    "hono": "^4.6.15"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}
