@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderAcknowledgement, renderFinalResult, renderProgress } from "../src/render.js";
+import { renderAcknowledgement, renderFinalResult, renderFinalSummaryPresentation, renderProgress } from "../src/render.js";
 
 describe("GitLab result rendering", () => {
   it("renders a GitLab-flavored approval copy in the suggested-action table", () => {
@@ -69,6 +69,33 @@ describe("GitLab result rendering", () => {
     });
 
     expect(body).toContain("- Verification:\n  - `pnpm test`: passed\n  - passed - Structured report parsed successfully.");
+  });
+
+  it("renders action table rows defensively when optional values are missing", () => {
+    const body = renderFinalSummaryPresentation({
+      outcome: "needs_human",
+      summary: "Prepared actions.",
+      actionReceiptTitle: "Ready to apply",
+      actions: [
+        {
+          index: 1,
+          title: "Create MR",
+          targetLabel: "GitLab merge request",
+          state: "ready_to_apply",
+          visibleDecisions: ["apply"],
+          primaryDecision: "apply",
+          detailRows: [
+            { label: "Optional", value: undefined as unknown as string },
+            { label: "Nullable", value: null as unknown as string },
+            { label: "Escaped", value: "a|b\nc" }
+          ]
+        }
+      ]
+    });
+
+    expect(body).toContain("| Optional |  |");
+    expect(body).toContain("| Nullable |  |");
+    expect(body).toContain("| Escaped | a\\|b<br>c |");
   });
 
   it("renders acknowledgement and progress helpers", () => {

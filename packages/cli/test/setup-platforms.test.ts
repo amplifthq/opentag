@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,13 @@ import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "opentag-cli-test-"));
+}
+
+function tempGitProjectWithOrigin(remoteUrl: string): string {
+  const projectPath = tempDir();
+  execFileSync("git", ["init"], { cwd: projectPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", remoteUrl], { cwd: projectPath, stdio: "ignore" });
+  return projectPath;
 }
 
 function testPrompts(notes: string[] = []): PromptAdapter {
@@ -301,5 +309,39 @@ describe("OpenTag CLI setup platforms", () => {
       gitlabBaseUrl: "https://gitlab.example.com",
       gitlabPort: 3060
     });
+  });
+
+  it("detects self-managed GitLab projects from custom-domain remotes", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempGitProjectWithOrigin("https://git.company.com/acme/team/demo.git");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.gitlab).toMatchObject({
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://git.company.com"
+    });
+    expect(config.daemon.repositories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "gitlab", owner: "acme/team", repo: "demo" })
+      ])
+    );
   });
 });

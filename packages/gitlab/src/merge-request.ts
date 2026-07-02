@@ -39,8 +39,8 @@ export async function createMergeRequestViaFetch(input: CreateMergeRequestInput,
     throw new Error(`create merge request failed: ${response.status} ${await response.text()}`);
   }
 
-  const body = (await response.json()) as { web_url?: string };
-  if (!body.web_url) {
+  const body = (await response.json()) as Record<string, unknown> | null;
+  if (!body || typeof body.web_url !== "string") {
     throw new Error("create merge request response did not include web_url");
   }
   return body.web_url;

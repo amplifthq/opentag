@@ -195,7 +195,11 @@ function gitLabProjectFromRemote(projectPath: string): { projectPathWithNamespac
 
   try {
     const parsed = parseGitLabProject(remote);
-    if (!parsed.baseUrl || !new URL(parsed.baseUrl).hostname.toLowerCase().includes("gitlab")) return undefined;
+    if (!parsed.baseUrl) return undefined;
+    const hostname = new URL(parsed.baseUrl).hostname.toLowerCase();
+    if (hostname === "github.com" || hostname.endsWith(".github.com") || hostname === "bitbucket.org" || hostname.endsWith(".bitbucket.org")) {
+      return undefined;
+    }
     return {
       projectPathWithNamespace: parsed.projectPathWithNamespace,
       baseUrl: normalizeGitLabBaseUrl(parsed.baseUrl)

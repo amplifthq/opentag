@@ -241,6 +241,52 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("does not reuse a GitLab note URI when the create-note response body is null", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json(null);
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "OpenTag picked this up."
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Still working"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "OpenTag picked this up." }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "Still working" }
+      }
+    ]);
+  });
+
   it("serializes concurrent GitHub callback deliveries for the same run", async () => {
     const requests: { url: string; method: string; body: unknown }[] = [];
     let resolveFirst: (() => void) | undefined;

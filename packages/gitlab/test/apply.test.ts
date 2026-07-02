@@ -97,6 +97,25 @@ describe("GitLab apply helpers", () => {
     ]);
   });
 
+  it("reports a missing web_url when the merge request API response is null", async () => {
+    const fetchImpl = (async () => Response.json(null)) as typeof fetch;
+
+    await expect(
+      createMergeRequestViaFetch(
+        {
+          token: "glpat_test",
+          baseUrl: "https://gitlab.example.com",
+          projectPathWithNamespace: "acme/demo",
+          title: "OpenTag run run_1",
+          description: "MR body",
+          sourceBranch: "opentag/run_1",
+          targetBranch: "main"
+        },
+        fetchImpl
+      )
+    ).rejects.toThrow("create merge request response did not include web_url");
+  });
+
   it("applies create_pull_request intents through the GitLab merge requests API", async () => {
     const requests: Array<{ url: string; method: string; body?: unknown; token: string | null }> = [];
     const fetchImpl = (async (url, init) => {

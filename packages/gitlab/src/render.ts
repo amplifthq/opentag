@@ -129,7 +129,8 @@ export function renderProgress(input: { runId: string; message: string }): strin
   return `OpenTag progress for \`${input.runId}\`: ${input.message}`;
 }
 
-function tableValue(value: string): string {
+function tableValue(value: string | null | undefined): string {
+  if (!value) return "";
   return value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
 }
 

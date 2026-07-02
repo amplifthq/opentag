@@ -35,8 +35,8 @@ function githubCommentUriFrom(input: { commentsUri: string; responseBody: { id?:
   return undefined;
 }
 
-function gitlabNoteUriFrom(input: { notesUri: string; responseBody: { id?: number | string } }): string | undefined {
-  if (typeof input.responseBody.id === "number" || typeof input.responseBody.id === "string") {
+function gitlabNoteUriFrom(input: { notesUri: string; responseBody: { id?: number | string } | null | undefined }): string | undefined {
+  if (input.responseBody && (typeof input.responseBody.id === "number" || typeof input.responseBody.id === "string")) {
     return `${input.notesUri.replace(/\/$/, "")}/${encodeURIComponent(String(input.responseBody.id))}`;
   }
   return undefined;
@@ -176,7 +176,7 @@ export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: Fe
           throw new Error(`deliver GitLab callback failed: ${response.status} ${await response.text()}`);
         }
         if (!existingNoteUri) {
-          const body = (await response.json()) as { id?: number | string };
+          const body = (await response.json()) as { id?: number | string } | null;
           const noteUri = gitlabNoteUriFrom({ notesUri: message.uri, responseBody: body });
           if (noteUri) {
             noteUriByKey.set(statusKey, noteUri);
