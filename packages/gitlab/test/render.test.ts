@@ -71,6 +71,48 @@ describe("GitLab result rendering", () => {
     expect(body).toContain("- Verification:\n  - `pnpm test`: passed\n  - passed - Structured report parsed successfully.");
   });
 
+  it("renders run artifacts in both final result paths", () => {
+    const result = {
+      conclusion: "success" as const,
+      summary: "Produced run artifacts.",
+      artifacts: [
+        { kind: "patch" as const, title: "Generated patch", uri: "opentag/run_1" },
+        { kind: "report" as const, title: "Run report", uri: "opentag://run/run_1/report" },
+        { kind: "log_summary" as const, title: "Log summary", uri: "opentag://run/run_1/log-summary" }
+      ]
+    };
+
+    const plain = renderFinalResult(result);
+    expect(plain).toContain("Artifacts:");
+    expect(plain).toContain("- patch: [Generated patch](opentag/run_1)");
+    expect(plain).toContain("- report: [Run report](opentag://run/run_1/report)");
+    expect(plain).toContain("- log_summary: [Log summary](opentag://run/run_1/log-summary)");
+
+    const withSuggestedAction = renderFinalResult({
+      ...result,
+      suggestedChanges: [
+        {
+          proposalId: "proposal_1",
+          createdAt: "2026-06-29T00:00:00.000Z",
+          sourceRunId: "run_1",
+          summary: "Create a merge request.",
+          intents: [
+            {
+              intentId: "intent_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create a merge request for branch opentag/run_1.",
+              params: { title: "OpenTag run run_1", head: "opentag/run_1", base: "main" }
+            }
+          ]
+        }
+      ]
+    });
+    expect(withSuggestedAction).toContain("Artifacts:");
+    expect(withSuggestedAction).toContain("- patch: [Generated patch](opentag/run_1)");
+    expect(withSuggestedAction).toContain("### Suggested actions:");
+  });
+
   it("renders action table rows defensively when optional values are missing", () => {
     const body = renderFinalSummaryPresentation({
       outcome: "needs_human",

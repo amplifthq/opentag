@@ -13,6 +13,7 @@ import {
   createLarkInteractiveMessageContent,
   createLarkSourceThreadStatusCard,
   createLarkTextMessageContent,
+  parseLarkThreadActionButtonValue,
   renderLarkActionReceiptPresentation,
   renderLarkAcknowledgement,
   renderLarkFinalSummaryPresentation,
@@ -80,6 +81,46 @@ describe("renderLarkFinalResult", () => {
         "Audit: opentag status --run run_semantic_lark"
       ].join("\n")
     );
+  });
+
+  it("renders artifacts in final fallback text", () => {
+    const presentation = createFinalSummaryPresentation({
+      result: {
+        conclusion: "success",
+        summary: "Produced artifacts.",
+        artifacts: [
+          { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+          { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" },
+          { kind: "screenshot", title: "UI screenshot", uri: "opentag/run_1.png" },
+          { kind: "log_summary", title: "Log summary", uri: "opentag/run_1-log.md" },
+          { kind: "pull_request", title: "Pull request", uri: "https://github.com/acme/demo/pull/1" },
+          { title: "Raw bundle", uri: "opentag/run_1.zip" }
+        ]
+      }
+    });
+
+    const text = renderLarkFinalSummaryPresentation(presentation);
+    expect(text).toContain("Artifacts");
+    expect(text).toContain("- Patch: Generated patch");
+    expect(text).toContain("- Report: Run report");
+    expect(text).toContain("- Screenshot: UI screenshot");
+    expect(text).toContain("- Logs: Log summary");
+    expect(text).toContain("- [Pull request](https://github.com/acme/demo/pull/1)");
+    expect(text).toContain("- Artifact: Raw bundle");
+    expect(text).toContain("Links/details are in audit/status.");
+    expect(text).not.toContain("opentag/run_1-report.md");
+
+    const zhText = renderLarkFinalSummaryPresentation(presentation, { locale: "zh-CN" });
+    expect(zhText).toContain("已完成：成功。");
+    expect(zhText).toContain("产物");
+    expect(zhText).toContain("- 补丁: Generated patch");
+    expect(zhText).toContain("- 报告: Run report");
+    expect(zhText).toContain("- 截图: UI screenshot");
+    expect(zhText).toContain("- 日志: Log summary");
+    expect(zhText).toContain("- [PR: Pull request](https://github.com/acme/demo/pull/1)");
+    expect(zhText).toContain("- 产物: Raw bundle");
+    expect(zhText).toContain("链接和详情在 audit/status 中。");
+    expect(zhText).not.toContain("Artifacts");
   });
 });
 
@@ -200,6 +241,10 @@ describe("createLarkFinalSummaryCard", () => {
         conclusion: "success",
         summary: "Did the thing.",
         changedFiles: ["packages/lark/src/render.ts"],
+        artifacts: [
+          { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+          { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" }
+        ],
         verification: [{ command: "pnpm test", outcome: "passed" }],
         nextAction: "Review the PR."
       }
@@ -217,10 +262,28 @@ describe("createLarkFinalSummaryCard", () => {
     expect(JSON.stringify(card)).toContain("Did the thing.");
     expect(JSON.stringify(card)).toContain("pnpm test: passed");
     expect(JSON.stringify(card)).toContain("packages/lark/src/render.ts");
+    expect(JSON.stringify(card)).toContain("Generated patch");
+    expect(JSON.stringify(card)).toContain("Run report");
+    expect(JSON.stringify(card)).toContain("Links/details are in audit/status.");
+    expect(JSON.stringify(card)).not.toContain("opentag/run_1.patch");
+    expect(JSON.stringify(card)).not.toContain("opentag/run_1-report.md");
     expect(JSON.stringify(card)).toContain("Review the PR.");
     expect(JSON.stringify(card)).toContain("Audit: opentag status --run run_1");
     expect(JSON.stringify(card)).not.toContain("blocks");
     expect(JSON.parse(createLarkInteractiveMessageContent(card))).toEqual(card);
+
+    const feishuCard = createLarkFinalSummaryCard(presentation, { locale: "zh-CN" });
+    const feishuRendered = JSON.stringify(feishuCard);
+    expect(feishuCard.header.title.content).toBe("完成：成功");
+    expect(feishuRendered).toContain("**验证**");
+    expect(feishuRendered).toContain("**变更文件**");
+    expect(feishuRendered).toContain("**产物**");
+    expect(feishuRendered).toContain("补丁: Generated patch");
+    expect(feishuRendered).toContain("报告: Run report");
+    expect(feishuRendered).toContain("详情在 audit/status 中。");
+    expect(feishuRendered).toContain("**下一步**");
+    expect(feishuRendered).not.toContain("**Artifacts**");
+    expect(feishuRendered).not.toContain("Links/details are in audit/status.");
   });
 
   it("renders source-thread action receipts in the Lark-native final card", () => {
@@ -229,6 +292,7 @@ describe("createLarkFinalSummaryCard", () => {
       result: {
         conclusion: "needs_human",
         summary: "Prepared a pull request action.",
+        nextAction: "Review the proposed pull request action.",
         suggestedChanges: [
           {
             proposalId: "proposal_pr",
@@ -257,20 +321,186 @@ describe("createLarkFinalSummaryCard", () => {
       }
     });
 
+    const card = createLarkFinalSummaryCard(presentation, { locale: "zh-CN" });
+    const rendered = JSON.stringify(card);
+    const fallbackText = renderLarkFinalSummaryPresentation(presentation, { locale: "zh-CN" });
+
+    expect(card.header.title.content).toBe("完成：待确认");
+    expect(rendered).toContain("需要确认");
+    expect(rendered).toContain("需要你确认");
+    expect(rendered).toContain("1. 创建 PR");
+    expect(rendered).not.toContain("Create a pull request for branch opentag/run_1.");
+    expect(rendered).toContain("可直接执行。");
+    expect(rendered).toContain("按钮不可用时");
+    expect(rendered).toContain("执行 1");
+    expect(rendered).toContain("apply 1");
+    expect(rendered).toContain("完整动作详情保留在 OpenTag audit/status。");
+    expect(rendered).not.toContain("Target: GitHub pull request");
+    expect(rendered).not.toContain("Branch: opentag/run_1 -> main");
+    expect(rendered).not.toContain("Changed files: README.md");
+    expect(rendered).not.toContain("Apply now: apply 1");
+    expect(rendered).toContain("创建 PR");
+    expect(rendered).toContain("拒绝");
+    expect(rendered).toContain("Audit: opentag status --run run_lark_receipt");
+    expect(fallbackText).toContain("下一步：Review the proposed pull request action.");
+    expect(fallbackText).toContain("**需要确认**");
+    expect(fallbackText).toContain("按钮不可用时");
+    expect(fallbackText).toContain("执行 1");
+    expect(fallbackText).toContain("apply 1");
+    expect(fallbackText).toContain("拒绝 1");
+    expect(fallbackText).toContain("reject 1");
+    expect(fallbackText).toContain("完整动作详情保留在 OpenTag audit/status。");
+
+    const actionBlock = card.elements.find((element) => element.tag === "action");
+    if (!actionBlock || actionBlock.tag !== "action") throw new Error("expected Lark action block");
+    expect(actionBlock).toMatchObject({
+      tag: "action",
+      layout: "bisected",
+      actions: [
+        { tag: "button", text: { tag: "plain_text", content: "创建 PR" }, type: "primary" },
+        { tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "danger" }
+      ]
+    });
+    expect(actionBlock.actions.map((action) => parseLarkThreadActionButtonValue(action.value))).toEqual([
+      {
+        opentag: "thread_action",
+        version: 1,
+        command: "apply 1",
+        decision: "apply",
+        index: 1,
+        proposalId: "proposal_pr",
+        intentId: "intent_create_pr"
+      },
+      {
+        opentag: "thread_action",
+        version: 1,
+        command: "reject 1",
+        decision: "reject",
+        index: 1,
+        proposalId: "proposal_pr",
+        intentId: "intent_create_pr"
+      }
+    ]);
+    expect(
+      parseLarkThreadActionButtonValue({
+        opentag: "thread_action",
+        version: 1,
+        command: "reject 1",
+        decision: "apply",
+        index: 1,
+        proposalId: "proposal_pr",
+        intentId: "intent_create_pr"
+      })
+    ).toBeNull();
+    expect(
+      parseLarkThreadActionButtonValue({
+        opentag: "thread_action",
+        version: 1,
+        command: "apply 2",
+        decision: "apply",
+        index: 1,
+        proposalId: "proposal_pr",
+        intentId: "intent_create_pr"
+      })
+    ).toBeNull();
+  });
+
+  it("renders Lark-domain final actions in English by default", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_lark_en_receipt",
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a pull request action.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_pr",
+            createdAt: "2026-06-29T00:00:00.000Z",
+            summary: "Create a pull request.",
+            intents: [
+              {
+                intentId: "intent_create_pr",
+                domain: "pull_request",
+                action: "create_pull_request",
+                summary: "Create a pull request for branch opentag/run_1.",
+                params: {
+                  head: "opentag/run_1",
+                  base: "main"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_create_pr: { state: "ready_to_apply" }
+        }
+      }
+    });
+
     const card = createLarkFinalSummaryCard(presentation);
     const rendered = JSON.stringify(card);
 
-    expect(rendered).toContain("Ready to apply");
-    expect(rendered).toContain("Choose a command in this source thread");
-    expect(rendered).toContain("Create a pull request for branch opentag/run_1.");
-    expect(rendered).toContain("Target: GitHub pull request");
-    expect(rendered).toContain("Branch: opentag/run_1 -> main");
-    expect(rendered).toContain("Changed files: README.md");
-    expect(rendered).toContain("Apply now: apply 1");
-    expect(rendered).toContain("Reject: reject 1");
-    expect(rendered).toContain("Audit: opentag status --run run_lark_receipt");
-    expect(rendered).not.toContain("proposal_pr");
-    expect(rendered).not.toContain("intent_create_pr");
+    expect(rendered).toContain("Actions");
+    expect(rendered).toContain("1. Create PR");
+    expect(rendered).toContain("Ready to apply.");
+    expect(rendered).toContain("If buttons are unavailable, reply");
+    expect(rendered).toContain("apply 1");
+    expect(rendered).not.toContain("创建 PR");
+    expect(rendered).not.toContain("按钮不可用时");
+
+    const actionBlock = card.elements.find((element) => element.tag === "action");
+    if (!actionBlock || actionBlock.tag !== "action") throw new Error("expected Lark action block");
+    expect(actionBlock.actions).toMatchObject([
+      { tag: "button", text: { tag: "plain_text", content: "Create PR" }, type: "primary" },
+      { tag: "button", text: { tag: "plain_text", content: "Reject" }, type: "danger" }
+    ]);
+  });
+
+  it("does not duplicate fallback commands when only reject is available", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_lark_reject_only",
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a reject-only action.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_reject_only",
+            createdAt: "2026-06-29T00:00:00.000Z",
+            summary: "Reject-only follow-up.",
+            intents: [
+              {
+                intentId: "intent_reject_only",
+                domain: "follow_up",
+                action: "record_decision",
+                summary: "Reject this generated follow-up."
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_reject_only: {
+            state: "needs_approval",
+            primaryDecision: "none",
+            visibleDecisions: ["reject"]
+          }
+        }
+      }
+    });
+
+    const card = createLarkFinalSummaryCard(presentation, { locale: "zh-CN" });
+    const rendered = JSON.stringify(card);
+
+    expect(rendered).toContain("按钮不可用时：回复 `拒绝 1`（也支持 `reject 1`）。");
+    expect(rendered).not.toContain("`拒绝 1` / `拒绝 1`");
+    expect(rendered).not.toContain("`reject 1` / `reject 1`");
+
+    const actionBlock = card.elements.find((element) => element.tag === "action");
+    if (!actionBlock || actionBlock.tag !== "action") throw new Error("expected Lark action block");
+    expect(actionBlock.actions).toHaveLength(1);
+    expect(actionBlock.actions).toMatchObject([{ tag: "button", text: { tag: "plain_text", content: "拒绝" }, type: "danger" }]);
   });
 
   it("keeps long Markdown summaries readable instead of flattening them into one Lark paragraph", () => {

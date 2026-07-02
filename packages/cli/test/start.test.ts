@@ -592,6 +592,9 @@ describe("OpenTag CLI start wiring", () => {
           calls.push("lark-ingress");
           return {
             startPromise: new Promise<void>(() => {}),
+            async handleCardAction() {
+              return { status: "ignored_card_action_not_opentag" as const };
+            },
             async close() {
               calls.push("lark.close");
             }

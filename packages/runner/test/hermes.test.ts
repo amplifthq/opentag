@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createHermesExecutor } from "../src/hermes.js";
 import type { CommandRunner } from "../src/command.js";
+import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-report.js";
 
 describe("Hermes executor", () => {
   it("creates an isolated branch, runs Hermes with an isolated profile and context, and reports changed files", async () => {
@@ -97,9 +98,17 @@ describe("Hermes executor", () => {
     expect(prompt).toContain("The failing test is flaky in CI.");
     expect(prompt).toContain("Do not modify unrelated callback code.");
     expect(prompt).toContain("https://github.com/acme/demo/issues/1");
+    expect(prompt).toContain("OpenTag owns the source-control handoff after you finish.");
+    expect(prompt).toContain(EXECUTOR_REPORT_START);
+    expect(prompt).toContain(EXECUTOR_REPORT_END);
 
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested Hermes change.");
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({ kind: "patch", title: "Generated patch", uri: "opentag/run_1" }),
+      expect.objectContaining({ kind: "report", title: "Run report", uri: "opentag://run/run_1/report" }),
+      expect.objectContaining({ kind: "log_summary", title: "Log summary", uri: "opentag://run/run_1/log-summary" })
+    ]);
   });
 
   it("returns not ready when git status throws", async () => {

@@ -2,6 +2,9 @@ import type { OpenTagRunResult } from "@opentag/core";
 import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
+const MAX_ARTIFACT_SUMMARY_LENGTH = 1200;
+
+type ResultArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
 
 const DIRECT_SOURCE_CONTROL_COMMAND_PATTERN = /^\s*(?:[-*]\s*)?(?:`{1,3})?\s*(?:git\s+(?:add|commit|push|checkout)|gh\s+pr\s+create)\b/i;
 
@@ -94,6 +97,79 @@ function summaryWithExecutorAnswer(input: {
   return hasReportDetails ? [answer, "", reportSummary].join("\n") : answer;
 }
 
+function runArtifactUri(runId: string, artifact: string): string {
+  return `opentag://run/${encodeURIComponent(runId)}/${artifact}`;
+}
+
+function truncateArtifactText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > MAX_ARTIFACT_SUMMARY_LENGTH ? `${normalized.slice(0, MAX_ARTIFACT_SUMMARY_LENGTH - 1)}...` : normalized;
+}
+
+function dedupeArtifacts(artifacts: ResultArtifact[]): ResultArtifact[] {
+  const seen = new Set<string>();
+  const deduped: ResultArtifact[] = [];
+  for (const artifact of artifacts) {
+    const key = `${artifact.kind ?? "artifact"}:${artifact.uri}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(artifact);
+  }
+  return deduped;
+}
+
+function createRunArtifacts(input: {
+  executorName: string;
+  runId: string;
+  branchName: string;
+  baseBranch?: string;
+  output: string;
+  summary: string;
+  changedFiles: string[];
+  report?: NonNullable<ReturnType<typeof parseExecutorReport>>;
+  extraArtifacts?: ResultArtifact[];
+}): ResultArtifact[] {
+  const generated: ResultArtifact[] = [];
+  if (input.changedFiles.length > 0) {
+    generated.push({
+      kind: "patch",
+      title: "Generated patch",
+      uri: input.branchName,
+      metadata: {
+        runId: input.runId,
+        executor: input.executorName,
+        branchName: input.branchName,
+        baseBranch: input.baseBranch ?? "main",
+        changedFiles: input.changedFiles
+      }
+    });
+    generated.push({
+      kind: "report",
+      title: "Run report",
+      uri: runArtifactUri(input.runId, "report"),
+      metadata: {
+        runId: input.runId,
+        executor: input.executorName,
+        summary: truncateArtifactText(input.summary),
+        changedFiles: input.changedFiles,
+        ...(input.report ? { report: input.report } : {})
+      }
+    });
+    generated.push({
+      kind: "log_summary",
+      title: "Log summary",
+      uri: runArtifactUri(input.runId, "log-summary"),
+      metadata: {
+        runId: input.runId,
+        executor: input.executorName,
+        summary: truncateArtifactText(executorAnswerBeforeReport(input.output) ?? input.summary)
+      }
+    });
+  }
+
+  return dedupeArtifacts([...generated, ...(input.report?.artifacts ?? []), ...(input.extraArtifacts ?? [])]);
+}
+
 export function createExecutorRunResult(input: {
   executorName: string;
   runId: string;
@@ -106,6 +182,7 @@ export function createExecutorRunResult(input: {
   const proposalId = `proposal_${input.runId}`;
   const report = parseExecutorReport(input.output);
   const summary = report ? summaryWithExecutorAnswer({ ...input, report }) : cleanOrFallbackExecutorSummary(input);
+  const artifacts = createRunArtifacts({ ...input, summary, ...(report ? { report } : {}) });
   const suggestedChanges =
     input.changedFiles.length > 0
       ? [
@@ -133,20 +210,6 @@ export function createExecutorRunResult(input: {
                   risks: ["Creates a pull request from the executor-produced branch; review the diff before merging."],
                   executorConditions: ["isolated branch exists"]
                 }
-              },
-              {
-                intentId: `${proposalId}_link_branch`,
-                domain: "artifact_links" as const,
-                action: "link_artifact",
-                summary: `Link the run branch ${input.branchName} to the work item.`,
-                params: { title: "Run branch", uri: input.branchName }
-              },
-              {
-                intentId: `${proposalId}_request_review`,
-                domain: "review" as const,
-                action: "request_review",
-                summary: "Request human review of the generated code changes.",
-                params: { changedFiles: input.changedFiles }
               }
             ],
             preconditions: ["The local branch was generated from the checkout state available to the runner."]
@@ -158,10 +221,7 @@ export function createExecutorRunResult(input: {
     conclusion: "success",
     summary,
     changedFiles: input.changedFiles,
-    artifacts: [
-      ...(input.changedFiles.length > 0 ? [{ kind: "patch" as const, title: "Run branch", uri: input.branchName }] : []),
-      ...(input.extraArtifacts ?? [])
-    ],
+    artifacts,
     ...(suggestedChanges ? { suggestedChanges } : {}),
     nextAction:
       input.changedFiles.length > 0

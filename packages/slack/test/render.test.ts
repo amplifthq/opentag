@@ -27,12 +27,16 @@ describe("Slack callback rendering", () => {
     const text = renderSlackFinalResult({
       conclusion: "success",
       summary: "Echoed **OpenTag** command: [introduce yourself](https://example.com/cmd)",
+      artifacts: [
+        { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+        { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" }
+      ],
       verification: [{ command: "echo '<tag>' & check", outcome: "passed" }],
       nextAction: "Open [thread](https://example.com/thread) & follow up"
     });
 
     expect(text).toBe(
-      "*Finished: success.*\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\nVerified: `echo '&lt;tag&gt;' &amp; check` passed\nNext: Open <https://example.com/thread|thread> &amp; follow up"
+      "*Finished: success.*\nEchoed *OpenTag* command: <https://example.com/cmd|introduce yourself>\nVerified: `echo '&lt;tag&gt;' &amp; check` passed\nArtifacts: Patch: Generated patch, Report: Run report. Details in audit/status.\nNext: Open <https://example.com/thread|thread> &amp; follow up"
     );
     expect(text).not.toContain("**success**");
   });
@@ -222,7 +226,9 @@ describe("Slack callback rendering", () => {
     const rendered = JSON.stringify(blocks);
     expect(rendered).toContain("Ready to apply");
     expect(rendered).toContain("1. *Add the bug label.*");
-    expect(rendered).toContain("Target: GitHub labels");
+    expect(rendered).toContain("Reply: `apply 1` / `reject 1`");
+    expect(rendered).not.toContain("Full action details stay in OpenTag audit/status.");
+    expect(rendered).not.toContain("Target: GitHub labels");
     expect(rendered).toContain("Audit: `opentag status --run run_receipt_1`");
     expect(rendered).not.toContain("Proposal:");
     expect(rendered).not.toContain("Intent ID:");
@@ -239,10 +245,10 @@ describe("Slack callback rendering", () => {
     });
     expect(actionsBlock).toMatchObject({
       type: "actions",
-      block_id: "opentag_actions_1",
+      block_id: "opentag_compact_actions_1",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+        { type: "button", text: { type: "plain_text", text: "Reject 1" }, action_id: "opentag:reject:1", style: "danger" }
       ]
     });
 
@@ -260,6 +266,56 @@ describe("Slack callback rendering", () => {
         proposalId: "proposal_1",
         intentId: "intent_label_1"
       }
+    ]);
+  });
+
+  it("does not duplicate reply commands when only reject is available", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_slack_reject_only",
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a reject-only action.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_reject_only",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Reject-only follow-up.",
+            intents: [
+              {
+                intentId: "intent_reject_only",
+                domain: "follow_up",
+                action: "record_decision",
+                summary: "Reject this generated follow-up."
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_reject_only: {
+            state: "needs_approval",
+            primaryDecision: "none",
+            visibleDecisions: ["reject"]
+          }
+        }
+      }
+    });
+
+    const text = renderSlackFinalSummaryPresentation(presentation);
+    const blocks = createSlackFinalSummaryBlocks(presentation);
+    const renderedBlocks = JSON.stringify(blocks);
+
+    expect(text).toContain("Reply: `reject 1`");
+    expect(text).not.toContain("Reply: `reject 1` / `reject 1`");
+    expect(renderedBlocks).toContain("Reply: `reject 1`");
+    expect(renderedBlocks).not.toContain("Reply: `reject 1` / `reject 1`");
+
+    const actionsBlock = blocks.find((block) => block.type === "actions");
+    if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
+    expect(actionsBlock.elements).toHaveLength(1);
+    expect(actionsBlock.elements).toMatchObject([
+      { type: "button", text: { type: "plain_text", text: "Reject 1" }, action_id: "opentag:reject:1" }
     ]);
   });
 
@@ -361,12 +417,16 @@ describe("Slack callback rendering", () => {
     const text = renderSlackFinalSummaryPresentation(presentation);
     const blocks = createSlackFinalSummaryBlocks(presentation);
 
-    expect(text).toContain("*Ready to apply*");
-    expect(text).toContain("Branch: `opentag/run_1` -> `main`");
-    expect(text).toContain("Changed files: `src/demo.ts`");
+    expect(text).toContain("*Actions*");
+    expect(text).toContain("Ready to apply");
+    expect(text).toContain("1. *Create a pull request*");
+    expect(text).toContain("Reply: `apply 1` / `reject 1`");
+    expect(text).not.toContain("Branch: `opentag/run_1` -> `main`");
+    expect(text).not.toContain("Changed files: `src/demo.ts`");
     expect(text).toContain("Audit: `opentag status --run run_semantic_1`");
-    expect(JSON.stringify(blocks)).toContain("Create a pull request for branch opentag/run_1.");
-    expect(JSON.stringify(blocks)).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(JSON.stringify(blocks)).toContain("Create a pull request");
+    expect(JSON.stringify(blocks)).not.toContain("Create a pull request for branch opentag/run_1.");
+    expect(JSON.stringify(blocks)).not.toContain("Branch: `opentag/run_1` -> `main`");
     expect(JSON.stringify(blocks)).not.toContain("Proposal:");
     expect(JSON.stringify(blocks)).not.toContain("Intent ID:");
 
@@ -448,23 +508,48 @@ describe("Slack callback rendering", () => {
 
     const text = renderSlackFinalSummaryPresentation(presentation);
     const blocks = createSlackFinalSummaryBlocks(presentation);
-    const renderedBlocks = JSON.stringify(blocks);
-
     expect(presentation.actionReceiptTitle).toBe("1 action ready to apply, 1 action needs setup, 1 action needs attention");
-    expect(text).toContain("*1 action ready to apply, 1 action needs setup, 1 action needs attention*");
-    expect(text).toContain("*Ready to apply*\n\n1. *Create a pull request for branch opentag/run_slack.*");
-    expect(text).toContain("*Needs setup*\n\n3. *Request human review of the generated code changes.*");
-    expect(text).toContain("*Needs attention*\n\n2. *Link the run branch to the work item.*");
-    expect(text).toContain("OpenTag audit log.\n\n*Ready to apply*");
-    expect(text).toContain("Preconditions: 1 check(s) in the audit log.\n\n*Needs setup*");
+    expect(text).toContain("*Actions*");
+    expect(text).toContain("1 action ready to apply, 1 action needs setup, 1 action needs attention");
+    expect(text).toContain("1. *Create a pull request*");
+    expect(text).toContain("2. *Link the run branch*");
+    expect(text).toContain("Needs attention: Audit-only for now; use audit/status for details.");
+    expect(text).toContain("3. *Request human review of the generated code changes.*");
+    expect(text).toContain("Needs setup: Direct apply for Slack actions is not configured on this dispatcher.");
+    expect(text).not.toContain("more action(s) in audit/status.");
+    expect(text).not.toContain("*Ready to apply*\n\n1.");
+    expect(text).not.toContain("*Needs setup*\n\n3.");
+    expect(text).not.toContain("*Needs attention*\n\n2.");
+    expect(text).not.toContain("Preconditions: 1 check(s) in the audit log.");
     expect(text).not.toContain("Some actions need setup");
     expect(text).not.toContain("audit log.1.");
     expect(text).not.toContain("audit log.2.");
 
-    expect(renderedBlocks).toContain("1 action ready to apply, 1 action needs setup, 1 action needs attention");
-    expect(renderedBlocks).toContain("Ready to apply");
-    expect(renderedBlocks).toContain("Needs setup");
-    expect(renderedBlocks).toContain("Needs attention");
+    const actionSummarySections = blocks
+      .filter((block) => block.type === "section")
+      .map((block) => block.text.text)
+      .filter((text) => text.startsWith("*Actions*"));
+    expect(actionSummarySections).toEqual(["*Actions*\n1 action ready to apply, 1 action needs setup, 1 action needs attention"]);
+
+    const compactActionSections = blocks
+      .filter((block) => block.type === "section")
+      .map((block) => block.text.text)
+      .filter((text) => /^\d+\. \*/u.test(text));
+    expect(compactActionSections).toEqual([
+      "1. *Create a pull request*\nReply: `apply 1` / `reject 1`",
+      "2. *Link the run branch*\nNeeds attention: Audit-only for now; use audit/status for details.\nReply: `continue 2` / `reject 2`",
+      "3. *Request human review of the generated code changes.*\nNeeds setup: Direct apply for Slack actions is not configured on this dispatcher.\nReply: `continue 3` / `reject 3`"
+    ]);
+    expect(compactActionSections.join("\n")).not.toContain("Branch: `opentag/run_slack` -> `main`");
+
+    const compactActionButtonBlocks = blocks
+      .filter((block) => block.type === "actions")
+      .map((block) => ({ block_id: block.block_id, labels: block.elements.map((element) => element.text.text) }));
+    expect(compactActionButtonBlocks).toEqual([
+      { block_id: "opentag_compact_actions_1", labels: ["Apply 1", "Reject 1"] },
+      { block_id: "opentag_compact_actions_2", labels: ["Continue 2", "Reject 2"] },
+      { block_id: "opentag_compact_actions_3", labels: ["Continue 3", "Reject 3"] }
+    ]);
   });
 
   it("does not show Apply when receipt capability is not proven", () => {
@@ -494,8 +579,8 @@ describe("Slack callback rendering", () => {
     expect(rendered).not.toContain("Apply 1");
     expect(rendered).not.toContain("opentag:apply:1");
     expect(rendered).not.toContain('"command":"apply 1"');
-    expect(rendered).toContain("Approve only");
-    expect(rendered).toContain("Reject");
+    expect(rendered).toContain("Approve 1");
+    expect(rendered).toContain("Reject 1");
   });
 
   it("caps suggested action blocks to stay under Slack's Block Kit limit", () => {
@@ -527,8 +612,12 @@ describe("Slack callback rendering", () => {
 
     const rendered = JSON.stringify(blocks);
     expect(blocks.length).toBeLessThanOrEqual(50);
-    expect(rendered).toContain("Apply 20");
+    expect(rendered).toContain("Apply 1");
+    expect(rendered).toContain("Apply 2");
+    expect(rendered).toContain("Apply 3");
+    expect(rendered).not.toContain("Apply 4");
+    expect(rendered).not.toContain("Apply 20");
     expect(rendered).not.toContain("Apply 21");
-    expect(rendered).toContain("Showing first 20 of 30 actions");
+    expect(rendered).toContain("+27 more action(s) in audit/status.");
   });
 });

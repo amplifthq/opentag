@@ -35,6 +35,18 @@ export function renderTelegramFinalSummaryPresentation(presentation: OpenTagFina
     }
   }
 
+  if (presentation.artifacts?.length) {
+    lines.push("", "Artifacts:");
+    const visibleArtifacts = presentation.artifacts.slice(0, 4);
+    for (const artifact of visibleArtifacts) {
+      lines.push(`- ${artifact.kind ? `${artifact.kind}: ` : ""}${artifact.title}: ${artifact.uri}`);
+    }
+    const remaining = presentation.artifacts.length - visibleArtifacts.length;
+    if (remaining > 0) {
+      lines.push(`+${remaining} more artifact(s) in audit/status.`);
+    }
+  }
+
   if (presentation.nextActions?.length) {
     lines.push("", `Next action: ${presentation.nextActions[0]}`);
   }

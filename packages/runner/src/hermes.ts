@@ -1,5 +1,6 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandResult, type CommandRunner } from "./command.js";
+import { executorPolicyPromptLines } from "./executor-report.js";
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
@@ -36,8 +37,7 @@ function buildPrompt(input: {
     contextLines(input.context),
     "",
     "Use only the selected Hermes profile for tools, skills, memory, and session behavior.",
-    "Work autonomously but keep the change narrow. Run relevant verification if you modify files.",
-    "End with a concise summary of what changed, what was verified, and the recommended next action."
+    ...executorPolicyPromptLines()
   ].join("\n");
 }
 

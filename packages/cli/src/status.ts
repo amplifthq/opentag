@@ -578,6 +578,27 @@ function formatCallbackDelivery(summary: RunStatusSummary): string[] {
   ];
 }
 
+function formatRunResult(run: OpenTagRun): string[] {
+  if (!run.result) return [];
+  const lines = ["Result:", `  summary: ${run.result.summary}`];
+  if (run.result.changedFiles?.length) {
+    lines.push(`  changed files: ${run.result.changedFiles.join(", ")}`);
+  }
+  if (run.result.artifacts?.length) {
+    lines.push("  artifacts:");
+    for (const artifact of run.result.artifacts) {
+      lines.push(`    - ${artifact.kind ? `${artifact.kind}: ` : ""}${artifact.title}: ${artifact.uri}`);
+    }
+  }
+  if (run.result.verification?.length) {
+    lines.push("  verification:");
+    for (const check of run.result.verification) {
+      lines.push(`    - ${check.command}: ${check.outcome}`);
+    }
+  }
+  return lines;
+}
+
 export function formatRunStatus(summary: RunStatusSummary): string {
   const latestEvents = summary.events.slice(-5);
   const conclusion = summary.run.result?.conclusion;
@@ -593,6 +614,7 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     ...formatRunProvenance(summary),
     `Command: ${summary.event.command.rawText}`,
     `Updated: ${summary.run.updatedAt}`,
+    ...formatRunResult(summary.run),
     `Metrics: ${summary.metrics.totalEventCount} events, ${summary.metrics.suggestedChangesCount} suggested action(s), ${summary.metrics.applyPlanCount} apply plan(s), ${summary.metrics.staleIntentCount} stale intent(s)`,
     ...formatRunLiveness(summary),
     ...formatCallbackDelivery(summary),

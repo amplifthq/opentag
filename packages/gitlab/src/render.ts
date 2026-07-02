@@ -1,5 +1,6 @@
 import {
   createFinalSummaryPresentation,
+  renderMarkdownArtifactLines,
   suggestedActionCandidatesFromResult,
   type ActionReceiptDecision,
   type OpenTagFinalSummaryPresentation,
@@ -187,6 +188,10 @@ function renderPresentationActions(presentation: OpenTagFinalSummaryPresentation
   return lines;
 }
 
+function renderArtifacts(presentation: OpenTagFinalSummaryPresentation): string[] {
+  return renderMarkdownArtifactLines(presentation);
+}
+
 export function renderFinalSummaryPresentation(presentation: OpenTagFinalSummaryPresentation): string {
   const lines = [`OpenTag finished with **${presentation.outcome}**.`, "", presentation.summary];
 
@@ -195,6 +200,11 @@ export function renderFinalSummaryPresentation(presentation: OpenTagFinalSummary
     for (const check of presentation.verification) {
       lines.push(`- \`${check.command}\`: ${check.outcome}`);
     }
+  }
+
+  const artifacts = renderArtifacts(presentation);
+  if (artifacts.length > 0) {
+    lines.push("", ...artifacts);
   }
 
   const suggestedActions = renderPresentationActions(presentation);
@@ -230,6 +240,10 @@ export function renderFinalResult(result: OpenTagRunResult): string {
     for (const check of result.verification) {
       lines.push(`- \`${check.command}\`: ${check.outcome}`);
     }
+  }
+  const artifacts = renderArtifacts(presentation);
+  if (artifacts.length > 0) {
+    lines.push("", ...artifacts);
   }
   const nextAction = nextActionSummary(result);
   if (nextAction) lines.push("", `Next action: ${nextAction}`);

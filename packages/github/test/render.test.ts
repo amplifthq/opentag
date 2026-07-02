@@ -42,7 +42,8 @@ describe("GitHub result rendering", () => {
       }
     });
 
-    expect(body).toContain("### Ready to apply");
+    expect(body).toContain("<details>");
+    expect(body).toContain("<summary>Ready to apply</summary>");
     expect(body).toContain("| Target | GitHub pull request |");
     expect(body).toContain("| Verification | `pnpm test`: passed<br>passed - Structured report parsed successfully. |");
     expect(body).toContain("| Apply now | `apply 1` |");
@@ -75,7 +76,7 @@ describe("GitHub result rendering", () => {
       ]
     });
 
-    expect(body).toContain("### Needs approval");
+    expect(body).toContain("<summary>Needs approval</summary>");
     expect(body).not.toContain("`apply 1`");
     expect(body).toContain("| Approve only | `approve 1` |");
     expect(body).toContain("| Reject | `reject 1` |");
@@ -124,7 +125,7 @@ describe("GitHub result rendering", () => {
 
     expect(body).toContain("OpenTag finished with **needs_human**.");
     expect(body).toContain("Verification:\n- `pnpm test`: passed");
-    expect(body).toContain("### Ready to apply");
+    expect(body).toContain("<summary>Ready to apply</summary>");
     expect(body).toContain("Audit: run `opentag status --run run_semantic_github` locally.");
     expect(body).toContain("| Title | OpenTag run run_1 |");
     expect(body).toContain("| Branch | `opentag/run_1` -> `main` |");
@@ -135,5 +136,26 @@ describe("GitHub result rendering", () => {
     expect(body).toContain("| Apply now | `apply 1` |");
     expect(body).not.toContain("Proposal:");
     expect(body).not.toContain("Intent ID:");
+  });
+
+  it("renders run artifacts in the final summary without external bridge fields", () => {
+    const body = renderFinalResult({
+      conclusion: "success",
+      summary: "Produced run artifacts.",
+      artifacts: [
+        { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+        { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" },
+        { kind: "screenshot", title: "UI screenshot", uri: "opentag/run_1.png" },
+        { kind: "log_summary", title: "Log summary", uri: "opentag/run_1-log.md" },
+        { kind: "pull_request", title: "Pull request", uri: "https://github.com/acme/demo/pull/1" }
+      ]
+    });
+
+    expect(body).toContain("Artifacts:");
+    expect(body).toContain("- patch: [Generated patch](opentag/run_1.patch)");
+    expect(body).toContain("- report: [Run report](opentag/run_1-report.md)");
+    expect(body).toContain("- screenshot: [UI screenshot](opentag/run_1.png)");
+    expect(body).toContain("- log_summary: [Log summary](opentag/run_1-log.md)");
+    expect(body).toContain("- pull_request: [Pull request](https://github.com/acme/demo/pull/1)");
   });
 });
