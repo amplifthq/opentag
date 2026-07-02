@@ -106,6 +106,8 @@ Use the published OpenTag CLI. Please:
 Do not invent credentials or secrets. Ask me before entering any token, app ID, channel ID, repository, or project path.
 ```
 
+Agents can also follow the full agent-readable setup checklist in [Agent-readable install guide](docs/agent-install.md).
+
 ## Platform Guides
 
 Use the guide for the platform you choose in `opentag setup`.

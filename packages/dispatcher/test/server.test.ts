@@ -4393,7 +4393,7 @@ describe("dispatcher API", () => {
         authorization: "Bearer gh_test"
       }
     ]);
-    expect(delivered.some((message) => message.body.includes("### Ready to apply"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("<summary>Ready to apply</summary>"))).toBe(true);
     expect(delivered.at(-1)?.body).toContain("Applied: Add the bug label.");
     expect(delivered.at(-1)?.body).not.toContain("proposal_thread_apply");
     expect(delivered.at(-1)?.body).not.toContain("intent_label_bug");
@@ -4457,7 +4457,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub apply is not configured on this dispatcher.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4512,7 +4512,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Create a pull request for branch"));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("Missing executor condition: isolated branch exists.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4562,7 +4562,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("Missing platform permission for set_labels.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4623,7 +4623,7 @@ describe("dispatcher API", () => {
       }
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub apply token cannot access GitHub issue or pull request #1.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4679,7 +4679,7 @@ describe("dispatcher API", () => {
 
     expect(githubRequests).toEqual(["https://api.github.com/repos/acme/demo/issues/1"]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Ready to apply");
+    expect(finalMessage?.body).toContain("<summary>Ready to apply</summary>");
     expect(finalMessage?.body).toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`apply 2`");
   });
@@ -4757,7 +4757,7 @@ describe("dispatcher API", () => {
       "https://api.github.com/repos/acme/demo/branches/main"
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub issue or pull request #1 was not found.");
     expect(finalMessage?.body).toContain("GitHub branch opentag/missing-branch was not found.");
     expect(finalMessage?.body).not.toContain("`apply 1`");

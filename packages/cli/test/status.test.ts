@@ -364,7 +364,17 @@ describe("OpenTag CLI status", () => {
             status: "succeeded",
             createdAt: "2026-06-24T00:00:00.000Z",
             updatedAt: "2026-06-24T00:01:00.000Z",
-            result: { conclusion: "success", summary: "Done." }
+            result: {
+              conclusion: "success",
+              summary: "Done.",
+              changedFiles: ["README.md"],
+              artifacts: [
+                { kind: "patch", title: "Generated patch", uri: "opentag/run_status_1" },
+                { kind: "report", title: "Run report", uri: "opentag://run/run_status_1/report" },
+                { kind: "log_summary", title: "Log summary", uri: "opentag://run/run_status_1/log-summary" }
+              ],
+              verification: [{ command: "corepack pnpm test", outcome: "passed" }]
+            }
           },
           event: runEvent
         });
@@ -427,6 +437,14 @@ describe("OpenTag CLI status", () => {
     );
     expect(formatRunStatus(summary)).toContain("Run: run_status_1");
     expect(formatRunStatus(summary)).toContain("Status: succeeded (success)");
+    expect(formatRunStatus(summary)).toContain("Result:");
+    expect(formatRunStatus(summary)).toContain("summary: Done.");
+    expect(formatRunStatus(summary)).toContain("changed files: README.md");
+    expect(formatRunStatus(summary)).toContain("artifacts:");
+    expect(formatRunStatus(summary)).toContain("- patch: Generated patch: opentag/run_status_1");
+    expect(formatRunStatus(summary)).toContain("- report: Run report: opentag://run/run_status_1/report");
+    expect(formatRunStatus(summary)).toContain("- log_summary: Log summary: opentag://run/run_status_1/log-summary");
+    expect(formatRunStatus(summary)).toContain("- corepack pnpm test: passed");
     expect(formatRunStatus(summary)).toContain("Metrics: 2 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
     expect(formatRunStatus(summary)).toContain("Liveness:");
     expect(formatRunStatus(summary)).toContain("Provider: github (status_update)");

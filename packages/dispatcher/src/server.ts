@@ -246,7 +246,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
   };
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
-import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
+import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
@@ -268,6 +268,20 @@ type DelayedLarkStatusState = {
   lastPhase?: DelayedLarkStatusPhase;
   lastUpdateAt?: number;
 };
+
+function larkRenderLocaleFromEvent(event: OpenTagEvent): LarkRenderLocale | undefined {
+  const locale = event.metadata?.["larkRenderLocale"];
+  if (locale === "en-US" || locale === "zh-CN") return locale;
+  const domain = event.metadata?.["larkDomain"];
+  if (domain === "feishu") return "zh-CN";
+  if (domain === "lark") return "en-US";
+  return undefined;
+}
+
+function larkRenderLocaleRenderOption(event: OpenTagEvent): { larkRenderLocale: LarkRenderLocale } | {} {
+  const locale = larkRenderLocaleFromEvent(event);
+  return locale ? { larkRenderLocale: locale } : {};
+}
 
 function shouldDeliverRunStatusUpdate(
   presentation: CallbackPresentation,
@@ -2295,6 +2309,7 @@ export function createDispatcherApp(input: {
     });
     const rendered = presentation.render({
       provider: input.event.callback.provider,
+      ...larkRenderLocaleRenderOption(input.event),
       presentation: statusPresentation
     });
 
@@ -2412,6 +2427,7 @@ export function createDispatcherApp(input: {
     const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: input.run.id });
     const acknowledgement = presentation.render({
       provider: input.event.callback.provider,
+      ...larkRenderLocaleRenderOption(input.event),
       presentation: acknowledgementPresentation
     });
     const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
@@ -2911,6 +2927,7 @@ export function createDispatcherApp(input: {
         });
         const queued = presentation.render({
           provider: event.callback.provider,
+          ...larkRenderLocaleRenderOption(event),
           presentation: queuedPresentation
         });
         await deliverAndAudit({
@@ -2967,6 +2984,7 @@ export function createDispatcherApp(input: {
       const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
       const acknowledgement = presentation.render({
         provider: parsed.event.callback.provider,
+        ...larkRenderLocaleRenderOption(parsed.event),
         presentation: acknowledgementPresentation
       });
       const statusMessageKey = larkLifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
@@ -3453,6 +3471,7 @@ export function createDispatcherApp(input: {
       });
       const running = presentation.render({
         provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: runningPresentation
       });
       await deliverAndAudit({
@@ -3515,6 +3534,7 @@ export function createDispatcherApp(input: {
       const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: progressPresentation
       });
       await deliverAndAudit({
@@ -3600,6 +3620,7 @@ export function createDispatcherApp(input: {
       });
       const waiting = presentation.render({
         provider: stored.event.callback.provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: waitingPresentation
       });
       await deliverAndAudit({
@@ -3627,6 +3648,7 @@ export function createDispatcherApp(input: {
     });
     const finalCallback = presentation.render({
       provider: stored.event.callback.provider,
+      ...larkRenderLocaleRenderOption(stored.event),
       presentation: finalPresentation
     });
     const statusMessageKey = larkLifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });

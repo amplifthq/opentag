@@ -126,7 +126,11 @@ describe("Codex executor", () => {
     expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.progress", "executor.completed"]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested fix.");
-    expect(result.artifacts?.[0]).toMatchObject({ title: "Run branch", uri: "opentag/run_1" });
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({ kind: "patch", title: "Generated patch", uri: "opentag/run_1" }),
+      expect.objectContaining({ kind: "report", title: "Run report", uri: "opentag://run/run_1/report" }),
+      expect.objectContaining({ kind: "log_summary", title: "Log summary", uri: "opentag://run/run_1/log-summary" })
+    ]);
     expect(result.suggestedChanges?.[0]).toMatchObject({
       proposalId: "proposal_run_1",
       intents: [
@@ -135,9 +139,7 @@ describe("Codex executor", () => {
           domain: "pull_request",
           action: "create_pull_request",
           params: { title: "OpenTag run run_1", head: "opentag/run_1", base: "main" }
-        },
-        { intentId: "proposal_run_1_link_branch", domain: "artifact_links", action: "link_artifact" },
-        { intentId: "proposal_run_1_request_review", domain: "review", action: "request_review" }
+        }
       ]
     });
     expect(result.verification).toBeUndefined();

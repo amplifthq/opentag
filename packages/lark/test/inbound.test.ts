@@ -1,9 +1,12 @@
 import type { CreateRunResult } from "@opentag/client";
 import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it, vi } from "vitest";
-import { createLarkMessageHandler, type LarkInboundMessageEvent } from "../src/inbound.js";
+import { createLarkCardActionHandler, createLarkMessageHandler, type LarkInboundMessageEvent } from "../src/inbound.js";
 
 const timestamp = "2026-06-24T00:00:00.000Z";
+
+type LarkHandlerConfig = Parameters<typeof createLarkMessageHandler>[0];
+type LarkSubmitThreadAction = NonNullable<LarkHandlerConfig["submitThreadAction"]>;
 
 const message: LarkInboundMessageEvent = {
   event_id: "evt_lark_1",
@@ -98,11 +101,13 @@ function createHandler(result: (event: OpenTagEvent) => CreateRunResult) {
 function createInteractiveHandler(input: {
   result?: (event: OpenTagEvent) => CreateRunResult;
   binding?: { tenantKey: string; chatId: string; repoProvider: string; owner: string; repo: string } | null;
-  status?: Parameters<typeof createLarkMessageHandler>[0]["status"];
-  doctor?: Parameters<typeof createLarkMessageHandler>[0]["doctor"];
-  stopRun?: Parameters<typeof createLarkMessageHandler>[0]["stopRun"] | null;
-  canManageBinding?: Parameters<typeof createLarkMessageHandler>[0]["canManageBinding"] | null;
+  status?: LarkHandlerConfig["status"];
+  doctor?: LarkHandlerConfig["doctor"];
+  stopRun?: LarkHandlerConfig["stopRun"] | null;
+  submitThreadAction?: LarkSubmitThreadAction | null;
+  canManageBinding?: LarkHandlerConfig["canManageBinding"] | null;
   suppressRunCreatedReply?: boolean;
+  domain?: LarkHandlerConfig["domain"];
 } = {}) {
   const createRun = vi.fn(async (event: OpenTagEvent) => (input.result ?? runCreated)(event));
   const bindChannel = vi.fn(async () => {});
@@ -115,11 +120,19 @@ function createInteractiveHandler(input: {
           return { outcome: "cancelled" as const, runId: request.runId ?? "run_active" };
         });
   const reply = vi.fn(async () => {});
+  const submitThreadAction =
+    input.submitThreadAction === null
+      ? undefined
+      : vi.fn(async (action: Parameters<LarkSubmitThreadAction>[0]) => {
+          if (input.submitThreadAction) return input.submitThreadAction(action);
+          return { outcome: "accepted" };
+        });
   const canManageBinding =
     input.canManageBinding === null ? undefined : vi.fn(input.canManageBinding ?? (async () => true));
   const handler = createLarkMessageHandler({
     agentId: "opentag",
     botOpenId: "ou_bot",
+    ...(input.domain ? { domain: input.domain } : {}),
     async resolveChannelBinding() {
       if ("binding" in input) return input.binding ?? null;
       return {
@@ -135,12 +148,13 @@ function createInteractiveHandler(input: {
     unbindChannel,
     ...(canManageBinding ? { canManageBinding } : {}),
     ...(stopRun ? { stopRun } : {}),
+    ...(submitThreadAction ? { submitThreadAction } : {}),
     ...(input.status ? { status: input.status } : {}),
     ...(input.doctor ? { doctor: input.doctor } : {}),
     ...(input.suppressRunCreatedReply !== undefined ? { suppressRunCreatedReply: input.suppressRunCreatedReply } : {}),
     reply
   });
-  return { handler, createRun, bindChannel, unbindChannel, stopRun, canManageBinding, reply };
+  return { handler, createRun, bindChannel, unbindChannel, stopRun, submitThreadAction, canManageBinding, reply };
 }
 
 describe("createLarkMessageHandler", () => {
@@ -187,6 +201,168 @@ describe("createLarkMessageHandler", () => {
     expect(outcome.status).toBe("created");
     expect(outcome.runId).toBe("run_dispatcher");
     expect(reply).not.toHaveBeenCalled();
+  });
+
+  it("derives Feishu render locale metadata for admitted runs", async () => {
+    const createRunResult = vi.fn((event: OpenTagEvent) => runCreated(event));
+    const { handler, createRun } = createInteractiveHandler({
+      domain: "feishu",
+      result: (event) => createRunResult(event)
+    });
+
+    const outcome = await handler(message);
+
+    expect(outcome.status).toBe("created");
+    expect(createRun).toHaveBeenCalledOnce();
+    expect(createRunResult.mock.calls[0]?.[0].metadata).toMatchObject({
+      larkDomain: "feishu",
+      larkRenderLocale: "zh-CN"
+    });
+  });
+
+  it("submits threaded action replies to OpenTag thread actions without creating a run", async () => {
+    const { handler, createRun, submitThreadAction, reply } = createInteractiveHandler();
+
+    const outcome = await handler({
+      ...message,
+      event_id: "evt_lark_action_1",
+      sender: {
+        sender_id: { open_id: "ou_sender", user_id: "user_sender", union_id: "union_sender" },
+        tenant_key: "tenant_1"
+      },
+      message: {
+        ...message.message!,
+        message_id: "om_action_reply",
+        root_id: "om_source",
+        parent_id: "om_final_card",
+        content: JSON.stringify({ text: "apply 1" }),
+        mentions: []
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "thread_action_submitted",
+      tenantKey: "tenant_1",
+      chatId: "oc_chat"
+    });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledWith({
+      id: "approval_lark_evt_lark_action_1",
+      rawText: "apply 1",
+      actor: {
+        provider: "lark",
+        providerUserId: "ou_sender",
+        handle: "ou_sender",
+        organizationId: "tenant_1"
+      },
+      callback: {
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tenant_1|oc_chat|om_source"
+      },
+      metadata: expect.objectContaining({
+        source: "lark_reply",
+        tenantKey: "tenant_1",
+        chatId: "oc_chat",
+        messageId: "om_action_reply",
+        sourceDeliveryId: "evt_lark_action_1",
+        larkEventId: "evt_lark_action_1",
+        rootId: "om_source",
+        parentId: "om_final_card",
+        senderUserId: "user_sender",
+        senderUnionId: "union_sender",
+        larkBotOpenId: "ou_bot",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    });
+  });
+
+  it("accepts localized Lark action replies while submitting cross-platform commands", async () => {
+    const { handler, createRun, submitThreadAction } = createInteractiveHandler();
+
+    const outcome = await handler({
+      ...message,
+      event_id: "evt_lark_localized_action",
+      message: {
+        ...message.message!,
+        message_id: "om_localized_action_reply",
+        root_id: "om_source",
+        parent_id: "om_final_card",
+        content: JSON.stringify({ text: "执行 1" }),
+        mentions: []
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "thread_action_submitted",
+      tenantKey: "tenant_1",
+      chatId: "oc_chat"
+    });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "approval_lark_evt_lark_localized_action",
+        rawText: "apply 1",
+        metadata: expect.objectContaining({
+          source: "lark_reply",
+          larkRawText: "执行 1",
+          messageId: "om_localized_action_reply"
+        })
+      })
+    );
+  });
+
+  it("does not turn Lark action commands into new runs when thread-action delivery is unavailable", async () => {
+    const { handler, createRun, reply } = createInteractiveHandler({ submitThreadAction: null });
+
+    const outcome = await handler({
+      ...message,
+      event_id: "evt_lark_action_unavailable",
+      message: {
+        ...message.message!,
+        message_id: "om_action_reply",
+        root_id: "om_source",
+        content: JSON.stringify({ text: "reject 1" }),
+        mentions: []
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "ignored_thread_action_unavailable",
+      tenantKey: "tenant_1",
+      chatId: "oc_chat"
+    });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith({
+      messageId: "om_action_reply",
+      text: expect.stringContaining("Source-thread actions are not configured")
+    });
+  });
+
+  it("still requires a bot mention before accepting unthreaded group action words", async () => {
+    const { handler, createRun, submitThreadAction } = createInteractiveHandler();
+
+    const outcome = await handler({
+      ...message,
+      event_id: "evt_lark_unthreaded_action",
+      message: {
+        ...message.message!,
+        message_id: "om_unthreaded_action",
+        content: JSON.stringify({ text: "apply 1" }),
+        mentions: []
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "ignored_not_addressed",
+      tenantKey: "tenant_1",
+      chatId: "oc_chat"
+    });
+    expect(submitThreadAction).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
   });
 
   it("preserves a queued follow-up admission outcome", async () => {
@@ -413,5 +589,113 @@ describe("createLarkMessageHandler", () => {
     expect(outcome.status).toBe("self_service_stop_unavailable");
     expect(createRun).not.toHaveBeenCalled();
     expect(reply.mock.calls[0]?.[0].text).toContain("will not treat a stop request as a successful completion");
+  });
+});
+
+describe("createLarkCardActionHandler", () => {
+  it("submits Lark button callbacks to OpenTag thread actions", async () => {
+    const submitThreadAction = vi.fn(async () => ({ outcome: "accepted" }));
+    const handler = createLarkCardActionHandler({
+      domain: "feishu",
+      async resolveChannelBinding() {
+        return {
+          tenantKey: "tenant_1",
+          chatId: "oc_chat",
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        };
+      },
+      submitThreadAction
+    });
+
+    const outcome = await handler({
+      event_id: "evt_card_1",
+      tenant_key: "tenant_1",
+      context: {
+        open_chat_id: "oc_chat",
+        open_message_id: "om_final_card"
+      },
+      operator: {
+        open_id: "ou_sender",
+        user_id: "user_sender",
+        union_id: "union_sender",
+        name: "Mingyou"
+      },
+      action: {
+        tag: "button",
+        name: "opentag_apply_1",
+        value: {
+          opentag: "thread_action",
+          version: 1,
+          command: "apply 1",
+          decision: "apply",
+          index: 1,
+          proposalId: "proposal_pr",
+          intentId: "intent_create_pr"
+        }
+      }
+    });
+
+    expect(outcome).toMatchObject({
+      status: "card_action_submitted",
+      tenantKey: "tenant_1",
+      chatId: "oc_chat",
+      messageId: "om_final_card"
+    });
+    expect(submitThreadAction).toHaveBeenCalledWith({
+      id: "approval_lark_card_evt_card_1",
+      rawText: "apply 1",
+      actor: {
+        provider: "lark",
+        providerUserId: "ou_sender",
+        handle: "Mingyou",
+        organizationId: "tenant_1"
+      },
+      callback: {
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tenant_1|oc_chat|om_final_card"
+      },
+      metadata: expect.objectContaining({
+        source: "lark_card_action",
+        tenantKey: "tenant_1",
+        chatId: "oc_chat",
+        messageId: "om_final_card",
+        larkDomain: "feishu",
+        larkRenderLocale: "zh-CN",
+        sourceDeliveryId: "evt_card_1",
+        larkEventId: "evt_card_1",
+        senderUserId: "user_sender",
+        senderUnionId: "union_sender",
+        actionTag: "button",
+        actionName: "opentag_apply_1",
+        proposalId: "proposal_pr",
+        intentId: "intent_create_pr",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    });
+  });
+
+  it("ignores non-OpenTag Lark card callbacks", async () => {
+    const submitThreadAction = vi.fn(async () => ({ outcome: "accepted" }));
+    const handler = createLarkCardActionHandler({
+      async resolveChannelBinding() {
+        throw new Error("should not resolve binding for foreign card payloads");
+      },
+      submitThreadAction
+    });
+
+    await expect(
+      handler({
+        tenant_key: "tenant_1",
+        context: { open_chat_id: "oc_chat", open_message_id: "om_card" },
+        operator: { open_id: "ou_sender" },
+        action: { tag: "button", value: { source: "other_app" } }
+      })
+    ).resolves.toEqual({ status: "ignored_card_action_not_opentag" });
+    expect(submitThreadAction).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,10 @@
+import type { OpenTagRunResult } from "@opentag/core";
+
 export const EXECUTOR_REPORT_START = "OPENTAG_EXECUTOR_REPORT_START";
 export const EXECUTOR_REPORT_END = "OPENTAG_EXECUTOR_REPORT_END";
 
 const REPORT_OUTCOMES = new Set(["passed", "failed", "not_run"]);
+const REPORT_ARTIFACT_KINDS = new Set(["screenshot"]);
 const MAX_REPORT_ITEMS = 8;
 const MAX_REPORT_TEXT_LENGTH = 600;
 
@@ -17,7 +20,10 @@ export type ExecutorReport = {
   }>;
   risks?: string[];
   notes?: string[];
+  artifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
 };
+
+type ExecutorReportArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
 
 export function executorReportPromptLines(): string[] {
   return [
@@ -25,11 +31,14 @@ export function executorReportPromptLines(): string[] {
     "If the user asked a read-only question or summary request, put the user-facing answer before this block; this block is only completion metadata.",
     "Replace every example value with the actual result. Use changes: [] if no files changed.",
     "Use verification: [] if no checks ran. Use verification outcome exactly one of: passed, failed, not_run.",
+    "Use artifacts: [] unless you produced a concrete extra artifact such as a screenshot. OpenTag adds patch, report, log summary, and pull-request artifacts itself.",
+    "For screenshots, use artifact kind screenshot, a short title, and a local path or durable URL in uri. Do not include raw logs or secrets in artifacts.",
     EXECUTOR_REPORT_START,
     JSON.stringify(
       {
         changes: [{ file: "README.md", summary: "Added one sentence describing the completed change." }],
         verification: [{ command: "corepack pnpm test", outcome: "passed", summary: "Tests passed." }],
+        artifacts: [],
         risks: []
       },
       null,
@@ -64,6 +73,35 @@ function cleanStringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const items = value.map(cleanReportText).filter((item): item is string => Boolean(item));
   return items.length > 0 ? items.slice(0, MAX_REPORT_ITEMS) : undefined;
+}
+
+function cleanReportArtifactUri(value: unknown): string | undefined {
+  const uri = cleanReportText(value);
+  if (!uri) return undefined;
+  if (/\s|[<>\[\]()]/u.test(uri)) return undefined;
+  if (/^https?:\/\//iu.test(uri)) {
+    try {
+      const parsed = new URL(uri);
+      return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(uri)) return undefined;
+  return uri;
+}
+
+function normalizeReportArtifact(item: unknown): ExecutorReportArtifact | undefined {
+  const artifact = asRecord(item);
+  if (!artifact) return undefined;
+  const title = cleanReportText(artifact["title"]);
+  const uri = cleanReportArtifactUri(artifact["uri"]);
+  if (!title || !uri || artifact["kind"] !== "screenshot" || !REPORT_ARTIFACT_KINDS.has(artifact["kind"])) return undefined;
+  return {
+    kind: "screenshot",
+    title,
+    uri
+  };
 }
 
 function normalizeReport(value: unknown): ExecutorReport | undefined {
@@ -106,12 +144,21 @@ function normalizeReport(value: unknown): ExecutorReport | undefined {
     return undefined;
   }
 
+  const artifactsRaw = record["artifacts"];
+  const artifacts = Array.isArray(artifactsRaw)
+    ? artifactsRaw
+        .map(normalizeReportArtifact)
+        .filter((item): item is ExecutorReportArtifact => Boolean(item))
+        .slice(0, MAX_REPORT_ITEMS)
+    : undefined;
+
   const risks = cleanStringArray(record["risks"]);
   const notes = cleanStringArray(record["notes"]);
 
   return {
     changes,
     ...(verification && verification.length > 0 ? { verification } : {}),
+    ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
     ...(risks ? { risks } : {}),
     ...(notes ? { notes } : {})
   };

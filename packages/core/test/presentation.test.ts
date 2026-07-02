@@ -16,6 +16,13 @@ describe("OpenTagPresentation", () => {
         conclusion: "success",
         summary: "Updated the failing test.",
         changedFiles: ["packages/core/test/demo.test.ts"],
+        artifacts: [
+          { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+          { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" },
+          { kind: "screenshot", title: "UI screenshot", uri: "opentag/run_1.png" },
+          { kind: "log_summary", title: "Log summary", uri: "opentag/run_1-log.md" },
+          { kind: "pull_request", title: "Pull request", uri: "https://github.com/acme/demo/pull/1" }
+        ],
         verification: [{ command: "pnpm test", outcome: "passed" }]
       },
       auditRunId: "run_1"
@@ -27,12 +34,26 @@ describe("OpenTagPresentation", () => {
       outcome: "success",
       summary: "Updated the failing test.",
       changedFiles: ["packages/core/test/demo.test.ts"],
+      artifacts: [
+        { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+        { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" },
+        { kind: "screenshot", title: "UI screenshot", uri: "opentag/run_1.png" },
+        { kind: "log_summary", title: "Log summary", uri: "opentag/run_1-log.md" },
+        { kind: "pull_request", title: "Pull request", uri: "https://github.com/acme/demo/pull/1" }
+      ],
       verification: [{ command: "pnpm test", outcome: "passed" }],
       auditRunId: "run_1"
     });
     expect(JSON.stringify(presentation)).not.toContain("blocks");
     expect(JSON.stringify(presentation)).not.toContain("mrkdwn");
-    expect(renderOpenTagPresentationPlainText(presentation)).toContain("Audit: opentag status --run run_1");
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain("Artifacts:");
+    expect(rendered).toContain("- Generated patch: opentag/run_1.patch");
+    expect(rendered).toContain("- Run report: opentag/run_1-report.md");
+    expect(rendered).toContain("- UI screenshot: opentag/run_1.png");
+    expect(rendered).toContain("- Log summary: opentag/run_1-log.md");
+    expect(rendered).toContain("- Pull request: https://github.com/acme/demo/pull/1");
+    expect(rendered).toContain("Audit: opentag status --run run_1");
   });
 
   it("carries action receipt semantics without provider-native UI fields", () => {

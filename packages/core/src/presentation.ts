@@ -84,6 +84,7 @@ export const OpenTagFinalSummaryPresentationSchema = z.object({
   outcome: z.string().min(1),
   summary: z.string().min(1),
   changedFiles: z.array(z.string().min(1)).optional(),
+  artifacts: OpenTagRunResultSchema.shape.artifacts,
   verification: OpenTagRunResultSchema.shape.verification,
   nextActions: z.array(z.string().min(1)).optional(),
   actionReceiptTitle: z.string().min(1).optional(),
@@ -110,6 +111,14 @@ export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSource
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
+
+export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
+  if (!presentation.artifacts?.length) return [];
+  return [
+    "Artifacts:",
+    ...presentation.artifacts.map((artifact) => `- ${artifact.kind ? `${artifact.kind}: ` : ""}[${artifact.title}](${artifact.uri})`)
+  ];
+}
 
 function nextActionSummary(result: OpenTagRunResult): string | undefined {
   if (!result.nextAction) return undefined;
@@ -302,6 +311,7 @@ export function createFinalSummaryPresentation(input: {
     outcome: input.result.conclusion,
     summary: input.result.summary,
     ...(input.result.changedFiles?.length ? { changedFiles: input.result.changedFiles } : {}),
+    ...(input.result.artifacts?.length ? { artifacts: input.result.artifacts } : {}),
     ...(input.result.verification?.length ? { verification: input.result.verification } : {}),
     ...(nextAction ? { nextActions: [nextAction] } : {}),
     ...(actionReceipt ? { actionReceiptTitle: actionReceipt.title, actions: actionReceipt.actions } : {}),
@@ -369,6 +379,7 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     `Finished: ${presentation.outcome}`,
     presentation.summary,
     ...(presentation.changedFiles?.length ? ["Changed files:", ...presentation.changedFiles.map((file) => `- ${file}`)] : []),
+    ...(presentation.artifacts?.length ? ["Artifacts:", ...presentation.artifacts.map((artifact) => `- ${artifact.title}: ${artifact.uri}`)] : []),
     ...(presentation.verification?.length ? ["Verification:", ...presentation.verification.map((check) => `- ${check.command}: ${check.outcome}`)] : []),
     ...(presentation.nextActions?.length ? ["Next actions:", ...presentation.nextActions.map((action) => `- ${action}`)] : []),
     ...(presentation.actions?.length

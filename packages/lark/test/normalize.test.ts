@@ -67,6 +67,13 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.tenantKey).toBe("tk_123");
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
+    expect(event?.metadata.larkRenderLocale).toBe("en-US");
+  });
+
+  it("derives Feishu render locale from the domain", () => {
+    const event = normalizeLarkMessage({ ...baseInput, domain: "feishu" });
+    expect(event?.metadata.larkDomain).toBe("feishu");
+    expect(event?.metadata.larkRenderLocale).toBe("zh-CN");
   });
 
   it("returns null when the command is empty after stripping", () => {
