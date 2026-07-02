@@ -1,7 +1,102 @@
 import { describe, expect, it } from "vitest";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "../src/normalize.js";
+import { githubPermissionHasWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "../src/normalize.js";
+
+describe("githubPermissionHasWriteAccess", () => {
+  it("maps actual GitHub repository permissions to write access", () => {
+    expect(githubPermissionHasWriteAccess("admin")).toBe(true);
+    expect(githubPermissionHasWriteAccess("maintain")).toBe(true);
+    expect(githubPermissionHasWriteAccess("write")).toBe(true);
+    expect(githubPermissionHasWriteAccess("read")).toBe(false);
+    expect(githubPermissionHasWriteAccess("triage")).toBe(false);
+    expect(githubPermissionHasWriteAccess("none")).toBe(false);
+    expect(githubPermissionHasWriteAccess("WRITE")).toBe(true);
+  });
+
+  it("returns undefined when the platform did not report a permission", () => {
+    expect(githubPermissionHasWriteAccess(undefined)).toBeUndefined();
+  });
+});
 
 describe("normalizeGitHubIssueComment", () => {
+  it("carries explicit actor write access and author_association metadata", () => {
+    const event = normalizeGitHubIssueComment({
+      id: "321",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-321",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      authorAssociation: "OWNER",
+      actorWriteAccess: true,
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(event?.actor).toMatchObject({ handle: "octocat", writeAccess: true });
+    expect(event?.metadata).toMatchObject({ authorAssociation: "OWNER" });
+  });
+
+  it("does not derive write access from author_association alone", () => {
+    const event = normalizeGitHubIssueComment({
+      id: "324",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-324",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      authorAssociation: "OWNER",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(event?.actor.writeAccess).toBeUndefined();
+    expect(event?.metadata).toMatchObject({ authorAssociation: "OWNER" });
+  });
+
+  it("marks explicit non-write permission as writeAccess false and leaves it unset when absent", () => {
+    const strangerEvent = normalizeGitHubIssueComment({
+      id: "322",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-322",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 99,
+      actorLogin: "mallory",
+      authorAssociation: "NONE",
+      actorWriteAccess: false,
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+    expect(strangerEvent?.actor.writeAccess).toBe(false);
+
+    const unreportedEvent = normalizeGitHubIssueComment({
+      id: "323",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-323",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+    expect(unreportedEvent?.actor.writeAccess).toBeUndefined();
+  });
+
   it("normalizes an @opentag GitHub issue comment", () => {
     const event = normalizeGitHubIssueComment({
       id: "123",

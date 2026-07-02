@@ -132,6 +132,16 @@ https://<你的 relay 域名>/gitlab/webhooks
 
 当 config 中包含 GitLab 时，`opentag pair --relay <url>` 和 `opentag start` 会打印 GitLab relay webhook URL。只有确认 relay 已配置上面的 GitLab 环境变量后，才把这个 URL 当成可用 webhook 地址。
 
+## 谁可以触发 run
+
+默认情况下，OpenTag 根据项目本身决定谁可以触发 run：
+
+- **私有（private）和内部（internal）项目**：所有能评论的人都可以触发 run。
+- **公开（public）项目**：默认关闭。GitLab Note Hook 不携带评论者的访问
+  级别，OpenTag 无法仅凭 webhook 验证写权限。请在 repository binding 上
+  配置 `allowedActors`（GitLab 用户名或用户 ID），放行可以在公开项目触发
+  run 和批准 `apply` 动作的用户。
+
 ## 当前范围
 
 当前已支持：

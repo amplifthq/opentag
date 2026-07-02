@@ -43,7 +43,11 @@ export const ActorIdentitySchema = z.object({
   providerUserId: z.string().min(1),
   handle: z.string().min(1).optional(),
   displayName: z.string().min(1).optional(),
-  organizationId: z.string().min(1).optional()
+  organizationId: z.string().min(1).optional(),
+  /** Platform-reported write access to the source repository (for example,
+   * GitHub's collaborator permission API). Absent when the platform does not
+   * report it; admission treats absent as "no write access" on public repos. */
+  writeAccess: z.boolean().optional()
 });
 
 export const AgentTargetSchema = z.object({
@@ -248,6 +252,7 @@ export const RunAdmissionReasonCodeSchema = z.enum([
   "repo_context_missing",
   "repo_not_bound",
   "actor_not_allowed_for_write",
+  "actor_not_authorized_for_public_repo",
   "agent_access_profile_denied"
 ]);
 

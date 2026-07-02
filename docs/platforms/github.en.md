@@ -168,6 +168,20 @@ While a run is active, you can inspect or stop the runtime from the same source 
 @opentag /stop [run_id]
 ```
 
+## Who Can Trigger Runs
+
+By default, OpenTag decides who may start runs from the repository itself:
+
+- **Private repositories**: anyone who can comment may trigger runs.
+- **Public repositories**: only commenters whose repository permission resolves
+  to `write`, `maintain`, or `admin` may trigger write-capable runs or approve
+  `apply` actions. Drive-by commenters cannot start those runs or approve those
+  actions; they receive a decision-needed reply instead.
+
+To open a public repository to specific users without granting them GitHub
+write access, configure `allowedActors` on the repository binding. When
+`allowedActors` is set it replaces the default policy for write-capable runs.
+
 These control commands report or cancel source-thread runtime state. They do not create another run.
 
 ## If It Does Not Work

@@ -57,9 +57,51 @@ describe("GitHub Probot handler", () => {
     expect(postComment).toHaveBeenCalledWith("OpenTag picked this up. Run: `run_1`");
   });
 
+  it("uses resolved GitHub repository permission for run actor write access", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_permission" }));
+    const postComment = vi.fn(async () => undefined);
+    const resolveActorWriteAccess = vi.fn(async () => true);
+
+    await handleIssueCommentCreated({
+      payload: {
+        comment: {
+          id: 125,
+          body: "@opentag fix this",
+          html_url: "https://github.com/acme/demo/issues/1#issuecomment-125",
+          author_association: "COLLABORATOR"
+        },
+        issue: {
+          html_url: "https://github.com/acme/demo/issues/1",
+          comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+          number: 1
+        },
+        repository: {
+          name: "demo",
+          private: false,
+          owner: { login: "acme" }
+        },
+        sender: {
+          id: 42,
+          login: "octocat"
+        }
+      },
+      createRun,
+      resolveActorWriteAccess,
+      postComment,
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(resolveActorWriteAccess).toHaveBeenCalledWith({ owner: "acme", repo: "demo", username: "octocat" });
+    expect(createRun.mock.calls[0]![0]).toMatchObject({
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      metadata: { authorAssociation: "COLLABORATOR" }
+    });
+  });
+
   it("ignores comments without an opentag mention", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const postComment = vi.fn(async () => undefined);
+    const resolveActorWriteAccess = vi.fn(async () => true);
 
     await handleIssueCommentCreated({
       payload: {
@@ -84,11 +126,13 @@ describe("GitHub Probot handler", () => {
         }
       },
       createRun,
+      resolveActorWriteAccess,
       postComment,
       now: () => "2026-06-24T00:00:00.000Z"
     });
 
     expect(createRun).not.toHaveBeenCalled();
+    expect(resolveActorWriteAccess).not.toHaveBeenCalled();
     expect(postComment).not.toHaveBeenCalled();
   });
 
@@ -143,6 +187,48 @@ describe("GitHub Probot handler", () => {
         issueNumber: 1,
         commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-124"
       }
+    });
+  });
+
+  it("uses resolved repository permission for source-thread action actors", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const postComment = vi.fn(async () => undefined);
+    const resolveActorWriteAccess = vi.fn(async () => false);
+
+    await handleIssueCommentCreated({
+      payload: {
+        comment: {
+          id: 126,
+          body: "apply 1",
+          html_url: "https://github.com/acme/demo/issues/1#issuecomment-126",
+          author_association: "COLLABORATOR"
+        },
+        issue: {
+          html_url: "https://github.com/acme/demo/issues/1",
+          comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+          number: 1
+        },
+        repository: {
+          name: "demo",
+          private: false,
+          owner: { login: "acme" }
+        },
+        sender: {
+          id: 99,
+          login: "mallory"
+        }
+      },
+      createRun,
+      submitThreadAction,
+      resolveActorWriteAccess,
+      postComment,
+      now: () => "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(resolveActorWriteAccess).toHaveBeenCalledWith({ owner: "acme", repo: "demo", username: "mallory" });
+    expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
+      actor: { provider: "github", providerUserId: "99", handle: "mallory", writeAccess: false }
     });
   });
 

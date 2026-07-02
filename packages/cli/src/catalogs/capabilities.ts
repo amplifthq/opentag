@@ -62,7 +62,7 @@ export const EXECUTOR_CAPABILITIES: Record<ExecutorId, ExecutorCapabilityDescrip
     promptMutation: "none",
     rawContextAccess: false,
     writeActionAccess: "none",
-    workspaceIsolation: "branch",
+    workspaceIsolation: "worktree",
     requiredSecrets: ["anthropic_api_key"],
     completionSignals: ["process_exit"]
   },

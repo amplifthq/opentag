@@ -12,6 +12,8 @@ export type GitHubIssueCommentInput = {
   repo: string;
   actorId: number;
   actorLogin: string;
+  authorAssociation?: string;
+  actorWriteAccess?: boolean;
   private: boolean;
   receivedAt: string;
   installationId?: number;
@@ -30,12 +32,21 @@ export type GitHubPullRequestReviewCommentInput = {
   pullRequestNumber: number;
   actorId: number;
   actorLogin: string;
+  authorAssociation?: string;
+  actorWriteAccess?: boolean;
   private: boolean;
   receivedAt: string;
   installationId?: number;
   deliveryId?: string;
   signatureVerified?: boolean;
 };
+
+const GITHUB_WRITE_PERMISSION_LEVELS = new Set(["admin", "maintain", "write"]);
+
+export function githubPermissionHasWriteAccess(permission: string | undefined): boolean | undefined {
+  if (!permission) return undefined;
+  return GITHUB_WRITE_PERMISSION_LEVELS.has(permission.toLowerCase());
+}
 
 function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
@@ -162,7 +173,8 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     actor: {
       provider: "github",
       providerUserId: String(input.actorId),
-      handle: input.actorLogin
+      handle: input.actorLogin,
+      ...(input.actorWriteAccess !== undefined ? { writeAccess: input.actorWriteAccess } : {})
     },
     target: {
       mention: "@opentag",
@@ -203,6 +215,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       owner: input.owner,
       repo: input.repo,
       issueNumber: input.issueNumber,
+      ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
       ...(typeof input.signatureVerified === "boolean"
@@ -232,7 +245,8 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
     actor: {
       provider: "github",
       providerUserId: String(input.actorId),
-      handle: input.actorLogin
+      handle: input.actorLogin,
+      ...(input.actorWriteAccess !== undefined ? { writeAccess: input.actorWriteAccess } : {})
     },
     target: {
       mention: "@opentag",
@@ -273,6 +287,7 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       owner: input.owner,
       repo: input.repo,
       pullRequestNumber: input.pullRequestNumber,
+      ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
       ...(typeof input.signatureVerified === "boolean"

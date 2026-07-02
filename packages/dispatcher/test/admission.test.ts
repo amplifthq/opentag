@@ -17,6 +17,111 @@ const event = {
 };
 
 describe("Admission Runtime", () => {
+  const bindingRepo = (binding: Record<string, unknown>) =>
+    ({
+      getRunByEventId: async () => null,
+      getRepoBinding: async () => binding,
+      findActiveRunForConversation: async () => null,
+      createFollowUpRequest: async () => {
+        throw new Error("should not queue follow-up");
+      },
+      appendRunEvent: async () => undefined
+    }) as never;
+
+  const publicIssueContext = [
+    { provider: "github" as const, kind: "issue" as const, uri: "https://github.com/acme/demo/issues/1", visibility: "public" as const }
+  ];
+  const privateIssueContext = [
+    { provider: "github" as const, kind: "issue" as const, uri: "https://github.com/acme/demo/issues/1", visibility: "private" as const }
+  ];
+  const githubBinding = { provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" };
+
+  it("denies public-repo runs by default when the actor has no platform-reported write access", async () => {
+    const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding) });
+
+    const result = await admission.admitRun({
+      requestId: "req_public_stranger",
+      event: { ...event, id: "evt_public_stranger", context: publicIssueContext }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: { reasonCode: "actor_not_authorized_for_public_repo" }
+    });
+  });
+
+  it("admits public-repo runs when the actor carries platform-reported write access", async () => {
+    const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding) });
+
+    const result = await admission.admitRun({
+      requestId: "req_public_maintainer",
+      event: {
+        ...event,
+        id: "evt_public_maintainer",
+        actor: { ...event.actor, writeAccess: true },
+        context: publicIssueContext
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "start" });
+  });
+
+  it("keeps private-repo runs open to actors without reported write access", async () => {
+    const admission = createAdmissionRuntime({ repo: bindingRepo(githubBinding) });
+
+    const result = await admission.admitRun({
+      requestId: "req_private_stranger",
+      event: { ...event, id: "evt_private_stranger", context: privateIssueContext }
+    });
+
+    expect(result).toMatchObject({ outcome: "start" });
+  });
+
+  it("lets an explicit allowedActors list override the public-repo default", async () => {
+    const admission = createAdmissionRuntime({
+      repo: bindingRepo({ ...githubBinding, allowedActors: ["octocat"] })
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_public_listed",
+      event: {
+        ...event,
+        id: "evt_public_listed",
+        context: publicIssueContext,
+        permissions: [
+          ...event.permissions,
+          { scope: "repo:write" as const, reason: "commit code changes on an isolated run branch" }
+        ]
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "start" });
+  });
+
+  it("still rejects write-capable runs from actors outside a configured allowedActors list", async () => {
+    const admission = createAdmissionRuntime({
+      repo: bindingRepo({ ...githubBinding, allowedActors: ["someone-else"] })
+    });
+
+    const result = await admission.admitRun({
+      requestId: "req_listed_denied",
+      event: {
+        ...event,
+        id: "evt_listed_denied",
+        context: privateIssueContext,
+        permissions: [
+          ...event.permissions,
+          { scope: "repo:write" as const, reason: "commit code changes on an isolated run branch" }
+        ]
+      }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: { reasonCode: "actor_not_allowed_for_write" }
+    });
+  });
+
   it("checks duplicate source events before mutable gates", async () => {
     const getRepoBinding = vi.fn(async () => {
       throw new Error("should not reach mutable gates for duplicate events");

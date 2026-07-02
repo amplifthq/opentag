@@ -10,7 +10,7 @@ const event: OpenTagEvent = {
   source: "github",
   sourceEventId: "comment_integration",
   receivedAt: "2026-06-24T00:00:00.000Z",
-  actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+  actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
   target: { mention: "@opentag", agentId: "opentag" },
   command: { rawText: "summarize this", intent: "run", args: {} },
   context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
