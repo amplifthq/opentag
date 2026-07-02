@@ -3,6 +3,7 @@ import {
   actionReceiptHeading,
   buildActionReceipt,
   parseThreadActionCommand,
+  parseThreadControlCommand,
   suggestedActionCandidatesFromResult
 } from "../src/action.js";
 
@@ -71,6 +72,27 @@ describe("thread action commands", () => {
   it("ignores ambiguous conversational text", () => {
     expect(parseThreadActionCommand("looks good to me")).toBeNull();
     expect(parseThreadActionCommand("maybe apply this later")).toBeNull();
+  });
+
+  it("parses mentioned source-thread control commands", () => {
+    expect(parseThreadControlCommand("@opentag /status")).toEqual({
+      verb: "status",
+      rawText: "/status"
+    });
+    expect(parseThreadControlCommand("@opentag /doctor")).toEqual({
+      verb: "doctor",
+      rawText: "/doctor"
+    });
+    expect(parseThreadControlCommand("@opentag /stop run_1")).toEqual({
+      verb: "stop",
+      rawText: "/stop run_1",
+      runId: "run_1"
+    });
+  });
+
+  it("does not parse non-slash status words as control commands", () => {
+    expect(parseThreadControlCommand("status looks okay")).toBeNull();
+    expect(parseThreadControlCommand("@opentag status")).toBeNull();
   });
 });
 

@@ -6,6 +6,7 @@ import {
   capabilityForMutationIntent,
   conversationKeysFromEvent,
   parseThreadActionCommand,
+  parseThreadControlCommand,
   permissionScopesAllowCapability,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
@@ -246,6 +247,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 }
 import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
+import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
 type DelayedLarkStatusPhase = "queued" | "running" | "progress";
@@ -2152,6 +2154,15 @@ export function createDispatcherApp(input: {
       ...(input.createdAt ? { createdAt: input.createdAt } : {})
     });
   };
+  const sourceThreadControl = createSourceThreadControlHandler({
+    repo,
+    presentation,
+    conversationKeysFromThreadAction,
+    latestRunTimeoutMs,
+    deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
+    deliverDirectMessage: (message) => callbackSink.deliver(message),
+    recordControlPlaneEvent
+  });
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
     schema: S,
@@ -2967,6 +2978,11 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/thread-actions", async (c) => {
     const parsed = await parseDispatcherBody(c, ThreadActionInputSchema);
+    const controlCommand = parseThreadControlCommand(parsed.rawText);
+    if (controlCommand) {
+      return sourceThreadControl.handle({ request: parsed, command: controlCommand });
+    }
+
     const command = parseThreadActionCommand(parsed.rawText);
     if (!command) {
       return c.json({ outcome: "ignored", reason: "not_action_command" }, 202);

@@ -3914,6 +3914,211 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("replies to GitHub source-thread /status without creating a run", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_github_thread_status",
+      event: githubIssueEvent({ id: "evt_github_thread_status", sourceEventId: "comment_github_thread_status", threadKey: "acme/demo#1" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_github_thread_status/running", jsonRequest({ executor: "echo", runTimeoutMs: 45_000 }));
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_github_thread_status",
+      event: githubIssueEvent({ id: "evt_github_thread_status_follow_up", sourceEventId: "comment_github_thread_status_follow_up", threadKey: "acme/demo#1" })
+    }));
+    expect(followUp.status).toBe(202);
+    delivered.length = 0;
+
+    const status = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /status",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      outcome: "status",
+      bindingState: "bound",
+      activeRun: {
+        id: "run_github_thread_status",
+        status: "running"
+      },
+      queuedFollowUps: [
+        {
+          id: "follow_up_github_thread_status",
+          status: "queued"
+        }
+      ],
+      runTimeoutPolicy: {
+        hardTimeoutMs: 45_000
+      }
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      kind: "final",
+      runId: "run_github_thread_status"
+    });
+    expect(delivered[0]!.body).toContain("OpenTag status:");
+    expect(delivered[0]!.body).toContain("Source container: github:acme/demo#1");
+    expect(delivered[0]!.body).toContain("Project Target: github:acme/demo");
+    expect(delivered[0]!.body).toContain("Active run: run_github_thread_status (running)");
+    expect(delivered[0]!.body).toContain("Queued follow-ups: 1 (follow_up_github_thread_status (queued)");
+  });
+
+  it("replies to source-thread /doctor without creating a run when no run is active", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo"
+    }));
+
+    const doctor = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /doctor",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(doctor.status).toBe(200);
+    await expect(doctor.json()).resolves.toMatchObject({
+      outcome: "doctor",
+      bindingState: "bound"
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.runId).toMatch(/^control_/);
+    expect(delivered[0]!.body).toContain("OpenTag doctor (redacted):");
+    expect(delivered[0]!.body).toContain("OK Source thread: github:acme/demo#1");
+    const missing = await app.request(`/v1/runs/${delivered[0]!.runId}`);
+    expect(missing.status).toBe(404);
+  });
+
+  it("cancels a GitLab active source-thread run from /stop without auto-promoting queued follow-ups", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "gitlab",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_gitlab_thread_stop",
+      event: gitlabIssueEvent({ id: "evt_gitlab_thread_stop", sourceEventId: "note_gitlab_thread_stop", threadKey: "acme/demo|issue|1" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_gitlab_thread_stop/running", jsonRequest({ executor: "echo" }));
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_gitlab_thread_stop",
+      event: gitlabIssueEvent({ id: "evt_gitlab_thread_stop_follow_up", sourceEventId: "note_gitlab_thread_stop_follow_up", threadKey: "acme/demo|issue|1" })
+    }));
+    expect(followUp.status).toBe(202);
+    delivered.length = 0;
+
+    const stop = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /stop",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      },
+      metadata: {
+        repoProvider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        projectPathWithNamespace: "acme/demo",
+        issueIid: 1
+      }
+    }));
+
+    expect(stop.status).toBe(200);
+    await expect(stop.json()).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_gitlab_thread_stop",
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      kind: "final",
+      runId: "run_gitlab_thread_stop"
+    });
+    expect(delivered[0]!.body).toContain("Cancellation requested for run run_gitlab_thread_stop.");
+
+    const lateComplete = await app.request("/v1/runners/runner_1/runs/run_gitlab_thread_stop/complete", jsonRequest({
+      result: { conclusion: "success", summary: "late success" }
+    }));
+    expect(lateComplete.status).toBe(404);
+    const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_gitlab_thread_stop");
+    await expect(queuedFollowUp.json()).resolves.toMatchObject({
+      followUpRequest: {
+        id: "follow_up_gitlab_thread_stop",
+        status: "queued"
+      }
+    });
+  });
+
   it("cancels a run by id", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

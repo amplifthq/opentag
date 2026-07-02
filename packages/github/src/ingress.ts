@@ -5,6 +5,7 @@ import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
   RequestBodyTooLargeError,
   parseThreadActionCommand,
+  parseThreadControlCommand,
   readRequestTextWithLimit,
   type OpenTagEvent
 } from "@opentag/core";
@@ -232,32 +233,36 @@ async function handleIssueCommentCreated(input: {
   signatureVerified?: boolean;
 }): Promise<void> {
   if (input.payload.action && input.payload.action !== "created") return;
-  if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    await input.submitThreadAction({
-      id: `approval_github_comment_${input.payload.comment.id}`,
-      rawText: input.payload.comment.body,
-      actor: {
-        provider: "github",
-        providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
-      },
-      callback: {
-        provider: "github",
-        uri: input.payload.issue.comments_url,
-        threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
-      },
-      metadata: {
-        repoProvider: "github",
-        owner: input.payload.repository.owner.login,
-        repo: input.payload.repository.name,
-        issueNumber: input.payload.issue.number,
-        commentUrl: input.payload.comment.html_url,
-        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
-        ...(typeof input.signatureVerified === "boolean"
-          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
-          : {})
-      }
-    });
+  const controlCommand = parseThreadControlCommand(input.payload.comment.body);
+  const actionCommand = parseThreadActionCommand(input.payload.comment.body);
+  if (controlCommand || actionCommand) {
+    if (input.submitThreadAction) {
+      await input.submitThreadAction({
+        id: `${controlCommand ? "control" : "approval"}_github_comment_${input.payload.comment.id}`,
+        rawText: input.payload.comment.body,
+        actor: {
+          provider: "github",
+          providerUserId: String(input.payload.sender.id),
+          handle: input.payload.sender.login
+        },
+        callback: {
+          provider: "github",
+          uri: input.payload.issue.comments_url,
+          threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
+        },
+        metadata: {
+          repoProvider: "github",
+          owner: input.payload.repository.owner.login,
+          repo: input.payload.repository.name,
+          issueNumber: input.payload.issue.number,
+          commentUrl: input.payload.comment.html_url,
+          ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+          ...(typeof input.signatureVerified === "boolean"
+            ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+            : {})
+        }
+      });
+    }
     return;
   }
 
@@ -295,32 +300,36 @@ async function handlePullRequestReviewCommentCreated(input: {
   if (input.payload.action && input.payload.action !== "created") return;
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
-  if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    await input.submitThreadAction({
-      id: `approval_github_pr_review_comment_${input.payload.comment.id}`,
-      rawText: input.payload.comment.body,
-      actor: {
-        provider: "github",
-        providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
-      },
-      callback: {
-        provider: "github",
-        uri: `https://api.github.com/repos/${owner}/${repo}/issues/${input.payload.pull_request.number}/comments`,
-        threadKey: `${owner}/${repo}#${input.payload.pull_request.number}`
-      },
-      metadata: {
-        repoProvider: "github",
-        owner,
-        repo,
-        pullRequestNumber: input.payload.pull_request.number,
-        commentUrl: input.payload.comment.html_url,
-        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
-        ...(typeof input.signatureVerified === "boolean"
-          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
-          : {})
-      }
-    });
+  const controlCommand = parseThreadControlCommand(input.payload.comment.body);
+  const actionCommand = parseThreadActionCommand(input.payload.comment.body);
+  if (controlCommand || actionCommand) {
+    if (input.submitThreadAction) {
+      await input.submitThreadAction({
+        id: `${controlCommand ? "control" : "approval"}_github_pr_review_comment_${input.payload.comment.id}`,
+        rawText: input.payload.comment.body,
+        actor: {
+          provider: "github",
+          providerUserId: String(input.payload.sender.id),
+          handle: input.payload.sender.login
+        },
+        callback: {
+          provider: "github",
+          uri: `https://api.github.com/repos/${owner}/${repo}/issues/${input.payload.pull_request.number}/comments`,
+          threadKey: `${owner}/${repo}#${input.payload.pull_request.number}`
+        },
+        metadata: {
+          repoProvider: "github",
+          owner,
+          repo,
+          pullRequestNumber: input.payload.pull_request.number,
+          commentUrl: input.payload.comment.html_url,
+          ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+          ...(typeof input.signatureVerified === "boolean"
+            ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+            : {})
+        }
+      });
+    }
     return;
   }
 

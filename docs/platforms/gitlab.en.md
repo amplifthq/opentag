@@ -100,6 +100,16 @@ Expected behavior:
 - The local runner starts against the bound checkout.
 - OpenTag replies in the same GitLab issue or merge request thread.
 
+While a run is active, you can inspect or stop the runtime from the same source thread:
+
+```text
+@opentag /status
+@opentag /doctor
+@opentag /stop [run_id]
+```
+
+These control commands report or cancel source-thread runtime state. They do not create another run.
+
 ## Relay Mode
 
 GitLab relay mode is for a relay you operate or have confirmed is configured for GitLab. Do not point a GitLab project at a generic hosted relay unless the relay operator explicitly confirms that `/gitlab/webhooks` is enabled and has the matching GitLab secrets. Without that relay-side configuration, use local `opentag start` plus a public tunnel.
@@ -131,6 +141,7 @@ Supported now:
 - Updating the same GitLab status note during a run instead of creating a new progress note for every state.
 - Direct GitLab merge request creation from supported `create_pull_request` action receipts after `apply 1`.
 - Thread action commands such as `apply 1`, `approve 1`, `continue 1`, and `reject 1` when the dispatcher has a supported action receipt.
+- Source-thread control commands such as `@opentag /status`, `@opentag /doctor`, and `@opentag /stop [run_id]` without creating a new run.
 
 Not yet implemented:
 

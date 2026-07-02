@@ -104,6 +104,55 @@ describe("GitHub webhook ingress", () => {
     });
   });
 
+  it("routes mentioned source-thread control commands without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({ outcome: "status" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun,
+      submitThreadAction,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "created",
+      comment: {
+        id: 124,
+        body: "@opentag /status",
+        html_url: "https://github.com/acme/demo/issues/1#issuecomment-124"
+      },
+      issue: {
+        html_url: "https://github.com/acme/demo/issues/1",
+        comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        number: 1
+      },
+      repository: { name: "demo", private: false, owner: { login: "acme" } },
+      sender: { id: 42, login: "octocat" }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "issue_comment", deliveryId: "delivery_124" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledOnce();
+    expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
+      id: "control_github_comment_124",
+      rawText: "@opentag /status",
+      callback: {
+        provider: "github",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    });
+  });
+
   it("rejects invalid signatures", async () => {
     const recordControlPlaneEvent = vi.fn(async () => {});
     const app = createGitHubWebhookApp({

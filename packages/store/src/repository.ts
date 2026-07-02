@@ -1066,6 +1066,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
+    async findCancelableRunForConversation(input: { conversationKeys: string[] }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
+      const keys = [...new Set(input.conversationKeys.filter((key) => key.length > 0))];
+      if (keys.length === 0) return null;
+      const row = await db
+        .select()
+        .from(runs)
+        .where(and(inArray(runs.conversationKey, keys), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
+        .orderBy(asc(runs.createdAt))
+        .limit(1)
+        .get();
+      if (!row) return null;
+      return {
+        run: runFromRow(row),
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+      };
+    },
+
     async findCancelableRunForSourceContainer(input: {
       source: string;
       repoProvider: string;

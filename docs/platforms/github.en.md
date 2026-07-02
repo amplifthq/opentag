@@ -30,6 +30,7 @@ OpenTag setup helps with the parts that can be local and safe:
 - It generates a strong webhook secret.
 - It saves the local dispatcher, GitHub webhook listener, runner, and repository binding.
 - It enables run branch preparation so `apply 1` can create a pull request later.
+- It routes source-thread control commands such as `@opentag /status`, `@opentag /doctor`, and `@opentag /stop [run_id]` without creating a new run.
 - It starts the local webhook listener with `opentag start`.
 
 ## What You Still Need To Do
@@ -158,6 +159,16 @@ Expected result:
 4. OpenTag posts acknowledgement, progress, and final result comments back to the same GitHub thread.
 5. If the agent changed files, OpenTag pushes a run branch and shows a `create_pull_request` action.
 6. Reply `apply 1` in the thread to create the pull request.
+
+While a run is active, you can inspect or stop the runtime from the same source thread:
+
+```text
+@opentag /status
+@opentag /doctor
+@opentag /stop [run_id]
+```
+
+These control commands report or cancel source-thread runtime state. They do not create another run.
 
 ## If It Does Not Work
 
