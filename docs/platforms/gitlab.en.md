@@ -102,19 +102,21 @@ Expected behavior:
 
 ## Relay Mode
 
-In relay mode, configure the GitLab project webhook to point at the relay URL plus the GitLab webhook path:
+GitLab relay mode is for a relay you operate or have confirmed is configured for GitLab. Do not point a GitLab project at a generic hosted relay unless the relay operator explicitly confirms that `/gitlab/webhooks` is enabled and has the matching GitLab secrets. Without that relay-side configuration, use local `opentag start` plus a public tunnel.
+
+For a configured relay, point the GitLab project webhook at the relay URL plus the GitLab webhook path:
 
 ```text
 https://<your-relay-host>/gitlab/webhooks
 ```
 
-The relay must be configured with:
+The self-hosted or custom relay must be configured with:
 
 - `OPENTAG_GITLAB_WEBHOOK_SECRET`: the shared secret GitLab sends as `X-Gitlab-Token`.
 - `OPENTAG_GITLAB_BASE_URL`: required for self-managed GitLab; optional for GitLab.com.
 - `OPENTAG_GITLAB_TOKEN`: required for source-thread replies and direct merge request creation after `apply 1`.
 
-`opentag pair --relay <url>` and `opentag start` print the GitLab relay webhook URL when the config includes GitLab.
+`opentag pair --relay <url>` and `opentag start` print the GitLab relay webhook URL when the config includes GitLab. Treat that URL as actionable only after the relay has the GitLab environment variables above.
 
 ## Current Scope
 
@@ -122,7 +124,7 @@ Supported now:
 
 - GitLab project setup in the CLI.
 - Local `opentag start` GitLab webhook ingress.
-- Relay-hosted GitLab webhook ingress at `/gitlab/webhooks` when the relay has the GitLab webhook secret configured.
+- Self-hosted or custom relay GitLab webhook ingress at `/gitlab/webhooks` when the relay has the GitLab token and webhook secret configured.
 - GitLab.com and self-managed GitLab through `--gitlab-base-url`.
 - Issue note and merge request note mentions.
 - Replying to the original issue or merge request via the Notes API.
