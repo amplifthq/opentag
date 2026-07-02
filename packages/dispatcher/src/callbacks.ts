@@ -196,6 +196,55 @@ export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: Fe
   };
 }
 
+export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const messageIdByKey = new Map<string, string>();
+  const deliveryByKey = new Map<string, Promise<void>>();
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "discord") return;
+      const token = input.token;
+      if (!token) return;
+
+      const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
+      const previous = deliveryByKey.get(statusKey) ?? Promise.resolve();
+      const current = previous.then(async () => {
+        const existingMessageId = messageIdByKey.get(statusKey);
+        // status_update edit chain: POST the first message, PATCH the same one after.
+        // message.uri is the channel `/messages` endpoint, so the edit URL appends the id.
+        const response = await fetchImpl(existingMessageId ? `${message.uri.replace(/\/$/, "")}/${existingMessageId}` : message.uri, {
+          method: existingMessageId ? "PATCH" : "POST",
+          headers: {
+            authorization: `Bot ${token}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ content: message.body })
+        });
+
+        if (!response.ok) {
+          throw new Error(`deliver Discord callback failed: ${response.status} ${await response.text()}`);
+        }
+        if (!existingMessageId) {
+          const body = (await response.json()) as { id?: string } | null;
+          if (body && typeof body.id === "string") {
+            messageIdByKey.set(statusKey, body.id);
+          }
+        }
+        if (message.kind === "final") {
+          messageIdByKey.delete(statusKey);
+        }
+      });
+      deliveryByKey.set(statusKey, current);
+      await current.finally(() => {
+        if (deliveryByKey.get(statusKey) === current) {
+          deliveryByKey.delete(statusKey);
+        }
+      });
+    }
+  };
+}
+
 export function createSlackCallbackSink(input: {
   botToken?: string;
   botTokensByAgentId?: Record<string, string>;
