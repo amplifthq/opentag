@@ -1,5 +1,38 @@
+import { createServer, type Server } from "node:net";
 import { describe, expect, it } from "vitest";
 import { dispatcherRuntimeInputFromEnv, startDispatcher, type LocalDispatcherRuntimeInput } from "../src/dispatcher.js";
+
+async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("Expected test server to listen on a TCP port.");
+  }
+  return { server, port: address.port };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function availablePort(): Promise<number> {
+  const { server, port } = await listenOnRandomPort();
+  await closeServer(server);
+  return port;
+}
 
 async function withDispatcherServer(
   input: Omit<LocalDispatcherRuntimeInput, "port" | "databasePath">,
@@ -46,6 +79,22 @@ describe("local dispatcher runtime", () => {
       githubToken: "ghp_callback_and_apply",
       githubCallbackToken: "ghp_callback",
       githubApplyToken: "ghp_apply"
+    });
+  });
+
+  it("parses GitLab callback/apply settings from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_GITLAB_TOKEN: "glpat_callback_and_apply",
+        OPENTAG_GITLAB_BASE_URL: "https://gitlab.example.com",
+        OPENTAG_GITLAB_WEBHOOK_SECRET: "gitlab_webhook_secret",
+        OPENTAG_GITLAB_WEBHOOK_PATH: "/gitlab/webhooks"
+      })
+    ).toMatchObject({
+      gitlabToken: "glpat_callback_and_apply",
+      gitlabBaseUrl: "https://gitlab.example.com",
+      gitlabWebhookSecret: "gitlab_webhook_secret",
+      gitlabWebhookPath: "/gitlab/webhooks"
     });
   });
 
@@ -177,5 +226,85 @@ describe("local dispatcher runtime", () => {
         });
       }
     );
+  });
+
+  it("mounts GitLab webhook ingress on the dispatcher when a relay secret is configured", async () => {
+    const port = await availablePort();
+    const handle = startDispatcher({
+      port,
+      databasePath: ":memory:",
+      gitlabBaseUrl: "https://gitlab.example.com",
+      gitlabWebhookSecret: "gitlab_webhook_secret",
+      gitlabWebhookPath: "/gitlab/webhooks"
+    });
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const binding = await fetch(`${baseUrl}/v1/repo-bindings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "gitlab",
+          owner: "acme/team",
+          repo: "demo",
+          runnerId: "runner_1",
+          workspacePath: "/Users/test/demo",
+          defaultExecutor: "echo"
+        })
+      });
+      expect(binding.status).toBe(201);
+
+      const webhook = await fetch(`${baseUrl}/gitlab/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-gitlab-event": "Note Hook",
+          "x-gitlab-token": "gitlab_webhook_secret"
+        },
+        body: JSON.stringify({
+          object_kind: "note",
+          object_attributes: {
+            id: 1004,
+            note: "@opentag investigate this issue",
+            url: "https://gitlab.example.com/acme/team/demo/-/issues/7#note_1004",
+            noteable_type: "Issue"
+          },
+          project: {
+            id: 42,
+            path_with_namespace: "acme/team/demo",
+            visibility: "private",
+            web_url: "https://gitlab.example.com/acme/team/demo"
+          },
+          issue: {
+            iid: 7,
+            url: "https://gitlab.example.com/acme/team/demo/-/issues/7"
+          },
+          user: {
+            id: 9,
+            username: "alice"
+          }
+        })
+      });
+      expect(webhook.status).toBe(200);
+      await expect(webhook.json()).resolves.toEqual({ ok: true });
+
+      const claim = await fetch(`${baseUrl}/v1/runners/runner_1/claim`, { method: "POST" });
+      expect(claim.status).toBe(200);
+      await expect(claim.json()).resolves.toMatchObject({
+        event: {
+          source: "gitlab",
+          metadata: {
+            repoProvider: "gitlab",
+            owner: "acme/team",
+            repo: "demo"
+          }
+        },
+        run: {
+          status: "assigned"
+        }
+      });
+    } finally {
+      await handle.close();
+    }
   });
 });

@@ -247,6 +247,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
@@ -316,6 +319,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
@@ -431,6 +437,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/runner':
         specifier: workspace:*
         version: link:../runner

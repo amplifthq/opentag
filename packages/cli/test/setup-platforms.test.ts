@@ -88,6 +88,32 @@ describe("OpenTag CLI setup platforms", () => {
     expect(notes.join("\n")).toContain("OpenTag 会自动生成 webhook secret");
   });
 
+  it("prints the GitLab setup guide before collecting GitLab credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabProject: "acme/team/demo",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/gitlab.en.md");
+    expect(notes.join("\n")).toContain("https://docs.gitlab.com/user/project/integrations/webhook_events/");
+    expect(notes.join("\n")).toContain("GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`");
+  });
+
   it("writes a Slack config and default channel binding without Lark", async () => {
     const configPath = join(tempDir(), "config.json");
 
@@ -232,5 +258,48 @@ describe("OpenTag CLI setup platforms", () => {
     expect(config.daemon.preparePullRequestBranch).toBe(true);
     expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
     expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
+  });
+
+  it("writes a GitLab config with a GitLab repository binding", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabProject: "acme/team/demo",
+        gitlabBaseUrl: "https://gitlab.example.com",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.gitlab).toEqual({
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    });
+    expect(config.daemon.repositories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "gitlab", owner: "acme/team", repo: "demo" })
+      ])
+    );
+    expect(config.preferences?.lastSetup).toMatchObject({
+      platforms: ["gitlab"],
+      gitlabProjectPathWithNamespace: "acme/team/demo",
+      gitlabBaseUrl: "https://gitlab.example.com",
+      gitlabPort: 3060
+    });
   });
 });

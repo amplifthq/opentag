@@ -1,5 +1,23 @@
 import { parseOpenTagMention, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant, type WorkItemReference } from "@opentag/core";
 
+export const DEFAULT_GITLAB_BASE_URL = "https://gitlab.com";
+
+export function normalizeGitLabBaseUrl(baseUrl: string | undefined = DEFAULT_GITLAB_BASE_URL): string {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) {
+    throw new Error("GitLab base URL must not be empty.");
+  }
+  const parsed = new URL(trimmed);
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error("GitLab base URL must use http or https.");
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error("GitLab base URL must not include credentials, query, or hash.");
+  }
+  const path = parsed.pathname.replace(/\/+$/g, "");
+  return `${parsed.origin}${path === "" ? "" : path}`;
+}
+
 /** `object_attributes.noteable_type` discriminator from a GitLab Note Hook
  * payload. The modern API surfaces `"Issue"` and `"MergeRequest"`; legacy
  * self-hosted instances (and some web-UI event names) surface the older
@@ -74,6 +92,10 @@ export type GitLabNoteInput = {
   noteableType: GitLabNoteableType;
   /** ISO-8601 timestamp the note was received by OpenTag. */
   receivedAt: string;
+  /** GitLab instance base URL. Defaults to https://gitlab.com; self-managed
+   * instances pass their root URL here so generated work-item links and
+   * owner-container URIs remain instance-correct. */
+  baseUrl?: string;
 };
 
 function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
@@ -162,7 +184,9 @@ function gitlabWorkItem(input: {
   kind: "issue" | "merge_request";
   iid: number;
   uri: string;
+  baseUrl?: string;
 }): WorkItemReference {
+  const baseUrl = normalizeGitLabBaseUrl(input.baseUrl);
   // The work-item-kind prefix on `externalId` is intentional: the dispatcher
   // admission gate (`packages/dispatcher/src/admission.ts:162-165`) and proposal
   // lookup (`packages/dispatcher/src/server.ts:386-423`) key off
@@ -177,7 +201,7 @@ function gitlabWorkItem(input: {
     ownerContainer: {
       provider: "gitlab",
       id: input.pathWithNamespace,
-      uri: `https://gitlab.com/${input.pathWithNamespace}`
+      uri: `${baseUrl}/${input.pathWithNamespace}`
     }
   };
 }
@@ -280,7 +304,8 @@ export function normalizeGitLabNote(input: GitLabNoteInput): OpenTagEvent | null
       pathWithNamespace: input.projectPathWithNamespace,
       kind: isMergeRequest ? "merge_request" : "issue",
       iid,
-      uri: input.workItemUrl
+      uri: input.workItemUrl,
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {})
     }),
     permissions: grantPermissions(mention.intent),
     callback: {

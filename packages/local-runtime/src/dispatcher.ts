@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
+import { createOpenTagClient } from "@opentag/client";
 import {
   createCompositeCallbackSink,
   createCompositeSourceReceiptSink,
   createDispatcherApp,
   createGitHubCallbackSink,
+  createGitLabCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
@@ -11,6 +14,7 @@ import {
   createTelegramCallbackSink
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions } from "@opentag/dispatcher";
+import { createGitLabWebhookApp } from "@opentag/gitlab";
 
 export type LocalDispatcherRuntimeInput = {
   port: number;
@@ -26,6 +30,10 @@ export type LocalDispatcherRuntimeInput = {
   githubToken?: string;
   githubCallbackToken?: string;
   githubApplyToken?: string | null;
+  gitlabToken?: string;
+  gitlabBaseUrl?: string;
+  gitlabWebhookSecret?: string;
+  gitlabWebhookPath?: string;
   lark?: {
     appId: string;
     appSecret: string;
@@ -181,6 +189,10 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
+    ...(env.OPENTAG_GITLAB_TOKEN ? { gitlabToken: env.OPENTAG_GITLAB_TOKEN } : {}),
+    ...(env.OPENTAG_GITLAB_BASE_URL ? { gitlabBaseUrl: env.OPENTAG_GITLAB_BASE_URL } : {}),
+    ...(env.OPENTAG_GITLAB_WEBHOOK_SECRET ? { gitlabWebhookSecret: env.OPENTAG_GITLAB_WEBHOOK_SECRET } : {}),
+    ...(env.OPENTAG_GITLAB_WEBHOOK_PATH ? { gitlabWebhookPath: env.OPENTAG_GITLAB_WEBHOOK_PATH } : {}),
     ...(env.LARK_APP_ID && env.LARK_APP_SECRET
       ? {
           lark: {
@@ -202,54 +214,94 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
   const githubCallbackToken = input.githubCallbackToken ?? input.githubToken;
   const githubApplyToken = input.githubApplyToken === null ? undefined : (input.githubApplyToken ?? input.githubToken);
 
+  const app = createDispatcherApp({
+    databasePath: input.databasePath,
+    ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
+    ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
+    ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
+    ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
+    ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
+    ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
+    ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
+    ...(input.gitlabToken
+      ? {
+          gitlabApply: {
+            token: input.gitlabToken,
+            ...(input.gitlabBaseUrl ? { baseUrl: input.gitlabBaseUrl } : {})
+          }
+        }
+      : {}),
+    sourceReceiptSink: createCompositeSourceReceiptSink([
+      createSlackSourceReceiptSink({
+        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
+        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
+      }),
+      createLarkSourceReceiptSink({
+        ...(input.lark
+          ? {
+              appId: input.lark.appId,
+              appSecret: input.lark.appSecret,
+              domain: input.lark.domain
+            }
+          : {})
+      })
+    ]),
+    callbackSink: createCompositeCallbackSink([
+      createGitHubCallbackSink({
+        ...(githubCallbackToken ? { token: githubCallbackToken } : {})
+      }),
+      createGitLabCallbackSink({
+        ...(input.gitlabToken ? { token: input.gitlabToken } : {})
+      }),
+      createSlackCallbackSink({
+        ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
+        ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
+      }),
+      createLarkCallbackSink({
+        ...(input.lark
+          ? {
+              appId: input.lark.appId,
+              appSecret: input.lark.appSecret,
+              domain: input.lark.domain
+            }
+          : {})
+      }),
+      createTelegramCallbackSink({
+        ...(input.telegramBotToken ? { botToken: input.telegramBotToken } : {}),
+        ...(input.telegramBotTokensByAgentId ? { botTokensByAgentId: input.telegramBotTokensByAgentId } : {})
+      })
+    ])
+  });
+
+  if (input.gitlabWebhookSecret) {
+    if (input.port === 0) {
+      throw new Error("GitLab relay webhook mount requires a fixed dispatcher port.");
+    }
+    const dispatcherClient = createOpenTagClient({
+      dispatcherUrl: `http://127.0.0.1:${input.port}`,
+      ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
+    });
+    app.route(
+      "/",
+      createGitLabWebhookApp({
+        webhookSecret: input.gitlabWebhookSecret,
+        ...(input.gitlabBaseUrl ? { baseUrl: input.gitlabBaseUrl } : {}),
+        ...(input.gitlabWebhookPath ? { webhookPath: input.gitlabWebhookPath } : {}),
+        async createRun(event) {
+          const runId = `run_${randomUUID()}`;
+          const created = await dispatcherClient.createRun({ runId, event });
+          return created.outcome === "run_created" ? { runId: created.run.id } : {};
+        },
+        async submitThreadAction(action) {
+          await dispatcherClient.submitThreadAction(action);
+        },
+        now: () => new Date().toISOString()
+      })
+    );
+  }
+
   const server: ClosableServer = serve({
-    fetch: createDispatcherApp({
-      databasePath: input.databasePath,
-      ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
-      ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
-      ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
-      ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
-      ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
-      ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
-      ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
-      sourceReceiptSink: createCompositeSourceReceiptSink([
-        createSlackSourceReceiptSink({
-          ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
-          ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
-        }),
-        createLarkSourceReceiptSink({
-          ...(input.lark
-            ? {
-                appId: input.lark.appId,
-                appSecret: input.lark.appSecret,
-                domain: input.lark.domain
-              }
-            : {})
-        })
-      ]),
-      callbackSink: createCompositeCallbackSink([
-        createGitHubCallbackSink({
-          ...(githubCallbackToken ? { token: githubCallbackToken } : {})
-        }),
-        createSlackCallbackSink({
-          ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
-          ...(input.slackBotTokensByAgentId ? { botTokensByAgentId: input.slackBotTokensByAgentId } : {})
-        }),
-        createLarkCallbackSink({
-          ...(input.lark
-            ? {
-                appId: input.lark.appId,
-                appSecret: input.lark.appSecret,
-                domain: input.lark.domain
-              }
-            : {})
-        }),
-        createTelegramCallbackSink({
-          ...(input.telegramBotToken ? { botToken: input.telegramBotToken } : {}),
-          ...(input.telegramBotTokensByAgentId ? { botTokensByAgentId: input.telegramBotTokensByAgentId } : {})
-        })
-      ])
-    }).fetch,
+    fetch: app.fetch,
     port: input.port
   });
 

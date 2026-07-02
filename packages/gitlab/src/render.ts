@@ -1,4 +1,11 @@
-import { suggestedActionCandidatesFromResult, type OpenTagRunResult } from "@opentag/core";
+import {
+  createFinalSummaryPresentation,
+  suggestedActionCandidatesFromResult,
+  type ActionReceiptDecision,
+  type OpenTagFinalSummaryPresentation,
+  type OpenTagPresentationAction,
+  type OpenTagRunResult
+} from "@opentag/core";
 
 function nextActionSummary(result: OpenTagRunResult): string | undefined {
   if (!result.nextAction) return undefined;
@@ -122,6 +129,83 @@ export function renderProgress(input: { runId: string; message: string }): strin
   return `OpenTag progress for \`${input.runId}\`: ${input.message}`;
 }
 
+function tableValue(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
+}
+
+function decisionLabel(decision: ActionReceiptDecision): string {
+  if (decision === "apply") return "Apply now";
+  if (decision === "approve") return "Approve only";
+  if (decision === "continue") return "Continue";
+  return "Reject";
+}
+
+function decisionEffect(decision: ActionReceiptDecision): string {
+  if (decision === "apply") return "Applies this action to the system of record.";
+  if (decision === "approve") return "Records approval without applying yet.";
+  if (decision === "continue") return "Starts a follow-up run from this approved action.";
+  return "Rejects this action.";
+}
+
+function actionDetailRows(action: OpenTagPresentationAction): Array<[string, string]> {
+  if (action.detailRows?.length) return action.detailRows.map((row) => [row.label, row.value]);
+  const rows: Array<[string, string]> = [["Target", action.targetLabel]];
+  if (action.setupReason) rows.push(["Status", action.setupReason]);
+  return rows;
+}
+
+function renderPresentationActions(presentation: OpenTagFinalSummaryPresentation): string[] {
+  const actions = presentation.actions ?? [];
+  if (actions.length === 0 || !presentation.actionReceiptTitle) return [];
+
+  const lines = [
+    `### ${presentation.actionReceiptTitle}`,
+    "",
+    "OpenTag prepared a source-thread action receipt. Choose one command in this GitLab thread; full protocol lineage stays in the audit log."
+  ];
+  if (presentation.auditRunId) {
+    lines.push("", `Audit: run \`opentag status --run ${presentation.auditRunId}\` locally.`);
+  }
+  for (const action of actions) {
+    lines.push(
+      "",
+      `#### ${action.index}. ${action.title}`,
+      "",
+      "| Field | Value |",
+      "| --- | --- |"
+    );
+    for (const [label, value] of actionDetailRows(action)) {
+      lines.push(`| ${label} | ${tableValue(value)} |`);
+    }
+    lines.push("", "**Choose in this thread**", "", "| Decision | Comment command | Effect |", "| --- | --- | --- |");
+    for (const decision of action.visibleDecisions) {
+      lines.push(`| ${decisionLabel(decision)} | \`${decision} ${action.index}\` | ${decisionEffect(decision)} |`);
+    }
+  }
+
+  return lines;
+}
+
+export function renderFinalSummaryPresentation(presentation: OpenTagFinalSummaryPresentation): string {
+  const lines = [`OpenTag finished with **${presentation.outcome}**.`, "", presentation.summary];
+
+  if (presentation.verification?.length) {
+    lines.push("", "Verification:");
+    for (const check of presentation.verification) {
+      lines.push(`- \`${check.command}\`: ${check.outcome}`);
+    }
+  }
+
+  const suggestedActions = renderPresentationActions(presentation);
+  if (suggestedActions.length > 0) {
+    lines.push("", ...suggestedActions);
+  } else if (presentation.nextActions?.length) {
+    lines.push("", `Next action: ${presentation.nextActions[0]}`);
+  }
+
+  return lines.join("\n");
+}
+
 /** Render the final result a runner posts back to the GitLab thread when a
  * run completes. Produces a GitLab-flavored markdown body with:
  *
@@ -134,24 +218,20 @@ export function renderProgress(input: { runId: string; message: string }): strin
  *    commands verbatim into a GitLab reply.
  */
 export function renderFinalResult(result: OpenTagRunResult): string {
+  const suggestedActions = renderSuggestedActions(result);
+  const presentation = createFinalSummaryPresentation({ result });
+  if (suggestedActions.length === 0) {
+    return renderFinalSummaryPresentation(presentation);
+  }
   const lines = [`OpenTag finished with **${result.conclusion}**.`, "", result.summary];
-
   if (result.verification?.length) {
     lines.push("", "Verification:");
     for (const check of result.verification) {
       lines.push(`- \`${check.command}\`: ${check.outcome}`);
     }
   }
-
   const nextAction = nextActionSummary(result);
-  if (nextAction) {
-    lines.push("", `Next action: ${nextAction}`);
-  }
-
-  const suggestedActions = renderSuggestedActions(result);
-  if (suggestedActions.length > 0) {
-    lines.push("", ...suggestedActions);
-  }
-
+  if (nextAction) lines.push("", `Next action: ${nextAction}`);
+  lines.push("", ...suggestedActions);
   return lines.join("\n");
 }

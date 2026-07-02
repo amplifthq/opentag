@@ -37,6 +37,7 @@
   "dependencies": {
     "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/gitlab": "workspace:*",
     "@opentag/lark": "workspace:*",
     "@opentag/slack": "workspace:*",
     "@opentag/telegram": "workspace:*",

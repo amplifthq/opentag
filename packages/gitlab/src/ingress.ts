@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
 import { Hono } from "hono";
-import { normalizeGitLabNote, type GitLabNoteableType, type GitLabVisibility } from "./normalize.js";
+import { normalizeGitLabBaseUrl, normalizeGitLabNote, type GitLabNoteableType, type GitLabVisibility } from "./normalize.js";
 
 type GitLabActor = {
   id: number;
@@ -13,7 +13,8 @@ type GitLabActor = {
 type GitLabProject = {
   id: number;
   path_with_namespace: string;
-  visibility: "private" | "internal" | "public";
+  visibility?: GitLabVisibility | string;
+  visibility_level?: number;
   web_url?: string;
 };
 
@@ -86,19 +87,12 @@ export type GitLabThreadActionInput = {
  * command. */
 export type GitLabWebhookAppInput = {
   webhookSecret: string;
+  baseUrl?: string;
   webhookPath?: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitLabThreadActionInput): Promise<unknown>;
   now(): string;
 };
-
-/**
- * Restricted callbacks must land on the MVP-approved surface — `gitlab.com` and
- * its API. Self-hosted GitLab instances are explicitly out of scope for this
- * adapter; the maintainer sign-off issue (#54) commits us to the SaaS surface
- * first. Adjust `GITLAB_API_HOST_ALLOWLIST` when broadening the surface.
- */
-const GITLAB_API_HOST_ALLOWLIST = new Set(["gitlab.com", "api.gitlab.com"]);
 
 /** Configuration for `startGitLabIngress`. Bundles the dispatcher pairing
  * info with the local HTTP receiver settings. `port` defaults to `3060` to
@@ -108,6 +102,10 @@ const GITLAB_API_HOST_ALLOWLIST = new Set(["gitlab.com", "api.gitlab.com"]);
 export type GitLabIngressConfig = {
   /** Shared secret GitLab's webhook will present in `X-Gitlab-Token`. */
   webhookSecret: string;
+  /** GitLab instance root URL. Defaults to https://gitlab.com. Self-managed
+   * instances should set this to their instance URL, for example
+   * https://gitlab.example.com. */
+  baseUrl?: string;
   /** Base URL of the paired OpenTag dispatcher (e.g. `http://127.0.0.1:8787`). */
   dispatcherUrl: string;
   /** Optional pairing token presented to the dispatcher as `Authorization`. */
@@ -199,9 +197,11 @@ const PROJECT_PATH_NAMESPACE_PATTERN = /^[^|\/\s]+(?:\/[^|\/\s]+)+$/;
  * 2. `object_attributes` is not an object, or any of `note` (non-empty string),
  *    `id` (number), `url` (non-empty string), `noteable_type` (non-empty
  *    string) is missing or wrong-typed.
- * 3. `project` is not an object, or `id` (number), `visibility` (one of
- *    `private | internal | public`), or `path_with_namespace` (non-empty
- *    string matching `PROJECT_PATH_NAMESPACE_PATTERN`) is missing or wrong-typed.
+ * 3. `project` is not an object, or `id` (number), a supported visibility
+ *    representation, or `path_with_namespace` (non-empty string matching
+ *    `PROJECT_PATH_NAMESPACE_PATTERN`) is missing or wrong-typed. GitLab.com
+ *    Note Hook payloads currently send `visibility_level` (0/10/20), while some
+ *    fixtures and API shapes use `visibility` (`private | internal | public`).
  * 4. `user` is not an object, or `id` (number) or `username` (non-empty string)
  *    is missing or wrong-typed.
  *
@@ -210,6 +210,22 @@ const PROJECT_PATH_NAMESPACE_PATTERN = /^[^|\/\s]+(?:\/[^|\/\s]+)+$/;
  * matching supported type) is checked in `handleNoteCreated`, not here.
  */
 const GITLAB_PROJECT_VISIBILITY_VALUES = new Set<GitLabVisibility>(["private", "internal", "public"]);
+
+function normalizeGitLabProjectVisibility(project: { visibility?: unknown; visibility_level?: unknown }): GitLabVisibility | null {
+  if (typeof project.visibility === "string" && GITLAB_PROJECT_VISIBILITY_VALUES.has(project.visibility as GitLabVisibility)) {
+    return project.visibility as GitLabVisibility;
+  }
+  switch (project.visibility_level) {
+    case 0:
+      return "private";
+    case 10:
+      return "internal";
+    case 20:
+      return "public";
+    default:
+      return null;
+  }
+}
 
 function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload {
   if (!value || typeof value !== "object") return false;
@@ -228,7 +244,7 @@ function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload
   if (!project || typeof project !== "object") return false;
   const p = project as Record<string, unknown>;
   if (typeof p.id !== "number") return false;
-  if (typeof p.visibility !== "string" || !GITLAB_PROJECT_VISIBILITY_VALUES.has(p.visibility as GitLabVisibility)) return false;
+  if (!normalizeGitLabProjectVisibility(p)) return false;
   if (typeof p.path_with_namespace !== "string") return false;
   if (!PROJECT_PATH_NAMESPACE_PATTERN.test(p.path_with_namespace)) return false;
 
@@ -241,32 +257,26 @@ function isGitLabNoteHookPayload(value: unknown): value is GitLabNoteHookPayload
   return true;
 }
 
-function isGitLabApiHost(uri: string): boolean {
-  try {
-    const hostname = new URL(uri).hostname.toLowerCase();
-    return GITLAB_API_HOST_ALLOWLIST.has(hostname);
-  } catch {
-    return false;
-  }
-}
-
 function encodeProjectPath(pathWithNamespace: string): string {
   return encodeURIComponent(pathWithNamespace);
 }
 
 function buildApiNotesUrl(input: {
+  baseUrl?: string;
   projectPathWithNamespace: string;
   noteableType: "Issue" | "MergeRequest";
   iid: number;
 }): string {
+  const apiBaseUrl = `${normalizeGitLabBaseUrl(input.baseUrl)}/api/v4`;
   const encodedPath = encodeProjectPath(input.projectPathWithNamespace);
   if (input.noteableType === "MergeRequest") {
-    return `https://gitlab.com/api/v4/projects/${encodedPath}/merge_requests/${input.iid}/notes`;
+    return `${apiBaseUrl}/projects/${encodedPath}/merge_requests/${input.iid}/notes`;
   }
-  return `https://gitlab.com/api/v4/projects/${encodedPath}/issues/${input.iid}/notes`;
+  return `${apiBaseUrl}/projects/${encodedPath}/issues/${input.iid}/notes`;
 }
 
 async function handleNoteCreated(input: {
+  baseUrl?: string;
   payload: GitLabNoteHookPayload;
   rawBody: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
@@ -278,6 +288,8 @@ async function handleNoteCreated(input: {
   const isMergeRequest = noteableType === "MergeRequest" || noteableType === "MergeRequestNote";
   const isIssue = noteableType === "Issue" || noteableType === "IssueNote";
   if (!isIssue && !isMergeRequest) return { ok: true };
+  const projectVisibility = normalizeGitLabProjectVisibility(payload.project);
+  if (!projectVisibility) return { ok: false, reason: "invalid_payload" };
 
   // Supported-note integrity check. Real GitLab Note Hook payloads always
   // carry a positive `issue.iid` (or `merge_request.iid`) AND a non-empty
@@ -310,18 +322,13 @@ async function handleNoteCreated(input: {
   const callback = {
     provider: "gitlab" as const,
     uri: buildApiNotesUrl({
+      ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
       projectPathWithNamespace: payload.project.path_with_namespace,
       noteableType: isMergeRequest ? "MergeRequest" : "Issue",
       iid: issueIid
     }),
     threadKey: `${payload.project.path_with_namespace}|${isMergeRequest ? "merge_request" : "issue"}|${issueIid}`
   };
-
-  // Inline doc-review P0: refuse callbacks that don't point at the approved
-  // GitLab surface. Self-hosted GitLab is intentionally excluded from the MVP.
-  if (!isGitLabApiHost(callback.uri)) {
-    return { ok: true };
-  }
 
   if (parseThreadActionCommand(payload.object_attributes.note) && input.submitThreadAction) {
     await input.submitThreadAction({
@@ -356,11 +363,12 @@ async function handleNoteCreated(input: {
     workItemUrl: isMergeRequest ? workItemUrl : issueUrl ?? workItemUrl,
     projectPathWithNamespace: payload.project.path_with_namespace,
     projectId: payload.project.id,
-    projectVisibility: payload.project.visibility,
+    projectVisibility,
     actorId: payload.user.id,
     actorUsername: payload.user.username,
     noteableType,
-    receivedAt: input.now()
+    receivedAt: input.now(),
+    ...(input.baseUrl ? { baseUrl: input.baseUrl } : {})
   });
 
   if (event) {
@@ -386,6 +394,7 @@ async function handleNoteCreated(input: {
  */
 export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
   const app = new Hono();
+  const baseUrl = normalizeGitLabBaseUrl(input.baseUrl);
   const webhookPath = input.webhookPath ?? "/gitlab/webhooks";
   if (!webhookPath.startsWith("/")) {
     throw new Error("GitLab webhook path must start with /.");
@@ -426,6 +435,7 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
         return c.json({ error: "invalid_payload" }, 422);
       }
       const result = await handleNoteCreated({
+        baseUrl,
         payload,
         rawBody,
         createRun: input.createRun,
@@ -458,6 +468,7 @@ export function createGitLabWebhookApp(input: GitLabWebhookAppInput) {
  * diagnostic access; treat it as opaque.
  */
 export function startGitLabIngress(config: GitLabIngressConfig): GitLabIngressHandle {
+  const baseUrl = normalizeGitLabBaseUrl(config.baseUrl);
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
@@ -471,6 +482,7 @@ export function startGitLabIngress(config: GitLabIngressConfig): GitLabIngressHa
   const server = serve({
     fetch: createGitLabWebhookApp({
       webhookSecret: config.webhookSecret,
+      baseUrl,
       webhookPath,
       async createRun(event) {
         const runId = `run_${randomUUID()}`;

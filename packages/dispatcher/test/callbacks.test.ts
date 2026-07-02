@@ -3,6 +3,7 @@ import {
   createCompositeCallbackSink,
   createCompositeSourceReceiptSink,
   createGitHubCallbackSink,
+  createGitLabCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
@@ -42,6 +43,58 @@ describe("createGitHubCallbackSink", () => {
         body: { body: "done" }
       }
     ]);
+  });
+
+  it("posts GitLab callback messages to the Notes API callback URI", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json({ id: 1, body: "done" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "done"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "done" }
+      }
+    ]);
+  });
+
+  it("ignores non-GitLab callback messages in the GitLab sink", async () => {
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async () => {
+        throw new Error("should not call fetch");
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        body: "done"
+      })
+    ).resolves.toBeUndefined();
   });
 
   it("updates the same GitHub callback comment for a run", async () => {
@@ -111,6 +164,78 @@ describe("createGitHubCallbackSink", () => {
         url: "https://api.github.com/repos/acme/demo/issues/1/comments",
         method: "POST",
         authorization: "Bearer ghs_test",
+        body: { body: "Starting again" }
+      }
+    ]);
+  });
+
+  it("updates the same GitLab callback note for a run", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json({ id: 123, body: "ok" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "OpenTag picked this up."
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Still working"
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Done"
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Starting again"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "OpenTag picked this up." }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes/123",
+        method: "PUT",
+        token: "glpat_test",
+        body: { body: "Still working" }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes/123",
+        method: "PUT",
+        token: "glpat_test",
+        body: { body: "Done" }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
         body: { body: "Starting again" }
       }
     ]);

@@ -98,8 +98,20 @@ export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySe
     });
   }
 
+  if (config.platforms.gitlab) {
+    const webhookPath = config.platforms.gitlab.webhookPath ?? "/gitlab/webhooks";
+    checks.push({
+      status: "ok",
+      name: "GitLab webhook secret",
+      message: `Configured locally; the relay ${webhookPath} endpoint must verify X-Gitlab-Token before creating runs.`
+    });
+  }
+
   if (config.platforms.slack || config.platforms.lark) {
-    const unsupported = [config.platforms.slack ? "Slack" : undefined, config.platforms.lark ? "Lark / Feishu" : undefined]
+    const unsupported = [
+      config.platforms.slack ? "Slack" : undefined,
+      config.platforms.lark ? "Lark / Feishu" : undefined
+    ]
       .filter((value): value is string => Boolean(value))
       .join(", ");
     checks.push({

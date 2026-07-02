@@ -26,6 +26,9 @@ type MessageKey =
   | "githubWebhookSecret"
   | "githubPort"
   | "githubAutoCreatePr"
+  | "gitlabProject"
+  | "gitlabToken"
+  | "gitlabPort"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -57,6 +60,9 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     githubWebhookSecret: "GitHub webhook secret",
     githubPort: "Local GitHub webhook port",
     githubAutoCreatePr: "Create pull requests immediately after runs? (advanced)",
+    gitlabProject: "GitLab project (group/project or group/subgroup/project)",
+    gitlabToken: "GitLab access token for source-thread replies",
+    gitlabPort: "Local GitLab webhook port",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -87,6 +93,9 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     githubWebhookSecret: "GitHub webhook secret",
     githubPort: "本地 GitHub webhook 端口",
     githubAutoCreatePr: "run 结束后立刻自动创建 pull request 吗？（高级选项）",
+    gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
+    gitlabToken: "GitLab access token（用于回写 source thread）",
+    gitlabPort: "本地 GitLab webhook 端口",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

@@ -93,6 +93,49 @@ function githubPullRequestEvent(input: { id: string; sourceEventId: string; thre
   };
 }
 
+function gitlabIssueEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "gitlab",
+    sourceEventId: input.sourceEventId,
+    context: [{ provider: "gitlab", kind: "issue", uri: "https://gitlab.example.com/acme/demo/-/issues/1", visibility: "private" }],
+    workItem: {
+      provider: "gitlab",
+      kind: "issue",
+      externalId: "issue:acme/demo#1",
+      uri: "https://gitlab.example.com/acme/demo/-/issues/1",
+      ownerContainer: {
+        provider: "gitlab",
+        id: "acme/demo",
+        uri: "https://gitlab.example.com/acme/demo"
+      }
+    },
+    permissions: [
+      { scope: "issue:comment", reason: "reply to the source GitLab thread" },
+      { scope: "runner:local", reason: "execute the run on a paired local daemon" },
+      { scope: "repo:read", reason: "inspect the repository in the paired local checkout" },
+      { scope: "repo:write", reason: "commit code changes on an isolated run branch" },
+      { scope: "pr:create", reason: "open a merge request for completed code changes" }
+    ],
+    callback: {
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      ...(input.threadKey ? { threadKey: input.threadKey } : {})
+    },
+    metadata: {
+      repoProvider: "gitlab",
+      owner: "acme",
+      repo: "demo",
+      projectPathWithNamespace: "acme/demo",
+      projectId: 42,
+      projectVisibility: "private",
+      issueIid: 1,
+      noteableType: "Issue"
+    }
+  };
+}
+
 function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: string }) {
   return {
     ...validEvent,
@@ -154,11 +197,13 @@ async function seedCompletedProposal(input: {
   event: unknown;
   suggestedChanges: unknown[];
   allowedActors?: string[];
+  repoBinding?: { provider: string; owner: string; repo: string };
 }) {
+  const repoBinding = input.repoBinding ?? { provider: "github", owner: "acme", repo: "demo" };
   await input.app.request("/v1/repo-bindings", jsonRequest({
-    provider: "github",
-    owner: "acme",
-    repo: "demo",
+    provider: repoBinding.provider,
+    owner: repoBinding.owner,
+    repo: repoBinding.repo,
     runnerId: "runner_1",
     workspacePath: "/Users/test/demo",
     defaultExecutor: "echo",
@@ -5362,6 +5407,122 @@ describe("dispatcher API", () => {
       }
     ]);
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/42"))).toBe(true);
+  });
+
+  it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {
+    const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      gitlabApply: {
+        token: "glpat_test",
+        baseUrl: "https://gitlab.example.com",
+        fetchImpl: async (url, init) => {
+          gitlabRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+          });
+          if (init?.method === "GET") {
+            return Response.json({ name: String(url).split("/").at(-1) });
+          }
+          return Response.json({ web_url: "https://gitlab.example.com/acme/demo/-/merge_requests/42" });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_mr",
+      event: gitlabIssueEvent({ id: "evt_thread_create_mr", sourceEventId: "note_thread_create_mr", threadKey: "acme/demo|issue|1" }),
+      repoBinding: { provider: "gitlab", owner: "acme", repo: "demo" },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_mr",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a merge request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_mr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create MR for branch opentag/run_thread_create_mr.",
+              params: {
+                title: "OpenTag run run_thread_create_mr",
+                body: "MR body",
+                head: "opentag/run_thread_create_mr",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                verification: [{ command: "pnpm test", outcome: "passed" }],
+                risks: ["Review before merge."],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("### Ready to apply"))).toBe(true);
+    gitlabRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        adapter: "gitlab",
+        proposalId: "proposal_thread_create_mr",
+        outcomes: [
+          {
+            intentId: "intent_create_mr",
+            outcome: "applied",
+            externalUri: "https://gitlab.example.com/acme/demo/-/merge_requests/42"
+          }
+        ]
+      }
+    });
+    expect(gitlabRequests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/merge_requests",
+        method: "POST",
+        token: "glpat_test",
+        body: {
+          title: "OpenTag run run_thread_create_mr",
+          description: [
+            "MR body",
+            "",
+            "## Changed Files",
+            "- `src/demo.ts`",
+            "",
+            "## Risks",
+            "- Review before merge.",
+            "",
+            "## Verification",
+            "- `pnpm test`: passed",
+            "",
+            "## Executor Conditions",
+            "- isolated branch exists"
+          ].join("\n"),
+          source_branch: "opentag/run_thread_create_mr",
+          target_branch: "main"
+        }
+      }
+    ]);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
   });
 
   it("routes repo-level create_pull_request actions from Slack threads to the GitHub adapter", async () => {

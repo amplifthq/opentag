@@ -13,9 +13,21 @@ function pairingToken(): string {
   return randomBytes(32).toString("hex");
 }
 
+function ownerRepoFromGitLabProjectPath(pathWithNamespace: string): { owner: string; repo: string } {
+  const lastSlash = pathWithNamespace.lastIndexOf("/");
+  if (lastSlash <= 0 || lastSlash === pathWithNamespace.length - 1) {
+    throw new Error("GitLab project must use namespace/project.");
+  }
+  return {
+    owner: pathWithNamespace.slice(0, lastSlash),
+    repo: pathWithNamespace.slice(lastSlash + 1)
+  };
+}
+
 export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment = process.env): OpenTagCliConfig {
   const checkoutPath = realpathSync.native(input.projectPath);
   const target = projectTargetRefFromLocalPath(checkoutPath);
+  const gitlabTarget = input.gitlab ? ownerRepoFromGitLabProjectPath(input.gitlab.projectPathWithNamespace) : undefined;
   const stateDirectory = input.stateDirectory ?? defaultStateDirectory(env);
   const worktreeRoot = join(stateDirectory, "worktrees");
   const databasePath = join(stateDirectory, "opentag.db");
@@ -37,6 +49,21 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
             provider: "github",
             owner: input.github.owner,
             repo: input.github.repo,
+            checkoutPath,
+            defaultExecutor: input.executor,
+            baseBranch: "main",
+            pushRemote: "origin",
+            worktreeRoot,
+            keepWorktree: "on_failure" as const
+          }
+        ]
+      : []),
+    ...(input.gitlab && gitlabTarget
+      ? [
+          {
+            provider: "gitlab",
+            owner: gitlabTarget.owner,
+            repo: gitlabTarget.repo,
             checkoutPath,
             defaultExecutor: input.executor,
             baseBranch: "main",
@@ -95,6 +122,13 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               githubRepo: input.github.repo,
               githubPort: input.github.port,
               githubAutoCreatePullRequest: input.github.autoCreatePullRequest
+            }
+          : {}),
+        ...(input.gitlab
+          ? {
+              gitlabProjectPathWithNamespace: input.gitlab.projectPathWithNamespace,
+              gitlabBaseUrl: input.gitlab.baseUrl,
+              gitlabPort: input.gitlab.port
             }
           : {})
       }
@@ -171,6 +205,18 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               repo: input.github.repo,
               webhookPath: input.github.webhookPath,
               port: input.github.port
+            }
+          }
+        : {}),
+      ...(input.gitlab
+        ? {
+            gitlab: {
+              token: input.gitlab.token,
+              webhookSecret: input.gitlab.webhookSecret,
+              projectPathWithNamespace: input.gitlab.projectPathWithNamespace,
+              baseUrl: input.gitlab.baseUrl,
+              webhookPath: input.gitlab.webhookPath,
+              port: input.gitlab.port
             }
           }
         : {})

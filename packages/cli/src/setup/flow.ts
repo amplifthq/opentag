@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { normalizeGitLabBaseUrl } from "@opentag/gitlab";
 import { validateLarkCredentials, type LarkDomain, type RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
   defaultExecutorId,
@@ -13,13 +14,13 @@ import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalog
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatGitHubTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
+import { formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, GitHubSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
+import type { BindingMethod, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
 
 const DEFAULT_HERMES_PROFILE_TEMPLATE =
   "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
@@ -56,6 +57,12 @@ export type SetupCommandOptions = {
   githubWebhookPath?: string;
   githubPort?: string;
   githubAutoCreatePr?: boolean;
+  gitlabToken?: string;
+  gitlabProject?: string;
+  gitlabBaseUrl?: string;
+  gitlabWebhookSecret?: string;
+  gitlabWebhookPath?: string;
+  gitlabPort?: string;
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
@@ -110,6 +117,42 @@ function parseGitHubRepository(value: string): { owner: string; repo: string } {
   };
 }
 
+function normalizeGitLabProjectPath(value: string): string {
+  const trimmed = value.trim().replace(/^gitlab:/, "").replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  if (!/^[^|/\s]+(?:\/[^|/\s]+)+$/.test(trimmed)) {
+    throw new Error("GitLab project must use namespace/project, for example group/subgroup/project.");
+  }
+  return trimmed;
+}
+
+function parseGitLabProject(value: string): { projectPathWithNamespace: string; baseUrl?: string } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error("GitLab project is required.");
+  }
+
+  const sshMatch = trimmed.match(/^git@([^:\s]+):(.+)$/) ?? trimmed.match(/^ssh:\/\/git@([^/\s]+)\/(.+)$/);
+  if (sshMatch) {
+    return {
+      baseUrl: `https://${sshMatch[1]}`,
+      projectPathWithNamespace: normalizeGitLabProjectPath(sshMatch[2]!)
+    };
+  }
+
+  if (/^https?:\/\//.test(trimmed)) {
+    const parsed = new URL(trimmed);
+    const path = parsed.pathname.replace(/^\/+/, "").split("/-/")[0] ?? "";
+    return {
+      baseUrl: `${parsed.protocol}//${parsed.host}`,
+      projectPathWithNamespace: normalizeGitLabProjectPath(path)
+    };
+  }
+
+  return {
+    projectPathWithNamespace: normalizeGitLabProjectPath(trimmed)
+  };
+}
+
 function parsePortInput(value: string | undefined, label: string): number | undefined {
   return value === undefined ? undefined : parseLocalPort(value, label);
 }
@@ -137,6 +180,29 @@ function githubRepositoryFromRemote(projectPath: string): string | undefined {
     }
   }
   return undefined;
+}
+
+function gitLabProjectFromRemote(projectPath: string): { projectPathWithNamespace: string; baseUrl: string } | undefined {
+  let remote: string;
+  try {
+    remote = execFileSync("git", ["-C", projectPath, "remote", "get-url", "origin"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
+    return undefined;
+  }
+
+  try {
+    const parsed = parseGitLabProject(remote);
+    if (!parsed.baseUrl || !new URL(parsed.baseUrl).hostname.toLowerCase().includes("gitlab")) return undefined;
+    return {
+      projectPathWithNamespace: parsed.projectPathWithNamespace,
+      baseUrl: normalizeGitLabBaseUrl(parsed.baseUrl)
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -203,10 +269,22 @@ function generateGitHubWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
 
+function generateGitLabWebhookSecret(): string {
+  return randomBytes(32).toString("hex");
+}
+
 function parseGitHubWebhookPath(value: string): string {
   const trimmed = nonEmpty(value, "GitHub webhook path");
   if (!trimmed.startsWith("/")) {
     throw new Error("GitHub webhook path must start with /.");
+  }
+  return trimmed;
+}
+
+function parseGitLabWebhookPath(value: string): string {
+  const trimmed = nonEmpty(value, "GitLab webhook path");
+  if (!trimmed.startsWith("/")) {
+    throw new Error("GitLab webhook path must start with /.");
   }
   return trimmed;
 }
@@ -745,6 +823,67 @@ async function collectGitHubSetup(
   };
 }
 
+async function collectGitLabSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  projectPath: string
+): Promise<GitLabSetupInput> {
+  const remoteDefault = gitLabProjectFromRemote(projectPath);
+  const baseUrlDefault = normalizeGitLabBaseUrl(
+    options.gitlabBaseUrl ?? defaults.gitlabBaseUrl ?? remoteDefault?.baseUrl ?? "https://gitlab.com"
+  );
+  const projectDefault = options.gitlabProject ?? defaults.gitlabProjectPathWithNamespace ?? remoteDefault?.projectPathWithNamespace;
+  const projectInput = nonEmpty(
+    options.gitlabProject ??
+      (await prompts.text({
+        message: t(language, "gitlabProject"),
+        ...(projectDefault ? { initialValue: projectDefault, placeholder: projectDefault } : { placeholder: "group/project" }),
+        validate(value) {
+          try {
+            parseGitLabProject(value);
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+      })),
+    "GitLab project"
+  );
+  const parsedProject = parseGitLabProject(projectInput);
+  const baseUrl = normalizeGitLabBaseUrl(options.gitlabBaseUrl ?? defaults.gitlabBaseUrl ?? parsedProject.baseUrl ?? baseUrlDefault);
+
+  if (!options.gitlabToken) {
+    prompts.note(formatGitLabTokenHelp(language, { baseUrl }));
+  }
+  const token = nonEmpty(options.gitlabToken ?? (await prompts.password({ message: t(language, "gitlabToken") })), "GitLab token");
+  const webhookSecret = options.gitlabWebhookSecret
+    ? nonEmpty(options.gitlabWebhookSecret, "GitLab webhook secret")
+    : defaults.gitlabWebhookSecret ?? generateGitLabWebhookSecret();
+  const port =
+    parsePortInput(options.gitlabPort, "GitLab webhook port") ??
+    (options.yes
+      ? defaults.gitlabPort ?? DEFAULT_GITLAB_WEBHOOK_PORT
+      : parseLocalPort(
+          await prompts.text({
+            message: t(language, "gitlabPort"),
+            initialValue: String(defaults.gitlabPort ?? DEFAULT_GITLAB_WEBHOOK_PORT),
+            placeholder: String(DEFAULT_GITLAB_WEBHOOK_PORT)
+          }),
+          "GitLab webhook port"
+        ));
+
+  return {
+    token,
+    webhookSecret,
+    projectPathWithNamespace: parsedProject.projectPathWithNamespace,
+    baseUrl,
+    webhookPath: parseGitLabWebhookPath(options.gitlabWebhookPath ?? defaults.gitlabWebhookPath ?? "/gitlab/webhooks"),
+    port
+  };
+}
+
 async function collectBindingMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
@@ -819,6 +958,7 @@ export async function collectSetupInput(
   const larkBindingMethod = platform === "lark" ? await collectBindingMethod(options, defaults, prompts, language, "lark") : undefined;
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const larkPersistedCredentials = larkCredentials
     ? {
         appId: larkCredentials.appId,
@@ -846,7 +986,8 @@ export async function collectSetupInput(
         }
       : {}),
     ...(slackSetup ? { slack: slackSetup } : {}),
-    ...(githubSetup ? { github: githubSetup } : {})
+    ...(githubSetup ? { github: githubSetup } : {}),
+    ...(gitlabSetup ? { gitlab: gitlabSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));
