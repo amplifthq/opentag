@@ -205,7 +205,7 @@ rm -rf ~/.config/opentag ~/.local/state/opentag
 
 ```mermaid
 flowchart LR
-    A["Slack, GitHub, GitLab, or Lark"] --> B["OpenTag listener"]
+    A["Slack, GitHub, GitLab, or Lark / Feishu"] --> B["OpenTag listener"]
     B --> C["Local dispatcher"]
     C --> D["Local runner"]
     D --> E["Codex, Claude Code, or custom executor"]
