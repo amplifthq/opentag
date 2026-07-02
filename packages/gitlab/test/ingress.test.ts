@@ -263,6 +263,65 @@ describe("GitLab webhook ingress", () => {
     });
   });
 
+  it("routes mentioned source-thread control commands to submitThreadAction without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({ outcome: "status" }));
+    const app = createGitLabWebhookApp({
+      webhookSecret: "shared-secret",
+      createRun,
+      submitThreadAction,
+      now: () => "2026-06-29T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      object_kind: "note",
+      object_attributes: {
+        id: 1004,
+        note: "@opentag /status",
+        url: "https://gitlab.com/acme/demo/-/issues/1#note_1004",
+        noteable_type: "Issue"
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility: "public",
+        web_url: "https://gitlab.com/acme/demo"
+      },
+      issue: {
+        iid: 1,
+        url: "https://gitlab.com/acme/demo/-/issues/1"
+      },
+      user: { id: 7, username: "alice" }
+    });
+
+    const response = await app.request("/gitlab/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gitlab-event": "Note Hook",
+        "x-gitlab-token": "shared-secret"
+      },
+      body
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledOnce();
+    expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
+      id: expect.stringMatching(/^control_gitlab_note_1004_[0-9a-f]{12}$/),
+      rawText: "@opentag /status",
+      callback: {
+        provider: "gitlab",
+        threadKey: "acme/demo|issue|1"
+      },
+      metadata: {
+        repoProvider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        projectPathWithNamespace: "acme/demo"
+      }
+    });
+  });
+
   it("ignores noteable types outside the MVP scope", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const app = createGitLabWebhookApp({

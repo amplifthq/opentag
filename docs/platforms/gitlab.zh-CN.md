@@ -104,6 +104,16 @@ ngrok http 3060
 - 本地 runner 针对绑定的 checkout 启动。
 - OpenTag 在同一个 GitLab issue 或 merge request thread 中回复结果。
 
+run 进行中时，你可以在同一个 source thread 里检查或停止 runtime：
+
+```text
+@opentag /status
+@opentag /doctor
+@opentag /stop [run_id]
+```
+
+这些控制命令只报告或取消 source-thread runtime 状态，不会再创建一次 run。
+
 ## Relay 模式
 
 GitLab relay 模式适用于你自己运营的 relay，或者已经确认配置了 GitLab webhook 能力的 relay。不要把 GitLab project webhook 指向一个泛用 hosted relay，除非 relay 运营方明确确认 `/gitlab/webhooks` 已启用，并且已经配置匹配的 GitLab secret。没有 relay 侧配置时，请使用本地 `opentag start` 加公网 tunnel。
@@ -135,6 +145,7 @@ https://<你的 relay 域名>/gitlab/webhooks
 - run 进行中更新同一条 GitLab status note，而不是每个状态都创建一条新的 progress note。
 - 对支持的 `create_pull_request` action receipt，在 `apply 1` 后直接创建 GitLab merge request。
 - 当 dispatcher 有支持的 action receipt 时，支持 `apply 1`、`approve 1`、`continue 1`、`reject 1` 等 thread action 命令。
+- 支持 `@opentag /status`、`@opentag /doctor`、`@opentag /stop [run_id]` 等 source-thread 控制命令，并且不会创建新的 run。
 
 暂未实现：
 

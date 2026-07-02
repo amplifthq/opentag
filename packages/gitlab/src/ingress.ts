@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
-import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
+import { parseThreadActionCommand, parseThreadControlCommand, type OpenTagEvent } from "@opentag/core";
 import { Hono } from "hono";
 import { normalizeGitLabBaseUrl, normalizeGitLabNote, type GitLabNoteableType, type GitLabVisibility } from "./normalize.js";
 
@@ -261,6 +261,15 @@ function encodeProjectPath(pathWithNamespace: string): string {
   return encodeURIComponent(pathWithNamespace);
 }
 
+function ownerRepoFromProjectPath(pathWithNamespace: string): { owner: string; repo: string } | undefined {
+  const lastSlash = pathWithNamespace.lastIndexOf("/");
+  if (lastSlash === -1) return undefined;
+  return {
+    owner: pathWithNamespace.substring(0, lastSlash),
+    repo: pathWithNamespace.substring(lastSlash + 1)
+  };
+}
+
 function buildApiNotesUrl(input: {
   baseUrl?: string;
   projectPathWithNamespace: string;
@@ -330,26 +339,31 @@ async function handleNoteCreated(input: {
     threadKey: `${payload.project.path_with_namespace}|${isMergeRequest ? "merge_request" : "issue"}|${issueIid}`
   };
 
-  if (parseThreadActionCommand(payload.object_attributes.note) && input.submitThreadAction) {
-    await input.submitThreadAction({
-      id: actionId,
-      rawText: payload.object_attributes.note,
-      actor: {
-        provider: "gitlab",
-        providerUserId: String(payload.user.id),
-        handle: payload.user.username
-      },
-      callback,
-      metadata: {
-        repoProvider: "gitlab",
-        projectPathWithNamespace: payload.project.path_with_namespace,
-        projectId: payload.project.id,
-        noteableType,
-        issueIid,
-        ...(mergeRequestIid !== undefined ? { mergeRequestIid } : {}),
-        noteUrl: payload.object_attributes.url
-      }
-    });
+  const controlCommand = parseThreadControlCommand(payload.object_attributes.note);
+  const actionCommand = parseThreadActionCommand(payload.object_attributes.note);
+  if (controlCommand || actionCommand) {
+    if (input.submitThreadAction) {
+      await input.submitThreadAction({
+        id: controlCommand ? actionId.replace(/^approval_/, "control_") : actionId,
+        rawText: payload.object_attributes.note,
+        actor: {
+          provider: "gitlab",
+          providerUserId: String(payload.user.id),
+          handle: payload.user.username
+        },
+        callback,
+        metadata: {
+          repoProvider: "gitlab",
+          ...ownerRepoFromProjectPath(payload.project.path_with_namespace),
+          projectPathWithNamespace: payload.project.path_with_namespace,
+          projectId: payload.project.id,
+          noteableType,
+          issueIid,
+          ...(mergeRequestIid !== undefined ? { mergeRequestIid } : {}),
+          noteUrl: payload.object_attributes.url
+        }
+      });
+    }
     return { ok: true };
   }
 

@@ -1,6 +1,8 @@
+import { parseOpenTagMention } from "./mention.js";
 import type { MutationIntent, OpenTagRunResult, SuggestedChangesSnapshot } from "./schema.js";
 
 export type ThreadActionVerb = "approve" | "apply" | "continue" | "reject";
+export type ThreadControlVerb = "status" | "doctor" | "stop";
 
 export type ThreadActionSelection =
   | { kind: "latest" }
@@ -15,6 +17,12 @@ export type ThreadActionCommand = {
   selection: ThreadActionSelection;
   rawText: string;
   reason?: string;
+};
+
+export type ThreadControlCommand = {
+  verb: ThreadControlVerb;
+  rawText: string;
+  runId?: string;
 };
 
 export type SuggestedActionCandidate = {
@@ -94,6 +102,11 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function threadCommandText(rawText: string): string {
+  const mention = parseOpenTagMention(rawText);
+  return mention.matched ? mention.rawText : rawText.trim();
+}
+
 function parseSelection(tokens: string[]): ThreadActionSelection {
   const normalized = tokens.map(normalizeToken).filter(Boolean);
   const first = normalized[0];
@@ -133,7 +146,7 @@ function reasonAfterSelection(rest: string, selection: ThreadActionSelection): s
 }
 
 export function parseThreadActionCommand(rawText: string): ThreadActionCommand | null {
-  const text = rawText.trim();
+  const text = threadCommandText(rawText);
   if (!text) return null;
 
   for (const candidate of CHINESE_VERBS) {
@@ -163,6 +176,27 @@ export function parseThreadActionCommand(rawText: string): ThreadActionCommand |
     selection,
     rawText: text,
     ...(reason ? { reason } : {})
+  };
+}
+
+export function parseThreadControlCommand(rawText: string): ThreadControlCommand | null {
+  const text = threadCommandText(rawText);
+  if (!text) return null;
+
+  const simple = text.match(/^\/(status|doctor)\s*$/i);
+  if (simple) {
+    return {
+      verb: simple[1]!.toLowerCase() as "status" | "doctor",
+      rawText: text
+    };
+  }
+
+  const stop = text.match(/^\/stop(?:\s+(\S+))?\s*$/i);
+  if (!stop) return null;
+  return {
+    verb: "stop",
+    rawText: text,
+    ...(stop[1] ? { runId: stop[1] } : {})
   };
 }
 
