@@ -62,6 +62,31 @@ function githubRelayConfig() {
   return built;
 }
 
+function gitlabRelayConfig() {
+  const built = createSetupConfig({
+    language: "en",
+    platform: "gitlab",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    gitlab: {
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    }
+  });
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  return built;
+}
+
 function hangingFetch(): typeof fetch {
   return vi.fn((_url: string | URL | Request, init?: RequestInit) => {
     return new Promise<Response>((_resolve, reject) => {
@@ -216,6 +241,19 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("OK GitHub webhook secret: Configured locally; the relay /github/webhooks endpoint must verify this secret before creating runs.");
     expect(formatted).toContain("WARN relay token scope: This self-hosted MVP still uses the daemon pairing token for registration and runner calls");
     expect(formatted).toContain("WARN runner security policy: No explicit daemon.security policy is configured");
+  });
+
+  it("formats GitLab relay security as supported when a GitLab webhook secret is configured", async () => {
+    const summary = await statusFromConfig({
+      config: gitlabRelayConfig(),
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: vi.fn(async () => Response.json({ ok: true }))
+    });
+
+    const formatted = formatStatus(summary);
+    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("OK GitLab webhook secret: Configured locally; the relay /gitlab/webhooks endpoint must verify X-Gitlab-Token before creating runs.");
+    expect(formatted).not.toContain("GitLab relay mode is not supported");
   });
 
   it("formats relay token scope as split when runnerToken is configured", async () => {

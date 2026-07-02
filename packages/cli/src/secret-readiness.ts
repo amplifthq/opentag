@@ -71,5 +71,10 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     add("platforms.github.webhookSecret", ["platforms", "github", "webhookSecret"]);
   }
 
+  if (hasPath(redactedConfig, ["platforms", "gitlab"])) {
+    add("platforms.gitlab.token", ["platforms", "gitlab", "token"]);
+    add("platforms.gitlab.webhookSecret", ["platforms", "gitlab", "webhookSecret"]);
+  }
+
   return rows;
 }

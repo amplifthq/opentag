@@ -15,7 +15,12 @@ export const OFFICIAL_SETUP_LINKS = {
   feishuConsole: "https://open.feishu.cn/app",
   larkAppIdDocs: "https://open.larksuite.com/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/how-to-obtain-app-id",
   larkWebSocketDocs: "https://open.larksuite.com/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-/use-websocket",
-  feishuWebSocketDocs: "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN"
+  feishuWebSocketDocs: "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/use-websocket?lang=zh-CN",
+  gitlabTokenPage: "https://gitlab.com/-/user_settings/personal_access_tokens",
+  gitlabTokenDocs: "https://docs.gitlab.com/user/profile/personal_access_tokens/",
+  gitlabWebhookEventsDocs: "https://docs.gitlab.com/user/project/integrations/webhook_events/",
+  gitlabNotesApiDocs: "https://docs.gitlab.com/api/notes/",
+  gitlabMergeRequestsApiDocs: "https://docs.gitlab.com/api/merge_requests/"
 } as const;
 
 function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
@@ -28,7 +33,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "github":
         return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；你回复 apply 1 后也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3050", "需要一个公网 tunnel 转发 GitHub webhook"];
       case "gitlab":
-        return [];
+        return ["GitLab 项目 path_with_namespace，例如 group/project", "GitLab access token（用于回写 issue/MR note；你回复 apply 1 后也用于创建 MR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3060", "需要一个公网 tunnel 转发 GitLab Note Hook"];
       case "telegram":
         return [];
     }
@@ -42,7 +47,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "github":
       return ["GitHub repository owner/repo", "GitHub token for comments and PR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3050", "A public tunnel is required for GitHub webhook delivery"];
     case "gitlab":
-      return [];
+      return ["GitLab project path_with_namespace, for example group/project", "GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3060", "A public tunnel is required for GitLab Note Hook delivery"];
     case "telegram":
       return [];
   }
@@ -67,7 +72,12 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
           `Repository webhook 官方文档: ${OFFICIAL_SETUP_LINKS.githubWebhookDocs}`
         ];
       case "gitlab":
-        return [];
+        return [
+          `GitLab token 创建页: ${OFFICIAL_SETUP_LINKS.gitlabTokenPage}`,
+          `GitLab webhook 事件文档: ${OFFICIAL_SETUP_LINKS.gitlabWebhookEventsDocs}`,
+          `GitLab Notes API 文档: ${OFFICIAL_SETUP_LINKS.gitlabNotesApiDocs}`,
+          `GitLab Merge Requests API 文档: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
+        ];
       case "telegram":
         return [];
     }
@@ -90,7 +100,12 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
         `Repository webhook docs: ${OFFICIAL_SETUP_LINKS.githubWebhookDocs}`
       ];
     case "gitlab":
-      return [];
+      return [
+        `GitLab token page: ${OFFICIAL_SETUP_LINKS.gitlabTokenPage}`,
+        `GitLab webhook event docs: ${OFFICIAL_SETUP_LINKS.gitlabWebhookEventsDocs}`,
+        `GitLab Notes API docs: ${OFFICIAL_SETUP_LINKS.gitlabNotesApiDocs}`,
+        `GitLab Merge Requests API docs: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
+      ];
     case "telegram":
       return [];
   }
@@ -237,5 +252,35 @@ export function formatGitHubTokenHelp(language: CliLanguage, input: { autoCreate
     ...permissions,
     "",
     "GitHub only shows the token once. Copy it immediately, then paste it into the next prompt."
+  ].join("\n");
+}
+
+export function formatGitLabTokenHelp(language: CliLanguage, input: { baseUrl: string }): string {
+  const tokenPage =
+    input.baseUrl === "https://gitlab.com"
+      ? OFFICIAL_SETUP_LINKS.gitlabTokenPage
+      : `${input.baseUrl.replace(/\/$/, "")}/-/user_settings/personal_access_tokens`;
+  if (language === "zh-CN") {
+    return [
+      "GitLab token 在哪里创建:",
+      `- 直接打开: ${tokenPage}`,
+      `- 官方教程: ${OFFICIAL_SETUP_LINKS.gitlabTokenDocs}`,
+      "",
+      "推荐创建 personal access token 或 project access token，只授权当前项目。需要权限:",
+      "- api: 用于通过 Notes API 回写 issue / merge request 评论，并在 apply 后通过 Merge Requests API 创建 MR",
+      "",
+      "Webhook 设置里需要启用 Note events，并填写 OpenTag 生成的 secret token。"
+    ].join("\n");
+  }
+
+  return [
+    "Where to create the GitLab token:",
+    `- Token page: ${tokenPage}`,
+    `- Official guide: ${OFFICIAL_SETUP_LINKS.gitlabTokenDocs}`,
+    "",
+    "Create a personal access token or project access token scoped to this project. Required scope:",
+    "- api: lets OpenTag post issue / merge request replies through the Notes API and create MRs through the Merge Requests API after apply",
+    "",
+    "In the project webhook, enable Note events and paste the secret token generated by OpenTag."
   ].join("\n");
 }

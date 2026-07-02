@@ -242,7 +242,7 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.3.5`. The npm package family is published under the `@opentag` scope.
+Current public release: `v0.4.0`. The npm package family is published under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
@@ -252,6 +252,7 @@ Current public release: `v0.3.5`. The npm package family is published under the 
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |
+| [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook handling, note replies, merge request helpers, and action application |
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / Feishu ingress, Personal Agent registration, and replies |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus Echo, Claude Code, and Codex adapters |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite persistence |

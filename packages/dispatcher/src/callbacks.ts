@@ -35,6 +35,13 @@ function githubCommentUriFrom(input: { commentsUri: string; responseBody: { id?:
   return undefined;
 }
 
+function gitlabNoteUriFrom(input: { notesUri: string; responseBody: { id?: number | string } | null | undefined }): string | undefined {
+  if (input.responseBody && (typeof input.responseBody.id === "number" || typeof input.responseBody.id === "string")) {
+    return `${input.notesUri.replace(/\/$/, "")}/${encodeURIComponent(String(input.responseBody.id))}`;
+  }
+  return undefined;
+}
+
 function slackBotTokenFor(input: {
   botToken?: string | undefined;
   botTokensByAgentId?: Record<string, string> | undefined;
@@ -129,6 +136,54 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
         }
         if (message.kind === "final") {
           commentUriByKey.delete(statusKey);
+        }
+      });
+      deliveryByKey.set(statusKey, current);
+      await current.finally(() => {
+        if (deliveryByKey.get(statusKey) === current) {
+          deliveryByKey.delete(statusKey);
+        }
+      });
+    }
+  };
+}
+
+export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const noteUriByKey = new Map<string, string>();
+  const deliveryByKey = new Map<string, Promise<void>>();
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "gitlab") return;
+      const token = input.token;
+      if (!token) return;
+
+      const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
+      const previous = deliveryByKey.get(statusKey) ?? Promise.resolve();
+      const current = previous.then(async () => {
+        const existingNoteUri = noteUriByKey.get(statusKey);
+        const response = await fetchImpl(existingNoteUri ?? message.uri, {
+          method: existingNoteUri ? "PUT" : "POST",
+          headers: {
+            "PRIVATE-TOKEN": token,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify({ body: message.body })
+        });
+
+        if (!response.ok) {
+          throw new Error(`deliver GitLab callback failed: ${response.status} ${await response.text()}`);
+        }
+        if (!existingNoteUri) {
+          const body = (await response.json()) as { id?: number | string } | null;
+          const noteUri = gitlabNoteUriFrom({ notesUri: message.uri, responseBody: body });
+          if (noteUri) {
+            noteUriByKey.set(statusKey, noteUri);
+          }
+        }
+        if (message.kind === "final") {
+          noteUriByKey.delete(statusKey);
         }
       });
       deliveryByKey.set(statusKey, current);

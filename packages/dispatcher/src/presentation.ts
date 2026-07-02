@@ -16,6 +16,11 @@ import {
 } from "@opentag/core";
 import { renderAcknowledgement, renderFinalSummaryPresentation, renderProgress } from "@opentag/github";
 import {
+  renderAcknowledgement as renderGitLabAcknowledgement,
+  renderFinalSummaryPresentation as renderGitLabFinalSummaryPresentation,
+  renderProgress as renderGitLabProgress
+} from "@opentag/gitlab";
+import {
   createLarkActionReceiptCard,
   createLarkDoctorSummaryCard,
   createLarkFinalSummaryCard,
@@ -94,12 +99,18 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
     if (provider === "telegram") {
       return { body: renderTelegramAcknowledgement(presentation.runId) };
     }
+    if (provider === "gitlab") {
+      return { body: renderGitLabAcknowledgement(presentation.runId) };
+    }
     return { body: renderAcknowledgement(presentation.runId) };
   }
 
   const message = presentation.message ?? presentation.nextAction ?? presentation.state;
   if (provider === "telegram") {
     return { body: renderTelegramProgress(message) };
+  }
+  if (provider === "gitlab") {
+    return { body: renderGitLabProgress({ runId: presentation.runId, message }) };
   }
   return { body: renderProgress({ runId: presentation.runId, message }) };
 }
@@ -127,6 +138,9 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
   }
   if (provider === "telegram") {
     return { body: renderTelegramFinalSummaryPresentation(presentation) };
+  }
+  if (provider === "gitlab") {
+    return { body: renderGitLabFinalSummaryPresentation(presentation) };
   }
   return { body: renderFinalSummaryPresentation(presentation) };
 }

@@ -21,6 +21,13 @@ pnpm add @opentag/gitlab
 ```ts
 import { normalizeGitLabNote } from "@opentag/gitlab";
 
+function visibilityFromLevel(level: number) {
+  if (level === 0) return "private";
+  if (level === 10) return "internal";
+  if (level === 20) return "public";
+  throw new Error(`Unsupported GitLab visibility_level: ${level}`);
+}
+
 const event = normalizeGitLabNote({
   id: String(payload.object_attributes.id),
   noteBody: payload.object_attributes.note,
@@ -30,7 +37,7 @@ const event = normalizeGitLabNote({
   workItemUrl: payload.issue.url,
   projectPathWithNamespace: payload.project.path_with_namespace,
   projectId: payload.project.id,
-  projectVisibility: payload.project.visibility,
+  projectVisibility: payload.project.visibility ?? visibilityFromLevel(payload.project.visibility_level),
   actorId: payload.user.id,
   actorUsername: payload.user.username,
   noteableType: payload.object_attributes.noteable_type,
@@ -48,7 +55,7 @@ GitLab notes are delivered via the `Note Hook` event with the `X-Gitlab-Token` h
 
 ## Visibility
 
-GitLab visibility levels are `"private" | "internal" | "public"`. We map `private` and `internal` to `ContextPointer.visibility: "private"` and `public` to `"public"`; the MVP does not yet wire `organization` visibility.
+GitLab visibility levels are `"private" | "internal" | "public"` in normalized adapter input. GitLab.com Note Hook payloads may send `project.visibility_level` instead of `project.visibility`; map `0 -> private`, `10 -> internal`, and `20 -> public` before calling `normalizeGitLabNote`. We map `private` and `internal` to `ContextPointer.visibility: "private"` and `public` to `"public"`; the MVP does not yet wire `organization` visibility.
 
 ## Stability
 

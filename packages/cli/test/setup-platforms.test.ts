@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,13 @@ import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "opentag-cli-test-"));
+}
+
+function tempGitProjectWithOrigin(remoteUrl: string): string {
+  const projectPath = tempDir();
+  execFileSync("git", ["init"], { cwd: projectPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", remoteUrl], { cwd: projectPath, stdio: "ignore" });
+  return projectPath;
 }
 
 function testPrompts(notes: string[] = []): PromptAdapter {
@@ -86,6 +94,32 @@ describe("OpenTag CLI setup platforms", () => {
     expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/github.zh-CN.md");
     expect(notes.join("\n")).toContain("https://github.com/settings/personal-access-tokens/new");
     expect(notes.join("\n")).toContain("OpenTag 会自动生成 webhook secret");
+  });
+
+  it("prints the GitLab setup guide before collecting GitLab credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabProject: "acme/team/demo",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/gitlab.en.md");
+    expect(notes.join("\n")).toContain("https://docs.gitlab.com/user/project/integrations/webhook_events/");
+    expect(notes.join("\n")).toContain("GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`");
   });
 
   it("writes a Slack config and default channel binding without Lark", async () => {
@@ -232,5 +266,82 @@ describe("OpenTag CLI setup platforms", () => {
     expect(config.daemon.preparePullRequestBranch).toBe(true);
     expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
     expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
+  });
+
+  it("writes a GitLab config with a GitLab repository binding", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabProject: "acme/team/demo",
+        gitlabBaseUrl: "https://gitlab.example.com",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.gitlab).toEqual({
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    });
+    expect(config.daemon.repositories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "gitlab", owner: "acme/team", repo: "demo" })
+      ])
+    );
+    expect(config.preferences?.lastSetup).toMatchObject({
+      platforms: ["gitlab"],
+      gitlabProjectPathWithNamespace: "acme/team/demo",
+      gitlabBaseUrl: "https://gitlab.example.com",
+      gitlabPort: 3060
+    });
+  });
+
+  it("detects self-managed GitLab projects from custom-domain remotes", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const projectPath = tempGitProjectWithOrigin("https://git.company.com/acme/team/demo.git");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: projectPath,
+        language: "en",
+        platform: "gitlab",
+        executor: "echo",
+        gitlabToken: "glpat_token",
+        gitlabWebhookSecret: "gitlab_webhook_secret",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.gitlab).toMatchObject({
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://git.company.com"
+    });
+    expect(config.daemon.repositories).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "gitlab", owner: "acme/team", repo: "demo" })
+      ])
+    );
   });
 });

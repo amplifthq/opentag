@@ -19,4 +19,13 @@ describe("gitlabProjectWebhooksSettingsUrl", () => {
       "https://gitlab.com/acme/demo/-/hooks"
     );
   });
+
+  it("uses a configured self-managed base URL", () => {
+    expect(
+      gitlabProjectWebhooksSettingsUrl({
+        baseUrl: "https://gitlab.example.com/",
+        projectPathWithNamespace: "acme/demo"
+      })
+    ).toBe("https://gitlab.example.com/acme/demo/-/hooks");
+  });
 });

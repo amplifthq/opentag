@@ -18,6 +18,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const lark = config.platforms.lark;
   const slack = config.platforms.slack;
   const github = config.platforms.github;
+  const gitlab = config.platforms.gitlab;
   const hermes = config.daemon.hermes;
   const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
@@ -26,7 +27,17 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
 
   return {
     ...(config.preferences?.language ? { language: config.preferences.language } : {}),
-    ...(lastSetup?.platforms?.[0] ? { platform: lastSetup.platforms[0] } : lark ? { platform: "lark" } : slack ? { platform: "slack" } : github ? { platform: "github" } : {}),
+    ...(lastSetup?.platforms?.[0]
+      ? { platform: lastSetup.platforms[0] }
+      : lark
+        ? { platform: "lark" }
+        : slack
+          ? { platform: "slack" }
+          : github
+            ? { platform: "github" }
+            : gitlab
+              ? { platform: "gitlab" }
+              : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
@@ -51,6 +62,15 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
       : config.daemon.allowAutoCreatePullRequest !== undefined
         ? { githubAutoCreatePullRequest: config.daemon.allowAutoCreatePullRequest }
         : {}),
+    ...(lastSetup?.gitlabProjectPathWithNamespace
+      ? { gitlabProjectPathWithNamespace: lastSetup.gitlabProjectPathWithNamespace }
+      : gitlab?.projectPathWithNamespace
+        ? { gitlabProjectPathWithNamespace: gitlab.projectPathWithNamespace }
+        : {}),
+    ...(lastSetup?.gitlabBaseUrl ? { gitlabBaseUrl: lastSetup.gitlabBaseUrl } : gitlab?.baseUrl ? { gitlabBaseUrl: gitlab.baseUrl } : {}),
+    ...(lastSetup?.gitlabPort ? { gitlabPort: lastSetup.gitlabPort } : gitlab?.port ? { gitlabPort: gitlab.port } : {}),
+    ...(gitlab?.webhookSecret ? { gitlabWebhookSecret: gitlab.webhookSecret } : {}),
+    ...(gitlab?.webhookPath ? { gitlabWebhookPath: gitlab.webhookPath } : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }
