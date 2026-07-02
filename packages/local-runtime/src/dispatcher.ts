@@ -4,6 +4,7 @@ import { createOpenTagClient } from "@opentag/client";
 import {
   createCompositeCallbackSink,
   createCompositeSourceReceiptSink,
+  createDiscordCallbackSink,
   createDispatcherApp,
   createGitHubCallbackSink,
   createGitLabCallbackSink,
@@ -14,6 +15,7 @@ import {
   createTelegramCallbackSink
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions } from "@opentag/dispatcher";
+import { createDiscordInteractionsApp } from "@opentag/discord";
 import { createGitLabWebhookApp } from "@opentag/gitlab";
 
 export type LocalDispatcherRuntimeInput = {
@@ -43,6 +45,9 @@ export type LocalDispatcherRuntimeInput = {
   slackBotTokensByAgentId?: Record<string, string>;
   telegramBotToken?: string;
   telegramBotTokensByAgentId?: Record<string, string>;
+  discordPublicKey?: string;
+  discordBotToken?: string;
+  discordWebhookPath?: string;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
 };
@@ -206,6 +211,9 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(slackBotTokensByAgentId ? { slackBotTokensByAgentId } : {}),
     ...(env.OPENTAG_TELEGRAM_BOT_TOKEN ? { telegramBotToken: env.OPENTAG_TELEGRAM_BOT_TOKEN } : {}),
     ...(telegramBotTokensByAgentId ? { telegramBotTokensByAgentId } : {}),
+    ...(env.OPENTAG_DISCORD_PUBLIC_KEY ? { discordPublicKey: env.OPENTAG_DISCORD_PUBLIC_KEY } : {}),
+    ...(env.OPENTAG_DISCORD_BOT_TOKEN ? { discordBotToken: env.OPENTAG_DISCORD_BOT_TOKEN } : {}),
+    ...(env.OPENTAG_DISCORD_WEBHOOK_PATH ? { discordWebhookPath: env.OPENTAG_DISCORD_WEBHOOK_PATH } : {}),
     ...hardening
   };
 }
@@ -269,6 +277,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       createTelegramCallbackSink({
         ...(input.telegramBotToken ? { botToken: input.telegramBotToken } : {}),
         ...(input.telegramBotTokensByAgentId ? { botTokensByAgentId: input.telegramBotTokensByAgentId } : {})
+      }),
+      createDiscordCallbackSink({
+        ...(input.discordBotToken ? { token: input.discordBotToken } : {})
       })
     ])
   });
@@ -287,6 +298,53 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         webhookSecret: input.gitlabWebhookSecret,
         ...(input.gitlabBaseUrl ? { baseUrl: input.gitlabBaseUrl } : {}),
         ...(input.gitlabWebhookPath ? { webhookPath: input.gitlabWebhookPath } : {}),
+        async createRun(event) {
+          const runId = `run_${randomUUID()}`;
+          const created = await dispatcherClient.createRun({ runId, event });
+          return created.outcome === "run_created" ? { runId: created.run.id } : {};
+        },
+        async submitThreadAction(action) {
+          await dispatcherClient.submitThreadAction(action);
+        },
+        now: () => new Date().toISOString()
+      })
+    );
+  }
+
+  if (input.discordPublicKey) {
+    if (input.port === 0) {
+      throw new Error("Discord interactions mount requires a fixed dispatcher port.");
+    }
+    const dispatcherClient = createOpenTagClient({
+      dispatcherUrl: `http://127.0.0.1:${input.port}`,
+      ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
+    });
+    app.route(
+      "/",
+      createDiscordInteractionsApp({
+        publicKey: input.discordPublicKey,
+        ...(input.discordWebhookPath ? { webhookPath: input.discordWebhookPath } : {}),
+        async resolveChannelBinding({ applicationId, channelId }) {
+          try {
+            const { binding } = await dispatcherClient.getChannelBinding({
+              provider: "discord",
+              accountId: applicationId,
+              conversationId: channelId
+            });
+            return {
+              applicationId,
+              channelId,
+              owner: binding.owner,
+              repo: binding.repo,
+              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+            };
+          } catch (error) {
+            // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
+            // from a genuinely unbound channel — log it so operators can tell them apart.
+            console.error("discord.resolveChannelBinding failed", error);
+            return null;
+          }
+        },
         async createRun(event) {
           const runId = `run_${randomUUID()}`;
           const created = await dispatcherClient.createRun({ runId, event });

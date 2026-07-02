@@ -249,6 +249,18 @@ export function dispatcherRuntimeInputFromCliConfig(
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  // Discord (experimental) is env-only for now — no config.platforms.discord until
+  // slice 3. When the public key is set it mounts alongside an existing startable
+  // platform (e.g. Lark).
+  const env = input.env ?? process.env;
+  const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
+  const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
+  const discordWebhookPath = env.OPENTAG_DISCORD_WEBHOOK_PATH;
+  if (discordPublicKey && !discordBotToken) {
+    // Without the bot token the interactions app still mounts and ACKs slash commands,
+    // but every progress/final callback would silently fail — fail fast instead.
+    throw new Error("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+  }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
   }
@@ -284,7 +296,10 @@ export function dispatcherRuntimeInputFromCliConfig(
           }
         }
       : {}),
-    ...(slack ? { slackBotToken: slack.botToken } : {})
+    ...(slack ? { slackBotToken: slack.botToken } : {}),
+    ...(discordPublicKey ? { discordPublicKey } : {}),
+    ...(discordBotToken ? { discordBotToken } : {}),
+    ...(discordWebhookPath ? { discordWebhookPath } : {})
   };
 }
 

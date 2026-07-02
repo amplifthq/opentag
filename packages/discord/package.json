@@ -1,0 +1,45 @@
+{
+  "name": "@opentag/discord",
+  "version": "0.4.0",
+  "description": "Discord interactions normalization and callback rendering for OpenTag.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "discord",
+    "interactions",
+    "agents",
+    "webhooks"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentag/core": "workspace:*",
+    "hono": "^4.6.15"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}

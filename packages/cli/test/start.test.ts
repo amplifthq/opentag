@@ -353,6 +353,32 @@ describe("OpenTag CLI start wiring", () => {
     );
   });
 
+  it("fails fast when the Discord public key is set without a bot token", () => {
+    const built = config();
+
+    expect(() =>
+      dispatcherRuntimeInputFromCliConfig(built, { env: { OPENTAG_DISCORD_PUBLIC_KEY: "pubkey" } })
+    ).toThrow("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+  });
+
+  it("passes the documented Discord webhook path through to the runtime input", () => {
+    const built = config();
+
+    expect(
+      dispatcherRuntimeInputFromCliConfig(built, {
+        env: {
+          OPENTAG_DISCORD_PUBLIC_KEY: "pubkey",
+          OPENTAG_DISCORD_BOT_TOKEN: "bot",
+          OPENTAG_DISCORD_WEBHOOK_PATH: "/custom/discord"
+        }
+      })
+    ).toMatchObject({
+      discordPublicKey: "pubkey",
+      discordBotToken: "bot",
+      discordWebhookPath: "/custom/discord"
+    });
+  });
+
   it("derives Lark ingress config with a default repo binding for one Project Target", () => {
     const built = config();
     built.daemon.runTimeoutMs = 30_000;
