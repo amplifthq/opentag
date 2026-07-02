@@ -245,7 +245,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
     await next();
   };
 }
-import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
+import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
@@ -1246,6 +1246,21 @@ async function authorizeThreadAction(input: {
       ok: false,
       reason: "actor_not_allowed",
       message: "This actor is not allowed to approve or apply actions for the bound repository."
+    };
+  }
+
+  // Same default as run admission: without an explicit allowlist, approvals
+  // arriving from a public GitHub/GitLab thread require platform-reported
+  // write access, so a drive-by commenter cannot approve a pending action.
+  if (
+    !binding.allowedActors?.length &&
+    sourceRepoIsPublic(input.resolved.proposal.event) &&
+    input.actor.writeAccess !== true
+  ) {
+    return {
+      ok: false,
+      reason: "actor_not_allowed",
+      message: "This repository is public, so only actors with write access can approve or apply actions."
     };
   }
 

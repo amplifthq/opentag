@@ -12,6 +12,7 @@ export type GitHubIssueCommentInput = {
   repo: string;
   actorId: number;
   actorLogin: string;
+  authorAssociation?: string;
   private: boolean;
   receivedAt: string;
   installationId?: number;
@@ -30,12 +31,24 @@ export type GitHubPullRequestReviewCommentInput = {
   pullRequestNumber: number;
   actorId: number;
   actorLogin: string;
+  authorAssociation?: string;
   private: boolean;
   receivedAt: string;
   installationId?: number;
   deliveryId?: string;
   signatureVerified?: boolean;
 };
+
+/** `author_association` values GitHub reports for commenters who can push to
+ * the repository. `MEMBER` (org member) is trusted the same way GitHub Actions
+ * and most GitHub bots treat it. Everything else (`CONTRIBUTOR`, `NONE`,
+ * `FIRST_TIME_CONTRIBUTOR`, ...) maps to no write access. */
+const GITHUB_WRITE_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+export function githubActorWriteAccess(authorAssociation: string | undefined): boolean | undefined {
+  if (!authorAssociation) return undefined;
+  return GITHUB_WRITE_ASSOCIATIONS.has(authorAssociation);
+}
 
 function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
@@ -154,6 +167,8 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     ...(mention.parsed ? { parsed: mention.parsed } : {})
   };
 
+  const writeAccess = githubActorWriteAccess(input.authorAssociation);
+
   return {
     id: `evt_github_comment_${input.id}`,
     source: "github",
@@ -162,7 +177,8 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     actor: {
       provider: "github",
       providerUserId: String(input.actorId),
-      handle: input.actorLogin
+      handle: input.actorLogin,
+      ...(writeAccess !== undefined ? { writeAccess } : {})
     },
     target: {
       mention: "@opentag",
@@ -203,6 +219,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       owner: input.owner,
       repo: input.repo,
       issueNumber: input.issueNumber,
+      ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
       ...(typeof input.signatureVerified === "boolean"
@@ -224,6 +241,8 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
     ...(mention.parsed ? { parsed: mention.parsed } : {})
   };
 
+  const writeAccess = githubActorWriteAccess(input.authorAssociation);
+
   return {
     id: `evt_github_pr_review_comment_${input.id}`,
     source: "github",
@@ -232,7 +251,8 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
     actor: {
       provider: "github",
       providerUserId: String(input.actorId),
-      handle: input.actorLogin
+      handle: input.actorLogin,
+      ...(writeAccess !== undefined ? { writeAccess } : {})
     },
     target: {
       mention: "@opentag",
@@ -273,6 +293,7 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       owner: input.owner,
       repo: input.repo,
       pullRequestNumber: input.pullRequestNumber,
+      ...(input.authorAssociation ? { authorAssociation: input.authorAssociation } : {}),
       ...commandMetadata(command),
       ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
       ...(typeof input.signatureVerified === "boolean"

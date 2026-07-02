@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Run admission on public GitHub/GitLab repositories now requires
+  platform-reported write access by default. GitHub commenters are checked via
+  the webhook `author_association` field (`OWNER`, `MEMBER`, `COLLABORATOR`);
+  GitLab Note Hooks carry no access level, so public GitLab projects stay
+  closed until `allowedActors` is configured on the repository binding.
+  Private repositories, Slack, and Lark behavior is unchanged, and an explicit
+  `allowedActors` list still overrides the default for write-capable runs.
+- Source-thread approvals (`apply`, `approve`, ...) from public GitHub/GitLab
+  threads follow the same default: without an `allowedActors` list, only
+  actors with write access can approve or apply proposed actions.
+
 ## v0.3.0 - 2026-06-30
 
 OpenTag 0.3.0 improves the local CLI setup path and makes source-thread

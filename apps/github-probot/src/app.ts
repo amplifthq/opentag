@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { createOpenTagClient, type ThreadActionInput } from "@opentag/client";
 import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, renderAcknowledgement } from "@opentag/github";
+import { githubActorWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, renderAcknowledgement } from "@opentag/github";
 import type { Probot } from "probot";
 
 type IssueCommentPayload = {
-  comment: { id: number; body: string; html_url: string };
+  comment: { id: number; body: string; html_url: string; author_association?: string };
   issue: { html_url: string; comments_url: string; number: number };
   repository: { name: string; private: boolean; owner: { login: string } };
   sender: { id: number; login: string };
@@ -13,7 +13,7 @@ type IssueCommentPayload = {
 };
 
 type PullRequestReviewCommentPayload = {
-  comment: { id: number; body: string; html_url: string };
+  comment: { id: number; body: string; html_url: string; author_association?: string };
   pull_request: { html_url: string; number: number };
   repository: { name: string; private: boolean; owner: { login: string } };
   sender: { id: number; login: string };
@@ -29,13 +29,15 @@ export async function handleIssueCommentCreated(input: {
   dispatcherOwnsCallbacks?: boolean;
 }): Promise<void> {
   if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
+    const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
     await input.submitThreadAction({
       id: `approval_github_comment_${input.payload.comment.id}`,
       rawText: input.payload.comment.body,
       actor: {
         provider: "github",
         providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
+        handle: input.payload.sender.login,
+        ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
       },
       callback: {
         provider: "github",
@@ -64,6 +66,7 @@ export async function handleIssueCommentCreated(input: {
     repo: input.payload.repository.name,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.payload.installation ? { installationId: input.payload.installation.id } : {})
@@ -88,13 +91,15 @@ export async function handlePullRequestReviewCommentCreated(input: {
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
   if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
+    const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
     await input.submitThreadAction({
       id: `approval_github_pr_review_comment_${input.payload.comment.id}`,
       rawText: input.payload.comment.body,
       actor: {
         provider: "github",
         providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
+        handle: input.payload.sender.login,
+        ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
       },
       callback: {
         provider: "github",
@@ -123,6 +128,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
     pullRequestNumber: input.payload.pull_request.number,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.payload.installation ? { installationId: input.payload.installation.id } : {})

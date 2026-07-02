@@ -9,7 +9,7 @@ const validEvent = {
   source: "github",
   sourceEventId: "comment_1",
   receivedAt: "2026-06-24T00:00:00.000Z",
-  actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+  actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
   target: { mention: "@opentag", agentId: "opentag" },
   command: { rawText: "fix this", intent: "fix", args: {} },
   context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
@@ -3949,7 +3949,7 @@ describe("dispatcher API", () => {
 
     const status = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "@opentag /status",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4013,7 +4013,7 @@ describe("dispatcher API", () => {
 
     const doctor = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "@opentag /doctor",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4367,7 +4367,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4401,7 +4401,7 @@ describe("dispatcher API", () => {
     const deliveredCountAfterFirstApply = delivered.length;
     const replayResponse = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4828,7 +4828,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4903,7 +4903,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4980,7 +4980,7 @@ describe("dispatcher API", () => {
 
     const action = {
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5228,7 +5228,7 @@ describe("dispatcher API", () => {
     const first = await app.request("/v1/thread-actions", jsonRequest({
       id: "approval_ingress_retry_id",
       rawText: "approve 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5243,7 +5243,7 @@ describe("dispatcher API", () => {
     const second = await app.request("/v1/thread-actions", jsonRequest({
       id: "approval_ingress_retry_id",
       rawText: "approve 2",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5296,7 +5296,7 @@ describe("dispatcher API", () => {
     });
 
     const baseAction = {
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5362,7 +5362,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "approve 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5409,7 +5409,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply proposal_thread_cross",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/99/comments",
@@ -5465,7 +5465,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
@@ -5563,7 +5563,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5877,7 +5877,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
@@ -5933,7 +5933,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "continue 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -6026,7 +6026,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",

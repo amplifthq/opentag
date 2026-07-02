@@ -1,7 +1,78 @@
 import { describe, expect, it } from "vitest";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "../src/normalize.js";
+import { githubActorWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "../src/normalize.js";
+
+describe("githubActorWriteAccess", () => {
+  it("maps write-capable associations to true and the rest to false", () => {
+    expect(githubActorWriteAccess("OWNER")).toBe(true);
+    expect(githubActorWriteAccess("MEMBER")).toBe(true);
+    expect(githubActorWriteAccess("COLLABORATOR")).toBe(true);
+    expect(githubActorWriteAccess("CONTRIBUTOR")).toBe(false);
+    expect(githubActorWriteAccess("FIRST_TIME_CONTRIBUTOR")).toBe(false);
+    expect(githubActorWriteAccess("NONE")).toBe(false);
+  });
+
+  it("returns undefined when the platform did not report an association", () => {
+    expect(githubActorWriteAccess(undefined)).toBeUndefined();
+  });
+});
 
 describe("normalizeGitHubIssueComment", () => {
+  it("carries author_association into actor write access and metadata", () => {
+    const event = normalizeGitHubIssueComment({
+      id: "321",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-321",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      authorAssociation: "OWNER",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+
+    expect(event?.actor).toMatchObject({ handle: "octocat", writeAccess: true });
+    expect(event?.metadata).toMatchObject({ authorAssociation: "OWNER" });
+  });
+
+  it("marks non-write associations as writeAccess false and leaves it unset when absent", () => {
+    const strangerEvent = normalizeGitHubIssueComment({
+      id: "322",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-322",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 99,
+      actorLogin: "mallory",
+      authorAssociation: "NONE",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+    expect(strangerEvent?.actor.writeAccess).toBe(false);
+
+    const unreportedEvent = normalizeGitHubIssueComment({
+      id: "323",
+      commentBody: "@opentag fix this",
+      commentUrl: "https://github.com/acme/demo/issues/1#issuecomment-323",
+      apiCommentsUrl: "https://api.github.com/repos/acme/demo/issues/1/comments",
+      issueUrl: "https://github.com/acme/demo/issues/1",
+      issueNumber: 1,
+      owner: "acme",
+      repo: "demo",
+      actorId: 42,
+      actorLogin: "octocat",
+      private: false,
+      receivedAt: "2026-06-24T00:00:00.000Z"
+    });
+    expect(unreportedEvent?.actor.writeAccess).toBeUndefined();
+  });
+
   it("normalizes an @opentag GitHub issue comment", () => {
     const event = normalizeGitHubIssueComment({
       id: "123",

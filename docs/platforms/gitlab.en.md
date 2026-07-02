@@ -128,6 +128,17 @@ The self-hosted or custom relay must be configured with:
 
 `opentag pair --relay <url>` and `opentag start` print the GitLab relay webhook URL when the config includes GitLab. Treat that URL as actionable only after the relay has the GitLab environment variables above.
 
+## Who Can Trigger Runs
+
+By default, OpenTag decides who may start runs from the project itself:
+
+- **Private and internal projects**: anyone who can comment may trigger runs.
+- **Public projects**: closed by default. GitLab Note Hooks do not report the
+  commenter's access level, so OpenTag cannot verify write access from the
+  webhook alone. Configure `allowedActors` on the repository binding to allow
+  specific GitLab usernames or user IDs to trigger runs and approve `apply`
+  actions on a public project.
+
 ## Current Scope
 
 Supported now:

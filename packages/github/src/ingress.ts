@@ -10,7 +10,7 @@ import {
   type OpenTagEvent
 } from "@opentag/core";
 import { Hono } from "hono";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
+import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, githubActorWriteAccess } from "./normalize.js";
 
 type GitHubActor = {
   id: number;
@@ -23,9 +23,16 @@ type GitHubRepository = {
   owner: { login: string };
 };
 
+type GitHubComment = {
+  id: number;
+  body: string;
+  html_url: string;
+  author_association?: string;
+};
+
 export type GitHubIssueCommentPayload = {
   action?: string;
-  comment: { id: number; body: string; html_url: string };
+  comment: GitHubComment;
   issue: { html_url: string; comments_url: string; number: number };
   repository: GitHubRepository;
   sender: GitHubActor;
@@ -34,7 +41,7 @@ export type GitHubIssueCommentPayload = {
 
 export type GitHubPullRequestReviewCommentPayload = {
   action?: string;
-  comment: { id: number; body: string; html_url: string };
+  comment: GitHubComment;
   pull_request: { html_url: string; number: number };
   repository: GitHubRepository;
   sender: GitHubActor;
@@ -48,6 +55,7 @@ export type GitHubThreadActionInput = {
     provider: "github";
     providerUserId: string;
     handle: string;
+    writeAccess?: boolean;
   };
   callback: {
     provider: "github";
@@ -189,14 +197,21 @@ function hasGitHubInstallation(value: unknown): value is { id: number } {
   return isRecord(value) && typeof value.id === "number";
 }
 
+function hasGitHubComment(value: unknown): value is GitHubComment {
+  return (
+    isRecord(value) &&
+    typeof value.id === "number" &&
+    typeof value.body === "string" &&
+    typeof value.html_url === "string" &&
+    (value.author_association === undefined || typeof value.author_association === "string")
+  );
+}
+
 function isGitHubIssueCommentPayload(value: unknown): value is GitHubIssueCommentPayload {
   return (
     isRecord(value) &&
     (value.action === undefined || typeof value.action === "string") &&
-    isRecord(value.comment) &&
-    typeof value.comment.id === "number" &&
-    typeof value.comment.body === "string" &&
-    typeof value.comment.html_url === "string" &&
+    hasGitHubComment(value.comment) &&
     isRecord(value.issue) &&
     typeof value.issue.html_url === "string" &&
     typeof value.issue.comments_url === "string" &&
@@ -211,10 +226,7 @@ function isGitHubPullRequestReviewCommentPayload(value: unknown): value is GitHu
   return (
     isRecord(value) &&
     (value.action === undefined || typeof value.action === "string") &&
-    isRecord(value.comment) &&
-    typeof value.comment.id === "number" &&
-    typeof value.comment.body === "string" &&
-    typeof value.comment.html_url === "string" &&
+    hasGitHubComment(value.comment) &&
     isRecord(value.pull_request) &&
     typeof value.pull_request.html_url === "string" &&
     typeof value.pull_request.number === "number" &&
@@ -237,13 +249,15 @@ async function handleIssueCommentCreated(input: {
   const actionCommand = parseThreadActionCommand(input.payload.comment.body);
   if (controlCommand || actionCommand) {
     if (input.submitThreadAction) {
+      const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
       await input.submitThreadAction({
         id: `${controlCommand ? "control" : "approval"}_github_comment_${input.payload.comment.id}`,
         rawText: input.payload.comment.body,
         actor: {
           provider: "github",
           providerUserId: String(input.payload.sender.id),
-          handle: input.payload.sender.login
+          handle: input.payload.sender.login,
+          ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
         },
         callback: {
           provider: "github",
@@ -277,6 +291,7 @@ async function handleIssueCommentCreated(input: {
     repo: input.payload.repository.name,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
@@ -304,13 +319,15 @@ async function handlePullRequestReviewCommentCreated(input: {
   const actionCommand = parseThreadActionCommand(input.payload.comment.body);
   if (controlCommand || actionCommand) {
     if (input.submitThreadAction) {
+      const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
       await input.submitThreadAction({
         id: `${controlCommand ? "control" : "approval"}_github_pr_review_comment_${input.payload.comment.id}`,
         rawText: input.payload.comment.body,
         actor: {
           provider: "github",
           providerUserId: String(input.payload.sender.id),
-          handle: input.payload.sender.login
+          handle: input.payload.sender.login,
+          ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
         },
         callback: {
           provider: "github",
@@ -344,6 +361,7 @@ async function handlePullRequestReviewCommentCreated(input: {
     pullRequestNumber: input.payload.pull_request.number,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
