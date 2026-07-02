@@ -229,7 +229,10 @@ export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: F
             authorization: `Bot ${token}`,
             "content-type": "application/json"
           },
-          body: JSON.stringify({ content: truncateDiscordContent(message.body) })
+          body: JSON.stringify({ content: truncateDiscordContent(message.body) }),
+          // Bound the request so a hung POST/PATCH can't stall every later status
+          // update for this run (deliveries are serialized through the edit chain).
+          signal: AbortSignal.timeout(10_000)
         });
 
         if (!response.ok) {

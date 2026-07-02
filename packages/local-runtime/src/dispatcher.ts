@@ -338,7 +338,10 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
               repo: binding.repo,
               ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
             };
-          } catch {
+          } catch (error) {
+            // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
+            // from a genuinely unbound channel — log it so operators can tell them apart.
+            console.error("discord.resolveChannelBinding failed", error);
             return null;
           }
         },

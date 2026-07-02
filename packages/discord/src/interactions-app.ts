@@ -185,22 +185,31 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
             anchorId: interaction.interactionId
           })
         };
-        await input.submitThreadAction({
-          id: actionId(interaction.interactionId, rawBody),
-          rawText: interaction.prompt,
-          actor: {
-            provider: "discord",
-            providerUserId: interaction.userId,
-            handle: interaction.username ?? interaction.userId
-          },
-          callback,
-          metadata: {
-            repoProvider: "discord",
-            applicationId: interaction.applicationId,
-            channelId: interaction.channelId,
-            ...(interaction.guildId ? { guildId: interaction.guildId } : {})
-          }
-        });
+        try {
+          await input.submitThreadAction({
+            id: actionId(interaction.interactionId, rawBody),
+            rawText: interaction.prompt,
+            actor: {
+              provider: "discord",
+              providerUserId: interaction.userId,
+              handle: interaction.username ?? interaction.userId
+            },
+            callback,
+            metadata: {
+              repoProvider: "discord",
+              applicationId: interaction.applicationId,
+              channelId: interaction.channelId,
+              ...(interaction.guildId ? { guildId: interaction.guildId } : {})
+            }
+          });
+        } catch (error) {
+          // Never let a rejected dispatcher call bubble out as a 500 ("This interaction failed").
+          console.error("discord.submitThreadAction failed", error);
+          return c.json({
+            type: RESPONSE_TYPE_CHANNEL_MESSAGE,
+            data: { content: "Sorry, that action couldn't be processed. Please try again." }
+          });
+        }
         return c.json({ type: RESPONSE_TYPE_CHANNEL_MESSAGE, data: { content: "Received." } });
       }
 
@@ -231,8 +240,17 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
 
       let runId: string | undefined;
       if (event) {
-        const created = await input.createRun(event);
-        runId = created.runId;
+        try {
+          const created = await input.createRun(event);
+          runId = created.runId;
+        } catch (error) {
+          // Never let a rejected dispatcher call bubble out as a 500 ("This interaction failed").
+          console.error("discord.createRun failed", error);
+          return c.json({
+            type: RESPONSE_TYPE_CHANNEL_MESSAGE,
+            data: { content: "Sorry, OpenTag couldn't start this run. Please try again." }
+          });
+        }
       }
       return c.json({
         type: RESPONSE_TYPE_CHANNEL_MESSAGE,

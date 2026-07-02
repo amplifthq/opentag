@@ -255,6 +255,7 @@ export function dispatcherRuntimeInputFromCliConfig(
   const env = input.env ?? process.env;
   const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
   const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
+  const discordWebhookPath = env.OPENTAG_DISCORD_WEBHOOK_PATH;
   if (discordPublicKey && !discordBotToken) {
     // Without the bot token the interactions app still mounts and ACKs slash commands,
     // but every progress/final callback would silently fail — fail fast instead.
@@ -297,7 +298,8 @@ export function dispatcherRuntimeInputFromCliConfig(
       : {}),
     ...(slack ? { slackBotToken: slack.botToken } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
-    ...(discordBotToken ? { discordBotToken } : {})
+    ...(discordBotToken ? { discordBotToken } : {}),
+    ...(discordWebhookPath ? { discordWebhookPath } : {})
   };
 }
 

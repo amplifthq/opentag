@@ -46,6 +46,10 @@ describe("normalizeDiscordInteraction", () => {
     expect(normalizeDiscordInteraction({ ...baseInput(), prompt: "   " })).toBeNull();
   });
 
+  it("returns null for a whitespace-only prompt even when an executor is set", () => {
+    expect(normalizeDiscordInteraction({ ...baseInput(), prompt: "   ", executor: "codex" })).toBeNull();
+  });
+
   it("maps the executor option into target.executorHint via --executor", () => {
     const event = normalizeDiscordInteraction({ ...baseInput(), prompt: "fix the login bug", executor: "codex" });
     expect(event?.target.executorHint).toBe("codex");

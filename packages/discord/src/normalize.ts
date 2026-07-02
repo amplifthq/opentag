@@ -132,8 +132,11 @@ function commandTextFromInteraction(input: DiscordInteractionInput): string {
  * external work item (same as the Telegram adapter).
  */
 export function normalizeDiscordInteraction(input: DiscordInteractionInput): OpenTagEvent | null {
+  // Guard on the prompt itself: a whitespace-only prompt with an executor option set
+  // would otherwise yield a truthy rawText like "--executor codex" and start a run with
+  // no real instruction.
+  if (!input.prompt.trim()) return null;
   const rawText = commandTextFromInteraction(input);
-  if (!rawText.trim()) return null;
 
   const command = commandFromRawText(rawText);
   const baseUrl = input.callbackBaseUrl ?? "https://discord.com/api/v10";

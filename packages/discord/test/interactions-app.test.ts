@@ -179,4 +179,28 @@ describe("Discord interactions app", () => {
     expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("not supported") } });
     expect(createRun).not.toHaveBeenCalled();
   });
+
+  it("returns a graceful message instead of a 500 when createRun rejects", async () => {
+    const { app } = makeApp({
+      createRun: vi.fn(async () => {
+        throw new Error("dispatcher down");
+      })
+    });
+    const body = commandBody([{ name: "prompt", value: "fix the bug" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("couldn't start") } });
+  });
+
+  it("returns a graceful message instead of a 500 when submitThreadAction rejects", async () => {
+    const { app } = makeApp({
+      submitThreadAction: vi.fn(async () => {
+        throw new Error("dispatcher down");
+      })
+    });
+    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("couldn't be processed") } });
+  });
 });
