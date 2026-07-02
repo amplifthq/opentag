@@ -6,7 +6,7 @@
 
 - Run admission on public GitHub/GitLab repositories now requires
   platform-reported write access by default. GitHub commenters are checked via
-  the webhook `author_association` field (`OWNER`, `MEMBER`, `COLLABORATOR`);
+  the repository collaborator permission API when the GitHub App path is used;
   GitLab Note Hooks carry no access level, so public GitLab projects stay
   closed until `allowedActors` is configured on the repository binding.
   Private repositories, Slack, and Lark behavior is unchanged, and an explicit
@@ -23,6 +23,9 @@
 - Codex runs admitted without a write scope now use the read-only sandbox
   (`--sandbox read-only`) instead of `--full-auto`, so granted permission
   scopes are enforced at the executor level.
+- Claude Code runs admitted without `repo:write` now use `--permission-mode
+  plan`; repo-write runs default to `acceptEdits` unless a narrower
+  `permissionMode` is configured.
 - Enabling `dangerouslySkipPermissions` for Claude Code now emits an audit
   warning on every run so the bypass stays visible in the run timeline.
 

@@ -367,6 +367,7 @@ export function githubIngressConfigFromCliConfig(
     webhookSecret: github.webhookSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
     ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})

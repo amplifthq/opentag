@@ -5059,6 +5059,64 @@ describe("dispatcher API", () => {
     expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
   });
 
+  it("rejects public-repo source-thread action actors without write access by default", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_public_no_write",
+      event: githubIssueEvent({ id: "evt_thread_public_no_write", sourceEventId: "comment_thread_public_no_write", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_public_no_write",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "99", handle: "mallory" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "actor_not_allowed"
+    });
+    expect(githubRequests).toHaveLength(0);
+
+    const eventsResponse = await app.request("/v1/runs/run_thread_public_no_write/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+  });
+
   it("rejects Slack thread actions when the source channel binding is missing", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
     await seedCompletedProposal({

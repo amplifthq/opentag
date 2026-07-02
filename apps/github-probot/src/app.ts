@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createOpenTagClient, type ThreadActionInput } from "@opentag/client";
 import { parseThreadActionCommand, type OpenTagEvent } from "@opentag/core";
-import { githubActorWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, renderAcknowledgement } from "@opentag/github";
+import {
+  githubPermissionHasWriteAccess,
+  normalizeGitHubIssueComment,
+  normalizeGitHubPullRequestReviewComment,
+  renderAcknowledgement,
+  type GitHubActorWriteAccessResolver
+} from "@opentag/github";
 import type { Probot } from "probot";
 
 type IssueCommentPayload = {
@@ -20,16 +26,35 @@ type PullRequestReviewCommentPayload = {
   installation?: { id: number };
 };
 
+async function resolvePayloadActorWriteAccess(input: {
+  payload: { repository: { name: string; owner: { login: string } }; sender: { login: string } };
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
+}): Promise<boolean | undefined> {
+  if (!input.resolveActorWriteAccess) return undefined;
+  try {
+    return await input.resolveActorWriteAccess({
+      owner: input.payload.repository.owner.login,
+      repo: input.payload.repository.name,
+      username: input.payload.sender.login
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export async function handleIssueCommentCreated(input: {
   payload: IssueCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: ThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   postComment(body: string): Promise<void>;
   now(): string;
   dispatcherOwnsCallbacks?: boolean;
 }): Promise<void> {
+  const owner = input.payload.repository.owner.login;
+  const repo = input.payload.repository.name;
   if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
     await input.submitThreadAction({
       id: `approval_github_comment_${input.payload.comment.id}`,
       rawText: input.payload.comment.body,
@@ -42,12 +67,12 @@ export async function handleIssueCommentCreated(input: {
       callback: {
         provider: "github",
         uri: input.payload.issue.comments_url,
-        threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
+        threadKey: `${owner}/${repo}#${input.payload.issue.number}`
       },
       metadata: {
         repoProvider: "github",
-        owner: input.payload.repository.owner.login,
-        repo: input.payload.repository.name,
+        owner,
+        repo,
         issueNumber: input.payload.issue.number,
         commentUrl: input.payload.comment.html_url
       }
@@ -62,8 +87,8 @@ export async function handleIssueCommentCreated(input: {
     apiCommentsUrl: input.payload.issue.comments_url,
     issueUrl: input.payload.issue.html_url,
     issueNumber: input.payload.issue.number,
-    owner: input.payload.repository.owner.login,
-    repo: input.payload.repository.name,
+    owner,
+    repo,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
     ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
@@ -73,6 +98,10 @@ export async function handleIssueCommentCreated(input: {
   });
 
   if (!event) return;
+  const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+  if (actorWriteAccess !== undefined) {
+    event.actor.writeAccess = actorWriteAccess;
+  }
 
   const { runId } = await input.createRun(event);
   if (runId && !input.dispatcherOwnsCallbacks) {
@@ -84,6 +113,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
   payload: PullRequestReviewCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: ThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   postComment(body: string): Promise<void>;
   now(): string;
   dispatcherOwnsCallbacks?: boolean;
@@ -91,7 +121,7 @@ export async function handlePullRequestReviewCommentCreated(input: {
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
   if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
     await input.submitThreadAction({
       id: `approval_github_pr_review_comment_${input.payload.comment.id}`,
       rawText: input.payload.comment.body,
@@ -135,6 +165,10 @@ export async function handlePullRequestReviewCommentCreated(input: {
   });
 
   if (!event) return;
+  const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+  if (actorWriteAccess !== undefined) {
+    event.actor.writeAccess = actorWriteAccess;
+  }
 
   const { runId } = await input.createRun(event);
   if (runId && !input.dispatcherOwnsCallbacks) {
@@ -189,6 +223,15 @@ export function createOpenTagProbotApp(app: Probot): void {
       payload: context.payload as IssueCommentPayload,
       createRun: async (event) => createDispatcherRun({ event, log: context.log }),
       submitThreadAction: async (action) => submitDispatcherThreadAction({ action, log: context.log }),
+      resolveActorWriteAccess: async ({ owner, repo, username }) => {
+        try {
+          const response = await context.octokit.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username });
+          return githubPermissionHasWriteAccess(response.data.permission);
+        } catch (error) {
+          context.log.warn({ error, owner, repo, username }, "Could not resolve GitHub actor repository permission; failing closed for write access");
+          return undefined;
+        }
+      },
       postComment: async (body) => {
         await context.octokit.rest.issues.createComment(context.issue({ body }));
       },
@@ -203,6 +246,15 @@ export function createOpenTagProbotApp(app: Probot): void {
       payload,
       createRun: async (event) => createDispatcherRun({ event, log: context.log }),
       submitThreadAction: async (action) => submitDispatcherThreadAction({ action, log: context.log }),
+      resolveActorWriteAccess: async ({ owner, repo, username }) => {
+        try {
+          const response = await context.octokit.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username });
+          return githubPermissionHasWriteAccess(response.data.permission);
+        } catch (error) {
+          context.log.warn({ error, owner, repo, username }, "Could not resolve GitHub actor repository permission; failing closed for write access");
+          return undefined;
+        }
+      },
       postComment: async (body) => {
         await context.octokit.rest.issues.createComment({
           owner: payload.repository.owner.login,

@@ -196,6 +196,47 @@ describe("Claude Code executor", () => {
     expect(events.some((event) => event.type === "executor.failed")).toBe(true);
   });
 
+  it("uses Claude plan permission mode for runs without repo:write", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && (args[0] === "worktree" || args[0] === "branch")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "claude" && args.includes("--print")) {
+          return { exitCode: 0, stdout: "Read-only analysis complete.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createClaudeCodeExecutor({ runner, permissionMode: "acceptEdits" }).run(
+      {
+        runId: "run_read_only",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "investigate this", intent: "investigate", args: {} },
+        context: [],
+        permissions: [
+          { scope: "repo:read", reason: "inspect repository" },
+          { scope: "pr:update", reason: "request reviewers after approval" }
+        ],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    const claudePrintCall = calls.find((call) => call.command === "claude" && call.args.includes("--print"));
+    expect(claudePrintCall?.args).toContain("--permission-mode");
+    expect(claudePrintCall?.args).toContain("plan");
+    expect(claudePrintCall?.args).not.toContain("acceptEdits");
+    expect(claudePrintCall?.args).not.toContain("--dangerously-skip-permissions");
+  });
+
   it("emits an audit warning when --dangerously-skip-permissions is enabled", async () => {
     const calls: { command: string; args: string[] }[] = [];
     const runner: CommandRunner = {
@@ -221,6 +262,7 @@ describe("Claude Code executor", () => {
         workspacePath: "/tmp/demo",
         command: { rawText: "summarize this repo", intent: "unknown", args: {} },
         context: [],
+        permissions: [{ scope: "repo:write", reason: "allow write-capable Claude mode" }],
         baseBranch: "main",
         keepWorktree: "on_failure"
       },

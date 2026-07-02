@@ -24,6 +24,19 @@ export type ClaudeCodeExecutorOptions = {
   security?: RunnerSecurityPolicy;
 };
 
+function permissionsAllowWorkspaceWriteMode(permissions: readonly { scope: string }[] | undefined): boolean {
+  return permissions?.some((permission) => permission.scope === "repo:write") ?? false;
+}
+
+function claudePermissionModeForRun(input: {
+  permissions: readonly { scope: string }[] | undefined;
+  configuredMode: ClaudeCodeExecutorOptions["permissionMode"];
+}): NonNullable<ClaudeCodeExecutorOptions["permissionMode"]> {
+  const workspaceWriteAllowed = permissionsAllowWorkspaceWriteMode(input.permissions);
+  if (!workspaceWriteAllowed) return "plan";
+  return input.configuredMode ?? "acceptEdits";
+}
+
 function contextLines(context: ContextPointer[]): string {
   if (!context.length) return "No additional context pointers were provided.";
   return context.map((pointer) => `- ${contextPointerLabel(pointer)}: ${pointer.uri}`).join("\n");
@@ -146,7 +159,22 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
         };
       }
 
-      if (options.dangerouslySkipPermissions) {
+      const workspaceWriteAllowed = permissionsAllowWorkspaceWriteMode(input.permissions);
+      const dangerousSkipPermissions = workspaceWriteAllowed && options.dangerouslySkipPermissions === true;
+      const permissionMode = claudePermissionModeForRun({
+        permissions: input.permissions,
+        configuredMode: options.permissionMode
+      });
+
+      if (options.dangerouslySkipPermissions && !workspaceWriteAllowed) {
+        await sink.emit({
+          type: "executor.progress",
+          message: "Ignoring Claude Code --dangerously-skip-permissions because this run was not granted repo:write.",
+          at: new Date().toISOString()
+        });
+      }
+
+      if (dangerousSkipPermissions) {
         await sink.emit({
           type: "executor.progress",
           message:
@@ -189,8 +217,9 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
           "text",
           "--no-session-persistence",
           ...(options.model ? ["--model", options.model] : []),
-          ...(options.permissionMode ? ["--permission-mode", options.permissionMode] : []),
-          ...(options.dangerouslySkipPermissions ? ["--dangerously-skip-permissions"] : [])
+          "--permission-mode",
+          permissionMode,
+          ...(dangerousSkipPermissions ? ["--dangerously-skip-permissions"] : [])
         ];
         const claudeResult = await runner.run(claudeCommand, args, {
           cwd: worktreePath,

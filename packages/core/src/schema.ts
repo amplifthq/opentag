@@ -44,9 +44,9 @@ export const ActorIdentitySchema = z.object({
   handle: z.string().min(1).optional(),
   displayName: z.string().min(1).optional(),
   organizationId: z.string().min(1).optional(),
-  /** Platform-reported write access to the source repository (e.g. derived from
-   * GitHub `author_association`). Absent when the platform does not report it;
-   * admission treats absent as "no write access" on public repositories. */
+  /** Platform-reported write access to the source repository (for example,
+   * GitHub's collaborator permission API). Absent when the platform does not
+   * report it; admission treats absent as "no write access" on public repos. */
   writeAccess: z.boolean().optional()
 });
 

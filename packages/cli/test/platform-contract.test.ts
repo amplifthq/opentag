@@ -166,6 +166,7 @@ describe("CLI platform contract smoke", () => {
       async submitThreadAction(action) {
         return client.submitThreadAction(action);
       },
+      resolveActorWriteAccess: async () => true,
       now: () => "2026-06-27T00:00:00.000Z"
     });
     const body = JSON.stringify({

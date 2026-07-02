@@ -13,6 +13,7 @@ export type GitHubIssueCommentInput = {
   actorId: number;
   actorLogin: string;
   authorAssociation?: string;
+  actorWriteAccess?: boolean;
   private: boolean;
   receivedAt: string;
   installationId?: number;
@@ -32,6 +33,7 @@ export type GitHubPullRequestReviewCommentInput = {
   actorId: number;
   actorLogin: string;
   authorAssociation?: string;
+  actorWriteAccess?: boolean;
   private: boolean;
   receivedAt: string;
   installationId?: number;
@@ -39,15 +41,11 @@ export type GitHubPullRequestReviewCommentInput = {
   signatureVerified?: boolean;
 };
 
-/** `author_association` values GitHub reports for commenters who can push to
- * the repository. `MEMBER` (org member) is trusted the same way GitHub Actions
- * and most GitHub bots treat it. Everything else (`CONTRIBUTOR`, `NONE`,
- * `FIRST_TIME_CONTRIBUTOR`, ...) maps to no write access. */
-const GITHUB_WRITE_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+const GITHUB_WRITE_PERMISSION_LEVELS = new Set(["admin", "maintain", "write"]);
 
-export function githubActorWriteAccess(authorAssociation: string | undefined): boolean | undefined {
-  if (!authorAssociation) return undefined;
-  return GITHUB_WRITE_ASSOCIATIONS.has(authorAssociation);
+export function githubPermissionHasWriteAccess(permission: string | undefined): boolean | undefined {
+  if (!permission) return undefined;
+  return GITHUB_WRITE_PERMISSION_LEVELS.has(permission.toLowerCase());
 }
 
 function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
@@ -167,8 +165,6 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
     ...(mention.parsed ? { parsed: mention.parsed } : {})
   };
 
-  const writeAccess = githubActorWriteAccess(input.authorAssociation);
-
   return {
     id: `evt_github_comment_${input.id}`,
     source: "github",
@@ -178,7 +174,7 @@ export function normalizeGitHubIssueComment(input: GitHubIssueCommentInput): Ope
       provider: "github",
       providerUserId: String(input.actorId),
       handle: input.actorLogin,
-      ...(writeAccess !== undefined ? { writeAccess } : {})
+      ...(input.actorWriteAccess !== undefined ? { writeAccess: input.actorWriteAccess } : {})
     },
     target: {
       mention: "@opentag",
@@ -241,8 +237,6 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
     ...(mention.parsed ? { parsed: mention.parsed } : {})
   };
 
-  const writeAccess = githubActorWriteAccess(input.authorAssociation);
-
   return {
     id: `evt_github_pr_review_comment_${input.id}`,
     source: "github",
@@ -252,7 +246,7 @@ export function normalizeGitHubPullRequestReviewComment(input: GitHubPullRequest
       provider: "github",
       providerUserId: String(input.actorId),
       handle: input.actorLogin,
-      ...(writeAccess !== undefined ? { writeAccess } : {})
+      ...(input.actorWriteAccess !== undefined ? { writeAccess: input.actorWriteAccess } : {})
     },
     target: {
       mention: "@opentag",

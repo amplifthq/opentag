@@ -174,10 +174,9 @@ run 进行中时，你可以在同一个 source thread 里检查或停止 runtim
 默认情况下，OpenTag 根据仓库本身决定谁可以触发 run：
 
 - **私有仓库**：所有能评论的人都可以触发 run。
-- **公开仓库**：只有 GitHub 报告为对该仓库有写权限的评论者（webhook 中
-  `author_association` 为 `OWNER`、`MEMBER` 或 `COLLABORATOR`）可以触发 run
-  或批准 `apply` 动作。路人评论者会收到一条"需要人工决定"的回复，而不会
-  触发执行。
+- **公开仓库**：只有仓库权限解析为 `write`、`maintain` 或 `admin` 的评论者
+  可以触发写操作 run 或批准 `apply` 动作。路人评论者会收到一条"需要人工
+  决定"的回复，而不会触发执行。
 
 如果想在公开仓库对特定用户放行、又不想给他们 GitHub 写权限，可以在
 repository binding 上配置 `allowedActors`。配置了 `allowedActors` 后，

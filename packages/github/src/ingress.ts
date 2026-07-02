@@ -10,7 +10,7 @@ import {
   type OpenTagEvent
 } from "@opentag/core";
 import { Hono } from "hono";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment, githubActorWriteAccess } from "./normalize.js";
+import { githubPermissionHasWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
 
 type GitHubActor = {
   id: number;
@@ -65,11 +65,18 @@ export type GitHubThreadActionInput = {
   metadata: Record<string, unknown>;
 };
 
+export type GitHubActorWriteAccessResolver = (input: {
+  owner: string;
+  repo: string;
+  username: string;
+}) => Promise<boolean | undefined>;
+
 export type GitHubWebhookAppInput = {
   webhookSecret: string;
   webhookPath?: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   recordControlPlaneEvent?(event: {
     type: string;
     severity?: "info" | "warn" | "error";
@@ -84,6 +91,8 @@ export type GitHubIngressConfig = {
   webhookSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
+  githubToken?: string;
+  fetchImpl?: typeof fetch;
   port?: number;
   hostname?: string;
   webhookPath?: string;
@@ -179,6 +188,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function encodeGitHubPathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
 function hasGitHubActor(value: unknown): value is GitHubActor {
   return isRecord(value) && typeof value.id === "number" && typeof value.login === "string";
 }
@@ -205,6 +218,47 @@ function hasGitHubComment(value: unknown): value is GitHubComment {
     typeof value.html_url === "string" &&
     (value.author_association === undefined || typeof value.author_association === "string")
   );
+}
+
+async function resolvePayloadActorWriteAccess(input: {
+  payload: { repository: GitHubRepository; sender: GitHubActor };
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
+}): Promise<boolean | undefined> {
+  if (!input.resolveActorWriteAccess) return undefined;
+  try {
+    return await input.resolveActorWriteAccess({
+      owner: input.payload.repository.owner.login,
+      repo: input.payload.repository.name,
+      username: input.payload.sender.login
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveGitHubActorWriteAccessWithToken(input: {
+  owner: string;
+  repo: string;
+  username: string;
+  token: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean | undefined> {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const response = await fetchImpl(
+    `https://api.github.com/repos/${encodeGitHubPathSegment(input.owner)}/${encodeGitHubPathSegment(input.repo)}/collaborators/${encodeGitHubPathSegment(input.username)}/permission`,
+    {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${input.token}`,
+        "x-github-api-version": "2022-11-28"
+      }
+    }
+  );
+  if (response.status === 404) return false;
+  if (!response.ok) return undefined;
+  const data: unknown = await response.json();
+  if (!isRecord(data) || typeof data.permission !== "string") return undefined;
+  return githubPermissionHasWriteAccess(data.permission);
 }
 
 function isGitHubIssueCommentPayload(value: unknown): value is GitHubIssueCommentPayload {
@@ -240,6 +294,7 @@ async function handleIssueCommentCreated(input: {
   payload: GitHubIssueCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   now(): string;
   deliveryId?: string;
   signatureVerified?: boolean;
@@ -249,7 +304,7 @@ async function handleIssueCommentCreated(input: {
   const actionCommand = parseThreadActionCommand(input.payload.comment.body);
   if (controlCommand || actionCommand) {
     if (input.submitThreadAction) {
-      const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
+      const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
       await input.submitThreadAction({
         id: `${controlCommand ? "control" : "approval"}_github_comment_${input.payload.comment.id}`,
         rawText: input.payload.comment.body,
@@ -300,6 +355,10 @@ async function handleIssueCommentCreated(input: {
   });
 
   if (event) {
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+    if (actorWriteAccess !== undefined) {
+      event.actor.writeAccess = actorWriteAccess;
+    }
     await input.createRun(event);
   }
 }
@@ -308,6 +367,7 @@ async function handlePullRequestReviewCommentCreated(input: {
   payload: GitHubPullRequestReviewCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   now(): string;
   deliveryId?: string;
   signatureVerified?: boolean;
@@ -319,7 +379,7 @@ async function handlePullRequestReviewCommentCreated(input: {
   const actionCommand = parseThreadActionCommand(input.payload.comment.body);
   if (controlCommand || actionCommand) {
     if (input.submitThreadAction) {
-      const actorWriteAccess = githubActorWriteAccess(input.payload.comment.author_association);
+      const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
       await input.submitThreadAction({
         id: `${controlCommand ? "control" : "approval"}_github_pr_review_comment_${input.payload.comment.id}`,
         rawText: input.payload.comment.body,
@@ -370,6 +430,10 @@ async function handlePullRequestReviewCommentCreated(input: {
   });
 
   if (event) {
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+    if (actorWriteAccess !== undefined) {
+      event.actor.writeAccess = actorWriteAccess;
+    }
     await input.createRun(event);
   }
 }
@@ -457,6 +521,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
         payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
+        ...(input.resolveActorWriteAccess ? { resolveActorWriteAccess: input.resolveActorWriteAccess } : {}),
         now: input.now,
         ...(deliveryId ? { deliveryId } : {}),
         signatureVerified: true
@@ -479,6 +544,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
         payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
+        ...(input.resolveActorWriteAccess ? { resolveActorWriteAccess: input.resolveActorWriteAccess } : {}),
         now: input.now,
         ...(deliveryId ? { deliveryId } : {}),
         signatureVerified: true
@@ -493,6 +559,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
 }
 
 export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHandle {
+  const githubToken = config.githubToken;
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
@@ -505,6 +572,16 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
       webhookSecret: config.webhookSecret,
       webhookPath,
       ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(githubToken
+        ? {
+            resolveActorWriteAccess: (input) =>
+              resolveGitHubActorWriteAccessWithToken({
+                ...input,
+                token: githubToken,
+                ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {})
+              })
+          }
+        : {}),
       async createRun(event) {
         const runId = `run_${randomUUID()}`;
         const created = await dispatcherClient.createRun({ runId, event });

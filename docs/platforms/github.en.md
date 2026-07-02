@@ -173,10 +173,10 @@ While a run is active, you can inspect or stop the runtime from the same source 
 By default, OpenTag decides who may start runs from the repository itself:
 
 - **Private repositories**: anyone who can comment may trigger runs.
-- **Public repositories**: only commenters GitHub reports as having write
-  access to the repository (`OWNER`, `MEMBER`, or `COLLABORATOR` in the
-  webhook's `author_association` field). Drive-by commenters cannot start runs
-  or approve `apply` actions; they receive a decision-needed reply instead.
+- **Public repositories**: only commenters whose repository permission resolves
+  to `write`, `maintain`, or `admin` may trigger write-capable runs or approve
+  `apply` actions. Drive-by commenters cannot start those runs or approve those
+  actions; they receive a decision-needed reply instead.
 
 To open a public repository to specific users without granting them GitHub
 write access, configure `allowedActors` on the repository binding. When
