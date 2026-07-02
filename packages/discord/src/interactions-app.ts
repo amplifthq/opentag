@@ -142,6 +142,11 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
       return c.json({ error: "missing_signature" }, 401);
     }
     const rawBody = await c.req.text();
+    // The content-length pre-check can be bypassed via chunked encoding or a spoofed/absent
+    // header, so re-check the actual body size before doing crypto/JSON work on it.
+    if (Buffer.byteLength(rawBody) >= MAX_WEBHOOK_BODY_BYTES) {
+      return c.json({ error: "payload_too_large" }, 413);
+    }
     if (!verifyDiscordSignature({ publicKey: input.publicKey, signature, timestamp, rawBody })) {
       return c.json({ error: "invalid_signature" }, 401);
     }
@@ -163,7 +168,14 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
       }
 
       // apply/approve N → submitThreadAction, no run (mirrors the GitLab ingress).
-      if (parseThreadActionCommand(interaction.prompt) && input.submitThreadAction) {
+      if (parseThreadActionCommand(interaction.prompt)) {
+        if (!input.submitThreadAction) {
+          // Never fall through to createRun: "apply N" is not a valid run prompt.
+          return c.json({
+            type: RESPONSE_TYPE_CHANNEL_MESSAGE,
+            data: { content: "Thread actions are not supported on this dispatcher." }
+          });
+        }
         const callback = {
           provider: "discord" as const,
           uri: `${input.callbackBaseUrl ?? "https://discord.com/api/v10"}/channels/${interaction.channelId}/messages`,

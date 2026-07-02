@@ -255,6 +255,11 @@ export function dispatcherRuntimeInputFromCliConfig(
   const env = input.env ?? process.env;
   const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
   const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
+  if (discordPublicKey && !discordBotToken) {
+    // Without the bot token the interactions app still mounts and ACKs slash commands,
+    // but every progress/final callback would silently fail — fail fast instead.
+    throw new Error("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+  }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
   }

@@ -162,4 +162,21 @@ describe("Discord interactions app", () => {
     expect(response.status).toBe(413);
     expect(createRun).not.toHaveBeenCalled();
   });
+
+  it("returns 413 when the actual body exceeds the cap despite no declared content-length", async () => {
+    const { app, createRun } = makeApp();
+    const body = commandBody([{ name: "prompt", value: "x".repeat(1_048_600) }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(413);
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("returns a message for an apply command when submitThreadAction is not configured", async () => {
+    const { app, createRun } = makeApp({ submitThreadAction: undefined });
+    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("not supported") } });
+    expect(createRun).not.toHaveBeenCalled();
+  });
 });

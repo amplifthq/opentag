@@ -196,6 +196,14 @@ export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: Fe
   };
 }
 
+// Discord rejects message content longer than 2000 characters with a 400 (code 50035),
+// which would fail the whole delivery. Truncate so long summaries/diffs still post.
+const DISCORD_MAX_CONTENT = 2000;
+
+function truncateDiscordContent(body: string): string {
+  return body.length > DISCORD_MAX_CONTENT ? `${body.slice(0, DISCORD_MAX_CONTENT - 3)}...` : body;
+}
+
 export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: FetchLike }): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
   const messageIdByKey = new Map<string, string>();
@@ -209,7 +217,9 @@ export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: F
 
       const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
       const previous = deliveryByKey.get(statusKey) ?? Promise.resolve();
-      const current = previous.then(async () => {
+      // Swallow a prior failure so a transient error on one update does not permanently
+      // break the edit chain for the subsequent progress/final messages of the same run.
+      const current = previous.catch(() => {}).then(async () => {
         const existingMessageId = messageIdByKey.get(statusKey);
         // status_update edit chain: POST the first message, PATCH the same one after.
         // message.uri is the channel `/messages` endpoint, so the edit URL appends the id.
@@ -219,7 +229,7 @@ export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: F
             authorization: `Bot ${token}`,
             "content-type": "application/json"
           },
-          body: JSON.stringify({ content: message.body })
+          body: JSON.stringify({ content: truncateDiscordContent(message.body) })
         });
 
         if (!response.ok) {
