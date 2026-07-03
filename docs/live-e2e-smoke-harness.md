@@ -109,10 +109,10 @@ It requires:
 ### Lark Patch
 
 `lark-patch-live` wraps `scripts/dev/run-lark-message-patch-live-test.ts`.
-It requires `lark-cli` or `OPENTAG_LARK_CLI`, with both bot and user identities
-ready. It can create a private seed message or reuse an existing message when
-`OPENTAG_LARK_LIVE_CHAT_ID` and `OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID` are set
-together.
+It requires `lark-cli` or `OPENTAG_LARK_CLI`, with a ready bot identity and a
+ready user identity or cached user `openId`. It can create a private seed
+message or reuse an existing message when `OPENTAG_LARK_LIVE_CHAT_ID` and
+`OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID` are set together.
 
 ## Boundary
 

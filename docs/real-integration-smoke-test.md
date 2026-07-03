@@ -51,7 +51,9 @@ Prerequisites:
 
 - `lark-cli` is installed and available on `PATH`, or `OPENTAG_LARK_CLI` points
   to the binary.
-- `lark-cli auth status` reports both the user and bot identities as ready.
+- `lark-cli auth status` reports the bot identity as ready and the user identity
+  as ready, or at least provides a cached user `openId` for bot-to-user seed
+  messages.
 - The bot identity can send a message to the current user.
 
 Run:
