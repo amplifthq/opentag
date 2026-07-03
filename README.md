@@ -229,6 +229,7 @@ The default loop is artifact-first rather than chat-first: a final reply should 
 - [Hook ingest contract](docs/hook-ingest.md)
 - [Adapter authoring](docs/adapter-authoring.md)
 - [Real integration smoke test](docs/real-integration-smoke-test.md)
+- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
 - [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [Local npm release guide](docs/npm-release.md)

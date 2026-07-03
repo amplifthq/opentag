@@ -225,6 +225,7 @@ flowchart LR
 - [Hook ingest contract](docs/hook-ingest.md)
 - [适配器开发](docs/adapter-authoring.md)
 - [真实集成 smoke test](docs/real-integration-smoke-test.md)
+- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
 - [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [本地 npm 发布指南](docs/npm-release.md)
