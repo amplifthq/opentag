@@ -10,6 +10,7 @@
     { "path": "../core" },
     { "path": "../github" },
     { "path": "../lark" },
+    { "path": "../line" },
     { "path": "../local-runtime" },
     { "path": "../slack" }
   ]

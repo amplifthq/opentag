@@ -39,6 +39,7 @@
     "@opentag/github": "workspace:*",
     "@opentag/gitlab": "workspace:*",
     "@opentag/lark": "workspace:*",
+    "@opentag/line": "workspace:*",
     "@opentag/slack": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/store": "workspace:*",

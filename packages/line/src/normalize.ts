@@ -36,6 +36,7 @@ export type LineMessageInput = {
   text: string;
   messageId: string;
   webhookEventId?: string;
+  webhookSignatureVerified?: boolean;
   replyToken?: string;
   mention?: LineMention;
   receivedAt?: string;
@@ -55,11 +56,7 @@ export function lineSourceType(source: LineSource): LineSourceType | null {
   return null;
 }
 
-export function stripLineInvocation(input: {
-  text: string;
-  sourceType: LineSourceType;
-  mention?: LineMention;
-}): string | null {
+export function stripLineInvocation(input: { text: string; sourceType: LineSourceType; mention?: LineMention }): string | null {
   const trimmed = input.text.trim();
   if (!trimmed) return null;
   if (input.sourceType === "user") return trimmed;
@@ -76,7 +73,7 @@ export function stripLineInvocation(input: {
     Number.isInteger(selfMention.index) &&
     Number.isInteger(selfMention.length) &&
     selfMention.index === 0 &&
-    selfMention.length &&
+    selfMention.length !== undefined &&
     selfMention.length > 0
   ) {
     const stripped = input.text.slice(selfMention.length).trim();
@@ -108,9 +105,7 @@ export function parseLineThreadKey(threadKey: string): { accountId: string; conv
     throw new Error(`Invalid LINE thread key: ${threadKey}`);
   }
   const { accountId, conversationId } = parsed as { accountId: string; conversationId: string };
-  if (!accountId || !conversationId) {
-    throw new Error(`Invalid LINE thread key: ${threadKey}`);
-  }
+  if (!accountId || !conversationId) throw new Error(`Invalid LINE thread key: ${threadKey}`);
   return { accountId, conversationId };
 }
 
@@ -217,6 +212,7 @@ export function normalizeLineMessage(input: LineMessageInput): OpenTagEvent | nu
       sourceType: input.sourceType,
       messageId: input.messageId,
       ...(input.webhookEventId ? { webhookEventId: input.webhookEventId } : {}),
+      ...(input.webhookSignatureVerified !== undefined ? { webhookSignatureVerified: input.webhookSignatureVerified } : {}),
       ...(input.replyToken ? { replyToken: input.replyToken } : {}),
       ...commandMetadata(command),
       repoProvider: input.binding.repoProvider ?? "github",

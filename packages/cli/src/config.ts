@@ -16,7 +16,7 @@ const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
-const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram", "discord"]);
+const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram", "line", "discord"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
@@ -258,6 +258,19 @@ const GitLabPlatformSchema = z
   })
   .strict();
 
+const LinePlatformSchema = z
+  .object({
+    accountId: z.string().min(1),
+    channelSecret: SecretStringSchema,
+    channelAccessToken: SecretStringSchema,
+    conversationId: z.string().min(1),
+    agentId: z.string().min(1).optional(),
+    callbackUri: z.string().url().optional(),
+    defaultProjectBinding: z.boolean().optional(),
+    port: OptionalPortSchema
+  })
+  .strict();
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -279,7 +292,10 @@ const PreferencesSchema = z
         githubAutoCreatePullRequest: z.boolean().optional(),
         gitlabProjectPathWithNamespace: z.string().min(1).optional(),
         gitlabBaseUrl: z.string().url().optional(),
-        gitlabPort: OptionalPortSchema
+        gitlabPort: OptionalPortSchema,
+        lineAccountId: z.string().min(1).optional(),
+        lineConversationId: z.string().min(1).optional(),
+        linePort: OptionalPortSchema
       })
       .strict()
       .optional()
@@ -304,7 +320,8 @@ export const OpenTagCliConfigSchema = z
         lark: LarkPlatformSchema.optional(),
         slack: SlackPlatformSchema.optional(),
         github: GitHubPlatformSchema.optional(),
-        gitlab: GitLabPlatformSchema.optional()
+        gitlab: GitLabPlatformSchema.optional(),
+        line: LinePlatformSchema.optional()
       })
       .strict()
   })
@@ -433,6 +450,8 @@ function redactValue(key: string, value: unknown): unknown {
       "appSecret",
       "appToken",
       "botToken",
+      "channelAccessToken",
+      "channelSecret",
       "githubToken",
       "githubApplyToken",
       "runnerToken",

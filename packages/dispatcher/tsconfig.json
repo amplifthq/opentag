@@ -9,6 +9,7 @@
     { "path": "../core" },
     { "path": "../github" },
     { "path": "../lark" },
+    { "path": "../line" },
     { "path": "../slack" },
     { "path": "../telegram" },
     { "path": "../store" }

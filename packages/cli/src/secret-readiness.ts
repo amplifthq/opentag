@@ -76,5 +76,10 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     add("platforms.gitlab.webhookSecret", ["platforms", "gitlab", "webhookSecret"]);
   }
 
+  if (hasPath(redactedConfig, ["platforms", "line"])) {
+    add("platforms.line.channelSecret", ["platforms", "line", "channelSecret"]);
+    add("platforms.line.channelAccessToken", ["platforms", "line", "channelAccessToken"]);
+  }
+
   return rows;
 }

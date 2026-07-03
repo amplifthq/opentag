@@ -30,6 +30,7 @@ import {
   renderLarkFinalSummaryPresentation,
   renderLarkRunStatusPresentation
 } from "@opentag/lark";
+import { renderLineAcknowledgement, renderLineFinalSummaryPresentation, renderLineProgress } from "@opentag/line";
 import {
   createSlackActionReceiptBlocks,
   createSlackDoctorSummaryBlocks,
@@ -110,6 +111,9 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
     if (provider === "gitlab") {
       return { body: renderGitLabAcknowledgement(presentation.runId) };
     }
+    if (provider === "line") {
+      return { body: renderLineAcknowledgement(presentation.runId) };
+    }
     return { body: renderAcknowledgement(presentation.runId) };
   }
 
@@ -119,6 +123,9 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
   }
   if (provider === "gitlab") {
     return { body: renderGitLabProgress({ runId: presentation.runId, message }) };
+  }
+  if (provider === "line") {
+    return { body: renderLineProgress() };
   }
   return { body: renderProgress({ runId: presentation.runId, message }) };
 }
@@ -158,6 +165,9 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
   }
   if (provider === "gitlab") {
     return { body: renderGitLabFinalSummaryPresentation(presentation) };
+  }
+  if (provider === "line") {
+    return { body: renderLineFinalSummaryPresentation(presentation) };
   }
   return { body: renderFinalSummaryPresentation(presentation) };
 }

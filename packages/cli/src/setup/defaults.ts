@@ -10,6 +10,8 @@ function defaultBindingMethod(config: OpenTagCliConfig): BindingMethod | undefin
   if (config.platforms.lark) return "default_project";
   if (config.platforms.slack?.defaultProjectBinding === false) return "bind_later";
   if (config.platforms.slack) return "default_project";
+  if (config.platforms.line?.defaultProjectBinding === false) return "bind_later";
+  if (config.platforms.line) return "default_project";
   return undefined;
 }
 
@@ -19,6 +21,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  const line = config.platforms.line;
   const hermes = config.daemon.hermes;
   const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
@@ -37,7 +40,9 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
             ? { platform: "github" }
             : gitlab
               ? { platform: "gitlab" }
-              : {}),
+              : line
+                ? { platform: "line" }
+                : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
@@ -55,6 +60,13 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.githubOwner ? { githubOwner: lastSetup.githubOwner } : github?.owner ? { githubOwner: github.owner } : {}),
     ...(lastSetup?.githubRepo ? { githubRepo: lastSetup.githubRepo } : github?.repo ? { githubRepo: github.repo } : {}),
     ...(lastSetup?.githubPort ? { githubPort: lastSetup.githubPort } : github?.port ? { githubPort: github.port } : {}),
+    ...(lastSetup?.lineAccountId ? { lineAccountId: lastSetup.lineAccountId } : line?.accountId ? { lineAccountId: line.accountId } : {}),
+    ...(lastSetup?.lineConversationId
+      ? { lineConversationId: lastSetup.lineConversationId }
+      : line?.conversationId
+        ? { lineConversationId: line.conversationId }
+        : {}),
+    ...(lastSetup?.linePort ? { linePort: lastSetup.linePort } : line?.port ? { linePort: line.port } : {}),
     ...(github?.webhookSecret ? { githubWebhookSecret: github.webhookSecret } : {}),
     ...(github?.webhookPath ? { githubWebhookPath: github.webhookPath } : {}),
     ...(lastSetup?.githubAutoCreatePullRequest !== undefined

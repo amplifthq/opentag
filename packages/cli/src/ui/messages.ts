@@ -29,6 +29,11 @@ type MessageKey =
   | "gitlabProject"
   | "gitlabToken"
   | "gitlabPort"
+  | "lineAccountId"
+  | "lineChannelSecret"
+  | "lineChannelAccessToken"
+  | "lineConversationId"
+  | "linePort"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -63,6 +68,11 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab project (group/project or group/subgroup/project)",
     gitlabToken: "GitLab access token for source-thread replies",
     gitlabPort: "Local GitLab webhook port",
+    lineAccountId: "LINE account ID (destination or local account key)",
+    lineChannelSecret: "LINE channel secret",
+    lineChannelAccessToken: "LINE channel access token",
+    lineConversationId: "LINE conversation ID to bind (userId, groupId, roomId, or auto)",
+    linePort: "Local LINE webhook port",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -96,6 +106,11 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
     gitlabToken: "GitLab access token（用于回写 source thread）",
     gitlabPort: "本地 GitLab webhook 端口",
+    lineAccountId: "LINE 账号 ID（destination 或本地账号键）",
+    lineChannelSecret: "LINE channel secret",
+    lineChannelAccessToken: "LINE channel access token",
+    lineConversationId: "要绑定的 LINE 会话 ID（userId、groupId、roomId 或 auto）",
+    linePort: "本地 LINE webhook 端口",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",
@@ -139,20 +154,20 @@ export function slackModeHint(language: CliLanguage, mode: SlackSetupMode): stri
   return mode === "socket_mode" ? "Best for this computer; no public URL" : "Best for hosted OpenTag or tunnel testing";
 }
 
-export function bindingMethodLabel(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" = "lark"): string {
+export function bindingMethodLabel(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" | "line" = "lark"): string {
   if (language === "zh-CN") {
     if (method === "default_project") return "默认使用这个项目";
-    return platform === "slack" ? "稍后在 OpenTag 配置里绑定" : "稍后在 Lark 里用 /bind 绑定";
+    return platform === "lark" ? "稍后在 Lark 里用 /bind 绑定" : "稍后在 OpenTag 配置里绑定";
   }
   if (method === "default_project") return "Use this project by default";
-  return platform === "slack" ? "Bind later from OpenTag config" : "Bind later from Lark with /bind";
+  return platform === "lark" ? "Bind later from Lark with /bind" : "Bind later from OpenTag config";
 }
 
-export function bindingMethodHint(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" = "lark"): string {
+export function bindingMethodHint(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" | "line" = "lark"): string {
   if (language === "zh-CN") {
     if (method === "default_project") return "推荐，最快跑通";
-    return platform === "slack" ? "适合先只保存 Slack 连接" : "适合多个项目";
+    return platform === "lark" ? "适合多个项目" : `适合先只保存 ${platform === "slack" ? "Slack" : "LINE"} 连接`;
   }
   if (method === "default_project") return "Recommended";
-  return platform === "slack" ? "Use when you only want to save the Slack connection first" : "Best for multiple projects";
+  return platform === "lark" ? "Best for multiple projects" : `Use when you only want to save the ${platform === "slack" ? "Slack" : "LINE"} connection first`;
 }

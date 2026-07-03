@@ -49,6 +49,15 @@ export type GitLabSetupInput = {
   port: number;
 };
 
+export type LineSetupInput = {
+  accountId: string;
+  channelSecret: string;
+  channelAccessToken: string;
+  conversationId: string;
+  bindingMethod: BindingMethod;
+  port: number;
+};
+
 export type HermesSetupInput = {
   command?: string;
   profile?: string;
@@ -70,6 +79,7 @@ export type OpenTagSetupInput = {
   slack?: SlackSetupInput;
   github?: GitHubSetupInput;
   gitlab?: GitLabSetupInput;
+  line?: LineSetupInput;
   hermes?: HermesSetupInput;
   agentSessionProfile?: AgentSessionProfileSetupInput;
 };
@@ -97,6 +107,9 @@ export type SetupDefaults = Partial<{
   gitlabPort: number;
   gitlabWebhookSecret: string;
   gitlabWebhookPath: string;
+  lineAccountId: string;
+  lineConversationId: string;
+  linePort: number;
   hermesCommand: string;
   hermesProfile: string;
   hermesProfileTemplate: string;

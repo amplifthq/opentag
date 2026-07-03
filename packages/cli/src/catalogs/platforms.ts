@@ -1,6 +1,6 @@
 import type { CliLanguage } from "./languages.js";
 
-export type PlatformId = "lark" | "slack" | "github" | "gitlab" | "telegram" | "discord";
+export type PlatformId = "lark" | "slack" | "github" | "gitlab" | "telegram" | "line" | "discord";
 
 export type PlatformStatus = "setup_ready" | "setup_pending" | "experimental_setup_pending";
 
@@ -29,6 +29,10 @@ const PLATFORM_SETUP_GUIDE_FILES: Partial<Record<PlatformId, Record<CliLanguage,
   gitlab: {
     en: "gitlab.en.md",
     "zh-CN": "gitlab.zh-CN.md"
+  },
+  line: {
+    en: "line.en.md",
+    "zh-CN": "line.zh-CN.md"
   }
 };
 
@@ -64,6 +68,12 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
     startable: false
   },
   {
+    id: "line",
+    label: "LINE Messenger",
+    status: "setup_ready",
+    startable: true
+  },
+  {
     id: "discord",
     label: "Discord",
     status: "experimental_setup_pending",
@@ -72,10 +82,10 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
 ];
 
 export function parsePlatformId(value: string): PlatformId {
-  if (value === "lark" || value === "slack" || value === "github" || value === "gitlab" || value === "telegram" || value === "discord") {
+  if (value === "lark" || value === "slack" || value === "github" || value === "gitlab" || value === "telegram" || value === "line" || value === "discord") {
     return value;
   }
-  throw new Error("Platform must be lark, slack, github, gitlab, telegram, or discord.");
+  throw new Error("Platform must be lark, slack, github, gitlab, telegram, line, or discord.");
 }
 
 export function platformById(id: PlatformId): PlatformDescriptor {

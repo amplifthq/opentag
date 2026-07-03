@@ -14,6 +14,7 @@ import {
 import { verifyLineSignature } from "./signature.js";
 
 export const DEFAULT_LINE_WEBHOOK_PORT = 3070;
+export const LINE_AUTO_CONVERSATION_ID = "auto";
 
 export type LineAccountConfig = {
   accountId: string;
@@ -43,6 +44,7 @@ export type LineWebhookEvent = {
 export type LineEventsAppInput = {
   lineAccounts: LineAccountConfig[];
   resolveChannelBinding(input: { accountId: string; conversationId: string }): Promise<LineChannelBinding | null>;
+  bindChannel?(binding: LineChannelBinding): Promise<void>;
   createRun(event: OpenTagEvent): Promise<{ runId: string }>;
   recordControlPlaneEvent?(event: {
     type: string;
@@ -169,6 +171,31 @@ async function recordLineRequestBodyRejected(input: {
   } catch {}
 }
 
+async function recordLineUnboundConversation(input: {
+  recordControlPlaneEvent?: LineEventsAppInput["recordControlPlaneEvent"];
+  accountId: string;
+  conversationId: string;
+  sourceType: string | null;
+  webhookEventId?: string;
+}): Promise<void> {
+  try {
+    await input.recordControlPlaneEvent?.({
+      type: "admission.needs_human_decision",
+      severity: "info",
+      subject: `line:${input.accountId}/${input.conversationId}`,
+      payload: {
+        provider: "line",
+        accountId: input.accountId,
+        conversationId: input.conversationId,
+        sourceType: input.sourceType,
+        decision: { reasonCode: "repo_not_bound" },
+        projectTarget: `line:${input.accountId}/${input.conversationId}`,
+        ...(input.webhookEventId ? { webhookEventId: input.webhookEventId } : {})
+      }
+    });
+  } catch {}
+}
+
 function lineMessageInputFromEvent(input: {
   event: LineWebhookEvent;
   account: LineAccountConfig;
@@ -190,6 +217,7 @@ function lineMessageInputFromEvent(input: {
     text: event.message.text,
     messageId: event.message.id,
     ...(event.webhookEventId ? { webhookEventId: event.webhookEventId } : {}),
+    webhookSignatureVerified: true,
     ...(event.replyToken ? { replyToken: event.replyToken } : {}),
     ...(event.message.mention ? { mention: event.message.mention } : {}),
     receivedAt: input.receivedAt,
@@ -197,6 +225,37 @@ function lineMessageInputFromEvent(input: {
     ...(account.callbackUri ? { callbackUri: account.callbackUri } : {}),
     binding
   };
+}
+
+function canAutoBindLineEvent(event: LineWebhookEvent): boolean {
+  return event.type === "join" || event.type === "follow" || event.type === "message";
+}
+
+async function resolveLineChannelBinding(input: {
+  app: LineEventsAppInput;
+  accountId: string;
+  conversationId: string;
+  autoBind: boolean;
+}): Promise<LineChannelBinding | null> {
+  const binding = await input.app.resolveChannelBinding({
+    accountId: input.accountId,
+    conversationId: input.conversationId
+  });
+  if (binding || !input.autoBind || input.conversationId === LINE_AUTO_CONVERSATION_ID || !input.app.bindChannel) return binding;
+
+  const template = await input.app.resolveChannelBinding({
+    accountId: input.accountId,
+    conversationId: LINE_AUTO_CONVERSATION_ID
+  });
+  if (!template) return null;
+
+  const autoBinding = {
+    ...template,
+    accountId: input.accountId,
+    conversationId: input.conversationId
+  };
+  await input.app.bindChannel(autoBinding);
+  return autoBinding;
 }
 
 export function createLineEventsApp(input: LineEventsAppInput) {
@@ -265,8 +324,17 @@ export function createLineEventsApp(input: LineEventsAppInput) {
       const source = event.source;
       const conversationId = source ? lineConversationIdFromSource(source) : null;
       if (!conversationId) continue;
-      const binding = await input.resolveChannelBinding({ accountId, conversationId });
-      if (!binding) continue;
+      const binding = await resolveLineChannelBinding({ app: input, accountId, conversationId, autoBind: canAutoBindLineEvent(event) });
+      if (!binding) {
+        await recordLineUnboundConversation({
+          recordControlPlaneEvent: input.recordControlPlaneEvent,
+          accountId,
+          conversationId,
+          sourceType: source ? lineSourceType(source) : null,
+          ...(event.webhookEventId ? { webhookEventId: event.webhookEventId } : {})
+        });
+        continue;
+      }
       const normalizedInput = lineMessageInputFromEvent({ event, account, binding, receivedAt: input.now() });
       if (!normalizedInput) continue;
       const normalizedEvent = normalizeLineMessage(normalizedInput);
@@ -296,7 +364,7 @@ export function startLineIngress(config: LineIngressConfig): LineIngressHandle {
           ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
         }
       ],
-      ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
       async resolveChannelBinding(inputValue) {
         try {
           const { binding } = await dispatcherClient.getChannelBinding({
@@ -315,6 +383,16 @@ export function startLineIngress(config: LineIngressConfig): LineIngressHandle {
           if (error instanceof Error && error.message.includes("channel_binding_not_found")) return null;
           throw error;
         }
+      },
+      async bindChannel(binding) {
+        await dispatcherClient.bindChannel({
+          provider: "line",
+          accountId: binding.accountId,
+          conversationId: binding.conversationId,
+          repoProvider: binding.repoProvider ?? "github",
+          owner: binding.owner,
+          repo: binding.repo
+        });
       },
       async createRun(event) {
         const runId = `run_${randomUUID()}`;

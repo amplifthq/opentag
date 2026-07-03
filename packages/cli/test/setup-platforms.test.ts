@@ -122,6 +122,33 @@ describe("OpenTag CLI setup platforms", () => {
     expect(notes.join("\n")).toContain("GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`");
   });
 
+  it("prints the LINE setup guide before collecting LINE credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "line",
+        executor: "echo",
+        lineAccountId: "line_main",
+        lineChannelSecret: "line_secret",
+        lineChannelAccessToken: "line_token",
+        lineConversationId: "U123",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/line.en.md");
+    expect(notes.join("\n")).toContain("https://developers.line.biz/console/");
+    expect(notes.join("\n")).toContain("channel secret");
+  });
+
   it("writes a Slack config and default channel binding without Lark", async () => {
     const configPath = join(tempDir(), "config.json");
 
@@ -309,6 +336,48 @@ describe("OpenTag CLI setup platforms", () => {
       gitlabBaseUrl: "https://gitlab.example.com",
       gitlabPort: 3060
     });
+  });
+
+  it("writes a LINE config and default channel binding", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "line",
+        executor: "echo",
+        lineAccountId: "line_main",
+        lineChannelSecret: "line_secret",
+        lineChannelAccessToken: "line_token",
+        lineConversationId: "U123",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.line).toEqual({
+      accountId: "line_main",
+      channelSecret: "line_secret",
+      channelAccessToken: "line_token",
+      conversationId: "U123",
+      defaultProjectBinding: true,
+      port: 3070
+    });
+    expect(config.daemon.channelBindings).toEqual([
+      {
+        provider: "line",
+        accountId: "line_main",
+        conversationId: "U123",
+        repoProvider: config.daemon.repositories[0]!.provider,
+        owner: config.daemon.repositories[0]!.owner,
+        repo: config.daemon.repositories[0]!.repo
+      }
+    ]);
   });
 
   it("detects self-managed GitLab projects from custom-domain remotes", async () => {

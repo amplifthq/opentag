@@ -11,6 +11,8 @@ describe("platform catalog command", () => {
     expect(output).toContain("Lark / Feishu: events=yes");
     expect(output).toContain("Slack: events=yes");
     expect(output).toContain("GitHub: events=yes");
+    expect(output).toContain("LINE Messenger: Setup wizard ready");
+    expect(output).toContain("LINE Messenger: events=yes");
     expect(output).toContain("rich=yes");
     expect(output).toContain("liveness=");
   });

@@ -60,6 +60,26 @@ describe("local dispatcher runtime", () => {
     ).toEqual({ reviewer: "xoxb-reviewer" });
   });
 
+  it("parses LINE channel access tokens from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINE_CHANNEL_ACCESS_TOKEN: "line-default",
+        OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON: JSON.stringify({ line_main: "line-main" })
+      })
+    ).toMatchObject({
+      lineChannelAccessToken: "line-default",
+      lineChannelAccessTokensByAccountId: { line_main: "line-main" }
+    });
+  });
+
+  it("rejects invalid LINE channel access token maps", () => {
+    expect(() =>
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON: JSON.stringify({ line_main: 123 })
+      })
+    ).toThrow("Token for LINE account line_main must be a non-empty string");
+  });
+
   it("rejects non-string per-agent bot tokens", () => {
     expect(() =>
       dispatcherRuntimeInputFromEnv({

@@ -35,7 +35,6 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@line/bot-sdk": "^10.8.0",
     "@hono/node-server": "^1.13.7",
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",

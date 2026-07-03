@@ -9,7 +9,7 @@ configuration map, then jump to the runnable examples for end-to-end commands:
 
 ## Configuration Layers
 
-OpenTag has five runtime surfaces today:
+OpenTag has six runtime surfaces today:
 
 | Surface | Process | Owns |
 | --- | --- | --- |
@@ -17,6 +17,7 @@ OpenTag has five runtime surfaces today:
 | Local daemon | `apps/opentagd` | Runner identity, Project Target bindings, local checkout paths, executor settings |
 | GitHub ingress | `@opentag/cli` / `apps/github-probot` | Repository webhooks or GitHub App webhooks and GitHub event normalization |
 | Slack ingress | `@opentag/cli` / `apps/slack-events` | Slack Socket Mode or Events API transport and Slack event normalization |
+| LINE ingress | `@opentag/cli` / `apps/line-events` | LINE Messaging API webhook verification and text event normalization |
 | Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
@@ -78,9 +79,9 @@ a Project Target:
 {
   "channelBindings": [
     {
-      "provider": "telegram",
-      "accountId": "bot_123",
-      "conversationId": "456",
+      "provider": "line",
+      "accountId": "line_main",
+      "conversationId": "U123",
       "repoProvider": "github",
       "owner": "acme",
       "repo": "demo"
@@ -163,7 +164,7 @@ use `--permission-mode plan`.
 | `runnerTokens` | none | Additional runner-scoped tokens accepted by the local dispatcher during a rotation window |
 | `revokedRunnerTokenFingerprints` | none | SHA-256 fingerprints of revoked runner tokens that must fail closed |
 | `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
-| `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
+| `channelBindings` | none | Generic channel bindings such as LINE `accountId/conversationId -> Project Target` or Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
@@ -460,6 +461,8 @@ for repeatable setups.
 | `LARK_DOMAIN` | `lark` | `lark` or `feishu`; selects the Lark vs Feishu API host |
 | `OPENTAG_TELEGRAM_BOT_TOKEN` | none | Single Telegram bot token for callback posting |
 | `OPENTAG_TELEGRAM_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Telegram bot token |
+| `OPENTAG_LINE_CHANNEL_ACCESS_TOKEN` | none | Single LINE channel access token for push-message callbacks |
+| `OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON` | none | JSON object mapping LINE `accountId` to channel access token |
 
 If `OPENTAG_PAIRING_TOKEN` is set on the dispatcher, legacy clients can use the
 same value as:
@@ -697,12 +700,48 @@ JSON field. `/stop [run_id]` requests cancellation for the active chat run or
 the specified run, and OpenTag does not treat that stop request as a successful
 completion.
 
+## LINE Ingress Environment
+
+`apps/line-events` receives LINE Messaging API webhook events and creates OpenTag runs from text messages.
+
+`opentag start` uses the same ingress when `platforms.line` is configured. The local webhook path is:
+
+```text
+/line/events/<accountId>
+```
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `OPENTAG_DISPATCHER_URL` | yes | Dispatcher URL |
+| `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |
+| `PORT` | no | Defaults to `3070` |
+| `OPENTAG_LINE_ACCOUNT_ID` | yes unless using JSON config | Account id used in the webhook path and channel binding lookup |
+| `OPENTAG_LINE_CHANNEL_SECRET` | yes unless using JSON config | LINE channel secret used to verify `x-line-signature` |
+| `OPENTAG_LINE_AGENT_ID` | no | Agent id for single-account mode. Defaults to `opentag` |
+| `OPENTAG_LINE_CALLBACK_URI` | no | Callback URI override. Defaults to `https://api.line.me/v2/bot/message/push` |
+| `OPENTAG_LINE_ACCOUNTS_JSON` | no | JSON array for multi-account ingress |
+
+`OPENTAG_LINE_ACCOUNTS_JSON` shape:
+
+```json
+[
+  {
+    "accountId": "line_main",
+    "channelSecret": "line-channel-secret",
+    "agentId": "opentag",
+    "callbackUri": "https://api.line.me/v2/bot/message/push"
+  }
+]
+```
+
+Set `OPENTAG_LINE_CHANNEL_ACCESS_TOKEN` or `OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON` on the dispatcher, not on the LINE ingress, when you want final replies posted back to LINE conversations. LINE support is text-only: direct messages are commands, and group/room messages must mention the bot or start with `/opentag`. Bind each `accountId/conversationId` to a Project Target from CLI config or `POST /v1/channel-bindings`; in-chat `/bind` is intentionally deferred.
+
 ## Secret Handling
 
 - Do not commit config files that contain real tokens, signing secrets, or private keys.
 - Prefer `SecretRef` entries, environment variables, or a local secret manager
   for `OPENTAG_GITHUB_TOKEN`, `OPENTAG_SLACK_BOT_TOKEN`, Slack signing
-  secrets, and GitHub App private keys.
+  secrets, LINE channel secrets/access tokens, and GitHub App private keys.
 - CLI config secret fields and direct daemon config secret fields accept either
   an inline string for local development or a reference object. Redacted config
   output prints the reference, not the secret value:

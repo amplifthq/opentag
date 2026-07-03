@@ -11,6 +11,7 @@ import {
   githubIngressConfigFromCliConfig,
   gitlabIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
+  lineIngressConfigFromCliConfig,
   shouldRethrowAbortReason,
   slackIngressConfigFromCliConfig,
   slackSocketModeIngressConfigFromCliConfig,
@@ -112,6 +113,24 @@ function gitlabConfig(port?: number) {
       baseUrl: "https://gitlab.example.com",
       webhookPath: "/gitlab/webhooks",
       port: port ?? 3060
+    }
+  });
+}
+
+function lineConfig(port?: number) {
+  return createSetupConfig({
+    language: "en",
+    platform: "line",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    line: {
+      accountId: "line_main",
+      channelSecret: "line_secret",
+      channelAccessToken: "line_token",
+      conversationId: "U123",
+      bindingMethod: "default_project",
+      port: port ?? 3070
     }
   });
 }
@@ -293,6 +312,36 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("derives dispatcher and ingress input for LINE without Lark", () => {
+    const built = lineConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      lineChannelAccessToken: "line_token"
+    });
+    expect(lineIngressConfigFromCliConfig(built)).toMatchObject({
+      accountId: "line_main",
+      channelSecret: "line_secret",
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      port: 3070
+    });
+  });
+
+  it("passes the service request body limit to LINE webhook ingress", () => {
+    const built = lineConfig();
+
+    expect(
+      lineIngressConfigFromCliConfig(built, {
+        env: { OPENTAG_MAX_REQUEST_BODY_BYTES: "8192" }
+      })
+    ).toMatchObject({
+      maxRequestBodyBytes: 8192
+    });
+  });
+
   it("can keep GitHub callbacks enabled while disabling direct apply capability", () => {
     const built = githubConfig();
     built.daemon.githubApplyToken = null;
@@ -335,6 +384,19 @@ describe("OpenTag CLI start wiring", () => {
 
       await expect(assertStartPortsAvailable(built)).rejects.toThrow(
         `OpenTag cannot start GitLab local webhook because port ${port} is already in use.`
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("fails before start when the LINE webhook port is already in use", async () => {
+    const { server, port } = await listenOnRandomPort();
+    try {
+      await expect(assertStartPortsAvailable(lineConfig(port))).rejects.toThrow(
+        `OpenTag cannot start LINE webhook because port ${port} is already in use.`
       );
     } finally {
       await new Promise<void>((resolve, reject) => {

@@ -14,13 +14,13 @@ import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalog
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINE_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
+import { formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatLineCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
+import type { BindingMethod, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, LineSetupInput, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
 
 const DEFAULT_HERMES_PROFILE_TEMPLATE =
   "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
@@ -63,6 +63,11 @@ export type SetupCommandOptions = {
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
   gitlabPort?: string;
+  lineAccountId?: string;
+  lineChannelSecret?: string;
+  lineChannelAccessToken?: string;
+  lineConversationId?: string;
+  linePort?: string;
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
@@ -888,21 +893,70 @@ async function collectGitLabSetup(
   };
 }
 
+async function collectLineSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<LineSetupInput> {
+  if (!options.lineAccountId || !options.lineChannelSecret || !options.lineChannelAccessToken || !options.lineConversationId) {
+    prompts.note(formatLineCredentialHelp(language));
+  }
+  const accountId = nonEmpty(
+    options.lineAccountId ??
+      (await prompts.text({
+        message: t(language, "lineAccountId"),
+        ...(defaults.lineAccountId ? { initialValue: defaults.lineAccountId } : {})
+      })),
+    "LINE account ID"
+  );
+  const channelSecret = nonEmpty(
+    options.lineChannelSecret ?? (await prompts.password({ message: t(language, "lineChannelSecret") })),
+    "LINE channel secret"
+  );
+  const channelAccessToken = nonEmpty(
+    options.lineChannelAccessToken ?? (await prompts.password({ message: t(language, "lineChannelAccessToken") })),
+    "LINE channel access token"
+  );
+  const conversationId = nonEmpty(
+    options.lineConversationId ??
+      (await prompts.text({
+        message: t(language, "lineConversationId"),
+        ...(defaults.lineConversationId ? { initialValue: defaults.lineConversationId } : {})
+      })),
+    "LINE conversation ID"
+  );
+  const port =
+    parsePortInput(options.linePort, "LINE webhook port") ??
+    (options.yes
+      ? defaults.linePort ?? DEFAULT_LINE_WEBHOOK_PORT
+      : parseLocalPort(
+          await prompts.text({
+            message: t(language, "linePort"),
+            initialValue: String(defaults.linePort ?? DEFAULT_LINE_WEBHOOK_PORT),
+            placeholder: String(DEFAULT_LINE_WEBHOOK_PORT)
+          }),
+          "LINE webhook port"
+        ));
+  const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "line");
+  return { accountId, channelSecret, channelAccessToken, conversationId, bindingMethod, port };
+}
+
 async function collectBindingMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
   prompts: PromptAdapter,
   language: CliLanguage,
-  platform: "lark" | "slack"
+  platform: "lark" | "slack" | "line"
 ): Promise<BindingMethod> {
   if (options.binding) {
     const binding = parseBindingMethod(options.binding);
-    if (platform === "slack" && binding === "bind_later") {
-      throw new Error("Slack setup requires a channel binding. Use --binding default_project.");
+    if ((platform === "slack" || platform === "line") && binding === "bind_later") {
+      throw new Error(`${platform === "slack" ? "Slack" : "LINE"} setup requires a channel binding. Use --binding default_project.`);
     }
     return binding;
   }
-  if (platform === "slack") {
+  if (platform === "slack" || platform === "line") {
     return "default_project";
   }
   const message =
@@ -963,6 +1017,7 @@ export async function collectSetupInput(
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const lineSetup = platform === "line" ? await collectLineSetup(options, defaults, prompts, language) : undefined;
   const larkPersistedCredentials = larkCredentials
     ? {
         appId: larkCredentials.appId,
@@ -991,7 +1046,8 @@ export async function collectSetupInput(
       : {}),
     ...(slackSetup ? { slack: slackSetup } : {}),
     ...(githubSetup ? { github: githubSetup } : {}),
-    ...(gitlabSetup ? { gitlab: gitlabSetup } : {})
+    ...(gitlabSetup ? { gitlab: gitlabSetup } : {}),
+    ...(lineSetup ? { line: lineSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));

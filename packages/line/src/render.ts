@@ -44,20 +44,14 @@ export function renderLineFinalSummaryPresentation(presentation: OpenTagFinalSum
     }
   }
 
-  if (presentation.nextActions?.length) {
-    lines.push("", `Next action: ${presentation.nextActions[0]}`);
-  }
-  if (presentation.auditRunId) {
-    lines.push("", `Audit: opentag status --run ${presentation.auditRunId}`);
-  }
+  if (presentation.nextActions?.length) lines.push("", `Next action: ${presentation.nextActions[0]}`);
+  if (presentation.auditRunId) lines.push("", `Audit: opentag status --run ${presentation.auditRunId}`);
 
   return lines.join("\n");
 }
 
 export function chunkLineText(text: string, maxChars = LINE_TEXT_MESSAGE_MAX_CHARS): string[] {
-  if (!Number.isInteger(maxChars) || maxChars <= 0) {
-    throw new Error("LINE text chunk size must be a positive integer.");
-  }
+  if (!Number.isInteger(maxChars) || maxChars <= 0) throw new Error("LINE text chunk size must be a positive integer.");
   const chars = Array.from(text);
   if (chars.length === 0) return [""];
   const chunks: string[] = [];

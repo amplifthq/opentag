@@ -72,12 +72,13 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("npm cache metadata exists");
     expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
-    expect(skill).toContain("Platform: Slack, GitHub, or Lark / Feishu");
+    expect(skill).toContain("Platform: Slack, GitHub, Lark / Feishu, or LINE Messenger");
     expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
     expect(skill).toContain("Lark / Feishu tenant for manual app setup");
     expect(skill).toContain("Lark scan vs manual setup");
+    expect(skill).toContain("LINE webhook port");
     expect(skill).toContain("default project binding vs bind later");
     expect(skill).toContain("--platform");
     expect(skill).toContain("--executor");
@@ -85,6 +86,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("--slack-mode");
     expect(skill).toContain("--tenant");
     expect(skill).toContain("--lark-setup");
+    expect(skill).toContain("--line-port");
     expect(skill).toContain("--binding");
     expect(skill).toContain(
       "Stop before entering any credential, token, app ID, app secret, signing secret, channel ID, repository name, or unconfirmed project path."
@@ -131,5 +133,20 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("application/json");
     expect(combined).toContain("3050");
     expect(combined).toContain("--github-port");
+  });
+
+  it("keeps LINE setup docs aligned with Messaging API webhook requirements", () => {
+    const english = repoFile("docs/platforms/line.en.md");
+    const chinese = repoFile("docs/platforms/line.zh-CN.md");
+    const combined = `${english}\n${chinese}`;
+
+    expect(combined).toContain("https://developers.line.biz/console/");
+    expect(combined).toContain("https://developers.line.biz/en/docs/messaging-api/receiving-messages/");
+    expect(combined).toContain("https://developers.line.biz/en/docs/messaging-api/verify-webhook-signature/");
+    expect(combined).toContain("Channel secret");
+    expect(combined).toContain("Channel access token");
+    expect(combined).toContain("x-line-signature");
+    expect(combined).toContain("3070");
+    expect(combined).toContain("/line/events/<accountId>");
   });
 });

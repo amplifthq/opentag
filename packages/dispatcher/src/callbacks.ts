@@ -8,6 +8,7 @@ import {
   replyLarkMessage,
   updateLarkTextMessage
 } from "@opentag/lark";
+import { createLinePushMessagePayloads, parseLineThreadKey } from "@opentag/line";
 import {
   createSlackPostMessagePayload,
   createSlackReactionPayload,
@@ -58,6 +59,22 @@ function slackBotTokenFor(input: {
   return input.botToken;
 }
 
+function lineChannelAccessTokenFor(input: {
+  channelAccessToken?: string | undefined;
+  channelAccessTokensByAccountId?: Record<string, string> | undefined;
+  accountId?: string | undefined;
+}): string | undefined {
+  if (
+    input.accountId &&
+    input.channelAccessTokensByAccountId &&
+    Object.hasOwn(input.channelAccessTokensByAccountId, input.accountId) &&
+    typeof input.channelAccessTokensByAccountId[input.accountId] === "string"
+  ) {
+    return input.channelAccessTokensByAccountId[input.accountId];
+  }
+  return input.channelAccessToken;
+}
+
 function metadataString(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -105,7 +122,7 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
   const deliveryByKey = new Map<string, Promise<void>>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "github") return;
       if (!input.token) return;
 
@@ -144,6 +161,7 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
           deliveryByKey.delete(statusKey);
         }
       });
+      return {};
     }
   };
 }
@@ -269,7 +287,7 @@ export function createSlackCallbackSink(input: {
   const statusMessageTsByKey = new Map<string, string>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "slack") return;
       const botToken = slackBotTokenFor({
         botToken: input.botToken,
@@ -320,6 +338,7 @@ export function createSlackCallbackSink(input: {
           }
         }
       }
+      return {};
     }
   };
 }
@@ -458,7 +477,7 @@ export function createLarkCallbackSink(input: {
         text: message.body,
         ...(message.rich?.provider === "lark" ? { card: message.rich.payload as LarkCard } : {})
       });
-      return reply.messageId ? { externalMessageId: reply.messageId } : undefined;
+      return reply.messageId ? { externalMessageId: reply.messageId } : {};
     }
   };
 }
@@ -473,7 +492,7 @@ export function createTelegramCallbackSink(input: {
   let nextDraftId = 1;
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "telegram") return;
       const botToken = slackBotTokenFor({
         botToken: input.botToken,
@@ -522,6 +541,46 @@ export function createTelegramCallbackSink(input: {
       if (message.kind === "final") {
         draftIdByKey.delete(statusKey);
       }
+      return {};
+    }
+  };
+}
+
+export function createLineCallbackSink(input: {
+  channelAccessToken?: string;
+  channelAccessTokensByAccountId?: Record<string, string>;
+  fetchImpl?: FetchLike;
+}): CallbackSink {
+  const fetchImpl = input.fetchImpl ?? fetch;
+
+  return {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      if (message.provider !== "line") return;
+      if (!input.channelAccessToken && !input.channelAccessTokensByAccountId) return;
+
+      const thread = parseLineThreadKey(message.threadKey ?? "");
+      const channelAccessToken = lineChannelAccessTokenFor({
+        channelAccessToken: input.channelAccessToken,
+        channelAccessTokensByAccountId: input.channelAccessTokensByAccountId,
+        accountId: thread.accountId
+      });
+      if (!channelAccessToken) return;
+
+      for (const payload of createLinePushMessagePayloads({ to: thread.conversationId, text: message.body })) {
+        const response = await fetchImpl(message.uri, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${channelAccessToken}`,
+            "content-type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          throw new Error(`deliver LINE callback failed: ${response.status} ${await response.text()}`);
+        }
+      }
+      return {};
     }
   };
 }
@@ -535,7 +594,7 @@ export function createCompositeCallbackSink(sinks: CallbackSink[]): CallbackSink
       for (const sink of sinks) {
         try {
           const deliveredResult = await sink.deliver(message);
-          delivered = true;
+          delivered ||= deliveredResult !== undefined;
           if (deliveredResult?.externalMessageId && !result?.externalMessageId) {
             result = { externalMessageId: deliveredResult.externalMessageId };
           }

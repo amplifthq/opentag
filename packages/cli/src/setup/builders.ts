@@ -89,6 +89,18 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
             repo: target.repo
           }
         ]
+      : []),
+    ...(input.line && input.line.bindingMethod === "default_project"
+      ? [
+          {
+            provider: "line",
+            accountId: input.line.accountId,
+            conversationId: input.line.conversationId,
+            repoProvider: target.provider,
+            owner: target.owner,
+            repo: target.repo
+          }
+        ]
       : [])
   ];
 
@@ -129,6 +141,14 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               gitlabProjectPathWithNamespace: input.gitlab.projectPathWithNamespace,
               gitlabBaseUrl: input.gitlab.baseUrl,
               gitlabPort: input.gitlab.port
+            }
+          : {}),
+        ...(input.line
+          ? {
+              bindingMethod: input.line.bindingMethod,
+              lineAccountId: input.line.accountId,
+              lineConversationId: input.line.conversationId,
+              linePort: input.line.port
             }
           : {})
       }
@@ -217,6 +237,18 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               baseUrl: input.gitlab.baseUrl,
               webhookPath: input.gitlab.webhookPath,
               port: input.gitlab.port
+            }
+          }
+        : {}),
+      ...(input.line
+        ? {
+            line: {
+              accountId: input.line.accountId,
+              channelSecret: input.line.channelSecret,
+              channelAccessToken: input.line.channelAccessToken,
+              conversationId: input.line.conversationId,
+              defaultProjectBinding: input.line.bindingMethod === "default_project",
+              port: input.line.port
             }
           }
         : {})

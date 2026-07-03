@@ -10,6 +10,7 @@ import {
   createGitLabCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
+  createLineCallbackSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
@@ -48,6 +49,8 @@ export type LocalDispatcherRuntimeInput = {
   discordPublicKey?: string;
   discordBotToken?: string;
   discordWebhookPath?: string;
+  lineChannelAccessToken?: string;
+  lineChannelAccessTokensByAccountId?: Record<string, string>;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
 };
@@ -81,6 +84,23 @@ function parseAgentTokenMap(name: string, raw: string | undefined): Record<strin
       if (typeof token !== "string" || !token.trim()) {
         throw new Error(`Token for agent ${agentId} must be a non-empty string`);
       }
+    }
+    return Object.fromEntries(entries) as Record<string, string>;
+  } catch (error) {
+    throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function parseLineTokenMap(name: string, raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Value is not a JSON object");
+    const entries = Object.entries(parsed);
+    if (entries.length === 0) return undefined;
+    for (const [accountId, token] of entries) {
+      if (!accountId.trim()) throw new Error("LINE account id must be a non-empty string");
+      if (typeof token !== "string" || !token.trim()) throw new Error(`Token for LINE account ${accountId} must be a non-empty string`);
     }
     return Object.fromEntries(entries) as Record<string, string>;
   } catch (error) {
@@ -175,6 +195,10 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     "OPENTAG_TELEGRAM_BOT_TOKENS_JSON",
     env.OPENTAG_TELEGRAM_BOT_TOKENS_JSON
   );
+  const lineChannelAccessTokensByAccountId = parseLineTokenMap(
+    "OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON",
+    env.OPENTAG_LINE_CHANNEL_ACCESS_TOKENS_JSON
+  );
   const hardening = dispatcherRuntimeHardeningInputFromEnv(env);
 
   const githubApplyToken =
@@ -214,6 +238,8 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_DISCORD_PUBLIC_KEY ? { discordPublicKey: env.OPENTAG_DISCORD_PUBLIC_KEY } : {}),
     ...(env.OPENTAG_DISCORD_BOT_TOKEN ? { discordBotToken: env.OPENTAG_DISCORD_BOT_TOKEN } : {}),
     ...(env.OPENTAG_DISCORD_WEBHOOK_PATH ? { discordWebhookPath: env.OPENTAG_DISCORD_WEBHOOK_PATH } : {}),
+    ...(env.OPENTAG_LINE_CHANNEL_ACCESS_TOKEN ? { lineChannelAccessToken: env.OPENTAG_LINE_CHANNEL_ACCESS_TOKEN } : {}),
+    ...(lineChannelAccessTokensByAccountId ? { lineChannelAccessTokensByAccountId } : {}),
     ...hardening
   };
 }
@@ -277,6 +303,10 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       createTelegramCallbackSink({
         ...(input.telegramBotToken ? { botToken: input.telegramBotToken } : {}),
         ...(input.telegramBotTokensByAgentId ? { botTokensByAgentId: input.telegramBotTokensByAgentId } : {})
+      }),
+      createLineCallbackSink({
+        ...(input.lineChannelAccessToken ? { channelAccessToken: input.lineChannelAccessToken } : {}),
+        ...(input.lineChannelAccessTokensByAccountId ? { channelAccessTokensByAccountId: input.lineChannelAccessTokensByAccountId } : {})
       }),
       createDiscordCallbackSink({
         ...(input.discordBotToken ? { token: input.discordBotToken } : {})

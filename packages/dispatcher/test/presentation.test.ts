@@ -9,6 +9,7 @@ describe("default callback presentation", () => {
     expect(presentation.shouldDeliverAcknowledgement("lark")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("slack")).toBe(false);
     expect(presentation.shouldDeliverAcknowledgement("telegram")).toBe(true);
+    expect(presentation.shouldDeliverAcknowledgement("line")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("github")).toBe(true);
     expect(presentation.shouldDeliverAcknowledgement("custom")).toBe(true);
   });
@@ -19,6 +20,7 @@ describe("default callback presentation", () => {
     expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(false);
     expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(false);
     expect(presentation.shouldDeliverStatusUpdate("telegram")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("line")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("github")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("custom")).toBe(true);
     expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "running" })).toBe(false);
@@ -28,6 +30,7 @@ describe("default callback presentation", () => {
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
     expect(presentation.shouldDeliverProgress("lark")).toBe(false);
     expect(presentation.shouldDeliverProgress("telegram")).toBe(false);
+    expect(presentation.shouldDeliverProgress("line")).toBe(false);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
     expect(presentation.shouldDeliverProgress("custom")).toBe(true);
   });
@@ -46,6 +49,7 @@ describe("default callback presentation", () => {
       ["Received. OpenTag is working.", "Run: run_1", "Use /status here for queue state; audit locally with opentag status --run run_1."].join("\n")
     );
     expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe("I picked this up: run_1");
+    expect(presentation.acknowledgement({ provider: "line", runId: "run_1" })).toBe("I picked this up: run_1");
     expect(presentation.final({ provider: "github", result })).toEqual({
       body: "OpenTag finished with **success**.\n\ndone\n\nVerification:\n- `echo`: passed"
     });
@@ -69,6 +73,9 @@ describe("default callback presentation", () => {
       ]
     });
     expect(presentation.final({ provider: "telegram", result })).toEqual({
+      body: "Finished with success.\n\ndone\n\nVerification:\n- echo: passed"
+    });
+    expect(presentation.final({ provider: "line", result })).toEqual({
       body: "Finished with success.\n\ndone\n\nVerification:\n- echo: passed"
     });
     expect(presentation.final({ provider: "lark", result })).toMatchObject({
@@ -147,6 +154,7 @@ describe("default callback presentation", () => {
       body: "OpenTag progress for `run_running`: Running with codex."
     });
     expect(presentation.render({ provider: "telegram", presentation: waiting }).body).toBe("Working...");
+    expect(presentation.render({ provider: "line", presentation: waiting }).body).toBe("Working...");
   });
 
   it("renders doctor summaries through semantic fallback and provider-native UI where supported", () => {

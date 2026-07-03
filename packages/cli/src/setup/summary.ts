@@ -6,7 +6,7 @@ import type { OpenTagCliConfig } from "../config.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "../platforms/github/display.js";
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "../platforms/gitlab/display.js";
 import { formatLarkPersonalAgentSummary } from "../platforms/lark/display.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "../platforms/ports.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINE_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "../platforms/ports.js";
 import type { LarkSetupMethod, OpenTagSetupInput } from "./types.js";
 
 function yesNo(value: boolean, language: CliLanguage): string {
@@ -139,6 +139,24 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           ])
     );
   }
+  if (input.line) {
+    const webhookUrl = `http://localhost:${input.line.port ?? DEFAULT_LINE_WEBHOOK_PORT}/line/events/${input.line.accountId}`;
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            `LINE account ID: ${input.line.accountId}`,
+            `LINE conversation ID: ${input.line.conversationId}`,
+            `LINE 本地 webhook: ${webhookUrl}`,
+            `默认绑定当前项目: ${yesNo(input.line.bindingMethod === "default_project", input.language)}`
+          ]
+        : [
+            `LINE account ID: ${input.line.accountId}`,
+            `LINE conversation ID: ${input.line.conversationId}`,
+            `LINE local webhook: ${webhookUrl}`,
+            `Default project binding: ${yesNo(input.line.bindingMethod === "default_project", input.language)}`
+          ])
+    );
+  }
   const sessionProfileLines =
     input.agentSessionProfile && (input.agentSessionProfile.profile || input.agentSessionProfile.profileTemplate)
       ? input.language === "zh-CN"
@@ -161,8 +179,10 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
   const slack = config.platforms.slack;
+  const line = config.platforms.line;
   const githubPort = github?.port ?? DEFAULT_GITHUB_WEBHOOK_PORT;
   const gitlabPort = gitlab?.port ?? DEFAULT_GITLAB_WEBHOOK_PORT;
+  const linePort = line?.port ?? DEFAULT_LINE_WEBHOOK_PORT;
   if (language === "zh-CN") {
     return [
       "OpenTag 配置已保存。",
@@ -192,7 +212,13 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
       gitlab ? "Content type: application/json" : undefined,
       gitlab ? "Events: Note events" : undefined,
       gitlab ? `本地监听: ${gitlabLocalWebhookUrl({ port: gitlab.port, webhookPath: gitlab.webhookPath })}` : undefined,
-      gitlab ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${gitlabPort}。` : undefined
+      gitlab ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${gitlabPort}。` : undefined,
+      line ? "" : undefined,
+      line ? "LINE webhook 下一步：" : undefined,
+      line ? `Webhook URL: https://<your-tunnel>/line/events/${line.accountId}` : undefined,
+      line ? `本地监听: http://localhost:${linePort}/line/events/${line.accountId}` : undefined,
+      line ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${linePort}。` : undefined,
+      line ? `已绑定会话: ${line.accountId}/${line.conversationId}` : undefined
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
@@ -225,7 +251,13 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
     gitlab ? "Content type: application/json" : undefined,
     gitlab ? "Events: Note events" : undefined,
     gitlab ? `Local listener: ${gitlabLocalWebhookUrl({ port: gitlab.port, webhookPath: gitlab.webhookPath })}` : undefined,
-    gitlab ? `Point a public tunnel at the local listener, for example: ngrok http ${gitlabPort}.` : undefined
+    gitlab ? `Point a public tunnel at the local listener, for example: ngrok http ${gitlabPort}.` : undefined,
+    line ? "" : undefined,
+    line ? "LINE webhook next steps:" : undefined,
+    line ? `Webhook URL: https://<your-tunnel>/line/events/${line.accountId}` : undefined,
+    line ? `Local listener: http://localhost:${linePort}/line/events/${line.accountId}` : undefined,
+    line ? `Point a public tunnel at the local listener, for example: ngrok http ${linePort}.` : undefined,
+    line ? `Bound conversation: ${line.accountId}/${line.conversationId}` : undefined
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");

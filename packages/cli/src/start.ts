@@ -3,6 +3,7 @@ import { createDispatcherAdminClient, type ChannelBindingInput, type RepositoryB
 import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
 import { startGitLabIngress, type GitLabIngressConfig, type GitLabIngressHandle } from "@opentag/gitlab";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
+import { startLineIngress, type LineIngressConfig, type LineIngressHandle } from "@opentag/line";
 import {
   createDaemonRuntimeInput,
   dispatcherRuntimeHardeningInputFromEnv,
@@ -30,7 +31,7 @@ import {
 import { probeDispatcherHealth } from "./health.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINE_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
 
 export type StartCommandOptions = {
@@ -50,6 +51,7 @@ export type StartRuntimeDependencies = {
   startGitHubIngress?: typeof startGitHubIngress;
   startGitLabIngress?: typeof startGitLabIngress;
   startLarkIngress?: typeof startLarkIngress;
+  startLineIngress?: typeof startLineIngress;
   startSlackIngress?: typeof startSlackIngress;
   startSlackSocketModeIngress?: typeof startSlackSocketModeIngress;
   waitForDispatcher?: typeof waitForDispatcher;
@@ -74,7 +76,8 @@ type PlatformIngressHandle =
   | { platform: "slack"; mode: "events_api"; url: string; handle: SlackIngressHandle }
   | { platform: "slack"; mode: "socket_mode"; handle: SlackSocketModeIngressHandle }
   | { platform: "github"; url: string; webhookPath: string; handle: GitHubIngressHandle }
-  | { platform: "gitlab"; url: string; webhookPath: string; handle: GitLabIngressHandle };
+  | { platform: "gitlab"; url: string; webhookPath: string; handle: GitLabIngressHandle }
+  | { platform: "line"; url: string; webhookPath: string; handle: LineIngressHandle };
 
 function dispatcherPortFromUrl(dispatcherUrl: string): number {
   const url = new URL(dispatcherUrl);
@@ -123,8 +126,16 @@ function requireGitLabConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
   return gitlab;
 }
 
+function requireLineConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["line"]> {
+  const line = config.platforms.line;
+  if (!line) {
+    throw new Error("This config has no LINE platform config.");
+  }
+  return line;
+}
+
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
-  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab);
+  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab || config.platforms.line);
 }
 
 function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
@@ -176,6 +187,14 @@ function localStartPortChecks(config: OpenTagCliConfig): LocalPortCheck[] {
       label: "GitLab local webhook",
       port: gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT,
       fix: "Run `opentag setup --platform gitlab --gitlab-port <port> --force`, or edit platforms.gitlab.port in the OpenTag config."
+    });
+  }
+  const line = config.platforms.line;
+  if (line) {
+    checks.push({
+      label: "LINE webhook",
+      port: line.port ?? DEFAULT_LINE_WEBHOOK_PORT,
+      fix: "Run `opentag setup --platform line --line-port <port> --force`, or edit platforms.line.port in the OpenTag config."
     });
   }
   return checks;
@@ -243,12 +262,13 @@ export function dispatcherRuntimeInputFromCliConfig(
   input: { env?: NodeJS.ProcessEnv } = {}
 ): LocalDispatcherRuntimeInput {
   if (!hasStartablePlatform(config)) {
-    throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, or GitHub.");
+    throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, GitHub, or LINE.");
   }
   const lark = config.platforms.lark;
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  const line = config.platforms.line;
   // Discord (experimental) is env-only for now — no config.platforms.discord until
   // slice 3. When the public key is set it mounts alongside an existing startable
   // platform (e.g. Lark).
@@ -299,7 +319,8 @@ export function dispatcherRuntimeInputFromCliConfig(
     ...(slack ? { slackBotToken: slack.botToken } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(discordBotToken ? { discordBotToken } : {}),
-    ...(discordWebhookPath ? { discordWebhookPath } : {})
+    ...(discordWebhookPath ? { discordWebhookPath } : {}),
+    ...(line ? { lineChannelAccessToken: line.channelAccessToken } : {})
   };
 }
 
@@ -401,6 +422,24 @@ export function gitlabIngressConfigFromCliConfig(config: OpenTagCliConfig): GitL
   };
 }
 
+export function lineIngressConfigFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv } = {}
+): LineIngressConfig {
+  const line = requireLineConfig(config);
+  const maxRequestBodyBytes = maxRequestBodyBytesFromEnv(input.env);
+  return {
+    accountId: line.accountId,
+    channelSecret: line.channelSecret,
+    dispatcherUrl: config.daemon.dispatcherUrl,
+    ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(line.agentId ? { agentId: line.agentId } : {}),
+    ...(line.callbackUri ? { callbackUri: line.callbackUri } : {}),
+    ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
+    port: line.port ?? DEFAULT_LINE_WEBHOOK_PORT
+  };
+}
+
 export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?: BootstrapClient): Promise<void> {
   const admin =
     client ??
@@ -484,6 +523,7 @@ function defaultStartDependencies(dependencies: StartRuntimeDependencies = {}) {
     startGitHubIngress: dependencies.startGitHubIngress ?? startGitHubIngress,
     startGitLabIngress: dependencies.startGitLabIngress ?? startGitLabIngress,
     startLarkIngress: dependencies.startLarkIngress ?? startLarkIngress,
+    startLineIngress: dependencies.startLineIngress ?? startLineIngress,
     startSlackIngress: dependencies.startSlackIngress ?? startSlackIngress,
     startSlackSocketModeIngress: dependencies.startSlackSocketModeIngress ?? startSlackSocketModeIngress,
     waitForDispatcher: dependencies.waitForDispatcher ?? waitForDispatcher
@@ -540,7 +580,8 @@ function abortOnSubsystemFailure(promise: Promise<void>, abortController: AbortC
 function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
   const unsupported = [
     ...(config.platforms.lark ? ["Lark / Feishu"] : []),
-    ...(config.platforms.slack ? ["Slack"] : [])
+    ...(config.platforms.slack ? ["Slack"] : []),
+    ...(config.platforms.line ? ["LINE Messenger"] : [])
   ];
   if (unsupported.length > 0) {
     throw new Error(
@@ -602,6 +643,10 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
       const handle = dependencies.startGitLabIngress(gitlabIngressConfigFromCliConfig(config));
       ingresses.push({ platform: "gitlab", url: handle.url, webhookPath: handle.webhookPath, handle });
     }
+    if (config.platforms.line) {
+      const handle = dependencies.startLineIngress(lineIngressConfigFromCliConfig(config, { env }));
+      ingresses.push({ platform: "line", url: handle.url, webhookPath: handle.webhookPath, handle });
+    }
 
     logger.log("OpenTag is running.");
     logger.log(`Config: ${input.configPath}`);
@@ -631,6 +676,12 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
         logger.log(`GitLab settings: ${gitlabProjectWebhooksSettingsUrl(gitlab)}`);
         logger.log("GitLab events: Note events");
         logger.log(`Tunnel example: ngrok http ${gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT}`);
+      } else if (ingress.platform === "line") {
+        const line = config.platforms.line!;
+        logger.log(`LINE local webhook: ${ingress.url}${ingress.webhookPath}`);
+        logger.log(`LINE Webhook URL: https://<your-tunnel>${ingress.webhookPath}`);
+        logger.log(`LINE conversation binding: ${line.accountId}/${line.conversationId}`);
+        logger.log(`Tunnel example: ngrok http ${line.port ?? DEFAULT_LINE_WEBHOOK_PORT}`);
       } else {
         logger.log("Lark / Feishu: connected through Personal Agent long connection");
       }

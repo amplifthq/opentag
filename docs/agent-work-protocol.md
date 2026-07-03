@@ -371,7 +371,7 @@ OpenTag should not assume every workspace message is a potential task.
 ### Agent As Capability, Not Place
 
 The agent should behave like a pluggable capability inside Slack, GitHub, Lark,
-Linear, Notion, Jira, or local workflows. It should not require the team to
+LINE, Linear, Notion, Jira, or local workflows. It should not require the team to
 adopt a new AI-shaped place as the center of collaboration.
 
 ### Human Attention Is A Scarce Resource

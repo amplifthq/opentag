@@ -11,6 +11,9 @@ export const OFFICIAL_SETUP_LINKS = {
   slackSocketModeDocs: "https://docs.slack.dev/apis/events-api/using-socket-mode/",
   slackQuickstartDocs: "https://docs.slack.dev/quickstart/",
   slackSigningSecretDocs: "https://docs.slack.dev/authentication/verifying-requests-from-slack/",
+  lineConsole: "https://developers.line.biz/console/",
+  lineWebhookDocs: "https://developers.line.biz/en/docs/messaging-api/receiving-messages/",
+  lineSignatureDocs: "https://developers.line.biz/en/docs/messaging-api/verify-webhook-signature/",
   larkConsole: "https://open.larksuite.com/app",
   feishuConsole: "https://open.feishu.cn/app",
   larkAppIdDocs: "https://open.larksuite.com/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/how-to-obtain-app-id",
@@ -37,6 +40,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "telegram":
       case "discord":
         return [];
+      case "line":
+        return ["LINE Official Account channel secret", "LINE channel access token", "Conversation ID or auto", "本地 webhook 端口，默认 3070", "需要一个公网 tunnel 转发 LINE webhook"];
     }
   }
 
@@ -52,6 +57,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "telegram":
     case "discord":
       return [];
+    case "line":
+      return ["LINE Official Account channel secret", "LINE channel access token", "Conversation ID or auto", "Local webhook port, default 3070", "A public tunnel is required for LINE webhook delivery"];
   }
 }
 
@@ -83,6 +90,11 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
       case "telegram":
       case "discord":
         return [];
+      case "line":
+        return [
+          `LINE Developers Console: ${OFFICIAL_SETUP_LINKS.lineConsole}`,
+          `LINE webhook 官方文档: ${OFFICIAL_SETUP_LINKS.lineWebhookDocs}`
+        ];
     }
   }
 
@@ -112,6 +124,11 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
     case "telegram":
     case "discord":
       return [];
+    case "line":
+      return [
+        `LINE Developers Console: ${OFFICIAL_SETUP_LINKS.lineConsole}`,
+        `LINE webhook docs: ${OFFICIAL_SETUP_LINKS.lineWebhookDocs}`
+      ];
   }
 }
 
@@ -222,6 +239,30 @@ export function formatSlackCredentialHelp(language: CliLanguage, mode: SlackSetu
     "- Bot Events: app_mention, message.channels",
     "- Team ID / Channel ID: open the Slack channel in a browser and copy the T... and C... values from the URL",
     "- Before testing, run /invite @your app name in the target channel so Slack sends mentions to the app"
+  ].join("\n");
+}
+
+export function formatLineCredentialHelp(language: CliLanguage): string {
+  if (language === "zh-CN") {
+    return [
+      "LINE 这些值在哪里拿:",
+      `- LINE Developers Console: ${OFFICIAL_SETUP_LINKS.lineConsole}`,
+      "- Channel secret: Messaging API channel -> Basic settings",
+      "- Channel access token: Messaging API channel -> Messaging API -> Channel access token",
+      "- Webhook URL: 使用公网 tunnel，例如 https://<your-tunnel>/line/events/<accountId>",
+      `- 签名校验官方文档: ${OFFICIAL_SETUP_LINKS.lineSignatureDocs}`,
+      "- 会话 ID: 使用 auto 自动绑定到达 webhook 且签名有效的 LINE 用户、群组或 room，也可以从 LINE webhook 事件里的 source.userId / groupId / roomId 复制"
+    ].join("\n");
+  }
+
+  return [
+    "Where to find LINE values:",
+    `- LINE Developers Console: ${OFFICIAL_SETUP_LINKS.lineConsole}`,
+    "- Channel secret: Messaging API channel -> Basic settings",
+    "- Channel access token: Messaging API channel -> Messaging API -> Channel access token",
+    "- Webhook URL: use your public tunnel, for example https://<your-tunnel>/line/events/<accountId>",
+    `- Signature verification docs: ${OFFICIAL_SETUP_LINKS.lineSignatureDocs}`,
+    "- Conversation ID: use auto to bind signed LINE users, groups, or rooms that reach this webhook, or copy source.userId, source.groupId, or source.roomId from a LINE webhook event"
   ].join("\n");
 }
 

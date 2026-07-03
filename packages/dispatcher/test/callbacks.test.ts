@@ -7,6 +7,7 @@ import {
   createGitLabCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
+  createLineCallbackSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
@@ -430,6 +431,59 @@ describe("createGitHubCallbackSink", () => {
         }
       }
     ]);
+  });
+
+  it("posts LINE callback messages to push API", async () => {
+    const requests: { url: string; body: unknown; authorization: string | null }[] = [];
+    const sink = createLineCallbackSink({
+      channelAccessToken: "line-token",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          body: JSON.parse(String(init?.body)),
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return Response.json({});
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "line",
+      uri: "https://api.line.me/v2/bot/message/push",
+      threadKey: Buffer.from(JSON.stringify({ accountId: "line_main", conversationId: "U123" }), "utf8").toString("base64url"),
+      body: "done"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://api.line.me/v2/bot/message/push",
+        authorization: "Bearer line-token",
+        body: { to: "U123", messages: [{ type: "text", text: "done" }] }
+      }
+    ]);
+  });
+
+  it("does not let ignored callback sinks hide LINE delivery failures", async () => {
+    const sink = createCompositeCallbackSink([
+      createGitHubCallbackSink({ token: "ghs_test" }),
+      createLineCallbackSink({
+        channelAccessToken: "line-token",
+        fetchImpl: (async () => new Response("line failed", { status: 500 })) as typeof fetch
+      })
+    ]);
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "line",
+        uri: "https://api.line.me/v2/bot/message/push",
+        threadKey: Buffer.from(JSON.stringify({ accountId: "line_main", conversationId: "U123" }), "utf8").toString("base64url"),
+        body: "done"
+      })
+    ).rejects.toThrow("Composite callback delivery failed for every sink.");
   });
 
   it("streams Telegram progress messages through sendMessageDraft with a stable draft id", async () => {

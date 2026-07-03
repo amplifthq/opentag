@@ -527,6 +527,14 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const line = config.platforms.line;
+  if (line) {
+    const ingressReady = configured(line.accountId) && configured(line.channelSecret);
+    lines.push(
+      `  line: ingress=webhook path=/line/events/${line.accountId} port=${line.port ?? "default"} ${connectorStatus(ingressReady, "accountId/channelSecret")}, callback=${connectorStatus(configured(line.channelAccessToken), "channelAccessToken")}, source=${line.accountId}/${line.conversationId}`
+    );
+  }
+
   return lines.length > 1 ? lines : [...lines, "  none configured"];
 }
 
