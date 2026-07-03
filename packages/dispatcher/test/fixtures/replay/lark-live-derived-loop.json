@@ -1,0 +1,86 @@
+{
+  "name": "lark live-derived patch loop",
+  "runId": "run_replay_lark_live",
+  "event": {
+    "id": "evt_replay_lark_live",
+    "source": "lark",
+    "sourceEventId": "msg_replay_lark_live",
+    "receivedAt": "2026-07-03T03:26:56.349Z",
+    "actor": { "provider": "lark", "providerUserId": "ou_sender", "handle": "ming", "organizationId": "tenant_replay" },
+    "target": { "mention": "@opentag", "agentId": "opentag" },
+    "command": { "rawText": "@opentag patch this message and report back", "intent": "fix", "args": {} },
+    "context": [
+      { "provider": "lark", "kind": "message", "uri": "lark://tenant/tenant_replay/chat/oc_replay_chat/message/om_replay_message", "visibility": "organization" }
+    ],
+    "permissions": [
+      { "scope": "chat:postMessage", "reason": "reply in source chat" },
+      { "scope": "runner:local", "reason": "execute on local daemon" },
+      { "scope": "repo:write", "reason": "modify the mapped repository" }
+    ],
+    "callback": {
+      "provider": "lark",
+      "uri": "lark://im/v1/messages",
+      "threadKey": "tenant_replay|oc_replay_chat|om_replay_message"
+    },
+    "metadata": {
+      "tenantKey": "tenant_replay",
+      "chatId": "oc_replay_chat",
+      "messageId": "om_replay_message",
+      "repoProvider": "github",
+      "owner": "acme",
+      "repo": "demo"
+    }
+  },
+  "executorCapability": {
+    "id": "echo",
+    "invocation": "spawn",
+    "supportsProfile": false,
+    "supportsStreaming": false,
+    "supportsCancel": false,
+    "supportsHookCompletion": false,
+    "progressEvents": "audit",
+    "approvalMode": "opentag_policy",
+    "contextAccess": ["context_packet", "context_pointers"],
+    "promptAssembly": "opentag",
+    "writeAccess": "none",
+    "conversationAccess": "request",
+    "promptMutation": "none",
+    "rawContextAccess": false,
+    "writeActionAccess": "none",
+    "workspaceIsolation": "none",
+    "requiredSecrets": [],
+    "completionSignals": [{ "type": "process_exit", "required": true, "description": "Fixture executor exits after producing a structured result." }]
+  },
+  "result": {
+    "conclusion": "success",
+    "summary": "Validated the Lark patch path while keeping the source chat quiet.",
+    "artifacts": [
+      {
+        "id": "run_replay_lark_live:patch",
+        "type": "patch",
+        "kind": "patch",
+        "title": "Lark replay patch",
+        "uri": "opentag://run/run_replay_lark_live/patch",
+        "summary": "The replayed Lark loop produced a machine-addressable patch artifact."
+      },
+      {
+        "id": "run_replay_lark_live:receipt",
+        "type": "report",
+        "kind": "report",
+        "title": "Action receipt",
+        "uri": "opentag://run/run_replay_lark_live/receipt",
+        "summary": "The callback stays concise and points to local status for audit detail."
+      }
+    ],
+    "verification": [{ "command": "live Lark patch smoke", "outcome": "passed" }],
+    "nextAction": {
+      "summary": "Use opentag status locally for the full ledger and artifact inventory.",
+      "hint": { "kind": "none" }
+    }
+  },
+  "expected": {
+    "artifactTypes": ["patch", "report"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "finalBodyContains": ["Validated the Lark patch path", "Artifacts", "Audit:"]
+  }
+}

@@ -32,10 +32,16 @@ Each fixture is JSON so it can be reviewed independently from test code. A fixtu
 
 1. Add a new JSON file in `packages/dispatcher/test/fixtures/replay/`.
 2. Use a realistic source-thread event from GitHub, Slack, GitLab, Lark / Feishu, or another adapter.
-3. Keep secrets and live provider IDs out of the fixture.
-4. Include at least one machine-addressable artifact with `id`, `type`, `title`, `uri`, and `summary`.
-5. Add the fixture name to `packages/dispatcher/test/replay-harness.test.ts`.
-6. Run:
+3. If the case came from a live run, preserve the live shape but sanitize it before committing:
+   replace real repository names, user IDs, project IDs, chat IDs, message IDs,
+   and branch suffixes with reviewable placeholders.
+4. Keep secrets and live provider IDs out of the fixture.
+5. Do not copy raw provider API responses, webhook headers, local absolute
+   checkout paths, executor stdout/stderr, full Lark message IDs, or Slack bot
+   tokens into the fixture.
+6. Include at least one machine-addressable artifact with `id`, `type`, `title`, `uri`, and `summary`.
+7. Add the fixture name to `packages/dispatcher/test/replay-harness.test.ts`.
+8. Run:
 
 ```bash
 corepack pnpm vitest run packages/dispatcher/test/replay-harness.test.ts

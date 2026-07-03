@@ -33,7 +33,33 @@ function loadFixture(name: string): ReplayFixture {
   };
 }
 
-const fixtures = [loadFixture("github-governed-loop"), loadFixture("slack-governed-loop")];
+const fixtures = [
+  loadFixture("github-governed-loop"),
+  loadFixture("slack-governed-loop"),
+  loadFixture("gitlab-live-derived-loop"),
+  loadFixture("lark-live-derived-loop")
+];
+
+function repoBindingFor(event: OpenTagEvent): { provider: string; owner: string; repo: string } {
+  const metadata = event.metadata ?? {};
+  const provider = typeof metadata.repoProvider === "string" ? metadata.repoProvider : event.source;
+  const owner = typeof metadata.owner === "string" ? metadata.owner : "acme";
+  const repo = typeof metadata.repo === "string" ? metadata.repo : "demo";
+  return { provider, owner, repo };
+}
+
+function expectSourceThreadBodyIsRedacted(body: string) {
+  expect(body).not.toMatch(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/);
+  expect(body).not.toMatch(/\bglpat-[A-Za-z0-9_-]{20,}\b/);
+  expect(body).not.toMatch(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{20,}\b/);
+  expect(body).not.toMatch(/-----BEGIN [A-Z ]*PRIVATE KEY-----/);
+  expect(body).not.toMatch(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\//);
+  expect(body).not.toMatch(/\bom_[A-Za-z0-9]{20,}\b/);
+  expect(body).not.toContain("proposal_");
+  expect(body).not.toContain("intent_");
+  expect(body).not.toContain("stdout:");
+  expect(body).not.toContain("stderr:");
+}
 
 describe("source-thread replay harness", () => {
   for (const fixture of fixtures) {
@@ -51,17 +77,18 @@ describe("source-thread replay harness", () => {
       await expect(
         app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Replay Runner" }))
       ).resolves.toMatchObject({ status: 201 });
+      const repoBinding = repoBindingFor(fixture.event);
       await expect(
         app.request(
           "/v1/repo-bindings",
           jsonRequest({
-            provider: "github",
-            owner: "acme",
-            repo: "demo",
+            provider: repoBinding.provider,
+            owner: repoBinding.owner,
+            repo: repoBinding.repo,
             runnerId: "runner_1",
             workspacePath: "/Users/test/demo",
             defaultExecutor: "echo",
-            allowedActors: ["octocat", "alice"]
+            allowedActors: ["octocat", "alice", "ming", "gitlab-user"]
           })
         )
       ).resolves.toMatchObject({ status: 201 });
@@ -111,6 +138,7 @@ describe("source-thread replay harness", () => {
       for (const expectedText of fixture.expected.finalBodyContains) {
         expect(final?.body).toContain(expectedText);
       }
+      expectSourceThreadBodyIsRedacted(final?.body ?? "");
     });
   }
 });

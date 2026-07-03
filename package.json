@@ -12,7 +12,9 @@
     "release:check": "node scripts/release/check-cli-package.mjs",
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
+    "smoke:governance": "node scripts/test/governance-matrix.mjs",
     "smoke:live": "node scripts/test/live-e2e-smoke.mjs",
+    "smoke:privacy": "node scripts/test/privacy-redaction-scan.mjs",
     "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",
     "smoke:slack-protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/slack-protocol-runtime-smoke.ts"
   },

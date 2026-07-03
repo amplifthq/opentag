@@ -1509,6 +1509,33 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
   return ["Results:", ...outcomes.map((outcome) => `- ${applyOutcomeSummary(outcome)}`)];
 }
 
+function sanitizeApplyFailureDetail(detail: string): string {
+  return detail
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+    .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+function applyFallbackReason(input: { plan: ApplyPlan; selectedIntentIds: string[] }): string {
+  const selected = (input.plan.outcomes ?? []).filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
+  const failed = selected.find((outcome) => outcome.outcome === "failed");
+  if (failed) {
+    const detail = failed.message ?? failed.error;
+    return detail ? `Direct apply failed: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply failed.";
+  }
+  const unsupported = selected.find((outcome) => outcome.outcome === "unsupported");
+  if (unsupported) {
+    const detail = unsupported.message ?? unsupported.error;
+    return detail ? `Direct apply is unsupported: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply is unsupported for this action.";
+  }
+  return "Some selected intents were not directly applied.";
+}
+
 function renderAppliedThreadActionBody(input: {
   selectionText: string;
   selectedIntentIds: string[];
@@ -1773,7 +1800,7 @@ async function updateExecutedApplyPlan(input: {
   return {
     plan,
     executed: allSelectedApplied,
-    ...(allSelectedApplied ? {} : { fallbackReason: "Some selected intents were not directly applied." })
+    ...(allSelectedApplied ? {} : { fallbackReason: applyFallbackReason({ plan, selectedIntentIds: input.resolved.selectedIntentIds }) })
   };
 }
 
