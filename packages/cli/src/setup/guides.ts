@@ -35,6 +35,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       case "gitlab":
         return ["GitLab 项目 path_with_namespace，例如 group/project", "GitLab access token（用于回写 issue/MR note；你回复 apply 1 后也用于创建 MR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3060", "需要一个公网 tunnel 转发 GitLab Note Hook"];
       case "telegram":
+      case "discord":
         return [];
     }
   }
@@ -49,6 +50,7 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
     case "gitlab":
       return ["GitLab project path_with_namespace, for example group/project", "GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3060", "A public tunnel is required for GitLab Note Hook delivery"];
     case "telegram":
+    case "discord":
       return [];
   }
 }
@@ -79,6 +81,7 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
           `GitLab Merge Requests API 文档: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
         ];
       case "telegram":
+      case "discord":
         return [];
     }
   }
@@ -107,6 +110,7 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
         `GitLab Merge Requests API docs: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
       ];
     case "telegram":
+    case "discord":
       return [];
   }
 }
