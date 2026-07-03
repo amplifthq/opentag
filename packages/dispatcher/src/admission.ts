@@ -57,9 +57,64 @@ function isWriteCapable(event: OpenTagEvent): boolean {
   return event.permissions.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope));
 }
 
-function actorIsAllowed(event: OpenTagEvent, allowedActors: string[] | undefined): boolean {
-  if (!allowedActors?.length) return true;
+function actorInAllowedList(event: OpenTagEvent, allowedActors: string[]): boolean {
   return allowedActors.includes(event.actor.handle ?? "") || allowedActors.includes(event.actor.providerUserId);
+}
+
+const SOURCE_WORK_ITEM_KINDS = new Set(["issue", "pull_request", "merge_request"]);
+
+/** True when the event originated from a work item on a public GitHub/GitLab
+ * repository. Uses the work-item context pointers, whose visibility the
+ * platform adapters derive from the repository's own private/visibility flag
+ * (GitLab "internal" is already collapsed to private by its adapter). */
+export function sourceRepoIsPublic(event: OpenTagEvent): boolean {
+  if (event.source !== "github" && event.source !== "gitlab") return false;
+  return event.context.some(
+    (pointer) => SOURCE_WORK_ITEM_KINDS.has(pointer.kind) && pointer.visibility === "public"
+  );
+}
+
+type ActorGateResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      reason: string;
+      reasonCode: Extract<RunAdmissionReasonCode, "actor_not_allowed_for_write" | "actor_not_authorized_for_public_repo">;
+    };
+
+/** Decides whether the requesting actor may start a run for this binding.
+ *
+ * With an explicit `allowedActors` list the operator's intent wins: the list
+ * gates write-capable runs, matching the pre-existing contract.
+ *
+ * Without a list, the default is platform-aware instead of allow-all:
+ * anyone inside a closed surface (Slack workspace, Lark tenant, private
+ * GitHub/GitLab repository) may trigger runs, but on a public repository the
+ * actor must carry platform-reported write access (`actor.writeAccess`).
+ * Platforms that cannot report access (GitLab Note Hooks) leave it unset, so
+ * public projects there stay closed until `allowedActors` is configured. */
+function evaluateActorGate(event: OpenTagEvent, allowedActors: string[] | undefined): ActorGateResult {
+  if (allowedActors?.length) {
+    if (isWriteCapable(event) && !actorInAllowedList(event, allowedActors)) {
+      return {
+        allowed: false,
+        reason: "The requesting actor is not allowed to start a write-capable run in this repository.",
+        reasonCode: "actor_not_allowed_for_write"
+      };
+    }
+    return { allowed: true };
+  }
+
+  if (sourceRepoIsPublic(event) && event.actor.writeAccess !== true) {
+    return {
+      allowed: false,
+      reason:
+        "This repository is public and the requesting actor does not have write access to it. Ask a maintainer to grant write access, or configure allowedActors on the repository binding.",
+      reasonCode: "actor_not_authorized_for_public_repo"
+    };
+  }
+
+  return { allowed: true };
 }
 
 function admissionDecision(input: {
@@ -133,13 +188,14 @@ export function createAdmissionRuntime(input: {
         };
       }
 
-      if (isWriteCapable(request.event) && !actorIsAllowed(request.event, binding.allowedActors)) {
+      const actorGate = evaluateActorGate(request.event, binding.allowedActors);
+      if (!actorGate.allowed) {
         return {
           outcome: "needs_human_decision",
           decision: admissionDecision({
             action: "needs_human_decision",
-            reason: "The requesting actor is not allowed to start a write-capable run in this repository.",
-            reasonCode: "actor_not_allowed_for_write",
+            reason: actorGate.reason,
+            reasonCode: actorGate.reasonCode,
             event: request.event
           })
         };

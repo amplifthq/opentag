@@ -17,6 +17,10 @@ export const OpenTagPresentationActionSchema = z.object({
   title: z.string().min(1),
   state: z.enum(["ready_to_apply", "needs_approval", "needs_setup", "unsupported"]),
   targetLabel: z.string().min(1),
+  impact: z.string().min(1).optional(),
+  capabilityState: z.string().min(1).optional(),
+  approvalRequirement: z.string().min(1).optional(),
+  safeNextAction: z.string().min(1).optional(),
   visibleDecisions: z.array(z.enum(["apply", "approve", "reject", "continue"])),
   primaryDecision: z.enum(["apply", "continue", "none"]),
   setupReason: z.string().min(1).optional(),
@@ -84,6 +88,7 @@ export const OpenTagFinalSummaryPresentationSchema = z.object({
   outcome: z.string().min(1),
   summary: z.string().min(1),
   changedFiles: z.array(z.string().min(1)).optional(),
+  artifacts: OpenTagRunResultSchema.shape.artifacts,
   verification: OpenTagRunResultSchema.shape.verification,
   nextActions: z.array(z.string().min(1)).optional(),
   actionReceiptTitle: z.string().min(1).optional(),
@@ -111,6 +116,14 @@ export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionRecei
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
 
+export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
+  if (!presentation.artifacts?.length) return [];
+  return [
+    "Artifacts:",
+    ...presentation.artifacts.map((artifact) => `- ${artifact.kind ? `${artifact.kind}: ` : ""}[${artifact.title}](${artifact.uri})`)
+  ];
+}
+
 function nextActionSummary(result: OpenTagRunResult): string | undefined {
   if (!result.nextAction) return undefined;
   if (typeof result.nextAction === "string") return result.nextAction;
@@ -118,6 +131,10 @@ function nextActionSummary(result: OpenTagRunResult): string | undefined {
 }
 
 function presentationActionFromReceipt(receipt: ActionReceipt): OpenTagPresentationAction {
+  const impact = actionImpactFromReceipt(receipt);
+  const capabilityState = actionCapabilityStateFromReceipt(receipt);
+  const approvalRequirement = actionApprovalRequirementFromReceipt(receipt);
+  const safeNextAction = actionSafeNextActionFromReceipt(receipt);
   const details = presentationActionDetailsFromReceipt(receipt);
   const detailRows = presentationActionDetailRowsFromReceipt(receipt);
   return {
@@ -127,6 +144,10 @@ function presentationActionFromReceipt(receipt: ActionReceipt): OpenTagPresentat
     title: receipt.candidate.intent.summary,
     state: receipt.state as ActionReceiptState,
     targetLabel: receipt.targetLabel,
+    impact,
+    capabilityState,
+    approvalRequirement,
+    safeNextAction,
     visibleDecisions: receipt.visibleDecisions as ActionReceiptDecision[],
     primaryDecision: receipt.primaryDecision as ActionReceiptPrimaryDecision,
     ...(receipt.setupReason ? { setupReason: receipt.setupReason } : {}),
@@ -158,6 +179,78 @@ function actionDecisionCommand(decision: ActionReceiptDecision, index: number): 
   return `${decision} ${index}`;
 }
 
+function commandForDecision(receipt: ActionReceipt, decision: ActionReceiptDecision): string {
+  return inlineCode(actionDecisionCommand(decision, receipt.candidate.index));
+}
+
+function actionImpactFromReceipt(receipt: ActionReceipt): string {
+  const intent = receipt.candidate.intent;
+  const params = intent.params;
+  if (intent.action === "create_pull_request") {
+    const head = stringParam(params, "head") ?? stringParam(params, "branch") ?? "unknown";
+    const base = stringParam(params, "base") ?? stringParam(params, "baseBranch") ?? "main";
+    const changedFiles = stringArrayParam(params, "changedFiles");
+    const fileText = changedFiles.length === 1 ? "1 changed file" : `${changedFiles.length} changed files`;
+    return `Creates a pull request from ${inlineCode(head)} into ${inlineCode(base)} with ${fileText}.`;
+  }
+  if (intent.domain === "labels") return "Writes label metadata on the source work item.";
+  if (intent.domain === "assignee" || intent.domain === "assignees") return "Writes assignee metadata on the source work item.";
+  if (intent.domain === "review") return "Requests review on the source work item or proposed code change.";
+  if (intent.domain === "artifact_links") return "Attaches or references an OpenTag artifact without changing repository files.";
+  if (intent.domain === "follow_up") return "Starts a bounded follow-up run from this source-thread action.";
+  return `Proposes ${intent.action} on ${intent.domain}.`;
+}
+
+function actionCapabilityStateFromReceipt(receipt: ActionReceipt): string {
+  if (receipt.state === "ready_to_apply") {
+    return "Adapter capability and preflight allow direct apply for this target.";
+  }
+  if (receipt.state === "needs_approval") {
+    return "External write is withheld until a human records approval.";
+  }
+  if (receipt.state === "needs_setup") {
+    return `Direct apply is blocked by setup or preflight: ${receipt.setupReason ?? "setup is required"}.`;
+  }
+  return receipt.setupReason
+    ? `No safe direct apply path is available here: ${receipt.setupReason}.`
+    : "No safe direct apply path is available from this source thread.";
+}
+
+function actionApprovalRequirementFromReceipt(receipt: ActionReceipt): string {
+  if (receipt.state === "ready_to_apply") {
+    return `Review impact, then use ${commandForDecision(receipt, "apply")} to approve and apply, or ${commandForDecision(receipt, "reject")}.`;
+  }
+  if (receipt.state === "needs_approval") {
+    return `Use ${commandForDecision(receipt, "approve")} to record approval without applying yet, or ${commandForDecision(receipt, "reject")}.`;
+  }
+  if (receipt.state === "needs_setup") {
+    return "Approval alone cannot apply this action until setup or preflight is fixed.";
+  }
+  return "No approval path is advertised for this unsupported action.";
+}
+
+function actionSafeNextActionFromReceipt(receipt: ActionReceipt): string {
+  if (receipt.primaryDecision === "apply" && receipt.visibleDecisions.includes("apply")) {
+    return `${commandForDecision(receipt, "apply")} is the safe apply path after reviewing this receipt.`;
+  }
+  if (receipt.primaryDecision === "continue" && receipt.visibleDecisions.includes("continue")) {
+    return `${commandForDecision(receipt, "continue")} continues in a bounded follow-up run without silently writing externally.`;
+  }
+  if (receipt.visibleDecisions.includes("approve")) {
+    return `${commandForDecision(receipt, "approve")} records human approval; OpenTag will not silently apply.`;
+  }
+  if (receipt.visibleDecisions.includes("continue")) {
+    return `${commandForDecision(receipt, "continue")} is the safest continuation path.`;
+  }
+  return `${commandForDecision(receipt, "reject")} leaves the source system unchanged.`;
+}
+
+function actionFallbackFromReceipt(receipt: ActionReceipt): string | undefined {
+  if (!receipt.visibleDecisions.includes("continue")) return undefined;
+  if (receipt.state === "ready_to_apply") return undefined;
+  return `${commandForDecision(receipt, "continue")} starts a follow-up run instead of applying an external write.`;
+}
+
 function renderVerificationParams(params: Record<string, unknown> | undefined): string[] {
   const value = params?.["verification"];
   if (!Array.isArray(value)) return [];
@@ -175,7 +268,14 @@ function renderVerificationParams(params: Record<string, unknown> | undefined): 
 }
 
 function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] {
-  const details: string[] = [];
+  const details: string[] = [
+    `Impact: ${actionImpactFromReceipt(receipt)}`,
+    `Capability/preflight: ${actionCapabilityStateFromReceipt(receipt)}`,
+    `Approval: ${actionApprovalRequirementFromReceipt(receipt)}`,
+    `Safe next action: ${actionSafeNextActionFromReceipt(receipt)}`
+  ];
+  const fallback = actionFallbackFromReceipt(receipt);
+  if (fallback) details.push(`Fallback: ${fallback}`);
   const params = receipt.candidate.intent.params;
   if (receipt.candidate.intent.action === "create_pull_request") {
     const head = stringParam(params, "head") ?? stringParam(params, "branch");
@@ -193,7 +293,15 @@ function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] 
 function presentationActionDetailRowsFromReceipt(receipt: ActionReceipt): Array<{ label: string; value: string }> {
   const candidate = receipt.candidate;
   const params = candidate.intent.params;
-  const rows: Array<{ label: string; value: string }> = [{ label: "Target", value: receipt.targetLabel }];
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "Target", value: receipt.targetLabel },
+    { label: "Impact", value: actionImpactFromReceipt(receipt) },
+    { label: "Capability / preflight", value: actionCapabilityStateFromReceipt(receipt) },
+    { label: "Required approval", value: actionApprovalRequirementFromReceipt(receipt) },
+    { label: "Safe next action", value: actionSafeNextActionFromReceipt(receipt) }
+  ];
+  const fallback = actionFallbackFromReceipt(receipt);
+  if (fallback) rows.push({ label: "Fallback", value: fallback });
   if (receipt.setupReason) rows.push({ label: "Status", value: receipt.setupReason });
   if (candidate.intent.action === "create_pull_request") {
     const title = stringParam(params, "title");
@@ -302,6 +410,7 @@ export function createFinalSummaryPresentation(input: {
     outcome: input.result.conclusion,
     summary: input.result.summary,
     ...(input.result.changedFiles?.length ? { changedFiles: input.result.changedFiles } : {}),
+    ...(input.result.artifacts?.length ? { artifacts: input.result.artifacts } : {}),
     ...(input.result.verification?.length ? { verification: input.result.verification } : {}),
     ...(nextAction ? { nextActions: [nextAction] } : {}),
     ...(actionReceipt ? { actionReceiptTitle: actionReceipt.title, actions: actionReceipt.actions } : {}),
@@ -369,6 +478,7 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     `Finished: ${presentation.outcome}`,
     presentation.summary,
     ...(presentation.changedFiles?.length ? ["Changed files:", ...presentation.changedFiles.map((file) => `- ${file}`)] : []),
+    ...(presentation.artifacts?.length ? ["Artifacts:", ...presentation.artifacts.map((artifact) => `- ${artifact.title}: ${artifact.uri}`)] : []),
     ...(presentation.verification?.length ? ["Verification:", ...presentation.verification.map((check) => `- ${check.command}: ${check.outcome}`)] : []),
     ...(presentation.nextActions?.length ? ["Next actions:", ...presentation.nextActions.map((action) => `- ${action}`)] : []),
     ...(presentation.actions?.length

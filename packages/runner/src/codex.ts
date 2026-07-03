@@ -165,11 +165,18 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
           at: new Date().toISOString()
         });
 
+        // Sandbox level follows the granted permission scopes: runs admitted
+        // without a write scope (e.g. `investigate`) get Codex's read-only
+        // sandbox, so a prompt-injected read run cannot modify the worktree.
+        // `--full-auto` keeps the OS sandbox in workspace-write mode with
+        // network disabled; OpenTag never uses the sandbox-bypass flags.
+        const writeCapable =
+          input.permissions?.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope)) ?? false;
         const args = [
           "exec",
           "--cd",
           worktreePath,
-          "--full-auto",
+          ...(writeCapable ? ["--full-auto"] : ["--sandbox", "read-only"]),
           "--ephemeral",
           ...(options.model ? ["--model", options.model] : []),
           "-"

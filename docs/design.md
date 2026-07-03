@@ -10,7 +10,7 @@ see [Thread Runtime Alignment](./thread-runtime-design.md).
 
 ## One-Liner
 
-OpenTag is the open mention layer for agents: tag any approved agent from a workspace surface, route the request through scoped permissions and auditable context, and let a local or hosted runner execute the work and report back.
+OpenTag turns an existing work thread into a governed agent work loop: tag any approved agent from a workspace surface, route the request through bounded context, scoped permissions, executor capability checks, an append-only work ledger, and artifact-first callbacks, then let a local or user-controlled runner execute the work and report back without creating a new AI workspace.
 
 ## Why Now
 
@@ -21,6 +21,7 @@ vendor-neutral, and protocol-first:
 - OpenTag brings approved agents into existing workspace surfaces.
 - OpenTag supports multiple executors instead of binding the workflow to one model.
 - OpenTag treats local runners and auditable source-thread context as core product boundaries.
+- OpenTag treats artifacts and agent work ledger entries as the durable output of a run; chat callbacks are concise projections, not the system of record.
 - OpenTag should stay protocol-first, executor-neutral, and local-runner friendly.
 
 The first release should move fast enough to ride the conversation while still proving the idea with a real end-to-end task flow.
@@ -39,8 +40,9 @@ from GitHub, Slack, or a similar workspace surface, then have OpenTag:
 2. Normalize the workspace event into a stable OpenTag event.
 3. Check actor, target, context, and permission scope.
 4. Create a run with auditable state.
-5. Dispatch the run to an approved local or hosted executor.
-6. Stream progress and final output back to the original surface.
+5. Persist a context packet snapshot and ledger entries that make the work replayable.
+6. Dispatch the run to an approved local or user-controlled executor with declared capability.
+7. Return concise artifacts, action receipts, and safe next actions to the original surface.
 
 ## First Release Scope
 
@@ -473,7 +475,7 @@ Responsibilities:
 
 - create dispatcher runs from normalized `OpenTagEvent` objects.
 - register runners and bind repositories or Slack channels.
-- claim runs for local or hosted runners.
+- claim runs for local or user-controlled runners.
 - report runner heartbeat, progress, running status, and final results.
 - validate dispatcher responses at the package boundary.
 
@@ -547,7 +549,7 @@ Responsibilities:
 - compose callback sinks.
 - start the `packages/opentag-dispatcher` Hono app with `@hono/node-server`.
 
-The dispatcher should stay boring. It is not an agent runtime, workflow engine, hosted IDE, or chat product. Its job is to bridge public workspace events to private/local runners without requiring the user's machine to expose an inbound port.
+The dispatcher should stay boring. It is not an agent runtime, workflow engine, hosted IDE, or chat product. Its job is to relay public workspace events to private/local runners without requiring the user's machine to expose an inbound port.
 
 ### `packages/opentag-store`
 
@@ -1122,5 +1124,5 @@ This gives the project a fast demo without sacrificing the bigger thesis:
 ```text
 OpenTag is not a GitHub bot.
 OpenTag is not an agent framework.
-OpenTag is the open tag-to-run bridge between collaboration surfaces and agent executors.
+OpenTag is the open Agent Work Protocol between collaboration surfaces and user-controlled agent executors.
 ```

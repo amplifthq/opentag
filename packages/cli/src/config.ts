@@ -16,7 +16,7 @@ const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
-const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram"]);
+const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram", "discord"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
@@ -247,6 +247,17 @@ const GitHubPlatformSchema = z
   })
   .strict();
 
+const GitLabPlatformSchema = z
+  .object({
+    token: SecretStringSchema,
+    webhookSecret: SecretStringSchema,
+    projectPathWithNamespace: z.string().min(1),
+    baseUrl: z.string().url(),
+    webhookPath: z.string().min(1).optional(),
+    port: OptionalPortSchema
+  })
+  .strict();
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -265,7 +276,10 @@ const PreferencesSchema = z
         githubOwner: z.string().min(1).optional(),
         githubRepo: z.string().min(1).optional(),
         githubPort: OptionalPortSchema,
-        githubAutoCreatePullRequest: z.boolean().optional()
+        githubAutoCreatePullRequest: z.boolean().optional(),
+        gitlabProjectPathWithNamespace: z.string().min(1).optional(),
+        gitlabBaseUrl: z.string().url().optional(),
+        gitlabPort: OptionalPortSchema
       })
       .strict()
       .optional()
@@ -289,7 +303,8 @@ export const OpenTagCliConfigSchema = z
       .object({
         lark: LarkPlatformSchema.optional(),
         slack: SlackPlatformSchema.optional(),
-        github: GitHubPlatformSchema.optional()
+        github: GitHubPlatformSchema.optional(),
+        gitlab: GitLabPlatformSchema.optional()
       })
       .strict()
   })
@@ -424,6 +439,7 @@ function redactValue(key: string, value: unknown): unknown {
       "runnerTokens",
       "pairingToken",
       "signingSecret",
+      "token",
       "webhookSecret"
     ].includes(key)
   ) {

@@ -104,6 +104,132 @@ describe("GitHub webhook ingress", () => {
     });
   });
 
+  it("keeps author_association metadata without inferring actor write access", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_assoc" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "created",
+      comment: {
+        id: 125,
+        body: "@opentag investigate this",
+        html_url: "https://github.com/acme/demo/issues/1#issuecomment-125",
+        author_association: "COLLABORATOR"
+      },
+      issue: {
+        html_url: "https://github.com/acme/demo/issues/1",
+        comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        number: 1
+      },
+      repository: { name: "demo", private: false, owner: { login: "acme" } },
+      sender: { id: 42, login: "octocat" }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "issue_comment", deliveryId: "delivery_125" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(createRun.mock.calls[0]![0]).toMatchObject({
+      actor: { provider: "github", handle: "octocat" },
+      metadata: { authorAssociation: "COLLABORATOR" }
+    });
+    expect(createRun.mock.calls[0]![0].actor.writeAccess).toBeUndefined();
+  });
+
+  it("uses resolved repository permission as actor write access when provided", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_permission" }));
+    const resolveActorWriteAccess = vi.fn(async () => true);
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun,
+      resolveActorWriteAccess,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "created",
+      comment: {
+        id: 126,
+        body: "@opentag investigate this",
+        html_url: "https://github.com/acme/demo/issues/1#issuecomment-126",
+        author_association: "COLLABORATOR"
+      },
+      issue: {
+        html_url: "https://github.com/acme/demo/issues/1",
+        comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        number: 1
+      },
+      repository: { name: "demo", private: false, owner: { login: "acme" } },
+      sender: { id: 42, login: "octocat" }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "issue_comment", deliveryId: "delivery_126" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(resolveActorWriteAccess).toHaveBeenCalledWith({ owner: "acme", repo: "demo", username: "octocat" });
+    expect(createRun.mock.calls[0]![0]).toMatchObject({
+      actor: { provider: "github", handle: "octocat", writeAccess: true },
+      metadata: { authorAssociation: "COLLABORATOR" }
+    });
+  });
+
+  it("routes mentioned source-thread control commands without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({ outcome: "status" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun,
+      submitThreadAction,
+      now: () => "2026-06-27T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "created",
+      comment: {
+        id: 124,
+        body: "@opentag /status",
+        html_url: "https://github.com/acme/demo/issues/1#issuecomment-124"
+      },
+      issue: {
+        html_url: "https://github.com/acme/demo/issues/1",
+        comments_url: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        number: 1
+      },
+      repository: { name: "demo", private: false, owner: { login: "acme" } },
+      sender: { id: 42, login: "octocat" }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "issue_comment", deliveryId: "delivery_124" })
+    );
+
+    expect(response.status).toBe(200);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledOnce();
+    expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
+      id: "control_github_comment_124",
+      rawText: "@opentag /status",
+      callback: {
+        provider: "github",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    });
+  });
+
   it("rejects invalid signatures", async () => {
     const recordControlPlaneEvent = vi.fn(async () => {});
     const app = createGitHubWebhookApp({

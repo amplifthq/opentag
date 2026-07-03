@@ -72,6 +72,33 @@ export type OpenTagAuditEvent = {
   createdAt: string;
 };
 
+export type AgentWorkLedgerCategory =
+  | "source_event"
+  | "admission"
+  | "context_packet"
+  | "executor_capability"
+  | "lifecycle"
+  | "progress_visibility"
+  | "approval_decision"
+  | "apply_plan"
+  | "artifact"
+  | "callback_delivery"
+  | "final_outcome"
+  | "error"
+  | "cancellation"
+  | "timeout"
+  | "audit";
+
+export type AgentWorkLedgerEntry = OpenTagAuditEvent & {
+  sequence: number;
+  category: AgentWorkLedgerCategory;
+};
+
+export type AgentWorkLedger = {
+  runId: string;
+  entries: AgentWorkLedgerEntry[];
+};
+
 export type CallbackDeliveryKind = "acknowledgement" | "progress" | "final";
 export type CallbackDeliveryProvider = string;
 export type CallbackDeliveryStatus = "pending" | "delivering" | "delivered" | "failed";
@@ -306,6 +333,26 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
 
 function terminalRunStatus(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "timed_out";
+}
+
+function ledgerCategoryForEventType(type: string): AgentWorkLedgerCategory {
+  if (type.startsWith("admission.")) return "admission";
+  if (type.startsWith("context_packet.")) return "context_packet";
+  if (type.startsWith("executor.capability.")) return "executor_capability";
+  if (type === "callback.progress.suppressed") return "progress_visibility";
+  if (type.startsWith("callback.")) return "callback_delivery";
+  if (type.startsWith("source_receipt.")) return "callback_delivery";
+  if (type.startsWith("approval.")) return "approval_decision";
+  if (type.startsWith("apply_plan.")) return "apply_plan";
+  if (type.startsWith("artifact.")) return "artifact";
+  if (type.startsWith("proposal.snapshot.")) return "artifact";
+  if (type === "run.completed") return "final_outcome";
+  if (type === "run.cancelled" || type.includes(".cancel")) return "cancellation";
+  if (type.includes("timeout") || type === "run.timed_out") return "timeout";
+  if (type === "run.progress") return "progress_visibility";
+  if (type.startsWith("run.")) return "lifecycle";
+  if (type.startsWith("security.") || type.endsWith(".failed")) return "error";
+  return "audit";
 }
 
 function sourceContainerMetadataMatches(input: {
@@ -1056,6 +1103,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .select()
         .from(runs)
         .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running"])))
+        .orderBy(asc(runs.createdAt))
+        .limit(1)
+        .get();
+      if (!row) return null;
+      return {
+        run: runFromRow(row),
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+      };
+    },
+
+    async findCancelableRunForConversation(input: { conversationKeys: string[] }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
+      const keys = [...new Set(input.conversationKeys.filter((key) => key.length > 0))];
+      if (keys.length === 0) return null;
+      const row = await db
+        .select()
+        .from(runs)
+        .where(and(inArray(runs.conversationKey, keys), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
         .orderBy(asc(runs.createdAt))
         .limit(1)
         .get();
@@ -1855,6 +1919,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       runId: string;
       executor: string;
       runnerId?: string;
+      executorCapability?: unknown;
       runTimeoutMs?: number;
       idempotencyKey?: string;
     }): Promise<MarkRunningOutcome> {
@@ -1891,12 +1956,39 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         importance: "normal",
         createdAt: updatedAt
       });
+      if (input.executorCapability) {
+        await appendRunEvent({
+          runId: input.runId,
+          type: "executor.capability.snapshot",
+          payload: {
+            executor: input.executor,
+            capability: input.executorCapability
+          },
+          visibility: "audit",
+          importance: "normal",
+          message: `Executor capability snapshot recorded for ${input.executor}.`,
+          createdAt: updatedAt
+        });
+      }
       return "running";
     },
 
     async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string; idempotencyKey?: string }): Promise<CompleteRunOutcome> {
-      const result = OpenTagRunResultSchema.parse(input.result);
+      const parsedResult = OpenTagRunResultSchema.parse(input.result);
       const updatedAt = nowIso();
+      const result = OpenTagRunResultSchema.parse({
+        ...parsedResult,
+        ...(parsedResult.artifacts?.length
+          ? {
+              artifacts: parsedResult.artifacts.map((artifact, index) => ({
+                ...artifact,
+                id: artifact.id ?? `${input.runId}:artifact:${index + 1}`,
+                sourceRunId: artifact.sourceRunId ?? input.runId,
+                createdAt: artifact.createdAt ?? updatedAt
+              }))
+            }
+          : {})
+      });
       const status =
         result.conclusion === "success"
           ? "succeeded"
@@ -1970,6 +2062,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           visibility: "audit",
           importance: "high",
           message: parsedSnapshot.summary,
+          createdAt: updatedAt
+        });
+      }
+      for (const artifact of result.artifacts ?? []) {
+        await appendRunEvent({
+          runId: input.runId,
+          type: "artifact.created",
+          payload: artifact,
+          visibility: "audit",
+          importance: "normal",
+          message: artifact.summary ?? artifact.title,
           createdAt: updatedAt
         });
       }
@@ -2312,6 +2415,43 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         payload: JSON.parse(row.payloadJson) as unknown,
         createdAt: row.createdAt
       }));
+    },
+
+    async getRunLedger(input: { runId: string }): Promise<AgentWorkLedger | null> {
+      const runRow = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+      if (!runRow) return null;
+      const event = OpenTagEventSchema.parse(JSON.parse(runRow.eventJson));
+      const rows = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(asc(runEvents.id));
+      const sourceEntry: AgentWorkLedgerEntry = {
+        id: 0,
+        sequence: 0,
+        runId: input.runId,
+        type: "source_event.received",
+        visibility: "audit",
+        importance: "normal",
+        message: `${event.source} source event ${event.sourceEventId} received.`,
+        payload: { event },
+        createdAt: event.receivedAt,
+        category: "source_event"
+      };
+      return {
+        runId: input.runId,
+        entries: [
+          sourceEntry,
+          ...rows.map((row, index) => ({
+            id: row.id,
+            sequence: index + 1,
+            runId: row.runId,
+            type: row.type,
+            visibility: RunEventVisibilitySchema.parse(row.visibility),
+            importance: RunEventImportanceSchema.parse(row.importance),
+            ...(row.message ? { message: row.message } : {}),
+            payload: row.payloadJson ? (JSON.parse(row.payloadJson) as unknown) : {},
+            createdAt: row.createdAt,
+            category: ledgerCategoryForEventType(row.type)
+          }))
+        ]
+      };
     },
 
     async appendControlPlaneEvent(input: {

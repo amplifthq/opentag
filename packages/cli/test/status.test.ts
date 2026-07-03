@@ -62,6 +62,31 @@ function githubRelayConfig() {
   return built;
 }
 
+function gitlabRelayConfig() {
+  const built = createSetupConfig({
+    language: "en",
+    platform: "gitlab",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    gitlab: {
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    }
+  });
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  return built;
+}
+
 function hangingFetch(): typeof fetch {
   return vi.fn((_url: string | URL | Request, init?: RequestInit) => {
     return new Promise<Response>((_resolve, reject) => {
@@ -218,6 +243,19 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("WARN runner security policy: No explicit daemon.security policy is configured");
   });
 
+  it("formats GitLab relay security as supported when a GitLab webhook secret is configured", async () => {
+    const summary = await statusFromConfig({
+      config: gitlabRelayConfig(),
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: vi.fn(async () => Response.json({ ok: true }))
+    });
+
+    const formatted = formatStatus(summary);
+    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("OK GitLab webhook secret: Configured locally; the relay /gitlab/webhooks endpoint must verify X-Gitlab-Token before creating runs.");
+    expect(formatted).not.toContain("GitLab relay mode is not supported");
+  });
+
   it("formats relay token scope as split when runnerToken is configured", async () => {
     const configured = githubRelayConfig();
     configured.daemon.runnerToken = "runner_token";
@@ -326,7 +364,17 @@ describe("OpenTag CLI status", () => {
             status: "succeeded",
             createdAt: "2026-06-24T00:00:00.000Z",
             updatedAt: "2026-06-24T00:01:00.000Z",
-            result: { conclusion: "success", summary: "Done." }
+            result: {
+              conclusion: "success",
+              summary: "Done.",
+              changedFiles: ["README.md"],
+              artifacts: [
+                { kind: "patch", title: "Generated patch", uri: "opentag/run_status_1" },
+                { kind: "report", title: "Run report", uri: "opentag://run/run_status_1/report" },
+                { kind: "log_summary", title: "Log summary", uri: "opentag://run/run_status_1/log-summary" }
+              ],
+              verification: [{ command: "corepack pnpm test", outcome: "passed" }]
+            }
           },
           event: runEvent
         });
@@ -370,6 +418,62 @@ describe("OpenTag CLI status", () => {
           }
         });
       }
+      if (href.endsWith("/v1/runs/run_status_1/ledger")) {
+        return Response.json({
+          ledger: {
+            runId: "run_status_1",
+            entries: [
+              {
+                type: "source_event.received",
+                category: "source_event",
+                visibility: "audit",
+                importance: "normal",
+                message: "github source event comment_status_run received.",
+                createdAt: "2026-06-24T00:00:00.000Z"
+              },
+              {
+                type: "context_packet.generated",
+                category: "context_packet",
+                visibility: "audit",
+                importance: "normal",
+                message: "label this bug",
+                createdAt: "2026-06-24T00:00:00.000Z"
+              },
+              {
+                type: "executor.capability.snapshot",
+                category: "executor_capability",
+                visibility: "audit",
+                importance: "normal",
+                message: "Captured executor capability.",
+                createdAt: "2026-06-24T00:00:10.000Z"
+              },
+              {
+                type: "artifact.created",
+                category: "artifact",
+                visibility: "audit",
+                importance: "normal",
+                message: "Stored run artifacts.",
+                createdAt: "2026-06-24T00:00:50.000Z"
+              },
+              {
+                type: "callback.final.delivered",
+                category: "callback_delivery",
+                visibility: "human",
+                importance: "normal",
+                message: "Delivered final receipt.",
+                createdAt: "2026-06-24T00:01:00.000Z"
+              },
+              {
+                type: "callback.progress.suppressed",
+                visibility: "audit",
+                importance: "low",
+                message: "Suppressed progress callback.",
+                createdAt: "2026-06-24T00:01:01.000Z"
+              }
+            ]
+          }
+        });
+      }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
 
@@ -384,12 +488,29 @@ describe("OpenTag CLI status", () => {
       expect.arrayContaining([
         expect.stringContaining("/v1/runs/run_status_1"),
         expect.stringContaining("/v1/runs/run_status_1/events"),
-        expect.stringContaining("/v1/runs/run_status_1/metrics")
+        expect.stringContaining("/v1/runs/run_status_1/metrics"),
+        expect.stringContaining("/v1/runs/run_status_1/ledger")
       ])
     );
     expect(formatRunStatus(summary)).toContain("Run: run_status_1");
     expect(formatRunStatus(summary)).toContain("Status: succeeded (success)");
+    expect(formatRunStatus(summary)).toContain("Result:");
+    expect(formatRunStatus(summary)).toContain("summary: Done.");
+    expect(formatRunStatus(summary)).toContain("changed files: README.md");
+    expect(formatRunStatus(summary)).toContain("artifacts:");
+    expect(formatRunStatus(summary)).toContain("- patch: Generated patch: opentag/run_status_1");
+    expect(formatRunStatus(summary)).toContain("- report: Run report: opentag://run/run_status_1/report");
+    expect(formatRunStatus(summary)).toContain("- log_summary: Log summary: opentag://run/run_status_1/log-summary");
+    expect(formatRunStatus(summary)).toContain("- corepack pnpm test: passed");
     expect(formatRunStatus(summary)).toContain("Metrics: 2 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
+    expect(formatRunStatus(summary)).toContain("Agent Work Ledger:");
+    expect(formatRunStatus(summary)).toContain(
+      "entries: 6 (source_event=1, context_packet=1, executor_capability=1, artifact=1, callback_delivery=1, progress_visibility=1)"
+    );
+    expect(formatRunStatus(summary)).toContain("source_event: source_event.received - github source event comment_status_run received.");
+    expect(formatRunStatus(summary)).toContain("executor_capability: executor.capability.snapshot - Captured executor capability.");
+    expect(formatRunStatus(summary)).toContain("artifact: artifact.created - Stored run artifacts.");
+    expect(formatRunStatus(summary)).toContain("progress_visibility: callback.progress.suppressed - Suppressed progress callback.");
     expect(formatRunStatus(summary)).toContain("Liveness:");
     expect(formatRunStatus(summary)).toContain("Provider: github (status_update)");
     expect(formatRunStatus(summary)).toContain("Human callbacks: 1; thread noise ratio: 0.5");

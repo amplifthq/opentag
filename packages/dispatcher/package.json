@@ -1,6 +1,6 @@
 {
   "name": "@opentag/dispatcher",
-  "version": "0.3.5",
+  "version": "0.4.0",
   "description": "Embeddable OpenTag dispatcher Hono app and callback sinks.",
   "type": "module",
   "engines": {
@@ -37,6 +37,7 @@
   "dependencies": {
     "@opentag/core": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/gitlab": "workspace:*",
     "@opentag/lark": "workspace:*",
     "@opentag/slack": "workspace:*",
     "@opentag/telegram": "workspace:*",

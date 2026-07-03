@@ -45,6 +45,9 @@ describe("Lark Personal Agent registration", () => {
         addons: expect.objectContaining({
           scopes: expect.objectContaining({
             tenant: expect.arrayContaining(["im:message:send_as_bot"])
+          }),
+          callbacks: expect.objectContaining({
+            items: expect.arrayContaining(["card.action.trigger"])
           })
         })
       })

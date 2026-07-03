@@ -53,4 +53,29 @@ describe("Telegram callback rendering", () => {
       ].join("\n")
     );
   });
+
+  it("renders artifacts in final fallback text", () => {
+    const presentation = createFinalSummaryPresentation({
+      result: {
+        conclusion: "success",
+        summary: "Produced artifacts.",
+        artifacts: [
+          { kind: "patch", title: "Generated patch", uri: "opentag/run_1.patch" },
+          { kind: "report", title: "Run report", uri: "opentag/run_1-report.md" },
+          { kind: "screenshot", title: "UI screenshot", uri: "opentag/run_1.png" },
+          { kind: "log_summary", title: "Log summary", uri: "opentag/run_1-log.md" },
+          { kind: "pull_request", title: "Pull request", uri: "https://github.com/acme/demo/pull/1" }
+        ]
+      }
+    });
+
+    const text = renderTelegramFinalSummaryPresentation(presentation);
+    expect(text).toContain("Artifacts:");
+    expect(text).toContain("- patch: Generated patch: opentag/run_1.patch");
+    expect(text).toContain("- report: Run report: opentag/run_1-report.md");
+    expect(text).toContain("- screenshot: UI screenshot: opentag/run_1.png");
+    expect(text).toContain("- log_summary: Log summary: opentag/run_1-log.md");
+    expect(text).not.toContain("- pull_request: Pull request: https://github.com/acme/demo/pull/1");
+    expect(text).toContain("+1 more artifact(s) in audit/status.");
+  });
 });

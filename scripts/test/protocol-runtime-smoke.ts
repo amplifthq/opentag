@@ -59,7 +59,7 @@ try {
     source: "github",
     sourceEventId: "comment_smoke_1",
     receivedAt: "2026-06-24T00:00:00.000Z",
-    actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+    actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
     target: { mention: "@opentag", agentId: "opentag" },
     command: { rawText: "triage this issue", intent: "run", args: {} },
     context: [
@@ -153,7 +153,7 @@ try {
   const threadAction = await client.submitThreadAction({
     id: "approval_smoke_1",
     rawText: "apply 1",
-    actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+    actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
     callback: event.callback,
     metadata: { source: "smoke", owner: "acme", repo: "demo", issueNumber: 9 }
   });

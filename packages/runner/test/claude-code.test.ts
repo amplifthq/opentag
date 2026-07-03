@@ -1,19 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createClaudeCodeExecutor } from "../src/claude-code.js";
 import type { CommandRunner } from "../src/command.js";
+import { worktreePathForRun } from "../src/git.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("Claude Code executor", () => {
-  it("creates an isolated branch, runs claude print mode, and reports changed files", async () => {
-    const calls: { command: string; args: string[]; input?: string }[] = [];
+  it("creates an isolated worktree, runs claude print mode, and reports changed files", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-secret");
+    const calls: { command: string; args: string[]; input?: string; cwd?: string; env?: Record<string, string | undefined> }[] = [];
     const runner: CommandRunner = {
       async run(command, args, options) {
-        calls.push({ command, args, input: options?.input });
+        calls.push({ command, args, input: options?.input, cwd: options?.cwd, env: options?.env });
         if (command === "claude" && args.includes("--version")) {
           return { exitCode: 0, stdout: "1.0.0", stderr: "" };
         }
-        // The canRun dirty-check uses plain `status --porcelain`; the git
-        // helpers (cleanup + changedFiles) use the NUL-delimited `-z` form.
-        if (command === "git" && args.join(" ") === "status --porcelain") {
+        if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+          return { exitCode: 0, stdout: "/tmp/demo\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse --verify main^{commit}") {
+          return { exitCode: 0, stdout: "abc123\n", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "add") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
@@ -21,11 +31,17 @@ describe("Claude Code executor", () => {
             ? { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" }
             : { exitCode: 0, stdout: "?? .claude/\0 M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" };
         }
-        if (command === "git" && args[0] === "checkout") {
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
         if (command === "git" && args.join(" ") === "clean -fd -- .claude") {
           return { exitCode: 0, stdout: "Removing .claude/\n", stderr: "" };
+        }
+        if (command === "git" && args[0] === "add") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && args[0] === "commit") {
+          return { exitCode: 0, stdout: "[opentag/run_1 abc123] commit\n", stderr: "" };
+        }
+        if (command === "git" && args[0] === "worktree" && args[1] === "remove") {
+          return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (command === "claude" && args.includes("--print")) {
           return { exitCode: 0, stdout: "Implemented the requested Claude Code change.", stderr: "" };
@@ -74,7 +90,9 @@ describe("Claude Code executor", () => {
           facts: [{ text: "The failing test is flaky in CI." }],
           exclusions: ["Do not modify unrelated callback code."]
         },
-        baseBranch: "main"
+        permissions: [{ scope: "repo:write", reason: "commit code changes on an isolated run branch" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
       },
       {
         emit: async (event) => {
@@ -83,9 +101,19 @@ describe("Claude Code executor", () => {
       }
     );
 
+    const worktreePath = worktreePathForRun({ workspacePath: "/tmp/demo", runId: "run_1" });
     const claudePrintCall = calls.find((call) => call.command === "claude" && call.args.includes("--print"));
-    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "checkout -B opentag/run_1 main")).toBe(true);
+    expect(
+      calls.some(
+        (call) => call.command === "git" && call.args.join(" ") === `worktree add -B opentag/run_1 ${worktreePath} main`
+      )
+    ).toBe(true);
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "clean -fd -- .claude")).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "add -- src/demo.ts test/demo.test.ts")).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "commit -m OpenTag run run_1")).toBe(true);
+    expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `worktree remove --force ${worktreePath}`)).toBe(true);
+    expect(claudePrintCall?.cwd).toBe(worktreePath);
+    expect(claudePrintCall?.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(claudePrintCall?.args).toContain("--input-format");
     expect(claudePrintCall?.args).toContain("text");
     expect(claudePrintCall?.args).toContain("--output-format");
@@ -94,6 +122,7 @@ describe("Claude Code executor", () => {
     expect(claudePrintCall?.args).toContain("acceptEdits");
     expect(claudePrintCall?.args).toContain("--model");
     expect(claudePrintCall?.args).toContain("sonnet");
+    expect(claudePrintCall?.args).not.toContain("--dangerously-skip-permissions");
     expect(claudePrintCall?.input).toContain("OpenTag context packet:");
     expect(claudePrintCall?.input).toContain("Use the linked issue and propose the narrowest fix.");
     expect(claudePrintCall?.input).toContain("intent: fix");
@@ -106,9 +135,20 @@ describe("Claude Code executor", () => {
     expect(claudePrintCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_START");
     expect(claudePrintCall?.input).toContain('"outcome": "passed"');
     expect(claudePrintCall?.input).toContain("OPENTAG_EXECUTOR_REPORT_END");
-    expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.completed"]);
+    expect(events).toEqual([
+      "executor.started",
+      "executor.progress",
+      "executor.progress",
+      "executor.progress",
+      "executor.completed"
+    ]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested Claude Code change.");
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({ kind: "patch", title: "Generated patch", uri: "opentag/run_1" }),
+      expect.objectContaining({ kind: "report", title: "Run report", uri: "opentag://run/run_1/report" }),
+      expect.objectContaining({ kind: "log_summary", title: "Log summary", uri: "opentag://run/run_1/log-summary" })
+    ]);
     expect(result.suggestedChanges?.[0]).toMatchObject({
       proposalId: "proposal_run_1",
       sourceRunId: "run_1",
@@ -118,9 +158,7 @@ describe("Claude Code executor", () => {
           domain: "pull_request",
           action: "create_pull_request",
           params: { title: "OpenTag run run_1", head: "opentag/run_1", base: "main" }
-        },
-        { intentId: "proposal_run_1_link_branch", domain: "artifact_links", action: "link_artifact" },
-        { intentId: "proposal_run_1_request_review", domain: "review", action: "request_review" }
+        }
       ]
     });
     expect(result.verification).toBeUndefined();
@@ -134,14 +172,130 @@ describe("Claude Code executor", () => {
     });
   });
 
-  it("refuses to run when the workspace has uncommitted changes", async () => {
+  it("blocks write-capable commands without a repo:write permission grant", async () => {
+    const runner: CommandRunner = {
+      async run() {
+        throw new Error("no command should run when the security assessment blocks");
+      }
+    };
+
+    const events: { type: string; message: string }[] = [];
+    const result = await createClaudeCodeExecutor({ runner }).run(
+      {
+        runId: "run_blocked",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: []
+      },
+      {
+        emit: async (event) => {
+          events.push({ type: event.type, message: event.message });
+        }
+      }
+    );
+
+    expect(result.conclusion).toBe("needs_human");
+    expect(result.summary).toContain("permission.repo_write_required");
+    expect(events.some((event) => event.type === "executor.failed")).toBe(true);
+  });
+
+  it("uses Claude plan permission mode for runs without repo:write", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && (args[0] === "worktree" || args[0] === "branch")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "claude" && args.includes("--print")) {
+          return { exitCode: 0, stdout: "Read-only analysis complete.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createClaudeCodeExecutor({ runner, permissionMode: "acceptEdits" }).run(
+      {
+        runId: "run_read_only",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "investigate this", intent: "investigate", args: {} },
+        context: [],
+        permissions: [
+          { scope: "repo:read", reason: "inspect repository" },
+          { scope: "pr:update", reason: "request reviewers after approval" }
+        ],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    const claudePrintCall = calls.find((call) => call.command === "claude" && call.args.includes("--print"));
+    expect(claudePrintCall?.args).toContain("--permission-mode");
+    expect(claudePrintCall?.args).toContain("plan");
+    expect(claudePrintCall?.args).not.toContain("acceptEdits");
+    expect(claudePrintCall?.args).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("emits an audit warning when --dangerously-skip-permissions is enabled", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && (args[0] === "worktree" || args[0] === "branch")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "claude" && args.includes("--print")) {
+          return { exitCode: 0, stdout: "Answered without changes.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    const events: { type: string; message: string }[] = [];
+    await createClaudeCodeExecutor({ runner, dangerouslySkipPermissions: true }).run(
+      {
+        runId: "run_skip",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "summarize this repo", intent: "unknown", args: {} },
+        context: [],
+        permissions: [{ scope: "repo:write", reason: "allow write-capable Claude mode" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      {
+        emit: async (event) => {
+          events.push({ type: event.type, message: event.message });
+        }
+      }
+    );
+
+    const claudePrintCall = calls.find((call) => call.command === "claude" && call.args.includes("--print"));
+    expect(claudePrintCall?.args).toContain("--dangerously-skip-permissions");
+    expect(
+      events.some(
+        (event) => event.type === "executor.progress" && event.message.includes("--dangerously-skip-permissions")
+      )
+    ).toBe(true);
+  });
+
+  it("returns not ready when the base branch is missing", async () => {
     const runner: CommandRunner = {
       async run(command, args) {
         if (command === "claude" && args.includes("--version")) {
           return { exitCode: 0, stdout: "1.0.0", stderr: "" };
         }
-        if (command === "git" && args.join(" ") === "status --porcelain") {
-          return { exitCode: 0, stdout: " M dirty.ts\n", stderr: "" };
+        if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+          return { exitCode: 0, stdout: "/tmp/demo\n", stderr: "" };
+        }
+        if (command === "git" && args.join(" ") === "rev-parse --verify main^{commit}") {
+          return { exitCode: 1, stdout: "", stderr: "fatal: Needed a single revision\n" };
         }
         return { exitCode: 0, stdout: "", stderr: "" };
       }
@@ -154,7 +308,7 @@ describe("Claude Code executor", () => {
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
-    ).resolves.toEqual({ ready: false, reason: "Workspace has uncommitted changes; refusing to run Claude Code executor." });
+    ).resolves.toEqual({ ready: false, reason: "Base branch 'main' is not available: fatal: Needed a single revision\n" });
   });
 
   it("returns not ready when the Claude Code CLI is missing", async () => {

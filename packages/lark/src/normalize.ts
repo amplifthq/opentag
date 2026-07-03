@@ -1,4 +1,5 @@
 import { commandFromRawText, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
+import { larkRenderLocaleFromDomain, type LarkRenderLocale } from "./render.js";
 
 export type LarkChannelBinding = {
   tenantKey: string;
@@ -20,6 +21,8 @@ export type LarkMessageInput = {
   eventTimeMs: number;
   agentId?: string;
   botOpenId?: string;
+  domain?: "lark" | "feishu";
+  renderLocale?: LarkRenderLocale;
   callbackUri?: string;
   binding: LarkChannelBinding;
 };
@@ -126,6 +129,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
 
   const command = commandFromRawText(rawText);
   const agentId = input.agentId ?? "opentag";
+  const renderLocale = input.renderLocale ?? larkRenderLocaleFromDomain(input.domain);
 
   return {
     id: `evt_lark_message_${input.eventId}`,
@@ -177,6 +181,8 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       chatType: input.chatType,
       sourceDeliveryId: input.eventId,
       larkEventId: input.eventId,
+      ...(input.domain ? { larkDomain: input.domain } : {}),
+      larkRenderLocale: renderLocale,
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...commandMetadata(command),

@@ -247,6 +247,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
@@ -308,6 +311,22 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/discord:
+    dependencies:
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/dispatcher:
     dependencies:
       '@opentag/core':
@@ -316,6 +335,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
@@ -450,12 +472,18 @@ importers:
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
+      '@opentag/discord':
+        specifier: workspace:*
+        version: link:../discord
       '@opentag/dispatcher':
         specifier: workspace:*
         version: link:../dispatcher
       '@opentag/github':
         specifier: workspace:*
         version: link:../github
+      '@opentag/gitlab':
+        specifier: workspace:*
+        version: link:../gitlab
       '@opentag/runner':
         specifier: workspace:*
         version: link:../runner

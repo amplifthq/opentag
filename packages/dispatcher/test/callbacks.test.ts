@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   createCompositeCallbackSink,
   createCompositeSourceReceiptSink,
+  createDiscordCallbackSink,
   createGitHubCallbackSink,
+  createGitLabCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
@@ -42,6 +44,58 @@ describe("createGitHubCallbackSink", () => {
         body: { body: "done" }
       }
     ]);
+  });
+
+  it("posts GitLab callback messages to the Notes API callback URI", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json({ id: 1, body: "done" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "done"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "done" }
+      }
+    ]);
+  });
+
+  it("ignores non-GitLab callback messages in the GitLab sink", async () => {
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async () => {
+        throw new Error("should not call fetch");
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        body: "done"
+      })
+    ).resolves.toBeUndefined();
   });
 
   it("updates the same GitHub callback comment for a run", async () => {
@@ -112,6 +166,124 @@ describe("createGitHubCallbackSink", () => {
         method: "POST",
         authorization: "Bearer ghs_test",
         body: { body: "Starting again" }
+      }
+    ]);
+  });
+
+  it("updates the same GitLab callback note for a run", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json({ id: 123, body: "ok" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "OpenTag picked this up."
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Still working"
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Done"
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Starting again"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "OpenTag picked this up." }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes/123",
+        method: "PUT",
+        token: "glpat_test",
+        body: { body: "Still working" }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes/123",
+        method: "PUT",
+        token: "glpat_test",
+        body: { body: "Done" }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "Starting again" }
+      }
+    ]);
+  });
+
+  it("does not reuse a GitLab note URI when the create-note response body is null", async () => {
+    const requests: { url: string; method: string; body: unknown; token: string | null }[] = [];
+    const sink = createGitLabCallbackSink({
+      token: "glpat_test",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+        });
+        return Response.json(null);
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "OpenTag picked this up."
+    });
+    await sink.deliver({
+      runId: "run_1",
+      kind: "progress",
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      body: "Still working"
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "OpenTag picked this up." }
+      },
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        method: "POST",
+        token: "glpat_test",
+        body: { body: "Still working" }
       }
     ]);
   });
@@ -509,6 +681,24 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("surfaces Slack bot permission errors instead of silently dropping callbacks", async () => {
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-no-channel-access",
+      fetchImpl: (async () => Response.json({ ok: false, error: "not_in_channel" })) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "done"
+      })
+    ).rejects.toThrow("not_in_channel");
+  });
+
   it("sends Lark rich callbacks as interactive cards", async () => {
     const replies: unknown[] = [];
     const sink = createLarkCallbackSink({
@@ -642,6 +832,31 @@ describe("createGitHubCallbackSink", () => {
         }
       }
     ]);
+  });
+
+  it("surfaces Lark bot permission errors instead of pretending the card was delivered", async () => {
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply() {
+              throw new Error("Lark API permission denied: im:message");
+            }
+          }
+        }
+      }
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tenant_1|oc_chat|om_source",
+        body: "Finished."
+      })
+    ).rejects.toThrow("Lark API permission denied");
   });
 
   it("adds a Lark source receipt reaction to the source message", async () => {
@@ -1025,5 +1240,78 @@ describe("createGitHubCallbackSink", () => {
       })
     ).resolves.toEqual({ delivered: true });
     expect(seen).toEqual(["a:lark", "b:lark"]);
+  });
+});
+
+describe("createDiscordCallbackSink", () => {
+  const uri = "https://discord.com/api/v10/channels/c1/messages";
+
+  it("truncates content over Discord's 2000-character limit", async () => {
+    const bodies: string[] = [];
+    const sink = createDiscordCallbackSink({
+      token: "bot_test",
+      fetchImpl: (async (_url, init) => {
+        bodies.push((JSON.parse(String(init?.body)) as { content: string }).content);
+        return Response.json({ id: "m1" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({ runId: "run_1", kind: "final", provider: "discord", uri, body: "a".repeat(5000) });
+
+    expect(bodies[0]!.length).toBe(2000);
+    expect(bodies[0]!.endsWith("...")).toBe(true);
+  });
+
+  it("bounds the request with an abort signal", async () => {
+    let signal: AbortSignal | null | undefined;
+    const sink = createDiscordCallbackSink({
+      token: "bot_test",
+      fetchImpl: (async (_url, init) => {
+        signal = init?.signal;
+        return Response.json({ id: "m1" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({ runId: "run_1", kind: "final", provider: "discord", uri, body: "hi" });
+
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("keeps delivering later updates after an earlier one fails in the chain", async () => {
+    let calls = 0;
+    const sink = createDiscordCallbackSink({
+      token: "bot_test",
+      fetchImpl: (async () => {
+        calls += 1;
+        if (calls === 1) return new Response("boom", { status: 500 });
+        return Response.json({ id: "m2" });
+      }) as typeof fetch
+    });
+
+    // Start the second delivery before the first settles so it chains onto the failing one.
+    const first = sink.deliver({ runId: "run_1", kind: "progress", provider: "discord", uri, body: "first" });
+    const second = sink.deliver({ runId: "run_1", kind: "final", provider: "discord", uri, body: "second" });
+    await Promise.allSettled([first, second]);
+
+    expect(calls).toBe(2);
+  });
+
+  it("suppresses mentions on both the initial post and the edit", async () => {
+    const payloads: Array<{ allowed_mentions?: { parse: string[] } }> = [];
+    const sink = createDiscordCallbackSink({
+      token: "bot_test",
+      fetchImpl: (async (_url, init) => {
+        payloads.push(JSON.parse(String(init?.body)) as { allowed_mentions?: { parse: string[] } });
+        return Response.json({ id: "m1" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({ runId: "run_1", kind: "acknowledgement", provider: "discord", uri, body: "hi @everyone" });
+    await sink.deliver({ runId: "run_1", kind: "progress", provider: "discord", uri, body: "working" });
+
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload.allowed_mentions).toEqual({ parse: [] });
+    }
   });
 });

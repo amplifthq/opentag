@@ -14,6 +14,7 @@ describe("createExecutorRunResult", () => {
         JSON.stringify({
           changes: [{ file: "README.md", summary: "Added one sentence about clean Slack approval summaries." }],
           verification: [{ outcome: "passed", summary: "The edit applied cleanly." }],
+          artifacts: [{ kind: "screenshot", title: "UI screenshot", uri: "artifacts/run_1.png" }],
           risks: ["No known risks beyond reviewing the generated diff."]
         }),
         EXECUTOR_REPORT_END
@@ -35,6 +36,40 @@ describe("createExecutorRunResult", () => {
     );
     expect(result.summary).not.toMatch(/git\s+commit/i);
     expect(result.summary).not.toMatch(/gh\s+pr\s+create/i);
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        kind: "patch",
+        title: "Generated patch",
+        uri: "opentag/run_1",
+        metadata: expect.objectContaining({
+          runId: "run_1",
+          branchName: "opentag/run_1",
+          changedFiles: ["README.md"]
+        })
+      }),
+      expect.objectContaining({
+        kind: "report",
+        title: "Run report",
+        uri: "opentag://run/run_1/report",
+        metadata: expect.objectContaining({
+          executor: "Claude Code",
+          changedFiles: ["README.md"],
+          report: expect.objectContaining({
+            changes: [{ file: "README.md", summary: "Added one sentence about clean Slack approval summaries." }],
+            artifacts: [{ kind: "screenshot", title: "UI screenshot", uri: "artifacts/run_1.png" }]
+          })
+        })
+      }),
+      expect.objectContaining({
+        kind: "log_summary",
+        title: "Log summary",
+        uri: "opentag://run/run_1/log-summary",
+        metadata: expect.objectContaining({
+          executor: "Claude Code"
+        })
+      }),
+      { kind: "screenshot", title: "UI screenshot", uri: "artifacts/run_1.png" }
+    ]);
 
     const pullRequestBody = result.suggestedChanges?.[0]?.intents[0]?.params?.["body"];
     expect(pullRequestBody).toContain("- `README.md`: Added one sentence about clean Slack approval summaries.");
@@ -72,6 +107,116 @@ describe("createExecutorRunResult", () => {
     expect(result.summary).toContain("git status --short --branch");
     expect(result.summary).not.toContain(EXECUTOR_REPORT_START);
     expect(result.summary).not.toContain(EXECUTOR_REPORT_END);
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        id: "run_1:diagnosis-report",
+        type: "diagnosis_report",
+        kind: "report",
+        title: "Run report",
+        uri: "opentag://run/run_1/report",
+        sourceRunId: "run_1",
+        metadata: expect.objectContaining({
+          executor: "Codex",
+          changedFiles: []
+        })
+      }),
+      expect.objectContaining({
+        id: "run_1:log-summary",
+        type: "log_summary",
+        kind: "log_summary",
+        title: "Log summary",
+        uri: "opentag://run/run_1/log-summary",
+        sourceRunId: "run_1",
+        metadata: expect.objectContaining({
+          executor: "Codex"
+        })
+      })
+    ]);
+  });
+
+  it("carries explicit executor artifacts even when no files changed", () => {
+    const result = createExecutorRunResult({
+      executorName: "Codex",
+      runId: "run_visual",
+      branchName: "opentag/run_visual",
+      output: [
+        "Captured the requested screenshot without editing files.",
+        "",
+        EXECUTOR_REPORT_START,
+        JSON.stringify({
+          changes: [],
+          verification: [{ command: "playwright screenshot", outcome: "passed", summary: "Screenshot captured." }],
+          artifacts: [{ kind: "screenshot", title: "Checkout screenshot", uri: "artifacts/checkout.png" }],
+          risks: []
+        }),
+        EXECUTOR_REPORT_END
+      ].join("\n"),
+      changedFiles: []
+    });
+
+    expect(result.changedFiles).toEqual([]);
+    expect(result.artifacts).toHaveLength(3);
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "diagnosis_report",
+          kind: "report",
+          sourceRunId: "run_visual"
+        }),
+        expect.objectContaining({
+          type: "log_summary",
+          kind: "log_summary",
+          sourceRunId: "run_visual"
+        }),
+        { kind: "screenshot", title: "Checkout screenshot", uri: "artifacts/checkout.png" }
+      ])
+    );
+    expect(result.summary).toContain("Captured the requested screenshot");
+    expect(result.summary).toContain("Verified:");
+  });
+
+  it("only accepts safe screenshot artifacts from executor reports", () => {
+    const result = createExecutorRunResult({
+      executorName: "Codex",
+      runId: "run_visual_safety",
+      branchName: "opentag/run_visual_safety",
+      output: [
+        "Captured one screenshot and ignored unsafe artifact claims.",
+        "",
+        EXECUTOR_REPORT_START,
+        JSON.stringify({
+          changes: [],
+          artifacts: [
+            { kind: "patch", title: "Fake patch", uri: "artifacts/fake.patch" },
+            { kind: "screenshot", title: "Unsafe screenshot", uri: "javascript:alert(1)" },
+            { kind: "screenshot", title: "Safe screenshot", uri: "artifacts/safe.png" }
+          ],
+          risks: []
+        }),
+        EXECUTOR_REPORT_END
+      ].join("\n"),
+      changedFiles: []
+    });
+
+    expect(result.artifacts).toHaveLength(3);
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "diagnosis_report",
+          kind: "report",
+          sourceRunId: "run_visual_safety"
+        }),
+        expect.objectContaining({
+          type: "log_summary",
+          kind: "log_summary",
+          sourceRunId: "run_visual_safety"
+        }),
+        { kind: "screenshot", title: "Safe screenshot", uri: "artifacts/safe.png" }
+      ])
+    );
+    expect(result.artifacts).not.toEqual(expect.arrayContaining([expect.objectContaining({ title: "Fake patch" })]));
+    expect(result.artifacts).not.toEqual(expect.arrayContaining([expect.objectContaining({ title: "Unsafe screenshot" })]));
+    expect(result.summary).toContain("Captured one screenshot");
   });
 
   it("drops a leading partial line when a long no-change answer is truncated before the executor report", () => {

@@ -9,7 +9,7 @@ const validEvent = {
   source: "github",
   sourceEventId: "comment_1",
   receivedAt: "2026-06-24T00:00:00.000Z",
-  actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+  actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
   target: { mention: "@opentag", agentId: "opentag" },
   command: { rawText: "fix this", intent: "fix", args: {} },
   context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
@@ -93,6 +93,49 @@ function githubPullRequestEvent(input: { id: string; sourceEventId: string; thre
   };
 }
 
+function gitlabIssueEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "gitlab",
+    sourceEventId: input.sourceEventId,
+    context: [{ provider: "gitlab", kind: "issue", uri: "https://gitlab.example.com/acme/demo/-/issues/1", visibility: "private" }],
+    workItem: {
+      provider: "gitlab",
+      kind: "issue",
+      externalId: "issue:acme/demo#1",
+      uri: "https://gitlab.example.com/acme/demo/-/issues/1",
+      ownerContainer: {
+        provider: "gitlab",
+        id: "acme/demo",
+        uri: "https://gitlab.example.com/acme/demo"
+      }
+    },
+    permissions: [
+      { scope: "issue:comment", reason: "reply to the source GitLab thread" },
+      { scope: "runner:local", reason: "execute the run on a paired local daemon" },
+      { scope: "repo:read", reason: "inspect the repository in the paired local checkout" },
+      { scope: "repo:write", reason: "commit code changes on an isolated run branch" },
+      { scope: "pr:create", reason: "open a merge request for completed code changes" }
+    ],
+    callback: {
+      provider: "gitlab",
+      uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+      ...(input.threadKey ? { threadKey: input.threadKey } : {})
+    },
+    metadata: {
+      repoProvider: "gitlab",
+      owner: "acme",
+      repo: "demo",
+      projectPathWithNamespace: "acme/demo",
+      projectId: 42,
+      projectVisibility: "private",
+      issueIid: 1,
+      noteableType: "Issue"
+    }
+  };
+}
+
 function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: string }) {
   return {
     ...validEvent,
@@ -154,11 +197,13 @@ async function seedCompletedProposal(input: {
   event: unknown;
   suggestedChanges: unknown[];
   allowedActors?: string[];
+  repoBinding?: { provider: string; owner: string; repo: string };
 }) {
+  const repoBinding = input.repoBinding ?? { provider: "github", owner: "acme", repo: "demo" };
   await input.app.request("/v1/repo-bindings", jsonRequest({
-    provider: "github",
-    owner: "acme",
-    repo: "demo",
+    provider: repoBinding.provider,
+    owner: repoBinding.owner,
+    repo: repoBinding.repo,
     runnerId: "runner_1",
     workspacePath: "/Users/test/demo",
     defaultExecutor: "echo",
@@ -3869,6 +3914,211 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("replies to GitHub source-thread /status without creating a run", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_github_thread_status",
+      event: githubIssueEvent({ id: "evt_github_thread_status", sourceEventId: "comment_github_thread_status", threadKey: "acme/demo#1" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_github_thread_status/running", jsonRequest({ executor: "echo", runTimeoutMs: 45_000 }));
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_github_thread_status",
+      event: githubIssueEvent({ id: "evt_github_thread_status_follow_up", sourceEventId: "comment_github_thread_status_follow_up", threadKey: "acme/demo#1" })
+    }));
+    expect(followUp.status).toBe(202);
+    delivered.length = 0;
+
+    const status = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /status",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toMatchObject({
+      outcome: "status",
+      bindingState: "bound",
+      activeRun: {
+        id: "run_github_thread_status",
+        status: "running"
+      },
+      queuedFollowUps: [
+        {
+          id: "follow_up_github_thread_status",
+          status: "queued"
+        }
+      ],
+      runTimeoutPolicy: {
+        hardTimeoutMs: 45_000
+      }
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      kind: "final",
+      runId: "run_github_thread_status"
+    });
+    expect(delivered[0]!.body).toContain("OpenTag status:");
+    expect(delivered[0]!.body).toContain("Source container: github:acme/demo#1");
+    expect(delivered[0]!.body).toContain("Project Target: github:acme/demo");
+    expect(delivered[0]!.body).toContain("Active run: run_github_thread_status (running)");
+    expect(delivered[0]!.body).toContain("Queued follow-ups: 1 (follow_up_github_thread_status (queued)");
+  });
+
+  it("replies to source-thread /doctor without creating a run when no run is active", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo"
+    }));
+
+    const doctor = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /doctor",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      },
+      metadata: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        issueNumber: 1
+      }
+    }));
+
+    expect(doctor.status).toBe(200);
+    await expect(doctor.json()).resolves.toMatchObject({
+      outcome: "doctor",
+      bindingState: "bound"
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.runId).toMatch(/^control_/);
+    expect(delivered[0]!.body).toContain("OpenTag doctor (redacted):");
+    expect(delivered[0]!.body).toContain("OK Source thread: github:acme/demo#1");
+    const missing = await app.request(`/v1/runs/${delivered[0]!.runId}`);
+    expect(missing.status).toBe(404);
+  });
+
+  it("cancels a GitLab active source-thread run from /stop without auto-promoting queued follow-ups", async () => {
+    const delivered: Array<{ kind: string; body: string; runId: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body, runId: message.runId });
+        }
+      }
+    });
+
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "gitlab",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_1",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const create = await app.request("/v1/runs", jsonRequest({
+      runId: "run_gitlab_thread_stop",
+      event: gitlabIssueEvent({ id: "evt_gitlab_thread_stop", sourceEventId: "note_gitlab_thread_stop", threadKey: "acme/demo|issue|1" })
+    }));
+    expect(create.status).toBe(201);
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    await app.request("/v1/runners/runner_1/runs/run_gitlab_thread_stop/running", jsonRequest({ executor: "echo" }));
+    const followUp = await app.request("/v1/runs", jsonRequest({
+      runId: "follow_up_gitlab_thread_stop",
+      event: gitlabIssueEvent({ id: "evt_gitlab_thread_stop_follow_up", sourceEventId: "note_gitlab_thread_stop_follow_up", threadKey: "acme/demo|issue|1" })
+    }));
+    expect(followUp.status).toBe(202);
+    delivered.length = 0;
+
+    const stop = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "@opentag /stop",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      },
+      metadata: {
+        repoProvider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        projectPathWithNamespace: "acme/demo",
+        issueIid: 1
+      }
+    }));
+
+    expect(stop.status).toBe(200);
+    await expect(stop.json()).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_gitlab_thread_stop",
+        status: "cancelled",
+        result: { conclusion: "cancelled" }
+      }
+    });
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      kind: "final",
+      runId: "run_gitlab_thread_stop"
+    });
+    expect(delivered[0]!.body).toContain("Cancellation requested for run run_gitlab_thread_stop.");
+
+    const lateComplete = await app.request("/v1/runners/runner_1/runs/run_gitlab_thread_stop/complete", jsonRequest({
+      result: { conclusion: "success", summary: "late success" }
+    }));
+    expect(lateComplete.status).toBe(404);
+    const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_gitlab_thread_stop");
+    await expect(queuedFollowUp.json()).resolves.toMatchObject({
+      followUpRequest: {
+        id: "follow_up_gitlab_thread_stop",
+        status: "queued"
+      }
+    });
+  });
+
   it("cancels a run by id", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 
@@ -4117,7 +4367,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4143,7 +4393,7 @@ describe("dispatcher API", () => {
         authorization: "Bearer gh_test"
       }
     ]);
-    expect(delivered.some((message) => message.body.includes("### Ready to apply"))).toBe(true);
+    expect(delivered.some((message) => message.body.includes("<summary>Ready to apply</summary>"))).toBe(true);
     expect(delivered.at(-1)?.body).toContain("Applied: Add the bug label.");
     expect(delivered.at(-1)?.body).not.toContain("proposal_thread_apply");
     expect(delivered.at(-1)?.body).not.toContain("intent_label_bug");
@@ -4151,7 +4401,7 @@ describe("dispatcher API", () => {
     const deliveredCountAfterFirstApply = delivered.length;
     const replayResponse = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4207,7 +4457,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub apply is not configured on this dispatcher.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4262,7 +4512,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Create a pull request for branch"));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("Missing executor condition: isolated branch exists.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4312,7 +4562,7 @@ describe("dispatcher API", () => {
     });
 
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("Missing platform permission for set_labels.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4373,7 +4623,7 @@ describe("dispatcher API", () => {
       }
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub apply token cannot access GitHub issue or pull request #1.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`continue 1`");
@@ -4429,7 +4679,7 @@ describe("dispatcher API", () => {
 
     expect(githubRequests).toEqual(["https://api.github.com/repos/acme/demo/issues/1"]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Ready to apply");
+    expect(finalMessage?.body).toContain("<summary>Ready to apply</summary>");
     expect(finalMessage?.body).toContain("`apply 1`");
     expect(finalMessage?.body).toContain("`apply 2`");
   });
@@ -4507,7 +4757,7 @@ describe("dispatcher API", () => {
       "https://api.github.com/repos/acme/demo/branches/main"
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("### Needs setup");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub issue or pull request #1 was not found.");
     expect(finalMessage?.body).toContain("GitHub branch opentag/missing-branch was not found.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
@@ -4578,7 +4828,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4653,7 +4903,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4730,7 +4980,7 @@ describe("dispatcher API", () => {
 
     const action = {
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4804,6 +5054,64 @@ describe("dispatcher API", () => {
     expect(githubRequests).toHaveLength(0);
 
     const eventsResponse = await app.request("/v1/runs/run_thread_unauthorized/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+  });
+
+  it("rejects public-repo source-thread action actors without write access by default", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_public_no_write",
+      event: githubIssueEvent({ id: "evt_thread_public_no_write", sourceEventId: "comment_thread_public_no_write", threadKey: "acme/demo" }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_public_no_write",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_label_bug",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "99", handle: "mallory" },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo"
+      }
+    }));
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "actor_not_allowed"
+    });
+    expect(githubRequests).toHaveLength(0);
+
+    const eventsResponse = await app.request("/v1/runs/run_thread_public_no_write/events");
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
     expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
@@ -4978,7 +5286,7 @@ describe("dispatcher API", () => {
     const first = await app.request("/v1/thread-actions", jsonRequest({
       id: "approval_ingress_retry_id",
       rawText: "approve 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -4993,7 +5301,7 @@ describe("dispatcher API", () => {
     const second = await app.request("/v1/thread-actions", jsonRequest({
       id: "approval_ingress_retry_id",
       rawText: "approve 2",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5046,7 +5354,7 @@ describe("dispatcher API", () => {
     });
 
     const baseAction = {
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5112,7 +5420,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "approve 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5159,7 +5467,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply proposal_thread_cross",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/99/comments",
@@ -5215,7 +5523,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
@@ -5313,7 +5621,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5362,6 +5670,359 @@ describe("dispatcher API", () => {
       }
     ]);
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/42"))).toBe(true);
+  });
+
+  it("falls back with a quiet receipt when GitHub PR creation fails", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          if (init?.method === "POST") {
+            return new Response("Validation Failed: pull request already exists for this head; token ghp_aaaaaaaaaaaaaaaaaaaa; path /home/alice/repos/demo", {
+              status: 422
+            });
+          }
+          return Response.json({ name: String(url).split("/").at(-1) });
+        }
+      }
+    });
+
+    const event = githubIssueEvent({ id: "evt_thread_create_pr_failed", sourceEventId: "comment_thread_create_pr_failed", threadKey: "acme/demo#1" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_pr_failed",
+      event: {
+        ...event,
+        permissions: [...event.permissions, { scope: "pr:create", reason: "create an approved pull request" }]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_pr_failed",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_pr_failed",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create PR for branch opentag/run_thread_create_pr_failed.",
+              params: {
+                title: "OpenTag run run_thread_create_pr_failed",
+                body: "PR body",
+                head: "opentag/run_thread_create_pr_failed",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        proposalId: "proposal_thread_create_pr_failed",
+        outcomes: [
+          {
+            intentId: "intent_create_pr_failed",
+            outcome: "failed",
+            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]"
+          }
+        ]
+      },
+      run: {
+        parentRunId: "run_thread_create_pr_failed",
+        sourceProposalId: "proposal_thread_create_pr_failed"
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls",
+        method: "POST",
+        authorization: "Bearer gh_test",
+        body: {
+          title: "OpenTag run run_thread_create_pr_failed",
+          body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          head: "opentag/run_thread_create_pr_failed",
+          base: "main"
+        }
+      }
+    ]);
+    const finalMessage = delivered.at(-1)?.body ?? "";
+    expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(finalMessage).toContain("Child run:");
+    expect(finalMessage).toContain("Reason: Direct apply failed: create pull request failed: 422 Validation Failed: pull request already exists for this head");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
+    expect(finalMessage).not.toContain("proposal_thread_create_pr_failed");
+    expect(finalMessage).not.toContain("intent_create_pr_failed");
+    expect(finalMessage).not.toContain("ghp_aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("/home/alice/repos/demo");
+    expect(finalMessage).not.toContain("gh_test");
+    expect(finalMessage).not.toContain("authorization");
+  });
+
+  it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {
+    const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      gitlabApply: {
+        token: "glpat_test",
+        baseUrl: "https://gitlab.example.com",
+        fetchImpl: async (url, init) => {
+          gitlabRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+          });
+          if (init?.method === "GET") {
+            return Response.json({ name: String(url).split("/").at(-1) });
+          }
+          return Response.json({ web_url: "https://gitlab.example.com/acme/demo/-/merge_requests/42" });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_mr",
+      event: gitlabIssueEvent({ id: "evt_thread_create_mr", sourceEventId: "note_thread_create_mr", threadKey: "acme/demo|issue|1" }),
+      repoBinding: { provider: "gitlab", owner: "acme", repo: "demo" },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_mr",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a merge request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_mr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create MR for branch opentag/run_thread_create_mr.",
+              params: {
+                title: "OpenTag run run_thread_create_mr",
+                body: "MR body",
+                head: "opentag/run_thread_create_mr",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                verification: [{ command: "pnpm test", outcome: "passed" }],
+                risks: ["Review before merge."],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("### Ready to apply"))).toBe(true);
+    gitlabRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        adapter: "gitlab",
+        proposalId: "proposal_thread_create_mr",
+        outcomes: [
+          {
+            intentId: "intent_create_mr",
+            outcome: "applied",
+            externalUri: "https://gitlab.example.com/acme/demo/-/merge_requests/42"
+          }
+        ]
+      }
+    });
+    expect(gitlabRequests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/merge_requests",
+        method: "POST",
+        token: "glpat_test",
+        body: {
+          title: "OpenTag run run_thread_create_mr",
+          description: [
+            "MR body",
+            "",
+            "## Changed Files",
+            "- `src/demo.ts`",
+            "",
+            "## Risks",
+            "- Review before merge.",
+            "",
+            "## Verification",
+            "- `pnpm test`: passed",
+            "",
+            "## Executor Conditions",
+            "- isolated branch exists"
+          ].join("\n"),
+          source_branch: "opentag/run_thread_create_mr",
+          target_branch: "main"
+        }
+      }
+    ]);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
+  });
+
+  it("falls back with a quiet receipt when GitLab MR creation fails", async () => {
+    const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      gitlabApply: {
+        token: "glpat_test",
+        baseUrl: "https://gitlab.example.com",
+        fetchImpl: async (url, init) => {
+          gitlabRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+          });
+          if (init?.method === "POST") {
+            return new Response("A merge request already exists for this source branch; token glpat-aaaaaaaaaaaaaaaaaaaa; path C:\\Users\\alice\\repo", {
+              status: 409
+            });
+          }
+          return Response.json({ name: String(url).split("/").at(-1) });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_mr_failed",
+      event: gitlabIssueEvent({ id: "evt_thread_create_mr_failed", sourceEventId: "note_thread_create_mr_failed", threadKey: "acme/demo|issue|1" }),
+      repoBinding: { provider: "gitlab", owner: "acme", repo: "demo" },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_mr_failed",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a merge request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_mr_failed",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create MR for branch opentag/run_thread_create_mr_failed.",
+              params: {
+                title: "OpenTag run run_thread_create_mr_failed",
+                body: "MR body",
+                head: "opentag/run_thread_create_mr_failed",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    gitlabRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        adapter: "gitlab",
+        proposalId: "proposal_thread_create_mr_failed",
+        outcomes: [
+          {
+            intentId: "intent_create_mr_failed",
+            outcome: "failed",
+            error: "create merge request failed: 409 A merge request already exists for this source branch; token [redacted]; path [redacted local path]"
+          }
+        ]
+      },
+      run: {
+        parentRunId: "run_thread_create_mr_failed",
+        sourceProposalId: "proposal_thread_create_mr_failed"
+      }
+    });
+    expect(gitlabRequests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/merge_requests",
+        method: "POST",
+        token: "glpat_test",
+        body: {
+          title: "OpenTag run run_thread_create_mr_failed",
+          description: ["MR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          source_branch: "opentag/run_thread_create_mr_failed",
+          target_branch: "main"
+        }
+      }
+    ]);
+    const finalMessage = delivered.at(-1)?.body ?? "";
+    expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(finalMessage).toContain("Child run:");
+    expect(finalMessage).toContain("Reason: Direct apply failed: create merge request failed: 409 A merge request already exists for this source branch");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
+    expect(finalMessage).not.toContain("proposal_thread_create_mr_failed");
+    expect(finalMessage).not.toContain("intent_create_mr_failed");
+    expect(finalMessage).not.toContain("glpat-aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("C:\\Users\\alice\\repo");
+    expect(finalMessage).not.toContain("glpat_test");
+    expect(finalMessage).not.toContain("PRIVATE-TOKEN");
   });
 
   it("routes repo-level create_pull_request actions from Slack threads to the GitHub adapter", async () => {
@@ -5511,7 +6172,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
@@ -5567,7 +6228,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "continue 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
@@ -5660,7 +6321,7 @@ describe("dispatcher API", () => {
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "apply 1",
-      actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
       callback: {
         provider: "github",
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",

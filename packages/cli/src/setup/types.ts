@@ -40,6 +40,15 @@ export type GitHubSetupInput = {
   port: number;
 };
 
+export type GitLabSetupInput = {
+  token: string;
+  webhookSecret: string;
+  projectPathWithNamespace: string;
+  baseUrl: string;
+  webhookPath: string;
+  port: number;
+};
+
 export type HermesSetupInput = {
   command?: string;
   profile?: string;
@@ -60,6 +69,7 @@ export type OpenTagSetupInput = {
   lark?: LarkSetupInput;
   slack?: SlackSetupInput;
   github?: GitHubSetupInput;
+  gitlab?: GitLabSetupInput;
   hermes?: HermesSetupInput;
   agentSessionProfile?: AgentSessionProfileSetupInput;
 };
@@ -82,6 +92,11 @@ export type SetupDefaults = Partial<{
   githubWebhookSecret: string;
   githubWebhookPath: string;
   githubAutoCreatePullRequest: boolean;
+  gitlabProjectPathWithNamespace: string;
+  gitlabBaseUrl: string;
+  gitlabPort: number;
+  gitlabWebhookSecret: string;
+  gitlabWebhookPath: string;
   hermesCommand: string;
   hermesProfile: string;
   hermesProfileTemplate: string;

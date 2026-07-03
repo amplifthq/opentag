@@ -2,7 +2,7 @@
 
 Use this guide when `opentag setup` asks for GitHub settings.
 
-The OpenTag CLI currently uses a **repository webhook** for GitHub. This is the smallest correct MVP path: GitHub sends issue and pull request comments to your local OpenTag process through a public tunnel, then OpenTag runs your local coding agent and posts the result back to GitHub.
+The OpenTag CLI currently uses a **repository webhook** for GitHub. This is the smallest correct MVP path: GitHub sends issue and pull request comments to your local OpenTag process through a public tunnel, then OpenTag turns the source thread into a governed agent work loop: bounded context, local execution, audit ledger, artifacts, action receipts, and concise GitHub callbacks.
 
 When a coding agent changes files, OpenTag's default flow is:
 
@@ -30,6 +30,7 @@ OpenTag setup helps with the parts that can be local and safe:
 - It generates a strong webhook secret.
 - It saves the local dispatcher, GitHub webhook listener, runner, and repository binding.
 - It enables run branch preparation so `apply 1` can create a pull request later.
+- It routes source-thread control commands such as `@opentag /status`, `@opentag /doctor`, and `@opentag /stop [run_id]` without creating a new run.
 - It starts the local webhook listener with `opentag start`.
 
 ## What You Still Need To Do
@@ -158,6 +159,30 @@ Expected result:
 4. OpenTag posts acknowledgement, progress, and final result comments back to the same GitHub thread.
 5. If the agent changed files, OpenTag pushes a run branch and shows a `create_pull_request` action.
 6. Reply `apply 1` in the thread to create the pull request.
+
+While a run is active, you can inspect or stop the runtime from the same source thread:
+
+```text
+@opentag /status
+@opentag /doctor
+@opentag /stop [run_id]
+```
+
+## Who Can Trigger Runs
+
+By default, OpenTag decides who may start runs from the repository itself:
+
+- **Private repositories**: anyone who can comment may trigger runs.
+- **Public repositories**: only commenters whose repository permission resolves
+  to `write`, `maintain`, or `admin` may trigger write-capable runs or approve
+  `apply` actions. Drive-by commenters cannot start those runs or approve those
+  actions; they receive a decision-needed reply instead.
+
+To open a public repository to specific users without granting them GitHub
+write access, configure `allowedActors` on the repository binding. When
+`allowedActors` is set it replaces the default policy for write-capable runs.
+
+These control commands report or cancel source-thread runtime state. They do not create another run.
 
 ## If It Does Not Work
 

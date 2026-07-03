@@ -26,6 +26,18 @@ mention -> run -> executor -> final callback with suggested actions
        -> ApprovalDecision -> ApplyPlan or explicit continuation run
 ```
 
+The implemented loop should now be read as artifact-first and ledger-backed:
+
+```text
+source event -> admission decision -> context packet snapshot
+             -> executor capability snapshot -> artifacts / suggested actions
+             -> quiet callback -> agent work ledger
+```
+
+The ledger is not a new workspace surface. It is the local audit/status view that
+lets OpenTag keep source-thread callbacks concise while preserving source event,
+context, capability, artifact, approval, callback, and final-outcome evidence.
+
 Ingress apps and product integrations should prefer
 `@opentag/client.submitThreadAction(...)` for source-thread replies. That path
 preserves the user's thread context, applies actor authorization against the
@@ -58,6 +70,8 @@ The next design step is to make three ideas first-class:
 
 For the concrete Slack and GitHub approval rendering pattern that follows these
 principles, see [Source-Thread Action Receipts](./source-thread-action-receipts.md).
+For external local runtimes that report lifecycle hooks instead of behaving like
+a simple spawn wrapper, see the [Hook Ingest Contract](./hook-ingest.md).
 
 Together, these shift OpenTag from a mention router to a protocol for bringing
 agents into real team workflows without flooding people, leaking context, or

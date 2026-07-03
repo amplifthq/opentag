@@ -1,0 +1,354 @@
+#!/usr/bin/env node
+import { spawn, spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const claudeCommand = process.env.OPENTAG_CLAUDE_COMMAND || "claude";
+const githubWebhookExecutor = process.env.OPENTAG_GH_LIVE_EXECUTOR || "claude-code";
+
+const cases = [
+  {
+    id: "protocol-runtime",
+    label: "In-memory GitHub-shaped protocol smoke",
+    live: false,
+    command: "corepack pnpm smoke:protocol",
+    requiredCommands: ["corepack"]
+  },
+  {
+    id: "slack-protocol",
+    label: "In-memory Slack-shaped protocol smoke",
+    live: false,
+    command: "corepack pnpm smoke:slack-protocol",
+    requiredCommands: ["corepack"]
+  },
+  {
+    id: "github-webhook-live",
+    label: "Live GitHub repository webhook smoke",
+    live: true,
+    command: "scripts/dev/run-github-webhook-live-test.sh",
+    requiredCommands: [
+      "curl",
+      "gh",
+      "lsof",
+      "node",
+      "python3",
+      "sqlite3",
+      ...(githubWebhookExecutor === "claude-code" ? [claudeCommand] : [])
+    ],
+    optionalCommands: ["ngrok"],
+    notes: [
+      "Requires gh auth with ADMIN or MAINTAIN access to OPENTAG_GH_REPO.",
+      "Requires the configured executor CLI, Claude Code by default.",
+      "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true."
+    ]
+  },
+  {
+    id: "github-cli-live",
+    label: "Live GitHub dispatcher-assisted local executor smoke",
+    live: true,
+    command: "scripts/dev/run-gh-claude-local-test.sh",
+    requiredCommands: ["gh", "node", claudeCommand],
+    requiredOneOfEnv: [["OPENTAG_GH_TEST_ISSUE", "OPENTAG_GH_CREATE_ISSUE=true"]],
+    notes: [
+      "Uses gh auth to create or reuse a real GitHub issue thread.",
+      "Set OPENTAG_WORKSPACE_PATH to a clean checkout when not testing this repo."
+    ]
+  },
+  {
+    id: "slack-local-live",
+    label: "Live Slack dispatcher-assisted local executor smoke",
+    live: true,
+    command: "scripts/dev/run-slack-claude-local-test.sh",
+    requiredCommands: ["node", "python3", claudeCommand],
+    optionalCommands: ["gh"],
+    requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
+    notes: [
+      "Usually load OPENTAG_CONFIG_PATH and OPENTAG_SLACK_BOT_TOKEN from .env.slack-test.",
+      "Set OPENTAG_SLACK_APPLY_PR_ACTION=true only when GitHub apply credentials are ready."
+    ]
+  },
+  {
+    id: "slack-ui-live",
+    label: "Live Slack UI-triggered source-thread smoke",
+    live: true,
+    command: "scripts/dev/run-slack-ui-trigger-local-test.sh",
+    requiredCommands: ["curl", "node", "python3", "sqlite3", "lsof", claudeCommand],
+    optionalCommands: ["ngrok"],
+    requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
+    requiredOneOfEnv: [["OPENTAG_SLACK_APP_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNING_SECRET"]],
+    notes: [
+      "Socket Mode uses OPENTAG_SLACK_APP_TOKEN or SLACK_APP_TOKEN.",
+      "Events API mode uses SLACK_SIGNING_SECRET plus a public URL or ngrok."
+    ]
+  },
+  {
+    id: "lark-patch-live",
+    label: "Live Lark card reply and patch smoke",
+    live: true,
+    command:
+      "NODE_OPTIONS='--conditions=development' packages/dispatcher/node_modules/.bin/tsx scripts/dev/run-lark-message-patch-live-test.ts",
+    requiredCommands: [process.env.OPENTAG_LARK_CLI || "lark-cli"],
+    notes: [
+      "Requires lark-cli auth status to report a ready bot identity and either a ready user identity or cached user openId.",
+      "Optionally set OPENTAG_LARK_LIVE_CHAT_ID and OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID together."
+    ]
+  }
+];
+
+function usage() {
+  return [
+    "Usage: node scripts/test/live-e2e-smoke.mjs [options]",
+    "",
+    "Options:",
+    "  --case <id>         Select a case. Repeat or pass comma-separated ids.",
+    "  --all               Select every case.",
+    "  --dry-run           Print plan and preflight without executing commands.",
+    "  --allow-missing     Skip selected cases with missing commands/env instead of failing.",
+    "  --report <path>     Write a JSON report.",
+    "  --json              Print JSON instead of text.",
+    "  --list              List cases and exit.",
+    "  --help              Show this help.",
+    "",
+    "Cases:",
+    ...cases.map((testCase) => `  ${testCase.id}${testCase.live ? " (live)" : " (local)"} - ${testCase.label}`)
+  ].join("\n");
+}
+
+function parseArgs(argv) {
+  const selected = new Set();
+  const options = {
+    all: false,
+    allowMissing: false,
+    dryRun: false,
+    json: false,
+    list: false,
+    reportPath: undefined
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--") continue;
+    if (arg === "--help" || arg === "-h") {
+      console.log(usage());
+      process.exit(0);
+    }
+    if (arg === "--list") {
+      options.list = true;
+      continue;
+    }
+    if (arg === "--all") {
+      options.all = true;
+      continue;
+    }
+    if (arg === "--allow-missing") {
+      options.allowMissing = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      options.dryRun = true;
+      continue;
+    }
+    if (arg === "--json") {
+      options.json = true;
+      continue;
+    }
+    if (arg === "--case") {
+      const value = argv[index + 1];
+      if (!value) throw new Error("--case requires a value.");
+      for (const id of value.split(",")) selected.add(id.trim());
+      index += 1;
+      continue;
+    }
+    if (arg === "--report") {
+      const value = argv[index + 1];
+      if (!value) throw new Error("--report requires a value.");
+      options.reportPath = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown option: ${arg}`);
+  }
+
+  return { ...options, selected };
+}
+
+function commandExists(command) {
+  const result = spawnSync("command", ["-v", command], {
+    cwd: rootDir,
+    shell: true,
+    stdio: "ignore"
+  });
+  return result.status === 0;
+}
+
+function envPresent(name) {
+  return typeof process.env[name] === "string" && process.env[name].trim().length > 0;
+}
+
+function envRequirementMet(requirement) {
+  const [name, expected] = requirement.split("=");
+  if (!name) return false;
+  if (expected === undefined) return envPresent(name);
+  return process.env[name]?.trim().toLowerCase() === expected.toLowerCase();
+}
+
+function preflight(testCase) {
+  const missing = [];
+  const warnings = [];
+
+  for (const command of testCase.requiredCommands ?? []) {
+    if (!commandExists(command)) missing.push(`command:${command}`);
+  }
+  for (const envName of testCase.requiredEnv ?? []) {
+    if (!envPresent(envName)) missing.push(`env:${envName}`);
+  }
+  for (const alternatives of testCase.requiredOneOfEnv ?? []) {
+    if (!alternatives.some(envRequirementMet)) missing.push(`env:${alternatives.join("|")}`);
+  }
+  for (const command of testCase.optionalCommands ?? []) {
+    if (!commandExists(command)) warnings.push(`optional command missing: ${command}`);
+  }
+
+  return { missing, warnings };
+}
+
+function selectedCases(options) {
+  if (options.list) return [];
+  const byId = new Map(cases.map((testCase) => [testCase.id, testCase]));
+  if (options.all) return cases;
+  if (options.selected.size === 0) return [];
+  const output = [];
+  for (const id of options.selected) {
+    const testCase = byId.get(id);
+    if (!testCase) {
+      throw new Error(`Unknown case: ${id}. Run with --list to see available cases.`);
+    }
+    output.push(testCase);
+  }
+  return output;
+}
+
+async function runCommand(command) {
+  const startedAt = Date.now();
+  const child = spawn(command, {
+    cwd: rootDir,
+    env: process.env,
+    shell: true,
+    stdio: "inherit"
+  });
+  const exitCode = await new Promise((resolve) => {
+    child.on("close", resolve);
+  });
+  return {
+    exitCode,
+    durationMs: Date.now() - startedAt
+  };
+}
+
+function renderText(report) {
+  const lines = [
+    `Live E2E smoke harness: ${report.selectedCases.length} selected case(s)`,
+    `Started: ${report.startedAt}`,
+    ""
+  ];
+  if (report.selectedCases.length === 0) {
+    lines.push("No cases selected. Use --case <id>, --all, or --list.");
+    return lines.join("\n");
+  }
+
+  for (const result of report.results) {
+    lines.push(`${result.status.toUpperCase()} ${result.id}: ${result.label}`);
+    lines.push(`  command: ${result.command}`);
+    if (result.missing.length > 0) lines.push(`  missing: ${result.missing.join(", ")}`);
+    if (result.warnings.length > 0) lines.push(`  warnings: ${result.warnings.join(", ")}`);
+    if (result.notes.length > 0) lines.push(...result.notes.map((note) => `  note: ${note}`));
+    if (typeof result.durationMs === "number") lines.push(`  durationMs: ${result.durationMs}`);
+    if (typeof result.exitCode === "number") lines.push(`  exitCode: ${result.exitCode}`);
+    lines.push("");
+  }
+  return lines.join("\n").trimEnd();
+}
+
+function writeReport(path, report) {
+  const absolute = resolve(rootDir, path);
+  mkdirSync(dirname(absolute), { recursive: true });
+  writeFileSync(absolute, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.list) {
+    console.log(usage());
+    return;
+  }
+
+  const selected = selectedCases(options);
+  const report = {
+    ok: true,
+    dryRun: options.dryRun,
+    startedAt: new Date().toISOString(),
+    selectedCases: selected.map((testCase) => testCase.id),
+    results: []
+  };
+
+  for (const testCase of selected) {
+    const { missing, warnings } = preflight(testCase);
+    const result = {
+      id: testCase.id,
+      label: testCase.label,
+      live: testCase.live,
+      command: testCase.command,
+      status: "planned",
+      missing,
+      warnings,
+      notes: testCase.notes ?? []
+    };
+
+    if (missing.length > 0) {
+      if (options.allowMissing) {
+        result.status = "skipped";
+        report.results.push(result);
+        continue;
+      }
+      result.status = "failed";
+      report.ok = false;
+      report.results.push(result);
+      continue;
+    }
+
+    if (options.dryRun) {
+      result.status = "planned";
+      report.results.push(result);
+      continue;
+    }
+
+    const execution = await runCommand(testCase.command);
+    result.exitCode = execution.exitCode;
+    result.durationMs = execution.durationMs;
+    result.status = execution.exitCode === 0 ? "passed" : "failed";
+    if (execution.exitCode !== 0) report.ok = false;
+    report.results.push(result);
+  }
+
+  report.finishedAt = new Date().toISOString();
+
+  if (options.reportPath) {
+    writeReport(options.reportPath, report);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(renderText(report));
+    if (options.reportPath) console.log(`Report: ${resolve(rootDir, options.reportPath)}`);
+  }
+
+  if (!report.ok) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

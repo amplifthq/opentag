@@ -74,6 +74,7 @@ export type SlackReactionPayload = {
 export type SlackSourceReceiptState = "received" | "running";
 
 const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
+const MAX_SLACK_COMPACT_FINAL_ACTIONS = 3;
 
 export type SlackRenderOptions = {
   receiptContext?: ActionReceiptContext;
@@ -173,6 +174,25 @@ function compactSlackSummary(summary: string): string {
 
 function compactNextAction(nextAction: string): string {
   return truncateSlackText(nextAction, 180);
+}
+
+function slackArtifactKindLabel(kind: string | undefined): string {
+  if (kind === "patch") return "Patch";
+  if (kind === "report") return "Report";
+  if (kind === "screenshot") return "Screenshot";
+  if (kind === "log_summary") return "Logs";
+  if (kind === "pull_request") return "Pull request";
+  return kind ? kind.replace(/_/g, " ") : "Artifact";
+}
+
+function compactArtifactLine(artifact: NonNullable<OpenTagFinalSummaryPresentation["artifacts"]>[number]): string {
+  const label = slackArtifactKindLabel(artifact.kind);
+  const title = artifact.title;
+  const summary = title.toLowerCase() === label.toLowerCase() ? label : `${label}: ${title}`;
+  if (/^https?:\/\//i.test(artifact.uri)) {
+    return `[${summary}](${artifact.uri})`;
+  }
+  return summary;
 }
 
 function resultForFinalSummaryPresentation(result: OpenTagRunResult): OpenTagRunResult {
@@ -295,10 +315,82 @@ function renderActionReceiptMarkdownLines(input: { title: string; actions: OpenT
   return lines;
 }
 
+function slackActionCommand(decision: OpenTagPresentationAction["visibleDecisions"][number], index: number): string {
+  return `${decision} ${index}`;
+}
+
+function slackPrimaryActionCommand(action: OpenTagPresentationAction): string | undefined {
+  const decision =
+    action.primaryDecision !== "none"
+      ? action.primaryDecision
+      : action.visibleDecisions.find((candidate) => candidate !== "reject") ?? action.visibleDecisions[0];
+  return decision ? slackActionCommand(decision, action.index) : undefined;
+}
+
+function compactSlackActionTitle(title: string): string {
+  const plain = title.replace(/`/g, "");
+  if (/^Create a pull request for branch\b/i.test(plain)) return "Create a pull request";
+  if (/^Link the run branch\b/i.test(plain)) return "Link the run branch";
+  return truncateSlackText(plain, 120);
+}
+
+function compactSlackActionHeading(action: OpenTagPresentationAction): string {
+  return `${action.index}. *${markdownToSlackMrkdwn(compactSlackActionTitle(action.title))}*`;
+}
+
+function compactSlackActionReplyLine(action: OpenTagPresentationAction): string | undefined {
+  const primaryCommand = slackPrimaryActionCommand(action);
+  const rejectCommand = action.visibleDecisions.includes("reject") ? slackActionCommand("reject", action.index) : undefined;
+  const commands = Array.from(new Set([primaryCommand, rejectCommand].filter((command): command is string => Boolean(command))));
+  if (commands.length === 0) return undefined;
+  return `Reply: ${commands.map((command) => `\`${command}\``).join(" / ")}`;
+}
+
+function compactSlackSetupReason(action: OpenTagPresentationAction): string {
+  const reason = action.setupReason?.replace(/\s+/g, " ").trim();
+  if (!reason) return action.state === "unsupported" ? "No direct source-thread handler is available." : "Setup is required before this action can run.";
+  if (/audit-only for now/i.test(reason)) return "Audit-only for now; use audit/status for details.";
+  if (/No source-thread apply capability is registered/i.test(reason)) return "No direct source-thread handler is registered.";
+  return truncateSlackText(reason, 140);
+}
+
+function compactSlackActionStatusLine(action: OpenTagPresentationAction): string | undefined {
+  if (action.state === "unsupported") return `Needs attention: ${compactSlackSetupReason(action)}`;
+  if (action.state === "needs_setup") return `Needs setup: ${compactSlackSetupReason(action)}`;
+  if (action.state === "needs_approval") return "Needs approval before apply.";
+  return undefined;
+}
+
+function compactSlackActionLines(action: OpenTagPresentationAction): string[] {
+  const statusLine = compactSlackActionStatusLine(action);
+  const replyLine = compactSlackActionReplyLine(action);
+  return [compactSlackActionHeading(action), ...(statusLine ? [statusLine] : []), ...(replyLine ? [replyLine] : [])];
+}
+
+function renderCompactActionReceiptMarkdownLines(input: { title: string; actions: OpenTagPresentationAction[]; auditRunId?: string }): string[] {
+  const visibleActions = input.actions.slice(0, MAX_SLACK_COMPACT_FINAL_ACTIONS);
+  if (visibleActions.length === 0) return [];
+  const lines = [
+    "*Actions*",
+    markdownToSlackMrkdwn(truncateSlackText(input.title, 140)),
+  ];
+
+  for (const action of visibleActions) {
+    lines.push("", ...compactSlackActionLines(action));
+  }
+
+  const remaining = input.actions.length - visibleActions.length;
+  lines.push(
+    ...(remaining > 0 ? ["", `+${remaining} more action(s) in audit/status.`] : []),
+    ...(!input.auditRunId ? ["Full action details stay in OpenTag audit/status."] : [])
+  );
+  return lines;
+}
+
 function renderSuggestedActionsMarkdown(presentation: OpenTagFinalSummaryPresentation): string[] {
   const actions = presentation.actions ?? [];
   if (actions.length === 0 || !presentation.actionReceiptTitle) return [];
-  return renderActionReceiptMarkdownLines({ title: presentation.actionReceiptTitle, actions });
+  return renderCompactActionReceiptMarkdownLines({ title: presentation.actionReceiptTitle, actions, ...(presentation.auditRunId ? { auditRunId: presentation.auditRunId } : {}) });
 }
 
 function createSuggestedActionButton(action: OpenTagPresentationAction & { proposalId: string; intentId: string }, decision: ActionReceiptDecision): SlackButtonElement {
@@ -331,6 +423,21 @@ function actionHasInteractiveIdentity(action: OpenTagPresentationAction): action
 function createSuggestedActionButtons(action: OpenTagPresentationAction): SlackButtonElement[] {
   if (!actionHasInteractiveIdentity(action)) return [];
   return action.visibleDecisions.map((decision) => createSuggestedActionButton(action, decision));
+}
+
+function createCompactSuggestedActionButtons(action: OpenTagPresentationAction): SlackButtonElement[] {
+  return createSuggestedActionButtons(action).map((button) => ({
+    ...button,
+    text: {
+      ...button.text,
+      text:
+        parseSlackSuggestedActionButtonValue(button.value)
+          ?.command.replace(/^apply\b/, "Apply")
+          .replace(/^approve\b/, "Approve")
+          .replace(/^continue\b/, "Continue")
+          .replace(/^reject\b/, "Reject") ?? button.text.text
+    }
+  }));
 }
 
 function createSlackActionReceiptBlockSet(input: {
@@ -376,6 +483,39 @@ function createSlackActionReceiptBlockSet(input: {
   return blocks;
 }
 
+function createSlackCompactActionReceiptBlockSet(input: {
+  title: string;
+  actions: OpenTagPresentationAction[];
+  auditRunId?: string;
+  includeDivider?: boolean;
+}): SlackBlock[] {
+  const visibleActions = input.actions.slice(0, MAX_SLACK_COMPACT_FINAL_ACTIONS);
+  if (visibleActions.length === 0) return [];
+  const blocks: SlackBlock[] = [];
+  if (input.includeDivider) blocks.push({ type: "divider" });
+  blocks.push(slackSection(`*Actions*\n${markdownToSlackMrkdwn(truncateSlackText(input.title, 140))}`));
+  for (const action of visibleActions) {
+    blocks.push(slackSection(compactSlackActionLines(action).join("\n")));
+    const buttons = createCompactSuggestedActionButtons(action);
+    if (buttons.length > 0) {
+      blocks.push({
+        type: "actions",
+        block_id: `opentag_compact_actions_${action.index}`,
+        elements: buttons
+      });
+    }
+  }
+  const remaining = input.actions.length - visibleActions.length;
+  const detailHint = [
+    remaining > 0 ? `+${remaining} more action(s) in audit/status.` : undefined,
+    input.auditRunId ? undefined : "Full action details stay in OpenTag audit/status."
+  ].filter((line): line is string => Boolean(line));
+  if (detailHint.length > 0) {
+    blocks.push(slackContext(markdownToSlackMrkdwn(detailHint.join(" "))));
+  }
+  return blocks;
+}
+
 export function renderSlackActionReceiptPresentation(presentation: OpenTagActionReceiptPresentation): string {
   const lines = renderActionReceiptMarkdownLines({ title: presentation.title, actions: presentation.actions });
   if (presentation.auditRunId) {
@@ -411,6 +551,15 @@ export function renderSlackFinalSummaryPresentation(presentation: OpenTagFinalSu
         .slice(0, 3)
         .map((check) => `\`${markdownToSlackMrkdwn(check.command)}\` ${markdownToSlackMrkdwn(check.outcome)}`)
         .join(", ")}`
+    );
+  }
+
+  if (presentation.artifacts?.length) {
+    lines.push(
+      `Artifacts: ${presentation.artifacts
+        .slice(0, 4)
+        .map((artifact) => markdownToSlackMrkdwn(compactArtifactLine(artifact)))
+        .join(", ")}. Details in audit/status.`
     );
   }
 
@@ -464,6 +613,16 @@ export function createSlackFinalSummaryBlocks(presentation: OpenTagFinalSummaryP
     });
   }
 
+  if (presentation.artifacts?.length) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `Artifacts: ${markdownToSlackMrkdwn(presentation.artifacts.slice(0, 4).map(compactArtifactLine).join(", "))}. Details in audit/status.`
+      }
+    });
+  }
+
   const actions = presentation.actions ?? [];
   if (presentation.nextActions?.length && actions.length === 0) {
     blocks.push({
@@ -476,7 +635,14 @@ export function createSlackFinalSummaryBlocks(presentation: OpenTagFinalSummaryP
   }
 
   if (actions.length > 0 && presentation.actionReceiptTitle) {
-    blocks.push(...createSlackActionReceiptBlockSet({ title: presentation.actionReceiptTitle, actions, includeDivider: true }));
+    blocks.push(
+      ...createSlackCompactActionReceiptBlockSet({
+        title: presentation.actionReceiptTitle,
+        actions,
+        ...(presentation.auditRunId ? { auditRunId: presentation.auditRunId } : {}),
+        includeDivider: true
+      })
+    );
   }
 
   if (presentation.auditRunId) {

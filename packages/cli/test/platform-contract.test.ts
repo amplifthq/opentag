@@ -166,6 +166,7 @@ describe("CLI platform contract smoke", () => {
       async submitThreadAction(action) {
         return client.submitThreadAction(action);
       },
+      resolveActorWriteAccess: async () => true,
       now: () => "2026-06-27T00:00:00.000Z"
     });
     const body = JSON.stringify({
@@ -173,7 +174,8 @@ describe("CLI platform contract smoke", () => {
       comment: {
         id: 1001,
         body: "@opentag fix README",
-        html_url: "https://github.com/acme/demo/issues/7#issuecomment-1001"
+        html_url: "https://github.com/acme/demo/issues/7#issuecomment-1001",
+        author_association: "OWNER"
       },
       issue: {
         html_url: "https://github.com/acme/demo/issues/7",
@@ -226,7 +228,8 @@ describe("CLI platform contract smoke", () => {
       comment: {
         id: 1002,
         body: "apply 1",
-        html_url: "https://github.com/acme/demo/issues/7#issuecomment-1002"
+        html_url: "https://github.com/acme/demo/issues/7#issuecomment-1002",
+        author_association: "OWNER"
       },
       issue: {
         html_url: "https://github.com/acme/demo/issues/7",

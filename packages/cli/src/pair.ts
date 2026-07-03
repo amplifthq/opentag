@@ -76,6 +76,10 @@ function githubRelayWebhookUrl(relayUrl: string): string {
   return `${stripTrailingSlash(relayUrl)}/github/webhooks`;
 }
 
+function gitlabRelayWebhookUrl(relayUrl: string, webhookPath = "/gitlab/webhooks"): string {
+  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
+}
+
 export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
   const projectTargets = input.config.daemon.repositories.map((repository) => {
     return `  ${formatConfiguredProjectTargetSummary(repository)}`;
@@ -90,6 +94,9 @@ export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
     "Project Targets:",
     ...(projectTargets.length ? projectTargets : ["  none"]),
     ...(input.config.platforms.github ? [`GitHub webhook URL: ${githubRelayWebhookUrl(input.relayUrl)}`] : []),
+    ...(input.config.platforms.gitlab
+      ? [`GitLab webhook URL: ${gitlabRelayWebhookUrl(input.relayUrl, input.config.platforms.gitlab.webhookPath)}`]
+      : []),
     "Next steps:",
     `  opentag start --config ${input.configPath}`,
     "  opentag service start"

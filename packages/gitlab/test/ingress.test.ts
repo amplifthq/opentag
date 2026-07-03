@@ -110,6 +110,109 @@ describe("GitLab webhook ingress", () => {
     });
   });
 
+  it("accepts GitLab.com Note Hooks that send project.visibility_level instead of project.visibility", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const app = createGitLabWebhookApp({
+      webhookSecret: "shared-secret",
+      createRun,
+      now: () => "2026-06-29T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      object_kind: "note",
+      object_attributes: {
+        id: 1005,
+        note: "@opentag investigate this",
+        url: "https://gitlab.com/acme/demo/-/work_items/1#note_1005",
+        noteable_type: "Issue"
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility_level: 0,
+        web_url: "https://gitlab.com/acme/demo"
+      },
+      issue: {
+        iid: 1,
+        url: "https://gitlab.com/acme/demo/-/work_items/1"
+      },
+      user: { id: 7, username: "alice" }
+    });
+
+    const response = await app.request("/gitlab/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gitlab-event": "Note Hook",
+        "x-gitlab-token": "shared-secret"
+      },
+      body
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(createRun.mock.calls[0]![0]).toMatchObject({
+      metadata: {
+        projectVisibility: "private",
+        repoProvider: "gitlab"
+      },
+      workItem: {
+        uri: "https://gitlab.com/acme/demo/-/work_items/1"
+      }
+    });
+  });
+
+  it("uses the configured self-managed base URL for callback notes", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const app = createGitLabWebhookApp({
+      webhookSecret: "shared-secret",
+      baseUrl: "https://gitlab.example.com",
+      createRun,
+      now: () => "2026-06-29T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      object_kind: "note",
+      object_attributes: {
+        id: 1004,
+        note: "@opentag investigate this",
+        url: "https://gitlab.example.com/acme/demo/-/issues/1#note_1004",
+        noteable_type: "Issue"
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility: "public",
+        web_url: "https://gitlab.example.com/acme/demo"
+      },
+      issue: {
+        iid: 1,
+        url: "https://gitlab.example.com/acme/demo/-/issues/1"
+      },
+      user: { id: 7, username: "alice" }
+    });
+
+    const response = await app.request("/gitlab/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gitlab-event": "Note Hook",
+        "x-gitlab-token": "shared-secret"
+      },
+      body
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun.mock.calls[0]![0]).toMatchObject({
+      callback: {
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes"
+      },
+      workItem: {
+        ownerContainer: {
+          uri: "https://gitlab.example.com/acme/demo"
+        }
+      }
+    });
+  });
+
   it("routes thread-action comments to submitThreadAction when provided", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const submitThreadAction = vi.fn(async () => ({ outcome: "applied" }));
@@ -157,6 +260,65 @@ describe("GitLab webhook ingress", () => {
       id: expect.stringMatching(/^approval_gitlab_note_1002_[0-9a-f]{12}$/),
       actor: { handle: "alice" },
       callback: { provider: "gitlab" }
+    });
+  });
+
+  it("routes mentioned source-thread control commands to submitThreadAction without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const submitThreadAction = vi.fn(async () => ({ outcome: "status" }));
+    const app = createGitLabWebhookApp({
+      webhookSecret: "shared-secret",
+      createRun,
+      submitThreadAction,
+      now: () => "2026-06-29T00:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      object_kind: "note",
+      object_attributes: {
+        id: 1004,
+        note: "@opentag /status",
+        url: "https://gitlab.com/acme/demo/-/issues/1#note_1004",
+        noteable_type: "Issue"
+      },
+      project: {
+        id: 42,
+        path_with_namespace: "acme/demo",
+        visibility: "public",
+        web_url: "https://gitlab.com/acme/demo"
+      },
+      issue: {
+        iid: 1,
+        url: "https://gitlab.com/acme/demo/-/issues/1"
+      },
+      user: { id: 7, username: "alice" }
+    });
+
+    const response = await app.request("/gitlab/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-gitlab-event": "Note Hook",
+        "x-gitlab-token": "shared-secret"
+      },
+      body
+    });
+
+    expect(response.status).toBe(200);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledOnce();
+    expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
+      id: expect.stringMatching(/^control_gitlab_note_1004_[0-9a-f]{12}$/),
+      rawText: "@opentag /status",
+      callback: {
+        provider: "gitlab",
+        threadKey: "acme/demo|issue|1"
+      },
+      metadata: {
+        repoProvider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        projectPathWithNamespace: "acme/demo"
+      }
     });
   });
 
@@ -624,7 +786,7 @@ describe("GitLab webhook ingress", () => {
       expect(createRun).not.toHaveBeenCalled();
     });
 
-    it("returns 422 when project.visibility is missing", async () => {
+    it("returns 422 when project visibility fields are missing", async () => {
       const { project, ...rest } = basePayload;
       const payload = { ...rest, project: { ...project } };
       delete (payload.project as Record<string, unknown>).visibility;
@@ -653,6 +815,15 @@ describe("GitLab webhook ingress", () => {
     it("returns 422 when project.visibility is an unrecognised string", async () => {
       const { project, ...rest } = basePayload;
       const payload = { ...rest, project: { ...project, visibility: "internal-but-secret" } };
+      const { response, createRun } = await postNoteWith(payload);
+      expect(response.status).toBe(422);
+      expect(createRun).not.toHaveBeenCalled();
+    });
+
+    it("returns 422 when project.visibility_level is unrecognised without a visibility string", async () => {
+      const { project, ...rest } = basePayload;
+      const payload = { ...rest, project: { ...project, visibility_level: 30 } };
+      delete (payload.project as Record<string, unknown>).visibility;
       const { response, createRun } = await postNoteWith(payload);
       expect(response.status).toBe(422);
       expect(createRun).not.toHaveBeenCalled();

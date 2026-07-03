@@ -16,6 +16,11 @@ import {
 } from "@opentag/core";
 import { renderAcknowledgement, renderFinalSummaryPresentation, renderProgress } from "@opentag/github";
 import {
+  renderAcknowledgement as renderGitLabAcknowledgement,
+  renderFinalSummaryPresentation as renderGitLabFinalSummaryPresentation,
+  renderProgress as renderGitLabProgress
+} from "@opentag/gitlab";
+import {
   createLarkActionReceiptCard,
   createLarkDoctorSummaryCard,
   createLarkFinalSummaryCard,
@@ -39,6 +44,7 @@ import { renderTelegramAcknowledgement, renderTelegramFinalSummaryPresentation, 
 import type { CallbackMessage } from "./server.js";
 
 export type CallbackProvider = CallbackMessage["provider"];
+export type LarkRenderLocale = "en-US" | "zh-CN";
 
 export type PresentedCallbackBody = {
   body: string;
@@ -61,7 +67,7 @@ export type CallbackPresentation = {
   acknowledgementPresentation(input: { runId: string }): OpenTagRunStatusPresentation;
   progressPresentation(input: { runId: string; message: string }): OpenTagRunStatusPresentation;
   finalPresentation(input: { result: OpenTagRunResult; runId?: string; receiptContext?: ActionReceiptContext }): OpenTagFinalSummaryPresentation;
-  render(input: { provider: CallbackProvider; presentation: OpenTagPresentation }): PresentedCallbackBody;
+  render(input: { provider: CallbackProvider; presentation: OpenTagPresentation; larkRenderLocale?: LarkRenderLocale }): PresentedCallbackBody;
   acknowledgement(input: { provider: CallbackProvider; runId: string }): string;
   runStatus(input: {
     provider: CallbackProvider;
@@ -70,9 +76,16 @@ export type CallbackPresentation = {
     message?: string;
     nextAction?: string;
     detailVisibility?: OpenTagRunStatusPresentation["detailVisibility"];
+    larkRenderLocale?: LarkRenderLocale;
   }): PresentedCallbackBody;
   progress(input: { provider: CallbackProvider; runId: string; message: string }): string;
-  final(input: { provider: CallbackProvider; result: OpenTagRunResult; runId?: string; receiptContext?: ActionReceiptContext }): PresentedCallbackBody;
+  final(input: {
+    provider: CallbackProvider;
+    result: OpenTagRunResult;
+    runId?: string;
+    receiptContext?: ActionReceiptContext;
+    larkRenderLocale?: LarkRenderLocale;
+  }): PresentedCallbackBody;
 };
 
 function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunStatusPresentation): PresentedCallbackBody {
@@ -94,12 +107,18 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
     if (provider === "telegram") {
       return { body: renderTelegramAcknowledgement(presentation.runId) };
     }
+    if (provider === "gitlab") {
+      return { body: renderGitLabAcknowledgement(presentation.runId) };
+    }
     return { body: renderAcknowledgement(presentation.runId) };
   }
 
   const message = presentation.message ?? presentation.nextAction ?? presentation.state;
   if (provider === "telegram") {
     return { body: renderTelegramProgress(message) };
+  }
+  if (provider === "gitlab") {
+    return { body: renderGitLabProgress({ runId: presentation.runId, message }) };
   }
   return { body: renderProgress({ runId: presentation.runId, message }) };
 }
@@ -108,7 +127,7 @@ function supportsRichPresentation(provider: CallbackProvider): boolean {
   return platformCapabilityForProvider(provider)?.supportsRichPresentation === true;
 }
 
-function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFinalSummaryPresentation): PresentedCallbackBody {
+function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFinalSummaryPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedCallbackBody {
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
@@ -117,16 +136,28 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
     };
   }
   if (canRenderRich && provider === "lark") {
+    const larkOptions = options.larkRenderLocale ? { locale: options.larkRenderLocale } : {};
+    const renderFinalSummaryWithOptions = renderLarkFinalSummaryPresentation as (
+      presentation: OpenTagFinalSummaryPresentation,
+      options?: { locale?: LarkRenderLocale }
+    ) => string;
+    const createFinalSummaryCardWithOptions = createLarkFinalSummaryCard as (
+      presentation: OpenTagFinalSummaryPresentation,
+      options?: { locale?: LarkRenderLocale }
+    ) => ReturnType<typeof createLarkFinalSummaryCard>;
     return {
-      body: renderLarkFinalSummaryPresentation(presentation),
+      body: renderFinalSummaryWithOptions(presentation, larkOptions),
       rich: {
         provider: "lark",
-        payload: createLarkFinalSummaryCard(presentation)
+        payload: createFinalSummaryCardWithOptions(presentation, larkOptions)
       }
     };
   }
   if (provider === "telegram") {
     return { body: renderTelegramFinalSummaryPresentation(presentation) };
+  }
+  if (provider === "gitlab") {
+    return { body: renderGitLabFinalSummaryPresentation(presentation) };
   }
   return { body: renderFinalSummaryPresentation(presentation) };
 }
@@ -173,7 +204,7 @@ function renderSourceThreadStatus(provider: CallbackProvider, presentation: Open
   return { body };
 }
 
-function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagActionReceiptPresentation): PresentedCallbackBody {
+function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagActionReceiptPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedCallbackBody {
   const body =
     provider === "slack"
       ? renderSlackActionReceiptPresentation(presentation)
@@ -258,7 +289,9 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
         return renderRunStatus(input.provider, input.presentation);
       }
       if (input.presentation.kind === "final_summary") {
-        return renderFinalSummary(input.provider, input.presentation);
+        return renderFinalSummary(input.provider, input.presentation, {
+          ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {})
+        });
       }
       if (input.presentation.kind === "doctor_summary") {
         return renderDoctorSummary(input.provider, input.presentation);
@@ -267,7 +300,9 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
         return renderSourceThreadStatus(input.provider, input.presentation);
       }
       if (input.presentation.kind === "action_receipt") {
-        return renderActionReceipt(input.provider, input.presentation);
+        return renderActionReceipt(input.provider, input.presentation, {
+          ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {})
+        });
       }
       return {
         body: renderOpenTagPresentationPlainText(input.presentation)
@@ -281,6 +316,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     runStatus(input) {
       return this.render({
         provider: input.provider,
+        ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {}),
         presentation: this.runStatusPresentation({
           runId: input.runId,
           state: input.state,
@@ -304,6 +340,7 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     final(input) {
       return this.render({
         provider: input.provider,
+        ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {}),
         presentation: this.finalPresentation({
           result: input.result,
           ...(input.runId ? { runId: input.runId } : {}),

@@ -2,6 +2,8 @@
 
 当 `opentag setup` 询问 Lark/飞书连接方式时，用这份教程对照选择。
 
+OpenTag 会把 Lark/飞书 source thread 变成本地可治理的 agent 工作回路。群聊或会话仍然是人的工作界面，只接收简洁状态、产物和安全下一步；详细过程证据留在本地 audit/status。
+
 ## 官方入口
 
 - [Lark 开发者后台](https://open.larksuite.com/app)

@@ -501,6 +501,13 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const gitlab = config.platforms.gitlab;
+  if (gitlab) {
+    lines.push(
+      `  gitlab: ingress=project_webhook path=${gitlab.webhookPath ?? "/gitlab/webhooks"} port=${gitlab.port ?? "default"}, callback=${connectorStatus(configured(gitlab.token), "token")}, target=gitlab:${gitlab.projectPathWithNamespace}, baseUrl=${gitlab.baseUrl}`
+    );
+  }
+
   const slack = config.platforms.slack;
   if (slack) {
     const mode = slack.mode ?? "events_api";

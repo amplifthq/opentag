@@ -1,5 +1,6 @@
 import {
   createFinalSummaryPresentation,
+  renderMarkdownArtifactLines,
   type ActionReceiptContext,
   type ActionReceiptDecision,
   type OpenTagFinalSummaryPresentation,
@@ -42,7 +43,8 @@ function renderSuggestedActions(presentation: OpenTagFinalSummaryPresentation): 
   if (actions.length === 0 || !presentation.actionReceiptTitle) return [];
 
   const lines = [
-    `### ${presentation.actionReceiptTitle}`,
+    "<details>",
+    `<summary>${presentation.actionReceiptTitle}</summary>`,
     "",
     "OpenTag prepared a source-thread action receipt. Choose one command in this GitHub thread; full protocol lineage stays in the audit log."
   ];
@@ -71,6 +73,7 @@ function renderSuggestedActions(presentation: OpenTagFinalSummaryPresentation): 
       lines.push(`| ${decisionLabel(decision)} | \`${decision} ${action.index}\` | ${decisionEffect(decision)} |`);
     }
   }
+  lines.push("", "</details>");
 
   return lines;
 }
@@ -101,6 +104,11 @@ export function renderFinalSummaryPresentation(presentation: OpenTagFinalSummary
     for (const check of presentation.verification) {
       lines.push(`- \`${check.command}\`: ${check.outcome}`);
     }
+  }
+
+  const artifacts = renderMarkdownArtifactLines(presentation);
+  if (artifacts.length > 0) {
+    lines.push("", ...artifacts);
   }
 
   const suggestedActions = renderSuggestedActions(presentation);

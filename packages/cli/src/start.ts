@@ -1,6 +1,7 @@
 import { createServer } from "node:net";
 import { createDispatcherAdminClient, type ChannelBindingInput, type RepositoryBindingConfig } from "@opentag/client";
 import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle } from "@opentag/github";
+import { startGitLabIngress, type GitLabIngressConfig, type GitLabIngressHandle } from "@opentag/gitlab";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
   createDaemonRuntimeInput,
@@ -28,7 +29,8 @@ import {
 } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
+import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
 
 export type StartCommandOptions = {
@@ -46,6 +48,7 @@ export type StartRuntimeDependencies = {
   serveDaemon?: typeof serveDaemon;
   startDispatcher?: typeof startDispatcher;
   startGitHubIngress?: typeof startGitHubIngress;
+  startGitLabIngress?: typeof startGitLabIngress;
   startLarkIngress?: typeof startLarkIngress;
   startSlackIngress?: typeof startSlackIngress;
   startSlackSocketModeIngress?: typeof startSlackSocketModeIngress;
@@ -70,7 +73,8 @@ type PlatformIngressHandle =
   | { platform: "lark"; url?: string; handle: LarkIngressHandle }
   | { platform: "slack"; mode: "events_api"; url: string; handle: SlackIngressHandle }
   | { platform: "slack"; mode: "socket_mode"; handle: SlackSocketModeIngressHandle }
-  | { platform: "github"; url: string; webhookPath: string; handle: GitHubIngressHandle };
+  | { platform: "github"; url: string; webhookPath: string; handle: GitHubIngressHandle }
+  | { platform: "gitlab"; url: string; webhookPath: string; handle: GitLabIngressHandle };
 
 function dispatcherPortFromUrl(dispatcherUrl: string): number {
   const url = new URL(dispatcherUrl);
@@ -111,8 +115,16 @@ function requireGitHubConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
   return github;
 }
 
+function requireGitLabConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliConfig["platforms"]["gitlab"]> {
+  const gitlab = config.platforms.gitlab;
+  if (!gitlab) {
+    throw new Error("This config has no GitLab platform config.");
+  }
+  return gitlab;
+}
+
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
-  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github);
+  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab);
 }
 
 function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
@@ -156,6 +168,14 @@ function localStartPortChecks(config: OpenTagCliConfig): LocalPortCheck[] {
       label: "GitHub local webhook",
       port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
       fix: "Run `opentag setup --platform github --github-port <port> --force`, or edit platforms.github.port in the OpenTag config."
+    });
+  }
+  const gitlab = config.platforms.gitlab;
+  if (gitlab) {
+    checks.push({
+      label: "GitLab local webhook",
+      port: gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT,
+      fix: "Run `opentag setup --platform gitlab --gitlab-port <port> --force`, or edit platforms.gitlab.port in the OpenTag config."
     });
   }
   return checks;
@@ -228,6 +248,19 @@ export function dispatcherRuntimeInputFromCliConfig(
   const lark = config.platforms.lark;
   const slack = config.platforms.slack;
   const github = config.platforms.github;
+  const gitlab = config.platforms.gitlab;
+  // Discord (experimental) is env-only for now — no config.platforms.discord until
+  // slice 3. When the public key is set it mounts alongside an existing startable
+  // platform (e.g. Lark).
+  const env = input.env ?? process.env;
+  const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
+  const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
+  const discordWebhookPath = env.OPENTAG_DISCORD_WEBHOOK_PATH;
+  if (discordPublicKey && !discordBotToken) {
+    // Without the bot token the interactions app still mounts and ACKs slash commands,
+    // but every progress/final callback would silently fail — fail fast instead.
+    throw new Error("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+  }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
   }
@@ -253,6 +286,7 @@ export function dispatcherRuntimeInputFromCliConfig(
       : config.daemon.githubToken
         ? { githubApplyToken: config.daemon.githubToken }
         : {}),
+    ...(gitlab ? { gitlabToken: gitlab.token, gitlabBaseUrl: gitlab.baseUrl } : {}),
     ...(lark
       ? {
           lark: {
@@ -262,7 +296,10 @@ export function dispatcherRuntimeInputFromCliConfig(
           }
         }
       : {}),
-    ...(slack ? { slackBotToken: slack.botToken } : {})
+    ...(slack ? { slackBotToken: slack.botToken } : {}),
+    ...(discordPublicKey ? { discordPublicKey } : {}),
+    ...(discordBotToken ? { discordBotToken } : {}),
+    ...(discordWebhookPath ? { discordWebhookPath } : {})
   };
 }
 
@@ -345,9 +382,22 @@ export function githubIngressConfigFromCliConfig(
     webhookSecret: github.webhookSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
     ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})
+  };
+}
+
+export function gitlabIngressConfigFromCliConfig(config: OpenTagCliConfig): GitLabIngressConfig {
+  const gitlab = requireGitLabConfig(config);
+  return {
+    webhookSecret: gitlab.webhookSecret,
+    baseUrl: gitlab.baseUrl,
+    dispatcherUrl: config.daemon.dispatcherUrl,
+    ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
+    port: gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT,
+    ...(gitlab.webhookPath ? { webhookPath: gitlab.webhookPath } : {})
   };
 }
 
@@ -432,6 +482,7 @@ function defaultStartDependencies(dependencies: StartRuntimeDependencies = {}) {
     serveDaemon: dependencies.serveDaemon ?? serveDaemon,
     startDispatcher: dependencies.startDispatcher ?? startDispatcher,
     startGitHubIngress: dependencies.startGitHubIngress ?? startGitHubIngress,
+    startGitLabIngress: dependencies.startGitLabIngress ?? startGitLabIngress,
     startLarkIngress: dependencies.startLarkIngress ?? startLarkIngress,
     startSlackIngress: dependencies.startSlackIngress ?? startSlackIngress,
     startSlackSocketModeIngress: dependencies.startSlackSocketModeIngress ?? startSlackSocketModeIngress,
@@ -493,7 +544,7 @@ function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
   ];
   if (unsupported.length > 0) {
     throw new Error(
-      `Relay mode currently supports GitHub-backed ingress only. ${unsupported.join(", ")} configs still require local mode.`
+      `Relay mode currently supports GitHub/GitLab-backed ingress only. ${unsupported.join(", ")} configs still require local mode.`
     );
   }
 }
@@ -501,6 +552,12 @@ function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
 export function githubRelayWebhookUrl(config: OpenTagCliConfig): string {
   const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
   return `${relayUrl.replace(/\/$/, "")}/github/webhooks`;
+}
+
+export function gitlabRelayWebhookUrl(config: OpenTagCliConfig): string {
+  const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
+  const webhookPath = config.platforms.gitlab?.webhookPath ?? "/gitlab/webhooks";
+  return `${relayUrl.replace(/\/$/, "")}${webhookPath}`;
 }
 
 async function startLocalMode(input: StartFromConfigInput, abortController: AbortController, shutdownRequested: () => boolean): Promise<void> {
@@ -541,6 +598,10 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
       const handle = dependencies.startGitHubIngress(githubIngressConfigFromCliConfig(config, { env }));
       ingresses.push({ platform: "github", url: handle.url, webhookPath: handle.webhookPath, handle });
     }
+    if (config.platforms.gitlab) {
+      const handle = dependencies.startGitLabIngress(gitlabIngressConfigFromCliConfig(config));
+      ingresses.push({ platform: "gitlab", url: handle.url, webhookPath: handle.webhookPath, handle });
+    }
 
     logger.log("OpenTag is running.");
     logger.log(`Config: ${input.configPath}`);
@@ -563,6 +624,13 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
         logger.log(`GitHub Payload URL: ${githubPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
         logger.log(`GitHub settings: ${githubWebhooksSettingsUrl(github)}`);
         logger.log(`Tunnel example: ngrok http ${github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT}`);
+      } else if (ingress.platform === "gitlab") {
+        const gitlab = config.platforms.gitlab!;
+        logger.log(`GitLab local webhook: ${gitlabLocalWebhookUrl({ port: gitlab.port, webhookPath: ingress.webhookPath })}`);
+        logger.log(`GitLab Payload URL: ${gitlabPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
+        logger.log(`GitLab settings: ${gitlabProjectWebhooksSettingsUrl(gitlab)}`);
+        logger.log("GitLab events: Note events");
+        logger.log(`Tunnel example: ngrok http ${gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT}`);
       } else {
         logger.log("Lark / Feishu: connected through Personal Agent long connection");
       }
@@ -619,6 +687,10 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     if (config.platforms.github) {
       logger.log(`GitHub webhook URL: ${githubRelayWebhookUrl(config)}`);
       logger.log("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
+    }
+    if (config.platforms.gitlab) {
+      logger.log(`GitLab webhook URL: ${gitlabRelayWebhookUrl(config)}`);
+      logger.log("GitLab webhook secret: the relay must verify X-Gitlab-Token before creating runs.");
     }
     logger.log("Press Ctrl-C to stop.");
 

@@ -43,7 +43,11 @@ export const ActorIdentitySchema = z.object({
   providerUserId: z.string().min(1),
   handle: z.string().min(1).optional(),
   displayName: z.string().min(1).optional(),
-  organizationId: z.string().min(1).optional()
+  organizationId: z.string().min(1).optional(),
+  /** Platform-reported write access to the source repository (for example,
+   * GitHub's collaborator permission API). Absent when the platform does not
+   * report it; admission treats absent as "no write access" on public repos. */
+  writeAccess: z.boolean().optional()
 });
 
 export const AgentTargetSchema = z.object({
@@ -248,6 +252,7 @@ export const RunAdmissionReasonCodeSchema = z.enum([
   "repo_context_missing",
   "repo_not_bound",
   "actor_not_allowed_for_write",
+  "actor_not_authorized_for_public_repo",
   "agent_access_profile_denied"
 ]);
 
@@ -295,11 +300,29 @@ export const ArtifactKindSchema = z.enum([
   "suggested_changes_snapshot",
   "verification_summary",
   "patch",
+  "report",
+  "screenshot",
+  "log_summary",
   "pull_request",
   "risk_note",
   "follow_up_task",
   "audit_trail",
   "decision_record"
+]);
+
+export const RunArtifactTypeSchema = z.enum([
+  "suggested_changes_snapshot",
+  "next_action",
+  "apply_plan",
+  "patch_summary",
+  "diagnosis_report",
+  "pr_intent",
+  "patch",
+  "report",
+  "log_summary",
+  "pull_request",
+  "verification_summary",
+  "custom"
 ]);
 
 export const ActionHintSchema = z.object({
@@ -420,9 +443,15 @@ export const OpenTagEventSchema = z.object({
 });
 
 export const ResultArtifactSchema = z.object({
+  id: z.string().min(1).optional(),
+  type: RunArtifactTypeSchema.optional(),
   kind: ArtifactKindSchema.optional(),
   title: z.string(),
   uri: z.string(),
+  summary: z.string().min(1).optional(),
+  sourceRunId: z.string().min(1).optional(),
+  createdAt: z.string().datetime().optional(),
+  relatedIds: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.unknown()).optional()
 });
 
@@ -499,6 +528,7 @@ export type RunEventVisibility = z.infer<typeof RunEventVisibilitySchema>;
 export type RunEventImportance = z.infer<typeof RunEventImportanceSchema>;
 export type RunEvent = z.infer<typeof RunEventSchema>;
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
+export type RunArtifactType = z.infer<typeof RunArtifactTypeSchema>;
 export type ActionHint = z.infer<typeof ActionHintSchema>;
 export type NextAction = z.infer<typeof NextActionSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;

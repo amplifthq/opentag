@@ -7,6 +7,31 @@ function repoFile(path: string): string {
 }
 
 describe("platform setup docs contract", () => {
+  it("keeps the agent-readable install guide aligned with OpenTag source-thread boundaries", () => {
+    const guide = repoFile("docs/agent-install.md");
+    const readme = repoFile("README.md");
+    const normalizedGuide = guide.replace(/\s+/g, " ");
+
+    expect(readme).toContain("[Agent-readable install guide](docs/agent-install.md)");
+    expect(guide).toContain("OpenTag is a source-thread action layer for coding agents");
+    expect(normalizedGuide).toContain("OpenTag is not a general chat remote-control cockpit");
+    expect(guide).toContain("Project Target");
+    expect(guide).toContain("RunScope");
+    expect(guide).toContain("Readiness");
+    expect(guide).toContain("OpenTagRunResult.artifacts");
+    expect(normalizedGuide).toContain("patches, reports, screenshots, log summaries, and pull request links");
+    expect(guide).toContain("opentag platforms");
+    expect(guide).toContain("opentag executors");
+    expect(guide).toContain("opentag service status");
+    expect(guide).toContain("opentag doctor");
+    expect(guide).toContain("opentag status");
+    expect(guide).toContain("Keep external runtime integration on OpenTag-owned APIs and data shapes.");
+    expect(normalizedGuide).toContain("run lifecycle, idempotency key, terminal semantics, audit visibility");
+    expect(guide).toContain("runner-scoped authentication");
+    expect(guide).not.toContain("register_ack");
+    expect(guide).not.toContain("ws://");
+  });
+
   it("keeps the OpenTag skill aligned with Codex askhuman setup guidance", () => {
     const skill = repoFile("skills/opentag/SKILL.md");
 

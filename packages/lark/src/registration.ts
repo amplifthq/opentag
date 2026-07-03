@@ -50,6 +50,7 @@ type LarkRegisterApp = (options: {
   addons?: {
     scopes?: { tenant?: string[] };
     events?: { items?: { tenant?: string[] } };
+    callbacks?: { items?: string[] };
   };
   createOnly?: boolean;
 }) => Promise<LarkRegisterAppResult>;
@@ -202,6 +203,9 @@ export async function registerLarkPersonalAgent(
         items: {
           tenant: ["im.message.receive_v1"]
         }
+      },
+      callbacks: {
+        items: ["card.action.trigger"]
       }
     },
     onQRCodeReady: input.onQrCode,

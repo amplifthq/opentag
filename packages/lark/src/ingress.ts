@@ -11,7 +11,15 @@ import {
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
 import { createLarkReplyClient, replyLarkMessage } from "./outbound.js";
-import { createLarkMessageHandler, type LarkInboundMessageEvent, type LarkMessageHandlerOutcome, type LarkSelfServiceReply } from "./inbound.js";
+import {
+  createLarkCardActionHandler,
+  createLarkMessageHandler,
+  type LarkCardActionEvent,
+  type LarkCardActionHandlerOutcome,
+  type LarkInboundMessageEvent,
+  type LarkMessageHandlerOutcome,
+  type LarkSelfServiceReply
+} from "./inbound.js";
 import { createLarkDoctorSummaryCard, createLarkSourceThreadStatusCard, type LarkCard } from "./render.js";
 
 export const DEFAULT_AGENT_ID = "opentag";
@@ -45,8 +53,36 @@ export type LarkIngressDependencies = {
 
 export type LarkIngressHandle = {
   startPromise: Promise<void>;
+  handleCardAction(data: LarkCardActionEvent): Promise<LarkCardActionHandlerOutcome>;
   close(): Promise<void>;
 };
+
+export type LarkCardActionCallbackHandlerConfig = {
+  verificationToken?: string;
+  encryptKey?: string;
+  loggerLevel?: lark.LoggerLevel;
+  handleCardAction(data: LarkCardActionEvent): Promise<LarkCardActionHandlerOutcome>;
+  logOutcome?(outcome: LarkCardActionHandlerOutcome): void;
+};
+
+export function createLarkCardActionCallbackHandler(config: LarkCardActionCallbackHandlerConfig): lark.CardActionHandler {
+  return new lark.CardActionHandler(
+    {
+      ...(config.verificationToken ? { verificationToken: config.verificationToken } : {}),
+      ...(config.encryptKey ? { encryptKey: config.encryptKey } : {}),
+      loggerLevel: config.loggerLevel ?? lark.LoggerLevel.error
+    },
+    async (data: LarkCardActionEvent) => {
+      try {
+        const outcome = await config.handleCardAction(data);
+        config.logOutcome?.(outcome);
+      } catch (error) {
+        console.error("[lark] failed to handle card action:", error);
+      }
+      return {};
+    }
+  );
+}
 
 function defaultRepoBindingFromEnv(value: string | undefined): LarkIngressConfig["defaultRepoBinding"] {
   if (!value) return undefined;
@@ -139,6 +175,7 @@ function logIgnored(outcome: LarkMessageHandlerOutcome): void {
     outcome.status === "created" ||
     outcome.status === "bound" ||
     outcome.status === "unbound" ||
+    outcome.status === "thread_action_submitted" ||
     outcome.status === "self_service_help" ||
     outcome.status === "self_service_status" ||
     outcome.status === "self_service_doctor" ||
@@ -310,32 +347,35 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
       return replyLarkMessage(replyClient, input);
     });
 
+  async function resolveChannelBinding(input: { tenantKey: string; chatId: string }) {
+    try {
+      const { binding } = await dispatcherClient.getChannelBinding({
+        provider: "lark",
+        accountId: input.tenantKey,
+        conversationId: input.chatId
+      });
+      return {
+        tenantKey: binding.accountId,
+        chatId: binding.conversationId,
+        repoProvider: binding.repoProvider,
+        owner: binding.owner,
+        repo: binding.repo
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   const handler = createLarkMessageHandler({
     agentId: config.agentId,
     suppressRunCreatedReply: true,
+    domain: config.domain,
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
     ...(config.defaultRepoBinding ? { defaultRepoBinding: config.defaultRepoBinding } : {}),
-    async resolveChannelBinding(input) {
-      try {
-        const { binding } = await dispatcherClient.getChannelBinding({
-          provider: "lark",
-          accountId: input.tenantKey,
-          conversationId: input.chatId
-        });
-        return {
-          tenantKey: binding.accountId,
-          chatId: binding.conversationId,
-          repoProvider: binding.repoProvider,
-          owner: binding.owner,
-          repo: binding.repo
-        };
-      } catch (error) {
-        if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
-          return null;
-        }
-        throw error;
-      }
-    },
+    resolveChannelBinding,
     async bindChannel(input) {
       await dispatcherClient.bindChannel({
         provider: "lark",
@@ -457,6 +497,16 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
     async createRun(event: OpenTagEvent) {
       const runId = `run_${randomUUID()}`;
       return dispatcherClient.createRun({ runId, event });
+    },
+    async submitThreadAction(action) {
+      return dispatcherClient.submitThreadAction(action);
+    }
+  });
+  const handleCardAction = createLarkCardActionHandler({
+    domain: config.domain,
+    resolveChannelBinding,
+    async submitThreadAction(action) {
+      return dispatcherClient.submitThreadAction(action);
     }
   });
 
@@ -471,6 +521,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
 
   return {
     startPromise: wsClient.start({ eventDispatcher }),
+    handleCardAction,
     async close() {
       await wsClient.close?.({ force: true });
     }

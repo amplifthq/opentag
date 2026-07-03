@@ -1,6 +1,7 @@
 import {
   createDoctorSummaryPresentation,
   createSourceThreadStatusPresentation,
+  parseThreadActionCommand,
   parseProjectTargetRef,
   renderOpenTagPresentationPlainText,
   type OpenTagDoctorSummaryPresentation,
@@ -8,8 +9,15 @@ import {
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
 import type { CreateRunResult } from "@opentag/client";
-import { type LarkChannelBinding, normalizeLarkMessage, stripLarkMention } from "./normalize.js";
-import { createLarkDoctorSummaryCard, createLarkSourceThreadStatusCard, type LarkCard } from "./render.js";
+import { encodeLarkThreadKey, type LarkChannelBinding, normalizeLarkMessage, stripLarkMention } from "./normalize.js";
+import {
+  createLarkDoctorSummaryCard,
+  createLarkSourceThreadStatusCard,
+  larkRenderLocaleFromDomain,
+  parseLarkThreadActionButtonValue,
+  type LarkRenderLocale,
+  type LarkCard
+} from "./render.js";
 
 export type LarkMention = { key?: string; id?: { open_id?: string }; name?: string };
 
@@ -37,13 +45,49 @@ export type LarkInboundMessageEvent = {
   };
 };
 
+export type LarkCardActionEvent = {
+  event_id?: string;
+  event_type?: string;
+  tenant_key?: string;
+  open_id?: string;
+  user_id?: string;
+  open_message_id?: string;
+  open_chat_id?: string;
+  context?: {
+    open_message_id?: string;
+    open_chat_id?: string;
+  };
+  operator?: {
+    open_id?: string;
+    user_id?: string;
+    union_id?: string;
+    name?: string;
+  };
+  user?: {
+    open_id?: string;
+    user_id?: string;
+    union_id?: string;
+    name?: string;
+  };
+  action?: {
+    value?: unknown;
+    tag?: string;
+    name?: string;
+    option?: string;
+    timezone?: string;
+  };
+};
+
 export type LarkMessageHandlerConfig = {
   agentId: string;
   botOpenId?: string;
+  domain?: "lark" | "feishu";
+  renderLocale?: LarkRenderLocale;
   callbackUri?: string;
   defaultRepoBinding?: { repoProvider: string; owner: string; repo: string };
   resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<CreateRunResult>;
+  submitThreadAction?(action: LarkThreadActionInput): Promise<unknown>;
   // Self-service binding from within Lark (`/bind owner/repo`); optional so tests can omit it.
   bindChannel?(input: { tenantKey: string; chatId: string; repoProvider: string; owner: string; repo: string }): Promise<void>;
   // Explicit self-service unbinding; callers should keep any admin checks at the hosting boundary.
@@ -62,9 +106,34 @@ export type LarkMessageHandlerConfig = {
   now?(): number;
 };
 
+export type LarkCardActionHandlerConfig = {
+  domain?: "lark" | "feishu";
+  renderLocale?: LarkRenderLocale;
+  callbackUri?: string;
+  resolveChannelBinding(input: { tenantKey: string; chatId: string }): Promise<LarkChannelBinding | null>;
+  submitThreadAction?(action: LarkThreadActionInput): Promise<unknown>;
+};
+
 export type LarkSelfServiceReply = {
   text: string;
   card?: LarkCard;
+};
+
+export type LarkThreadActionInput = {
+  id: string;
+  rawText: string;
+  actor: {
+    provider: "lark";
+    providerUserId: string;
+    handle: string;
+    organizationId: string;
+  };
+  callback: {
+    provider: "lark";
+    uri: string;
+    threadKey: string;
+  };
+  metadata: Record<string, unknown>;
 };
 
 export type LarkSelfServiceContext = {
@@ -113,6 +182,8 @@ export type LarkMessageHandlerOutcome = {
     | "ignored_unbind_unauthorized"
     | "ignored_unbound_chat"
     | "ignored_empty_command"
+    | "ignored_thread_action_unavailable"
+    | "thread_action_submitted"
     | "follow_up_queued"
     | "needs_human_decision";
   runId?: string;
@@ -120,6 +191,18 @@ export type LarkMessageHandlerOutcome = {
   reason?: string;
   tenantKey?: string;
   chatId?: string;
+};
+
+export type LarkCardActionHandlerOutcome = {
+  status:
+    | "card_action_submitted"
+    | "ignored_card_action_invalid_payload"
+    | "ignored_card_action_unavailable"
+    | "ignored_card_action_unbound_chat"
+    | "ignored_card_action_not_opentag";
+  tenantKey?: string;
+  chatId?: string;
+  messageId?: string;
 };
 
 const BIND_USAGE =
@@ -142,6 +225,10 @@ const STOP_UNAVAILABLE_TEXT = [
   "Run cancellation from this Lark ingress is not configured.",
   "OpenTag will not treat a stop request as a successful completion. Use `opentag status --run <run_id>` for audit detail, or `opentag service stop` if you need to stop the local background service."
 ].join("\n");
+const THREAD_ACTION_UNAVAILABLE_TEXT =
+  "Source-thread actions are not configured for this Lark ingress yet. Use `opentag status --run <run_id>` for audit detail.";
+const THREAD_ACTION_INVALID_THREAD_TEXT =
+  "I couldn't match this action reply to a source-thread result. Reply in the final result thread, or use `opentag status --run <run_id>` for audit detail.";
 const BINDING_AUTH_DENIED_TEXT =
   "Only an authorized Lark binding manager can change this chat's Project Target. Ask an admin to run the command or update local OpenTag channel bindings.";
 
@@ -186,6 +273,32 @@ function mentionsBot(mentions: LarkMention[] | undefined, botOpenId: string): bo
 
 function formatProjectTarget(binding: LarkChannelBinding): string {
   return `${binding.repoProvider}:${binding.owner}/${binding.repo}`;
+}
+
+function larkCallbackMessageId(message: NonNullable<LarkInboundMessageEvent["message"]>): string | undefined {
+  return message.root_id ?? message.parent_id ?? message.message_id;
+}
+
+function compactIdPart(value: string): string {
+  return value.replace(/[^A-Za-z0-9_.:-]+/g, "_").slice(0, 96);
+}
+
+function larkCardActionId(input: { eventId?: string; messageId: string; actorId: string; command: string }): string {
+  if (input.eventId) return `approval_lark_card_${input.eventId}`;
+  return `approval_lark_card_${compactIdPart(input.messageId)}_${compactIdPart(input.actorId)}_${compactIdPart(input.command)}`;
+}
+
+function normalizeLocalizedThreadActionCommand(text: string): string {
+  const match = text.trim().match(/^(执行|应用|确认|批准|继续|拒绝)\s+([1-9]\d*)$/u);
+  if (!match) return text;
+  const [, verb, index] = match;
+  const decision = verb === "执行" || verb === "应用" ? "apply" : verb === "确认" || verb === "批准" ? "approve" : verb === "继续" ? "continue" : "reject";
+  return `${decision} ${index}`;
+}
+
+function parseLarkThreadActionCommand(text: string) {
+  const normalized = normalizeLocalizedThreadActionCommand(text);
+  return parseThreadActionCommand(normalized) ?? parseThreadActionCommand(text);
 }
 
 function normalizeSelfServiceReply(reply: LarkSelfServiceReply | string): LarkSelfServiceReply {
@@ -335,9 +448,10 @@ async function canManageLarkBinding(
   return context.chatType === "p2p";
 }
 
-// Handle one inbound Lark message: group messages must @-mention the bot, then handle /bind, resolve binding, normalize, create a run.
+// Handle one inbound Lark message: group messages must @-mention the bot unless they are exact threaded action replies.
 export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
   return async function handleLarkMessage(data: LarkInboundMessageEvent): Promise<LarkMessageHandlerOutcome> {
+    const renderLocale = config.renderLocale ?? larkRenderLocaleFromDomain(config.domain);
     const message = data.message;
     if (!message || message.message_type !== "text") {
       return { status: "ignored_non_text" };
@@ -352,19 +466,22 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       return { status: "ignored_invalid_payload" };
     }
 
-    // Group messages must @-mention the bot before triggering a (write-capable) run; p2p is exempt.
+    const command = stripLarkMention(extractText(message.content));
+    const threadActionCommand = parseLarkThreadActionCommand(command);
+    const isThreadReply = Boolean(message.root_id || message.parent_id);
+
+    // Group messages must @-mention the bot before triggering a write-capable run. Exact source-thread
+    // action replies are allowed without a mention only when Lark marks the message as threaded.
     const chatType = message.chat_type ?? "group";
     const isDirect = chatType === "p2p";
     if (!isDirect) {
       if (!config.botOpenId) {
         return { status: "ignored_group_requires_bot_open_id", tenantKey, chatId };
       }
-      if (!mentionsBot(message.mentions, config.botOpenId)) {
+      if (!mentionsBot(message.mentions, config.botOpenId) && !(threadActionCommand && isThreadReply)) {
         return { status: "ignored_not_addressed", tenantKey, chatId };
       }
     }
-
-    const command = stripLarkMention(extractText(message.content));
 
     // Self-service binding: connect this chat to a Project Target without leaving Lark.
     const bindRequest = parseBindCommand(command);
@@ -507,6 +624,53 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       }
     }
 
+    if (threadActionCommand) {
+      if (!config.submitThreadAction) {
+        await config.reply?.({ messageId, text: THREAD_ACTION_UNAVAILABLE_TEXT });
+        return { status: "ignored_thread_action_unavailable", tenantKey, chatId };
+      }
+      const callbackMessageId = larkCallbackMessageId(message);
+      if (!callbackMessageId) {
+        await config.reply?.({ messageId, text: THREAD_ACTION_INVALID_THREAD_TEXT });
+        return { status: "ignored_invalid_payload", tenantKey, chatId };
+      }
+      await config.submitThreadAction({
+        id: `approval_lark_${eventId}`,
+        rawText: threadActionCommand.rawText,
+        actor: {
+          provider: "lark",
+          providerUserId: senderOpenId,
+          handle: senderOpenId,
+          organizationId: tenantKey
+        },
+        callback: {
+          provider: "lark",
+          uri: config.callbackUri ?? "lark://im/v1/messages",
+          threadKey: encodeLarkThreadKey({ tenantKey, chatId, messageId: callbackMessageId })
+        },
+        metadata: {
+          source: "lark_reply",
+          tenantKey,
+          chatId,
+          messageId,
+          ...(threadActionCommand.rawText !== command ? { larkRawText: command } : {}),
+          sourceDeliveryId: eventId,
+          larkEventId: eventId,
+          ...(config.domain ? { larkDomain: config.domain } : {}),
+          larkRenderLocale: renderLocale,
+          ...(message.root_id ? { rootId: message.root_id } : {}),
+          ...(message.parent_id ? { parentId: message.parent_id } : {}),
+          ...(data.sender?.sender_id?.user_id ? { senderUserId: data.sender.sender_id.user_id } : {}),
+          ...(data.sender?.sender_id?.union_id ? { senderUnionId: data.sender.sender_id.union_id } : {}),
+          ...(config.botOpenId ? { larkBotOpenId: config.botOpenId } : {}),
+          repoProvider: binding.repoProvider ?? "github",
+          owner: binding.owner,
+          repo: binding.repo
+        }
+      });
+      return { status: "thread_action_submitted", tenantKey, chatId };
+    }
+
     const parsedTime = data.create_time ? Number(data.create_time) : Number.NaN;
     const eventTimeMs = Number.isFinite(parsedTime) ? parsedTime : (config.now?.() ?? Date.now());
 
@@ -522,6 +686,8 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       eventTimeMs,
       agentId: config.agentId,
       ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
+      ...(config.domain ? { domain: config.domain } : {}),
+      renderLocale,
       ...(config.callbackUri ? { callbackUri: config.callbackUri } : {}),
       binding
     });
@@ -560,5 +726,82 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       tenantKey,
       chatId
     };
+  };
+}
+
+export function createLarkCardActionHandler(config: LarkCardActionHandlerConfig) {
+  return async function handleLarkCardAction(data: LarkCardActionEvent): Promise<LarkCardActionHandlerOutcome> {
+    const renderLocale = config.renderLocale ?? larkRenderLocaleFromDomain(config.domain);
+    const parsedValue = parseLarkThreadActionButtonValue(data.action?.value);
+    if (!parsedValue) {
+      return { status: "ignored_card_action_not_opentag" };
+    }
+    const command = parseLarkThreadActionCommand(parsedValue.command);
+    if (!command) {
+      return { status: "ignored_card_action_invalid_payload" };
+    }
+
+    const tenantKey = data.tenant_key;
+    const chatId = data.context?.open_chat_id ?? data.open_chat_id;
+    const messageId = data.context?.open_message_id ?? data.open_message_id;
+    const actorOpenId = data.operator?.open_id ?? data.user?.open_id ?? data.open_id;
+    if (!tenantKey || !chatId || !messageId || !actorOpenId) {
+      return {
+        status: "ignored_card_action_invalid_payload",
+        ...(tenantKey ? { tenantKey } : {}),
+        ...(chatId ? { chatId } : {}),
+        ...(messageId ? { messageId } : {})
+      };
+    }
+
+    const binding = await config.resolveChannelBinding({ tenantKey, chatId });
+    if (!binding) {
+      return { status: "ignored_card_action_unbound_chat", tenantKey, chatId, messageId };
+    }
+    if (!config.submitThreadAction) {
+      return { status: "ignored_card_action_unavailable", tenantKey, chatId, messageId };
+    }
+
+    await config.submitThreadAction({
+      id: larkCardActionId({
+        ...(data.event_id ? { eventId: data.event_id } : {}),
+        messageId,
+        actorId: actorOpenId,
+        command: command.rawText
+      }),
+      rawText: command.rawText,
+      actor: {
+        provider: "lark",
+        providerUserId: actorOpenId,
+        handle: data.operator?.name ?? data.user?.name ?? actorOpenId,
+        organizationId: tenantKey
+      },
+      callback: {
+        provider: "lark",
+        uri: config.callbackUri ?? "lark://im/v1/messages",
+        threadKey: encodeLarkThreadKey({ tenantKey, chatId, messageId })
+      },
+      metadata: {
+        source: "lark_card_action",
+        tenantKey,
+        chatId,
+        messageId,
+        ...(config.domain ? { larkDomain: config.domain } : {}),
+        larkRenderLocale: renderLocale,
+        ...(command.rawText !== parsedValue.command ? { larkRawCommand: parsedValue.command } : {}),
+        sourceDeliveryId: data.event_id ?? larkCardActionId({ messageId, actorId: actorOpenId, command: command.rawText }),
+        ...(data.event_id ? { larkEventId: data.event_id } : {}),
+        ...(data.operator?.user_id ?? data.user?.user_id ?? data.user_id ? { senderUserId: data.operator?.user_id ?? data.user?.user_id ?? data.user_id } : {}),
+        ...(data.operator?.union_id ?? data.user?.union_id ? { senderUnionId: data.operator?.union_id ?? data.user?.union_id } : {}),
+        ...(data.action?.tag ? { actionTag: data.action.tag } : {}),
+        ...(data.action?.name ? { actionName: data.action.name } : {}),
+        ...(parsedValue.proposalId ? { proposalId: parsedValue.proposalId } : {}),
+        ...(parsedValue.intentId ? { intentId: parsedValue.intentId } : {}),
+        repoProvider: binding.repoProvider ?? "github",
+        owner: binding.owner,
+        repo: binding.repo
+      }
+    });
+    return { status: "card_action_submitted", tenantKey, chatId, messageId };
   };
 }

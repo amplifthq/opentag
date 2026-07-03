@@ -29,6 +29,24 @@ function githubConfig() {
   });
 }
 
+function gitlabConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "gitlab",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    gitlab: {
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    }
+  });
+}
+
 function okFetch(): typeof fetch {
   return vi.fn(async () => Response.json({ ok: true })) as unknown as typeof fetch;
 }
@@ -197,5 +215,19 @@ describe("OpenTag CLI pair relay", () => {
     expect(formatted).toContain("opentag service start");
     expect(checkoutPath).toBeTruthy();
     expect(formatted).not.toContain(checkoutPath);
+  });
+
+  it("includes the GitLab relay webhook URL when pairing a GitLab config", () => {
+    const source = gitlabConfig();
+
+    const formatted = formatPairRelaySummary({
+      configPath: "/tmp/config.json",
+      config: source,
+      relayUrl: "https://relay.example",
+      registered: true
+    });
+
+    expect(formatted).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
+    expect(formatted).toContain("gitlab:acme/team/demo (hasWorkspacePath=yes)");
   });
 });

@@ -5,11 +5,12 @@ import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
   RequestBodyTooLargeError,
   parseThreadActionCommand,
+  parseThreadControlCommand,
   readRequestTextWithLimit,
   type OpenTagEvent
 } from "@opentag/core";
 import { Hono } from "hono";
-import { normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
+import { githubPermissionHasWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
 
 type GitHubActor = {
   id: number;
@@ -22,9 +23,16 @@ type GitHubRepository = {
   owner: { login: string };
 };
 
+type GitHubComment = {
+  id: number;
+  body: string;
+  html_url: string;
+  author_association?: string;
+};
+
 export type GitHubIssueCommentPayload = {
   action?: string;
-  comment: { id: number; body: string; html_url: string };
+  comment: GitHubComment;
   issue: { html_url: string; comments_url: string; number: number };
   repository: GitHubRepository;
   sender: GitHubActor;
@@ -33,7 +41,7 @@ export type GitHubIssueCommentPayload = {
 
 export type GitHubPullRequestReviewCommentPayload = {
   action?: string;
-  comment: { id: number; body: string; html_url: string };
+  comment: GitHubComment;
   pull_request: { html_url: string; number: number };
   repository: GitHubRepository;
   sender: GitHubActor;
@@ -47,6 +55,7 @@ export type GitHubThreadActionInput = {
     provider: "github";
     providerUserId: string;
     handle: string;
+    writeAccess?: boolean;
   };
   callback: {
     provider: "github";
@@ -56,11 +65,18 @@ export type GitHubThreadActionInput = {
   metadata: Record<string, unknown>;
 };
 
+export type GitHubActorWriteAccessResolver = (input: {
+  owner: string;
+  repo: string;
+  username: string;
+}) => Promise<boolean | undefined>;
+
 export type GitHubWebhookAppInput = {
   webhookSecret: string;
   webhookPath?: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   recordControlPlaneEvent?(event: {
     type: string;
     severity?: "info" | "warn" | "error";
@@ -75,6 +91,8 @@ export type GitHubIngressConfig = {
   webhookSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
+  githubToken?: string;
+  fetchImpl?: typeof fetch;
   port?: number;
   hostname?: string;
   webhookPath?: string;
@@ -170,6 +188,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function encodeGitHubPathSegment(value: string): string {
+  return encodeURIComponent(value);
+}
+
 function hasGitHubActor(value: unknown): value is GitHubActor {
   return isRecord(value) && typeof value.id === "number" && typeof value.login === "string";
 }
@@ -188,14 +210,62 @@ function hasGitHubInstallation(value: unknown): value is { id: number } {
   return isRecord(value) && typeof value.id === "number";
 }
 
+function hasGitHubComment(value: unknown): value is GitHubComment {
+  return (
+    isRecord(value) &&
+    typeof value.id === "number" &&
+    typeof value.body === "string" &&
+    typeof value.html_url === "string" &&
+    (value.author_association === undefined || typeof value.author_association === "string")
+  );
+}
+
+async function resolvePayloadActorWriteAccess(input: {
+  payload: { repository: GitHubRepository; sender: GitHubActor };
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
+}): Promise<boolean | undefined> {
+  if (!input.resolveActorWriteAccess) return undefined;
+  try {
+    return await input.resolveActorWriteAccess({
+      owner: input.payload.repository.owner.login,
+      repo: input.payload.repository.name,
+      username: input.payload.sender.login
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveGitHubActorWriteAccessWithToken(input: {
+  owner: string;
+  repo: string;
+  username: string;
+  token: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean | undefined> {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const response = await fetchImpl(
+    `https://api.github.com/repos/${encodeGitHubPathSegment(input.owner)}/${encodeGitHubPathSegment(input.repo)}/collaborators/${encodeGitHubPathSegment(input.username)}/permission`,
+    {
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${input.token}`,
+        "x-github-api-version": "2022-11-28"
+      }
+    }
+  );
+  if (response.status === 404) return false;
+  if (!response.ok) return undefined;
+  const data: unknown = await response.json();
+  if (!isRecord(data) || typeof data.permission !== "string") return undefined;
+  return githubPermissionHasWriteAccess(data.permission);
+}
+
 function isGitHubIssueCommentPayload(value: unknown): value is GitHubIssueCommentPayload {
   return (
     isRecord(value) &&
     (value.action === undefined || typeof value.action === "string") &&
-    isRecord(value.comment) &&
-    typeof value.comment.id === "number" &&
-    typeof value.comment.body === "string" &&
-    typeof value.comment.html_url === "string" &&
+    hasGitHubComment(value.comment) &&
     isRecord(value.issue) &&
     typeof value.issue.html_url === "string" &&
     typeof value.issue.comments_url === "string" &&
@@ -210,10 +280,7 @@ function isGitHubPullRequestReviewCommentPayload(value: unknown): value is GitHu
   return (
     isRecord(value) &&
     (value.action === undefined || typeof value.action === "string") &&
-    isRecord(value.comment) &&
-    typeof value.comment.id === "number" &&
-    typeof value.comment.body === "string" &&
-    typeof value.comment.html_url === "string" &&
+    hasGitHubComment(value.comment) &&
     isRecord(value.pull_request) &&
     typeof value.pull_request.html_url === "string" &&
     typeof value.pull_request.number === "number" &&
@@ -227,37 +294,44 @@ async function handleIssueCommentCreated(input: {
   payload: GitHubIssueCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   now(): string;
   deliveryId?: string;
   signatureVerified?: boolean;
 }): Promise<void> {
   if (input.payload.action && input.payload.action !== "created") return;
-  if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    await input.submitThreadAction({
-      id: `approval_github_comment_${input.payload.comment.id}`,
-      rawText: input.payload.comment.body,
-      actor: {
-        provider: "github",
-        providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
-      },
-      callback: {
-        provider: "github",
-        uri: input.payload.issue.comments_url,
-        threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
-      },
-      metadata: {
-        repoProvider: "github",
-        owner: input.payload.repository.owner.login,
-        repo: input.payload.repository.name,
-        issueNumber: input.payload.issue.number,
-        commentUrl: input.payload.comment.html_url,
-        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
-        ...(typeof input.signatureVerified === "boolean"
-          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
-          : {})
-      }
-    });
+  const controlCommand = parseThreadControlCommand(input.payload.comment.body);
+  const actionCommand = parseThreadActionCommand(input.payload.comment.body);
+  if (controlCommand || actionCommand) {
+    if (input.submitThreadAction) {
+      const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+      await input.submitThreadAction({
+        id: `${controlCommand ? "control" : "approval"}_github_comment_${input.payload.comment.id}`,
+        rawText: input.payload.comment.body,
+        actor: {
+          provider: "github",
+          providerUserId: String(input.payload.sender.id),
+          handle: input.payload.sender.login,
+          ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
+        },
+        callback: {
+          provider: "github",
+          uri: input.payload.issue.comments_url,
+          threadKey: `${input.payload.repository.owner.login}/${input.payload.repository.name}#${input.payload.issue.number}`
+        },
+        metadata: {
+          repoProvider: "github",
+          owner: input.payload.repository.owner.login,
+          repo: input.payload.repository.name,
+          issueNumber: input.payload.issue.number,
+          commentUrl: input.payload.comment.html_url,
+          ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+          ...(typeof input.signatureVerified === "boolean"
+            ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+            : {})
+        }
+      });
+    }
     return;
   }
 
@@ -272,6 +346,7 @@ async function handleIssueCommentCreated(input: {
     repo: input.payload.repository.name,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
@@ -280,6 +355,10 @@ async function handleIssueCommentCreated(input: {
   });
 
   if (event) {
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+    if (actorWriteAccess !== undefined) {
+      event.actor.writeAccess = actorWriteAccess;
+    }
     await input.createRun(event);
   }
 }
@@ -288,6 +367,7 @@ async function handlePullRequestReviewCommentCreated(input: {
   payload: GitHubPullRequestReviewCommentPayload;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
+  resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
   now(): string;
   deliveryId?: string;
   signatureVerified?: boolean;
@@ -295,32 +375,38 @@ async function handlePullRequestReviewCommentCreated(input: {
   if (input.payload.action && input.payload.action !== "created") return;
   const owner = input.payload.repository.owner.login;
   const repo = input.payload.repository.name;
-  if (parseThreadActionCommand(input.payload.comment.body) && input.submitThreadAction) {
-    await input.submitThreadAction({
-      id: `approval_github_pr_review_comment_${input.payload.comment.id}`,
-      rawText: input.payload.comment.body,
-      actor: {
-        provider: "github",
-        providerUserId: String(input.payload.sender.id),
-        handle: input.payload.sender.login
-      },
-      callback: {
-        provider: "github",
-        uri: `https://api.github.com/repos/${owner}/${repo}/issues/${input.payload.pull_request.number}/comments`,
-        threadKey: `${owner}/${repo}#${input.payload.pull_request.number}`
-      },
-      metadata: {
-        repoProvider: "github",
-        owner,
-        repo,
-        pullRequestNumber: input.payload.pull_request.number,
-        commentUrl: input.payload.comment.html_url,
-        ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
-        ...(typeof input.signatureVerified === "boolean"
-          ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
-          : {})
-      }
-    });
+  const controlCommand = parseThreadControlCommand(input.payload.comment.body);
+  const actionCommand = parseThreadActionCommand(input.payload.comment.body);
+  if (controlCommand || actionCommand) {
+    if (input.submitThreadAction) {
+      const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+      await input.submitThreadAction({
+        id: `${controlCommand ? "control" : "approval"}_github_pr_review_comment_${input.payload.comment.id}`,
+        rawText: input.payload.comment.body,
+        actor: {
+          provider: "github",
+          providerUserId: String(input.payload.sender.id),
+          handle: input.payload.sender.login,
+          ...(actorWriteAccess !== undefined ? { writeAccess: actorWriteAccess } : {})
+        },
+        callback: {
+          provider: "github",
+          uri: `https://api.github.com/repos/${owner}/${repo}/issues/${input.payload.pull_request.number}/comments`,
+          threadKey: `${owner}/${repo}#${input.payload.pull_request.number}`
+        },
+        metadata: {
+          repoProvider: "github",
+          owner,
+          repo,
+          pullRequestNumber: input.payload.pull_request.number,
+          commentUrl: input.payload.comment.html_url,
+          ...(input.deliveryId ? { sourceDeliveryId: input.deliveryId, webhookDeliveryId: input.deliveryId } : {}),
+          ...(typeof input.signatureVerified === "boolean"
+            ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
+            : {})
+        }
+      });
+    }
     return;
   }
 
@@ -335,6 +421,7 @@ async function handlePullRequestReviewCommentCreated(input: {
     pullRequestNumber: input.payload.pull_request.number,
     actorId: input.payload.sender.id,
     actorLogin: input.payload.sender.login,
+    ...(input.payload.comment.author_association ? { authorAssociation: input.payload.comment.author_association } : {}),
     private: input.payload.repository.private,
     receivedAt: input.now(),
     ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
@@ -343,6 +430,10 @@ async function handlePullRequestReviewCommentCreated(input: {
   });
 
   if (event) {
+    const actorWriteAccess = await resolvePayloadActorWriteAccess(input);
+    if (actorWriteAccess !== undefined) {
+      event.actor.writeAccess = actorWriteAccess;
+    }
     await input.createRun(event);
   }
 }
@@ -430,6 +521,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
         payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
+        ...(input.resolveActorWriteAccess ? { resolveActorWriteAccess: input.resolveActorWriteAccess } : {}),
         now: input.now,
         ...(deliveryId ? { deliveryId } : {}),
         signatureVerified: true
@@ -452,6 +544,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
         payload,
         createRun: input.createRun,
         ...(input.submitThreadAction ? { submitThreadAction: input.submitThreadAction } : {}),
+        ...(input.resolveActorWriteAccess ? { resolveActorWriteAccess: input.resolveActorWriteAccess } : {}),
         now: input.now,
         ...(deliveryId ? { deliveryId } : {}),
         signatureVerified: true
@@ -466,6 +559,7 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
 }
 
 export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHandle {
+  const githubToken = config.githubToken;
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
@@ -478,6 +572,16 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
       webhookSecret: config.webhookSecret,
       webhookPath,
       ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(githubToken
+        ? {
+            resolveActorWriteAccess: (input) =>
+              resolveGitHubActorWriteAccessWithToken({
+                ...input,
+                token: githubToken,
+                ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {})
+              })
+          }
+        : {}),
       async createRun(event) {
         const runId = `run_${randomUUID()}`;
         const created = await dispatcherClient.createRun({ runId, event });

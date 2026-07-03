@@ -1,0 +1,127 @@
+{
+  "name": "gitlab live-derived merge request loop",
+  "runId": "run_replay_gitlab_live",
+  "event": {
+    "id": "evt_replay_gitlab_live",
+    "source": "gitlab",
+    "sourceEventId": "note_replay_gitlab_live",
+    "receivedAt": "2026-07-03T03:47:18.320Z",
+    "actor": { "provider": "gitlab", "providerUserId": "7", "handle": "gitlab-user" },
+    "target": { "mention": "@opentag", "agentId": "opentag" },
+    "command": { "rawText": "@opentag create a merge request for this fix", "intent": "fix", "args": {} },
+    "context": [
+      { "provider": "gitlab", "kind": "issue", "uri": "https://gitlab.com/acme/demo/-/issues/7", "visibility": "private" }
+    ],
+    "workItem": {
+      "provider": "gitlab",
+      "kind": "issue",
+      "externalId": "issue:acme/demo#7",
+      "uri": "https://gitlab.com/acme/demo/-/issues/7",
+      "ownerContainer": { "provider": "gitlab", "id": "acme/demo", "uri": "https://gitlab.com/acme/demo" }
+    },
+    "permissions": [
+      { "scope": "issue:comment", "reason": "reply to the source GitLab thread" },
+      { "scope": "runner:local", "reason": "execute the run on a paired local daemon" },
+      { "scope": "repo:read", "reason": "inspect the repository in the paired local checkout" },
+      { "scope": "repo:write", "reason": "commit code changes on an isolated run branch" },
+      { "scope": "pr:create", "reason": "open a merge request for completed code changes" }
+    ],
+    "callback": {
+      "provider": "gitlab",
+      "uri": "https://gitlab.com/api/v4/projects/acme%2Fdemo/issues/7/notes",
+      "threadKey": "acme/demo|issue|7"
+    },
+    "metadata": {
+      "repoProvider": "gitlab",
+      "owner": "acme",
+      "repo": "demo",
+      "projectPathWithNamespace": "acme/demo",
+      "projectId": 12345,
+      "projectVisibility": "private",
+      "issueIid": 7,
+      "noteableType": "Issue"
+    }
+  },
+  "executorCapability": {
+    "id": "echo",
+    "invocation": "spawn",
+    "supportsProfile": false,
+    "supportsStreaming": false,
+    "supportsCancel": false,
+    "supportsHookCompletion": false,
+    "progressEvents": "audit",
+    "approvalMode": "opentag_policy",
+    "contextAccess": ["context_packet", "context_pointers"],
+    "promptAssembly": "opentag",
+    "writeAccess": "none",
+    "conversationAccess": "request",
+    "promptMutation": "none",
+    "rawContextAccess": false,
+    "writeActionAccess": "none",
+    "workspaceIsolation": "none",
+    "requiredSecrets": [],
+    "completionSignals": [{ "type": "process_exit", "required": true, "description": "Fixture executor exits after producing a structured result." }]
+  },
+  "result": {
+    "conclusion": "needs_human",
+    "summary": "Prepared a GitLab merge request path from the live smoke shape.",
+    "artifacts": [
+      {
+        "id": "run_replay_gitlab_live:diagnosis",
+        "type": "diagnosis_report",
+        "kind": "report",
+        "title": "GitLab diagnosis report",
+        "uri": "opentag://run/run_replay_gitlab_live/report",
+        "summary": "The replayed GitLab loop produced a bounded diagnosis artifact."
+      },
+      {
+        "id": "run_replay_gitlab_live:mr-intent",
+        "type": "pr_intent",
+        "kind": "suggested_changes_snapshot",
+        "title": "Merge request intent",
+        "uri": "opentag://run/run_replay_gitlab_live/proposal",
+        "summary": "Open a GitLab merge request from the isolated branch after approval.",
+        "relatedIds": ["proposal_replay_gitlab_live"]
+      }
+    ],
+    "suggestedChanges": [
+      {
+        "proposalId": "proposal_replay_gitlab_live",
+        "createdAt": "2026-07-03T03:47:21.000Z",
+        "summary": "Create a GitLab MR for the replayed fix.",
+        "intents": [
+          {
+            "intentId": "proposal_replay_gitlab_live_create_mr",
+            "domain": "pull_request",
+            "action": "create_pull_request",
+            "summary": "Create a merge request for branch opentag/run_replay_gitlab_live.",
+            "params": {
+              "title": "OpenTag replay GitLab run",
+              "body": "Replay fixture MR body",
+              "head": "opentag/run_replay_gitlab_live",
+              "base": "main",
+              "changedFiles": [".opentag-live-smoke/run_replay_gitlab_live.md"],
+              "verification": [{ "command": "live GitLab smoke", "outcome": "passed" }],
+              "risks": ["Review the diff before merging."],
+              "executorConditions": ["isolated branch exists"]
+            }
+          }
+        ],
+        "preconditions": ["The executor produced a reviewable GitLab branch."]
+      }
+    ],
+    "nextAction": {
+      "summary": "Review the GitLab action receipt before applying the merge request.",
+      "hint": {
+        "kind": "create_pull_request",
+        "targetId": "proposal_replay_gitlab_live",
+        "selectedIntentIds": ["proposal_replay_gitlab_live_create_mr"]
+      }
+    }
+  },
+  "expected": {
+    "artifactTypes": ["diagnosis_report", "pr_intent"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "finalBodyContains": ["Prepared a GitLab merge request path", "Artifacts:", "Needs setup", "Audit:"]
+  }
+}

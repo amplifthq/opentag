@@ -126,7 +126,11 @@ describe("Codex executor", () => {
     expect(events).toEqual(["executor.started", "executor.progress", "executor.progress", "executor.progress", "executor.completed"]);
     expect(result.changedFiles).toEqual(["src/demo.ts", "test/demo.test.ts"]);
     expect(result.summary).toContain("Implemented the requested fix.");
-    expect(result.artifacts?.[0]).toMatchObject({ title: "Run branch", uri: "opentag/run_1" });
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({ kind: "patch", title: "Generated patch", uri: "opentag/run_1" }),
+      expect.objectContaining({ kind: "report", title: "Run report", uri: "opentag://run/run_1/report" }),
+      expect.objectContaining({ kind: "log_summary", title: "Log summary", uri: "opentag://run/run_1/log-summary" })
+    ]);
     expect(result.suggestedChanges?.[0]).toMatchObject({
       proposalId: "proposal_run_1",
       intents: [
@@ -135,9 +139,7 @@ describe("Codex executor", () => {
           domain: "pull_request",
           action: "create_pull_request",
           params: { title: "OpenTag run run_1", head: "opentag/run_1", base: "main" }
-        },
-        { intentId: "proposal_run_1_link_branch", domain: "artifact_links", action: "link_artifact" },
-        { intentId: "proposal_run_1_request_review", domain: "review", action: "request_review" }
+        }
       ]
     });
     expect(result.verification).toBeUndefined();
@@ -202,8 +204,45 @@ describe("Codex executor", () => {
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `worktree remove --force ${worktreePath}`)).toBe(true);
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "branch -D opentag/run_no_change")).toBe(true);
     expect(result.changedFiles).toEqual([]);
-    expect(result.artifacts).toEqual([]);
+    expect(result.artifacts?.map((artifact) => artifact.type)).toEqual(["diagnosis_report", "log_summary"]);
+    expect(result.artifacts?.every((artifact) => artifact.sourceRunId === "run_no_change")).toBe(true);
     expect(result.nextAction).toBe("No file changes were detected.");
+  });
+
+  it("selects the read-only sandbox for runs without a write scope", async () => {
+    const codexExecCalls: string[][] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "git" && (args[0] === "worktree" || args[0] === "branch")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "codex" && args[0] === "exec") {
+          codexExecCalls.push(args);
+          return { exitCode: 0, stdout: "Summary of the repository.", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createCodexExecutor({ runner }).run(
+      {
+        runId: "run_read_sandbox",
+        workspacePath: "/tmp/demo",
+        command: { rawText: "summarize this repo", intent: "unknown", args: {} },
+        context: [],
+        permissions: [{ scope: "repo:read", reason: "read-only summary" }],
+        baseBranch: "main",
+        keepWorktree: "on_failure"
+      },
+      { emit: async () => undefined }
+    );
+
+    expect(codexExecCalls[0]).toContain("--sandbox");
+    expect(codexExecCalls[0]).toContain("read-only");
+    expect(codexExecCalls[0]).not.toContain("--full-auto");
   });
 
   it("preserves Codex read-only answers when the executor report has no file changes", async () => {

@@ -24,7 +24,7 @@ let idempotencySequence = 0;
 
 async function main(): Promise<void> {
   const authStatus = runLarkCliJson(["auth", "status"], "auth status");
-  assertReadyIdentity(authStatus, "user");
+  assertUsableUserIdentity(authStatus);
   assertReadyIdentity(authStatus, "bot");
 
   const repoRef = parseRepoRef(process.env.OPENTAG_LARK_LIVE_REPO ?? DEFAULT_REPO);
@@ -390,6 +390,13 @@ function assertReadyIdentity(status: JsonObject, identity: "bot" | "user"): void
   if (ready !== "ready") {
     throw new Error(`lark-cli ${identity} identity is not ready`);
   }
+}
+
+function assertUsableUserIdentity(status: JsonObject): void {
+  const ready = getOptionalString(status, ["identities", "user", "status"]);
+  const openId = getOptionalString(status, ["identities", "user", "openId"]);
+  if (ready === "ready" || openId) return;
+  throw new Error("lark-cli user identity is not ready and has no cached openId");
 }
 
 function assertLarkOk(response: JsonObject, action: string): void {

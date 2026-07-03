@@ -9,7 +9,7 @@ Publish all public packages together with the same version. The CLI depends on l
 Current release version:
 
 ```text
-0.3.5
+0.4.0
 ```
 
 Package publish order:
@@ -20,11 +20,12 @@ Package publish order:
 4. `@opentag/runner`
 5. `@opentag/store`
 6. `@opentag/github`
-7. `@opentag/lark`
-8. `@opentag/slack`
-9. `@opentag/dispatcher`
-10. `@opentag/local-runtime`
-11. `@opentag/cli`
+7. `@opentag/gitlab`
+8. `@opentag/lark`
+9. `@opentag/slack`
+10. `@opentag/dispatcher`
+11. `@opentag/local-runtime`
+12. `@opentag/cli`
 
 ## Preflight
 

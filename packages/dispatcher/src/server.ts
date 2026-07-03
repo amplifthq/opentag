@@ -6,6 +6,7 @@ import {
   capabilityForMutationIntent,
   conversationKeysFromEvent,
   parseThreadActionCommand,
+  parseThreadControlCommand,
   permissionScopesAllowCapability,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
@@ -40,6 +41,13 @@ import {
   type FetchLike as GitHubFetchLike
 } from "@opentag/github";
 import type { GitHubIssueMutationOperation } from "@opentag/github";
+import {
+  applyGitLabMutationOperation,
+  createGitLabMutationCompiler,
+  normalizeGitLabBaseUrl,
+  type FetchLike as GitLabFetchLike
+} from "@opentag/gitlab";
+import type { GitLabMutationOperation } from "@opentag/gitlab";
 import type { SlackBlock } from "@opentag/slack";
 import { createOpenTagRepository, migrateSchema } from "@opentag/store";
 import Database from "better-sqlite3";
@@ -237,8 +245,9 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
     await next();
   };
 }
-import { createAdmissionRuntime, type AgentAccessProfileCheck } from "./admission.js";
-import { createDefaultCallbackPresentation, type CallbackPresentation } from "./presentation.js";
+import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
+import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
+import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
 type DelayedLarkStatusPhase = "queued" | "running" | "progress";
@@ -259,6 +268,20 @@ type DelayedLarkStatusState = {
   lastPhase?: DelayedLarkStatusPhase;
   lastUpdateAt?: number;
 };
+
+function larkRenderLocaleFromEvent(event: OpenTagEvent): LarkRenderLocale | undefined {
+  const locale = event.metadata?.["larkRenderLocale"];
+  if (locale === "en-US" || locale === "zh-CN") return locale;
+  const domain = event.metadata?.["larkDomain"];
+  if (domain === "feishu") return "zh-CN";
+  if (domain === "lark") return "en-US";
+  return undefined;
+}
+
+function larkRenderLocaleRenderOption(event: OpenTagEvent): { larkRenderLocale: LarkRenderLocale } | {} {
+  const locale = larkRenderLocaleFromEvent(event);
+  return locale ? { larkRenderLocale: locale } : {};
+}
 
 function shouldDeliverRunStatusUpdate(
   presentation: CallbackPresentation,
@@ -354,6 +377,7 @@ const CompleteRunSchema = z.object({
 
 const MarkRunningSchema = z.object({
   executor: z.string().min(1),
+  executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
   idempotencyKey: z.string().min(1).max(256).optional()
 });
@@ -743,8 +767,31 @@ function isGitHubRepoEvent(event: OpenTagEvent): boolean {
   return repoProvider === "github" || (event.source === "github" && repoProvider === undefined);
 }
 
+function isGitLabRepoEvent(event: OpenTagEvent): boolean {
+  const repoProvider = event.metadata["repoProvider"];
+  return repoProvider === "gitlab" || event.source === "gitlab";
+}
+
 function hasGitHubRepoTarget(event: OpenTagEvent): boolean {
   return isGitHubRepoEvent(event) && typeof event.metadata["owner"] === "string" && typeof event.metadata["repo"] === "string";
+}
+
+function gitlabProjectPathFromEvent(event: OpenTagEvent): string | null {
+  if (!isGitLabRepoEvent(event)) return null;
+  const projectPathWithNamespace = event.metadata["projectPathWithNamespace"];
+  if (typeof projectPathWithNamespace === "string" && projectPathWithNamespace.length > 0) {
+    return projectPathWithNamespace;
+  }
+  const owner = event.metadata["owner"];
+  const repoName = event.metadata["repo"];
+  if (typeof owner === "string" && owner.length > 0 && typeof repoName === "string" && repoName.length > 0) {
+    return `${owner}/${repoName}`;
+  }
+  return null;
+}
+
+function hasGitLabRepoTarget(event: OpenTagEvent): boolean {
+  return gitlabProjectPathFromEvent(event) !== null;
 }
 
 function hasGitHubIssueOrPullTarget(event: OpenTagEvent): boolean {
@@ -756,11 +803,16 @@ function isRepoLevelGitHubIntent(intent: MutationIntent): boolean {
 }
 
 function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string; selectedIntents: MutationIntent[] }): string {
-  return hasGitHubRepoTarget(input.event) &&
+  if (hasGitHubRepoTarget(input.event) &&
     (hasGitHubIssueOrPullTarget(input.event) ||
       (input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isRepoLevelGitHubIntent(intent))))
-    ? "github"
-    : input.callbackProvider;
+  ) {
+    return "github";
+  }
+  if (hasGitLabRepoTarget(input.event)) {
+    return "gitlab";
+  }
+  return input.callbackProvider;
 }
 
 function executorConditionsFromIntent(intent: { params?: Record<string, unknown> | undefined }): string[] {
@@ -770,8 +822,10 @@ function executorConditionsFromIntent(intent: { params?: Record<string, unknown>
 }
 
 const GITHUB_PREFLIGHT_TIMEOUT_MS = 5_000;
+const GITLAB_PREFLIGHT_TIMEOUT_MS = 5_000;
 
 type GitHubPreflightCache = Map<string, Promise<ActionReceiptCapability | null>>;
+type GitLabPreflightCache = Map<string, Promise<ActionReceiptCapability | null>>;
 
 function githubPreflightCacheKey(input: { owner: string; repo: string; path: string }): string {
   return `${input.owner}/${input.repo}${input.path}`;
@@ -924,12 +978,122 @@ async function preflightGitHubOperation(input: {
   });
 }
 
+function gitlabPreflightCacheKey(input: { baseUrl?: string; projectPathWithNamespace: string; path: string }): string {
+  return `${normalizeGitLabBaseUrl(input.baseUrl)}:${input.projectPathWithNamespace}${input.path}`;
+}
+
+type GitLabPreflightInput = {
+  gitlabApply: GitLabApplyOptions;
+  projectPathWithNamespace: string;
+  path: string;
+  description: string;
+  notFoundReason: string;
+  cache?: GitLabPreflightCache;
+};
+
+async function gitlabPreflight(input: GitLabPreflightInput): Promise<ActionReceiptCapability | null> {
+  if (input.cache) {
+    const cacheKey = gitlabPreflightCacheKey({
+      projectPathWithNamespace: input.projectPathWithNamespace,
+      path: input.path,
+      ...(input.gitlabApply.baseUrl ? { baseUrl: input.gitlabApply.baseUrl } : {})
+    });
+    const cached = input.cache.get(cacheKey);
+    if (cached) return await cached;
+    const pending = gitlabPreflightUncached(input);
+    input.cache.set(cacheKey, pending);
+    return await pending;
+  }
+  return await gitlabPreflightUncached(input);
+}
+
+async function gitlabPreflightUncached(input: Omit<GitLabPreflightInput, "cache">): Promise<ActionReceiptCapability | null> {
+  let response: Response;
+  const deadline = createGitHubPreflightDeadline(GITLAB_PREFLIGHT_TIMEOUT_MS);
+  const encodedProject = encodeURIComponent(input.projectPathWithNamespace);
+  try {
+    response = await (input.gitlabApply.fetchImpl ?? fetch)(`${normalizeGitLabBaseUrl(input.gitlabApply.baseUrl)}/api/v4/projects/${encodedProject}${input.path}`, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        "PRIVATE-TOKEN": input.gitlabApply.token
+      },
+      ...(deadline.signal ? { signal: deadline.signal } : {})
+    });
+  } catch (error) {
+    if (deadline.didTimeout()) {
+      return {
+        state: "needs_setup",
+        setupReason: `GitLab preflight timed out for ${input.description} after ${GITLAB_PREFLIGHT_TIMEOUT_MS}ms.`
+      };
+    }
+    return {
+      state: "needs_setup",
+      setupReason: `GitLab preflight failed for ${input.description}: ${error instanceof Error ? error.message : String(error)}.`
+    };
+  } finally {
+    deadline.clear();
+  }
+
+  if (response.ok) return null;
+
+  if (response.status === 401 || response.status === 403) {
+    return {
+      state: "needs_setup",
+      setupReason: `GitLab apply token cannot access ${input.description}. Check project permissions and token scopes.`
+    };
+  }
+  if (response.status === 404) {
+    return {
+      state: "needs_setup",
+      setupReason: input.notFoundReason
+    };
+  }
+  return {
+    state: "needs_setup",
+    setupReason: `GitLab preflight failed for ${input.description}: HTTP ${response.status}.`
+  };
+}
+
+async function preflightGitLabOperation(input: {
+  gitlabApply: GitLabApplyOptions;
+  target: NonNullable<ReturnType<typeof gitlabTargetFromEvent>>;
+  operation: GitLabMutationOperation;
+  preflightCache?: GitLabPreflightCache;
+}): Promise<ActionReceiptCapability | null> {
+  if (input.operation.kind !== "create_merge_request") return null;
+  const base = {
+    gitlabApply: input.gitlabApply,
+    projectPathWithNamespace: input.target.projectPathWithNamespace,
+    ...(input.preflightCache ? { cache: input.preflightCache } : {})
+  };
+  const sourceBranch = encodeURIComponent(input.operation.sourceBranch);
+  const targetBranch = encodeURIComponent(input.operation.targetBranch);
+  const [sourcePreflight, targetPreflight] = await Promise.all([
+    gitlabPreflight({
+      ...base,
+      path: `/repository/branches/${sourceBranch}`,
+      description: `GitLab branch ${input.operation.sourceBranch}`,
+      notFoundReason: `GitLab branch ${input.operation.sourceBranch} was not found.`
+    }),
+    gitlabPreflight({
+      ...base,
+      path: `/repository/branches/${targetBranch}`,
+      description: `GitLab target branch ${input.operation.targetBranch}`,
+      notFoundReason: `GitLab target branch ${input.operation.targetBranch} was not found.`
+    })
+  ]);
+  return sourcePreflight ?? targetPreflight;
+}
+
 async function directApplyReceiptCapability(input: {
   event: OpenTagEvent;
   callbackProvider: string;
   intent: MutationIntent;
   githubApply?: GitHubApplyOptions;
+  gitlabApply?: GitLabApplyOptions;
   preflightCache?: GitHubPreflightCache;
+  gitlabPreflightCache?: GitLabPreflightCache;
 }): Promise<ActionReceiptCapability> {
   const capability = capabilityForMutationIntent(input.intent);
   if (!capability) {
@@ -950,28 +1114,10 @@ async function directApplyReceiptCapability(input: {
     callbackProvider: input.callbackProvider,
     selectedIntents: [input.intent]
   });
-  if (adapter !== "github") {
+  if (adapter !== "github" && adapter !== "gitlab") {
     return {
       state: "needs_setup",
       setupReason: `Direct apply for ${adapter} actions is not configured on this dispatcher.`
-    };
-  }
-  if (!input.githubApply) {
-    return {
-      state: "needs_setup",
-      setupReason: "GitHub apply is not configured on this dispatcher."
-    };
-  }
-  if (!hasGitHubRepoTarget(input.event)) {
-    return {
-      state: "needs_setup",
-      setupReason: "The source thread does not include a GitHub repository target."
-    };
-  }
-  if (!isRepoLevelGitHubIntent(input.intent) && !hasGitHubIssueOrPullTarget(input.event)) {
-    return {
-      state: "needs_setup",
-      setupReason: "The source thread does not include a GitHub issue or pull request target."
     };
   }
   if (!permissionScopesAllowCapability(input.event.permissions ?? [], capability)) {
@@ -991,40 +1137,91 @@ async function directApplyReceiptCapability(input: {
     };
   }
 
-  const githubTarget = githubTargetFromEvent(input.event);
-  if (!githubTarget) {
+  if (adapter === "github") {
+    if (!input.githubApply) {
+      return {
+        state: "needs_setup",
+        setupReason: "GitHub apply is not configured on this dispatcher."
+      };
+    }
+    if (!hasGitHubRepoTarget(input.event)) {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a GitHub repository target."
+      };
+    }
+    if (!isRepoLevelGitHubIntent(input.intent) && !hasGitHubIssueOrPullTarget(input.event)) {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a GitHub issue or pull request target."
+      };
+    }
+    const githubTarget = githubTargetFromEvent(input.event);
+    if (!githubTarget) {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a GitHub repository target."
+      };
+    }
+    const compilation = createGitHubIssueMutationCompiler({
+      ...(githubTarget?.targetKind ? { targetKind: githubTarget.targetKind } : {})
+    }).compile(input.intent);
+    if (!compilation.ok) {
+      return {
+        state: compilation.outcome.outcome === "unsupported" ? "unsupported" : "needs_setup",
+        setupReason: compilation.outcome.message ?? "GitHub cannot apply this action from the current source thread."
+      };
+    }
+
+    const preflight = await preflightGitHubOperation({
+      githubApply: input.githubApply,
+      target: githubTarget,
+      operation: compilation.operation as GitHubIssueMutationOperation,
+      ...(input.preflightCache ? { preflightCache: input.preflightCache } : {})
+    });
+    if (preflight) return preflight;
+    return { state: "ready_to_apply" };
+  }
+
+  if (!input.gitlabApply) {
     return {
       state: "needs_setup",
-      setupReason: "The source thread does not include a GitHub repository target."
+      setupReason: "GitLab apply is not configured on this dispatcher."
     };
   }
-  const compilation = createGitHubIssueMutationCompiler({
-    ...(githubTarget?.targetKind ? { targetKind: githubTarget.targetKind } : {})
-  }).compile(input.intent);
+  const gitlabTarget = gitlabTargetFromEvent(input.event);
+  if (!gitlabTarget) {
+    return {
+      state: "needs_setup",
+      setupReason: "The source thread does not include a GitLab project target."
+    };
+  }
+  const compilation = createGitLabMutationCompiler().compile(input.intent);
   if (!compilation.ok) {
     return {
       state: compilation.outcome.outcome === "unsupported" ? "unsupported" : "needs_setup",
-      setupReason: compilation.outcome.message ?? "GitHub cannot apply this action from the current source thread."
+      setupReason: compilation.outcome.message ?? "GitLab cannot apply this action from the current source thread."
     };
   }
-
-  const preflight = await preflightGitHubOperation({
-    githubApply: input.githubApply,
-    target: githubTarget,
-    operation: compilation.operation as GitHubIssueMutationOperation,
-    ...(input.preflightCache ? { preflightCache: input.preflightCache } : {})
+  const preflight = await preflightGitLabOperation({
+    gitlabApply: input.gitlabApply,
+    target: gitlabTarget,
+    operation: compilation.operation as GitLabMutationOperation,
+    ...(input.gitlabPreflightCache ? { preflightCache: input.gitlabPreflightCache } : {})
   });
   if (preflight) return preflight;
 
-  return { state: "ready_to_apply" };
+  return { state: "ready_to_apply", targetLabel: "GitLab merge request" };
 }
 
 async function actionReceiptContextForFinal(input: {
   event: OpenTagEvent;
   result: OpenTagRunResult;
   githubApply?: GitHubApplyOptions;
+  gitlabApply?: GitLabApplyOptions;
 }): Promise<ActionReceiptContext> {
   const preflightCache: GitHubPreflightCache = new Map();
+  const gitlabPreflightCache: GitLabPreflightCache = new Map();
   const capabilityEntries = await Promise.all(
     (input.result.suggestedChanges ?? []).flatMap((snapshot) =>
       snapshot.intents.map(async (intent) => {
@@ -1033,7 +1230,9 @@ async function actionReceiptContextForFinal(input: {
           callbackProvider: input.event.callback.provider,
           intent,
           ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-          preflightCache
+          ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          preflightCache,
+          gitlabPreflightCache
         });
         return [intent.intentId, capability] as const;
       })
@@ -1062,6 +1261,21 @@ async function authorizeThreadAction(input: {
       ok: false,
       reason: "actor_not_allowed",
       message: "This actor is not allowed to approve or apply actions for the bound repository."
+    };
+  }
+
+  // Same default as run admission: without an explicit allowlist, approvals
+  // arriving from a public GitHub/GitLab thread require platform-reported
+  // write access, so a drive-by commenter cannot approve a pending action.
+  if (
+    !binding.allowedActors?.length &&
+    sourceRepoIsPublic(input.resolved.proposal.event) &&
+    input.actor.writeAccess !== true
+  ) {
+    return {
+      ok: false,
+      reason: "actor_not_allowed",
+      message: "This repository is public, so only actors with write access can approve or apply actions."
     };
   }
 
@@ -1201,6 +1415,11 @@ function githubTargetFromEvent(event: OpenTagEvent):
   return { owner, repoName };
 }
 
+function gitlabTargetFromEvent(event: OpenTagEvent): { projectPathWithNamespace: string } | null {
+  const projectPathWithNamespace = gitlabProjectPathFromEvent(event);
+  return projectPathWithNamespace ? { projectPathWithNamespace } : null;
+}
+
 function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandidates"]): string {
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
 }
@@ -1290,6 +1509,43 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
   return ["Results:", ...outcomes.map((outcome) => `- ${applyOutcomeSummary(outcome)}`)];
 }
 
+function sanitizeApplyFailureDetail(detail: unknown): string {
+  return String(detail ?? "")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+    .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+function sanitizeApplyOutcomeForStorage(outcome: ApplyIntentOutcome): ApplyIntentOutcome {
+  return {
+    ...outcome,
+    ...(outcome.message ? { message: sanitizeApplyFailureDetail(outcome.message) } : {}),
+    ...(outcome.error ? { error: sanitizeApplyFailureDetail(outcome.error) } : {})
+  };
+}
+
+function applyFallbackReason(input: { plan: ApplyPlan; selectedIntentIds: string[] }): string {
+  const selected = (input.plan.outcomes ?? []).filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
+  const failed = selected.find((outcome) => outcome.outcome === "failed");
+  if (failed) {
+    const detail = failed.message ?? failed.error;
+    return detail ? `Direct apply failed: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply failed.";
+  }
+  const unsupported = selected.find((outcome) => outcome.outcome === "unsupported");
+  if (unsupported) {
+    const detail = unsupported.message ?? unsupported.error;
+    return detail ? `Direct apply is unsupported: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply is unsupported for this action.";
+  }
+  return "Some selected intents were not directly applied.";
+}
+
 function renderAppliedThreadActionBody(input: {
   selectionText: string;
   selectedIntentIds: string[];
@@ -1346,16 +1602,20 @@ async function selectedDirectApplyStatus(input: {
   callbackProvider: string;
   candidates: ResolvedThreadAction["selectedCandidates"];
   githubApply?: GitHubApplyOptions;
+  gitlabApply?: GitLabApplyOptions;
 }): Promise<{ ready: boolean; reason?: string }> {
   if (input.candidates.length === 0) return { ready: false, reason: "No selected action was found." };
   const preflightCache: GitHubPreflightCache = new Map();
+  const gitlabPreflightCache: GitLabPreflightCache = new Map();
   for (const candidate of input.candidates) {
     const capability = await directApplyReceiptCapability({
       event: input.event,
       callbackProvider: input.callbackProvider,
       intent: candidate.intent,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-      preflightCache
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      preflightCache,
+      gitlabPreflightCache
     });
     if (capability.state !== "ready_to_apply") {
       return {
@@ -1515,32 +1775,101 @@ export type GitHubApplyOptions = {
   fetchImpl?: GitHubFetchLike;
 };
 
-async function executeGitHubApplyPlan(input: {
-  repo: ReturnType<typeof createOpenTagRepository>;
-  plan: ApplyPlan;
-  resolved: ResolvedThreadAction;
-  githubApply?: GitHubApplyOptions;
-}): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
-  if (input.plan.adapter !== "github") {
-    return { plan: input.plan, executed: false, fallbackReason: `Adapter ${input.plan.adapter ?? "unknown"} is not directly executable yet.` };
-  }
-  if (!input.githubApply) {
-    return { plan: input.plan, executed: false, fallbackReason: "GitHub apply is not configured on this dispatcher." };
-  }
+export type GitLabApplyOptions = {
+  token: string;
+  baseUrl?: string;
+  fetchImpl?: GitLabFetchLike;
+};
 
-  const target = githubTargetFromEvent(input.resolved.proposal.event);
-  if (!target) {
-    return { plan: input.plan, executed: false, fallbackReason: "The source run does not include a GitHub issue or pull request target." };
-  }
-
+function executableIntentsForPlan(input: { plan: ApplyPlan; resolved: ResolvedThreadAction }): MutationIntent[] {
   const preflightOutcomeByIntentId = new Map((input.plan.outcomes ?? []).map((outcome) => [outcome.intentId, outcome]));
-  const executableIntents = input.resolved.proposal.snapshot.intents.filter((intent) => {
+  return input.resolved.proposal.snapshot.intents.filter((intent) => {
     if (!input.resolved.selectedIntentIds.includes(intent.intentId)) return false;
     const outcome = preflightOutcomeByIntentId.get(intent.intentId);
     return outcome?.outcome === "skipped" && outcome.message?.startsWith("Preflight passed");
   });
+}
+
+async function updateExecutedApplyPlan(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  plan: ApplyPlan;
+  resolved: ResolvedThreadAction;
+  executedOutcomes: ApplyIntentOutcome[];
+}): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
+  const executedOutcomeByIntentId = new Map(input.executedOutcomes.map((outcome) => {
+    const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+    return [sanitized.intentId, sanitized];
+  }));
+  const mergedOutcomes = (input.plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
+  const updated = await input.repo.updateApplyPlanOutcomes({
+    id: input.plan.id,
+    outcomes: mergedOutcomes,
+    externalWritesExecuted: true
+  });
+  const plan = updated ?? input.plan;
+  const allSelectedApplied = input.resolved.selectedIntentIds.every((intentId) =>
+    plan.outcomes?.some((outcome) => outcome.intentId === intentId && outcome.outcome === "applied")
+  );
+  return {
+    plan,
+    executed: allSelectedApplied,
+    ...(allSelectedApplied ? {} : { fallbackReason: applyFallbackReason({ plan, selectedIntentIds: input.resolved.selectedIntentIds }) })
+  };
+}
+
+async function executeDirectApplyPlan(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  plan: ApplyPlan;
+  resolved: ResolvedThreadAction;
+  githubApply?: GitHubApplyOptions;
+  gitlabApply?: GitLabApplyOptions;
+}): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
+  if (input.plan.adapter !== "github" && input.plan.adapter !== "gitlab") {
+    return { plan: input.plan, executed: false, fallbackReason: `Adapter ${input.plan.adapter ?? "unknown"} is not directly executable yet.` };
+  }
+
+  const executableIntents = executableIntentsForPlan(input);
   if (executableIntents.length === 0) {
     return { plan: input.plan, executed: false, fallbackReason: "No selected intent has a direct adapter execution path." };
+  }
+
+  if (input.plan.adapter === "gitlab") {
+    if (!input.gitlabApply) {
+      return { plan: input.plan, executed: false, fallbackReason: "GitLab apply is not configured on this dispatcher." };
+    }
+    const target = gitlabTargetFromEvent(input.resolved.proposal.event);
+    if (!target) {
+      return { plan: input.plan, executed: false, fallbackReason: "The source run does not include a GitLab project target." };
+    }
+
+    const executedOutcomes: ApplyIntentOutcome[] = [];
+    const compilerRegistry = createAdapterMutationCompilerRegistry([createGitLabMutationCompiler()]);
+    for (const compilation of compilerRegistry.compile("gitlab", executableIntents)) {
+      if (!compilation.ok) {
+        executedOutcomes.push(compilation.outcome);
+        continue;
+      }
+      executedOutcomes.push(
+        await applyGitLabMutationOperation({
+          target: {
+            token: input.gitlabApply.token,
+            projectPathWithNamespace: target.projectPathWithNamespace,
+            ...(input.gitlabApply.baseUrl ? { baseUrl: input.gitlabApply.baseUrl } : {})
+          },
+          operation: compilation.operation as GitLabMutationOperation,
+          ...(input.gitlabApply.fetchImpl ? { fetchImpl: input.gitlabApply.fetchImpl } : {})
+        })
+      );
+    }
+    return await updateExecutedApplyPlan({ repo: input.repo, plan: input.plan, resolved: input.resolved, executedOutcomes });
+  }
+
+  if (!input.githubApply) {
+    return { plan: input.plan, executed: false, fallbackReason: "GitHub apply is not configured on this dispatcher." };
+  }
+  const target = githubTargetFromEvent(input.resolved.proposal.event);
+  if (!target) {
+    return { plan: input.plan, executed: false, fallbackReason: "The source run does not include a GitHub issue or pull request target." };
   }
 
   const executedOutcomes: ApplyIntentOutcome[] = [];
@@ -1570,22 +1899,7 @@ async function executeGitHubApplyPlan(input: {
     );
   }
 
-  const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
-  const mergedOutcomes = (input.plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
-  const updated = await input.repo.updateApplyPlanOutcomes({
-    id: input.plan.id,
-    outcomes: mergedOutcomes,
-    externalWritesExecuted: true
-  });
-  const plan = updated ?? input.plan;
-  const allSelectedApplied = input.resolved.selectedIntentIds.every((intentId) =>
-    plan.outcomes?.some((outcome) => outcome.intentId === intentId && outcome.outcome === "applied")
-  );
-  return {
-    plan,
-    executed: allSelectedApplied,
-    ...(allSelectedApplied ? {} : { fallbackReason: "Some selected intents were not directly applied." })
-  };
+  return await updateExecutedApplyPlan({ repo: input.repo, plan: input.plan, resolved: input.resolved, executedOutcomes });
 }
 
 const noopCallbackSink: CallbackSink = {
@@ -1869,6 +2183,7 @@ export function createDispatcherApp(input: {
   revokedRunnerTokenFingerprints?: string[];
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
+  gitlabApply?: GitLabApplyOptions;
   callbackRetry?: CallbackRetryOptions;
   larkStatusCards?: LarkDelayedStatusCardOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
@@ -1909,6 +2224,15 @@ export function createDispatcherApp(input: {
       ...(input.createdAt ? { createdAt: input.createdAt } : {})
     });
   };
+  const sourceThreadControl = createSourceThreadControlHandler({
+    repo,
+    presentation,
+    conversationKeysFromThreadAction,
+    latestRunTimeoutMs,
+    deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
+    deliverDirectMessage: (message) => callbackSink.deliver(message),
+    recordControlPlaneEvent
+  });
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
     schema: S,
@@ -2026,6 +2350,7 @@ export function createDispatcherApp(input: {
     });
     const rendered = presentation.render({
       provider: input.event.callback.provider,
+      ...larkRenderLocaleRenderOption(input.event),
       presentation: statusPresentation
     });
 
@@ -2143,6 +2468,7 @@ export function createDispatcherApp(input: {
     const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: input.run.id });
     const acknowledgement = presentation.render({
       provider: input.event.callback.provider,
+      ...larkRenderLocaleRenderOption(input.event),
       presentation: acknowledgementPresentation
     });
     const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
@@ -2642,6 +2968,7 @@ export function createDispatcherApp(input: {
         });
         const queued = presentation.render({
           provider: event.callback.provider,
+          ...larkRenderLocaleRenderOption(event),
           presentation: queuedPresentation
         });
         await deliverAndAudit({
@@ -2698,6 +3025,7 @@ export function createDispatcherApp(input: {
       const acknowledgementPresentation = presentation.acknowledgementPresentation({ runId: run.id });
       const acknowledgement = presentation.render({
         provider: parsed.event.callback.provider,
+        ...larkRenderLocaleRenderOption(parsed.event),
         presentation: acknowledgementPresentation
       });
       const statusMessageKey = larkLifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
@@ -2724,6 +3052,11 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/thread-actions", async (c) => {
     const parsed = await parseDispatcherBody(c, ThreadActionInputSchema);
+    const controlCommand = parseThreadControlCommand(parsed.rawText);
+    if (controlCommand) {
+      return sourceThreadControl.handle({ request: parsed, command: controlCommand });
+    }
+
     const command = parseThreadActionCommand(parsed.rawText);
     if (!command) {
       return c.json({ outcome: "ignored", reason: "not_action_command" }, 202);
@@ -2892,7 +3225,8 @@ export function createDispatcherApp(input: {
         event: resolved.resolved.proposal.event,
         callbackProvider: parsed.callback.provider,
         candidates: resolved.resolved.selectedCandidates,
-        ...(input.githubApply ? { githubApply: input.githubApply } : {})
+        ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
       });
       const body = renderThreadActionRecordedBody({
         verb: "approve",
@@ -3001,11 +3335,12 @@ export function createDispatcherApp(input: {
     }
     const plan = planResult.plan;
 
-    const execution = await executeGitHubApplyPlan({
+    const execution = await executeDirectApplyPlan({
       repo,
       plan,
       resolved: resolved.resolved,
-      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+      ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
     });
     if (execution.executed) {
       const outcomes = execution.plan.outcomes ?? [];
@@ -3146,6 +3481,7 @@ export function createDispatcherApp(input: {
       runId,
       runnerId: c.req.param("runnerId"),
       executor: body.executor,
+      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
@@ -3177,6 +3513,7 @@ export function createDispatcherApp(input: {
       });
       const running = presentation.render({
         provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: runningPresentation
       });
       await deliverAndAudit({
@@ -3239,6 +3576,7 @@ export function createDispatcherApp(input: {
       const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: progressPresentation
       });
       await deliverAndAudit({
@@ -3308,7 +3646,8 @@ export function createDispatcherApp(input: {
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
       result: parsed.result,
-      ...(input.githubApply ? { githubApply: input.githubApply } : {})
+      ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
     });
     if (
       parsed.result.conclusion === "needs_human" &&
@@ -3323,6 +3662,7 @@ export function createDispatcherApp(input: {
       });
       const waiting = presentation.render({
         provider: stored.event.callback.provider,
+        ...larkRenderLocaleRenderOption(stored.event),
         presentation: waitingPresentation
       });
       await deliverAndAudit({
@@ -3350,6 +3690,7 @@ export function createDispatcherApp(input: {
     });
     const finalCallback = presentation.render({
       provider: stored.event.callback.provider,
+      ...larkRenderLocaleRenderOption(stored.event),
       presentation: finalPresentation
     });
     const statusMessageKey = larkLifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
@@ -3433,27 +3774,44 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, ApplyPlanInputSchema);
     let executableTarget:
       | {
+          adapter: "github";
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
           target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
+        }
+      | {
+          adapter: "gitlab";
+          proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
+          target: NonNullable<ReturnType<typeof gitlabTargetFromEvent>>;
         }
       | undefined;
 
     if (body.execute) {
-      if (body.adapter !== "github") {
+      if (body.adapter !== "github" && body.adapter !== "gitlab") {
         return c.json({ error: "apply_execution_adapter_not_supported" }, 422);
       }
-      if (!input.githubApply) {
+      if (body.adapter === "github" && !input.githubApply) {
         return c.json({ error: "github_apply_not_configured" }, 422);
+      }
+      if (body.adapter === "gitlab" && !input.gitlabApply) {
+        return c.json({ error: "gitlab_apply_not_configured" }, 422);
       }
       const proposal = await repo.getSuggestedChanges({ proposalId });
       if (!proposal) return c.json({ error: "proposal_not_found" }, 404);
       const stored = await repo.getRun({ runId: proposal.runId });
       if (!stored) return c.json({ error: "run_not_found" }, 404);
-      const target = githubTargetFromEvent(stored.event);
-      if (!target) {
-        return c.json({ error: "github_target_missing" }, 422);
+      if (body.adapter === "github") {
+        const target = githubTargetFromEvent(stored.event);
+        if (!target) {
+          return c.json({ error: "github_target_missing" }, 422);
+        }
+        executableTarget = { adapter: "github", proposal, target };
+      } else {
+        const target = gitlabTargetFromEvent(stored.event);
+        if (!target) {
+          return c.json({ error: "gitlab_target_missing" }, 422);
+        }
+        executableTarget = { adapter: "gitlab", proposal, target };
       }
-      executableTarget = { proposal, target };
     }
 
     const applyPlanInput = {
@@ -3477,43 +3835,71 @@ export function createDispatcherApp(input: {
       plan = planResult;
     }
     if (body.execute && executableTarget) {
-      const githubApply = input.githubApply;
-      if (!githubApply) {
-        return c.json({ error: "github_apply_not_configured" }, 422);
-      }
       const preflightOutcomeByIntentId = new Map((plan.outcomes ?? []).map((outcome) => [outcome.intentId, outcome]));
       const executableIntents = executableTarget.proposal.snapshot.intents.filter((intent) => {
         const outcome = preflightOutcomeByIntentId.get(intent.intentId);
         return outcome?.outcome === "skipped" && outcome.message?.startsWith("Preflight passed");
       });
-      const target = {
-        token: githubApply.token,
-        owner: executableTarget.target.owner,
-        repo: executableTarget.target.repoName,
-        ...(typeof executableTarget.target.issueNumber === "number" ? { issueNumber: executableTarget.target.issueNumber } : {}),
-        ...(executableTarget.target.pullRequestNumber ? { pullRequestNumber: executableTarget.target.pullRequestNumber } : {})
-      };
-      const executedOutcomes = [];
-      const compilerRegistry = createAdapterMutationCompilerRegistry([
-        createGitHubIssueMutationCompiler({
-          mappings: mappingsFromAdapterPlan(plan.adapterPlan),
-          ...(executableTarget.target.targetKind ? { targetKind: executableTarget.target.targetKind } : {})
-        })
-      ]);
-      for (const compilation of compilerRegistry.compile("github", executableIntents)) {
-        if (!compilation.ok) {
-          executedOutcomes.push(compilation.outcome);
-          continue;
+      const executedOutcomes: ApplyIntentOutcome[] = [];
+      if (executableTarget.adapter === "github") {
+        const githubApply = input.githubApply;
+        if (!githubApply) {
+          return c.json({ error: "github_apply_not_configured" }, 422);
         }
-        executedOutcomes.push(
-          await applyGitHubIssueMutationOperation({
-            target,
-            operation: compilation.operation as GitHubIssueMutationOperation,
-            ...(githubApply.fetchImpl ? { fetchImpl: githubApply.fetchImpl } : {})
+        const target = {
+          token: githubApply.token,
+          owner: executableTarget.target.owner,
+          repo: executableTarget.target.repoName,
+          ...(typeof executableTarget.target.issueNumber === "number" ? { issueNumber: executableTarget.target.issueNumber } : {}),
+          ...(executableTarget.target.pullRequestNumber ? { pullRequestNumber: executableTarget.target.pullRequestNumber } : {})
+        };
+        const compilerRegistry = createAdapterMutationCompilerRegistry([
+          createGitHubIssueMutationCompiler({
+            mappings: mappingsFromAdapterPlan(plan.adapterPlan),
+            ...(executableTarget.target.targetKind ? { targetKind: executableTarget.target.targetKind } : {})
           })
-        );
+        ]);
+        for (const compilation of compilerRegistry.compile("github", executableIntents)) {
+          if (!compilation.ok) {
+            executedOutcomes.push(compilation.outcome);
+            continue;
+          }
+          executedOutcomes.push(
+            await applyGitHubIssueMutationOperation({
+              target,
+              operation: compilation.operation as GitHubIssueMutationOperation,
+              ...(githubApply.fetchImpl ? { fetchImpl: githubApply.fetchImpl } : {})
+            })
+          );
+        }
+      } else {
+        const gitlabApply = input.gitlabApply;
+        if (!gitlabApply) {
+          return c.json({ error: "gitlab_apply_not_configured" }, 422);
+        }
+        const compilerRegistry = createAdapterMutationCompilerRegistry([createGitLabMutationCompiler()]);
+        for (const compilation of compilerRegistry.compile("gitlab", executableIntents)) {
+          if (!compilation.ok) {
+            executedOutcomes.push(compilation.outcome);
+            continue;
+          }
+          executedOutcomes.push(
+            await applyGitLabMutationOperation({
+              target: {
+                token: gitlabApply.token,
+                projectPathWithNamespace: executableTarget.target.projectPathWithNamespace,
+                ...(gitlabApply.baseUrl ? { baseUrl: gitlabApply.baseUrl } : {})
+              },
+              operation: compilation.operation as GitLabMutationOperation,
+              ...(gitlabApply.fetchImpl ? { fetchImpl: gitlabApply.fetchImpl } : {})
+            })
+          );
+        }
       }
-      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => {
+        const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+        return [sanitized.intentId, sanitized];
+      }));
       const mergedOutcomes = (plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
       const executedPlan = await repo.updateApplyPlanOutcomes({
         id: plan.id,
@@ -3586,6 +3972,12 @@ export function createDispatcherApp(input: {
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
     return c.json({ events });
+  });
+
+  app.get("/v1/runs/:runId/ledger", async (c) => {
+    const ledger = await repo.getRunLedger({ runId: c.req.param("runId") });
+    if (!ledger) return c.json({ error: "run_not_found" }, 404);
+    return c.json({ ledger });
   });
 
   app.onError((err, c) => {

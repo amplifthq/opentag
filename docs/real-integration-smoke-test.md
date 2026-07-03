@@ -12,6 +12,10 @@ Use this document when you want to prove that OpenTag works beyond local unit te
 - real local Claude Code execution
 - protocol metrics that show callback noise and artifact flow
 
+For the consolidated runner that wraps the local protocol smoke cases and the
+live GitHub/Slack/Lark scripts, see
+[Live E2E Smoke Harness](./live-e2e-smoke-harness.md).
+
 ## Goal
 
 A smoke test is complete when all of these are true:
@@ -47,7 +51,9 @@ Prerequisites:
 
 - `lark-cli` is installed and available on `PATH`, or `OPENTAG_LARK_CLI` points
   to the binary.
-- `lark-cli auth status` reports both the user and bot identities as ready.
+- `lark-cli auth status` reports the bot identity as ready and the user identity
+  as ready, or at least provides a cached user `openId` for bot-to-user seed
+  messages.
 - The bot identity can send a message to the current user.
 
 Run:

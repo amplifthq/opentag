@@ -291,6 +291,10 @@ describe("default callback presentation", () => {
       "Ready to apply",
       "1. Add the bug label.",
       "Target: GitHub labels",
+      "Impact: Writes label metadata on the source work item.",
+      "Capability/preflight: Adapter capability and preflight allow direct apply for this target.",
+      "Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
+      "Safe next action: `apply 1` is the safe apply path after reviewing this receipt.",
       "Actions: apply 1, reject 1",
       "Audit: opentag status --run run_action_receipt"
     ].join("\n");
@@ -399,7 +403,7 @@ describe("default callback presentation", () => {
     };
 
     const github = presentation.final({ provider: "github", result, runId: "run_receipt_1", receiptContext }).body;
-    expect(github).toContain("### Ready to apply");
+    expect(github).toContain("<summary>Ready to apply</summary>");
     expect(github).toContain("source-thread action receipt");
     expect(github).toContain("Audit: run `opentag status --run run_receipt_1` locally.");
     expect(github).toContain("#### 1. Add the bug label.");
@@ -412,17 +416,20 @@ describe("default callback presentation", () => {
     expect(github).not.toContain("Intent ID: `intent_label_1`");
 
     const slack = presentation.final({ provider: "slack", result, runId: "run_receipt_1", receiptContext });
-    expect(slack.body).toContain("*Ready to apply*");
+    expect(slack.body).toContain("*Actions*");
+    expect(slack.body).toContain("Ready to apply");
     expect(slack.body).toContain("Audit: `opentag status --run run_receipt_1`");
     expect(slack.body).toContain("1. *Add the bug label.*");
-    expect(slack.body).toContain("Target: GitHub labels");
+    expect(slack.body).toContain("Reply: `apply 1` / `reject 1`");
+    expect(slack.body).not.toContain("Target: GitHub labels");
     expect(slack.body).not.toContain("Proposal:");
     expect(slack.body).not.toContain("Intent ID:");
-    expect(slack.blocks?.at(-2)).toMatchObject({
+    const slackActionBlock = slack.blocks?.find((block) => block.type === "actions" && block.block_id === "opentag_compact_actions_1");
+    expect(slackActionBlock).toMatchObject({
       type: "actions",
       elements: [
         { type: "button", text: { type: "plain_text", text: "Apply 1" }, action_id: "opentag:apply:1", style: "primary" },
-        { type: "button", text: { type: "plain_text", text: "Reject" }, action_id: "opentag:reject:1", style: "danger" }
+        { type: "button", text: { type: "plain_text", text: "Reject 1" }, action_id: "opentag:reject:1", style: "danger" }
       ]
     });
     expect(slack.blocks?.at(-1)).toEqual({
@@ -477,11 +484,32 @@ describe("default callback presentation", () => {
     expect(github).toContain("| Risks | Review before merge. |");
 
     const slack = presentation.final({ provider: "slack", result });
-    expect(slack.body).toContain("Branch: `opentag/run_1` -> `main`");
-    expect(slack.body).toContain("Changed files: `src/demo.ts`");
+    expect(slack.body).toContain("1. *Create a pull request*");
+    expect(slack.body).toContain("Reply: `approve 1` / `reject 1`");
+    expect(slack.body).not.toContain("Branch: `opentag/run_1` -> `main`");
+    expect(slack.body).not.toContain("Changed files: `src/demo.ts`");
     expect(slack.body).not.toContain("Title: OpenTag run run_1");
     expect(slack.body).not.toContain("`pnpm test`: passed");
-    expect(JSON.stringify(slack.blocks)).toContain("Branch: `opentag/run_1` -> `main`");
+    expect(JSON.stringify(slack.blocks)).toContain("Create a pull request");
+    expect(JSON.stringify(slack.blocks)).not.toContain("Branch: `opentag/run_1` -> `main`");
     expect(JSON.stringify(slack.blocks)).not.toContain("Title: OpenTag run run_1");
+
+    const receiptContext = {
+      capabilityByIntentId: {
+        intent_create_pr: { state: "ready_to_apply" as const }
+      }
+    };
+    const lark = presentation.final({ provider: "lark", result, receiptContext });
+    expect(JSON.stringify(lark.rich)).toContain("Create PR");
+    expect(JSON.stringify(lark.rich)).toContain("Reject");
+    expect(JSON.stringify(lark.rich)).toContain("If buttons are unavailable");
+    expect(JSON.stringify(lark.rich)).not.toContain("创建 PR");
+
+    const feishu = presentation.final({ provider: "lark", result, receiptContext, larkRenderLocale: "zh-CN" });
+    expect(JSON.stringify(feishu.rich)).toContain("创建 PR");
+    expect(JSON.stringify(feishu.rich)).toContain("拒绝");
+    expect(JSON.stringify(feishu.rich)).toContain("按钮不可用时");
+    expect(JSON.stringify(feishu.rich)).toContain("完成：待确认");
+    expect(JSON.stringify(feishu.rich)).not.toContain("Create PR");
   });
 });

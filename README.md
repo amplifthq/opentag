@@ -15,7 +15,7 @@
 
 **[opentag.im](https://opentag.im)**
 
-**Connect Slack, GitHub, or Lark to a local coding agent.**
+**Turn an existing work thread into a governed agent work loop.**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
@@ -25,7 +25,9 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It listens to Slack, GitHub, or Lark / Feishu, runs Codex or Claude Code on your computer, and sends the result back to the same place.
+OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs Codex or Claude Code locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
+
+The concrete setup still connects Slack, GitHub, GitLab, or Lark / Feishu to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
 
 ## Demo
 
@@ -40,6 +42,8 @@ https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
 OpenTag treats the thread where a request starts as the approval surface for agent-proposed system-of-record mutations. When an agent suggests a change, OpenTag renders a compact receipt that shows what will change, whether it is ready to apply, and which decision is safe now.
 
 `Apply` appears only when the dispatcher confirms a configured adapter can execute the action. Otherwise the receipt shows setup or attention needed, and the local audit trail stays available through commands such as `opentag status --run <run_id>`.
+
+Each run also keeps a local agent work ledger: the source event, admission decision, context packet snapshot, executor capability snapshot, produced artifacts, callback delivery, and final outcome stay available through status and dispatcher audit APIs without flooding the human thread.
 
 ## Quick Start
 
@@ -99,12 +103,14 @@ Help me set up OpenTag from https://github.com/amplifthq/opentag.
 Use the published OpenTag CLI. Please:
 1. Check that Node.js 20 or newer is available.
 2. Install or run the published OpenTag CLI.
-3. Run opentag setup and help me choose Slack, GitHub, or Lark / Feishu, a coding agent, and a local project.
+3. Run opentag setup and help me choose Slack, GitHub, GitLab, or Lark / Feishu, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
 5. When setup asks how OpenTag should run, choose the recommended background service option. Then verify with opentag service status and opentag doctor. If service mode is unsupported or I choose terminal mode, use opentag start and keep that terminal open.
 
 Do not invent credentials or secrets. Ask me before entering any token, app ID, channel ID, repository, or project path.
 ```
+
+Agents can also follow the full agent-readable setup checklist in [Agent-readable install guide](docs/agent-install.md).
 
 ## Platform Guides
 
@@ -114,6 +120,7 @@ Use the guide for the platform you choose in `opentag setup`.
 | --- | --- | --- |
 | Slack | Use Socket Mode for local development | [Slack setup](docs/platforms/slack.en.md) |
 | GitHub | Use a repository webhook and GitHub token | [GitHub setup](docs/platforms/github.en.md) |
+| GitLab | Use a project Note Hook and GitLab access token | [GitLab setup](docs/platforms/gitlab.en.md) |
 | Lark / Feishu | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
 
 OpenTag also has an experimental Telegram adapter, but CLI setup is not ready for it yet.
@@ -204,7 +211,7 @@ rm -rf ~/.config/opentag ~/.local/state/opentag
 
 ```mermaid
 flowchart LR
-    A["Slack, GitHub, or Lark"] --> B["OpenTag listener"]
+    A["Slack, GitHub, GitLab, or Lark / Feishu"] --> B["OpenTag listener"]
     B --> C["Local dispatcher"]
     C --> D["Local runner"]
     D --> E["Codex, Claude Code, or custom executor"]
@@ -213,12 +220,17 @@ flowchart LR
 
 The important boundary: platforms receive messages, OpenTag coordinates the run, and the coding agent executes on your machine.
 
+The default loop is artifact-first rather than chat-first: a final reply should compress the outcome, link to artifacts such as reports, patches, pull request intents, or next actions, and point back to local audit/status for detail.
+
 ## Developer Docs
 
 - [Platform setup guides](docs/platforms/README.md)
 - [Configuration](docs/configuration.md)
+- [Hook ingest contract](docs/hook-ingest.md)
 - [Adapter authoring](docs/adapter-authoring.md)
 - [Real integration smoke test](docs/real-integration-smoke-test.md)
+- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
+- [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [Local npm release guide](docs/npm-release.md)
 
@@ -242,7 +254,7 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.3.5`. The npm package family is published under the `@opentag` scope.
+Current public release: `v0.4.0`. The npm package family is published under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
@@ -252,6 +264,7 @@ Current public release: `v0.3.5`. The npm package family is published under the 
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |
+| [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook handling, note replies, merge request helpers, and action application |
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / Feishu ingress, Personal Agent registration, and replies |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus Echo, Claude Code, and Codex adapters |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite persistence |

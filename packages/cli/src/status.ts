@@ -60,6 +60,11 @@ type RunAuditEvent = {
   createdAt?: unknown;
 };
 
+type RunLedgerEntry = RunAuditEvent & {
+  category?: unknown;
+  sequence?: unknown;
+};
+
 export type RunStatusSummary = {
   configPath: string;
   dispatcherUrl: string;
@@ -68,6 +73,7 @@ export type RunStatusSummary = {
   metrics: RunMetrics;
   runTimeoutPolicy?: string;
   events: RunAuditEvent[];
+  ledgerEntries?: RunLedgerEntry[];
 };
 
 export type ChannelStatusSummary = {
@@ -263,10 +269,11 @@ export async function runStatusFromConfig(input: {
     ...(token ? { pairingToken: token } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
-  const [claimed, events, metrics] = await Promise.all([
+  const [claimed, events, metrics, ledger] = await Promise.all([
     client.getRun({ runId: input.runId }),
     client.listRunEvents({ runId: input.runId }),
-    client.getRunMetrics({ runId: input.runId })
+    client.getRunMetrics({ runId: input.runId }),
+    client.getRunLedger({ runId: input.runId }).catch(() => undefined)
   ]);
   return {
     configPath: input.configPath,
@@ -275,7 +282,8 @@ export async function runStatusFromConfig(input: {
     event: claimed.event,
     metrics: metrics.metrics,
     runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
-    events: events.events as RunAuditEvent[]
+    events: events.events as RunAuditEvent[],
+    ...(ledger?.ledger && Array.isArray(ledger.ledger.entries) ? { ledgerEntries: ledger.ledger.entries as RunLedgerEntry[] } : {})
   };
 }
 
@@ -578,6 +586,113 @@ function formatCallbackDelivery(summary: RunStatusSummary): string[] {
   ];
 }
 
+function formatRunResult(run: OpenTagRun): string[] {
+  if (!run.result) return [];
+  const lines = ["Result:", `  summary: ${run.result.summary}`];
+  if (run.result.changedFiles?.length) {
+    lines.push(`  changed files: ${run.result.changedFiles.join(", ")}`);
+  }
+  if (run.result.artifacts?.length) {
+    lines.push("  artifacts:");
+    for (const artifact of run.result.artifacts) {
+      lines.push(`    - ${artifact.kind ? `${artifact.kind}: ` : ""}${artifact.title}: ${artifact.uri}`);
+    }
+  }
+  if (run.result.verification?.length) {
+    lines.push("  verification:");
+    for (const check of run.result.verification) {
+      lines.push(`    - ${check.command}: ${check.outcome}`);
+    }
+  }
+  return lines;
+}
+
+function formatRunContextPacket(run: OpenTagRun): string[] {
+  const packet = run.contextPacket;
+  if (!packet) return ["Context Packet:", "  none"];
+  const lines = ["Context Packet:", `  summary: ${packet.summary}`];
+  if (packet.intent) {
+    lines.push(`  intent: ${packet.intent.normalizedIntent}`);
+    lines.push(`  requested by: ${packet.intent.requestedBy.provider}:${packet.intent.requestedBy.providerUserId}`);
+  }
+  const visibleSources = packet.sources?.slice(0, 4) ?? [];
+  if (visibleSources.length > 0) {
+    lines.push(`  sources: ${packet.sources?.length ?? 0}`);
+    for (const source of visibleSources) {
+      lines.push(`    - ${source.included ? "included" : "excluded"} ${source.role}: ${source.pointer.uri} (${source.reason})`);
+    }
+  } else if (packet.sourcePointers.length > 0) {
+    lines.push(`  source pointers: ${packet.sourcePointers.length}`);
+    for (const pointer of packet.sourcePointers.slice(0, 4)) {
+      lines.push(`    - ${pointer.kind}: ${pointer.uri}`);
+    }
+  }
+  if (packet.facts?.length) lines.push(`  facts: ${packet.facts.slice(0, 3).map((fact) => fact.text).join("; ")}`);
+  if (packet.risks?.length) lines.push(`  risks: ${packet.risks.slice(0, 3).join("; ")}`);
+  if (packet.exclusions?.length) lines.push(`  exclusions: ${packet.exclusions.slice(0, 3).join("; ")}`);
+  if (packet.mustPreserve?.length) lines.push(`  must preserve: ${packet.mustPreserve.slice(0, 3).join("; ")}`);
+  if (packet.redactions?.length) lines.push(`  redactions: ${packet.redactions.map((redaction) => redaction.reason).slice(0, 3).join("; ")}`);
+  if (packet.assembly?.stages.length) {
+    lines.push(`  assembly: ${packet.assembly.stages.join(" -> ")}${packet.assembly.emittedAt ? ` at ${packet.assembly.emittedAt}` : ""}`);
+  }
+  return lines;
+}
+
+function ledgerCategoryForStatus(type: unknown): string {
+  if (typeof type !== "string") return "audit";
+  if (type === "source_event.received") return "source_event";
+  if (type.startsWith("admission.")) return "admission";
+  if (type.startsWith("context_packet.")) return "context_packet";
+  if (type.startsWith("executor.capability.")) return "executor_capability";
+  if (type === "callback.progress.suppressed") return "progress_visibility";
+  if (type.startsWith("callback.") || type.startsWith("source_receipt.")) return "callback_delivery";
+  if (type.startsWith("approval.")) return "approval_decision";
+  if (type.startsWith("apply_plan.")) return "apply_plan";
+  if (type.startsWith("artifact.") || type.startsWith("proposal.snapshot.")) return "artifact";
+  if (type === "run.completed") return "final_outcome";
+  if (type === "run.cancelled" || type.includes(".cancel")) return "cancellation";
+  if (type.includes("timeout") || type === "run.timed_out") return "timeout";
+  if (type === "run.progress") return "progress_visibility";
+  if (type.startsWith("run.")) return "lifecycle";
+  if (type.startsWith("security.") || type.endsWith(".failed")) return "error";
+  return "audit";
+}
+
+function ledgerCategoryForEntry(event: RunLedgerEntry): string {
+  return typeof event.category === "string" && event.category.length > 0 ? event.category : ledgerCategoryForStatus(event.type);
+}
+
+function formatAgentWorkLedger(summary: RunStatusSummary): string[] {
+  const ledgerEvents: RunLedgerEntry[] =
+    summary.ledgerEntries ??
+    [
+      {
+        type: "source_event.received",
+        visibility: "audit",
+        importance: "normal",
+        message: `${summary.event.source} source event ${summary.event.sourceEventId} received.`,
+        createdAt: summary.event.receivedAt,
+        category: "source_event"
+      },
+      ...summary.events
+    ];
+  const categories = new Map<string, number>();
+  for (const event of ledgerEvents) {
+    const category = ledgerCategoryForEntry(event);
+    categories.set(category, (categories.get(category) ?? 0) + 1);
+  }
+  const counts = [...categories.entries()].map(([category, count]) => `${category}=${count}`).join(", ");
+  return [
+    "Agent Work Ledger:",
+    `  entries: ${ledgerEvents.length}${counts ? ` (${counts})` : ""}`,
+    ...ledgerEvents.slice(-6).map((event) => {
+      const type = typeof event.type === "string" ? event.type : "unknown";
+      const message = typeof event.message === "string" ? ` - ${event.message}` : "";
+      return `  ${ledgerCategoryForEntry(event)}: ${type}${message}`;
+    })
+  ];
+}
+
 export function formatRunStatus(summary: RunStatusSummary): string {
   const latestEvents = summary.events.slice(-5);
   const conclusion = summary.run.result?.conclusion;
@@ -593,7 +708,10 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     ...formatRunProvenance(summary),
     `Command: ${summary.event.command.rawText}`,
     `Updated: ${summary.run.updatedAt}`,
+    ...formatRunContextPacket(summary.run),
+    ...formatRunResult(summary.run),
     `Metrics: ${summary.metrics.totalEventCount} events, ${summary.metrics.suggestedChangesCount} suggested action(s), ${summary.metrics.applyPlanCount} apply plan(s), ${summary.metrics.staleIntentCount} stale intent(s)`,
+    ...formatAgentWorkLedger(summary),
     ...formatRunLiveness(summary),
     ...formatCallbackDelivery(summary),
     "Recent Events:",

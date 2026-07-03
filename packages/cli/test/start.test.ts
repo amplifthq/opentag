@@ -9,6 +9,7 @@ import {
   bootstrapLocalDispatcher,
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
+  gitlabIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
   shouldRethrowAbortReason,
   slackIngressConfigFromCliConfig,
@@ -93,6 +94,24 @@ function githubConfig(port?: number) {
       webhookPath: "/github/webhooks",
       autoCreatePullRequest: false,
       port: port ?? 3050
+    }
+  });
+}
+
+function gitlabConfig(port?: number) {
+  return createSetupConfig({
+    language: "en",
+    platform: "gitlab",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    gitlab: {
+      token: "glpat_token",
+      webhookSecret: "gitlab_webhook_secret",
+      projectPathWithNamespace: "acme/team/demo",
+      baseUrl: "https://gitlab.example.com",
+      webhookPath: "/gitlab/webhooks",
+      port: port ?? 3060
     }
   });
 }
@@ -242,6 +261,26 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("derives dispatcher and ingress input for GitLab without Lark", () => {
+    const built = gitlabConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      gitlabToken: "glpat_token",
+      gitlabBaseUrl: "https://gitlab.example.com"
+    });
+    expect(gitlabIngressConfigFromCliConfig(built)).toMatchObject({
+      webhookSecret: "gitlab_webhook_secret",
+      baseUrl: "https://gitlab.example.com",
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      webhookPath: "/gitlab/webhooks",
+      port: 3060
+    });
+  });
+
   it("passes the service request body limit to GitHub webhook ingress", () => {
     const built = githubConfig();
 
@@ -289,6 +328,21 @@ describe("OpenTag CLI start wiring", () => {
     }
   });
 
+  it("fails before start when the GitLab webhook port is already in use", async () => {
+    const { server, port } = await listenOnRandomPort();
+    try {
+      const built = gitlabConfig(port);
+
+      await expect(assertStartPortsAvailable(built)).rejects.toThrow(
+        `OpenTag cannot start GitLab local webhook because port ${port} is already in use.`
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   it("fails fast for GitHub when run branches are not prepared for apply actions", () => {
     const built = githubConfig();
     built.daemon.preparePullRequestBranch = false;
@@ -297,6 +351,32 @@ describe("OpenTag CLI start wiring", () => {
     expect(() => dispatcherRuntimeInputFromCliConfig(built)).toThrow(
       "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled."
     );
+  });
+
+  it("fails fast when the Discord public key is set without a bot token", () => {
+    const built = config();
+
+    expect(() =>
+      dispatcherRuntimeInputFromCliConfig(built, { env: { OPENTAG_DISCORD_PUBLIC_KEY: "pubkey" } })
+    ).toThrow("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+  });
+
+  it("passes the documented Discord webhook path through to the runtime input", () => {
+    const built = config();
+
+    expect(
+      dispatcherRuntimeInputFromCliConfig(built, {
+        env: {
+          OPENTAG_DISCORD_PUBLIC_KEY: "pubkey",
+          OPENTAG_DISCORD_BOT_TOKEN: "bot",
+          OPENTAG_DISCORD_WEBHOOK_PATH: "/custom/discord"
+        }
+      })
+    ).toMatchObject({
+      discordPublicKey: "pubkey",
+      discordBotToken: "bot",
+      discordWebhookPath: "/custom/discord"
+    });
   });
 
   it("derives Lark ingress config with a default repo binding for one Project Target", () => {
@@ -421,6 +501,57 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
   });
 
+  it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {
+    const built = gitlabConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    const calls: string[] = [];
+    const logs: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {
+          calls.push("ports");
+        },
+        startDispatcher() {
+          calls.push("dispatcher");
+          throw new Error("local dispatcher should not start in relay mode");
+        },
+        startGitLabIngress() {
+          calls.push("gitlab-ingress");
+          throw new Error("GitLab ingress should not start in relay mode");
+        },
+        async waitForDispatcher() {
+          calls.push("wait");
+        },
+        async bootstrapDispatcher() {
+          calls.push("bootstrap");
+        },
+        async serveDaemon() {
+          calls.push("daemon");
+        },
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
+    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
+    expect(logs.join("\n")).toContain("GitLab webhook secret: the relay must verify X-Gitlab-Token before creating runs.");
+  });
+
   it("refuses public HTTP relay configs before connecting", async () => {
     const built = githubConfig();
     built.runtime = {
@@ -487,6 +618,9 @@ describe("OpenTag CLI start wiring", () => {
           calls.push("lark-ingress");
           return {
             startPromise: new Promise<void>(() => {}),
+            async handleCardAction() {
+              return { status: "ignored_card_action_not_opentag" as const };
+            },
             async close() {
               calls.push("lark.close");
             }
@@ -526,7 +660,7 @@ describe("OpenTag CLI start wiring", () => {
           }
         }
       })
-    ).rejects.toThrow("Relay mode currently supports GitHub-backed ingress only.");
+    ).rejects.toThrow("Relay mode currently supports GitHub/GitLab-backed ingress only.");
   });
 
   it("waits for dispatcher health instead of assuming the port is ready", async () => {
