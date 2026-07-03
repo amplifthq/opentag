@@ -171,6 +171,31 @@ describe("Discord interactions app", () => {
     });
   });
 
+  it("still sends a failure notice when a custom background error reporter throws", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app, notifyChannel } = makeApp({
+        createRun: async () => {
+          throw new Error("dispatcher down");
+        },
+        onBackgroundError: () => {
+          throw new Error("reporter down");
+        }
+      });
+      const body = commandBody([{ name: "prompt", value: "fix the bug" }]);
+      const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+      expect(response.status).toBe(200);
+      await vi.waitFor(() => expect(notifyChannel).toHaveBeenCalledTimes(1));
+      expect(notifyChannel.mock.calls[0]![0]).toMatchObject({
+        channelId: "chan_1",
+        content: expect.stringContaining("couldn't start")
+      });
+      expect(consoleError).toHaveBeenCalledWith("Discord interaction background error reporter failed:", expect.any(Error));
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("acknowledges, reports, and notifies the channel when submitThreadAction rejects", async () => {
     const { app, onBackgroundError, notifyChannel } = makeApp({
       submitThreadAction: async () => {
@@ -193,6 +218,24 @@ describe("Discord interactions app", () => {
     const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("not supported") } });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("returns prompt guidance for whitespace-only prompts without creating a run", async () => {
+    const { app, createRun, resolveChannelBinding } = makeApp();
+    const body = commandBody([
+      { name: "prompt", value: "   " },
+      { name: "executor", value: "codex" }
+    ]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: {
+        content: expect.stringContaining("Please include a prompt"),
+        allowed_mentions: { parse: [] }
+      }
+    });
+    expect(resolveChannelBinding).not.toHaveBeenCalled();
     expect(createRun).not.toHaveBeenCalled();
   });
 

@@ -143,6 +143,13 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
     ((error: unknown) => {
       console.error("Discord interaction background task failed:", error);
     });
+  const safelyReportBackgroundError = (error: unknown) => {
+    try {
+      reportBackgroundError(error);
+    } catch (reportError) {
+      console.error("Discord interaction background error reporter failed:", reportError);
+    }
+  };
 
   app.post(webhookPath, async (c) => {
     const contentLengthHeader = c.req.header("content-length");
@@ -188,17 +195,25 @@ export function createDiscordInteractionsApp(input: DiscordInteractionsAppInput)
       if (!interaction) {
         return c.json({ error: "invalid_payload" }, 422);
       }
+      if (!interaction.prompt.trim()) {
+        return c.json({
+          type: RESPONSE_TYPE_CHANNEL_MESSAGE,
+          data: { content: "Please include a prompt after /opentag.", allowed_mentions: NO_MENTIONS }
+        });
+      }
 
       // Deferred work runs after the type-4 ACK below so Discord's 3-second
       // deadline never depends on dispatcher/DB latency. Failures are reported
       // and surfaced to the channel as a bot-token notice instead of a 500.
       const runDeferred = (work: () => Promise<void>, failureNotice: string) => {
-        work().catch((error) => {
-          reportBackgroundError(error);
-          input
-            .notifyChannel?.({ channelId: interaction.channelId, content: failureNotice })
-            .catch(reportBackgroundError);
-        });
+        void Promise.resolve()
+          .then(work)
+          .catch((error) => {
+            safelyReportBackgroundError(error);
+            input
+              .notifyChannel?.({ channelId: interaction.channelId, content: failureNotice })
+              .catch(safelyReportBackgroundError);
+          });
       };
 
       // apply/approve N → submitThreadAction, no run (mirrors the GitLab ingress).
