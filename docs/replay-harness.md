@@ -1,0 +1,54 @@
+# OpenTag Replay Harness
+
+OpenTag's replay harness keeps the product from drifting back into a plain connector. A replay fixture captures a source-thread event, the expected executor result, and the governed-loop evidence that must appear after dispatch.
+
+Use replay fixtures for source-thread behavior that should stay stable:
+
+- admission and duplicate handling;
+- context packet snapshot generation;
+- executor capability ledger entries;
+- artifact-first final results;
+- source-thread action receipt shape;
+- callback delivery without internal process noise;
+- agent work ledger categories.
+
+## Fixture Location
+
+Dispatcher replay fixtures live under:
+
+```text
+packages/dispatcher/test/fixtures/replay/
+```
+
+Each fixture is JSON so it can be reviewed independently from test code. A fixture contains:
+
+- `runId`: stable run identifier for the replay.
+- `event`: an `OpenTagEvent` source-thread event.
+- `executorCapability`: the capability snapshot the runner reports at `running`.
+- `result`: an `OpenTagRunResult` with artifacts and optional suggested actions.
+- `expected`: compact assertions for artifact types, ledger categories, and final callback text.
+
+## Add A Replay Case
+
+1. Add a new JSON file in `packages/dispatcher/test/fixtures/replay/`.
+2. Use a realistic source-thread event from GitHub, Slack, GitLab, Lark / Feishu, or another adapter.
+3. Keep secrets and live provider IDs out of the fixture.
+4. Include at least one machine-addressable artifact with `id`, `type`, `title`, `uri`, and `summary`.
+5. Add the fixture name to `packages/dispatcher/test/replay-harness.test.ts`.
+6. Run:
+
+```bash
+corepack pnpm vitest run packages/dispatcher/test/replay-harness.test.ts
+```
+
+Replay tests should not call live provider APIs. They exercise the dispatcher app in memory and prove that OpenTag still produces a bounded context packet, an executor capability snapshot, artifacts, callbacks, and a ledger view for the source thread.
+
+## Product Boundary
+
+Replay fixtures should reinforce OpenTag's boundary:
+
+- The source thread remains the human workflow surface.
+- The local runner remains the execution boundary.
+- The agent work ledger is the durable audit surface.
+- Final callbacks compress the outcome and point to artifacts/status.
+- OpenTag does not become a new AI workspace or a stream of internal agent logs.

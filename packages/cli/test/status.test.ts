@@ -418,6 +418,55 @@ describe("OpenTag CLI status", () => {
           }
         });
       }
+      if (href.endsWith("/v1/runs/run_status_1/ledger")) {
+        return Response.json({
+          ledger: {
+            runId: "run_status_1",
+            entries: [
+              {
+                type: "source_event.received",
+                category: "source_event",
+                visibility: "audit",
+                importance: "normal",
+                message: "github source event comment_status_run received.",
+                createdAt: "2026-06-24T00:00:00.000Z"
+              },
+              {
+                type: "context_packet.generated",
+                category: "context_packet",
+                visibility: "audit",
+                importance: "normal",
+                message: "label this bug",
+                createdAt: "2026-06-24T00:00:00.000Z"
+              },
+              {
+                type: "executor.capability.snapshot",
+                category: "executor_capability",
+                visibility: "audit",
+                importance: "normal",
+                message: "Captured executor capability.",
+                createdAt: "2026-06-24T00:00:10.000Z"
+              },
+              {
+                type: "artifact.created",
+                category: "artifact",
+                visibility: "audit",
+                importance: "normal",
+                message: "Stored run artifacts.",
+                createdAt: "2026-06-24T00:00:50.000Z"
+              },
+              {
+                type: "callback.final.delivered",
+                category: "callback_delivery",
+                visibility: "human",
+                importance: "normal",
+                message: "Delivered final receipt.",
+                createdAt: "2026-06-24T00:01:00.000Z"
+              }
+            ]
+          }
+        });
+      }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
 
@@ -432,7 +481,8 @@ describe("OpenTag CLI status", () => {
       expect.arrayContaining([
         expect.stringContaining("/v1/runs/run_status_1"),
         expect.stringContaining("/v1/runs/run_status_1/events"),
-        expect.stringContaining("/v1/runs/run_status_1/metrics")
+        expect.stringContaining("/v1/runs/run_status_1/metrics"),
+        expect.stringContaining("/v1/runs/run_status_1/ledger")
       ])
     );
     expect(formatRunStatus(summary)).toContain("Run: run_status_1");
@@ -446,6 +496,13 @@ describe("OpenTag CLI status", () => {
     expect(formatRunStatus(summary)).toContain("- log_summary: Log summary: opentag://run/run_status_1/log-summary");
     expect(formatRunStatus(summary)).toContain("- corepack pnpm test: passed");
     expect(formatRunStatus(summary)).toContain("Metrics: 2 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
+    expect(formatRunStatus(summary)).toContain("Agent Work Ledger:");
+    expect(formatRunStatus(summary)).toContain(
+      "entries: 5 (source_event=1, context_packet=1, executor_capability=1, artifact=1, callback_delivery=1)"
+    );
+    expect(formatRunStatus(summary)).toContain("source_event: source_event.received - github source event comment_status_run received.");
+    expect(formatRunStatus(summary)).toContain("executor_capability: executor.capability.snapshot - Captured executor capability.");
+    expect(formatRunStatus(summary)).toContain("artifact: artifact.created - Stored run artifacts.");
     expect(formatRunStatus(summary)).toContain("Liveness:");
     expect(formatRunStatus(summary)).toContain("Provider: github (status_update)");
     expect(formatRunStatus(summary)).toContain("Human callbacks: 1; thread noise ratio: 0.5");

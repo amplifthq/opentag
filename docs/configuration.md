@@ -373,6 +373,9 @@ event such as `agent_end`, `agent_failed`, `agent_cancelled`,
 Do not pass dispatcher tokens, local paths, or raw executor logs through source
 threads. Hook ingest is a local authenticated reporting path; source-thread
 callbacks should remain concise and provider-rendered from OpenTag state.
+See [Hook Ingest Contract](./hook-ingest.md) for the public manifest shape,
+runner-scoped endpoints, idempotency rules, visibility model, and terminal-event
+semantics.
 
 Project Target binding fields:
 

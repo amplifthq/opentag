@@ -1,0 +1,115 @@
+{
+  "name": "github governed artifact loop",
+  "runId": "run_replay_github",
+  "event": {
+    "id": "evt_replay_github",
+    "source": "github",
+    "sourceEventId": "comment_replay_github",
+    "receivedAt": "2026-06-24T00:00:00.000Z",
+    "actor": { "provider": "github", "providerUserId": "42", "handle": "octocat", "writeAccess": true },
+    "target": { "mention": "@opentag", "agentId": "opentag" },
+    "command": { "rawText": "fix this flaky test", "intent": "fix", "args": {} },
+    "context": [
+      { "provider": "github", "kind": "issue", "uri": "https://github.com/acme/demo/issues/1", "visibility": "public" }
+    ],
+    "workItem": {
+      "provider": "github",
+      "kind": "issue",
+      "externalId": "acme/demo#1",
+      "uri": "https://github.com/acme/demo/issues/1",
+      "ownerContainer": { "provider": "github", "id": "acme/demo", "uri": "https://github.com/acme/demo" }
+    },
+    "permissions": [
+      { "scope": "issue:comment", "reason": "reply to source thread" },
+      { "scope": "repo:write", "reason": "prepare an isolated branch" },
+      { "scope": "pr:create", "reason": "open a pull request after approval" }
+    ],
+    "callback": {
+      "provider": "github",
+      "uri": "https://api.github.com/repos/acme/demo/issues/1/comments",
+      "threadKey": "acme/demo#1"
+    },
+    "metadata": { "repoProvider": "github", "owner": "acme", "repo": "demo", "issueNumber": 1 }
+  },
+  "executorCapability": {
+    "id": "echo",
+    "invocation": "spawn",
+    "supportsProfile": false,
+    "supportsStreaming": false,
+    "supportsCancel": false,
+    "supportsHookCompletion": false,
+    "progressEvents": "audit",
+    "approvalMode": "opentag_policy",
+    "contextAccess": ["context_packet", "context_pointers"],
+    "promptAssembly": "opentag",
+    "writeAccess": "none",
+    "conversationAccess": "request",
+    "promptMutation": "none",
+    "rawContextAccess": false,
+    "writeActionAccess": "none",
+    "workspaceIsolation": "none",
+    "requiredSecrets": [],
+    "completionSignals": [{ "type": "process_exit", "required": true, "description": "Fixture executor exits after producing a structured result." }]
+  },
+  "result": {
+    "conclusion": "success",
+    "summary": "Prepared a governed fix path with a PR intent.",
+    "artifacts": [
+      {
+        "id": "run_replay_github:diagnosis",
+        "type": "diagnosis_report",
+        "kind": "report",
+        "title": "Diagnosis report",
+        "uri": "opentag://run/run_replay_github/report",
+        "summary": "The replayed work loop produced a bounded diagnosis artifact."
+      },
+      {
+        "id": "run_replay_github:pr-intent",
+        "type": "pr_intent",
+        "kind": "suggested_changes_snapshot",
+        "title": "Pull request intent",
+        "uri": "opentag://run/run_replay_github/proposal",
+        "summary": "Create a pull request from the isolated branch after approval.",
+        "relatedIds": ["proposal_replay_github"]
+      }
+    ],
+    "suggestedChanges": [
+      {
+        "proposalId": "proposal_replay_github",
+        "createdAt": "2026-06-24T00:00:03.000Z",
+        "summary": "Create a PR for the replayed fix.",
+        "intents": [
+          {
+            "intentId": "proposal_replay_github_create_pr",
+            "domain": "pull_request",
+            "action": "create_pull_request",
+            "summary": "Create a pull request for branch opentag/run_replay_github.",
+            "params": {
+              "title": "OpenTag replay run",
+              "body": "Replay fixture body",
+              "head": "opentag/run_replay_github",
+              "base": "main",
+              "changedFiles": ["README.md"],
+              "risks": ["Review the diff before merging."],
+              "executorConditions": ["isolated branch exists"]
+            }
+          }
+        ],
+        "preconditions": ["The executor produced a reviewable branch."]
+      }
+    ],
+    "nextAction": {
+      "summary": "Review the action receipt and continue or apply after setup is ready.",
+      "hint": {
+        "kind": "create_pull_request",
+        "targetId": "proposal_replay_github",
+        "selectedIntentIds": ["proposal_replay_github_create_pr"]
+      }
+    }
+  },
+  "expected": {
+    "artifactTypes": ["diagnosis_report", "pr_intent"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "finalBodyContains": ["Prepared a governed fix path", "Artifacts:", "Needs setup", "Audit:"]
+  }
+}

@@ -38,6 +38,7 @@ export function createEchoExecutor(): ExecutorAdapter {
       return { ready: true };
     },
     async run(input, sink) {
+      const completedAt = nowIso();
       await sink.emit({
         type: "executor.started",
         message: `Echo executor started for ${input.runId}`,
@@ -46,11 +47,29 @@ export function createEchoExecutor(): ExecutorAdapter {
       await sink.emit({
         type: "executor.completed",
         message: `Echo executor completed for ${input.runId}`,
-        at: nowIso()
+        at: completedAt
       });
       return {
         conclusion: "success",
         summary: `Echoed OpenTag command: ${input.command.rawText}`,
+        artifacts: [
+          {
+            id: `${input.runId}:echo-diagnosis-report`,
+            type: "diagnosis_report",
+            kind: "report",
+            title: "Echo diagnosis report",
+            uri: `opentag://run/${encodeURIComponent(input.runId)}/echo-report`,
+            summary: `Echo executor validated the governed loop for: ${input.command.rawText}`,
+            sourceRunId: input.runId,
+            createdAt: completedAt,
+            metadata: {
+              executor: "echo",
+              command: input.command.rawText,
+              contextPointerCount: input.context.length,
+              hasContextPacket: Boolean(input.contextPacket)
+            }
+          }
+        ],
         verification: [
           {
             command: "echo",

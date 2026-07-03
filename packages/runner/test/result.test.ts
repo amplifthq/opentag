@@ -107,7 +107,31 @@ describe("createExecutorRunResult", () => {
     expect(result.summary).toContain("git status --short --branch");
     expect(result.summary).not.toContain(EXECUTOR_REPORT_START);
     expect(result.summary).not.toContain(EXECUTOR_REPORT_END);
-    expect(result.artifacts).toEqual([]);
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        id: "run_1:diagnosis-report",
+        type: "diagnosis_report",
+        kind: "report",
+        title: "Run report",
+        uri: "opentag://run/run_1/report",
+        sourceRunId: "run_1",
+        metadata: expect.objectContaining({
+          executor: "Codex",
+          changedFiles: []
+        })
+      }),
+      expect.objectContaining({
+        id: "run_1:log-summary",
+        type: "log_summary",
+        kind: "log_summary",
+        title: "Log summary",
+        uri: "opentag://run/run_1/log-summary",
+        sourceRunId: "run_1",
+        metadata: expect.objectContaining({
+          executor: "Codex"
+        })
+      })
+    ]);
   });
 
   it("carries explicit executor artifacts even when no files changed", () => {
@@ -131,7 +155,22 @@ describe("createExecutorRunResult", () => {
     });
 
     expect(result.changedFiles).toEqual([]);
-    expect(result.artifacts).toEqual([{ kind: "screenshot", title: "Checkout screenshot", uri: "artifacts/checkout.png" }]);
+    expect(result.artifacts).toHaveLength(3);
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "diagnosis_report",
+          kind: "report",
+          sourceRunId: "run_visual"
+        }),
+        expect.objectContaining({
+          type: "log_summary",
+          kind: "log_summary",
+          sourceRunId: "run_visual"
+        }),
+        { kind: "screenshot", title: "Checkout screenshot", uri: "artifacts/checkout.png" }
+      ])
+    );
     expect(result.summary).toContain("Captured the requested screenshot");
     expect(result.summary).toContain("Verified:");
   });
@@ -159,7 +198,22 @@ describe("createExecutorRunResult", () => {
       changedFiles: []
     });
 
-    expect(result.artifacts).toEqual([{ kind: "screenshot", title: "Safe screenshot", uri: "artifacts/safe.png" }]);
+    expect(result.artifacts).toHaveLength(3);
+    expect(result.artifacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "diagnosis_report",
+          kind: "report",
+          sourceRunId: "run_visual_safety"
+        }),
+        expect.objectContaining({
+          type: "log_summary",
+          kind: "log_summary",
+          sourceRunId: "run_visual_safety"
+        }),
+        { kind: "screenshot", title: "Safe screenshot", uri: "artifacts/safe.png" }
+      ])
+    );
     expect(result.artifacts).not.toEqual(expect.arrayContaining([expect.objectContaining({ title: "Fake patch" })]));
     expect(result.artifacts).not.toEqual(expect.arrayContaining([expect.objectContaining({ title: "Unsafe screenshot" })]));
     expect(result.summary).toContain("Captured one screenshot");

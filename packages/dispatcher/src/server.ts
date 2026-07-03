@@ -377,6 +377,7 @@ const CompleteRunSchema = z.object({
 
 const MarkRunningSchema = z.object({
   executor: z.string().min(1),
+  executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
   idempotencyKey: z.string().min(1).max(256).optional()
 });
@@ -3440,6 +3441,7 @@ export function createDispatcherApp(input: {
       runId,
       runnerId: c.req.param("runnerId"),
       executor: body.executor,
+      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
@@ -3927,6 +3929,12 @@ export function createDispatcherApp(input: {
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
     return c.json({ events });
+  });
+
+  app.get("/v1/runs/:runId/ledger", async (c) => {
+    const ledger = await repo.getRunLedger({ runId: c.req.param("runId") });
+    if (!ledger) return c.json({ error: "run_not_found" }, 404);
+    return c.json({ ledger });
   });
 
   app.onError((err, c) => {

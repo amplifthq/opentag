@@ -1,0 +1,78 @@
+{
+  "name": "slack quiet artifact loop",
+  "runId": "run_replay_slack",
+  "event": {
+    "id": "evt_replay_slack",
+    "source": "slack",
+    "sourceEventId": "EvReplaySlack",
+    "receivedAt": "2026-06-24T00:00:00.000Z",
+    "actor": { "provider": "slack", "providerUserId": "U123", "handle": "alice", "organizationId": "T123" },
+    "target": { "mention": "<@U_OPENTAG>", "agentId": "opentag" },
+    "command": { "rawText": "investigate this failure", "intent": "investigate", "args": {} },
+    "context": [
+      { "provider": "slack", "kind": "message", "uri": "slack://team/T123/channel/C123/message/1710000000.000100", "visibility": "organization" }
+    ],
+    "permissions": [
+      { "scope": "chat:write", "reason": "reply to the source thread" },
+      { "scope": "repo:read", "reason": "inspect the bound project target" }
+    ],
+    "callback": {
+      "provider": "slack",
+      "uri": "https://slack.com/api/chat.postMessage",
+      "threadKey": "T123|C123|1710000000.000100"
+    },
+    "metadata": { "teamId": "T123", "channelId": "C123", "repoProvider": "github", "owner": "acme", "repo": "demo" }
+  },
+  "executorCapability": {
+    "id": "echo",
+    "invocation": "spawn",
+    "supportsProfile": false,
+    "supportsStreaming": false,
+    "supportsCancel": false,
+    "supportsHookCompletion": false,
+    "progressEvents": "audit",
+    "approvalMode": "opentag_policy",
+    "contextAccess": ["context_packet", "context_pointers"],
+    "promptAssembly": "opentag",
+    "writeAccess": "none",
+    "conversationAccess": "request",
+    "promptMutation": "none",
+    "rawContextAccess": false,
+    "writeActionAccess": "none",
+    "workspaceIsolation": "none",
+    "requiredSecrets": [],
+    "completionSignals": [{ "type": "process_exit", "required": true, "description": "Fixture executor exits after producing a structured result." }]
+  },
+  "result": {
+    "conclusion": "success",
+    "summary": "Investigated the Slack thread without posting internal process noise.",
+    "artifacts": [
+      {
+        "id": "run_replay_slack:diagnosis",
+        "type": "diagnosis_report",
+        "kind": "report",
+        "title": "Slack diagnosis report",
+        "uri": "opentag://run/run_replay_slack/report",
+        "summary": "The replayed Slack loop kept progress audit-only and returned a concise artifact."
+      },
+      {
+        "id": "run_replay_slack:next-action",
+        "type": "next_action",
+        "kind": "follow_up_task",
+        "title": "Next action",
+        "uri": "opentag://run/run_replay_slack/next-action",
+        "summary": "Continue in the source thread if more context is needed."
+      }
+    ],
+    "verification": [{ "command": "replay fixture", "outcome": "passed" }],
+    "nextAction": {
+      "summary": "Use /status in the Slack thread for queue state or opentag status locally for audit detail.",
+      "hint": { "kind": "none" }
+    }
+  },
+  "expected": {
+    "artifactTypes": ["diagnosis_report", "next_action"],
+    "ledgerCategories": ["source_event", "admission", "context_packet", "executor_capability", "artifact", "final_outcome", "callback_delivery"],
+    "finalBodyContains": ["Investigated the Slack thread", "Artifacts:", "Audit:"]
+  }
+}

@@ -2,6 +2,8 @@
 
 Use this guide when `opentag setup --platform gitlab` asks for GitLab values.
 
+OpenTag turns GitLab issue and merge request notes into a governed local agent work loop: the source thread stays the human workflow surface, execution stays local, artifacts and action receipts come back concisely, and detailed evidence stays in audit/status.
+
 ## What You Need
 
 - A GitLab project path, for example `acme/demo` or `acme/team/demo`.

@@ -273,7 +273,14 @@ export type OpenTagClient = {
   createRunFromFollowUpRequest(input: { id: string; runId: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string }): Promise<void>;
-  markRunning(input: { runnerId: string; runId: string; executor: string; runTimeoutMs?: number; idempotencyKey?: string }): Promise<void>;
+  markRunning(input: {
+    runnerId: string;
+    runId: string;
+    executor: string;
+    executorCapability?: Record<string, unknown>;
+    runTimeoutMs?: number;
+    idempotencyKey?: string;
+  }): Promise<void>;
   progress(input: { runnerId: string; runId: string } & RunProgressInput): Promise<void>;
   complete(input: CompleteRunInput): Promise<void>;
   cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunResult>;
@@ -286,6 +293,7 @@ export type OpenTagClient = {
   }): Promise<CancelRunResult>;
   getRun(input: { runId: string }): Promise<ClaimedOpenTagRun>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
+  getRunLedger(input: { runId: string }): Promise<{ ledger: { runId: string; entries: unknown[] } }>;
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
   getRepoMetrics(input: { provider: string; owner: string; repo: string }): Promise<{ metrics: AggregateMetrics }>;
   getWorkThreadMetrics(input: { threadId: string }): Promise<{ metrics: AggregateMetrics }>;
@@ -302,7 +310,11 @@ export type OpenTagClient = {
 
 export type DispatcherRunnerClient = {
   claim(): Promise<ClaimedOpenTagRun | null>;
-  markRunning(runId: string, executor: string, options?: { runTimeoutMs?: number; idempotencyKey?: string }): Promise<void>;
+  markRunning(
+    runId: string,
+    executor: string,
+    options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
+  ): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   progress(runId: string, input: RunProgressInput & { type: string; at: string }): Promise<void>;
   complete(runId: string, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
@@ -620,6 +632,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
           executor: input.executor,
+          ...(input.executorCapability ? { executorCapability: input.executorCapability } : {}),
           ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {}),
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
         })
@@ -701,6 +714,14 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "listRunEvents");
       return (await response.json()) as { events: unknown[] };
+    },
+
+    async getRunLedger(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/ledger`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getRunLedger");
+      return (await response.json()) as { ledger: { runId: string; entries: unknown[] } };
     },
 
     async getRunMetrics(input) {
@@ -850,6 +871,7 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
         runnerId: options.runnerId,
         runId,
         executor,
+        ...(markRunningOptions?.executorCapability ? { executorCapability: markRunningOptions.executorCapability } : {}),
         ...(markRunningOptions?.runTimeoutMs ? { runTimeoutMs: markRunningOptions.runTimeoutMs } : {}),
         ...(markRunningOptions?.idempotencyKey ? { idempotencyKey: markRunningOptions.idempotencyKey } : {})
       }),

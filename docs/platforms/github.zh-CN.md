@@ -2,7 +2,7 @@
 
 当 `opentag setup` 询问 GitHub 配置时，用这份教程对照填写。
 
-OpenTag CLI 当前使用 **Repository Webhook** 接入 GitHub。这是最小正确的 MVP 路线：GitHub 把 issue 和 pull request 评论通过公网 tunnel 发到你本机的 OpenTag，OpenTag 再运行本地 coding agent，并把结果回写到 GitHub。
+OpenTag CLI 当前使用 **Repository Webhook** 接入 GitHub。这是最小正确的 MVP 路线：GitHub 把 issue 和 pull request 评论通过公网 tunnel 发到你本机的 OpenTag，OpenTag 再把这个 source thread 变成一个可治理的 agent 工作回路：有边界的 context、本地执行、audit ledger、产物、action receipt，以及简洁的 GitHub 回调。
 
 当 coding agent 修改了文件时，OpenTag 默认会走这个流程：
 

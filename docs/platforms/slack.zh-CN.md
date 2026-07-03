@@ -7,7 +7,7 @@ OpenTag 支持两种 Slack 连接方式：
 - **本地 Socket Mode**：推荐在这台电脑上运行 OpenTag 时使用，不需要公网 URL。
 - **公网 Events API**：适合云端部署，或者高级用户用 tunnel 做本地测试。
 
-两种方式最终都支持同一个核心体验：在 Slack 里 mention 这个 app，OpenTag 在本机运行 coding agent，然后回到同一个 Slack thread 里回复结果。
+两种方式最终都支持同一个核心体验：在 Slack 里 mention 这个 app，OpenTag 把这个 Slack thread 变成一个可治理的 agent 工作回路，在本机运行 coding agent，然后把简洁产物、状态和安全下一步回复回同一个 Slack thread。详细过程留在本地 audit/status 里，不把 Slack 变成 agent 内部日志流。
 
 Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 写权限。如果某次 run 产出了 pull request action，只有在 OpenTag 同时配置了 GitHub repository target 和 GitHub token 时，Slack thread 里的 `apply 1` 才能直接创建 GitHub PR。
 

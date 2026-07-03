@@ -310,6 +310,21 @@ export const ArtifactKindSchema = z.enum([
   "decision_record"
 ]);
 
+export const RunArtifactTypeSchema = z.enum([
+  "suggested_changes_snapshot",
+  "next_action",
+  "apply_plan",
+  "patch_summary",
+  "diagnosis_report",
+  "pr_intent",
+  "patch",
+  "report",
+  "log_summary",
+  "pull_request",
+  "verification_summary",
+  "custom"
+]);
+
 export const ActionHintSchema = z.object({
   kind: z.enum([
     "apply_suggested_changes",
@@ -428,9 +443,15 @@ export const OpenTagEventSchema = z.object({
 });
 
 export const ResultArtifactSchema = z.object({
+  id: z.string().min(1).optional(),
+  type: RunArtifactTypeSchema.optional(),
   kind: ArtifactKindSchema.optional(),
   title: z.string(),
   uri: z.string(),
+  summary: z.string().min(1).optional(),
+  sourceRunId: z.string().min(1).optional(),
+  createdAt: z.string().datetime().optional(),
+  relatedIds: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.unknown()).optional()
 });
 
@@ -507,6 +528,7 @@ export type RunEventVisibility = z.infer<typeof RunEventVisibilitySchema>;
 export type RunEventImportance = z.infer<typeof RunEventImportanceSchema>;
 export type RunEvent = z.infer<typeof RunEventSchema>;
 export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
+export type RunArtifactType = z.infer<typeof RunArtifactTypeSchema>;
 export type ActionHint = z.infer<typeof ActionHintSchema>;
 export type NextAction = z.infer<typeof NextActionSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;

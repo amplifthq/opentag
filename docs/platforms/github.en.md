@@ -2,7 +2,7 @@
 
 Use this guide when `opentag setup` asks for GitHub settings.
 
-The OpenTag CLI currently uses a **repository webhook** for GitHub. This is the smallest correct MVP path: GitHub sends issue and pull request comments to your local OpenTag process through a public tunnel, then OpenTag runs your local coding agent and posts the result back to GitHub.
+The OpenTag CLI currently uses a **repository webhook** for GitHub. This is the smallest correct MVP path: GitHub sends issue and pull request comments to your local OpenTag process through a public tunnel, then OpenTag turns the source thread into a governed agent work loop: bounded context, local execution, audit ledger, artifacts, action receipts, and concise GitHub callbacks.
 
 When a coding agent changes files, OpenTag's default flow is:
 
