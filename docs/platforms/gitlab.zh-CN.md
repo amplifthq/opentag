@@ -2,6 +2,8 @@
 
 当 `opentag setup --platform gitlab` 要求填写 GitLab 信息时，按这份指南配置。
 
+OpenTag 会把 GitLab issue / merge request note 变成本地可治理的 agent 工作回路：source thread 仍然是人的工作界面，执行留在本机，产物和 action receipt 简洁回写，详细证据留在 audit/status。
+
 ## 需要准备
 
 - GitLab project path，例如 `acme/demo` 或 `acme/team/demo`。

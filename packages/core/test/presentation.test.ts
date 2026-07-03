@@ -100,9 +100,25 @@ describe("OpenTagPresentation", () => {
         title: "Add the bug label.",
         state: "ready_to_apply",
         targetLabel: "GitHub labels",
+        impact: "Writes label metadata on the source work item.",
+        capabilityState: "Adapter capability and preflight allow direct apply for this target.",
+        approvalRequirement: "Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
+        safeNextAction: "`apply 1` is the safe apply path after reviewing this receipt.",
         visibleDecisions: ["apply", "reject"],
         primaryDecision: "apply",
-        detailRows: [{ label: "Target", value: "GitHub labels" }]
+        details: [
+          "Impact: Writes label metadata on the source work item.",
+          "Capability/preflight: Adapter capability and preflight allow direct apply for this target.",
+          "Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
+          "Safe next action: `apply 1` is the safe apply path after reviewing this receipt."
+        ],
+        detailRows: [
+          { label: "Target", value: "GitHub labels" },
+          { label: "Impact", value: "Writes label metadata on the source work item." },
+          { label: "Capability / preflight", value: "Adapter capability and preflight allow direct apply for this target." },
+          { label: "Required approval", value: "Review impact, then use `apply 1` to approve and apply, or `reject 1`." },
+          { label: "Safe next action", value: "`apply 1` is the safe apply path after reviewing this receipt." }
+        ]
       }
     ]);
     expect(JSON.stringify(presentation)).not.toContain("button");
@@ -112,6 +128,10 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("Ready to apply");
     expect(rendered).toContain("1. Add the bug label.");
     expect(rendered).toContain("Target: GitHub labels");
+    expect(rendered).toContain("Impact: Writes label metadata on the source work item.");
+    expect(rendered).toContain("Capability/preflight: Adapter capability and preflight allow direct apply for this target.");
+    expect(rendered).toContain("Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.");
+    expect(rendered).toContain("Safe next action: `apply 1` is the safe apply path after reviewing this receipt.");
     expect(rendered).toContain("Actions: apply 1, reject 1");
     expect(rendered).toContain("Audit: opentag status --run run_receipt_1");
   });
@@ -148,9 +168,21 @@ describe("OpenTagPresentation", () => {
     expect(presentation.actions?.[0]).toMatchObject({
       proposalId: "proposal_pr",
       intentId: "intent_create_pr",
-      details: ["Branch: `opentag/run_1` -> `main`", "Changed files: `src/demo.ts`", "Preconditions: 1 check(s) in the audit log."],
+      details: [
+        "Impact: Creates a pull request from `opentag/run_1` into `main` with 1 changed file.",
+        "Capability/preflight: External write is withheld until a human records approval.",
+        "Approval: Use `approve 1` to record approval without applying yet, or `reject 1`.",
+        "Safe next action: `approve 1` records human approval; OpenTag will not silently apply.",
+        "Branch: `opentag/run_1` -> `main`",
+        "Changed files: `src/demo.ts`",
+        "Preconditions: 1 check(s) in the audit log."
+      ],
       detailRows: [
         { label: "Target", value: "GitHub pull request" },
+        { label: "Impact", value: "Creates a pull request from `opentag/run_1` into `main` with 1 changed file." },
+        { label: "Capability / preflight", value: "External write is withheld until a human records approval." },
+        { label: "Required approval", value: "Use `approve 1` to record approval without applying yet, or `reject 1`." },
+        { label: "Safe next action", value: "`approve 1` records human approval; OpenTag will not silently apply." },
         { label: "Branch", value: "`opentag/run_1` -> `main`" },
         { label: "Changed files", value: "`src/demo.ts`" },
         { label: "Preconditions", value: "The branch still exists." }
@@ -160,6 +192,7 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("Branch: `opentag/run_1` -> `main`");
     expect(rendered).toContain("Changed files: `src/demo.ts`");
     expect(rendered).toContain("Preconditions: 1 check(s) in the audit log.");
+    expect(rendered).toContain("Safe next action: `approve 1` records human approval; OpenTag will not silently apply.");
     expect(JSON.stringify(presentation)).not.toContain("blocks");
     expect(JSON.stringify(presentation)).not.toContain("action_id");
   });
@@ -209,6 +242,10 @@ describe("OpenTagPresentation", () => {
         "Ready to apply",
         "1. Add the bug label.",
         "Target: GitHub labels",
+        "Impact: Writes label metadata on the source work item.",
+        "Capability/preflight: Adapter capability and preflight allow direct apply for this target.",
+        "Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
+        "Safe next action: `apply 1` is the safe apply path after reviewing this receipt.",
         "Actions: apply 1, reject 1",
         "Audit: opentag status --run run_receipt_1"
       ].join("\n")

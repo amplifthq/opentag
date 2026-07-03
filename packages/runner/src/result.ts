@@ -110,7 +110,7 @@ function dedupeArtifacts(artifacts: ResultArtifact[]): ResultArtifact[] {
   const seen = new Set<string>();
   const deduped: ResultArtifact[] = [];
   for (const artifact of artifacts) {
-    const key = `${artifact.kind ?? "artifact"}:${artifact.uri}`;
+    const key = artifact.id ?? `${artifact.type ?? artifact.kind ?? "artifact"}:${artifact.uri}`;
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(artifact);
@@ -130,11 +130,17 @@ function createRunArtifacts(input: {
   extraArtifacts?: ResultArtifact[];
 }): ResultArtifact[] {
   const generated: ResultArtifact[] = [];
+  const createdAt = new Date().toISOString();
   if (input.changedFiles.length > 0) {
     generated.push({
+      id: `${input.runId}:patch-summary`,
+      type: "patch_summary",
       kind: "patch",
       title: "Generated patch",
       uri: input.branchName,
+      summary: `${input.executorName} changed ${input.changedFiles.length} file(s) on branch ${input.branchName}.`,
+      sourceRunId: input.runId,
+      createdAt,
       metadata: {
         runId: input.runId,
         executor: input.executorName,
@@ -143,29 +149,39 @@ function createRunArtifacts(input: {
         changedFiles: input.changedFiles
       }
     });
-    generated.push({
-      kind: "report",
-      title: "Run report",
-      uri: runArtifactUri(input.runId, "report"),
-      metadata: {
-        runId: input.runId,
-        executor: input.executorName,
-        summary: truncateArtifactText(input.summary),
-        changedFiles: input.changedFiles,
-        ...(input.report ? { report: input.report } : {})
-      }
-    });
-    generated.push({
-      kind: "log_summary",
-      title: "Log summary",
-      uri: runArtifactUri(input.runId, "log-summary"),
-      metadata: {
-        runId: input.runId,
-        executor: input.executorName,
-        summary: truncateArtifactText(executorAnswerBeforeReport(input.output) ?? input.summary)
-      }
-    });
   }
+  generated.push({
+    id: `${input.runId}:diagnosis-report`,
+    type: "diagnosis_report",
+    kind: "report",
+    title: "Run report",
+    uri: runArtifactUri(input.runId, "report"),
+    summary: truncateArtifactText(input.summary),
+    sourceRunId: input.runId,
+    createdAt,
+    metadata: {
+      runId: input.runId,
+      executor: input.executorName,
+      summary: truncateArtifactText(input.summary),
+      changedFiles: input.changedFiles,
+      ...(input.report ? { report: input.report } : {})
+    }
+  });
+  generated.push({
+    id: `${input.runId}:log-summary`,
+    type: "log_summary",
+    kind: "log_summary",
+    title: "Log summary",
+    uri: runArtifactUri(input.runId, "log-summary"),
+    summary: truncateArtifactText(executorAnswerBeforeReport(input.output) ?? input.summary),
+    sourceRunId: input.runId,
+    createdAt,
+    metadata: {
+      runId: input.runId,
+      executor: input.executorName,
+      summary: truncateArtifactText(executorAnswerBeforeReport(input.output) ?? input.summary)
+    }
+  });
 
   return dedupeArtifacts([...generated, ...(input.report?.artifacts ?? []), ...(input.extraArtifacts ?? [])]);
 }

@@ -680,6 +680,24 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("surfaces Slack bot permission errors instead of silently dropping callbacks", async () => {
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-no-channel-access",
+      fetchImpl: (async () => Response.json({ ok: false, error: "not_in_channel" })) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "done"
+      })
+    ).rejects.toThrow("not_in_channel");
+  });
+
   it("sends Lark rich callbacks as interactive cards", async () => {
     const replies: unknown[] = [];
     const sink = createLarkCallbackSink({
@@ -813,6 +831,31 @@ describe("createGitHubCallbackSink", () => {
         }
       }
     ]);
+  });
+
+  it("surfaces Lark bot permission errors instead of pretending the card was delivered", async () => {
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply() {
+              throw new Error("Lark API permission denied: im:message");
+            }
+          }
+        }
+      }
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "lark",
+        uri: "lark://im/v1/messages",
+        threadKey: "tenant_1|oc_chat|om_source",
+        body: "Finished."
+      })
+    ).rejects.toThrow("Lark API permission denied");
   });
 
   it("adds a Lark source receipt reaction to the source message", async () => {

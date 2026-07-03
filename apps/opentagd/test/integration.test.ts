@@ -87,7 +87,7 @@ describe("opentagd local integration", () => {
     expect(delivered).toEqual([
       "acknowledgement:OpenTag picked this up. Run: `run_integration`",
       "progress:OpenTag progress for `run_integration`: Running with echo.",
-      "final:OpenTag finished with **success**.\n\nEchoed OpenTag command: summarize this\n\nVerification:\n- `echo`: passed\n\nNext action: No external state change is suggested for the echo executor result."
+      "final:OpenTag finished with **success**.\n\nEchoed OpenTag command: summarize this\n\nVerification:\n- `echo`: passed\n\nArtifacts:\n- report: [Echo diagnosis report](opentag://run/run_integration/echo-report)\n\nNext action: No external state change is suggested for the echo executor result."
     ]);
 
     const { events } = await client.listRunEvents({ runId: "run_integration" });
@@ -99,11 +99,14 @@ describe("opentagd local integration", () => {
       "callback.acknowledgement.delivered",
       "run.claimed",
       "run.running",
+      "executor.capability.snapshot",
       "callback.progress.queued",
       "callback.progress.delivered",
       "run.progress",
       "run.progress",
+      "artifact.created",
       "run.completed",
+      "success_metric.observed",
       "callback.final.queued",
       "callback.final.delivered"
     ]);

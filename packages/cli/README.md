@@ -1,6 +1,8 @@
 # @opentag/cli
 
-OpenTag CLI for setting up and running a local OpenTag stack.
+OpenTag CLI for setting up and running a local source-thread agent work loop.
+
+OpenTag turns an existing work thread into a governed agent work loop. The CLI configures the local dispatcher, platform listener, runner, executor capability checks, context packet snapshots, action receipts, artifacts, and local audit/status surfaces that keep that loop source-thread-native and local-first.
 
 ## Install
 
@@ -16,16 +18,20 @@ opentag service status
 opentag doctor
 ```
 
-`opentag setup` walks through the local configuration:
+`opentag setup` walks through the local governed-loop configuration:
 
 - Choose a language.
 - Choose a platform: Lark / Feishu, Slack, GitHub, or GitLab.
-- Choose a coding agent: Codex, Claude Code, or Echo for local testing.
+- Choose a coding agent: Codex, Claude Code, or Echo for local testing, including its executor capability boundary.
 - Configure platform credentials.
 - Bind the selected project.
 - Choose how OpenTag should run.
 
 The recommended setup option keeps OpenTag running after the terminal closes. It installs and starts a background service on macOS and Linux. If background service mode is unsupported or you choose terminal mode, use `opentag start` and keep that terminal open.
+
+`opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, callback delivery, and safe next actions without turning the source thread into an agent log stream.
+
+External local runtimes can report lifecycle hooks through the public [Hook Ingest Contract](../../docs/hook-ingest.md): `opentag ingest-template --format manifest` prints the manifest, and `opentag ingest` records audit-visible progress or terminal state through runner-scoped auth.
 
 ## Commands
 

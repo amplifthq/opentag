@@ -377,6 +377,7 @@ const CompleteRunSchema = z.object({
 
 const MarkRunningSchema = z.object({
   executor: z.string().min(1),
+  executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
   idempotencyKey: z.string().min(1).max(256).optional()
 });
@@ -1508,6 +1509,43 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
   return ["Results:", ...outcomes.map((outcome) => `- ${applyOutcomeSummary(outcome)}`)];
 }
 
+function sanitizeApplyFailureDetail(detail: unknown): string {
+  return String(detail ?? "")
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
+    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+    .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+function sanitizeApplyOutcomeForStorage(outcome: ApplyIntentOutcome): ApplyIntentOutcome {
+  return {
+    ...outcome,
+    ...(outcome.message ? { message: sanitizeApplyFailureDetail(outcome.message) } : {}),
+    ...(outcome.error ? { error: sanitizeApplyFailureDetail(outcome.error) } : {})
+  };
+}
+
+function applyFallbackReason(input: { plan: ApplyPlan; selectedIntentIds: string[] }): string {
+  const selected = (input.plan.outcomes ?? []).filter((outcome) => input.selectedIntentIds.includes(outcome.intentId));
+  const failed = selected.find((outcome) => outcome.outcome === "failed");
+  if (failed) {
+    const detail = failed.message ?? failed.error;
+    return detail ? `Direct apply failed: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply failed.";
+  }
+  const unsupported = selected.find((outcome) => outcome.outcome === "unsupported");
+  if (unsupported) {
+    const detail = unsupported.message ?? unsupported.error;
+    return detail ? `Direct apply is unsupported: ${sanitizeApplyFailureDetail(detail)}` : "Direct apply is unsupported for this action.";
+  }
+  return "Some selected intents were not directly applied.";
+}
+
 function renderAppliedThreadActionBody(input: {
   selectionText: string;
   selectedIntentIds: string[];
@@ -1758,7 +1796,10 @@ async function updateExecutedApplyPlan(input: {
   resolved: ResolvedThreadAction;
   executedOutcomes: ApplyIntentOutcome[];
 }): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
-  const executedOutcomeByIntentId = new Map(input.executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+  const executedOutcomeByIntentId = new Map(input.executedOutcomes.map((outcome) => {
+    const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+    return [sanitized.intentId, sanitized];
+  }));
   const mergedOutcomes = (input.plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
   const updated = await input.repo.updateApplyPlanOutcomes({
     id: input.plan.id,
@@ -1772,7 +1813,7 @@ async function updateExecutedApplyPlan(input: {
   return {
     plan,
     executed: allSelectedApplied,
-    ...(allSelectedApplied ? {} : { fallbackReason: "Some selected intents were not directly applied." })
+    ...(allSelectedApplied ? {} : { fallbackReason: applyFallbackReason({ plan, selectedIntentIds: input.resolved.selectedIntentIds }) })
   };
 }
 
@@ -3440,6 +3481,7 @@ export function createDispatcherApp(input: {
       runId,
       runnerId: c.req.param("runnerId"),
       executor: body.executor,
+      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
@@ -3854,7 +3896,10 @@ export function createDispatcherApp(input: {
           );
         }
       }
-      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => {
+        const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+        return [sanitized.intentId, sanitized];
+      }));
       const mergedOutcomes = (plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
       const executedPlan = await repo.updateApplyPlanOutcomes({
         id: plan.id,
@@ -3927,6 +3972,12 @@ export function createDispatcherApp(input: {
   app.get("/v1/runs/:runId/events", async (c) => {
     const events = await repo.listRunEvents({ runId: c.req.param("runId") });
     return c.json({ events });
+  });
+
+  app.get("/v1/runs/:runId/ledger", async (c) => {
+    const ledger = await repo.getRunLedger({ runId: c.req.param("runId") });
+    if (!ledger) return c.json({ error: "run_not_found" }, 404);
+    return c.json({ ledger });
   });
 
   app.onError((err, c) => {

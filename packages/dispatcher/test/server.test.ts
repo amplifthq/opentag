@@ -5672,6 +5672,125 @@ describe("dispatcher API", () => {
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://github.com/acme/demo/pull/42"))).toBe(true);
   });
 
+  it("falls back with a quiet receipt when GitHub PR creation fails", async () => {
+    const githubRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url, init) => {
+          githubRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          if (init?.method === "POST") {
+            return new Response("Validation Failed: pull request already exists for this head; token ghp_aaaaaaaaaaaaaaaaaaaa; path /home/alice/repos/demo", {
+              status: 422
+            });
+          }
+          return Response.json({ name: String(url).split("/").at(-1) });
+        }
+      }
+    });
+
+    const event = githubIssueEvent({ id: "evt_thread_create_pr_failed", sourceEventId: "comment_thread_create_pr_failed", threadKey: "acme/demo#1" });
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_pr_failed",
+      event: {
+        ...event,
+        permissions: [...event.permissions, { scope: "pr:create", reason: "create an approved pull request" }]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_pr_failed",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a pull request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_pr_failed",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create PR for branch opentag/run_thread_create_pr_failed.",
+              params: {
+                title: "OpenTag run run_thread_create_pr_failed",
+                body: "PR body",
+                head: "opentag/run_thread_create_pr_failed",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "github", providerUserId: "42", handle: "octocat", writeAccess: true },
+      callback: {
+        provider: "github",
+        uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
+        threadKey: "acme/demo#1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        proposalId: "proposal_thread_create_pr_failed",
+        outcomes: [
+          {
+            intentId: "intent_create_pr_failed",
+            outcome: "failed",
+            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]"
+          }
+        ]
+      },
+      run: {
+        parentRunId: "run_thread_create_pr_failed",
+        sourceProposalId: "proposal_thread_create_pr_failed"
+      }
+    });
+    expect(githubRequests).toEqual([
+      {
+        url: "https://api.github.com/repos/acme/demo/pulls",
+        method: "POST",
+        authorization: "Bearer gh_test",
+        body: {
+          title: "OpenTag run run_thread_create_pr_failed",
+          body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          head: "opentag/run_thread_create_pr_failed",
+          base: "main"
+        }
+      }
+    ]);
+    const finalMessage = delivered.at(-1)?.body ?? "";
+    expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(finalMessage).toContain("Child run:");
+    expect(finalMessage).toContain("Reason: Direct apply failed: create pull request failed: 422 Validation Failed: pull request already exists for this head");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
+    expect(finalMessage).not.toContain("proposal_thread_create_pr_failed");
+    expect(finalMessage).not.toContain("intent_create_pr_failed");
+    expect(finalMessage).not.toContain("ghp_aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("/home/alice/repos/demo");
+    expect(finalMessage).not.toContain("gh_test");
+    expect(finalMessage).not.toContain("authorization");
+  });
+
   it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {
     const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
     const delivered: Array<{ kind: string; body: string }> = [];
@@ -5786,6 +5905,124 @@ describe("dispatcher API", () => {
       }
     ]);
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
+  });
+
+  it("falls back with a quiet receipt when GitLab MR creation fails", async () => {
+    const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      gitlabApply: {
+        token: "glpat_test",
+        baseUrl: "https://gitlab.example.com",
+        fetchImpl: async (url, init) => {
+          gitlabRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            token: new Headers(init?.headers).get("PRIVATE-TOKEN")
+          });
+          if (init?.method === "POST") {
+            return new Response("A merge request already exists for this source branch; token glpat-aaaaaaaaaaaaaaaaaaaa; path C:\\Users\\alice\\repo", {
+              status: 409
+            });
+          }
+          return Response.json({ name: String(url).split("/").at(-1) });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_create_mr_failed",
+      event: gitlabIssueEvent({ id: "evt_thread_create_mr_failed", sourceEventId: "note_thread_create_mr_failed", threadKey: "acme/demo|issue|1" }),
+      repoBinding: { provider: "gitlab", owner: "acme", repo: "demo" },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_create_mr_failed",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a merge request for the generated branch.",
+          intents: [
+            {
+              intentId: "intent_create_mr_failed",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: "Create MR for branch opentag/run_thread_create_mr_failed.",
+              params: {
+                title: "OpenTag run run_thread_create_mr_failed",
+                body: "MR body",
+                head: "opentag/run_thread_create_mr_failed",
+                base: "main",
+                changedFiles: ["src/demo.ts"],
+                executorConditions: ["isolated branch exists"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    gitlabRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "gitlab", providerUserId: "7", handle: "alice" },
+      callback: {
+        provider: "gitlab",
+        uri: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/issues/1/notes",
+        threadKey: "acme/demo|issue|1"
+      }
+    }));
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      outcome: "child_run_created",
+      plan: {
+        adapter: "gitlab",
+        proposalId: "proposal_thread_create_mr_failed",
+        outcomes: [
+          {
+            intentId: "intent_create_mr_failed",
+            outcome: "failed",
+            error: "create merge request failed: 409 A merge request already exists for this source branch; token [redacted]; path [redacted local path]"
+          }
+        ]
+      },
+      run: {
+        parentRunId: "run_thread_create_mr_failed",
+        sourceProposalId: "proposal_thread_create_mr_failed"
+      }
+    });
+    expect(gitlabRequests).toEqual([
+      {
+        url: "https://gitlab.example.com/api/v4/projects/acme%2Fdemo/merge_requests",
+        method: "POST",
+        token: "glpat_test",
+        body: {
+          title: "OpenTag run run_thread_create_mr_failed",
+          description: ["MR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          source_branch: "opentag/run_thread_create_mr_failed",
+          target_branch: "main"
+        }
+      }
+    ]);
+    const finalMessage = delivered.at(-1)?.body ?? "";
+    expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(finalMessage).toContain("Child run:");
+    expect(finalMessage).toContain("Reason: Direct apply failed: create merge request failed: 409 A merge request already exists for this source branch");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
+    expect(finalMessage).not.toContain("proposal_thread_create_mr_failed");
+    expect(finalMessage).not.toContain("intent_create_mr_failed");
+    expect(finalMessage).not.toContain("glpat-aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("C:\\Users\\alice\\repo");
+    expect(finalMessage).not.toContain("glpat_test");
+    expect(finalMessage).not.toContain("PRIVATE-TOKEN");
   });
 
   it("routes repo-level create_pull_request actions from Slack threads to the GitHub adapter", async () => {

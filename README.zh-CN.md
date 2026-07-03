@@ -15,7 +15,7 @@
 
 **[opentag.im](https://opentag.im)**
 
-**把 Slack、GitHub、GitLab 或 Lark / 飞书连接到你本地的 coding agent。**
+**把现有协作线程变成一个可授权、可审计、可回放的 agent 工作回路。**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
@@ -25,7 +25,9 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#许可证)
 
-OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agent。它可以监听 Slack、GitHub、GitLab 或 Lark / 飞书，在你的电脑上运行 Codex 或 Claude Code，然后把结果回复回原来的地方。
+OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agent。它会把这个源线程变成一个有边界、可审计的 run：OpenTag 组装 context packet，检查权限和 executor capability，在你的电脑上运行 Codex 或 Claude Code，记录 agent work ledger，然后把简洁的产物和安全下一步回复回同一个 thread。
+
+具体 setup 仍然会把 Slack、GitHub、GitLab 或 Lark / 飞书连接到本地 coding agent。但 OpenTag 不只是 connector：它保持 source-thread-native、local-first、executor-neutral，让工作留在已有上下文里，同时让 agent 看到了什么、被允许做什么、产出了什么、回调到了哪里都可以复盘。
 
 ## 演示
 
@@ -40,6 +42,8 @@ https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
 OpenTag 把请求发生的原始 thread 当成审批 agent 建议变更的地方。agent 提出要修改系统记录时，OpenTag 会渲染一个简洁的 action receipt，说明将要改什么、现在是否可以 apply，以及当前最安全的决策是什么。
 
 只有 dispatcher 确认已有 adapter 可以执行该 action 时，OpenTag 才会显示 `Apply`。否则 receipt 会显示需要 setup 或需要注意的原因，同时保留本地 audit 入口，例如 `opentag status --run <run_id>`。
+
+每个 run 也会保留本地 agent work ledger：source event、admission decision、context packet snapshot、executor capability snapshot、产物、callback delivery 和最终结果都可以通过 status / audit API 查看，而不会把 agent 内部过程刷到人类 thread。
 
 ## 快速开始
 
@@ -218,8 +222,11 @@ flowchart LR
 
 - [平台配置教程](docs/platforms/README.md)
 - [配置说明](docs/configuration.md)
+- [Hook ingest contract](docs/hook-ingest.md)
 - [适配器开发](docs/adapter-authoring.md)
 - [真实集成 smoke test](docs/real-integration-smoke-test.md)
+- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
+- [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [本地 npm 发布指南](docs/npm-release.md)
 

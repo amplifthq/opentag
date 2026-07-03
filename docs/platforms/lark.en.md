@@ -2,6 +2,8 @@
 
 Use this guide when `opentag setup` asks how OpenTag should connect to Lark / Feishu.
 
+OpenTag turns a Lark / Feishu source thread into a governed local agent work loop. The chat remains the human workflow surface for concise status, artifacts, and safe next actions; detailed process evidence stays in local audit/status.
+
 ## Official Links
 
 - [Lark Developer Console](https://open.larksuite.com/app)

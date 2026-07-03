@@ -7,7 +7,7 @@ OpenTag supports two Slack connection modes:
 - **Local Socket Mode**: recommended for running OpenTag on this computer. No public URL is required.
 - **Public Events API**: best for hosted OpenTag, or advanced local testing with a tunnel.
 
-Both modes support the same core product flow: mention the Slack app, let OpenTag run a local coding agent, and get the result back in the same Slack thread.
+Both modes support the same core product flow: mention the Slack app, let OpenTag turn that Slack thread into a governed agent work loop, run a local coding agent, and get concise artifacts, status, and safe next actions back in the same Slack thread. Detailed process stays in local audit/status instead of becoming Slack noise.
 
 Slack-only setup proves the Slack loop. It does not by itself grant GitHub write access. If a run proposes a pull request action, `apply 1` can create a GitHub PR only when OpenTag also has a GitHub repository target and GitHub token configured.
 

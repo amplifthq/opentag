@@ -514,9 +514,9 @@ print_metrics "$RUN_ID"
 
 echo "Recent issue comments after final receipt:"
 gh issue view "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --json comments --jq '.comments[-4:][] | {author: .author.login, body: (.body | split("\n")[0:8] | join("\n"))}'
-EXPECTED_HEADING="### Ready to apply"
+EXPECTED_HEADING="<summary>Ready to apply</summary>"
 if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
-  EXPECTED_HEADING="### Needs setup"
+  EXPECTED_HEADING="<summary>Needs setup</summary>"
 fi
 if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
   if ! issue_comments_contain "$EXPECTED_HEADING"; then
@@ -528,10 +528,13 @@ if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
     exit 1
   fi
 elif ! issue_comments_contain "### Ready to apply" &&
+  ! issue_comments_contain "<summary>Ready to apply</summary>" &&
   ! issue_comments_contain "action ready to apply" &&
   ! issue_comments_contain "actions ready to apply" &&
   ! issue_comments_contain "### Some actions need setup" &&
+  ! issue_comments_contain "<summary>Needs setup</summary>" &&
   ! issue_comments_contain "### Some actions need attention" &&
+  ! issue_comments_contain "<summary>Needs attention</summary>" &&
   ! issue_comments_contain "### Needs review"; then
   echo "Expected the final GitHub receipt to render a ready or mixed-state action heading." >&2
   exit 1

@@ -25,7 +25,11 @@ export type ClaimedRun = {
 
 export type DaemonClient = {
   claim(): Promise<ClaimedRun | null>;
-  markRunning(runId: string, executor: string, options?: { runTimeoutMs?: number; idempotencyKey?: string }): Promise<void>;
+  markRunning(
+    runId: string,
+    executor: string,
+    options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
+  ): Promise<void>;
   heartbeat(runId: string): Promise<void>;
   progress(runId: string, input: { type: string; message: string; at: string }): Promise<void>;
   complete(runId: string, result: OpenTagRunResult): Promise<void>;
@@ -288,6 +292,7 @@ export async function runOneDaemonIteration(input: {
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
   const runTimeoutMs = input.runTimeoutMs;
   await input.client.markRunning(runId, activeExecutor.id, {
+    ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
     idempotencyKey: `${input.runnerId}:${runId}:running`,
     ...(runTimeoutMs ? { runTimeoutMs } : {})
   });

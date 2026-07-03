@@ -204,7 +204,8 @@ describe("Codex executor", () => {
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === `worktree remove --force ${worktreePath}`)).toBe(true);
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "branch -D opentag/run_no_change")).toBe(true);
     expect(result.changedFiles).toEqual([]);
-    expect(result.artifacts).toEqual([]);
+    expect(result.artifacts?.map((artifact) => artifact.type)).toEqual(["diagnosis_report", "log_summary"]);
+    expect(result.artifacts?.every((artifact) => artifact.sourceRunId === "run_no_change")).toBe(true);
     expect(result.nextAction).toBe("No file changes were detected.");
   });
 

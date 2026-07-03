@@ -15,7 +15,7 @@
 
 **[opentag.im](https://opentag.im)**
 
-**Connect Slack, GitHub, GitLab, or Lark / Feishu to a local coding agent.**
+**Turn an existing work thread into a governed agent work loop.**
 
 [![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
 [![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
@@ -25,7 +25,9 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It listens to Slack, GitHub, GitLab, or Lark / Feishu, runs Codex or Claude Code on your computer, and sends the result back to the same place.
+OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs Codex or Claude Code locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
+
+The concrete setup still connects Slack, GitHub, GitLab, or Lark / Feishu to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
 
 ## Demo
 
@@ -40,6 +42,8 @@ https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
 OpenTag treats the thread where a request starts as the approval surface for agent-proposed system-of-record mutations. When an agent suggests a change, OpenTag renders a compact receipt that shows what will change, whether it is ready to apply, and which decision is safe now.
 
 `Apply` appears only when the dispatcher confirms a configured adapter can execute the action. Otherwise the receipt shows setup or attention needed, and the local audit trail stays available through commands such as `opentag status --run <run_id>`.
+
+Each run also keeps a local agent work ledger: the source event, admission decision, context packet snapshot, executor capability snapshot, produced artifacts, callback delivery, and final outcome stay available through status and dispatcher audit APIs without flooding the human thread.
 
 ## Quick Start
 
@@ -216,12 +220,17 @@ flowchart LR
 
 The important boundary: platforms receive messages, OpenTag coordinates the run, and the coding agent executes on your machine.
 
+The default loop is artifact-first rather than chat-first: a final reply should compress the outcome, link to artifacts such as reports, patches, pull request intents, or next actions, and point back to local audit/status for detail.
+
 ## Developer Docs
 
 - [Platform setup guides](docs/platforms/README.md)
 - [Configuration](docs/configuration.md)
+- [Hook ingest contract](docs/hook-ingest.md)
 - [Adapter authoring](docs/adapter-authoring.md)
 - [Real integration smoke test](docs/real-integration-smoke-test.md)
+- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
+- [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
 - [Local npm release guide](docs/npm-release.md)
 

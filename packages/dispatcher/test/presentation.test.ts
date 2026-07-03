@@ -291,6 +291,10 @@ describe("default callback presentation", () => {
       "Ready to apply",
       "1. Add the bug label.",
       "Target: GitHub labels",
+      "Impact: Writes label metadata on the source work item.",
+      "Capability/preflight: Adapter capability and preflight allow direct apply for this target.",
+      "Approval: Review impact, then use `apply 1` to approve and apply, or `reject 1`.",
+      "Safe next action: `apply 1` is the safe apply path after reviewing this receipt.",
       "Actions: apply 1, reject 1",
       "Audit: opentag status --run run_action_receipt"
     ].join("\n");
