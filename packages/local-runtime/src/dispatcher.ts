@@ -319,11 +319,27 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       dispatcherUrl: `http://127.0.0.1:${input.port}`,
       ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
     });
+    const discordBotToken = input.discordBotToken;
     app.route(
       "/",
       createDiscordInteractionsApp({
         publicKey: input.discordPublicKey,
         ...(input.discordWebhookPath ? { webhookPath: input.discordWebhookPath } : {}),
+        ...(discordBotToken
+          ? {
+              async notifyChannel(target: { channelId: string; content: string }) {
+                const response = await fetch(`https://discord.com/api/v10/channels/${target.channelId}/messages`, {
+                  method: "POST",
+                  headers: { authorization: `Bot ${discordBotToken}`, "content-type": "application/json" },
+                  body: JSON.stringify({ content: target.content, allowed_mentions: { parse: [] } }),
+                  signal: AbortSignal.timeout(10_000)
+                });
+                if (!response.ok) {
+                  throw new Error(`Discord channel notice failed: ${response.status} ${await response.text()}`);
+                }
+              }
+            }
+          : {}),
         async resolveChannelBinding({ applicationId, channelId }) {
           try {
             const { binding } = await dispatcherClient.getChannelBinding({

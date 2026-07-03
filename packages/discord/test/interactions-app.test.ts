@@ -1,6 +1,7 @@
 import { generateKeyPairSync, sign } from "node:crypto";
+import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it, vi } from "vitest";
-import { createDiscordInteractionsApp, type DiscordInteractionsAppInput } from "../src/interactions-app.js";
+import { createDiscordInteractionsApp, type DiscordInteractionsAppInput, type DiscordThreadActionInput } from "../src/interactions-app.js";
 import type { DiscordChannelBinding } from "../src/normalize.js";
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -27,18 +28,24 @@ const binding: DiscordChannelBinding = {
 };
 
 function makeApp(overrides: Partial<DiscordInteractionsAppInput> = {}) {
-  const createRun = vi.fn(async () => ({ runId: "run_1" }));
-  const submitThreadAction = vi.fn(async () => ({ outcome: "applied" }));
-  const resolveChannelBinding = vi.fn(async () => binding as DiscordChannelBinding | null);
+  const createRun = vi.fn(async (_event: OpenTagEvent) => ({ runId: "run_1" }));
+  const submitThreadAction = vi.fn(async (_action: DiscordThreadActionInput) => ({ outcome: "applied" }));
+  const resolveChannelBinding = vi.fn(
+    async (_input: { applicationId: string; channelId: string }): Promise<DiscordChannelBinding | null> => binding
+  );
+  const notifyChannel = vi.fn(async (_input: { channelId: string; content: string }) => {});
+  const onBackgroundError = vi.fn((_error: unknown) => {});
   const app = createDiscordInteractionsApp({
     publicKey: PUBLIC_KEY_HEX,
     resolveChannelBinding,
     createRun,
     submitThreadAction,
+    notifyChannel,
+    onBackgroundError,
     now: () => "2026-07-02T00:00:00.000Z",
     ...overrides
   });
-  return { app, createRun, submitThreadAction, resolveChannelBinding };
+  return { app, createRun, submitThreadAction, resolveChannelBinding, notifyChannel, onBackgroundError };
 }
 
 function commandBody(options: Array<{ name: string; value: string }>, extra: Record<string, unknown> = {}): string {
@@ -88,7 +95,7 @@ describe("Discord interactions app", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 
-  it("creates a run for a signed slash command", async () => {
+  it("acknowledges immediately with suppressed mentions and creates the run in the background", async () => {
     const { app, createRun } = makeApp();
     const body = commandBody([
       { name: "prompt", value: "fix the bug" },
@@ -96,7 +103,12 @@ describe("Discord interactions app", () => {
     ]);
     const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     expect(response.status).toBe(200);
-    expect(createRun).toHaveBeenCalledTimes(1);
+    const json = (await response.json()) as { type: number; data: { content: string; allowed_mentions?: unknown } };
+    expect(json.type).toBe(4);
+    expect(json.data.content).toContain("Received");
+    expect(json.data.allowed_mentions).toEqual({ parse: [] });
+
+    await vi.waitFor(() => expect(createRun).toHaveBeenCalledTimes(1));
     expect(createRun.mock.calls[0]![0]).toMatchObject({
       source: "discord",
       target: { executorHint: "codex" },
@@ -110,8 +122,8 @@ describe("Discord interactions app", () => {
     const body = commandBody([{ name: "prompt", value: "apply 1" }]);
     const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(submitThreadAction).toHaveBeenCalledTimes(1));
     expect(createRun).not.toHaveBeenCalled();
-    expect(submitThreadAction).toHaveBeenCalledTimes(1);
     expect(submitThreadAction.mock.calls[0]![0]).toMatchObject({
       id: expect.stringMatching(/^approval_discord_int_1_[0-9a-f]{12}$/),
       actor: { provider: "discord", handle: "alice" },
@@ -124,15 +136,63 @@ describe("Discord interactions app", () => {
     const body = commandBody([{ name: "prompt", value: "apply 1" }]);
     await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
-    expect(submitThreadAction).toHaveBeenCalledTimes(2);
-    expect(submitThreadAction.mock.calls[0]![0]!.id).toBe(submitThreadAction.mock.calls[1]![0]!.id);
+    await vi.waitFor(() => expect(submitThreadAction).toHaveBeenCalledTimes(2));
+    expect(submitThreadAction.mock.calls[0]![0].id).toBe(submitThreadAction.mock.calls[1]![0].id);
   });
 
-  it("does not create a run when the channel is not bound", async () => {
-    const { app, createRun } = makeApp({ resolveChannelBinding: vi.fn(async () => null) });
+  it("notifies the channel instead of creating a run when the channel is not bound", async () => {
+    const { app, createRun, notifyChannel } = makeApp({ resolveChannelBinding: async () => null });
     const body = commandBody([{ name: "prompt", value: "fix this" }]);
     const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(notifyChannel).toHaveBeenCalledTimes(1));
+    expect(notifyChannel.mock.calls[0]![0]).toMatchObject({
+      channelId: "chan_1",
+      content: expect.stringContaining("not bound")
+    });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges, reports, and notifies the channel when createRun rejects", async () => {
+    const { app, onBackgroundError, notifyChannel } = makeApp({
+      createRun: async () => {
+        throw new Error("dispatcher down");
+      }
+    });
+    const body = commandBody([{ name: "prompt", value: "fix the bug" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledTimes(1));
+    expect((onBackgroundError.mock.calls[0]![0] as Error).message).toBe("dispatcher down");
+    await vi.waitFor(() => expect(notifyChannel).toHaveBeenCalledTimes(1));
+    expect(notifyChannel.mock.calls[0]![0]).toMatchObject({
+      channelId: "chan_1",
+      content: expect.stringContaining("couldn't start")
+    });
+  });
+
+  it("acknowledges, reports, and notifies the channel when submitThreadAction rejects", async () => {
+    const { app, onBackgroundError, notifyChannel } = makeApp({
+      submitThreadAction: async () => {
+        throw new Error("dispatcher down");
+      }
+    });
+    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(notifyChannel).toHaveBeenCalledTimes(1));
+    expect(notifyChannel.mock.calls[0]![0]).toMatchObject({
+      content: expect.stringContaining("couldn't be processed")
+    });
+  });
+
+  it("returns a message for an apply command when submitThreadAction is not configured", async () => {
+    const { app, createRun } = makeApp({ submitThreadAction: undefined });
+    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
+    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("not supported") } });
     expect(createRun).not.toHaveBeenCalled();
   });
 
@@ -169,38 +229,5 @@ describe("Discord interactions app", () => {
     const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
     expect(response.status).toBe(413);
     expect(createRun).not.toHaveBeenCalled();
-  });
-
-  it("returns a message for an apply command when submitThreadAction is not configured", async () => {
-    const { app, createRun } = makeApp({ submitThreadAction: undefined });
-    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
-    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("not supported") } });
-    expect(createRun).not.toHaveBeenCalled();
-  });
-
-  it("returns a graceful message instead of a 500 when createRun rejects", async () => {
-    const { app } = makeApp({
-      createRun: vi.fn(async () => {
-        throw new Error("dispatcher down");
-      })
-    });
-    const body = commandBody([{ name: "prompt", value: "fix the bug" }]);
-    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("couldn't start") } });
-  });
-
-  it("returns a graceful message instead of a 500 when submitThreadAction rejects", async () => {
-    const { app } = makeApp({
-      submitThreadAction: vi.fn(async () => {
-        throw new Error("dispatcher down");
-      })
-    });
-    const body = commandBody([{ name: "prompt", value: "apply 1" }]);
-    const response = await app.request("/discord/interactions", { method: "POST", body, ...signed(body) });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ data: { content: expect.stringContaining("couldn't be processed") } });
   });
 });

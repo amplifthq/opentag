@@ -1252,4 +1252,23 @@ describe("createDiscordCallbackSink", () => {
 
     expect(calls).toBe(2);
   });
+
+  it("suppresses mentions on both the initial post and the edit", async () => {
+    const payloads: Array<{ allowed_mentions?: { parse: string[] } }> = [];
+    const sink = createDiscordCallbackSink({
+      token: "bot_test",
+      fetchImpl: (async (_url, init) => {
+        payloads.push(JSON.parse(String(init?.body)) as { allowed_mentions?: { parse: string[] } });
+        return Response.json({ id: "m1" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({ runId: "run_1", kind: "acknowledgement", provider: "discord", uri, body: "hi @everyone" });
+    await sink.deliver({ runId: "run_1", kind: "progress", provider: "discord", uri, body: "working" });
+
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload.allowed_mentions).toEqual({ parse: [] });
+    }
+  });
 });
