@@ -40,7 +40,14 @@ import {
   renderSlackFinalSummaryPresentation,
   type SlackBlock
 } from "@opentag/slack";
-import { renderTelegramAcknowledgement, renderTelegramFinalSummaryPresentation, renderTelegramProgress } from "@opentag/telegram";
+import {
+  createTelegramFinalSummaryReplyMarkup,
+  createTelegramMessageRich,
+  createTelegramRunStatusReplyMarkup,
+  renderTelegramAcknowledgement,
+  renderTelegramFinalSummaryPresentation,
+  renderTelegramProgress
+} from "@opentag/telegram";
 import type { CallbackMessage } from "./server.js";
 
 export type CallbackProvider = CallbackMessage["provider"];
@@ -105,7 +112,10 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
       return { body: renderSlackAcknowledgement(presentation.runId) };
     }
     if (provider === "telegram") {
-      return { body: renderTelegramAcknowledgement(presentation.runId) };
+      return {
+        body: renderTelegramAcknowledgement(presentation.runId),
+        rich: createTelegramMessageRich({ replyMarkup: createTelegramRunStatusReplyMarkup(presentation.runId) })
+      };
     }
     if (provider === "gitlab") {
       return { body: renderGitLabAcknowledgement(presentation.runId) };
@@ -115,7 +125,10 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
 
   const message = presentation.message ?? presentation.nextAction ?? presentation.state;
   if (provider === "telegram") {
-    return { body: renderTelegramProgress(message) };
+    return {
+      body: renderTelegramProgress(message, { runId: presentation.runId }),
+      rich: createTelegramMessageRich({ replyMarkup: createTelegramRunStatusReplyMarkup(presentation.runId) })
+    };
   }
   if (provider === "gitlab") {
     return { body: renderGitLabProgress({ runId: presentation.runId, message }) };
@@ -154,7 +167,13 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
     };
   }
   if (provider === "telegram") {
-    return { body: renderTelegramFinalSummaryPresentation(presentation) };
+    const replyMarkup = createTelegramFinalSummaryReplyMarkup(presentation);
+    return {
+      body: renderTelegramFinalSummaryPresentation(presentation),
+      rich: createTelegramMessageRich({
+        ...(replyMarkup ? { replyMarkup } : {})
+      })
+    };
   }
   if (provider === "gitlab") {
     return { body: renderGitLabFinalSummaryPresentation(presentation) };

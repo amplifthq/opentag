@@ -7,7 +7,12 @@ import {
   renderOpenTagPresentationPlainText,
   type OpenTagSourceThreadQueuedFollowUp
 } from "@opentag/core";
-import { createTelegramSendMessagePayload, type TelegramChannelBinding } from "@opentag/telegram";
+import {
+  TELEGRAM_DOCTOR_TITLE,
+  TELEGRAM_STATUS_TITLE,
+  createTelegramSendMessagePayload,
+  type TelegramChannelBinding
+} from "@opentag/telegram";
 import { createTelegramEventsApp, type TelegramStopRunResult } from "./app.js";
 
 const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
@@ -142,7 +147,7 @@ function formatRuntimeStatusText(input: {
   if (!input.binding) {
     return renderOpenTagPresentationPlainText(
       createSourceThreadStatusPresentation({
-        title: "OpenTag status:",
+        title: TELEGRAM_STATUS_TITLE,
         sourceContainer: `telegram:${input.botId}/${input.chatId}`,
         bindingState: "unbound",
         nextAction: "Bind this Telegram chat to a Project Target before starting runs.",
@@ -154,7 +159,7 @@ function formatRuntimeStatusText(input: {
   const status = input.status;
   return renderOpenTagPresentationPlainText(
     createSourceThreadStatusPresentation({
-      title: "OpenTag status:",
+      title: TELEGRAM_STATUS_TITLE,
       sourceContainer: `telegram:${input.botId}/${input.chatId}`,
       projectTarget: formatProjectTarget(input.binding),
       bindingState: "bound",
@@ -176,7 +181,7 @@ function formatRuntimeStatusText(input: {
 function formatDoctorText(input: { botId: string; chatId: string; binding: TelegramChannelBinding | null }): string {
   return renderOpenTagPresentationPlainText(
     createDoctorSummaryPresentation({
-      title: "OpenTag doctor (redacted):",
+      title: TELEGRAM_DOCTOR_TITLE,
       checks: [
         { status: "ok", name: "Source container", message: `telegram:${input.botId}/${input.chatId}` },
         {

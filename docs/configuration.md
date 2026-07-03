@@ -17,7 +17,8 @@ OpenTag has five runtime surfaces today:
 | Local daemon | `apps/opentagd` | Runner identity, Project Target bindings, local checkout paths, executor settings |
 | GitHub ingress | `@opentag/cli` / `apps/github-probot` | Repository webhooks or GitHub App webhooks and GitHub event normalization |
 | Slack ingress | `@opentag/cli` / `apps/slack-events` | Slack Socket Mode or Events API transport and Slack event normalization |
-| Telegram ingress | `apps/telegram-events` | Telegram webhook ingestion and Telegram event normalization |
+| Telegram ingress | `@opentag/cli` / `apps/telegram-events` | Telegram getUpdates polling by default, or advanced webhook ingestion |
+| Discord ingress | `@opentag/cli` | Discord Gateway by default, or advanced Interactions Endpoint webhook ingestion |
 
 Keep these boundaries separate. Ingress apps should know how to receive platform
 events and create runs. The dispatcher should coordinate runs and callbacks. The
@@ -458,8 +459,13 @@ for repeatable setups.
 | `LARK_APP_ID` | none | Lark app id for the callback sink that posts replies via the Lark API |
 | `LARK_APP_SECRET` | none | Lark app secret for the callback sink |
 | `LARK_DOMAIN` | `lark` | `lark` or `feishu`; selects the Lark vs Feishu API host |
-| `OPENTAG_TELEGRAM_BOT_TOKEN` | none | Single Telegram bot token for callback posting |
+| `OPENTAG_TELEGRAM_MODE` | `polling` | Local Telegram transport for single-bot env config: `polling` or `webhook` |
+| `OPENTAG_TELEGRAM_BOT_TOKEN` | none | Single Telegram bot token for polling and callback posting |
 | `OPENTAG_TELEGRAM_BOT_TOKENS_JSON` | none | JSON object mapping `agentId` to Telegram bot token |
+| `OPENTAG_DISCORD_MODE` | `gateway` | Local Discord transport: `gateway` or `webhook` |
+| `OPENTAG_DISCORD_BOT_TOKEN` | none | Discord bot token for Gateway delivery and channel replies |
+| `OPENTAG_DISCORD_PUBLIC_KEY` | none | Required only for Discord webhook mode signature verification |
+| `OPENTAG_DISCORD_WEBHOOK_PATH` | `/discord/interactions` | Discord Interactions Endpoint path for webhook mode |
 
 If `OPENTAG_PAIRING_TOKEN` is set on the dispatcher, legacy clients can use the
 same value as:
@@ -648,19 +654,24 @@ progress events.
 
 ## Telegram Ingress Environment
 
-`apps/telegram-events` receives Telegram webhook updates and creates OpenTag runs.
+`opentag start` receives Telegram bot messages with `getUpdates` polling by
+default. Polling mode runs entirely from the local dispatcher and does not need
+a public tunnel. The advanced webhook path still uses the same Telegram event
+normalization and can be mounted by `opentag start --telegram-mode webhook` or
+the standalone `apps/telegram-events` app.
 
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `OPENTAG_DISPATCHER_URL` | yes | Dispatcher URL |
 | `OPENTAG_DISPATCHER_TOKEN` | when dispatcher is paired | Bearer token for dispatcher `/v1/*` |
 | `PORT` | no | Defaults to `3050` |
+| `OPENTAG_TELEGRAM_MODE` | no | `polling` by default for `opentag start`; use `webhook` only when Telegram should push updates to a public HTTPS URL |
 | `OPENTAG_TELEGRAM_BOT_ID` | yes unless using JSON config | Bot id used in the webhook path and channel binding lookup |
 | `OPENTAG_TELEGRAM_AGENT_ID` | no | Agent id for single-bot mode. Defaults to `opentag` |
 | `OPENTAG_TELEGRAM_BOT_USERNAME` | no | Used to strip mentions in group chats |
-| `OPENTAG_TELEGRAM_BOT_TOKEN` | no | Bot API token for Telegram ingress self-service replies such as `/help`, `/bind`, `/unbind`, `/status`, `/doctor`, and `/stop`; final callbacks can still be sent by the dispatcher |
+| `OPENTAG_TELEGRAM_BOT_TOKEN` | yes for polling; no for webhook-only ingress | Bot API token for polling, final replies, and self-service replies such as `/help`, `/bind`, `/unbind`, `/status`, `/doctor`, and `/stop` |
 | `OPENTAG_TELEGRAM_BINDING_ADMIN_USER_IDS` | no | Comma-separated Telegram user ids allowed to run `/bind` and `/unbind confirm` in group chats. Private chats can manage their own binding by default |
-| `OPENTAG_TELEGRAM_SECRET_TOKEN` | no | Expected `x-telegram-bot-api-secret-token` header value |
+| `OPENTAG_TELEGRAM_SECRET_TOKEN` | no | Expected `x-telegram-bot-api-secret-token` header value for webhook mode |
 | `OPENTAG_TELEGRAM_CALLBACK_URI` | no | Callback URI override. Defaults to `https://api.telegram.org/sendMessage` |
 | `OPENTAG_TELEGRAM_BOTS_JSON` | no | JSON array for multi-bot ingress |
 
@@ -670,6 +681,7 @@ progress events.
 [
   {
     "botId": "bot_123",
+    "mode": "polling",
     "agentId": "opentag",
     "botUsername": "opentag_bot",
     "botToken": "telegram-bot-token",
@@ -681,8 +693,9 @@ progress events.
 ```
 
 Set `OPENTAG_TELEGRAM_BOT_TOKEN` or `OPENTAG_TELEGRAM_BOT_TOKENS_JSON` on the
-dispatcher, not on the Telegram ingress, when you want final replies posted
-back to Telegram chats. Set `OPENTAG_TELEGRAM_BOT_TOKEN` on the ingress only
+dispatcher when you want final replies posted back to Telegram chats. In
+polling mode the same token is also required to receive updates. In advanced
+webhook-only ingress mode, set `OPENTAG_TELEGRAM_BOT_TOKEN` on the ingress only
 when you also want self-service replies for `/help`, `/bind`, `/unbind`,
 `/status`, `/doctor`, and `/stop`; those replies stay concise and keep Project
 Target binding separate from local checkout paths. `/bind <owner>/<repo>` and
@@ -696,6 +709,25 @@ binding changes require the sender's Telegram user id to be listed in
 JSON field. `/stop [run_id]` requests cancellation for the active chat run or
 the specified run, and OpenTag does not treat that stop request as a successful
 completion.
+
+## Discord Ingress Environment
+
+`opentag start` receives Discord slash-command interactions through Gateway mode
+by default. Gateway mode keeps a local WebSocket connection open, so it does not
+need a public tunnel. The advanced webhook mode mounts `/discord/interactions`
+for Discord Interactions Endpoint delivery and requires a public HTTPS URL plus
+the application public key.
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `OPENTAG_DISCORD_MODE` | no | `gateway` by default. Use `webhook` only when Discord should push interactions to a public HTTPS endpoint |
+| `OPENTAG_DISCORD_BOT_TOKEN` | yes | Bot token for Gateway identify and Discord channel replies |
+| `OPENTAG_DISCORD_PUBLIC_KEY` | webhook mode only | Application Ed25519 public key used to verify `X-Signature-Ed25519` and `X-Signature-Timestamp` |
+| `OPENTAG_DISCORD_WEBHOOK_PATH` | no | Defaults to `/discord/interactions` in webhook mode |
+
+Gateway mode requires a runtime with `globalThis.WebSocket` support or an
+injected WebSocket implementation. If that is not available, use
+`--discord-mode webhook` with a public HTTPS tunnel.
 
 ## Secret Handling
 

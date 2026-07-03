@@ -290,8 +290,8 @@ function shouldDeliverRunStatusUpdate(
   return presentation.shouldDeliverRunStatusUpdate?.(input) ?? presentation.shouldDeliverStatusUpdate(input.provider);
 }
 
-function larkLifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
-  return input.provider === "lark" ? `${input.runId}:status` : undefined;
+function lifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
+  return input.provider === "lark" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
 }
 
 function isTerminalRun(run: OpenTagRun): boolean {
@@ -2328,7 +2328,7 @@ export function createDispatcherApp(input: {
     if (!input.event.callback.threadKey) return false;
     if (isTerminalRun(input.run)) return false;
 
-    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+    const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
     if (!statusMessageKey) return false;
 
     const state = delayedLarkStatusCards.get(input.run.id) ?? { cardCreated: false };
@@ -2434,7 +2434,7 @@ export function createDispatcherApp(input: {
   }): Promise<void> {
     let state = delayedLarkStatusCards.get(input.run.id);
     if (!state?.cardCreated) {
-      const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+      const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
       const externalMessageId =
         statusMessageKey && input.event.callback.threadKey
           ? await repo.findCallbackExternalMessageId({
@@ -2471,7 +2471,7 @@ export function createDispatcherApp(input: {
       ...larkRenderLocaleRenderOption(input.event),
       presentation: acknowledgementPresentation
     });
-    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
+    const statusMessageKey = lifecycleStatusMessageKey({ provider: input.event.callback.provider, runId: input.run.id });
     await deliverAndAudit({
       repo,
       sink: callbackSink,
@@ -3028,7 +3028,7 @@ export function createDispatcherApp(input: {
         ...larkRenderLocaleRenderOption(parsed.event),
         presentation: acknowledgementPresentation
       });
-      const statusMessageKey = larkLifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
+      const statusMessageKey = lifecycleStatusMessageKey({ provider: parsed.event.callback.provider, runId: run.id });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -3693,7 +3693,7 @@ export function createDispatcherApp(input: {
       ...larkRenderLocaleRenderOption(stored.event),
       presentation: finalPresentation
     });
-    const statusMessageKey = larkLifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
+    const statusMessageKey = lifecycleStatusMessageKey({ provider: stored.event.callback.provider, runId });
     await deliverAndAudit({
       repo,
       sink: callbackSink,

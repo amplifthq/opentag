@@ -19,6 +19,8 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  const telegram = config.platforms.telegram;
+  const discord = config.platforms.discord;
   const hermes = config.daemon.hermes;
   const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
@@ -37,6 +39,10 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
             ? { platform: "github" }
             : gitlab
               ? { platform: "gitlab" }
+              : telegram
+                ? { platform: "telegram" }
+                : discord
+                  ? { platform: "discord" }
               : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
@@ -71,6 +77,22 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.gitlabPort ? { gitlabPort: lastSetup.gitlabPort } : gitlab?.port ? { gitlabPort: gitlab.port } : {}),
     ...(gitlab?.webhookSecret ? { gitlabWebhookSecret: gitlab.webhookSecret } : {}),
     ...(gitlab?.webhookPath ? { gitlabWebhookPath: gitlab.webhookPath } : {}),
+    ...(lastSetup?.telegramMode ? { telegramMode: lastSetup.telegramMode } : telegram?.mode ? { telegramMode: telegram.mode } : {}),
+    ...(lastSetup?.telegramBotId ? { telegramBotId: lastSetup.telegramBotId } : telegram?.botId ? { telegramBotId: telegram.botId } : {}),
+    ...(lastSetup?.telegramBotUsername
+      ? { telegramBotUsername: lastSetup.telegramBotUsername }
+      : telegram?.botUsername
+        ? { telegramBotUsername: telegram.botUsername }
+        : {}),
+    ...(telegram?.secretToken ? { telegramSecretToken: telegram.secretToken } : {}),
+    ...(telegram?.bindingAdminUserIds ? { telegramBindingAdminUserIds: telegram.bindingAdminUserIds } : {}),
+    ...(telegram?.callbackUri ? { telegramCallbackUri: telegram.callbackUri } : {}),
+    ...(lastSetup?.discordMode ? { discordMode: lastSetup.discordMode } : discord?.mode ? { discordMode: discord.mode } : {}),
+    ...(lastSetup?.discordWebhookPath
+      ? { discordWebhookPath: lastSetup.discordWebhookPath }
+      : discord?.webhookPath
+        ? { discordWebhookPath: discord.webhookPath }
+        : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }

@@ -28,9 +28,11 @@ import {
   type OpenTagCliConfig
 } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
+import { discordLocalInteractionsUrl, discordPublicInteractionsUrlPlaceholder } from "./platforms/discord/display.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
+import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
 
 export type StartCommandOptions = {
@@ -124,7 +126,14 @@ function requireGitLabConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
 }
 
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
-  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab);
+  return Boolean(
+    config.platforms.lark ||
+      config.platforms.slack ||
+      config.platforms.github ||
+      config.platforms.gitlab ||
+      config.platforms.telegram ||
+      config.platforms.discord
+  );
 }
 
 function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
@@ -134,6 +143,12 @@ function positiveIntegerFromEnv(name: string, value: string | undefined): number
     throw new Error(`${name} must be a positive integer`);
   }
   return parsed;
+}
+
+function discordModeFromEnv(value: string | undefined): "gateway" | "webhook" | undefined {
+  if (!value) return undefined;
+  if (value === "gateway" || value === "webhook") return value;
+  throw new Error("OPENTAG_DISCORD_MODE must be gateway or webhook.");
 }
 
 function maxRequestBodyBytesFromEnv(env?: NodeJS.ProcessEnv): number | undefined {
@@ -249,17 +264,23 @@ export function dispatcherRuntimeInputFromCliConfig(
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
-  // Discord (experimental) is env-only for now — no config.platforms.discord until
-  // slice 3. When the public key is set it mounts alongside an existing startable
-  // platform (e.g. Lark).
+  const telegram = config.platforms.telegram;
+  const discord = config.platforms.discord;
   const env = input.env ?? process.env;
-  const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
-  const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
-  const discordWebhookPath = env.OPENTAG_DISCORD_WEBHOOK_PATH;
-  if (discordPublicKey && !discordBotToken) {
+  const discordMode =
+    discord?.mode ??
+    discordModeFromEnv(env.OPENTAG_DISCORD_MODE) ??
+    (env.OPENTAG_DISCORD_PUBLIC_KEY ? "webhook" : env.OPENTAG_DISCORD_BOT_TOKEN ? "gateway" : undefined);
+  const discordPublicKey = discord?.publicKey ?? env.OPENTAG_DISCORD_PUBLIC_KEY;
+  const discordBotToken = discord?.botToken ?? env.OPENTAG_DISCORD_BOT_TOKEN;
+  const discordWebhookPath = discord?.webhookPath ?? env.OPENTAG_DISCORD_WEBHOOK_PATH;
+  if (discordMode === "webhook" && !discordPublicKey) {
+    throw new Error("Discord webhook mode requires platforms.discord.publicKey or OPENTAG_DISCORD_PUBLIC_KEY.");
+  }
+  if ((discordMode === "gateway" || discordMode === "webhook") && !discordBotToken) {
     // Without the bot token the interactions app still mounts and ACKs slash commands,
     // but every progress/final callback would silently fail — fail fast instead.
-    throw new Error("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+    throw new Error("Discord platform requires platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN.");
   }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
@@ -297,6 +318,24 @@ export function dispatcherRuntimeInputFromCliConfig(
         }
       : {}),
     ...(slack ? { slackBotToken: slack.botToken } : {}),
+    ...(telegram ? { telegramBotToken: telegram.botToken } : {}),
+    ...(telegram
+      ? {
+          telegramBots: [
+            {
+              mode: telegram.mode ?? "polling",
+              botId: telegram.botId,
+              agentId: telegram.agentId ?? "opentag",
+              ...(telegram.botUsername ? { botUsername: telegram.botUsername } : {}),
+              botToken: telegram.botToken,
+              ...(telegram.bindingAdminUserIds ? { bindingAdminUserIds: telegram.bindingAdminUserIds } : {}),
+              ...(telegram.secretToken ? { secretToken: telegram.secretToken } : {}),
+              ...(telegram.callbackUri ? { callbackUri: telegram.callbackUri } : {})
+            }
+          ]
+        }
+      : {}),
+    ...(discordMode ? { discordMode } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(discordBotToken ? { discordBotToken } : {}),
     ...(discordWebhookPath ? { discordWebhookPath } : {})
@@ -540,7 +579,9 @@ function abortOnSubsystemFailure(promise: Promise<void>, abortController: AbortC
 function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
   const unsupported = [
     ...(config.platforms.lark ? ["Lark / Feishu"] : []),
-    ...(config.platforms.slack ? ["Slack"] : [])
+    ...(config.platforms.slack ? ["Slack"] : []),
+    ...(config.platforms.telegram ? ["Telegram"] : []),
+    ...(config.platforms.discord ? ["Discord"] : [])
   ];
   if (unsupported.length > 0) {
     throw new Error(
@@ -633,6 +674,31 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
         logger.log(`Tunnel example: ngrok http ${gitlab.port ?? DEFAULT_GITLAB_WEBHOOK_PORT}`);
       } else {
         logger.log("Lark / Feishu: connected through Personal Agent long connection");
+      }
+    }
+    if (config.platforms.telegram) {
+      const telegram = config.platforms.telegram;
+      if ((telegram.mode ?? "polling") === "webhook") {
+        logger.log(`Telegram local webhook: ${telegramLocalWebhookUrl({ botId: telegram.botId })}`);
+        logger.log(`Telegram webhook URL: ${telegramPublicWebhookUrlPlaceholder({ botId: telegram.botId })}`);
+        logger.log("Telegram setWebhook must point at the public HTTPS tunnel URL and include the configured secret token.");
+        logger.log("Tunnel example: ngrok http 3030");
+      } else {
+        logger.log("Telegram: using getUpdates polling");
+        logger.log("Telegram tunnel: not required in polling mode");
+      }
+    }
+    if (config.platforms.discord) {
+      const discord = config.platforms.discord;
+      if ((discord.mode ?? "gateway") === "webhook") {
+        logger.log(`Discord local interactions endpoint: ${discordLocalInteractionsUrl({ webhookPath: discord.webhookPath })}`);
+        logger.log(`Discord Interactions Endpoint URL: ${discordPublicInteractionsUrlPlaceholder(discord.webhookPath ?? "/discord/interactions")}`);
+        logger.log("Discord slash command: register /opentag and install the app into the target server.");
+        logger.log("Tunnel example: ngrok http 3030");
+      } else {
+        logger.log("Discord: using Gateway connection");
+        logger.log("Discord tunnel: not required in Gateway mode");
+        logger.log("Discord slash command: register /opentag and install the app into the target server.");
       }
     }
     logger.log("Press Ctrl-C to stop.");

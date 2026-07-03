@@ -122,6 +122,57 @@ describe("OpenTag CLI setup platforms", () => {
     expect(notes.join("\n")).toContain("GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`");
   });
 
+  it("prints the Telegram setup guide before collecting Telegram credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "telegram",
+        executor: "echo",
+        telegramBotToken: "123456789:telegram_secret",
+        telegramBotUsername: "opentag_bot",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/telegram.en.md");
+    expect(notes.join("\n")).toContain("https://t.me/BotFather");
+    expect(notes.join("\n")).toContain("Telegram Bot API / getUpdates");
+    expect(notes.join("\n")).toContain("Telegram bot token from BotFather");
+  });
+
+  it("prints the Discord setup guide before collecting Discord credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordBotToken: "discord_bot_token",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/discord.en.md");
+    expect(notes.join("\n")).toContain("https://discord.com/developers/applications");
+    expect(notes.join("\n")).toContain("Discord Gateway docs");
+    expect(notes.join("\n")).toContain("A registered /opentag slash command");
+  });
+
   it("writes a Slack config and default channel binding without Lark", async () => {
     const configPath = join(tempDir(), "config.json");
 
@@ -343,5 +394,72 @@ describe("OpenTag CLI setup platforms", () => {
         expect.objectContaining({ provider: "gitlab", owner: "acme/team", repo: "demo" })
       ])
     );
+  });
+
+  it("writes a Telegram polling config by default", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "telegram",
+        executor: "echo",
+        telegramBotToken: "123456789:telegram_secret",
+        telegramBotUsername: "opentag_bot",
+        telegramBindingAdminUserIds: "111,222",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.telegram).toMatchObject({
+      mode: "polling",
+      botId: "123456789",
+      agentId: "opentag",
+      botUsername: "opentag_bot",
+      botToken: "123456789:telegram_secret",
+      bindingAdminUserIds: ["111", "222"]
+    });
+    expect(config.platforms.telegram?.secretToken).toBeUndefined();
+    expect(config.preferences?.lastSetup).toMatchObject({
+      platforms: ["telegram"],
+      telegramMode: "polling",
+      telegramBotId: "123456789",
+      telegramBotUsername: "opentag_bot"
+    });
+  });
+
+  it("writes a Discord Gateway config by default", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordBotToken: "discord_bot_token",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.discord).toEqual({
+      mode: "gateway",
+      botToken: "discord_bot_token"
+    });
+    expect(config.preferences?.lastSetup).toMatchObject({
+      platforms: ["discord"],
+      discordMode: "gateway"
+    });
   });
 });

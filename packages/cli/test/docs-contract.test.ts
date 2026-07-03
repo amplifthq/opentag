@@ -72,7 +72,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("npm cache metadata exists");
     expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
-    expect(skill).toContain("Platform: Slack, GitHub, or Lark / Feishu");
+    expect(skill).toContain("Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord");
     expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
@@ -131,5 +131,50 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("application/json");
     expect(combined).toContain("3050");
     expect(combined).toContain("--github-port");
+  });
+
+  it("keeps Telegram setup docs aligned with BotFather, polling defaults, and webhook requirements", () => {
+    const english = repoFile("docs/platforms/telegram.en.md");
+    const chinese = repoFile("docs/platforms/telegram.zh-CN.md");
+    const combined = `${english}\n${chinese}`;
+
+    expect(combined).toContain("https://t.me/BotFather");
+    expect(combined).toContain("https://core.telegram.org/bots/api#getupdates");
+    expect(combined).toContain("getUpdates");
+    expect(combined).toContain("polling");
+    expect(combined).toContain("not required in polling mode");
+    expect(combined).toContain("不需要公网 tunnel");
+    expect(combined).toContain("https://core.telegram.org/bots/api#setwebhook");
+    expect(combined).toContain("setWebhook");
+    expect(combined).toContain("secret_token");
+    expect(combined).toContain("X-Telegram-Bot-Api-Secret-Token");
+    expect(combined).toContain("/telegram/events/<bot_id>");
+    expect(combined).toContain("3030");
+    expect(combined).toContain("--telegram-mode webhook");
+    expect(combined).toContain("--telegram-bot-token");
+    expect(combined).toContain("--telegram-binding-admin-user-ids");
+  });
+
+  it("keeps Discord setup docs aligned with Gateway defaults, Interactions Endpoint, and slash-command requirements", () => {
+    const english = repoFile("docs/platforms/discord.en.md");
+    const chinese = repoFile("docs/platforms/discord.zh-CN.md");
+    const combined = `${english}\n${chinese}`;
+
+    expect(combined).toContain("https://discord.com/developers/applications");
+    expect(combined).toContain("https://docs.discord.com/developers/events/gateway-events#interaction-create");
+    expect(combined).toContain("https://docs.discord.com/developers/interactions/overview");
+    expect(combined).toContain("https://docs.discord.com/developers/interactions/application-commands");
+    expect(combined).toContain("Gateway");
+    expect(combined).toContain("INTERACTION_CREATE");
+    expect(combined).toContain("not required in Gateway mode");
+    expect(combined).toContain("不需要公网 tunnel");
+    expect(combined).toContain("Interactions Endpoint URL");
+    expect(combined).toContain("X-Signature-Ed25519");
+    expect(combined).toContain("X-Signature-Timestamp");
+    expect(combined).toContain("/discord/interactions");
+    expect(combined).toContain("/opentag");
+    expect(combined).toContain("--discord-mode webhook");
+    expect(combined).toContain("--discord-public-key");
+    expect(combined).toContain("--discord-webhook-path");
   });
 });

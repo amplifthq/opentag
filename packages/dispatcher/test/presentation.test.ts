@@ -27,7 +27,7 @@ describe("default callback presentation", () => {
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
     expect(presentation.shouldDeliverProgress("lark")).toBe(false);
-    expect(presentation.shouldDeliverProgress("telegram")).toBe(false);
+    expect(presentation.shouldDeliverProgress("telegram")).toBe(true);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
     expect(presentation.shouldDeliverProgress("custom")).toBe(true);
   });
@@ -45,7 +45,9 @@ describe("default callback presentation", () => {
     expect(presentation.acknowledgement({ provider: "lark", runId: "run_1" })).toBe(
       ["Received. OpenTag is working.", "Run: run_1", "Use /status here for queue state; audit locally with opentag status --run run_1."].join("\n")
     );
-    expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe("I picked this up: run_1");
+    expect(presentation.acknowledgement({ provider: "telegram", runId: "run_1" })).toBe(
+      ["<b>OpenTag picked this up</b>", "Run: <code>run_1</code>", "Status: <b>received</b>"].join("\n")
+    );
     expect(presentation.final({ provider: "github", result })).toEqual({
       body: "OpenTag finished with **success**.\n\ndone\n\nVerification:\n- `echo`: passed"
     });
@@ -69,7 +71,11 @@ describe("default callback presentation", () => {
       ]
     });
     expect(presentation.final({ provider: "telegram", result })).toEqual({
-      body: "Finished with success.\n\ndone\n\nVerification:\n- echo: passed"
+      body: ["<b>OpenTag finished</b>", "Status: <b>success</b>", "Summary: done", "Verification: echo: passed"].join("\n"),
+      rich: {
+        provider: "telegram",
+        payload: { parseMode: "HTML" }
+      }
     });
     expect(presentation.final({ provider: "lark", result })).toMatchObject({
       body: "Finished with success.\n\ndone\n\nVerification\n- echo: passed",
@@ -146,7 +152,23 @@ describe("default callback presentation", () => {
     expect(presentation.runStatus({ provider: "github", runId: "run_running", state: "running", message: "Running with codex." })).toEqual({
       body: "OpenTag progress for `run_running`: Running with codex."
     });
-    expect(presentation.render({ provider: "telegram", presentation: waiting }).body).toBe("Working...");
+    expect(presentation.render({ provider: "telegram", presentation: waiting })).toMatchObject({
+      body: ["<b>OpenTag is working</b>", "Run: <code>run_waiting</code>", "Status: <b>running</b>", "", "Waiting for approval."].join("\n"),
+      rich: {
+        provider: "telegram",
+        payload: {
+          parseMode: "HTML",
+          replyMarkup: {
+            inline_keyboard: [
+              [
+                { text: "Copy run id", copy_text: { text: "run_waiting" } },
+                { text: "Copy audit", copy_text: { text: "opentag status --run run_waiting" } }
+              ]
+            ]
+          }
+        }
+      }
+    });
   });
 
   it("renders doctor summaries through semantic fallback and provider-native UI where supported", () => {
@@ -326,7 +348,7 @@ describe("default callback presentation", () => {
     const presentation = createDefaultCallbackPresentation();
 
     expect(presentation.progress({ provider: "telegram", runId: "run_1", message: "Starting claude --print" })).toBe(
-      "Thinking..."
+      ["<b>OpenTag is thinking</b>", "Run: <code>run_1</code>", "Status: <b>running</b>"].join("\n")
     );
     expect(
       presentation.progress({
@@ -334,7 +356,15 @@ describe("default callback presentation", () => {
         runId: "run_1",
         message: "Creating isolated branch opentag/run_1"
       })
-    ).toBe("Working...");
+    ).toBe(
+      [
+        "<b>OpenTag is working</b>",
+        "Run: <code>run_1</code>",
+        "Status: <b>running</b>",
+        "",
+        "Creating isolated branch opentag/run_1"
+      ].join("\n")
+    );
   });
 
   it("renders structured next actions by summary", () => {
@@ -442,7 +472,10 @@ describe("default callback presentation", () => {
     expect(JSON.stringify(lark.rich)).toContain("Audit: opentag status --run run_receipt_1");
 
     const telegram = presentation.final({ provider: "telegram", result, runId: "run_receipt_1", receiptContext });
-    expect(telegram.body).toContain("Audit: opentag status --run run_receipt_1");
+    expect(telegram.body).not.toContain("opentag status --run run_receipt_1");
+    expect(JSON.stringify(telegram.rich)).toContain("Copy audit");
+    expect(JSON.stringify(telegram.rich)).toContain("opentag status --run run_receipt_1");
+    expect(JSON.stringify(telegram.rich)).toContain("Copy apply 1");
   });
 
   it("renders create PR suggested actions with PR-specific details", () => {

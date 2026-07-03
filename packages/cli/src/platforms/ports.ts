@@ -1,6 +1,7 @@
 export const DEFAULT_SLACK_EVENTS_PORT = 3040;
 export const DEFAULT_GITHUB_WEBHOOK_PORT = 3050;
 export const DEFAULT_GITLAB_WEBHOOK_PORT = 3060;
+export const DEFAULT_DISPATCHER_PORT = 3030;
 
 export function parseLocalPort(value: string | number, label: string): number {
   const port = typeof value === "number" ? value : Number(value.trim());

@@ -5,6 +5,8 @@ import type { SavedLarkCredentials } from "../platforms/lark/saved-config.js";
 
 export type LarkSetupMethod = "saved" | "scan" | "manual";
 export type SlackSetupMode = "socket_mode" | "events_api";
+export type TelegramSetupMode = "polling" | "webhook";
+export type DiscordSetupMode = "gateway" | "webhook";
 
 export type BindingMethod = "default_project" | "bind_later";
 
@@ -49,6 +51,24 @@ export type GitLabSetupInput = {
   port: number;
 };
 
+export type TelegramSetupInput = {
+  mode: TelegramSetupMode;
+  botId: string;
+  agentId: string;
+  botUsername?: string;
+  botToken: string;
+  bindingAdminUserIds?: string[];
+  secretToken?: string;
+  callbackUri?: string;
+};
+
+export type DiscordSetupInput = {
+  mode: DiscordSetupMode;
+  publicKey?: string;
+  botToken: string;
+  webhookPath?: string;
+};
+
 export type HermesSetupInput = {
   command?: string;
   profile?: string;
@@ -70,6 +90,8 @@ export type OpenTagSetupInput = {
   slack?: SlackSetupInput;
   github?: GitHubSetupInput;
   gitlab?: GitLabSetupInput;
+  telegram?: TelegramSetupInput;
+  discord?: DiscordSetupInput;
   hermes?: HermesSetupInput;
   agentSessionProfile?: AgentSessionProfileSetupInput;
 };
@@ -97,6 +119,14 @@ export type SetupDefaults = Partial<{
   gitlabPort: number;
   gitlabWebhookSecret: string;
   gitlabWebhookPath: string;
+  telegramBotId: string;
+  telegramMode: TelegramSetupMode;
+  telegramBotUsername: string;
+  telegramSecretToken: string;
+  telegramBindingAdminUserIds: string[];
+  telegramCallbackUri: string;
+  discordMode: DiscordSetupMode;
+  discordWebhookPath: string;
   hermesCommand: string;
   hermesProfile: string;
   hermesProfileTemplate: string;

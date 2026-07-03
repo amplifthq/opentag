@@ -130,6 +130,19 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               gitlabBaseUrl: input.gitlab.baseUrl,
               gitlabPort: input.gitlab.port
             }
+          : {}),
+        ...(input.telegram
+          ? {
+              telegramMode: input.telegram.mode,
+              telegramBotId: input.telegram.botId,
+              ...(input.telegram.botUsername ? { telegramBotUsername: input.telegram.botUsername } : {})
+            }
+          : {}),
+        ...(input.discord
+          ? {
+              discordMode: input.discord.mode,
+              ...(input.discord.webhookPath ? { discordWebhookPath: input.discord.webhookPath } : {})
+            }
           : {})
       }
     },
@@ -217,6 +230,30 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               baseUrl: input.gitlab.baseUrl,
               webhookPath: input.gitlab.webhookPath,
               port: input.gitlab.port
+            }
+          }
+        : {}),
+      ...(input.telegram
+        ? {
+            telegram: {
+              mode: input.telegram.mode,
+              botId: input.telegram.botId,
+              agentId: input.telegram.agentId,
+              ...(input.telegram.botUsername ? { botUsername: input.telegram.botUsername } : {}),
+              botToken: input.telegram.botToken,
+              ...(input.telegram.bindingAdminUserIds ? { bindingAdminUserIds: input.telegram.bindingAdminUserIds } : {}),
+              ...(input.telegram.secretToken ? { secretToken: input.telegram.secretToken } : {}),
+              ...(input.telegram.callbackUri ? { callbackUri: input.telegram.callbackUri } : {})
+            }
+          }
+        : {}),
+      ...(input.discord
+        ? {
+            discord: {
+              mode: input.discord.mode,
+              ...(input.discord.publicKey ? { publicKey: input.discord.publicKey } : {}),
+              botToken: input.discord.botToken,
+              ...(input.discord.webhookPath ? { webhookPath: input.discord.webhookPath } : {})
             }
           }
         : {})

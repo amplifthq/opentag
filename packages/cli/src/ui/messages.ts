@@ -29,6 +29,12 @@ type MessageKey =
   | "gitlabProject"
   | "gitlabToken"
   | "gitlabPort"
+  | "telegramBotToken"
+  | "telegramBotUsername"
+  | "telegramBindingAdminUserIds"
+  | "discordPublicKey"
+  | "discordBotToken"
+  | "discordWebhookPath"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -63,6 +69,12 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab project (group/project or group/subgroup/project)",
     gitlabToken: "GitLab access token for source-thread replies",
     gitlabPort: "Local GitLab webhook port",
+    telegramBotToken: "Telegram bot token",
+    telegramBotUsername: "Telegram bot username (optional)",
+    telegramBindingAdminUserIds: "Telegram group binding admin user IDs, comma-separated (optional)",
+    discordPublicKey: "Discord application public key",
+    discordBotToken: "Discord bot token",
+    discordWebhookPath: "Discord interactions webhook path",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -96,6 +108,12 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
     gitlabToken: "GitLab access token（用于回写 source thread）",
     gitlabPort: "本地 GitLab webhook 端口",
+    telegramBotToken: "Telegram bot token",
+    telegramBotUsername: "Telegram bot username（可选）",
+    telegramBindingAdminUserIds: "Telegram 群聊绑定管理员 user id，逗号分隔（可选）",
+    discordPublicKey: "Discord application public key",
+    discordBotToken: "Discord bot token",
+    discordWebhookPath: "Discord interactions webhook path",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

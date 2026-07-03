@@ -18,12 +18,28 @@ import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
+import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp, formatTelegramCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
+import type {
+  BindingMethod,
+  DiscordSetupInput,
+  DiscordSetupMode,
+  GitHubSetupInput,
+  GitLabSetupInput,
+  HermesSetupInput,
+  LarkSetupMethod,
+  OpenTagSetupInput,
+  SetupDefaults,
+  SlackSetupInput,
+  SlackSetupMode,
+  TelegramSetupInput,
+  TelegramSetupMode
+} from "./types.js";
 
 const DEFAULT_HERMES_PROFILE_TEMPLATE =
   "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
+const DEFAULT_TELEGRAM_AGENT_ID = "opentag";
+const DEFAULT_DISCORD_WEBHOOK_PATH = "/discord/interactions";
 
 type LarkCredentialInput = {
   appId: string;
@@ -63,6 +79,17 @@ export type SetupCommandOptions = {
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
   gitlabPort?: string;
+  telegramMode?: string;
+  telegramBotToken?: string;
+  telegramBotId?: string;
+  telegramBotUsername?: string;
+  telegramSecretToken?: string;
+  telegramBindingAdminUserIds?: string;
+  telegramCallbackUri?: string;
+  discordMode?: string;
+  discordPublicKey?: string;
+  discordBotToken?: string;
+  discordWebhookPath?: string;
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
@@ -98,6 +125,18 @@ function parseSlackSetupMode(value: string): SlackSetupMode {
   const normalized = value.trim().toLowerCase().replace(/-/g, "_");
   if (normalized === "socket_mode" || normalized === "events_api") return normalized;
   throw new Error("Slack mode must be socket_mode or events_api.");
+}
+
+function parseTelegramSetupMode(value: string): TelegramSetupMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "polling" || normalized === "webhook") return normalized;
+  throw new Error("Telegram mode must be polling or webhook.");
+}
+
+function parseDiscordSetupMode(value: string): DiscordSetupMode {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "gateway" || normalized === "webhook") return normalized;
+  throw new Error("Discord mode must be gateway or webhook.");
 }
 
 function parseBindingMethod(value: string): BindingMethod {
@@ -291,6 +330,34 @@ function parseGitLabWebhookPath(value: string): string {
     throw new Error("GitLab webhook path must start with /.");
   }
   return trimmed;
+}
+
+function parseTelegramBotIdFromToken(token: string): string {
+  const match = token.trim().match(/^(\d+):\S+$/);
+  if (!match) {
+    throw new Error("Telegram bot token must look like 123456789:secret from BotFather.");
+  }
+  return match[1]!;
+}
+
+function parseTelegramBindingAdminUserIds(value: string | undefined): string[] | undefined {
+  const items = value
+    ?.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items?.length ? items : undefined;
+}
+
+function parseWebhookPath(value: string, label: string): string {
+  const trimmed = nonEmpty(value, label);
+  if (!trimmed.startsWith("/")) {
+    throw new Error(`${label} must start with /.`);
+  }
+  return trimmed;
+}
+
+function generateTelegramSecretToken(): string {
+  return randomBytes(32).toString("base64url");
 }
 
 function hasManualLarkCredentials(options: SetupCommandOptions): boolean {
@@ -888,6 +955,105 @@ async function collectGitLabSetup(
   };
 }
 
+async function collectTelegramSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<TelegramSetupInput> {
+  const mode = options.telegramMode ? parseTelegramSetupMode(options.telegramMode) : defaults.telegramMode ?? "polling";
+  if (!options.telegramBotToken) {
+    prompts.note(formatTelegramCredentialHelp(language));
+  }
+  const botToken = nonEmpty(
+    options.telegramBotToken ?? (await prompts.password({ message: t(language, "telegramBotToken") })),
+    "Telegram bot token"
+  );
+  const botIdFromToken = parseTelegramBotIdFromToken(botToken);
+  const botId = nonEmpty(options.telegramBotId ?? defaults.telegramBotId ?? botIdFromToken, "Telegram bot id");
+  if (botId !== botIdFromToken) {
+    throw new Error("Telegram bot id must match the numeric prefix of the bot token.");
+  }
+  const botUsername = optionalTrimmed(
+    options.telegramBotUsername ??
+      (options.yes
+        ? defaults.telegramBotUsername
+        : await prompts.text({
+            message: t(language, "telegramBotUsername"),
+            ...(defaults.telegramBotUsername ? { initialValue: defaults.telegramBotUsername } : { placeholder: "opentag_bot" })
+          }))
+  );
+  const bindingAdminUserIds =
+    parseTelegramBindingAdminUserIds(options.telegramBindingAdminUserIds) ??
+    (options.telegramBindingAdminUserIds === undefined ? defaults.telegramBindingAdminUserIds : undefined);
+  if (mode === "polling" && options.telegramSecretToken) {
+    throw new Error("Telegram webhook secret token is only used with --telegram-mode webhook.");
+  }
+  const secretToken =
+    mode === "webhook"
+      ? nonEmpty(options.telegramSecretToken ?? defaults.telegramSecretToken ?? generateTelegramSecretToken(), "Telegram webhook secret token")
+      : undefined;
+  const callbackUri = optionalTrimmed(options.telegramCallbackUri ?? defaults.telegramCallbackUri);
+  if (callbackUri) {
+    // Reuse URL parsing for an actionable setup-time error instead of a later
+    // config-schema failure.
+    new URL(callbackUri);
+  }
+  return {
+    mode,
+    botId,
+    agentId: DEFAULT_TELEGRAM_AGENT_ID,
+    ...(botUsername ? { botUsername } : {}),
+    botToken,
+    ...(bindingAdminUserIds ? { bindingAdminUserIds } : {}),
+    ...(secretToken ? { secretToken } : {}),
+    ...(callbackUri ? { callbackUri } : {})
+  };
+}
+
+async function collectDiscordSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<DiscordSetupInput> {
+  const mode = options.discordMode ? parseDiscordSetupMode(options.discordMode) : defaults.discordMode ?? "gateway";
+  if ((mode === "webhook" && !options.discordPublicKey) || !options.discordBotToken) {
+    prompts.note(formatDiscordCredentialHelp(language));
+  }
+  if (mode === "gateway" && options.discordPublicKey) {
+    throw new Error("Discord application public key is only used with --discord-mode webhook.");
+  }
+  const publicKey =
+    mode === "webhook"
+      ? nonEmpty(
+          options.discordPublicKey ??
+            (await prompts.text({
+              message: t(language, "discordPublicKey"),
+              placeholder: "Ed25519 public key"
+            })),
+          "Discord application public key"
+        )
+      : undefined;
+  const botToken = nonEmpty(
+    options.discordBotToken ?? (await prompts.password({ message: t(language, "discordBotToken") })),
+    "Discord bot token"
+  );
+  if (mode === "gateway" && options.discordWebhookPath) {
+    throw new Error("Discord interactions webhook path is only used with --discord-mode webhook.");
+  }
+  const webhookPath =
+    mode === "webhook"
+      ? parseWebhookPath(options.discordWebhookPath ?? defaults.discordWebhookPath ?? DEFAULT_DISCORD_WEBHOOK_PATH, "Discord interactions webhook path")
+      : undefined;
+  return {
+    mode,
+    ...(publicKey ? { publicKey } : {}),
+    botToken,
+    ...(webhookPath ? { webhookPath } : {})
+  };
+}
+
 async function collectBindingMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
@@ -963,6 +1129,8 @@ export async function collectSetupInput(
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const telegramSetup = platform === "telegram" ? await collectTelegramSetup(options, defaults, prompts, language) : undefined;
+  const discordSetup = platform === "discord" ? await collectDiscordSetup(options, defaults, prompts, language) : undefined;
   const larkPersistedCredentials = larkCredentials
     ? {
         appId: larkCredentials.appId,
@@ -991,7 +1159,9 @@ export async function collectSetupInput(
       : {}),
     ...(slackSetup ? { slack: slackSetup } : {}),
     ...(githubSetup ? { github: githubSetup } : {}),
-    ...(gitlabSetup ? { gitlab: gitlabSetup } : {})
+    ...(gitlabSetup ? { gitlab: gitlabSetup } : {}),
+    ...(telegramSetup ? { telegram: telegramSetup } : {}),
+    ...(discordSetup ? { discord: discordSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));
