@@ -339,6 +339,7 @@ function ledgerCategoryForEventType(type: string): AgentWorkLedgerCategory {
   if (type.startsWith("admission.")) return "admission";
   if (type.startsWith("context_packet.")) return "context_packet";
   if (type.startsWith("executor.capability.")) return "executor_capability";
+  if (type === "callback.progress.suppressed") return "progress_visibility";
   if (type.startsWith("callback.")) return "callback_delivery";
   if (type.startsWith("source_receipt.")) return "callback_delivery";
   if (type.startsWith("approval.")) return "approval_decision";
@@ -348,7 +349,7 @@ function ledgerCategoryForEventType(type: string): AgentWorkLedgerCategory {
   if (type === "run.completed") return "final_outcome";
   if (type === "run.cancelled" || type.includes(".cancel")) return "cancellation";
   if (type.includes("timeout") || type === "run.timed_out") return "timeout";
-  if (type === "callback.progress.suppressed" || type === "run.progress") return "progress_visibility";
+  if (type === "run.progress") return "progress_visibility";
   if (type.startsWith("run.")) return "lifecycle";
   if (type.startsWith("security.") || type.endsWith(".failed")) return "error";
   return "audit";
@@ -2445,7 +2446,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             visibility: RunEventVisibilitySchema.parse(row.visibility),
             importance: RunEventImportanceSchema.parse(row.importance),
             ...(row.message ? { message: row.message } : {}),
-            payload: JSON.parse(row.payloadJson) as unknown,
+            payload: row.payloadJson ? (JSON.parse(row.payloadJson) as unknown) : {},
             createdAt: row.createdAt,
             category: ledgerCategoryForEventType(row.type)
           }))

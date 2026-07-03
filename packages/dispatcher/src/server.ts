@@ -1509,16 +1509,26 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
   return ["Results:", ...outcomes.map((outcome) => `- ${applyOutcomeSummary(outcome)}`)];
 }
 
-function sanitizeApplyFailureDetail(detail: string): string {
-  return detail
+function sanitizeApplyFailureDetail(detail: unknown): string {
+  return String(detail ?? "")
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
     .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
     .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
     .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
+    .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 220);
+}
+
+function sanitizeApplyOutcomeForStorage(outcome: ApplyIntentOutcome): ApplyIntentOutcome {
+  return {
+    ...outcome,
+    ...(outcome.message ? { message: sanitizeApplyFailureDetail(outcome.message) } : {}),
+    ...(outcome.error ? { error: sanitizeApplyFailureDetail(outcome.error) } : {})
+  };
 }
 
 function applyFallbackReason(input: { plan: ApplyPlan; selectedIntentIds: string[] }): string {
@@ -1786,7 +1796,10 @@ async function updateExecutedApplyPlan(input: {
   resolved: ResolvedThreadAction;
   executedOutcomes: ApplyIntentOutcome[];
 }): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
-  const executedOutcomeByIntentId = new Map(input.executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+  const executedOutcomeByIntentId = new Map(input.executedOutcomes.map((outcome) => {
+    const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+    return [sanitized.intentId, sanitized];
+  }));
   const mergedOutcomes = (input.plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
   const updated = await input.repo.updateApplyPlanOutcomes({
     id: input.plan.id,
@@ -3883,7 +3896,10 @@ export function createDispatcherApp(input: {
           );
         }
       }
-      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => [outcome.intentId, outcome]));
+      const executedOutcomeByIntentId = new Map(executedOutcomes.map((outcome) => {
+        const sanitized = sanitizeApplyOutcomeForStorage(outcome);
+        return [sanitized.intentId, sanitized];
+      }));
       const mergedOutcomes = (plan.outcomes ?? []).map((outcome) => executedOutcomeByIntentId.get(outcome.intentId) ?? outcome);
       const executedPlan = await repo.updateApplyPlanOutcomes({
         id: plan.id,

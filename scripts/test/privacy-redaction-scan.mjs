@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const defaultPaths = ["packages/dispatcher/test/fixtures/replay", ".omx/live-e2e", ".omx/governance-matrix"];
 const scannedExtensions = new Set([".json", ".md", ".txt", ".log"]);
+const localAbsolutePathRegex =
+  /(?:\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"',)]+|\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"',)]+|[A-Za-z]:\\Users\\[^\s"',)]+)/g;
 
 const patterns = [
   {
@@ -36,7 +38,7 @@ const patterns = [
   {
     id: "local_absolute_path",
     description: "local absolute path",
-    regex: /\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"',)]+/g
+    regex: localAbsolutePathRegex
   },
   {
     id: "lark_message_id",
@@ -131,21 +133,57 @@ function lineForIndex(content, index) {
 
 function isAllowedMatch(finding) {
   if (finding.patternId !== "local_absolute_path") return false;
-  return finding.match.includes("/Users/test/") || finding.match.includes("/Users/example/");
+  return (
+    finding.match.includes("/Users/test/") ||
+    finding.match.includes("/Users/example/") ||
+    finding.match.includes("/home/test/") ||
+    finding.match.includes("/home/example/") ||
+    finding.match.includes("C:\\Users\\test\\") ||
+    finding.match.includes("C:\\Users\\example\\")
+  );
 }
 
 function redactExcerpt(value) {
   return value
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-private-key]")
+    .replace(/-{0,5}BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*/g, "[redacted-private-key]")
+    .replace(/^[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted-private-key]")
     .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted-github-token]")
     .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted-gitlab-token]")
     .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted-slack-token]")
     .replace(/"(?:authorization|PRIVATE-TOKEN|private[_-]?token|token|secret|webhookSecret|botToken|appSecret|privateKey)"\s*:\s*"[^"]+"/gi, "\"[redacted-secret-field]\"")
-    .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"',)]+/g, "[redacted-local-path]")
+    .replace(localAbsolutePathRegex, "[redacted-local-path]")
     .replace(/\bom_[A-Za-z0-9]{20,}\b/g, "[redacted-lark-message-id]");
+}
+
+function collectPrivateKeyRanges(content) {
+  const ranges = [];
+  const regex = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g;
+  for (const match of content.matchAll(regex)) {
+    const index = match.index ?? 0;
+    ranges.push({ start: index, end: index + match[0].length });
+  }
+  return ranges;
+}
+
+function excerptForRange(content, start, end, privateKeyRanges) {
+  const chunks = [];
+  let cursor = start;
+  for (const range of privateKeyRanges) {
+    if (range.end <= start) continue;
+    if (range.start >= end) break;
+    const plainEnd = Math.min(range.start, end);
+    if (cursor < plainEnd) chunks.push(content.slice(cursor, plainEnd));
+    chunks.push("[redacted-private-key]");
+    cursor = Math.max(cursor, Math.min(range.end, end));
+  }
+  if (cursor < end) chunks.push(content.slice(cursor, end));
+  return redactExcerpt(chunks.join("").replace(/\s+/g, " ").trim());
 }
 
 function scanFile(file) {
   const content = readFileSync(file, "utf8");
+  const privateKeyRanges = collectPrivateKeyRanges(content);
   const findings = [];
   for (const pattern of patterns) {
     pattern.regex.lastIndex = 0;
@@ -160,7 +198,7 @@ function scanFile(file) {
         patternId: pattern.id,
         description: pattern.description,
         match: matched,
-        excerpt: redactExcerpt(content.slice(start, end).replace(/\s+/g, " ").trim())
+        excerpt: excerptForRange(content, start, end, privateKeyRanges)
       };
       if (!isAllowedMatch(finding)) findings.push(finding);
     }
@@ -208,7 +246,7 @@ function main() {
   if (options.reportPath) {
     const outputPath = resolve(rootDir, options.reportPath);
     mkdirSync(dirname(outputPath), { recursive: true });
-    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   }
 
   if (options.json) {

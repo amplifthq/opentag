@@ -644,6 +644,7 @@ function ledgerCategoryForStatus(type: unknown): string {
   if (type.startsWith("admission.")) return "admission";
   if (type.startsWith("context_packet.")) return "context_packet";
   if (type.startsWith("executor.capability.")) return "executor_capability";
+  if (type === "callback.progress.suppressed") return "progress_visibility";
   if (type.startsWith("callback.") || type.startsWith("source_receipt.")) return "callback_delivery";
   if (type.startsWith("approval.")) return "approval_decision";
   if (type.startsWith("apply_plan.")) return "apply_plan";
@@ -651,7 +652,7 @@ function ledgerCategoryForStatus(type: unknown): string {
   if (type === "run.completed") return "final_outcome";
   if (type === "run.cancelled" || type.includes(".cancel")) return "cancellation";
   if (type.includes("timeout") || type === "run.timed_out") return "timeout";
-  if (type === "callback.progress.suppressed" || type === "run.progress") return "progress_visibility";
+  if (type === "run.progress") return "progress_visibility";
   if (type.startsWith("run.")) return "lifecycle";
   if (type.startsWith("security.") || type.endsWith(".failed")) return "error";
   return "audit";

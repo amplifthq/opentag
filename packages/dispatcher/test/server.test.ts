@@ -5692,7 +5692,9 @@ describe("dispatcher API", () => {
             authorization: new Headers(init?.headers).get("authorization")
           });
           if (init?.method === "POST") {
-            return new Response("Validation Failed: pull request already exists for this head", { status: 422 });
+            return new Response("Validation Failed: pull request already exists for this head; token ghp_aaaaaaaaaaaaaaaaaaaa; path /home/alice/repos/demo", {
+              status: 422
+            });
           }
           return Response.json({ name: String(url).split("/").at(-1) });
         }
@@ -5753,7 +5755,7 @@ describe("dispatcher API", () => {
           {
             intentId: "intent_create_pr_failed",
             outcome: "failed",
-            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head"
+            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]"
           }
         ]
       },
@@ -5779,8 +5781,12 @@ describe("dispatcher API", () => {
     expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
     expect(finalMessage).toContain("Child run:");
     expect(finalMessage).toContain("Reason: Direct apply failed: create pull request failed: 422 Validation Failed: pull request already exists for this head");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
     expect(finalMessage).not.toContain("proposal_thread_create_pr_failed");
     expect(finalMessage).not.toContain("intent_create_pr_failed");
+    expect(finalMessage).not.toContain("ghp_aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("/home/alice/repos/demo");
     expect(finalMessage).not.toContain("gh_test");
     expect(finalMessage).not.toContain("authorization");
   });
@@ -5922,7 +5928,9 @@ describe("dispatcher API", () => {
             token: new Headers(init?.headers).get("PRIVATE-TOKEN")
           });
           if (init?.method === "POST") {
-            return new Response("A merge request already exists for this source branch", { status: 409 });
+            return new Response("A merge request already exists for this source branch; token glpat-aaaaaaaaaaaaaaaaaaaa; path C:\\Users\\alice\\repo", {
+              status: 409
+            });
           }
           return Response.json({ name: String(url).split("/").at(-1) });
         }
@@ -5981,7 +5989,7 @@ describe("dispatcher API", () => {
           {
             intentId: "intent_create_mr_failed",
             outcome: "failed",
-            error: "create merge request failed: 409 A merge request already exists for this source branch"
+            error: "create merge request failed: 409 A merge request already exists for this source branch; token [redacted]; path [redacted local path]"
           }
         ]
       },
@@ -6007,8 +6015,12 @@ describe("dispatcher API", () => {
     expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
     expect(finalMessage).toContain("Child run:");
     expect(finalMessage).toContain("Reason: Direct apply failed: create merge request failed: 409 A merge request already exists for this source branch");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
     expect(finalMessage).not.toContain("proposal_thread_create_mr_failed");
     expect(finalMessage).not.toContain("intent_create_mr_failed");
+    expect(finalMessage).not.toContain("glpat-aaaaaaaaaaaaaaaaaaaa");
+    expect(finalMessage).not.toContain("C:\\Users\\alice\\repo");
     expect(finalMessage).not.toContain("glpat_test");
     expect(finalMessage).not.toContain("PRIVATE-TOKEN");
   });

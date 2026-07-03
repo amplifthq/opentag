@@ -358,7 +358,7 @@ async function main() {
   if (options.reportPath) {
     const outputPath = resolve(rootDir, options.reportPath);
     mkdirSync(dirname(outputPath), { recursive: true });
-    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+    writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   }
 
   if (options.json) {

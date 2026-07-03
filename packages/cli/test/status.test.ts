@@ -462,6 +462,13 @@ describe("OpenTag CLI status", () => {
                 importance: "normal",
                 message: "Delivered final receipt.",
                 createdAt: "2026-06-24T00:01:00.000Z"
+              },
+              {
+                type: "callback.progress.suppressed",
+                visibility: "audit",
+                importance: "low",
+                message: "Suppressed progress callback.",
+                createdAt: "2026-06-24T00:01:01.000Z"
               }
             ]
           }
@@ -498,11 +505,12 @@ describe("OpenTag CLI status", () => {
     expect(formatRunStatus(summary)).toContain("Metrics: 2 events, 1 suggested action(s), 0 apply plan(s), 0 stale intent(s)");
     expect(formatRunStatus(summary)).toContain("Agent Work Ledger:");
     expect(formatRunStatus(summary)).toContain(
-      "entries: 5 (source_event=1, context_packet=1, executor_capability=1, artifact=1, callback_delivery=1)"
+      "entries: 6 (source_event=1, context_packet=1, executor_capability=1, artifact=1, callback_delivery=1, progress_visibility=1)"
     );
     expect(formatRunStatus(summary)).toContain("source_event: source_event.received - github source event comment_status_run received.");
     expect(formatRunStatus(summary)).toContain("executor_capability: executor.capability.snapshot - Captured executor capability.");
     expect(formatRunStatus(summary)).toContain("artifact: artifact.created - Stored run artifacts.");
+    expect(formatRunStatus(summary)).toContain("progress_visibility: callback.progress.suppressed - Suppressed progress callback.");
     expect(formatRunStatus(summary)).toContain("Liveness:");
     expect(formatRunStatus(summary)).toContain("Provider: github (status_update)");
     expect(formatRunStatus(summary)).toContain("Human callbacks: 1; thread noise ratio: 0.5");

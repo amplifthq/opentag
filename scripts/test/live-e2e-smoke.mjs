@@ -91,7 +91,7 @@ const cases = [
       "NODE_OPTIONS='--conditions=development' packages/dispatcher/node_modules/.bin/tsx scripts/dev/run-lark-message-patch-live-test.ts",
     requiredCommands: [process.env.OPENTAG_LARK_CLI || "lark-cli"],
     notes: [
-      "Requires lark-cli auth status to report ready user and bot identities.",
+      "Requires lark-cli auth status to report a ready bot identity and either a ready user identity or cached user openId.",
       "Optionally set OPENTAG_LARK_LIVE_CHAT_ID and OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID together."
     ]
   }
