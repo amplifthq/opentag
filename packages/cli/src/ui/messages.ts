@@ -33,6 +33,7 @@ type MessageKey =
   | "discordPublicKey"
   | "discordBotToken"
   | "discordChannelId"
+  | "discordWebhookPath"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -71,6 +72,7 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     discordPublicKey: "Discord application public key (64 hex characters)",
     discordBotToken: "Discord bot token",
     discordChannelId: "Discord channel ID to bind",
+    discordWebhookPath: "Discord interactions path on the dispatcher",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -108,6 +110,7 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     discordPublicKey: "Discord 应用公钥（64 位十六进制）",
     discordBotToken: "Discord 机器人令牌（Bot Token）",
     discordChannelId: "要绑定的 Discord 频道 ID",
+    discordWebhookPath: "Discord interactions 端点路径（挂在 dispatcher 上）",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

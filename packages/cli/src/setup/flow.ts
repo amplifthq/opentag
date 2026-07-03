@@ -956,6 +956,25 @@ async function collectDiscordSetup(
       })),
     "Discord channel ID"
   );
+  const webhookPathDefault = defaults.discordWebhookPath ?? "/discord/interactions";
+  const webhookPath = parseDiscordWebhookPath(
+    options.discordWebhookPath ??
+      (options.yes
+        ? webhookPathDefault
+        : await prompts.text({
+            message: t(language, "discordWebhookPath"),
+            initialValue: webhookPathDefault,
+            placeholder: "/discord/interactions",
+            validate(value) {
+              try {
+                parseDiscordWebhookPath(value);
+                return undefined;
+              } catch (error) {
+                return error instanceof Error ? error.message : String(error);
+              }
+            }
+          }))
+  );
   const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "discord");
   return {
     applicationId,
@@ -963,7 +982,7 @@ async function collectDiscordSetup(
     botToken,
     channelId,
     bindingMethod,
-    webhookPath: parseDiscordWebhookPath(options.discordWebhookPath ?? defaults.discordWebhookPath ?? "/discord/interactions")
+    webhookPath
   };
 }
 

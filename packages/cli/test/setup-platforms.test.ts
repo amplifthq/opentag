@@ -416,4 +416,75 @@ describe("OpenTag CLI setup platforms", () => {
     expect(config.preferences?.lastSetup?.discordApplicationId).toBe("1234567890");
     expect(config.preferences?.lastSetup?.discordChannelId).toBe("9876543210");
   });
+
+  it("prompts for the Discord interactions path when it is not provided", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const askedMessages: string[] = [];
+    const prompts: PromptAdapter = {
+      intro() {},
+      outro() {},
+      note() {},
+      async select<Value extends string>(input: { options: Array<PromptOption<Value>>; initialValue?: Value }): Promise<Value> {
+        return input.initialValue ?? input.options[0]!.value;
+      },
+      async text(input) {
+        askedMessages.push(input.message);
+        if (input.message.includes("interactions path")) return "/custom/interactions";
+        return input.initialValue ?? "";
+      },
+      async password() {
+        return "secret_prompt";
+      },
+      async confirm() {
+        return true;
+      }
+    };
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordApplicationId: "1234567890",
+        discordPublicKey: "d".repeat(64),
+        discordBotToken: "discord_bot_token",
+        discordChannelId: "9876543210",
+        start: false,
+        force: true
+      },
+      { prompts }
+    );
+
+    expect(askedMessages.some((message) => message.includes("interactions path"))).toBe(true);
+    const config = readCliConfig(configPath);
+    expect(config.platforms.discord?.webhookPath).toBe("/custom/interactions");
+  });
+
+  it("honors the --discord-webhook-path flag without prompting", async () => {
+    const configPath = join(tempDir(), "config.json");
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordApplicationId: "1234567890",
+        discordPublicKey: "e".repeat(64),
+        discordBotToken: "discord_bot_token",
+        discordChannelId: "9876543210",
+        discordWebhookPath: "/flag/interactions",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.discord?.webhookPath).toBe("/flag/interactions");
+  });
 });
