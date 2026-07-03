@@ -89,6 +89,18 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
             repo: target.repo
           }
         ]
+      : []),
+    ...(input.discord && input.discord.bindingMethod === "default_project"
+      ? [
+          {
+            provider: "discord",
+            accountId: input.discord.applicationId,
+            conversationId: input.discord.channelId,
+            repoProvider: target.provider,
+            owner: target.owner,
+            repo: target.repo
+          }
+        ]
       : [])
   ];
 
@@ -129,6 +141,12 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               gitlabProjectPathWithNamespace: input.gitlab.projectPathWithNamespace,
               gitlabBaseUrl: input.gitlab.baseUrl,
               gitlabPort: input.gitlab.port
+            }
+          : {}),
+        ...(input.discord
+          ? {
+              discordApplicationId: input.discord.applicationId,
+              discordChannelId: input.discord.channelId
             }
           : {})
       }
@@ -217,6 +235,18 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               baseUrl: input.gitlab.baseUrl,
               webhookPath: input.gitlab.webhookPath,
               port: input.gitlab.port
+            }
+          }
+        : {}),
+      ...(input.discord
+        ? {
+            discord: {
+              applicationId: input.discord.applicationId,
+              publicKey: input.discord.publicKey,
+              botToken: input.discord.botToken,
+              channelId: input.discord.channelId,
+              defaultProjectBinding: input.discord.bindingMethod === "default_project",
+              webhookPath: input.discord.webhookPath
             }
           }
         : {})

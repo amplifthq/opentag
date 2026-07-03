@@ -18,9 +18,9 @@ import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
+import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
-import type { BindingMethod, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
+import type { BindingMethod, DiscordSetupInput, GitHubSetupInput, GitLabSetupInput, HermesSetupInput, LarkSetupMethod, OpenTagSetupInput, SetupDefaults, SlackSetupInput, SlackSetupMode } from "./types.js";
 
 const DEFAULT_HERMES_PROFILE_TEMPLATE =
   "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
@@ -63,6 +63,11 @@ export type SetupCommandOptions = {
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
   gitlabPort?: string;
+  discordApplicationId?: string;
+  discordPublicKey?: string;
+  discordBotToken?: string;
+  discordChannelId?: string;
+  discordWebhookPath?: string;
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
@@ -888,21 +893,95 @@ async function collectGitLabSetup(
   };
 }
 
+function parseDiscordPublicKey(value: string): string {
+  const trimmed = nonEmpty(value, "Discord public key").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(trimmed)) {
+    throw new Error("Discord public key must be 64 hex characters (Developer Portal → General Information).");
+  }
+  return trimmed;
+}
+
+function parseDiscordWebhookPath(value: string): string {
+  const trimmed = nonEmpty(value, "Discord interactions path");
+  if (!trimmed.startsWith("/")) {
+    throw new Error("Discord interactions path must start with /.");
+  }
+  return trimmed;
+}
+
+async function collectDiscordSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<DiscordSetupInput> {
+  if (!options.discordPublicKey || !options.discordBotToken) {
+    prompts.note(formatDiscordCredentialHelp(language));
+  }
+  const applicationId = nonEmpty(
+    options.discordApplicationId ??
+      (await prompts.text({
+        message: t(language, "discordApplicationId"),
+        placeholder: "1234567890123456789",
+        ...(defaults.discordApplicationId ? { initialValue: defaults.discordApplicationId } : {})
+      })),
+    "Discord application ID"
+  );
+  const publicKey = parseDiscordPublicKey(
+    options.discordPublicKey ??
+      (await prompts.text({
+        message: t(language, "discordPublicKey"),
+        placeholder: "64 hex characters",
+        ...(defaults.discordPublicKey ? { initialValue: defaults.discordPublicKey } : {}),
+        validate(value) {
+          try {
+            parseDiscordPublicKey(value);
+            return undefined;
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        }
+      }))
+  );
+  const botToken = nonEmpty(
+    options.discordBotToken ?? (await prompts.password({ message: t(language, "discordBotToken") })),
+    "Discord bot token"
+  );
+  const channelId = nonEmpty(
+    options.discordChannelId ??
+      (await prompts.text({
+        message: t(language, "discordChannelId"),
+        placeholder: "1234567890123456789",
+        ...(defaults.discordChannelId ? { initialValue: defaults.discordChannelId } : {})
+      })),
+    "Discord channel ID"
+  );
+  const bindingMethod = await collectBindingMethod(options, defaults, prompts, language, "discord");
+  return {
+    applicationId,
+    publicKey,
+    botToken,
+    channelId,
+    bindingMethod,
+    webhookPath: parseDiscordWebhookPath(options.discordWebhookPath ?? defaults.discordWebhookPath ?? "/discord/interactions")
+  };
+}
+
 async function collectBindingMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
   prompts: PromptAdapter,
   language: CliLanguage,
-  platform: "lark" | "slack"
+  platform: "lark" | "slack" | "discord"
 ): Promise<BindingMethod> {
   if (options.binding) {
     const binding = parseBindingMethod(options.binding);
-    if (platform === "slack" && binding === "bind_later") {
-      throw new Error("Slack setup requires a channel binding. Use --binding default_project.");
+    if (platform !== "lark" && binding === "bind_later") {
+      throw new Error(`${platform === "slack" ? "Slack" : "Discord"} setup requires a channel binding. Use --binding default_project.`);
     }
     return binding;
   }
-  if (platform === "slack") {
+  if (platform !== "lark") {
     return "default_project";
   }
   const message =
@@ -963,6 +1042,7 @@ export async function collectSetupInput(
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const discordSetup = platform === "discord" ? await collectDiscordSetup(options, defaults, prompts, language) : undefined;
   const larkPersistedCredentials = larkCredentials
     ? {
         appId: larkCredentials.appId,
@@ -991,7 +1071,8 @@ export async function collectSetupInput(
       : {}),
     ...(slackSetup ? { slack: slackSetup } : {}),
     ...(githubSetup ? { github: githubSetup } : {}),
-    ...(gitlabSetup ? { gitlab: gitlabSetup } : {})
+    ...(gitlabSetup ? { gitlab: gitlabSetup } : {}),
+    ...(discordSetup ? { discord: discordSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));

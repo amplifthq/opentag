@@ -107,6 +107,15 @@ export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySe
     });
   }
 
+  if (config.platforms.discord) {
+    const webhookPath = config.platforms.discord.webhookPath ?? "/discord/interactions";
+    checks.push({
+      status: "ok",
+      name: "Discord interaction signature",
+      message: `Configured locally; the relay ${webhookPath} endpoint must verify the Ed25519 signature before creating runs.`
+    });
+  }
+
   if (config.platforms.slack || config.platforms.lark) {
     const unsupported = [
       config.platforms.slack ? "Slack" : undefined,

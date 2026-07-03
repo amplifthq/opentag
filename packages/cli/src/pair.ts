@@ -80,6 +80,10 @@ function gitlabRelayWebhookUrl(relayUrl: string, webhookPath = "/gitlab/webhooks
   return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
 }
 
+function discordRelayInteractionsUrl(relayUrl: string, webhookPath = "/discord/interactions"): string {
+  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
+}
+
 export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
   const projectTargets = input.config.daemon.repositories.map((repository) => {
     return `  ${formatConfiguredProjectTargetSummary(repository)}`;
@@ -96,6 +100,9 @@ export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
     ...(input.config.platforms.github ? [`GitHub webhook URL: ${githubRelayWebhookUrl(input.relayUrl)}`] : []),
     ...(input.config.platforms.gitlab
       ? [`GitLab webhook URL: ${gitlabRelayWebhookUrl(input.relayUrl, input.config.platforms.gitlab.webhookPath)}`]
+      : []),
+    ...(input.config.platforms.discord
+      ? [`Discord Interactions Endpoint URL: ${discordRelayInteractionsUrl(input.relayUrl, input.config.platforms.discord.webhookPath)}`]
       : []),
     "Next steps:",
     `  opentag start --config ${input.configPath}`,

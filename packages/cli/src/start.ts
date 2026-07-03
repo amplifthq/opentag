@@ -124,7 +124,9 @@ function requireGitLabConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
 }
 
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
-  return Boolean(config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab);
+  return Boolean(
+    config.platforms.lark || config.platforms.slack || config.platforms.github || config.platforms.gitlab || config.platforms.discord
+  );
 }
 
 function positiveIntegerFromEnv(name: string, value: string | undefined): number | undefined {
@@ -249,17 +251,17 @@ export function dispatcherRuntimeInputFromCliConfig(
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
-  // Discord (experimental) is env-only for now — no config.platforms.discord until
-  // slice 3. When the public key is set it mounts alongside an existing startable
-  // platform (e.g. Lark).
+  // config.platforms.discord is canonical; the OPENTAG_DISCORD_* env vars remain a
+  // fallback so env-only experimental setups keep working without a config block.
   const env = input.env ?? process.env;
-  const discordPublicKey = env.OPENTAG_DISCORD_PUBLIC_KEY;
-  const discordBotToken = env.OPENTAG_DISCORD_BOT_TOKEN;
-  const discordWebhookPath = env.OPENTAG_DISCORD_WEBHOOK_PATH;
+  const discord = config.platforms.discord;
+  const discordPublicKey = discord?.publicKey ?? env.OPENTAG_DISCORD_PUBLIC_KEY;
+  const discordBotToken = discord?.botToken ?? env.OPENTAG_DISCORD_BOT_TOKEN;
+  const discordWebhookPath = discord?.webhookPath ?? env.OPENTAG_DISCORD_WEBHOOK_PATH;
   if (discordPublicKey && !discordBotToken) {
     // Without the bot token the interactions app still mounts and ACKs slash commands,
     // but every progress/final callback would silently fail — fail fast instead.
-    throw new Error("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+    throw new Error("Discord platform requires a bot token for callbacks (platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN).");
   }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
@@ -634,6 +636,14 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
       } else {
         logger.log("Lark / Feishu: connected through Personal Agent long connection");
       }
+    }
+    if (config.platforms.discord) {
+      const discord = config.platforms.discord;
+      const webhookPath = discord.webhookPath ?? "/discord/interactions";
+      logger.log(`Discord interactions: ${config.daemon.dispatcherUrl.replace(/\/$/, "")}${webhookPath} (mounted on the dispatcher)`);
+      logger.log(`Discord Interactions Endpoint URL: https://<public-tunnel>${webhookPath}`);
+      logger.log(`Discord channel binding: ${discord.applicationId}/${discord.channelId}`);
+      logger.log(`Tunnel example: cloudflared tunnel --url ${config.daemon.dispatcherUrl}`);
     }
     logger.log("Press Ctrl-C to stop.");
 

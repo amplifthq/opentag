@@ -139,6 +139,25 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
           ])
     );
   }
+  if (input.discord) {
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            `Discord 应用 ID: ${input.discord.applicationId}`,
+            `Discord 频道绑定: ${input.discord.channelId}`,
+            `Discord interactions 本地端点: http://localhost:3030${input.discord.webhookPath}（挂在 dispatcher 上）`,
+            `Interactions Endpoint URL: https://<public-tunnel>${input.discord.webhookPath}`,
+            `默认绑定当前项目: ${yesNo(input.discord.bindingMethod === "default_project", input.language)}`
+          ]
+        : [
+            `Discord application ID: ${input.discord.applicationId}`,
+            `Discord channel binding: ${input.discord.channelId}`,
+            `Discord interactions local endpoint: http://localhost:3030${input.discord.webhookPath} (mounted on the dispatcher)`,
+            `Interactions Endpoint URL: https://<public-tunnel>${input.discord.webhookPath}`,
+            `Default project binding: ${yesNo(input.discord.bindingMethod === "default_project", input.language)}`
+          ])
+    );
+  }
   const sessionProfileLines =
     input.agentSessionProfile && (input.agentSessionProfile.profile || input.agentSessionProfile.profileTemplate)
       ? input.language === "zh-CN"
@@ -161,6 +180,8 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
   const slack = config.platforms.slack;
+  const discord = config.platforms.discord;
+  const discordWebhookPath = discord?.webhookPath ?? "/discord/interactions";
   const githubPort = github?.port ?? DEFAULT_GITHUB_WEBHOOK_PORT;
   const gitlabPort = gitlab?.port ?? DEFAULT_GITLAB_WEBHOOK_PORT;
   if (language === "zh-CN") {
@@ -192,7 +213,14 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
       gitlab ? "Content type: application/json" : undefined,
       gitlab ? "Events: Note events" : undefined,
       gitlab ? `本地监听: ${gitlabLocalWebhookUrl({ port: gitlab.port, webhookPath: gitlab.webhookPath })}` : undefined,
-      gitlab ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${gitlabPort}。` : undefined
+      gitlab ? `公网 URL 需要由 tunnel 指向本地监听地址，例如 ngrok http ${gitlabPort}。` : undefined,
+      discord ? "" : undefined,
+      discord ? "Discord 下一步：" : undefined,
+      discord ? `绑定频道: ${discord.applicationId}/${discord.channelId}` : undefined,
+      discord ? `本地 interactions 端点: http://localhost:3030${discordWebhookPath}（挂在 dispatcher 上）` : undefined,
+      discord ? "起公网 tunnel 指向 3030（例如 cloudflared tunnel --url http://localhost:3030），" : undefined,
+      discord ? `再把 https://<tunnel>${discordWebhookPath} 填进 Developer Portal 的 Interactions Endpoint URL（保存时会用 PING 验证）。` : undefined,
+      discord ? "还需注册 /opentag 斜杠命令，注册命令见配置教程 docs/platforms/discord.zh-CN.md。" : undefined
     ]
       .filter((line): line is string => Boolean(line))
       .join("\n");
@@ -225,7 +253,14 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
     gitlab ? "Content type: application/json" : undefined,
     gitlab ? "Events: Note events" : undefined,
     gitlab ? `Local listener: ${gitlabLocalWebhookUrl({ port: gitlab.port, webhookPath: gitlab.webhookPath })}` : undefined,
-    gitlab ? `Point a public tunnel at the local listener, for example: ngrok http ${gitlabPort}.` : undefined
+    gitlab ? `Point a public tunnel at the local listener, for example: ngrok http ${gitlabPort}.` : undefined,
+    discord ? "" : undefined,
+    discord ? "Discord next steps:" : undefined,
+    discord ? `Bound channel: ${discord.applicationId}/${discord.channelId}` : undefined,
+    discord ? `Local interactions endpoint: http://localhost:3030${discordWebhookPath} (mounted on the dispatcher)` : undefined,
+    discord ? "Run a public tunnel to port 3030 (for example: cloudflared tunnel --url http://localhost:3030)," : undefined,
+    discord ? `then paste https://<tunnel>${discordWebhookPath} into the Developer Portal Interactions Endpoint URL (Discord verifies it with a PING).` : undefined,
+    discord ? "Register the /opentag slash command; see docs/platforms/discord.en.md for the exact command." : undefined
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n");

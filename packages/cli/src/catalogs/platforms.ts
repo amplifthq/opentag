@@ -29,6 +29,10 @@ const PLATFORM_SETUP_GUIDE_FILES: Partial<Record<PlatformId, Record<CliLanguage,
   gitlab: {
     en: "gitlab.en.md",
     "zh-CN": "gitlab.zh-CN.md"
+  },
+  discord: {
+    en: "discord.en.md",
+    "zh-CN": "discord.zh-CN.md"
   }
 };
 
@@ -66,8 +70,8 @@ export const PLATFORM_CATALOG: PlatformDescriptor[] = [
   {
     id: "discord",
     label: "Discord",
-    status: "experimental_setup_pending",
-    startable: false
+    status: "setup_ready",
+    startable: true
   }
 ];
 

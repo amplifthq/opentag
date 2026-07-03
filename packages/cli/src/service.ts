@@ -508,6 +508,13 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const discord = config.platforms.discord;
+  if (discord) {
+    lines.push(
+      `  discord: ingress=dispatcher_interactions path=${discord.webhookPath ?? "/discord/interactions"}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, binding=discord:${discord.applicationId}/${discord.channelId}`
+    );
+  }
+
   const slack = config.platforms.slack;
   if (slack) {
     const mode = slack.mode ?? "events_api";

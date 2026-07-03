@@ -258,6 +258,17 @@ const GitLabPlatformSchema = z
   })
   .strict();
 
+const DiscordPlatformSchema = z
+  .object({
+    applicationId: z.string().min(1),
+    publicKey: z.string().regex(/^[0-9a-fA-F]{64}$/, "Discord public key must be 64 hex characters."),
+    botToken: SecretStringSchema,
+    channelId: z.string().min(1),
+    defaultProjectBinding: z.boolean().optional(),
+    webhookPath: z.string().min(1).optional()
+  })
+  .strict();
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -279,7 +290,9 @@ const PreferencesSchema = z
         githubAutoCreatePullRequest: z.boolean().optional(),
         gitlabProjectPathWithNamespace: z.string().min(1).optional(),
         gitlabBaseUrl: z.string().url().optional(),
-        gitlabPort: OptionalPortSchema
+        gitlabPort: OptionalPortSchema,
+        discordApplicationId: z.string().min(1).optional(),
+        discordChannelId: z.string().min(1).optional()
       })
       .strict()
       .optional()
@@ -304,7 +317,8 @@ export const OpenTagCliConfigSchema = z
         lark: LarkPlatformSchema.optional(),
         slack: SlackPlatformSchema.optional(),
         github: GitHubPlatformSchema.optional(),
-        gitlab: GitLabPlatformSchema.optional()
+        gitlab: GitLabPlatformSchema.optional(),
+        discord: DiscordPlatformSchema.optional()
       })
       .strict()
   })

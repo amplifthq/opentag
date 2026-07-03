@@ -29,6 +29,10 @@ type MessageKey =
   | "gitlabProject"
   | "gitlabToken"
   | "gitlabPort"
+  | "discordApplicationId"
+  | "discordPublicKey"
+  | "discordBotToken"
+  | "discordChannelId"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -63,6 +67,10 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab project (group/project or group/subgroup/project)",
     gitlabToken: "GitLab access token for source-thread replies",
     gitlabPort: "Local GitLab webhook port",
+    discordApplicationId: "Discord application ID",
+    discordPublicKey: "Discord application public key (64 hex characters)",
+    discordBotToken: "Discord bot token",
+    discordChannelId: "Discord channel ID to bind",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -96,6 +104,10 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
     gitlabToken: "GitLab access token（用于回写 source thread）",
     gitlabPort: "本地 GitLab webhook 端口",
+    discordApplicationId: "Discord 应用 ID（Application ID）",
+    discordPublicKey: "Discord 应用公钥（64 位十六进制）",
+    discordBotToken: "Discord 机器人令牌（Bot Token）",
+    discordChannelId: "要绑定的 Discord 频道 ID",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

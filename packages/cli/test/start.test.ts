@@ -79,6 +79,26 @@ function slackSocketModeConfig() {
   });
 }
 
+const DISCORD_PUBLIC_KEY = "a".repeat(64);
+
+function discordConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "discord",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    discord: {
+      applicationId: "1234567890",
+      publicKey: DISCORD_PUBLIC_KEY,
+      botToken: "discord_bot_token",
+      channelId: "9876543210",
+      bindingMethod: "default_project",
+      webhookPath: "/discord/interactions"
+    }
+  });
+}
+
 function githubConfig(port?: number) {
   return createSetupConfig({
     language: "en",
@@ -358,7 +378,7 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(() =>
       dispatcherRuntimeInputFromCliConfig(built, { env: { OPENTAG_DISCORD_PUBLIC_KEY: "pubkey" } })
-    ).toThrow("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+    ).toThrow("Discord platform requires a bot token for callbacks (platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN).");
   });
 
   it("passes the documented Discord webhook path through to the runtime input", () => {
@@ -376,6 +396,34 @@ describe("OpenTag CLI start wiring", () => {
       discordPublicKey: "pubkey",
       discordBotToken: "bot",
       discordWebhookPath: "/custom/discord"
+    });
+  });
+
+  it("treats a Discord-only config as startable and wires platforms.discord into the runtime input", () => {
+    const built = discordConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built, { env: {} })).toMatchObject({
+      discordPublicKey: DISCORD_PUBLIC_KEY,
+      discordBotToken: "discord_bot_token",
+      discordWebhookPath: "/discord/interactions"
+    });
+  });
+
+  it("prefers platforms.discord over the OPENTAG_DISCORD_* env fallback", () => {
+    const built = discordConfig();
+
+    expect(
+      dispatcherRuntimeInputFromCliConfig(built, {
+        env: {
+          OPENTAG_DISCORD_PUBLIC_KEY: "env-key",
+          OPENTAG_DISCORD_BOT_TOKEN: "env-bot",
+          OPENTAG_DISCORD_WEBHOOK_PATH: "/env/discord"
+        }
+      })
+    ).toMatchObject({
+      discordPublicKey: DISCORD_PUBLIC_KEY,
+      discordBotToken: "discord_bot_token",
+      discordWebhookPath: "/discord/interactions"
     });
   });
 

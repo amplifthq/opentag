@@ -344,4 +344,76 @@ describe("OpenTag CLI setup platforms", () => {
       ])
     );
   });
+
+  it("prints the Discord setup guide before collecting Discord credentials", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordApplicationId: "1234567890",
+        discordPublicKey: "a".repeat(64),
+        discordBotToken: "discord_bot_token",
+        discordChannelId: "9876543210",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts(notes) }
+    );
+
+    expect(notes.join("\n")).toContain("https://github.com/amplifthq/opentag/blob/main/docs/platforms/discord.en.md");
+    expect(notes.join("\n")).toContain("https://discord.com/developers/applications");
+    expect(notes.join("\n")).toContain("The /opentag slash command must be registered");
+  });
+
+  it("writes a Discord config and default channel binding", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const publicKey = "b".repeat(64);
+
+    await runSetupCommand(
+      {
+        config: configPath,
+        project: tempDir(),
+        language: "en",
+        platform: "discord",
+        executor: "echo",
+        discordApplicationId: "1234567890",
+        discordPublicKey: publicKey,
+        discordBotToken: "discord_bot_token",
+        discordChannelId: "9876543210",
+        start: false,
+        force: true,
+        yes: true
+      },
+      { prompts: testPrompts() }
+    );
+
+    const config = readCliConfig(configPath);
+    expect(config.platforms.discord).toMatchObject({
+      applicationId: "1234567890",
+      publicKey,
+      botToken: "discord_bot_token",
+      channelId: "9876543210",
+      defaultProjectBinding: true,
+      webhookPath: "/discord/interactions"
+    });
+    expect(config.daemon.channelBindings).toEqual([
+      {
+        provider: "discord",
+        accountId: "1234567890",
+        conversationId: "9876543210",
+        repoProvider: config.daemon.repositories[0]!.provider,
+        owner: config.daemon.repositories[0]!.owner,
+        repo: config.daemon.repositories[0]!.repo
+      }
+    ]);
+    expect(config.preferences?.lastSetup?.discordApplicationId).toBe("1234567890");
+    expect(config.preferences?.lastSetup?.discordChannelId).toBe("9876543210");
+  });
 });

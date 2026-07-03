@@ -10,6 +10,8 @@ function defaultBindingMethod(config: OpenTagCliConfig): BindingMethod | undefin
   if (config.platforms.lark) return "default_project";
   if (config.platforms.slack?.defaultProjectBinding === false) return "bind_later";
   if (config.platforms.slack) return "default_project";
+  if (config.platforms.discord?.defaultProjectBinding === false) return "bind_later";
+  if (config.platforms.discord) return "default_project";
   return undefined;
 }
 
@@ -19,6 +21,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  const discord = config.platforms.discord;
   const hermes = config.daemon.hermes;
   const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
@@ -37,7 +40,9 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
             ? { platform: "github" }
             : gitlab
               ? { platform: "gitlab" }
-              : {}),
+              : discord
+                ? { platform: "discord" }
+                : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
@@ -71,6 +76,18 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.gitlabPort ? { gitlabPort: lastSetup.gitlabPort } : gitlab?.port ? { gitlabPort: gitlab.port } : {}),
     ...(gitlab?.webhookSecret ? { gitlabWebhookSecret: gitlab.webhookSecret } : {}),
     ...(gitlab?.webhookPath ? { gitlabWebhookPath: gitlab.webhookPath } : {}),
+    ...(lastSetup?.discordApplicationId
+      ? { discordApplicationId: lastSetup.discordApplicationId }
+      : discord?.applicationId
+        ? { discordApplicationId: discord.applicationId }
+        : {}),
+    ...(lastSetup?.discordChannelId
+      ? { discordChannelId: lastSetup.discordChannelId }
+      : discord?.channelId
+        ? { discordChannelId: discord.channelId }
+        : {}),
+    ...(discord?.publicKey ? { discordPublicKey: discord.publicKey } : {}),
+    ...(discord?.webhookPath ? { discordWebhookPath: discord.webhookPath } : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };
 }
