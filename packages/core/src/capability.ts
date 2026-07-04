@@ -58,11 +58,11 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
     id: "telegram",
     receivesEvents: true,
     repliesToSourceThread: true,
-    supportsStatusUpdates: false,
-    supportsRichPresentation: false,
+    supportsStatusUpdates: true,
+    supportsRichPresentation: true,
     supportsActionReplies: false,
     requiresExplicitAddressing: false,
-    livenessStrategy: "thread_reply"
+    livenessStrategy: "status_update"
   },
   discord: {
     id: "discord",

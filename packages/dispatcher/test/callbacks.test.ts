@@ -396,7 +396,7 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
-  it("posts Telegram callback messages to sendMessage", async () => {
+  it("posts Telegram callback messages to sendMessage without quoting non-ack messages", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createTelegramCallbackSink({
       botToken: "telegram-token",
@@ -409,7 +409,7 @@ describe("createGitHubCallbackSink", () => {
       }) as typeof fetch
     });
 
-    await sink.deliver({
+    const result = await sink.deliver({
       runId: "run_1",
       kind: "final",
       provider: "telegram",
@@ -424,15 +424,14 @@ describe("createGitHubCallbackSink", () => {
         body: {
           chat_id: "-1001",
           text: "done",
-          reply_to_message_id: 789,
-          message_thread_id: 42,
-          allow_sending_without_reply: true
+          message_thread_id: 42
         }
       }
     ]);
+    expect(result).toEqual({ externalMessageId: "999" });
   });
 
-  it("streams Telegram progress messages through sendMessageDraft with a stable draft id", async () => {
+  it("edits a Telegram status card with editMessageText after the acknowledgement", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createTelegramCallbackSink({
       botToken: "telegram-token",
@@ -441,49 +440,92 @@ describe("createGitHubCallbackSink", () => {
           url: String(url),
           body: JSON.parse(String(init?.body))
         });
-        return Response.json({ ok: true });
+        return String(url).endsWith("/sendMessage")
+          ? Response.json({ ok: true, result: { message_id: 100 } })
+          : Response.json({ ok: true, result: true });
       }) as typeof fetch
     });
 
-    await sink.deliver({
+    const first = await sink.deliver({
       runId: "run_1",
-      kind: "progress",
+      kind: "acknowledgement",
       provider: "telegram",
       uri: "https://api.telegram.org/sendMessage",
       threadKey: "bot_123|-1001|789|42",
       statusMessageKey: "run_1:status",
-      body: "step 1"
+      body: "<b>OpenTag picked this up</b>",
+      rich: {
+        provider: "telegram",
+        payload: {
+          parseMode: "HTML",
+          replyMarkup: {
+            inline_keyboard: [[{ text: "Copy run id", copy_text: { text: "run_1" } }]]
+          }
+        }
+      }
     });
-    await sink.deliver({
+    const second = await sink.deliver({
       runId: "run_1",
       kind: "progress",
       provider: "telegram",
       uri: "https://api.telegram.org/sendMessage",
       threadKey: "bot_123|-1001|789|42",
       statusMessageKey: "run_1:status",
-      body: "step 2"
+      body: "<b>OpenTag is working</b>",
+      rich: {
+        provider: "telegram",
+        payload: { parseMode: "HTML" }
+      }
+    });
+    const final = await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "telegram",
+      uri: "https://api.telegram.org/sendMessage",
+      threadKey: "bot_123|-1001|789|42",
+      statusMessageKey: "run_1:status",
+      body: "<b>OpenTag finished</b>",
+      rich: {
+        provider: "telegram",
+        payload: { parseMode: "HTML" }
+      }
     });
 
     expect(requests).toEqual([
       {
-        url: "https://api.telegram.org/bottelegram-token/sendMessageDraft",
+        url: "https://api.telegram.org/bottelegram-token/sendMessage",
         body: {
           chat_id: "-1001",
-          text: "step 1",
-          draft_id: 1,
+          text: "<b>OpenTag picked this up</b>",
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [[{ text: "Copy run id", copy_text: { text: "run_1" } }]]
+          },
           message_thread_id: 42
         }
       },
       {
-        url: "https://api.telegram.org/bottelegram-token/sendMessageDraft",
+        url: "https://api.telegram.org/bottelegram-token/editMessageText",
         body: {
           chat_id: "-1001",
-          text: "step 2",
-          draft_id: 1,
-          message_thread_id: 42
+          message_id: 100,
+          text: "<b>OpenTag is working</b>",
+          parse_mode: "HTML"
+        }
+      },
+      {
+        url: "https://api.telegram.org/bottelegram-token/editMessageText",
+        body: {
+          chat_id: "-1001",
+          message_id: 100,
+          text: "<b>OpenTag finished</b>",
+          parse_mode: "HTML"
         }
       }
     ]);
+    expect(first).toEqual({ externalMessageId: "100" });
+    expect(second).toEqual({ externalMessageId: "100" });
+    expect(final).toEqual({ externalMessageId: "100" });
   });
 
   it("selects Slack bot tokens by agent id when provided", async () => {

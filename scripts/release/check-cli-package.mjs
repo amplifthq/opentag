@@ -10,6 +10,7 @@ const packageDirs = [
   "core",
   "client",
   "telegram",
+  "discord",
   "runner",
   "store",
   "github",

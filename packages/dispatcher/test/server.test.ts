@@ -3227,6 +3227,105 @@ describe("dispatcher API", () => {
     ]);
   });
 
+  it("uses one editable Telegram status card from acknowledgement through final", async () => {
+    const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; richProvider?: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {}),
+            ...(message.externalMessageId ? { externalMessageId: message.externalMessageId } : {}),
+            ...(message.rich?.provider ? { richProvider: message.rich.provider } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "100" };
+        }
+      }
+    });
+
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1",
+        workspacePath: "/Users/test/demo",
+        defaultExecutor: "echo"
+      })
+    );
+
+    const response = await app.request(
+      "/v1/runs",
+      jsonRequest({
+        runId: "run_telegram_status_card",
+        event: {
+          ...validEvent,
+          id: "evt_telegram_status_card",
+          source: "telegram",
+          sourceEventId: "EvTelegramStatusCard",
+          actor: { provider: "telegram", providerUserId: "789", handle: "alice" },
+          permissions: [
+            { scope: "chat:postMessage", reason: "reply in Telegram" },
+            { scope: "runner:local", reason: "execute locally" }
+          ],
+          callback: {
+            provider: "telegram",
+            uri: "https://api.telegram.org/sendMessage",
+            threadKey: "bot_123|-1001|789|42"
+          },
+          metadata: { repoProvider: "github", owner: "acme", repo: "demo", botId: "bot_123", chatId: "-1001" }
+        }
+      })
+    );
+    expect(response.status).toBe(201);
+
+    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(
+      (await app.request(
+        "/v1/runners/runner_1/runs/run_telegram_status_card/running",
+        jsonRequest({ executor: "echo" })
+      )).status
+    ).toBe(200);
+    expect(
+      (await app.request(
+        "/v1/runners/runner_1/runs/run_telegram_status_card/complete",
+        jsonRequest({
+          result: {
+            conclusion: "success",
+            summary: "Echoed OpenTag command: hi",
+            verification: [{ command: "echo", outcome: "passed" }]
+          }
+        })
+      )).status
+    ).toBe(200);
+
+    expect(delivered).toEqual([
+      {
+        kind: "acknowledgement",
+        body: expect.stringContaining("<b>OpenTag picked this up</b>"),
+        statusMessageKey: "run_telegram_status_card:status",
+        richProvider: "telegram"
+      },
+      {
+        kind: "progress",
+        body: expect.stringContaining("<b>OpenTag is working</b>"),
+        statusMessageKey: "run_telegram_status_card:status",
+        externalMessageId: "100",
+        richProvider: "telegram"
+      },
+      {
+        kind: "final",
+        body: expect.stringContaining("<b>OpenTag finished</b>"),
+        statusMessageKey: "run_telegram_status_card:status",
+        externalMessageId: "100",
+        richProvider: "telegram"
+      }
+    ]);
+  });
+
   it("delivers a running liveness status when a status-update provider starts executing", async () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string }> = [];
     const app = createDispatcherApp({

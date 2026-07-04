@@ -1098,6 +1098,62 @@ describe("OpenTag CLI setup", () => {
     ).rejects.toThrow("GitHub webhook path must start with /.");
   });
 
+  it("rejects a Telegram bot id that does not match the token prefix", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          platform: "telegram",
+          executor: "echo",
+          telegramBotToken: "123456789:telegram_secret",
+          telegramBotId: "987654321",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("Telegram bot id must match the numeric prefix of the bot token.");
+  });
+
+  it("rejects a Discord webhook path that is not rooted", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          platform: "discord",
+          executor: "echo",
+          discordMode: "webhook",
+          discordPublicKey: "discord_public_key",
+          discordBotToken: "discord_bot_token",
+          discordWebhookPath: "discord/interactions",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("Discord interactions webhook path must start with /.");
+  });
+
+  it("rejects a Discord public key in default Gateway mode", async () => {
+    await expect(
+      runSetupCommand(
+        {
+          config: join(tempDir(), "config.json"),
+          project: tempDir(),
+          platform: "discord",
+          executor: "echo",
+          discordPublicKey: "discord_public_key",
+          discordBotToken: "discord_bot_token",
+          force: true,
+          yes: true
+        },
+        { prompts: testPrompts() }
+      )
+    ).rejects.toThrow("Discord application public key is only used with --discord-mode webhook.");
+  });
+
   it("writes Hermes setup options into daemon config", async () => {
     const configPath = join(tempDir(), "config.json");
 

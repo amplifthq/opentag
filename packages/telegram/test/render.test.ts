@@ -1,30 +1,43 @@
 import { describe, expect, it } from "vitest";
 import { createFinalSummaryPresentation } from "@opentag/core";
-import { renderTelegramAcknowledgement, renderTelegramFinalResult, renderTelegramFinalSummaryPresentation, renderTelegramProgress } from "../src/render.js";
+import {
+  createTelegramFinalSummaryReplyMarkup,
+  renderTelegramAcknowledgement,
+  renderTelegramFinalResult,
+  renderTelegramFinalSummaryPresentation,
+  renderTelegramProgress
+} from "../src/render.js";
 
 describe("Telegram callback rendering", () => {
   it("renders acknowledgement and compact progress", () => {
-    expect(renderTelegramAcknowledgement("run_1")).toContain("run_1");
-    expect(renderTelegramProgress("Thinking hard")).toBe("Thinking...");
-    expect(renderTelegramProgress("Running tests")).toBe("Working...");
+    expect(renderTelegramAcknowledgement("run_1")).toBe(
+      ["<b>OpenTag picked this up</b>", "Run: <code>run_1</code>", "Status: <b>received</b>"].join("\n")
+    );
+    expect(renderTelegramProgress("Thinking hard", { runId: "run_1" })).toBe(
+      ["<b>OpenTag is thinking</b>", "Run: <code>run_1</code>", "Status: <b>running</b>"].join("\n")
+    );
+    expect(renderTelegramProgress("Running tests", { runId: "run_1" })).toBe(
+      ["<b>OpenTag is working</b>", "Run: <code>run_1</code>", "Status: <b>running</b>", "", "Running tests"].join("\n")
+    );
   });
 
-  it("renders final results with audit fallback detail", () => {
+  it("renders final results with compact HTML-safe detail", () => {
     const text = renderTelegramFinalResult(
       {
         conclusion: "success",
-        summary: "Done.",
-        verification: [{ command: "pnpm test", outcome: "passed" }],
+        summary: "Done <safely>.",
+        verification: [{ command: "pnpm test --filter <x>", outcome: "passed" }],
         nextAction: "Review the PR."
       },
       { auditRunId: "run_1" }
     );
 
-    expect(text).toContain("success");
-    expect(text).toContain("Done.");
-    expect(text).toContain("pnpm test");
-    expect(text).toContain("Review the PR.");
-    expect(text).toContain("Audit: opentag status --run run_1");
+    expect(text).toContain("<b>OpenTag finished</b>");
+    expect(text).toContain("Status: <b>success</b> · Run: <code>run_1</code>");
+    expect(text).toContain("Summary: Done &lt;safely&gt;.");
+    expect(text).toContain("Verification: pnpm test --filter &lt;x&gt;: passed");
+    expect(text).toContain("Next: Review the PR.");
+    expect(text).not.toContain("opentag status --run run_1");
   });
 
   it("renders final fallback text from semantic final summary presentation", () => {
@@ -40,21 +53,16 @@ describe("Telegram callback rendering", () => {
 
     expect(renderTelegramFinalSummaryPresentation(presentation)).toBe(
       [
-        "Finished with success.",
-        "",
-        "Done semantically.",
-        "",
-        "Verification:",
-        "- pnpm test: passed",
-        "",
-        "Next action: Review the PR.",
-        "",
-        "Audit: opentag status --run run_semantic_telegram"
+        "<b>OpenTag finished</b>",
+        "Status: <b>success</b> · Run: <code>run_semantic_telegram</code>",
+        "Summary: Done semantically.",
+        "Verification: pnpm test: passed",
+        "Next: Review the PR."
       ].join("\n")
     );
   });
 
-  it("renders artifacts in final fallback text", () => {
+  it("summarizes artifacts in final fallback text", () => {
     const presentation = createFinalSummaryPresentation({
       result: {
         conclusion: "success",
@@ -70,12 +78,40 @@ describe("Telegram callback rendering", () => {
     });
 
     const text = renderTelegramFinalSummaryPresentation(presentation);
-    expect(text).toContain("Artifacts:");
-    expect(text).toContain("- patch: Generated patch: opentag/run_1.patch");
-    expect(text).toContain("- report: Run report: opentag/run_1-report.md");
-    expect(text).toContain("- screenshot: UI screenshot: opentag/run_1.png");
-    expect(text).toContain("- log_summary: Log summary: opentag/run_1-log.md");
-    expect(text).not.toContain("- pull_request: Pull request: https://github.com/acme/demo/pull/1");
-    expect(text).toContain("+1 more artifact(s) in audit/status.");
+    expect(text).toContain("Artifacts: 5 artifacts available · 1 openable link · 4 local-only items via audit");
+    expect(text).not.toContain("patch: Generated patch");
+    expect(text).not.toContain("report: Run report");
+    expect(text).not.toContain("screenshot: UI screenshot");
+    expect(text).not.toContain("log_summary: Log summary");
+    expect(text).not.toContain("opentag/run_1.patch");
+    expect(text).not.toContain("https://github.com/acme/demo/pull/1");
+  });
+
+  it("renders Telegram-native reply markup for safe copy and URL actions", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_1",
+      result: {
+        conclusion: "success",
+        summary: "Produced artifacts.",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/1",
+        artifacts: [
+          { kind: "report", title: "Local report", uri: "opentag://run/run_1/report" },
+          { kind: "screenshot", title: "Screenshot", uri: "https://example.com/run_1.png" }
+        ]
+      }
+    });
+
+    expect(createTelegramFinalSummaryReplyMarkup(presentation)).toEqual({
+      inline_keyboard: [
+        [
+          { text: "Copy run id", copy_text: { text: "run_1" } },
+          { text: "Copy audit", copy_text: { text: "opentag status --run run_1" } }
+        ],
+        [
+          { text: "Open PR", url: "https://github.com/acme/demo/pull/1" },
+          { text: "Open screenshot", url: "https://example.com/run_1.png" }
+        ]
+      ]
+    });
   });
 });

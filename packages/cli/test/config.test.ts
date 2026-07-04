@@ -147,6 +147,18 @@ describe("OpenTag CLI config", () => {
     source.daemon.githubApplyToken = "apply_secret";
     source.daemon.runnerToken = "runner_secret";
     source.daemon.runnerTokens = ["runner_old_secret"];
+    source.platforms.telegram = {
+      mode: "webhook",
+      botId: "123456789",
+      botToken: "telegram_bot_secret",
+      secretToken: "telegram_webhook_secret"
+    };
+    source.platforms.discord = {
+      mode: "webhook",
+      publicKey: "discord_public_key",
+      botToken: "discord_bot_secret",
+      webhookPath: "/discord/interactions"
+    };
     const redacted = redactedCliConfig(source);
 
     expect(JSON.stringify(redacted)).toContain("[REDACTED]");
@@ -154,6 +166,10 @@ describe("OpenTag CLI config", () => {
     expect(JSON.stringify(redacted)).not.toContain("apply_secret");
     expect(JSON.stringify(redacted)).not.toContain("runner_secret");
     expect(JSON.stringify(redacted)).not.toContain("runner_old_secret");
+    expect(JSON.stringify(redacted)).not.toContain("telegram_bot_secret");
+    expect(JSON.stringify(redacted)).not.toContain("telegram_webhook_secret");
+    expect(JSON.stringify(redacted)).not.toContain("discord_bot_secret");
+    expect(JSON.stringify(redacted)).toContain("discord_public_key");
   });
 
   it("resolves env secret refs when reading runtime config", () => {

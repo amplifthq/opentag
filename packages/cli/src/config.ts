@@ -19,6 +19,8 @@ const CliLanguageSchema = z.enum(["en", "zh-CN"]);
 const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram", "discord"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
+const TelegramModeSchema = z.enum(["polling", "webhook"]);
+const DiscordModeSchema = z.enum(["gateway", "webhook"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 const OptionalPortSchema = z.number().int().min(1).max(65535).optional();
 
@@ -258,6 +260,38 @@ const GitLabPlatformSchema = z
   })
   .strict();
 
+const TelegramPlatformSchema = z
+  .object({
+    mode: TelegramModeSchema.optional(),
+    botId: z.string().min(1),
+    agentId: z.string().min(1).optional(),
+    botUsername: z.string().min(1).optional(),
+    botToken: SecretStringSchema,
+    bindingAdminUserIds: z.array(z.string().min(1)).optional(),
+    secretToken: SecretStringSchema.optional(),
+    callbackUri: z.string().url().optional()
+  })
+  .strict();
+
+const DiscordPlatformSchema = z
+  .object({
+    mode: DiscordModeSchema.optional(),
+    publicKey: z.string().min(1).optional(),
+    botToken: SecretStringSchema,
+    webhookPath: z.string().min(1).optional()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const mode = value.mode ?? "gateway";
+    if (mode === "webhook" && !value.publicKey) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["publicKey"],
+        message: "Discord webhook mode requires publicKey."
+      });
+    }
+  });
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -279,7 +313,12 @@ const PreferencesSchema = z
         githubAutoCreatePullRequest: z.boolean().optional(),
         gitlabProjectPathWithNamespace: z.string().min(1).optional(),
         gitlabBaseUrl: z.string().url().optional(),
-        gitlabPort: OptionalPortSchema
+        gitlabPort: OptionalPortSchema,
+        telegramMode: TelegramModeSchema.optional(),
+        telegramBotId: z.string().min(1).optional(),
+        telegramBotUsername: z.string().min(1).optional(),
+        discordMode: DiscordModeSchema.optional(),
+        discordWebhookPath: z.string().min(1).optional()
       })
       .strict()
       .optional()
@@ -304,7 +343,9 @@ export const OpenTagCliConfigSchema = z
         lark: LarkPlatformSchema.optional(),
         slack: SlackPlatformSchema.optional(),
         github: GitHubPlatformSchema.optional(),
-        gitlab: GitLabPlatformSchema.optional()
+        gitlab: GitLabPlatformSchema.optional(),
+        telegram: TelegramPlatformSchema.optional(),
+        discord: DiscordPlatformSchema.optional()
       })
       .strict()
   })
@@ -438,6 +479,7 @@ function redactValue(key: string, value: unknown): unknown {
       "runnerToken",
       "runnerTokens",
       "pairingToken",
+      "secretToken",
       "signingSecret",
       "token",
       "webhookSecret"

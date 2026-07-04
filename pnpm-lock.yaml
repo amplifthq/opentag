@@ -464,6 +464,9 @@ importers:
       '@opentag/runner':
         specifier: workspace:*
         version: link:../runner
+      '@opentag/telegram':
+        specifier: workspace:*
+        version: link:../telegram
       zod:
         specifier: ^3.24.1
         version: 3.25.76
@@ -543,6 +546,9 @@ importers:
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
     devDependencies:
       tsup:
         specifier: ^8.5.1

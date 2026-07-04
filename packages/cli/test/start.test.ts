@@ -116,6 +116,38 @@ function gitlabConfig(port?: number) {
   });
 }
 
+function telegramConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "telegram",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    telegram: {
+      mode: "polling",
+      botId: "123456789",
+      agentId: "opentag",
+      botUsername: "opentag_bot",
+      botToken: "123456789:telegram_secret",
+      bindingAdminUserIds: ["111", "222"]
+    }
+  });
+}
+
+function discordConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "discord",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    discord: {
+      mode: "gateway",
+      botToken: "discord_bot_token"
+    }
+  });
+}
+
 async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -281,6 +313,43 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("derives dispatcher input for Telegram from saved setup config", () => {
+    const built = telegramConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      telegramBotToken: "123456789:telegram_secret",
+      telegramBots: [
+        {
+          botId: "123456789",
+          agentId: "opentag",
+          botUsername: "opentag_bot",
+          botToken: "123456789:telegram_secret",
+          bindingAdminUserIds: ["111", "222"]
+        }
+      ]
+    });
+  });
+
+  it("derives dispatcher input for Discord from saved setup config before env fallback", () => {
+    const built = discordConfig();
+
+    expect(
+      dispatcherRuntimeInputFromCliConfig(built, {
+        env: {
+          OPENTAG_DISCORD_PUBLIC_KEY: "env_public_key",
+          OPENTAG_DISCORD_BOT_TOKEN: "env_bot_token",
+          OPENTAG_DISCORD_WEBHOOK_PATH: "/env/discord"
+        }
+      })
+    ).toMatchObject({
+      discordMode: "gateway",
+      discordBotToken: "discord_bot_token"
+    });
+  });
+
   it("passes the service request body limit to GitHub webhook ingress", () => {
     const built = githubConfig();
 
@@ -358,7 +427,7 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(() =>
       dispatcherRuntimeInputFromCliConfig(built, { env: { OPENTAG_DISCORD_PUBLIC_KEY: "pubkey" } })
-    ).toThrow("Discord platform requires OPENTAG_DISCORD_BOT_TOKEN for callbacks.");
+    ).toThrow("Discord platform requires platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN.");
   });
 
   it("passes the documented Discord webhook path through to the runtime input", () => {
@@ -367,12 +436,14 @@ describe("OpenTag CLI start wiring", () => {
     expect(
       dispatcherRuntimeInputFromCliConfig(built, {
         env: {
+          OPENTAG_DISCORD_MODE: "webhook",
           OPENTAG_DISCORD_PUBLIC_KEY: "pubkey",
           OPENTAG_DISCORD_BOT_TOKEN: "bot",
           OPENTAG_DISCORD_WEBHOOK_PATH: "/custom/discord"
         }
       })
     ).toMatchObject({
+      discordMode: "webhook",
       discordPublicKey: "pubkey",
       discordBotToken: "bot",
       discordWebhookPath: "/custom/discord"
@@ -634,6 +705,55 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(calls.slice(0, 2)).toEqual(["ports", "dispatcher"]);
     expect(calls).toEqual(expect.arrayContaining(["wait", "bootstrap", "daemon", "lark-ingress", "lark.close", "dispatcher.close"]));
+  });
+
+  it("logs mounted Telegram and Discord dispatcher endpoints in local mode", async () => {
+    const built = telegramConfig();
+    built.platforms.discord = discordConfig().platforms.discord;
+    const calls: string[] = [];
+    const logs: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:3030",
+      server: {},
+      async close() {
+        calls.push("dispatcher.close");
+      }
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {
+          calls.push("ports");
+        },
+        startDispatcher() {
+          calls.push("dispatcher");
+          return dispatcherHandle;
+        },
+        async waitForDispatcher() {
+          calls.push("wait");
+        },
+        async bootstrapDispatcher() {
+          calls.push("bootstrap");
+        },
+        async serveDaemon() {
+          calls.push("daemon");
+        },
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(logs.join("\n")).toContain("Telegram: using getUpdates polling");
+    expect(logs.join("\n")).toContain("Telegram tunnel: not required in polling mode");
+    expect(logs.join("\n")).toContain("Discord: using Gateway connection");
+    expect(logs.join("\n")).toContain("Discord tunnel: not required in Gateway mode");
   });
 
   it("fails clearly for relay mode platform ingress that is not supported in the MVP", async () => {

@@ -21,7 +21,7 @@ opentag doctor
 `opentag setup` walks through the local governed-loop configuration:
 
 - Choose a language.
-- Choose a platform: Lark / Feishu, Slack, GitHub, or GitLab.
+- Choose a platform: Lark / Feishu, Slack, GitHub, GitLab, Telegram, or Discord.
 - Choose a coding agent: Codex, Claude Code, or Echo for local testing, including its executor capability boundary.
 - Configure platform credentials.
 - Bind the selected project.
@@ -68,6 +68,8 @@ The setup wizard links to the matching guide for each platform:
 - Slack: `docs/platforms/slack.en.md`
 - GitHub: `docs/platforms/github.en.md`
 - GitLab: `docs/platforms/gitlab.en.md`
+- Telegram: `docs/platforms/telegram.en.md`
+- Discord: `docs/platforms/discord.en.md`
 
 ## Requirements
 

@@ -7,10 +7,14 @@ describe("platform catalog command", () => {
 
     expect(output).toContain("CLI setup support:");
     expect(output).toContain("Lark / Feishu: Setup wizard ready");
+    expect(output).toContain("Telegram: Setup wizard ready");
+    expect(output).toContain("Discord: Setup wizard ready");
     expect(output).toContain("Platform capabilities:");
     expect(output).toContain("Lark / Feishu: events=yes");
     expect(output).toContain("Slack: events=yes");
     expect(output).toContain("GitHub: events=yes");
+    expect(output).toContain("Telegram: events=yes");
+    expect(output).toContain("Discord: events=yes");
     expect(output).toContain("rich=yes");
     expect(output).toContain("liveness=");
   });

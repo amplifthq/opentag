@@ -72,6 +72,7 @@
     "@opentag/dispatcher": "workspace:*",
     "@opentag/gitlab": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/telegram": "workspace:*",
     "@opentag/runner": "workspace:*",
     "zod": "^3.24.1"
   },

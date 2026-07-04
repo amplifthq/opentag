@@ -67,7 +67,7 @@ opentag setup
 
 Help the user choose:
 
-- Platform: Slack, GitHub, GitLab, or Lark / Feishu.
+- Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord.
 - Coding agent: Codex, Claude Code, or Echo.
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
@@ -79,6 +79,8 @@ walk the user through the provider console:
 - GitHub: `docs/platforms/github.en.md`
 - GitLab: `docs/platforms/gitlab.en.md`
 - Lark / Feishu: `docs/platforms/lark.en.md`
+- Telegram: `docs/platforms/telegram.en.md`
+- Discord: `docs/platforms/discord.en.md`
 
 Never ask the user to paste secrets into chat if a local prompt, environment
 variable, keychain item, or provider console entry is the safer place to enter

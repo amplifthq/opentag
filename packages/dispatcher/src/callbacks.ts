@@ -15,7 +15,12 @@ import {
   parseSlackThreadKey,
   slackSourceReceiptReactionName
 } from "@opentag/slack";
-import { createTelegramSendMessageDraftPayload, createTelegramSendMessagePayload, parseTelegramThreadKey } from "@opentag/telegram";
+import {
+  createTelegramEditMessageTextPayload,
+  createTelegramSendMessagePayload,
+  parseTelegramThreadKey,
+  telegramMessageRichPayloadFromUnknown
+} from "@opentag/telegram";
 import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
@@ -469,11 +474,10 @@ export function createTelegramCallbackSink(input: {
   fetchImpl?: FetchLike;
 }): CallbackSink {
   const fetchImpl = input.fetchImpl ?? fetch;
-  const draftIdByKey = new Map<string, number>();
-  let nextDraftId = 1;
+  const messageIdByKey = new Map<string, string>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "telegram") return;
       const botToken = slackBotTokenFor({
         botToken: input.botToken,
@@ -484,29 +488,29 @@ export function createTelegramCallbackSink(input: {
 
       const thread = parseTelegramThreadKey(message.threadKey ?? "");
       const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
-      const isDraft = message.kind === "progress";
-      const draftId = isDraft ? (draftIdByKey.get(statusKey) ?? nextDraftId++) : undefined;
-      if (isDraft && draftId && !draftIdByKey.has(statusKey)) {
-        draftIdByKey.set(statusKey, draftId);
-      }
+      const rich =
+        message.rich?.provider === "telegram" ? telegramMessageRichPayloadFromUnknown(message.rich.payload) ?? undefined : undefined;
+      const existingMessageId = message.externalMessageId ?? messageIdByKey.get(statusKey);
+      const parsedExistingMessageId = existingMessageId ? Number(existingMessageId) : undefined;
+      const canEdit = parsedExistingMessageId !== undefined && Number.isInteger(parsedExistingMessageId) && parsedExistingMessageId > 0;
 
-      const response = await fetchImpl(`https://api.telegram.org/bot${botToken}/${isDraft ? "sendMessageDraft" : "sendMessage"}`, {
+      const response = await fetchImpl(`https://api.telegram.org/bot${botToken}/${canEdit ? "editMessageText" : "sendMessage"}`, {
         method: "POST",
         headers: {
           "content-type": "application/json"
         },
         body: JSON.stringify(
-          isDraft
-            ? createTelegramSendMessageDraftPayload({
+          canEdit
+            ? createTelegramEditMessageTextPayload({
                 chatId: thread.chatId,
+                messageId: parsedExistingMessageId,
                 text: message.body,
-                draftId: draftId!,
-                ...(thread.messageThreadId ? { messageThreadId: thread.messageThreadId } : {})
+                ...(rich ? { rich } : {})
               })
             : createTelegramSendMessagePayload({
                 chatId: thread.chatId,
                 text: message.body,
-                replyToMessageId: thread.replyToMessageId,
+                ...(rich ? { rich } : {}),
                 ...(thread.messageThreadId ? { messageThreadId: thread.messageThreadId } : {})
               })
         )
@@ -519,9 +523,21 @@ export function createTelegramCallbackSink(input: {
       if (body.ok === false) {
         throw new Error(`deliver Telegram callback failed: ${body.description ?? "unknown_error"}`);
       }
-      if (message.kind === "final") {
-        draftIdByKey.delete(statusKey);
+      if (canEdit) {
+        if (message.kind === "final") {
+          messageIdByKey.delete(statusKey);
+        }
+        return { externalMessageId: String(parsedExistingMessageId) };
       }
+      const result = (body as { result?: { message_id?: unknown } }).result;
+      const deliveredMessageId = typeof result?.message_id === "number" ? String(result.message_id) : undefined;
+      if (deliveredMessageId && message.statusMessageKey) {
+        messageIdByKey.set(statusKey, deliveredMessageId);
+      }
+      if (message.kind === "final") {
+        messageIdByKey.delete(statusKey);
+      }
+      return deliveredMessageId ? { externalMessageId: deliveredMessageId } : undefined;
     }
   };
 }

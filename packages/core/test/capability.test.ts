@@ -13,7 +13,7 @@ describe("platform capability catalog", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.gitlab.livenessStrategy).toBe("thread_reply");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.slack.livenessStrategy).toBe("source_receipt");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.lark.livenessStrategy).toBe("source_receipt");
-    expect(OPEN_TAG_PLATFORM_CAPABILITIES.telegram.livenessStrategy).toBe("thread_reply");
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.telegram.livenessStrategy).toBe("status_update");
   });
 
   it("declares provider-native presentation capabilities separately from action replies", () => {
@@ -35,7 +35,7 @@ describe("platform capability catalog", () => {
 
     expect(shouldDeliverCallbackProgress("github")).toBe(true);
     expect(shouldDeliverCallbackProgress("gitlab")).toBe(false);
-    expect(shouldDeliverCallbackProgress("telegram")).toBe(false);
+    expect(shouldDeliverCallbackProgress("telegram")).toBe(true);
     expect(shouldDeliverCallbackProgress("slack")).toBe(false);
     expect(shouldDeliverCallbackProgress("lark")).toBe(false);
     expect(shouldDeliverCallbackProgress("custom")).toBe(true);

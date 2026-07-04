@@ -194,7 +194,7 @@ describe("Telegram events app", () => {
     expect(reply).toHaveBeenCalledWith(expect.objectContaining({
       chatId: "456",
       messageId: 101,
-      text: expect.stringContaining("OpenTag commands:")
+      text: expect.stringContaining("📚 OpenTag commands")
     }));
     expect(reply.mock.calls[0]?.[0].text).toContain("Project Targets never use absolute local paths");
   });
@@ -231,7 +231,7 @@ describe("Telegram events app", () => {
       repo: "demo"
     });
     expect(reply).toHaveBeenCalledWith(expect.objectContaining({
-      text: "Connected this Telegram chat to Project Target github:acme/demo. Send a task to start a run."
+      text: ["🔗 Bound", "", "📌 Target: github:acme/demo", "Send a task to start a run."].join("\n")
     }));
   });
 
@@ -407,8 +407,9 @@ describe("Telegram events app", () => {
       requestedBy: "telegram:789"
     });
     expect(reply).toHaveBeenCalledWith(expect.objectContaining({
-      text: expect.stringContaining("Cancellation requested for run run_active.")
+      text: expect.stringContaining("⏹️ Cancellation requested")
     }));
+    expect(reply.mock.calls[0]?.[0].text).toContain("🆔 Run: run_active");
     expect(reply.mock.calls[0]?.[0].text).toContain("will not treat this stop request as a successful completion");
   });
 
@@ -479,7 +480,8 @@ describe("Telegram events app", () => {
     await expect(confirmed.json()).resolves.toMatchObject({ ok: true, command: "unbind" });
     expect(createRun).not.toHaveBeenCalled();
     expect(unbindChannel).toHaveBeenCalledWith({ botId: "bot_123", chatId: "456" });
-    expect(reply.mock.calls[1]?.[0].text).toContain("Disconnected this Telegram chat from Project Target github:acme/demo");
+    expect(reply.mock.calls[1]?.[0].text).toContain("🔓 Unbound");
+    expect(reply.mock.calls[1]?.[0].text).toContain("Disconnected from github:acme/demo");
   });
 
   it("denies group /unbind by default before reading or deleting the Project Target binding", async () => {
@@ -535,7 +537,7 @@ describe("Telegram events app", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true, command: "doctor" });
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith(expect.objectContaining({
-      text: expect.stringContaining("OpenTag doctor (redacted):")
+      text: expect.stringContaining("🩺 OpenTag doctor (redacted)")
     }));
     expect(reply.mock.calls[0]?.[0].text).toContain("Secrets: redacted");
     expect(reply.mock.calls[0]?.[0].text).not.toContain("secret_token_value");
