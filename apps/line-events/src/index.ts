@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import type { OpenTagEvent } from "@opentag/core";
@@ -98,8 +97,8 @@ serve({
         repo: binding.repo
       });
     },
-    async createRun(event: OpenTagEvent) {
-      const runId = `run_${randomUUID()}`;
+    async createRun(event: OpenTagEvent, input) {
+      const runId = input.runId;
       await dispatcherClient.createRun({ runId, event });
       return { runId };
     },

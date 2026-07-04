@@ -9,6 +9,10 @@ function signedHeaders(rawBody: string) {
   };
 }
 
+function lineRunId(sourceEventId: string): string {
+  return `run_line_${Buffer.from(sourceEventId, "utf8").toString("base64url")}`;
+}
+
 describe("LINE events app", () => {
   it("rejects unknown accounts", async () => {
     const app = createLineEventsApp({
@@ -94,6 +98,51 @@ describe("LINE events app", () => {
     expect(response.status).toBe(200);
     expect(createRun).toHaveBeenCalledOnce();
     expect(createRun.mock.calls[0]?.[0]).toMatchObject({ source: "line", sourceEventId: "webhook_1", metadata: { webhookSignatureVerified: true } });
+    expect(createRun.mock.calls[0]?.[1]).toEqual({ runId: lineRunId("webhook_1") });
+  });
+
+  it("continues processing later events when one LINE event fails", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const recordControlPlaneEvent = vi.fn(async () => undefined);
+    const rawBody = JSON.stringify({
+      events: [
+        {
+          type: "message",
+          webhookEventId: "webhook_bad",
+          source: { type: "user", userId: "Ubad" },
+          message: { id: "msg_bad", type: "text", text: "fix bad" }
+        },
+        {
+          type: "message",
+          source: { type: "user", userId: "Uok" },
+          message: { id: "msg_ok", type: "text", text: "fix ok" }
+        }
+      ]
+    });
+    const app = createLineEventsApp({
+      lineAccounts: [{ accountId: "line_main", channelSecret: "secret", agentId: "opentag" }],
+      async resolveChannelBinding(input) {
+        if (input.conversationId === "Ubad") throw new Error("lookup failed");
+        return { accountId: "line_main", conversationId: input.conversationId, repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      createRun,
+      recordControlPlaneEvent,
+      now: () => "2026-07-02T00:00:00.000Z"
+    });
+
+    const response = await app.request("/line/events/line_main", { method: "POST", headers: signedHeaders(rawBody), body: rawBody });
+
+    expect(response.status).toBe(200);
+    expect(createRun).toHaveBeenCalledOnce();
+    expect(createRun.mock.calls[0]?.[0]).toMatchObject({ source: "line", sourceEventId: "msg_ok" });
+    expect(createRun.mock.calls[0]?.[1]).toEqual({ runId: lineRunId("msg_ok") });
+    expect(recordControlPlaneEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "line.webhook_event_failed",
+        subject: "line:line_main/Ubad",
+        payload: expect.objectContaining({ webhookEventId: "webhook_bad", messageId: "msg_bad", error: "lookup failed" })
+      })
+    );
   });
 
   it("records unbound LINE conversations for setup discovery", async () => {

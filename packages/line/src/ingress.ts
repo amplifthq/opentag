@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import { DEFAULT_MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError, readRequestTextWithLimit, type OpenTagEvent } from "@opentag/core";
@@ -45,7 +44,7 @@ export type LineEventsAppInput = {
   lineAccounts: LineAccountConfig[];
   resolveChannelBinding(input: { accountId: string; conversationId: string }): Promise<LineChannelBinding | null>;
   bindChannel?(binding: LineChannelBinding): Promise<void>;
-  createRun(event: OpenTagEvent): Promise<{ runId: string }>;
+  createRun(event: OpenTagEvent, input: { runId: string }): Promise<{ runId: string }>;
   recordControlPlaneEvent?(event: {
     type: string;
     severity?: "info" | "warn" | "error";
@@ -196,6 +195,32 @@ async function recordLineUnboundConversation(input: {
   } catch {}
 }
 
+async function recordLineEventProcessingFailure(input: {
+  recordControlPlaneEvent?: LineEventsAppInput["recordControlPlaneEvent"];
+  accountId: string;
+  event: LineWebhookEvent;
+  conversationId: string | null;
+  error: unknown;
+}): Promise<void> {
+  try {
+    await input.recordControlPlaneEvent?.({
+      type: "line.webhook_event_failed",
+      severity: "warn",
+      subject: `line:${input.accountId}/${input.conversationId ?? "unknown"}`,
+      payload: {
+        provider: "line",
+        accountId: input.accountId,
+        conversationId: input.conversationId,
+        sourceType: input.event.source ? lineSourceType(input.event.source) : null,
+        eventType: input.event.type ?? null,
+        webhookEventId: input.event.webhookEventId ?? null,
+        messageId: input.event.message?.id ?? null,
+        error: input.error instanceof Error ? input.error.message : String(input.error)
+      }
+    });
+  } catch {}
+}
+
 function lineMessageInputFromEvent(input: {
   event: LineWebhookEvent;
   account: LineAccountConfig;
@@ -239,6 +264,10 @@ function shouldResolveLineBinding(event: LineWebhookEvent): boolean {
   const sourceType = event.source ? lineSourceType(event.source) : null;
   if (sourceType === "user") return event.type === "follow" || event.type === "message";
   return event.type === "join" || hasLineInvocation(event);
+}
+
+function lineRunIdFromEvent(event: OpenTagEvent): string {
+  return `run_line_${Buffer.from(event.sourceEventId, "utf8").toString("base64url")}`;
 }
 
 async function resolveLineChannelBinding(input: {
@@ -333,23 +362,33 @@ export function createLineEventsApp(input: LineEventsAppInput) {
     for (const event of payload.events) {
       const source = event.source;
       const conversationId = source ? lineConversationIdFromSource(source) : null;
-      if (!conversationId) continue;
-      if (!shouldResolveLineBinding(event)) continue;
-      const binding = await resolveLineChannelBinding({ app: input, accountId, conversationId, autoBind: true });
-      if (!binding) {
-        await recordLineUnboundConversation({
+      try {
+        if (!conversationId) continue;
+        if (!shouldResolveLineBinding(event)) continue;
+        const binding = await resolveLineChannelBinding({ app: input, accountId, conversationId, autoBind: true });
+        if (!binding) {
+          await recordLineUnboundConversation({
+            recordControlPlaneEvent: input.recordControlPlaneEvent,
+            accountId,
+            conversationId,
+            sourceType: source ? lineSourceType(source) : null,
+            ...(event.webhookEventId ? { webhookEventId: event.webhookEventId } : {})
+          });
+          continue;
+        }
+        const normalizedInput = lineMessageInputFromEvent({ event, account, binding, receivedAt: input.now() });
+        if (!normalizedInput) continue;
+        const normalizedEvent = normalizeLineMessage(normalizedInput);
+        if (normalizedEvent) await input.createRun(normalizedEvent, { runId: lineRunIdFromEvent(normalizedEvent) });
+      } catch (error) {
+        await recordLineEventProcessingFailure({
           recordControlPlaneEvent: input.recordControlPlaneEvent,
           accountId,
+          event,
           conversationId,
-          sourceType: source ? lineSourceType(source) : null,
-          ...(event.webhookEventId ? { webhookEventId: event.webhookEventId } : {})
+          error
         });
-        continue;
       }
-      const normalizedInput = lineMessageInputFromEvent({ event, account, binding, receivedAt: input.now() });
-      if (!normalizedInput) continue;
-      const normalizedEvent = normalizeLineMessage(normalizedInput);
-      if (normalizedEvent) await input.createRun(normalizedEvent);
     }
 
     return c.json({ ok: true });
@@ -405,8 +444,8 @@ export function startLineIngress(config: LineIngressConfig): LineIngressHandle {
           repo: binding.repo
         });
       },
-      async createRun(event) {
-        const runId = `run_${randomUUID()}`;
+      async createRun(event, inputValue) {
+        const runId = inputValue.runId;
         await dispatcherClient.createRun({ runId, event });
         return { runId };
       },
