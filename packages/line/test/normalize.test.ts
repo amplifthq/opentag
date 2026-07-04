@@ -53,6 +53,32 @@ describe("LINE normalization", () => {
     expect(event?.command.rawText).toBe("fix this");
   });
 
+  it("removes self mention using the LINE mention offset", () => {
+    const leading = normalizeLineMessage({
+      accountId: "line_main",
+      conversationId: "G123",
+      sourceType: "group",
+      userId: "U123",
+      text: "  @OpenTag fix this",
+      messageId: "msg_1",
+      mention: { mentionees: [{ isSelf: true, index: 2, length: 8 }] },
+      binding: { ...binding, conversationId: "G123" }
+    });
+    const middle = normalizeLineMessage({
+      accountId: "line_main",
+      conversationId: "G123",
+      sourceType: "group",
+      userId: "U123",
+      text: "@All @OpenTag fix this",
+      messageId: "msg_2",
+      mention: { mentionees: [{ isSelf: false, index: 0, length: 4 }, { isSelf: true, index: 5, length: 8 }] },
+      binding: { ...binding, conversationId: "G123" }
+    });
+
+    expect(leading?.command.rawText).toBe("fix this");
+    expect(middle?.command.rawText).toBe("@All fix this");
+  });
+
   it("encodes and decodes LINE thread keys", () => {
     const key = encodeLineThreadKey({ accountId: "line_main", conversationId: "G123" });
     expect(parseLineThreadKey(key)).toEqual({ accountId: "line_main", conversationId: "G123" });

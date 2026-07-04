@@ -72,16 +72,19 @@ export function stripLineInvocation(input: { text: string; sourceType: LineSourc
   if (
     Number.isInteger(selfMention.index) &&
     Number.isInteger(selfMention.length) &&
-    selfMention.index === 0 &&
+    selfMention.index !== undefined &&
     selfMention.length !== undefined &&
-    selfMention.length > 0
+    selfMention.index >= 0 &&
+    selfMention.length > 0 &&
+    selfMention.index + selfMention.length <= input.text.length
   ) {
-    const stripped = input.text.slice(selfMention.length).trim();
+    const before = input.text.slice(0, selfMention.index).trimEnd();
+    const after = input.text.slice(selfMention.index + selfMention.length).trimStart();
+    const stripped = `${before}${before && after ? " " : ""}${after}`.trim();
     return stripped.length > 0 ? stripped : null;
   }
 
-  const stripped = trimmed.replace(/^@\S+\s+/, "").trim();
-  return stripped !== trimmed && stripped.length > 0 ? stripped : null;
+  return null;
 }
 
 export function encodeLineThreadKey(input: { accountId: string; conversationId: string }): string {
