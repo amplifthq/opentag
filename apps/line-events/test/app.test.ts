@@ -131,7 +131,7 @@ describe("LINE events app", () => {
     );
   });
 
-  it("auto-binds group joins and direct messages from the auto template", async () => {
+  it("auto-binds group and room joins plus direct messages from the auto template", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_1" }));
     const bindChannel = vi.fn(async () => undefined);
     const template = { accountId: "line_main", conversationId: "auto", repoProvider: "github", owner: "acme", repo: "demo" };
@@ -141,6 +141,11 @@ describe("LINE events app", () => {
           type: "join",
           webhookEventId: "webhook_join",
           source: { type: "group", groupId: "G123" }
+        },
+        {
+          type: "join",
+          webhookEventId: "webhook_room_join",
+          source: { type: "room", roomId: "R123" }
         },
         {
           type: "message",
@@ -163,10 +168,44 @@ describe("LINE events app", () => {
     const response = await app.request("/line/events/line_main", { method: "POST", headers: signedHeaders(rawBody), body: rawBody });
 
     expect(response.status).toBe(200);
-    expect(bindChannel).toHaveBeenCalledTimes(2);
+    expect(bindChannel).toHaveBeenCalledTimes(3);
     expect(bindChannel).toHaveBeenNthCalledWith(1, { ...template, conversationId: "G123" });
-    expect(bindChannel).toHaveBeenNthCalledWith(2, { ...template, conversationId: "U123" });
+    expect(bindChannel).toHaveBeenNthCalledWith(2, { ...template, conversationId: "R123" });
+    expect(bindChannel).toHaveBeenNthCalledWith(3, { ...template, conversationId: "U123" });
     expect(createRun).toHaveBeenCalledOnce();
     expect(createRun.mock.calls[0]?.[0]).toMatchObject({ source: "line", metadata: { conversationId: "U123" } });
+  });
+
+  it("ignores uninvoked group messages without binding or recording discovery noise", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_1" }));
+    const bindChannel = vi.fn(async () => undefined);
+    const resolveChannelBinding = vi.fn(async () => null);
+    const recordControlPlaneEvent = vi.fn(async () => undefined);
+    const rawBody = JSON.stringify({
+      events: [
+        {
+          type: "message",
+          webhookEventId: "webhook_group_chatter",
+          source: { type: "group", groupId: "G123", userId: "U123" },
+          message: { id: "msg_1", type: "text", text: "hello team" }
+        }
+      ]
+    });
+    const app = createLineEventsApp({
+      lineAccounts: [{ accountId: "line_main", channelSecret: "secret", agentId: "opentag" }],
+      resolveChannelBinding,
+      bindChannel,
+      createRun,
+      recordControlPlaneEvent,
+      now: () => "2026-07-02T00:00:00.000Z"
+    });
+
+    const response = await app.request("/line/events/line_main", { method: "POST", headers: signedHeaders(rawBody), body: rawBody });
+
+    expect(response.status).toBe(200);
+    expect(resolveChannelBinding).not.toHaveBeenCalled();
+    expect(bindChannel).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(recordControlPlaneEvent).not.toHaveBeenCalled();
   });
 });

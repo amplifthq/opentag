@@ -227,8 +227,18 @@ function lineMessageInputFromEvent(input: {
   };
 }
 
-function canAutoBindLineEvent(event: LineWebhookEvent): boolean {
-  return event.type === "join" || event.type === "follow" || event.type === "message";
+function hasLineInvocation(event: LineWebhookEvent): boolean {
+  if (event.type !== "message" || event.message?.type !== "text") return false;
+  return (
+    /^\/opentag(?:\s+|$)/i.test(event.message.text?.trim() ?? "") ||
+    event.message.mention?.mentionees?.some((mentionee) => mentionee.isSelf === true) === true
+  );
+}
+
+function shouldResolveLineBinding(event: LineWebhookEvent): boolean {
+  const sourceType = event.source ? lineSourceType(event.source) : null;
+  if (sourceType === "user") return event.type === "follow" || event.type === "message";
+  return event.type === "join" || hasLineInvocation(event);
 }
 
 async function resolveLineChannelBinding(input: {
@@ -324,7 +334,8 @@ export function createLineEventsApp(input: LineEventsAppInput) {
       const source = event.source;
       const conversationId = source ? lineConversationIdFromSource(source) : null;
       if (!conversationId) continue;
-      const binding = await resolveLineChannelBinding({ app: input, accountId, conversationId, autoBind: canAutoBindLineEvent(event) });
+      if (!shouldResolveLineBinding(event)) continue;
+      const binding = await resolveLineChannelBinding({ app: input, accountId, conversationId, autoBind: true });
       if (!binding) {
         await recordLineUnboundConversation({
           recordControlPlaneEvent: input.recordControlPlaneEvent,
