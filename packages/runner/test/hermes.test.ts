@@ -29,6 +29,14 @@ describe("Hermes executor", () => {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
 
+        if (command === "hermes" && joinedArgs === "profile show opentag-slack-t123-456") {
+          return { exitCode: 1, stdout: "", stderr: "profile not found" };
+        }
+
+        if (command === "hermes" && joinedArgs === "profile create opentag-slack-t123-456 --clone --no-alias") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+
         if (command === "hermes" && args.includes("-z")) {
           return { exitCode: 0, stdout: "Implemented the requested Hermes change.", stderr: "" };
         }
@@ -87,10 +95,11 @@ describe("Hermes executor", () => {
 
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "checkout -B opentag/run_1 main")).toBe(true);
     expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain("opentag-slack-T123-456");
+    expect(hermesCall?.args).toContain("opentag-slack-t123-456");
     expect(hermesCall?.args).not.toContain("--provider");
     expect(hermesCall?.args).not.toContain("--model");
     expect(hermesCall?.args).not.toContain("-s");
+    expect(calls.some((call) => call.command === "hermes" && call.args.join(" ") === "profile create opentag-slack-t123-456 --clone --no-alias")).toBe(true);
 
     expect(prompt).toContain("OpenTag context packet:");
     expect(prompt).toContain("Use the linked issue and propose the narrowest fix.");
@@ -109,6 +118,54 @@ describe("Hermes executor", () => {
       expect.objectContaining({ kind: "report", title: "Run report", uri: "opentag://run/run_1/report" }),
       expect.objectContaining({ kind: "log_summary", title: "Log summary", uri: "opentag://run/run_1/log-summary" })
     ]);
+  });
+
+  it("shortens long OpenTag session profile ids into valid Hermes profile names", async () => {
+    const calls: { command: string; args: string[] }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        const joinedArgs = args.join(" ");
+
+        if (command === "git" && args[0] === "checkout") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "hermes" && joinedArgs.startsWith("profile show ")) {
+          return { exitCode: 1, stdout: "", stderr: "profile not found" };
+        }
+        if (command === "hermes" && joinedArgs.startsWith("profile create ")) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (command === "hermes" && args.includes("-z")) {
+          return { exitCode: 0, stdout: "done", stderr: "" };
+        }
+        if (command === "git" && joinedArgs === "-c core.quotePath=false status --porcelain -z") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    await createHermesExecutor({
+      runner,
+      profile: "opentag-line-2010060501-Udc79037c3ab92debc61416cf04a9664c-path_w32cbh142ku6-opentag-i-pr"
+    }).run({
+      runId: "run_1",
+      workspacePath: "/tmp/demo",
+      command: { rawText: "fix this", intent: "fix", args: {} },
+      context: []
+    }, {
+      emit: async () => {}
+    });
+
+    const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
+    const createCall = calls.find((call) => call.command === "hermes" && call.args[0] === "profile" && call.args[1] === "create");
+    const profileName = hermesCall?.args[(hermesCall?.args.indexOf("-p") ?? -2) + 1] ?? "";
+
+    expect(profileName).toMatch(/^[a-z0-9][a-z0-9_-]{0,63}$/);
+    expect(profileName.length).toBeLessThanOrEqual(64);
+    expect(createCall?.args[2]).toBe(profileName);
   });
 
   it("returns not ready when git status throws", async () => {
@@ -141,6 +198,9 @@ describe("Hermes executor", () => {
         if (command === "git" && args[0] === "checkout") {
           return { exitCode: 0, stdout: "", stderr: "" };
         }
+        if (command === "hermes" && joinedArgs === "profile show opentag-slack-t123-c456-acme-demo-u123") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
         if (command === "hermes" && args.includes("-z")) {
           return { exitCode: 0, stdout: "done", stderr: "" };
         }
@@ -169,7 +229,7 @@ describe("Hermes executor", () => {
 
     const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
     expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain("opentag-slack-T123-C456-acme-demo-U123");
+    expect(hermesCall?.args).toContain("opentag-slack-t123-c456-acme-demo-u123");
   });
 
   it("cleans internal artifacts when Hermes exits unsuccessfully", async () => {

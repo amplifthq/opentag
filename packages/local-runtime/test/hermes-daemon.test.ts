@@ -40,6 +40,12 @@ function runForEvent(input: { event: OpenTagEvent; profileTemplate: string }) {
       if (command === "git" && args[0] === "checkout") {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
+      if (command === "hermes" && joinedArgs.startsWith("profile show ")) {
+        return { exitCode: 1, stdout: "", stderr: "profile not found" };
+      }
+      if (command === "hermes" && joinedArgs.startsWith("profile create ")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       if (command === "hermes" && args.includes("-z")) {
         return { exitCode: 0, stdout: "done", stderr: "" };
       }
@@ -93,7 +99,7 @@ describe("Hermes daemon integration", () => {
       source: "slack",
       metadata: { teamId: "T123", channelId: "C456", repoProvider: "github", owner: "acme", repo: "demo" },
       profileTemplate: "opentag-{provider}-{accountId}-{conversationId}",
-      expectedProfile: "opentag-slack-T123-C456"
+      expectedProfile: "opentag-slack-t123-c456"
     },
     {
       source: "github",

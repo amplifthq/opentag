@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandResult, type CommandRunner } from "./command.js";
 import { executorPolicyPromptLines } from "./executor-report.js";
@@ -12,6 +13,8 @@ export type HermesExecutorOptions = {
   profile?: string;
   profileTemplate?: string;
 };
+
+const HERMES_PROFILE_MAX_LENGTH = 64;
 
 function contextLines(context: ContextPointer[]): string {
   if (!context.length) return "No additional context pointers were provided.";
@@ -39,6 +42,41 @@ function buildPrompt(input: {
     "Use only the selected Hermes profile for tools, skills, memory, and session behavior.",
     ...executorPolicyPromptLines()
   ].join("\n");
+}
+
+function hermesCliProfileName(profileId: string): string {
+  const normalized = profileId
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[^a-z0-9]+/, "") || "opentag";
+  if (normalized.length <= HERMES_PROFILE_MAX_LENGTH) return normalized;
+
+  const hash = createHash("sha256").update(profileId).digest("hex").slice(0, 12);
+  const prefix = normalized.slice(0, HERMES_PROFILE_MAX_LENGTH - hash.length - 1);
+  return `${prefix}-${hash}`;
+}
+
+async function ensureHermesProfile(input: {
+  runner: CommandRunner;
+  hermesCommand: string;
+  workspacePath: string;
+  profileName: string;
+}): Promise<void> {
+  if (input.profileName === "default") return;
+
+  const show = await input.runner.run(input.hermesCommand, ["profile", "show", input.profileName], { cwd: input.workspacePath });
+  if (show.exitCode === 0) return;
+
+  const create = await input.runner.run(input.hermesCommand, ["profile", "create", input.profileName, "--clone", "--no-alias"], {
+    cwd: input.workspacePath
+  });
+  if (create.exitCode === 0) return;
+
+  const retry = await input.runner.run(input.hermesCommand, ["profile", "show", input.profileName], { cwd: input.workspacePath });
+  if (retry.exitCode === 0) return;
+
+  await assertCommandSucceeded(create, `hermes profile create ${input.profileName}`);
 }
 
 export function createHermesExecutor(options: HermesExecutorOptions = {}): ExecutorAdapter {
@@ -114,12 +152,6 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
         ...(input.baseBranch ? { startPoint: input.baseBranch } : {})
       });
 
-      await sink.emit({
-        type: "executor.progress",
-        message: "Starting hermes -z",
-        at: new Date().toISOString()
-      });
-
       const prompt = buildPrompt({
         runId: input.runId,
         rawText: input.command.rawText,
@@ -137,7 +169,23 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
         ...(input.sessionProfile ? { fallback: input.sessionProfile } : {})
       });
 
-      const args = [...(profile ? ["-p", profile.id] : []), "-z", prompt];
+      const profileName = profile ? hermesCliProfileName(profile.id) : undefined;
+      if (profileName) {
+        await sink.emit({
+          type: "executor.progress",
+          message: `Preparing Hermes profile ${profileName}`,
+          at: new Date().toISOString()
+        });
+        await ensureHermesProfile({ runner, hermesCommand, workspacePath: input.workspacePath, profileName });
+      }
+
+      await sink.emit({
+        type: "executor.progress",
+        message: "Starting hermes -z",
+        at: new Date().toISOString()
+      });
+
+      const args = [...(profileName ? ["-p", profileName] : []), "-z", prompt];
 
       let hermesResult: CommandResult | undefined;
       try {
