@@ -9,6 +9,7 @@
     { "path": "../client" },
     { "path": "../core" },
     { "path": "../github" },
+    { "path": "../gitlab" },
     { "path": "../lark" },
     { "path": "../line" },
     { "path": "../local-runtime" },

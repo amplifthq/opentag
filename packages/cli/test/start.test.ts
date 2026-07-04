@@ -188,6 +188,13 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("lists every startable setup platform when config has none", () => {
+    const built = config();
+    built.platforms = {};
+
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).toThrow("choose Lark, Slack, GitHub, GitLab, or LINE");
+  });
+
   it("adds dispatcher hardening env to the local dispatcher without overriding config authority", () => {
     const built = config();
     built.daemon.pairingToken = "config_pairing_token";

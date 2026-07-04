@@ -262,7 +262,7 @@ export function dispatcherRuntimeInputFromCliConfig(
   input: { env?: NodeJS.ProcessEnv } = {}
 ): LocalDispatcherRuntimeInput {
   if (!hasStartablePlatform(config)) {
-    throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, GitHub, or LINE.");
+    throw new Error("This config has no startable platform. Run `opentag setup` and choose Lark, Slack, GitHub, GitLab, or LINE.");
   }
   const lark = config.platforms.lark;
   const slack = config.platforms.slack;

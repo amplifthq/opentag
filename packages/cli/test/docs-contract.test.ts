@@ -80,6 +80,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("Lark scan vs manual setup");
     expect(skill).toContain("LINE webhook port");
     expect(skill).toContain("default project binding vs bind later");
+    expect(skill).toContain("LINE webhook port with default project binding only");
     expect(skill).toContain("--platform");
     expect(skill).toContain("--executor");
     expect(skill).toContain("--project");

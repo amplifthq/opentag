@@ -95,7 +95,7 @@ When helping a Codex user install or configure OpenTag, collect these non-secret
 - Platform: Slack, GitHub, Lark / Feishu, or LINE Messenger.
 - Coding agent: Codex, Claude Code, or Echo, using local detection from `opentag executors` when available.
 - Local project: the current working directory as the recommended option, plus a free-form path option inside askhuman for another path.
-- Platform mode choices that are not credentials, such as Slack Socket Mode vs Events API, Lark / Feishu tenant for manual app setup, Lark scan vs manual setup, LINE webhook port, and default project binding vs bind later. LINE requires default project binding.
+- Platform mode choices that are not credentials, such as Slack Socket Mode vs Events API, Lark / Feishu tenant for manual app setup, Lark scan vs manual setup, default project binding vs bind later for platforms that support it, and LINE webhook port with default project binding only.
 
 If the run is still in Codex Default mode, first look for an actual runtime-provided Plan-mode transition. If none exists, stop and report that the current Codex host cannot render askhuman from Default mode. Do not claim a Plan-mode handoff is complete, do not ask the user to switch modes, do not present a plain-text fallback for the same choices, do not run `opentag setup`, and do not continue with guessed defaults.
 

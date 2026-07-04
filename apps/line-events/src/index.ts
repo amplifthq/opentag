@@ -13,7 +13,7 @@ const dispatcherUrl = process.env.OPENTAG_DISPATCHER_URL;
 if (!dispatcherUrl) throw new Error("OPENTAG_DISPATCHER_URL is required");
 
 const dispatcherToken = process.env.OPENTAG_DISPATCHER_TOKEN;
-const port = Number(process.env.PORT ?? "3070");
+const port = positiveIntegerFromEnv("PORT", process.env.PORT) ?? 3070;
 const dispatcherClient = createOpenTagClient({
   dispatcherUrl,
   ...(dispatcherToken ? { pairingToken: dispatcherToken } : {})
@@ -32,15 +32,22 @@ function lineAccountsFromEnv(): LineAccountConfig[] {
     try {
       const parsed = JSON.parse(accountsJson);
       if (!Array.isArray(parsed)) throw new Error("Value is not a JSON array");
-      return parsed.filter(
-        (candidate): candidate is LineAccountConfig =>
-          Boolean(candidate) &&
-          typeof candidate === "object" &&
-          typeof candidate.accountId === "string" &&
-          typeof candidate.channelSecret === "string" &&
-          typeof candidate.agentId === "string" &&
-          (!("callbackUri" in candidate) || typeof candidate.callbackUri === "string")
-      );
+      return parsed.map((candidate, index): LineAccountConfig => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error(`Account ${index} must be a JSON object`);
+        const record = candidate as Record<string, unknown>;
+        if (typeof record.accountId !== "string" || !record.accountId.trim()) throw new Error(`Account ${index} accountId must be a non-empty string`);
+        if (typeof record.channelSecret !== "string" || !record.channelSecret.trim()) throw new Error(`Account ${index} channelSecret must be a non-empty string`);
+        if (record.agentId !== undefined && (typeof record.agentId !== "string" || !record.agentId.trim())) {
+          throw new Error(`Account ${index} agentId must be a non-empty string`);
+        }
+        if (record.callbackUri !== undefined && typeof record.callbackUri !== "string") throw new Error(`Account ${index} callbackUri must be a string`);
+        return {
+          accountId: record.accountId,
+          channelSecret: record.channelSecret,
+          agentId: record.agentId ?? "opentag",
+          ...(record.callbackUri ? { callbackUri: record.callbackUri } : {})
+        };
+      });
     } catch (error) {
       throw new Error(`Failed to parse OPENTAG_LINE_ACCOUNTS_JSON: ${error instanceof Error ? error.message : String(error)}`);
     }
