@@ -266,7 +266,7 @@ export function buildSystemdUserService(input: {
     "",
     "[Service]",
     "Type=simple",
-    `WorkingDirectory=${systemdQuote(input.workingDirectory)}`,
+    `WorkingDirectory=${systemdPathValue(input.workingDirectory)}`,
     ...environment,
     `ExecStart=${input.execStart.map(systemdQuote).join(" ")}`,
     "Restart=always",

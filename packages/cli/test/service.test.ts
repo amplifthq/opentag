@@ -183,7 +183,8 @@ describe("OpenTag CLI service", () => {
     expect(unit).toContain("[Unit]");
     expect(unit).toContain("Description=OpenTag local agent");
     expect(unit).toContain("[Service]");
-    expect(unit).toContain('WorkingDirectory="/home/mingyoo/opentag"');
+    expect(unit).toContain("WorkingDirectory=/home/mingyoo/opentag");
+    expect(unit).not.toContain('WorkingDirectory="/home/mingyoo/opentag"');
     expect(unit).toContain('ExecStart="/usr/local/bin/node" "/opt/opentag/dist/index.js" "service" "run" "--mode" "background"');
     expect(unit).toContain('Environment="OPENTAG_CONFIG_PATH=/tmp/config.json"');
     expect(unit).toContain('Environment="OPENTAG_MAX_REQUEST_BODY_BYTES=4096"');
