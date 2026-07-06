@@ -87,6 +87,29 @@ function gitlabRelayConfig() {
   return built;
 }
 
+function discordWebhookRelayConfig() {
+  const built = createSetupConfig({
+    language: "en",
+    platform: "discord",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    discord: {
+      mode: "webhook",
+      publicKey: "discord_public_key",
+      botToken: "discord_bot_token",
+      webhookPath: "/discord/interactions"
+    }
+  });
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  return built;
+}
+
 function hangingFetch(): typeof fetch {
   return vi.fn((_url: string | URL | Request, init?: RequestInit) => {
     return new Promise<Response>((_resolve, reject) => {
@@ -254,6 +277,18 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Runtime: relay");
     expect(formatted).toContain("OK GitLab webhook secret: Configured locally; the relay /gitlab/webhooks endpoint must verify X-Gitlab-Token before creating runs.");
     expect(formatted).not.toContain("GitLab relay mode is not supported");
+  });
+
+  it("formats Discord relay signature requirements for webhook mode", async () => {
+    const summary = await statusFromConfig({
+      config: discordWebhookRelayConfig(),
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: vi.fn(async () => Response.json({ ok: true }))
+    });
+
+    const formatted = formatStatus(summary);
+    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("OK Discord interaction signature: Configured locally; the relay /discord/interactions endpoint must verify the Ed25519 signature before creating runs.");
   });
 
   it("formats relay token scope as split when runnerToken is configured", async () => {

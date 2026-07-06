@@ -47,6 +47,36 @@ function gitlabConfig() {
   });
 }
 
+function discordWebhookConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "discord",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    discord: {
+      mode: "webhook",
+      publicKey: "discord_public_key",
+      botToken: "discord_bot_token",
+      webhookPath: "/discord/interactions"
+    }
+  });
+}
+
+function discordGatewayConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "discord",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    discord: {
+      mode: "gateway",
+      botToken: "discord_bot_token"
+    }
+  });
+}
+
 function okFetch(): typeof fetch {
   return vi.fn(async () => Response.json({ ok: true })) as unknown as typeof fetch;
 }
@@ -229,5 +259,23 @@ describe("OpenTag CLI pair relay", () => {
 
     expect(formatted).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
     expect(formatted).toContain("gitlab:acme/team/demo (hasWorkspacePath=yes)");
+  });
+
+  it("includes the Discord relay Interactions Endpoint URL only for webhook mode", () => {
+    const webhook = formatPairRelaySummary({
+      configPath: "/tmp/config.json",
+      config: discordWebhookConfig(),
+      relayUrl: "https://relay.example",
+      registered: true
+    });
+    const gateway = formatPairRelaySummary({
+      configPath: "/tmp/config.json",
+      config: discordGatewayConfig(),
+      relayUrl: "https://relay.example",
+      registered: true
+    });
+
+    expect(webhook).toContain("Discord Interactions Endpoint URL: https://relay.example/discord/interactions");
+    expect(gateway).not.toContain("Discord Interactions Endpoint URL:");
   });
 });

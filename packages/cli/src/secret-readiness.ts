@@ -76,5 +76,9 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     add("platforms.gitlab.webhookSecret", ["platforms", "gitlab", "webhookSecret"]);
   }
 
+  if (hasPath(redactedConfig, ["platforms", "discord"])) {
+    add("platforms.discord.botToken", ["platforms", "discord", "botToken"]);
+  }
+
   return rows;
 }

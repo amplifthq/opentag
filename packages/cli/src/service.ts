@@ -508,6 +508,18 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const discord = config.platforms.discord;
+  if (discord) {
+    const mode = discord.mode ?? "gateway";
+    if (mode === "webhook") {
+      lines.push(
+        `  discord: ingress=dispatcher_interactions path=${discord.webhookPath ?? "/discord/interactions"}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, signature=${connectorStatus(configured(discord.publicKey), "publicKey")}`
+      );
+    } else {
+      lines.push(`  discord: ingress=gateway ${connectorStatus(configured(discord.botToken), "botToken")}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, tunnel=not required`);
+    }
+  }
+
   const slack = config.platforms.slack;
   if (slack) {
     const mode = slack.mode ?? "events_api";
