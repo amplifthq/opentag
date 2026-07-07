@@ -97,6 +97,12 @@ const HermesExecutorConfigSchema = z.object({
   profileTemplate: z.string().trim().min(1).optional()
 });
 
+const OpenclawExecutorConfigSchema = z.object({
+  command: z.string().trim().min(1).optional(),
+  agent: z.string().trim().min(1).optional(),
+  sessionKey: z.string().trim().min(1).optional()
+});
+
 const AgentSessionProfileConfigSchema = z.object({
   profile: z.string().trim().min(1).optional(),
   profileTemplate: z.string().trim().min(1).optional()
@@ -156,6 +162,7 @@ export const OpenTagDaemonConfigSchema = z.object({
   larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
   claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
   hermes: HermesExecutorConfigSchema.optional(),
+  openclaw: OpenclawExecutorConfigSchema.optional(),
   agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
   security: RunnerSecurityPolicySchema.optional(),
   githubToken: SecretStringSchema.optional(),

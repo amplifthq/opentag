@@ -86,6 +86,26 @@ export const EXECUTOR_CAPABILITIES: Record<ExecutorId, ExecutorCapabilityDescrip
     requiredSecrets: [],
     completionSignals: ["process_exit"]
   },
+  openclaw: {
+    id: "openclaw",
+    invocation: "spawn",
+    supportsProfile: false,
+    supportsStreaming: false,
+    supportsCancel: false,
+    supportsHookCompletion: false,
+    progressEvents: "audit",
+    approvalMode: "opentag_policy",
+    contextAccess: ["context_packet", "context_pointers", "workspace"],
+    promptAssembly: "executor_adapter",
+    writeAccess: "workspace",
+    conversationAccess: "request",
+    promptMutation: "none",
+    rawContextAccess: false,
+    writeActionAccess: "none",
+    workspaceIsolation: "branch",
+    requiredSecrets: [],
+    completionSignals: ["process_exit"]
+  },
   echo: {
     id: "echo",
     invocation: "spawn",

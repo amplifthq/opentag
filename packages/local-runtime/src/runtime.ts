@@ -1,5 +1,12 @@
 import { createDispatcherClient } from "@opentag/client";
-import { createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, createHermesExecutor, type RunnerSecurityPolicy } from "@opentag/runner";
+import {
+  createClaudeCodeExecutor,
+  createCodexExecutor,
+  createEchoExecutor,
+  createHermesExecutor,
+  createOpenclawExecutor,
+  type RunnerSecurityPolicy
+} from "@opentag/runner";
 import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
@@ -38,6 +45,11 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
       ...(config.hermes?.profile ? { profile: config.hermes.profile } : {}),
       ...(config.hermes?.profileTemplate ? { profileTemplate: config.hermes.profileTemplate } : {})
+    }),
+    openclaw: createOpenclawExecutor({
+      ...(config.openclaw?.command ? { openclawCommand: config.openclaw.command } : {}),
+      ...(config.openclaw?.agent ? { agent: config.openclaw.agent } : {}),
+      ...(config.openclaw?.sessionKey ? { sessionKey: config.openclaw.sessionKey } : {})
     })
   };
 }

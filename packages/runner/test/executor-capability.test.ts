@@ -3,6 +3,7 @@ import { createClaudeCodeExecutor } from "../src/claude-code.js";
 import { createCodexExecutor } from "../src/codex.js";
 import { createEchoExecutor } from "../src/echo.js";
 import { createHermesExecutor } from "../src/hermes.js";
+import { createOpenclawExecutor } from "../src/openclaw.js";
 
 describe("executor capability contracts", () => {
   it("exposes runtime capabilities for built-in executors", () => {
@@ -10,6 +11,7 @@ describe("executor capability contracts", () => {
       createCodexExecutor(),
       createClaudeCodeExecutor(),
       createHermesExecutor(),
+      createOpenclawExecutor(),
       createEchoExecutor()
     ];
 
@@ -39,6 +41,10 @@ describe("executor capability contracts", () => {
     expect(createClaudeCodeExecutor().capability?.workspaceIsolation).toBe("worktree");
     expect(createHermesExecutor().capability).toMatchObject({
       supportsProfile: true,
+      workspaceIsolation: "branch"
+    });
+    expect(createOpenclawExecutor().capability).toMatchObject({
+      supportsProfile: false,
       workspaceIsolation: "branch"
     });
     expect(createEchoExecutor().capability?.workspaceIsolation).toBe("none");

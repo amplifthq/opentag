@@ -158,6 +158,14 @@ const HermesSchema = z
   })
   .strict();
 
+const OpenclawSchema = z
+  .object({
+    command: z.string().trim().min(1).optional(),
+    agent: z.string().trim().min(1).optional(),
+    sessionKey: z.string().trim().min(1).optional()
+  })
+  .strict();
+
 const AgentSessionProfileSchema = z
   .object({
     profile: z.string().trim().min(1).optional(),
@@ -182,6 +190,7 @@ const DaemonConfigSchema = z
     channelBindings: z.array(ChannelBindingSchema).optional(),
     claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),
+    openclaw: OpenclawSchema.optional(),
     agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: SecretStringSchema.optional(),

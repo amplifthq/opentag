@@ -11,6 +11,14 @@ describe("executor catalog", () => {
     expect(defaultExecutorId({ detections })).toBe("hermes");
   });
 
+  it("uses OPENTAG_OPENCLAW_COMMAND for OpenClaw detection", () => {
+    const detections = detectExecutors({ PATH: "", OPENTAG_OPENCLAW_COMMAND: process.execPath } as NodeJS.ProcessEnv);
+    const openclaw = detections.find((executor) => executor.id === "openclaw");
+
+    expect(openclaw).toMatchObject({ available: true, reason: `Found ${process.execPath} on PATH` });
+    expect(defaultExecutorId({ detections })).toBe("openclaw");
+  });
+
   it("formats executor runtime capabilities next to executor availability", () => {
     const output = formatExecutorsCommandOutput({ PATH: "" } as NodeJS.ProcessEnv);
 
@@ -31,6 +39,7 @@ describe("executor catalog", () => {
     expect(output).toContain("write_actions=none");
     expect(output).toContain("secrets=openai_api_key");
     expect(output).toContain("Hermes: invocation=spawn, profile=yes");
+    expect(output).toContain("OpenClaw: invocation=spawn, profile=no");
     expect(output).toContain("completion=process_exit");
   });
 

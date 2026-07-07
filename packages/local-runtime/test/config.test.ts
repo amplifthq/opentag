@@ -16,7 +16,7 @@ function tempDir(): string {
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
-    for (const executor of ["echo", "codex", "claude-code", "hermes"]) {
+    for (const executor of ["echo", "codex", "claude-code", "hermes", "openclaw"]) {
       const config = parseDaemonConfig({
         repositories: [{ ...baseRepository, defaultExecutor: executor }]
       });
@@ -84,6 +84,36 @@ describe("parseDaemonConfig Hermes config", () => {
         repositories: [{ ...baseRepository, defaultExecutor: "hermes" }],
         hermes: {
           profileTemplate: "   "
+        }
+      })
+    ).toThrow();
+  });
+});
+
+describe("parseDaemonConfig OpenClaw config", () => {
+  it("trims OpenClaw config strings", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository, defaultExecutor: "openclaw" }],
+      openclaw: {
+        command: " /opt/tools/openclaw ",
+        agent: " ops ",
+        sessionKey: " opentag-ops "
+      }
+    });
+
+    expect(config.openclaw).toEqual({
+      command: "/opt/tools/openclaw",
+      agent: "ops",
+      sessionKey: "opentag-ops"
+    });
+  });
+
+  it("rejects whitespace-only OpenClaw config strings", () => {
+    expect(() =>
+      parseDaemonConfig({
+        repositories: [{ ...baseRepository, defaultExecutor: "openclaw" }],
+        openclaw: {
+          agent: "   "
         }
       })
     ).toThrow();

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { delimiter, extname, join } from "node:path";
 
-export type ExecutorId = "echo" | "codex" | "claude-code" | "hermes";
+export type ExecutorId = "echo" | "codex" | "claude-code" | "hermes" | "openclaw";
 
 export type ExecutorDescriptor = {
   id: ExecutorId;
@@ -37,6 +37,12 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
     commandEnv: "OPENTAG_HERMES_COMMAND"
   },
   {
+    id: "openclaw",
+    label: "OpenClaw",
+    command: "openclaw",
+    commandEnv: "OPENTAG_OPENCLAW_COMMAND"
+  },
+  {
     id: "echo",
     label: "Echo",
     alwaysAvailable: true,
@@ -59,7 +65,7 @@ function executorCommand(executor: ExecutorDescriptor, env: NodeJS.ProcessEnv): 
 }
 
 export function isExecutorId(value: string): value is ExecutorId {
-  return value === "echo" || value === "codex" || value === "claude-code" || value === "hermes";
+  return value === "echo" || value === "codex" || value === "claude-code" || value === "hermes" || value === "openclaw";
 }
 
 export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorDetection[] {
@@ -97,6 +103,9 @@ export function defaultExecutorId(input: {
   }
   if (detections.find((executor) => executor.id === "hermes")?.available) {
     return "hermes";
+  }
+  if (detections.find((executor) => executor.id === "openclaw")?.available) {
+    return "openclaw";
   }
   return "echo";
 }
