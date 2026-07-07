@@ -10,10 +10,10 @@ async function setup() {
   jwk.kid = "test-key";
   jwk.alg = "RS256";
   const jwksClient: JWTVerifyGetKey = async () => publicKey;
-  async function mint(claims: Record<string, unknown>) {
+  async function mint(claims: Record<string, unknown>, issuer: string = ISSUER) {
     return new SignJWT(claims)
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-      .setIssuer(ISSUER)
+      .setIssuer(issuer)
       .setExpirationTime("5m")
       .sign(privateKey);
   }
@@ -43,6 +43,22 @@ describe("teams inbound JWT authentication", () => {
     const token = await mint({ aud: "app-123", serviceUrl: "https://evil/" });
     const result = await auth.verify({ authorizationHeader: `Bearer ${token}`, bodyServiceUrl: "https://smba/" });
     expect(result).toEqual({ ok: false, reason: expect.stringMatching(/serviceUrl/i) });
+  });
+
+  it("rejects a validly-signed token that omits the serviceUrl claim (fail closed)", async () => {
+    const { jwksClient, mint } = await setup();
+    const auth = createTeamsAuthenticator({ appId: "app-123", jwksClient });
+    const token = await mint({ aud: "app-123" });
+    const result = await auth.verify({ authorizationHeader: `Bearer ${token}`, bodyServiceUrl: "https://smba/" });
+    expect(result).toEqual({ ok: false, reason: expect.stringMatching(/serviceUrl/i) });
+  });
+
+  it("rejects a token minted with a different issuer", async () => {
+    const { jwksClient, mint } = await setup();
+    const auth = createTeamsAuthenticator({ appId: "app-123", jwksClient });
+    const token = await mint({ aud: "app-123", serviceUrl: "https://smba/" }, "https://evil.example");
+    const result = await auth.verify({ authorizationHeader: `Bearer ${token}`, bodyServiceUrl: "https://smba/" });
+    expect(result).toEqual({ ok: false, reason: expect.stringMatching(/issuer/i) });
   });
 
   it("rejects a missing Authorization header", async () => {

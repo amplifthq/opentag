@@ -45,8 +45,12 @@ export function createTeamsAuthenticator(config: TeamsAuthConfig) {
         return { ok: false, reason: "invalid_token" };
       }
 
-      const tokenServiceUrl = typeof payload.serviceUrl === "string" ? payload.serviceUrl : undefined;
-      if (tokenServiceUrl && normalizeUrl(tokenServiceUrl) !== normalizeUrl(input.bodyServiceUrl)) {
+      // Fail closed: a missing or non-string serviceUrl claim is treated as a mismatch, so a
+      // validly-signed token with correct aud/iss cannot bypass this anti-redirection check.
+      if (
+        typeof payload.serviceUrl !== "string" ||
+        normalizeUrl(payload.serviceUrl) !== normalizeUrl(input.bodyServiceUrl)
+      ) {
         return { ok: false, reason: "serviceUrl_mismatch" };
       }
       return { ok: true };
