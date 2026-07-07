@@ -197,6 +197,62 @@ describe("OpenTagPresentation", () => {
     expect(JSON.stringify(presentation)).not.toContain("action_id");
   });
 
+  it("renders Linear issue create action receipt details", () => {
+    const presentation = createFinalSummaryPresentation({
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a Linear issue proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_issue",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Create a Linear issue.",
+            intents: [
+              {
+                intentId: "intent_create_issue",
+                domain: "issue",
+                action: "create_issue",
+                summary: "Create a Linear issue for the OAuth callback error.",
+                params: {
+                  title: "Fix OAuth callback error",
+                  body: "Created from a Slack thread.",
+                  teamKey: "ENG",
+                  priority: "high",
+                  labels: ["bug"]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_create_issue: { state: "ready_to_apply" }
+        }
+      }
+    });
+
+    expect(presentation.actions?.[0]).toMatchObject({
+      title: "Create a Linear issue for the OAuth callback error.",
+      targetLabel: "Linear issue",
+      details: expect.arrayContaining([
+        "Impact: Creates a new Linear issue titled `Fix OAuth callback error` for team `ENG`.",
+        "Title: `Fix OAuth callback error`",
+        "Team: `ENG`",
+        "Labels: `bug`"
+      ]),
+      detailRows: expect.arrayContaining([
+        { label: "Target", value: "Linear issue" },
+        { label: "Title", value: "Fix OAuth callback error" },
+        { label: "Team", value: "`ENG`" },
+        { label: "Priority", value: "`high`" },
+        { label: "Labels", value: "`bug`" },
+        { label: "Description", value: "Created from a Slack thread." }
+      ])
+    });
+    expect(renderOpenTagPresentationPlainText(presentation)).toContain("Actions: apply 1, reject 1");
+  });
+
   it("renders standalone action receipts with command and audit fallback", () => {
     const presentation = createActionReceiptPresentation({
       auditRunId: "run_receipt_1",

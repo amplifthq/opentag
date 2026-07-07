@@ -508,6 +508,15 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const linear = config.platforms.linear;
+  if (linear) {
+    const target = linear.projectTarget;
+    const callbackStatus = linear.auth?.method === "hosted_oauth_app" ? "hosted_oauth_install" : connectorStatus(configured(linear.token), "token");
+    lines.push(
+      `  linear: ingress=workspace_webhook path=${linear.webhookPath ?? "/linear/webhooks"} port=${linear.port ?? "default"}, callback=${callbackStatus}, target=${target.repoProvider}:${target.owner}/${target.repo}`
+    );
+  }
+
   const discord = config.platforms.discord;
   if (discord) {
     const mode = discord.mode ?? "gateway";

@@ -7,13 +7,14 @@ Use this document when you want to prove that OpenTag works beyond local unit te
 - real GitHub App webhook delivery
 - real Slack Events API delivery
 - real Lark card reply and patch delivery
+- real Linear workspace comment and issue update delivery
 - real dispatcher and daemon execution
 - real callback messages posted back to the source thread
 - real local Claude Code execution
 - protocol metrics that show callback noise and artifact flow
 
 For the consolidated runner that wraps the local protocol smoke cases and the
-live GitHub/Slack/Lark scripts, see
+live GitHub/Slack/Lark/Linear scripts, see
 [Live E2E Smoke Harness](./live-e2e-smoke-harness.md).
 
 ## Goal
@@ -25,6 +26,55 @@ A smoke test is complete when all of these are true:
 3. The local daemon claims the run and executes the configured executor.
 4. The final result is posted back to the original GitHub thread or Slack thread.
 5. Metrics show low human callback noise relative to audit events.
+
+## Linear Workspace Live Test
+
+Use this script when you need to prove the real Linear hosted-relay callback and
+issue-update path. It registers a temporary Linear relay installation for
+token/project-target storage and submits signed Linear webhook payloads locally
+to the fixed hosted OAuth App webhook path (`/linear/oauth/webhooks` by
+default), so it does not need ngrok, but it does call the real Linear GraphQL
+API for `commentCreate` and `issueUpdate`.
+
+```bash
+OPENTAG_LINEAR_SMOKE_TOKEN='Bearer <linear-oauth-app-actor-access-token>' \
+OPENTAG_LINEAR_SMOKE_ISSUE=<linear-issue-key-or-url-or-uuid> \
+corepack pnpm smoke:live -- --case linear-workspace-live
+```
+
+By default, the smoke verifies that the token resolves to a Linear OAuth app
+actor (`viewer.app=true`) and reports that evidence in `oauthActor`. This keeps
+the live validation aligned with the hosted OAuth App / `actor=app` install
+path. Set `OPENTAG_LINEAR_SMOKE_ALLOW_NON_APP_TOKEN=true` only when intentionally
+running an API-key compatibility smoke.
+
+Expected evidence:
+
+- signed `/linear/oauth/webhooks` payload creates an OpenTag run through the
+  hosted OAuth webhook ingress and routes by `organizationId`
+- `oauthActor.appActorVerified` is `true` for the default OAuth App smoke token
+- acknowledgement/final callback creates or updates a real Linear issue comment
+- `singleStatusComment.reusedExternalMessageId` and
+  `singleStatusComment.graphql.statusCommentUpdateVerified` are `true`,
+  proving the status lifecycle updated one Linear comment instead of creating
+  comment noise
+- signed `apply 1` payload creates an approval and apply plan
+- Linear direct apply executes a real `issueUpdate`
+- metadata discovery queries teams, users, workflow states, and labels, then
+  reports generated mapping domains and value counts in `metadataDiscovery`
+- optional `OPENTAG_LINEAR_SMOKE_AGENT_SESSION_ID` validates native
+  `AgentSessionEvent` `created` and `prompted` delivery through
+  `agentSessionUpdate` and `agentActivityCreate`
+- optional Agent Session output includes `agentSessionSmoke.prompted` with the
+  queued follow-up id, the active run it queued behind, `followUpStatus:
+  "promoted"`, and the promoted follow-up run id
+- `linearGraphqlEvidence.requiredOperations` is `true` for the required Linear
+  GraphQL paths, with operation counts included in the JSON output
+- the JSON output reports `ok: true` and `applyOutcomeCounts.applied: 1`
+
+`OPENTAG_LINEAR_SMOKE_ISSUE_ID` remains supported for older local scripts, but
+new runs should prefer `OPENTAG_LINEAR_SMOKE_ISSUE` because it accepts the
+human-readable Linear issue key as well as the model UUID or issue URL.
 
 ## Shared Local Prerequisites
 

@@ -14,20 +14,31 @@ These are required for the self-hosted relay MVP:
 - `opentag pair --relay` prints an explicit trust warning before telling the
   user to start a relay-backed runner.
 - `opentag start` refuses public HTTP relay configs, disables local dispatcher
-  and local GitHub ingress in relay mode, and reminds the user that the relay
-  must verify the GitHub webhook secret.
+  and local webhook ingress in relay mode, and reminds the user that the relay
+  must verify the configured source-platform webhook secret/signature.
 - `opentag status`, `opentag doctor`, and `opentag service status` show relay
   security checks for transport, relay trust, Project Target allowlisting,
-  GitHub webhook secret configuration, unsupported relay-mode platforms, and
+  source webhook secret configuration, unsupported relay-mode platforms, and
   missing runner security policy.
+- Relay processes expose `/v1/relay/capabilities` without secrets so setup and
+  pairing flows can confirm whether source ingress, callback delivery, and
+  direct apply are ready before users point provider webhooks at the relay.
 - The local daemon refuses claimed runs whose Project Target metadata is
   missing, outside the local config allowlist, or a GitHub source event pointing
   at a non-GitHub Project Target. This check happens before executor startup.
 
-Relay deployments must also verify GitHub webhook signatures before creating
-runs. For repository webhooks, verify `X-Hub-Signature-256` using the secret
-stored in `platforms.github.webhookSecret`. Do not accept unsigned GitHub
-events on `/github/webhooks`.
+Relay deployments must also verify source-platform webhook signatures before
+creating runs. For GitHub repository webhooks, verify
+`X-Hub-Signature-256` using `platforms.github.webhookSecret`. For GitLab Note
+Hooks, verify `X-Gitlab-Token` using `platforms.gitlab.webhookSecret`. For
+Linear workspace webhooks, verify `Linear-Signature` and the webhook timestamp
+using `platforms.linear.webhookSecret` for static self-hosted ingress, or the
+per-install secret selected by a unique `/linear/webhooks/<install-id>` path for
+static dynamic relay ingress. Hosted Linear OAuth App ingress uses a fixed
+`/linear/oauth/webhooks` path: verify that shared OAuth App signing secret
+first, then route the verified payload by `organizationId` to the completed
+OAuth installation. Do not accept unsigned source events on `/github/webhooks`,
+`/gitlab/webhooks`, or Linear webhook paths.
 
 ## P1 Beta Hardening
 
@@ -70,6 +81,9 @@ These are required before any public hosted or multi-tenant relay:
 
 - Tenant isolation for runners, Project Targets, channel bindings, webhook
   secrets, and run history.
+- Per-install Linear relay secrets and tokens stored server-side, with webhook
+  paths that let the relay select the signing secret before parsing trusted
+  tenant metadata.
 - Audit logs for pairing, binding changes, webhook admission, run creation,
   runner claim, progress, completion, token rotation, and token revocation.
 - Rate limits per tenant, source platform, relay token, runner id, and webhook

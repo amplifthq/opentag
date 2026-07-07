@@ -356,6 +356,7 @@ export const CanonicalMutationDomainSchema = z.enum([
   "schedule",
   "review",
   "artifact_links",
+  "issue",
   "pull_request"
 ]);
 
@@ -412,6 +413,7 @@ export const ApplyIntentOutcomeSchema = z.object({
   intentId: z.string().min(1),
   outcome: z.enum(["applied", "skipped", "failed", "stale", "unsupported"]),
   message: z.string().min(1).optional(),
+  externalId: z.string().min(1).optional(),
   externalUri: z.string().min(1).optional(),
   error: z.string().min(1).optional()
 });

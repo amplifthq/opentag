@@ -485,6 +485,16 @@ describe("OpenTag CLI service", () => {
         botToken: "discord_bot_secret",
         webhookPath: "/discord/interactions"
       };
+      config.platforms.linear = {
+        token: "linear_api_secret",
+        webhookSecret: "linear_webhook_secret",
+        webhookPath: "/linear/webhooks",
+        projectTarget: {
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        }
+      };
     });
     installService({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) });
 
@@ -496,11 +506,15 @@ describe("OpenTag CLI service", () => {
     expect(formatted).toContain("slack: ingress=events_api ready (signingSecret port=3060), callback=ready (botToken), source=T123/C456");
     expect(formatted).toContain("lark: ingress=long_connection tenant=lark ready (appId/appSecret), callback=ready (appId/appSecret)");
     expect(formatted).toContain("addressing=bot_open_id configured");
+    expect(formatted).toContain("linear: ingress=workspace_webhook path=/linear/webhooks port=default, callback=ready (token), target=github:acme/demo");
     expect(formatted).toContain("discord: ingress=dispatcher_interactions path=/discord/interactions, callback=ready (botToken), signature=ready (publicKey)");
+    expect(formatted).toContain("platforms.linear.token: inline (redacted)");
     expect(formatted).toContain("platforms.discord.botToken: inline (redacted)");
     expect(formatted).not.toContain("slack_signing_secret");
     expect(formatted).not.toContain("xoxb_secret");
     expect(formatted).not.toContain("lark_secret");
+    expect(formatted).not.toContain("linear_api_secret");
+    expect(formatted).not.toContain("linear_webhook_secret");
     expect(formatted).not.toContain("discord_bot_secret");
   });
 

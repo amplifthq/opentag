@@ -9,6 +9,15 @@ import {
   updateLarkTextMessage
 } from "@opentag/lark";
 import {
+  createLinearAgentActivity,
+  createLinearIssueCommentRecord,
+  linearAgentSessionIdFromCallbackUri,
+  linearIssueIdFromCallbackUri,
+  updateLinearAgentSession,
+  updateLinearComment,
+  type FetchLike as LinearFetchLike
+} from "@opentag/linear";
+import {
   createSlackPostMessagePayload,
   createSlackReactionPayload,
   createSlackUpdateMessagePayload,
@@ -24,6 +33,7 @@ import {
 import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
+export type LinearTokenProvider = () => Promise<string | undefined> | string | undefined;
 
 const DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS = 5_000;
 const DEFAULT_LARK_RECEIVED_REACTION = "Typing";
@@ -84,6 +94,29 @@ function larkSourceMessageTarget(receipt: SourceReceipt): { messageId: string } 
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+async function resolveLinearToken(input: { token?: string; getToken?: LinearTokenProvider }): Promise<string | undefined> {
+  const token = input.getToken ? await input.getToken() : input.token;
+  return token?.trim() ? token : undefined;
+}
+
+function linearAgentSessionPlanFor(message: CallbackMessage) {
+  const completed = message.kind === "final";
+  return [
+    {
+      content: "Accept the Linear agent session",
+      status: "completed" as const
+    },
+    {
+      content: "Run OpenTag on the paired local checkout",
+      status: completed ? ("completed" as const) : ("inProgress" as const)
+    },
+    {
+      content: "Report the result back to Linear",
+      status: completed ? ("completed" as const) : ("pending" as const)
+    }
+  ];
 }
 
 async function fetchWithTimeout(input: {
@@ -197,6 +230,65 @@ export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: Fe
           deliveryByKey.delete(statusKey);
         }
       });
+    }
+  };
+}
+
+export function createLinearCallbackSink(input: {
+  token?: string;
+  getToken?: LinearTokenProvider;
+  graphqlUrl?: string;
+  fetchImpl?: LinearFetchLike;
+}): CallbackSink {
+  return {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      if (message.provider !== "linear") return;
+      const token = await resolveLinearToken(input);
+      if (!token) return;
+      const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
+      if (agentSessionId) {
+        await updateLinearAgentSession({
+          token,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          agentSessionId,
+          plan: linearAgentSessionPlanFor(message),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        const activityId = await createLinearAgentActivity({
+          token,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          activity: {
+            agentSessionId,
+            type: message.kind === "final" ? "response" : "thought",
+            body: message.body,
+            ephemeral: message.kind === "progress"
+          },
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        return activityId ? { externalMessageId: activityId } : undefined;
+      }
+      const issueId = linearIssueIdFromCallbackUri(message.uri);
+      if (!issueId) {
+        throw new Error(`deliver Linear callback failed: invalid callback URI ${message.uri}`);
+      }
+      if (message.statusMessageKey && message.externalMessageId) {
+        await updateLinearComment({
+          token,
+          commentId: message.externalMessageId,
+          body: message.body,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        return { externalMessageId: message.externalMessageId };
+      }
+      const comment = await createLinearIssueCommentRecord({
+        token,
+        issueId,
+        body: message.body,
+        ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+      });
+      return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
     }
   };
 }

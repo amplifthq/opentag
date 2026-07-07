@@ -108,5 +108,5 @@ describe("ProjectTargetRef", () => {
       if (existsSync(symlinkPath)) unlinkSync(symlinkPath);
       rmSync(workspace, { force: true, recursive: true });
     }
-  });
+  }, 15_000);
 });

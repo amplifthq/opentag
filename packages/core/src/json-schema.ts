@@ -27,6 +27,11 @@ import {
   WorkItemReferenceSchema,
   WorkThreadSchema
 } from "./schema.js";
+import {
+  OpenTagExecutorProtocolEventSchema,
+  OpenTagExecutorProtocolManifestSchema,
+  OpenTagExecutorRunRequestSchema
+} from "./executor-protocol.js";
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
@@ -38,6 +43,9 @@ export const OpenTagJsonSchemas = {
   ConversationAnchor: zodToJsonSchema(ConversationAnchorSchema, "ConversationAnchor"),
   WorkThread: zodToJsonSchema(WorkThreadSchema, "WorkThread"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
+  OpenTagExecutorProtocolManifest: zodToJsonSchema(OpenTagExecutorProtocolManifestSchema, "OpenTagExecutorProtocolManifest"),
+  OpenTagExecutorRunRequest: zodToJsonSchema(OpenTagExecutorRunRequestSchema, "OpenTagExecutorRunRequest"),
+  OpenTagExecutorProtocolEvent: zodToJsonSchema(OpenTagExecutorProtocolEventSchema, "OpenTagExecutorProtocolEvent"),
   RunEventVisibility: zodToJsonSchema(RunEventVisibilitySchema, "RunEventVisibility"),
   RunEventImportance: zodToJsonSchema(RunEventImportanceSchema, "RunEventImportance"),
   RunEvent: zodToJsonSchema(RunEventSchema, "RunEvent"),

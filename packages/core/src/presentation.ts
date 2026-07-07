@@ -193,6 +193,13 @@ function actionImpactFromReceipt(receipt: ActionReceipt): string {
     const fileText = changedFiles.length === 1 ? "1 changed file" : `${changedFiles.length} changed files`;
     return `Creates a pull request from ${inlineCode(head)} into ${inlineCode(base)} with ${fileText}.`;
   }
+  if (intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")) {
+    const title = stringParam(params, "title") ?? "untitled issue";
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    return team
+      ? `Creates a new Linear issue titled ${inlineCode(title)} for team ${inlineCode(team)}.`
+      : `Creates a new Linear issue titled ${inlineCode(title)}.`;
+  }
   if (intent.domain === "labels") return "Writes label metadata on the source work item.";
   if (intent.domain === "assignee" || intent.domain === "assignees") return "Writes assignee metadata on the source work item.";
   if (intent.domain === "review") return "Requests review on the source work item or proposed code change.";
@@ -284,6 +291,14 @@ function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] 
     if (head || base) details.push(`Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
     if (changedFiles.length > 0) details.push(`Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
   }
+  if (receipt.candidate.intent.action === "create_issue" || (receipt.candidate.intent.domain === "issue" && receipt.candidate.intent.action === "create")) {
+    const title = stringParam(params, "title");
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    const labels = stringArrayParam(params, "labels").concat(stringArrayParam(params, "labelIds"));
+    if (title) details.push(`Title: ${inlineCode(title)}`);
+    if (team) details.push(`Team: ${inlineCode(team)}`);
+    if (labels.length > 0) details.push(`Labels: ${labels.map(inlineCode).join(", ")}`);
+  }
   if (receipt.candidate.proposalPreconditions?.length) {
     details.push(`Preconditions: ${receipt.candidate.proposalPreconditions.length} check(s) in the audit log.`);
   }
@@ -315,6 +330,18 @@ function presentationActionDetailRowsFromReceipt(receipt: ActionReceipt): Array<
     if (changedFiles.length > 0) rows.push({ label: "Changed files", value: changedFiles.map(inlineCode).join(", ") });
     if (verification.length > 0) rows.push({ label: "Verification", value: listValue(verification) });
     if (risks.length > 0) rows.push({ label: "Risks", value: listValue(risks) });
+  }
+  if (candidate.intent.action === "create_issue" || (candidate.intent.domain === "issue" && candidate.intent.action === "create")) {
+    const title = stringParam(params, "title");
+    const description = stringParam(params, "description") ?? stringParam(params, "body");
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    const priority = stringParam(params, "priority");
+    const labels = stringArrayParam(params, "labels").concat(stringArrayParam(params, "labelIds"));
+    if (title) rows.push({ label: "Title", value: title });
+    if (team) rows.push({ label: "Team", value: inlineCode(team) });
+    if (priority) rows.push({ label: "Priority", value: inlineCode(priority) });
+    if (labels.length > 0) rows.push({ label: "Labels", value: labels.map(inlineCode).join(", ") });
+    if (description) rows.push({ label: "Description", value: description });
   }
   if (candidate.proposalPreconditions?.length) {
     rows.push({ label: "Preconditions", value: listValue(candidate.proposalPreconditions) });

@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:net";
-import { describe, expect, it } from "vitest";
+import { computeLinearSignature } from "@opentag/linear";
+import { describe, expect, it, vi } from "vitest";
 import { dispatcherRuntimeInputFromEnv, startDispatcher, type LocalDispatcherRuntimeInput } from "../src/dispatcher.js";
 
 async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
@@ -96,6 +97,127 @@ describe("local dispatcher runtime", () => {
       gitlabWebhookSecret: "gitlab_webhook_secret",
       gitlabWebhookPath: "/gitlab/webhooks"
     });
+  });
+
+  it("parses Linear callback/apply settings from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_API_KEY: "lin_api_callback_and_apply",
+        OPENTAG_LINEAR_GRAPHQL_URL: "https://linear.example/graphql",
+        OPENTAG_LINEAR_WEBHOOK_SECRET: "linear_webhook_secret",
+        OPENTAG_LINEAR_WEBHOOK_PATH: "/linear/webhooks",
+        OPENTAG_LINEAR_REPO_PROVIDER: "github",
+        OPENTAG_LINEAR_REPO_OWNER: "acme",
+        OPENTAG_LINEAR_REPO_NAME: "demo"
+      })
+    ).toMatchObject({
+      linearToken: "lin_api_callback_and_apply",
+      linearGraphqlUrl: "https://linear.example/graphql",
+      linearWebhookSecret: "linear_webhook_secret",
+      linearWebhookPath: "/linear/webhooks",
+      linearProjectTarget: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+  });
+
+  it("parses Linear hosted OAuth install settings from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_OAUTH_CLIENT_ID: "linear_client",
+        OPENTAG_LINEAR_OAUTH_CLIENT_SECRET: "linear_secret",
+        OPENTAG_LINEAR_OAUTH_REDIRECT_URI: "https://relay.example/linear/oauth/callback",
+        OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET: "linear_app_webhook_secret",
+        OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH: "/linear/oauth/webhooks",
+        OPENTAG_LINEAR_OAUTH_SCOPES: "read,write comments:create app:assignable"
+      })
+    ).toMatchObject({
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        webhookSecret: "linear_app_webhook_secret",
+        webhookPath: "/linear/oauth/webhooks",
+        scopes: ["read", "write", "comments:create", "app:assignable"]
+      }
+    });
+  });
+
+  it("advertises Linear hosted OAuth install support when configured", async () => {
+    await withDispatcherServer(
+      {
+        linearOAuthInstall: {
+          clientId: "linear_client",
+          redirectUri: "https://relay.example/linear/oauth/callback",
+          webhookSecret: "linear_app_webhook_secret"
+        }
+      },
+      async (baseUrl) => {
+        const capabilities = await fetch(`${baseUrl}/v1/relay/capabilities`);
+        expect(capabilities.status).toBe(200);
+        await expect(capabilities.json()).resolves.toMatchObject({
+          relay: true,
+          platforms: [
+            {
+              provider: "linear",
+              ingress: {
+                enabled: true,
+                path: "/linear/oauth/webhooks",
+                signatureVerification: "configured"
+              },
+              oauthInstall: {
+                enabled: true,
+                path: "/v1/linear-oauth-installations"
+              }
+            }
+          ]
+        });
+      }
+    );
+  });
+
+  it("rejects incomplete Linear hosted OAuth install settings", () => {
+    expect(() =>
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_OAUTH_CLIENT_ID: "linear_client"
+      })
+    ).toThrow("OPENTAG_LINEAR_OAUTH_CLIENT_ID and OPENTAG_LINEAR_OAUTH_REDIRECT_URI must be configured together.");
+
+    expect(() =>
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_OAUTH_REDIRECT_URI: "https://relay.example/linear/oauth/callback"
+      })
+    ).toThrow("OPENTAG_LINEAR_OAUTH_CLIENT_ID and OPENTAG_LINEAR_OAUTH_REDIRECT_URI must be configured together.");
+  });
+
+  it("uses the env-derived Project Target for Linear relay ingress when Linear-specific repo env is omitted", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_API_KEY: "lin_api_callback_and_apply",
+        OPENTAG_LINEAR_WEBHOOK_SECRET: "linear_webhook_secret",
+        OPENTAG_REPO_OWNER: "amplifthq",
+        OPENTAG_REPO_NAME: "opentag",
+        OPENTAG_REPO_PROVIDER: "github"
+      })
+    ).toMatchObject({
+      linearProjectTarget: {
+        repoProvider: "github",
+        owner: "amplifthq",
+        repo: "opentag"
+      }
+    });
+  });
+
+  it("rejects incomplete Linear relay Project Target env", () => {
+    expect(() =>
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_LINEAR_API_KEY: "lin_api_callback_and_apply",
+        OPENTAG_LINEAR_WEBHOOK_SECRET: "linear_webhook_secret",
+        OPENTAG_LINEAR_REPO_OWNER: "acme"
+      })
+    ).toThrow("OPENTAG_LINEAR_REPO_OWNER and OPENTAG_LINEAR_REPO_NAME must be configured together.");
   });
 
   it("can split pairing and runner dispatcher tokens from env", () => {
@@ -240,6 +362,28 @@ describe("local dispatcher runtime", () => {
     const baseUrl = `http://127.0.0.1:${port}`;
 
     try {
+      const capabilities = await fetch(`${baseUrl}/v1/relay/capabilities`);
+      expect(capabilities.status).toBe(200);
+      await expect(capabilities.json()).resolves.toMatchObject({
+        relay: true,
+        platforms: [
+          {
+            provider: "gitlab",
+            ingress: {
+              enabled: true,
+              path: "/gitlab/webhooks",
+              signatureVerification: "configured"
+            },
+            callback: {
+              enabled: false
+            },
+            apply: {
+              enabled: false
+            }
+          }
+        ]
+      });
+
       const binding = await fetch(`${baseUrl}/v1/repo-bindings`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -304,6 +448,237 @@ describe("local dispatcher runtime", () => {
         }
       });
     } finally {
+      await handle.close();
+    }
+  });
+
+  it("mounts Linear webhook ingress on the dispatcher when a relay secret is configured", async () => {
+    const port = await availablePort();
+    const handle = startDispatcher({
+      port,
+      databasePath: ":memory:",
+      linearWebhookSecret: "linear_webhook_secret",
+      linearWebhookPath: "/linear/webhooks",
+      linearProjectTarget: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const capabilities = await fetch(`${baseUrl}/v1/relay/capabilities`);
+      expect(capabilities.status).toBe(200);
+      await expect(capabilities.json()).resolves.toMatchObject({
+        relay: true,
+        platforms: [
+          {
+            provider: "linear",
+            ingress: {
+              enabled: true,
+              path: "/linear/webhooks",
+              signatureVerification: "configured"
+            },
+            callback: {
+              enabled: false
+            },
+            apply: {
+              enabled: false
+            }
+          }
+        ]
+      });
+
+      const binding = await fetch(`${baseUrl}/v1/repo-bindings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_1",
+          workspacePath: "/Users/test/demo",
+          defaultExecutor: "echo"
+        })
+      });
+      expect(binding.status).toBe(201);
+
+      const webhookTimestamp = Date.now();
+      const body = JSON.stringify({
+        type: "Comment",
+        action: "create",
+        webhookId: "webhook_1",
+        organizationId: "org_1",
+        createdAt: "2026-06-24T00:00:00.000Z",
+        webhookTimestamp,
+        data: {
+          id: "comment_1",
+          body: "@opentag investigate this issue",
+          url: "https://linear.app/acme/issue/ENG-1#comment_1",
+          issue: {
+            id: "issue_123",
+            identifier: "ENG-1",
+            title: "Demo issue",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: {
+              id: "team_eng",
+              key: "ENG",
+              name: "Engineering"
+            }
+          },
+          user: {
+            id: "user_1",
+            name: "alice"
+          }
+        }
+      });
+      const webhook = await fetch(`${baseUrl}/linear/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: body }),
+          "linear-timestamp": String(webhookTimestamp)
+        },
+        body
+      });
+      expect(webhook.status).toBe(200);
+      await expect(webhook.json()).resolves.toEqual({ ok: true, runId: expect.any(String) });
+
+      const claim = await fetch(`${baseUrl}/v1/runners/runner_1/claim`, { method: "POST" });
+      expect(claim.status).toBe(200);
+      await expect(claim.json()).resolves.toMatchObject({
+        event: {
+          source: "linear",
+          metadata: {
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo",
+            issueId: "issue_123",
+            issueIdentifier: "ENG-1"
+          }
+        },
+        run: {
+          status: "assigned"
+        }
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it("acknowledges Linear AgentSessionEvent webhooks from dispatcher-mounted relay ingress", async () => {
+    const port = await availablePort();
+    const originalFetch = globalThis.fetch;
+    const linearRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
+    vi.stubGlobal("fetch", (async (url, init) => {
+      if (String(url) === "https://linear.example/graphql") {
+        const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+        linearRequests.push({
+          authorization: new Headers(init?.headers).get("authorization"),
+          body
+        });
+        if (body.query?.includes("agentActivityCreate")) {
+          return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: "activity_accepted" } } } });
+        }
+        return Response.json({ data: { agentSessionUpdate: { success: true } } });
+      }
+      return originalFetch(url, init);
+    }) as typeof fetch);
+    const handle = startDispatcher({
+      port,
+      databasePath: ":memory:",
+      linearToken: "app_access",
+      linearGraphqlUrl: "https://linear.example/graphql",
+      linearWebhookSecret: "linear_webhook_secret",
+      linearWebhookPath: "/linear/webhooks",
+      linearProjectTarget: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+    const baseUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const binding = await fetch(`${baseUrl}/v1/repo-bindings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_1",
+          workspacePath: "/Users/test/demo",
+          defaultExecutor: "echo"
+        })
+      });
+      expect(binding.status).toBe(201);
+
+      const webhookTimestamp = Date.now();
+      const body = JSON.stringify({
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "webhook_agent_1",
+        organizationId: "org_1",
+        createdAt: "2026-06-24T00:00:00.000Z",
+        webhookTimestamp,
+        promptContext: "<issue identifier=\"ENG-1\">Demo issue</issue>",
+        agentSession: {
+          id: "agent_session_1",
+          creator: { id: "user_1", name: "alice" },
+          issue: {
+            id: "issue_123",
+            identifier: "ENG-1",
+            title: "Demo issue",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: {
+              id: "team_eng",
+              key: "ENG",
+              name: "Engineering"
+            }
+          }
+        }
+      });
+      const webhook = await fetch(`${baseUrl}/linear/webhooks`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: body }),
+          "linear-timestamp": String(webhookTimestamp)
+        },
+        body
+      });
+      expect(webhook.status).toBe(200);
+      await expect(webhook.json()).resolves.toEqual({ ok: true, runId: expect.any(String) });
+
+      await vi.waitFor(() => {
+        expect(linearRequests).toHaveLength(2);
+      });
+      expect(linearRequests.map((request) => request.authorization)).toEqual(["Bearer app_access", "Bearer app_access"]);
+      expect(linearRequests[0]!.body.query).toContain("agentSessionUpdate");
+      expect(linearRequests[0]!.body.variables).toMatchObject({
+        agentSessionId: "agent_session_1",
+        input: {
+          plan: [
+            { content: "Accept the Linear agent session", status: "completed" },
+            { content: "Run OpenTag on the paired local checkout", status: "inProgress" },
+            { content: "Report the result back to Linear", status: "pending" }
+          ]
+        }
+      });
+      expect(linearRequests[1]!.body.query).toContain("agentActivityCreate");
+      expect(linearRequests[1]!.body.variables).toMatchObject({
+        input: {
+          agentSessionId: "agent_session_1",
+          content: {
+            type: "thought",
+            body: expect.stringContaining("OpenTag picked this up")
+          }
+        }
+      });
+    } finally {
+      vi.unstubAllGlobals();
       await handle.close();
     }
   });

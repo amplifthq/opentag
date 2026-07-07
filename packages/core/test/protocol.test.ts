@@ -136,6 +136,44 @@ describe("protocol helpers", () => {
     expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
   });
 
+  it("preflights provider-neutral issue creation as a Linear external write", () => {
+    const denied = preflightMutationIntent({
+      intent: {
+        intentId: "intent_create_issue",
+        domain: "issue",
+        action: "create_issue",
+        summary: "Create a Linear issue.",
+        params: { title: "Fix OAuth callback error", teamKey: "ENG" }
+      },
+      permissions: githubEvent.permissions,
+      policyRules: [],
+      adapter: "linear"
+    });
+    expect(denied.outcome).toMatchObject({
+      intentId: "intent_create_issue",
+      outcome: "unsupported",
+      message: "Missing platform permission for capability create_issue."
+    });
+
+    const allowed = preflightMutationIntent({
+      intent: {
+        intentId: "intent_create_issue",
+        domain: "issue",
+        action: "create_issue",
+        summary: "Create a Linear issue.",
+        params: { title: "Fix OAuth callback error", teamKey: "ENG" }
+      },
+      permissions: [...githubEvent.permissions, { scope: "issue:create", reason: "create Linear issues after approval" }],
+      policyRules: [{ id: "manual", scope: "primary_anchor_override", effect: "allow", capabilityId: "create_issue", reason: "Approved." }],
+      adapter: "linear"
+    });
+    expect(allowed.outcome).toMatchObject({
+      intentId: "intent_create_issue",
+      outcome: "skipped",
+      message: "Preflight passed for create_issue; adapter execution is not implemented in this protocol slice."
+    });
+  });
+
   it("falls back to summary when the command rawText is whitespace-only", () => {
     const whitespaceRawTextEvent: OpenTagEvent = {
       ...githubEvent,

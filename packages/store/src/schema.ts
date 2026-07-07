@@ -181,6 +181,48 @@ export const repoMutationMappings = sqliteTable(
   })
 );
 
+export const linearRelayInstallations = sqliteTable(
+  "linear_relay_installations",
+  {
+    id: text("id").primaryKey(),
+    webhookPath: text("webhook_path").notNull(),
+    webhookSecret: text("webhook_secret").notNull(),
+    token: text("token").notNull(),
+    authJson: text("auth_json"),
+    graphqlUrl: text("graphql_url"),
+    repoProvider: text("repo_provider").notNull(),
+    owner: text("owner").notNull(),
+    repo: text("repo").notNull(),
+    organizationId: text("organization_id"),
+    teamId: text("team_id"),
+    teamKey: text("team_key"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    webhookPathUniqueIdx: uniqueIndex("linear_relay_installations_webhook_path_idx").on(table.webhookPath),
+    organizationUniqueIdx: uniqueIndex("linear_relay_installations_organization_idx").on(table.organizationId)
+  })
+);
+
+export const linearOAuthInstallStates = sqliteTable("linear_oauth_install_states", {
+  state: text("state").primaryKey(),
+  installationId: text("installation_id").notNull(),
+  webhookPath: text("webhook_path").notNull(),
+  webhookSecret: text("webhook_secret").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  graphqlUrl: text("graphql_url"),
+  repoProvider: text("repo_provider").notNull(),
+  owner: text("owner").notNull(),
+  repo: text("repo").notNull(),
+  teamId: text("team_id"),
+  teamKey: text("team_key"),
+  scopesJson: text("scopes_json").notNull(),
+  createdAt: text("created_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+  completedAt: text("completed_at")
+});
+
 export const channelBindings = sqliteTable(
   "channel_bindings",
   {
@@ -351,6 +393,41 @@ export function migrateSchema(sqlite: Database.Database): void {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS repo_mutation_mappings_repo_id_idx
       ON repo_mutation_mappings(provider, owner, repo, id);
+    CREATE TABLE IF NOT EXISTS linear_relay_installations (
+      id TEXT PRIMARY KEY,
+      webhook_path TEXT NOT NULL,
+      webhook_secret TEXT NOT NULL,
+      token TEXT NOT NULL,
+      auth_json TEXT,
+      graphql_url TEXT,
+      repo_provider TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      organization_id TEXT,
+      team_id TEXT,
+      team_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS linear_relay_installations_webhook_path_idx
+      ON linear_relay_installations(webhook_path);
+    CREATE TABLE IF NOT EXISTS linear_oauth_install_states (
+      state TEXT PRIMARY KEY,
+      installation_id TEXT NOT NULL,
+      webhook_path TEXT NOT NULL,
+      webhook_secret TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      graphql_url TEXT,
+      repo_provider TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      team_id TEXT,
+      team_key TEXT,
+      scopes_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      completed_at TEXT
+    );
     CREATE TABLE IF NOT EXISTS channel_bindings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       provider TEXT NOT NULL,
@@ -516,6 +593,53 @@ export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec("CREATE INDEX IF NOT EXISTS control_plane_events_severity_idx ON control_plane_events(severity)");
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS repo_policy_rules_repo_id_idx ON repo_policy_rules(provider, owner, repo, id)");
   sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS repo_mutation_mappings_repo_id_idx ON repo_mutation_mappings(provider, owner, repo, id)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS linear_relay_installations (
+      id TEXT PRIMARY KEY,
+      webhook_path TEXT NOT NULL,
+      webhook_secret TEXT NOT NULL,
+      token TEXT NOT NULL,
+      auth_json TEXT,
+      graphql_url TEXT,
+      repo_provider TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      organization_id TEXT,
+      team_id TEXT,
+      team_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS linear_relay_installations_webhook_path_idx ON linear_relay_installations(webhook_path)");
+  const linearRelayInstallationColumns = sqlite.prepare("PRAGMA table_info(linear_relay_installations)").all() as { name: string }[];
+  const linearRelayInstallationColumnNames = new Set(linearRelayInstallationColumns.map((column) => column.name));
+  if (!linearRelayInstallationColumnNames.has("auth_json")) {
+    sqlite.exec("ALTER TABLE linear_relay_installations ADD COLUMN auth_json TEXT");
+  }
+  if (!linearRelayInstallationColumnNames.has("organization_id")) {
+    sqlite.exec("ALTER TABLE linear_relay_installations ADD COLUMN organization_id TEXT");
+  }
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS linear_relay_installations_organization_idx ON linear_relay_installations(organization_id)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS linear_oauth_install_states (
+      state TEXT PRIMARY KEY,
+      installation_id TEXT NOT NULL,
+      webhook_path TEXT NOT NULL,
+      webhook_secret TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      graphql_url TEXT,
+      repo_provider TEXT NOT NULL,
+      owner TEXT NOT NULL,
+      repo TEXT NOT NULL,
+      team_id TEXT,
+      team_key TEXT,
+      scopes_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+  `);
   const callbackColumns = sqlite.prepare("PRAGMA table_info(callback_deliveries)").all() as { name: string }[];
   const callbackColumnNames = new Set(callbackColumns.map((column) => column.name));
   if (!callbackColumnNames.has("next_attempt_at")) {

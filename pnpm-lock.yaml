@@ -255,6 +255,9 @@ importers:
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
+      '@opentag/linear':
+        specifier: workspace:*
+        version: link:../linear
       '@opentag/local-runtime':
         specifier: workspace:*
         version: link:../local-runtime
@@ -343,6 +346,9 @@ importers:
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark
+      '@opentag/linear':
+        specifier: workspace:*
+        version: link:../linear
       '@opentag/slack':
         specifier: workspace:*
         version: link:../slack
@@ -438,6 +444,28 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/linear:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.7
+        version: 1.19.14(hono@4.12.27)
+      '@opentag/client':
+        specifier: workspace:*
+        version: link:../client
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../core
+      hono:
+        specifier: ^4.6.15
+        version: 4.12.27
+    devDependencies:
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+
   packages/local-runtime:
     dependencies:
       '@hono/node-server':
@@ -461,6 +489,9 @@ importers:
       '@opentag/gitlab':
         specifier: workspace:*
         version: link:../gitlab
+      '@opentag/linear':
+        specifier: workspace:*
+        version: link:../linear
       '@opentag/runner':
         specifier: workspace:*
         version: link:../runner

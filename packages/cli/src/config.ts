@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { AdapterMutationMappingSchema } from "@opentag/core";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
 import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
@@ -16,7 +17,7 @@ const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
-const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "telegram", "discord"]);
+const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "linear", "telegram", "discord"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const TelegramModeSchema = z.enum(["polling", "webhook"]);
@@ -260,6 +261,74 @@ const GitLabPlatformSchema = z
   })
   .strict();
 
+const LinearAuthSchema = z.discriminatedUnion("method", [
+  z
+    .object({
+      method: z.literal("api_key")
+    })
+    .strict(),
+  z
+    .object({
+      method: z.literal("oauth_app"),
+      actor: z.literal("app"),
+      clientId: z.string().min(1),
+      clientSecret: SecretStringSchema.optional(),
+      redirectUri: z.string().url().optional(),
+      refreshToken: SecretStringSchema.optional(),
+      accessTokenExpiresAt: z.string().min(1).optional(),
+      scopes: z.array(z.string().min(1)).optional()
+    })
+    .strict(),
+  z
+    .object({
+      method: z.literal("hosted_oauth_app"),
+      actor: z.literal("app"),
+      installationId: z.string().min(1).optional(),
+      authorizationUrl: z.string().url().optional(),
+      stateExpiresAt: z.string().min(1).optional(),
+      scopes: z.array(z.string().min(1)).optional()
+    })
+    .strict()
+]);
+
+const LinearPlatformSchema = z
+  .object({
+    token: SecretStringSchema.optional(),
+    auth: LinearAuthSchema.optional(),
+    webhookSecret: SecretStringSchema.optional(),
+    teamId: z.string().min(1).optional(),
+    teamKey: z.string().min(1).optional(),
+    graphqlUrl: z.string().url().optional(),
+    webhookPath: z.string().min(1).optional(),
+    port: OptionalPortSchema,
+    mappings: z.array(AdapterMutationMappingSchema).optional(),
+    projectTarget: z
+      .object({
+        repoProvider: z.string().min(1),
+        owner: z.string().min(1),
+        repo: z.string().min(1)
+      })
+      .strict()
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.auth?.method === "hosted_oauth_app") return;
+    if (!value.token) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["token"],
+        message: "Linear token is required unless auth.method is hosted_oauth_app."
+      });
+    }
+    if (!value.webhookSecret) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["webhookSecret"],
+        message: "Linear webhookSecret is required unless auth.method is hosted_oauth_app."
+      });
+    }
+  });
+
 const TelegramPlatformSchema = z
   .object({
     mode: TelegramModeSchema.optional(),
@@ -314,6 +383,10 @@ const PreferencesSchema = z
         gitlabProjectPathWithNamespace: z.string().min(1).optional(),
         gitlabBaseUrl: z.string().url().optional(),
         gitlabPort: OptionalPortSchema,
+        linearAuth: z.enum(["api_key", "oauth_app"]).optional(),
+        linearTeamId: z.string().min(1).optional(),
+        linearTeamKey: z.string().min(1).optional(),
+        linearPort: OptionalPortSchema,
         telegramMode: TelegramModeSchema.optional(),
         telegramBotId: z.string().min(1).optional(),
         telegramBotUsername: z.string().min(1).optional(),
@@ -344,6 +417,7 @@ export const OpenTagCliConfigSchema = z
         slack: SlackPlatformSchema.optional(),
         github: GitHubPlatformSchema.optional(),
         gitlab: GitLabPlatformSchema.optional(),
+        linear: LinearPlatformSchema.optional(),
         telegram: TelegramPlatformSchema.optional(),
         discord: DiscordPlatformSchema.optional()
       })
@@ -474,8 +548,10 @@ function redactValue(key: string, value: unknown): unknown {
       "appSecret",
       "appToken",
       "botToken",
+      "clientSecret",
       "githubToken",
       "githubApplyToken",
+      "refreshToken",
       "runnerToken",
       "runnerTokens",
       "pairingToken",
