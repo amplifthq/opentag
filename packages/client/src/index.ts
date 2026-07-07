@@ -245,6 +245,62 @@ export type AggregateMetrics = Omit<RunMetrics, "runId"> & {
   runCount: number;
 };
 
+export type LinearRelayInstallationInput = {
+  id: string;
+  webhookPath: string;
+  webhookSecret: string;
+  token: string;
+  auth?:
+    | { method: "api_key" }
+    | {
+        method: "oauth_app";
+        actor: "app";
+        clientId?: string;
+        refreshToken?: string;
+        accessTokenExpiresAt?: string;
+        scopes?: string[];
+      };
+  graphqlUrl?: string;
+  repoProvider: string;
+  owner: string;
+  repo: string;
+  organizationId?: string;
+  teamId?: string;
+  teamKey?: string;
+};
+
+export type CreateLinearOAuthInstallationInput = {
+  repoProvider?: string;
+  owner: string;
+  repo: string;
+  teamId?: string;
+  teamKey?: string;
+  graphqlUrl?: string;
+  redirectUri?: string;
+  scopes?: string[];
+};
+
+export type LinearRelayInstallationSummary = {
+  id: string;
+  webhookPath: string;
+  projectTarget: {
+    repoProvider: string;
+    owner: string;
+    repo: string;
+  };
+  graphqlUrl?: string;
+  organizationId?: string;
+  teamId?: string;
+  teamKey?: string;
+};
+
+export type LinearOAuthInstallationStart = {
+  authorizationUrl: string;
+  stateExpiresAt: string;
+  oauthWebhookPath?: string;
+  installation: LinearRelayInstallationSummary;
+};
+
 export type OpenTagClient = {
   registerRunner(input: { runnerId: string; name?: string }): Promise<void>;
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
@@ -262,6 +318,8 @@ export type OpenTagClient = {
     mapping: AdapterMutationMapping;
   }): Promise<{ mapping: AdapterMutationMapping }>;
   listRepoMutationMappings(input: { provider: string; owner: string; repo: string }): Promise<{ mappings: AdapterMutationMapping[] }>;
+  createLinearOAuthInstallation(input: CreateLinearOAuthInstallationInput): Promise<LinearOAuthInstallationStart>;
+  upsertLinearRelayInstallation(input: LinearRelayInstallationInput): Promise<{ installation: LinearRelayInstallationSummary }>;
   bindChannel(input: ChannelBindingInput): Promise<void>;
   getChannelBinding(input: { provider: string; accountId: string; conversationId: string }): Promise<{ binding: ChannelBindingInput }>;
   getChannelRuntimeStatus(input: { provider: string; accountId: string; conversationId: string }): Promise<ChannelRuntimeStatus>;
@@ -475,6 +533,26 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       await assertOk(response, "listRepoMutationMappings");
       return (await response.json()) as { mappings: AdapterMutationMapping[] };
+    },
+
+    async createLinearOAuthInstallation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/linear-oauth-installations`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(input)
+      });
+      await assertOk(response, "createLinearOAuthInstallation");
+      return (await response.json()) as LinearOAuthInstallationStart;
+    },
+
+    async upsertLinearRelayInstallation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/linear-relay-installations`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(input)
+      });
+      await assertOk(response, "upsertLinearRelayInstallation");
+      return (await response.json()) as { installation: LinearRelayInstallationSummary };
     },
 
     async bindChannel(input) {
@@ -911,6 +989,23 @@ export function createDispatcherAdminClient(options: RunnerClientOptions) {
 
     bindChannel(binding: ChannelBindingInput): Promise<void> {
       return client.bindChannel(binding);
+    },
+
+    upsertRepoMutationMapping(input: {
+      provider: string;
+      owner: string;
+      repo: string;
+      mapping: AdapterMutationMapping;
+    }): Promise<{ mapping: AdapterMutationMapping }> {
+      return client.upsertRepoMutationMapping(input);
+    },
+
+    createLinearOAuthInstallation(input: CreateLinearOAuthInstallationInput): Promise<LinearOAuthInstallationStart> {
+      return client.createLinearOAuthInstallation(input);
+    },
+
+    upsertLinearRelayInstallation(input: LinearRelayInstallationInput): Promise<{ installation: LinearRelayInstallationSummary }> {
+      return client.upsertLinearRelayInstallation(input);
     },
 
     getChannelBinding(input: {

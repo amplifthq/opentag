@@ -88,6 +88,10 @@ const DOMAIN_ALIASES: Record<string, string> = {
   reviews: "review",
   artifact: "artifact_links",
   artifacts: "artifact_links",
+  issue: "issue",
+  issues: "issue",
+  ticket: "issue",
+  tickets: "issue",
   pr: "pull_request",
   prs: "pull_request",
   pull_request: "pull_request",
@@ -227,6 +231,7 @@ export function suggestedActionCandidatesFromResult(result: OpenTagRunResult): S
 
 function defaultActionTargetLabel(intent: MutationIntent): string {
   if (intent.action === "create_pull_request") return "GitHub pull request";
+  if (intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")) return "Linear issue";
   if (intent.domain === "labels") return "GitHub labels";
   if (intent.domain === "assignee" || intent.domain === "assignees") return "GitHub assignees";
   if (intent.domain === "review") return "GitHub review request";

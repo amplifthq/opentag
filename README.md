@@ -27,7 +27,7 @@
 
 OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs Codex or Claude Code locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
 
-The concrete setup still connects Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
+The concrete setup still connects Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
 
 ## Demo
 
@@ -103,7 +103,7 @@ Help me set up OpenTag from https://github.com/amplifthq/opentag.
 Use the published OpenTag CLI. Please:
 1. Check that Node.js 20 or newer is available.
 2. Install or run the published OpenTag CLI.
-3. Run opentag setup and help me choose Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord, a coding agent, and a local project.
+3. Run opentag setup and help me choose Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
 5. When setup asks how OpenTag should run, choose the recommended background service option. Then verify with opentag service status and opentag doctor. If service mode is unsupported or I choose terminal mode, use opentag start and keep that terminal open.
 
@@ -121,6 +121,7 @@ Use the guide for the platform you choose in `opentag setup`.
 | Slack | Use Socket Mode for local development | [Slack setup](docs/platforms/slack.en.md) |
 | GitHub | Use a repository webhook and GitHub token | [GitHub setup](docs/platforms/github.en.md) |
 | GitLab | Use a project Note Hook and GitLab access token | [GitLab setup](docs/platforms/gitlab.en.md) |
+| Linear | Use a workspace webhook and OAuth App install | [Linear setup](docs/platforms/linear.en.md) |
 | Lark / Feishu | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
 | Telegram | Use BotFather token with local getUpdates polling | [Telegram setup](docs/platforms/telegram.en.md) |
 | Discord | Use a bot token with local Gateway delivery | [Discord setup](docs/platforms/discord.en.md) |
@@ -211,7 +212,7 @@ rm -rf ~/.config/opentag ~/.local/state/opentag
 
 ```mermaid
 flowchart LR
-    A["Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord"] --> B["OpenTag listener"]
+    A["Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord"] --> B["OpenTag listener"]
     B --> C["Local dispatcher"]
     C --> D["Local runner"]
     D --> E["Codex, Claude Code, or custom executor"]
@@ -265,6 +266,7 @@ Current public release: `v0.4.0`. The npm package family is published under the 
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |
 | [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook handling, note replies, merge request helpers, and action application |
+| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook handling, issue comments, and issue action application |
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / Feishu ingress, Personal Agent registration, and replies |
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook normalization, bot replies, and source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions and channel replies |

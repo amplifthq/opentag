@@ -103,7 +103,7 @@ describe("Slack normalization", () => {
     });
   });
 
-  it("captures parser hints without converting requested scopes into extra granted permissions", () => {
+  it("captures parser hints and preserves requested write scopes", () => {
     const event = normalizeSlackAppMention({
       teamId: "T123",
       channelId: "C123",
@@ -131,6 +131,29 @@ describe("Slack normalization", () => {
       expect.arrayContaining([
         expect.objectContaining({ kind: "file", uri: "src/auth.ts", line: 12 })
       ])
+    );
+  });
+
+  it("grants issue creation permission for explicit Linear issue create requests", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_APP> create a Linear issue for the OAuth callback error",
+      ts: "1710000000.000100",
+      eventId: "EvLinearIssue",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: {
+        teamId: "T123",
+        channelId: "C123",
+        owner: "acme",
+        repo: "demo"
+      }
+    });
+
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(
+      expect.arrayContaining(["chat:postMessage", "reactions:write", "runner:local", "issue:create"])
     );
   });
 
@@ -187,7 +210,7 @@ describe("Slack normalization", () => {
       teamId: "T123",
       channelId: "C123",
       userId: "U456",
-      text: "<@U_APP> Add a Linear ticket for this customer",
+      text: "<@U_APP> Add a support ticket for this customer",
       ts: "1710000000.000100",
       eventId: "Ev791",
       eventTime: 1710000000,

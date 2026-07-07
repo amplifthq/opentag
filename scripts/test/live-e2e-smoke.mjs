@@ -88,11 +88,31 @@ const cases = [
     label: "Live Lark card reply and patch smoke",
     live: true,
     command:
-      "NODE_OPTIONS='--conditions=development' packages/dispatcher/node_modules/.bin/tsx scripts/dev/run-lark-message-patch-live-test.ts",
+      "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/dev/run-lark-message-patch-live-test.ts",
     requiredCommands: [process.env.OPENTAG_LARK_CLI || "lark-cli"],
     notes: [
       "Requires lark-cli auth status to report a ready bot identity and either a ready user identity or cached user openId.",
       "Optionally set OPENTAG_LARK_LIVE_CHAT_ID and OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID together."
+    ]
+  },
+  {
+    id: "linear-workspace-live",
+    label: "Live Linear workspace webhook, comment, and issue update smoke",
+    live: true,
+    command:
+      "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/dev/run-linear-workspace-live-test.ts",
+    requiredCommands: ["corepack", "node"],
+    requiredEnv: ["OPENTAG_LINEAR_SMOKE_TOKEN"],
+    requiredOneOfEnv: [["OPENTAG_LINEAR_SMOKE_ISSUE", "OPENTAG_LINEAR_SMOKE_ISSUE_ID"]],
+    notes: [
+      "Uses a real Linear workspace issue for GraphQL commentCreate and issueUpdate.",
+      "By default the token must resolve to a Linear OAuth app actor (viewer.app=true); set OPENTAG_LINEAR_SMOKE_ALLOW_NON_APP_TOKEN=true only for API-key compatibility smoke runs.",
+      "Also runs Linear metadata discovery for teams, users, workflow states, and labels, then verifies mapping generation.",
+      "OPENTAG_LINEAR_SMOKE_ISSUE accepts a Linear issue key, model UUID, or issue URL; OPENTAG_LINEAR_SMOKE_ISSUE_ID remains supported for compatibility.",
+      "The script registers a temporary relay installation and submits signed webhook payloads locally to the fixed /linear/oauth/webhooks hosted OAuth path, so no public tunnel is required for this smoke.",
+      "Optionally set OPENTAG_LINEAR_SMOKE_AGENT_SESSION_ID to validate AgentSessionEvent created/prompted, queued follow-up promotion, agentSessionUpdate, and agentActivityCreate.",
+      "Optionally set OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_SECRET, OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_PATH, or OPENTAG_LINEAR_SMOKE_ORGANIZATION_ID to match a specific hosted OAuth relay setup.",
+      "Set OPENTAG_LINEAR_SMOKE_GRAPHQL_URL only when testing a non-default Linear GraphQL endpoint."
     ]
   }
 ];

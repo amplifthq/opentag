@@ -851,6 +851,138 @@ describe("@opentag/client", () => {
     ]);
   });
 
+  it("calls Linear relay installation endpoint without reading secrets back", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_token",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return jsonResponse(
+          {
+            installation: {
+              id: "install_123",
+              webhookPath: "/linear/webhooks/install_123",
+              projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+            }
+          },
+          201
+        );
+      }
+    });
+
+    await expect(
+      client.upsertLinearRelayInstallation({
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_oauth_token",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_token",
+          accessTokenExpiresAt: "2026-07-07T00:10:00.000Z",
+          scopes: ["read", "comments:create"]
+        },
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    ).resolves.toEqual({
+      installation: {
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+      }
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "http://dispatcher.test/v1/linear-relay-installations",
+        method: "POST",
+        body: {
+          id: "install_123",
+          webhookPath: "/linear/webhooks/install_123",
+          webhookSecret: "linear_webhook_secret",
+          token: "linear_oauth_token",
+          auth: {
+            method: "oauth_app",
+            actor: "app",
+            clientId: "linear_client",
+            refreshToken: "linear_refresh_token",
+            accessTokenExpiresAt: "2026-07-07T00:10:00.000Z",
+            scopes: ["read", "comments:create"]
+          },
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        }
+      }
+    ]);
+  });
+
+  it("calls Linear OAuth installation start endpoint", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_token",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return jsonResponse(
+          {
+            authorizationUrl: "https://linear.app/oauth/authorize?state=linear_state",
+            stateExpiresAt: "2026-07-07T00:10:00.000Z",
+            oauthWebhookPath: "/linear/oauth/webhooks",
+            installation: {
+              id: "install_123",
+              webhookPath: "/linear/webhooks/install_123",
+              projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+            }
+          },
+          201
+        );
+      }
+    });
+
+    await expect(
+      client.createLinearOAuthInstallation({
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        teamKey: "ENG"
+      })
+    ).resolves.toMatchObject({
+      authorizationUrl: expect.stringContaining("linear.app/oauth/authorize"),
+      oauthWebhookPath: "/linear/oauth/webhooks",
+      installation: {
+        webhookPath: "/linear/webhooks/install_123",
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+      }
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "http://dispatcher.test/v1/linear-oauth-installations",
+        method: "POST",
+        body: {
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          teamKey: "ENG"
+        }
+      }
+    ]);
+  });
+
   it("calls aggregate metrics endpoints", async () => {
     const requests: string[] = [];
     const metrics = {
