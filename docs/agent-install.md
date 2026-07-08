@@ -67,7 +67,7 @@ opentag setup
 
 Help the user choose:
 
-- Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord.
+- Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
 - Coding agent: Codex, Claude Code, or Echo.
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
@@ -81,10 +81,60 @@ walk the user through the provider console:
 - Lark / Feishu: `docs/platforms/lark.en.md`
 - Telegram: `docs/platforms/telegram.en.md`
 - Discord: `docs/platforms/discord.en.md`
+- Microsoft Teams: `docs/platforms/teams.en.md`
 
 Never ask the user to paste secrets into chat if a local prompt, environment
 variable, keychain item, or provider console entry is the safer place to enter
 them.
+
+### Microsoft Teams Notes For Agents
+
+Teams setup is more involved than Slack, Discord, or Telegram. Do not improvise
+from memory or skip the platform guide. Open `docs/platforms/teams.en.md` and
+walk the user through the checklist.
+
+Key points to verify with the user:
+
+- They need a Microsoft 365 tenant with Teams enabled. They do **not** need to
+  be a Microsoft 365 Developer Program member, and a personal Gmail/Outlook
+  Microsoft account alone is not enough.
+- They need permission to upload/install a custom Teams app, or a Teams admin
+  who can approve/install it.
+- They need an Azure Bot resource, Microsoft App ID, Tenant ID, client secret
+  **Value**, and the Microsoft Teams channel enabled on the Azure Bot.
+- The Azure Bot Messaging endpoint must be public HTTPS and must end with the
+  OpenTag Teams path, usually `https://<tunnel-host>/teams/messages`.
+- For local testing, `ngrok http 3030` is easiest because `http://127.0.0.1:4040`
+  shows incoming `POST /teams/messages` requests. If using `devtunnel`, it must
+  be started with `devtunnel host -p 3030 --allow-anonymous`.
+- Do not ask the user to paste Azure client secrets, Teams app passwords,
+  GitHub tokens, or one-time verification codes into the agent chat. Have them
+  enter secrets in provider consoles, `opentag setup`, a local environment
+  variable, keychain, or local config.
+- To bind a Teams channel, prefer the base channel conversation id from
+  `channelData.channel.id` / `channelData.teamsChannelId`. Teams thread replies
+  may include `;messageid=<root>` in `conversation.id`.
+- Read-only smoke tests can use `@OpenTag investigate ...`. Write tests should
+  use `@OpenTag fix ...` or `@OpenTag run ...`; otherwise Claude Code may only
+  produce a plan.
+- `@OpenTag apply 1` requires the channel to be bound to a GitHub/GitLab repo
+  and apply credentials to be configured. A local-only repo binding can produce
+  a branch/patch but cannot create a pull request from Teams.
+
+Common Teams troubleshooting shortcuts:
+
+- If no request reaches OpenTag, check the Azure Bot Messaging endpoint, Teams
+  app installation, and whether the user actually mentioned the bot.
+- If a devtunnel URL redirects to sign-in, restart it with `--allow-anonymous`.
+- If Teams requests return 401, check that the Azure Bot Microsoft App ID matches
+  `platforms.teams.appId`, the tenant is correct, and OpenTag is running the
+  current Teams adapter.
+- If service mode reports `spawn claude ENOENT`, set
+  `daemon.claudeCode.command` to the absolute Claude CLI path and restart the
+  service.
+- If the action receipt says direct apply is not configured, check whether the
+  channel binding points at a GitHub/GitLab repository and whether apply tokens
+  are configured.
 
 6. Start and verify OpenTag:
 
