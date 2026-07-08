@@ -46,7 +46,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
                   ? { platform: "discord" }
                   : teams
                     ? { platform: "teams" }
-              : {}),
+                    : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),

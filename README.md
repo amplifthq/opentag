@@ -124,6 +124,7 @@ Use the guide for the platform you choose in `opentag setup`.
 | Lark / Feishu | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
 | Telegram | Use BotFather token with local getUpdates polling | [Telegram setup](docs/platforms/telegram.en.md) |
 | Discord | Use a bot token with local Gateway delivery | [Discord setup](docs/platforms/discord.en.md) |
+| Microsoft Teams | Use an Azure Bot resource and a dev tunnel | [Microsoft Teams setup](docs/platforms/teams.en.md) |
 
 ## What Runs Locally
 
@@ -268,6 +269,7 @@ Current public release: `v0.4.0`. The npm package family is published under the 
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / Feishu ingress, Personal Agent registration, and replies |
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook normalization, bot replies, and source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions and channel replies |
+| [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework ingest, channel replies, and action apply |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus Echo, Claude Code, and Codex adapters |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite persistence |
 | [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | Embeddable dispatcher and callback sinks |

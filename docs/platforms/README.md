@@ -10,5 +10,6 @@ Use these guides when `opentag setup` asks for platform credentials:
 - [GitLab](gitlab.en.md) / [简体中文](gitlab.zh-CN.md)
 - [Telegram](telegram.en.md) / [简体中文](telegram.zh-CN.md)
 - [Discord](discord.en.md) / [简体中文](discord.zh-CN.md)
+- [Microsoft Teams](teams.en.md) / [简体中文](teams.zh-CN.md)
 
 Each guide only covers the values the OpenTag CLI asks for. For deeper integration debugging, see [Real integration smoke test](../real-integration-smoke-test.md).
