@@ -21,6 +21,7 @@ import {
   parseTelegramThreadKey,
   telegramMessageRichPayloadFromUnknown
 } from "@opentag/telegram";
+import { createTeamsConnector, createTeamsTokenProvider, parseTeamsThreadKey } from "@opentag/teams";
 import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
@@ -253,6 +254,67 @@ export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: F
         }
         if (message.kind === "final") {
           messageIdByKey.delete(statusKey);
+        }
+      });
+      deliveryByKey.set(statusKey, current);
+      await current.finally(() => {
+        if (deliveryByKey.get(statusKey) === current) {
+          deliveryByKey.delete(statusKey);
+        }
+      });
+    }
+  };
+}
+
+export function createTeamsCallbackSink(input: {
+  appId?: string;
+  appPassword?: string;
+  tenantId?: string;
+  fetchImpl?: FetchLike;
+}): CallbackSink {
+  // Reject partial credentials so a misconfigured sink fails at startup, not silently.
+  if (Boolean(input.appId) !== Boolean(input.appPassword)) {
+    throw new Error("Teams callback sink requires both appId and appPassword (or neither).");
+  }
+
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const tokenProvider =
+    input.appId && input.appPassword
+      ? createTeamsTokenProvider({
+          appId: input.appId,
+          appPassword: input.appPassword,
+          ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+          fetchImpl
+        })
+      : undefined;
+  const connector = tokenProvider ? createTeamsConnector({ getToken: () => tokenProvider.getToken(), fetchImpl }) : undefined;
+  const activityIdByKey = new Map<string, string>();
+  const deliveryByKey = new Map<string, Promise<void>>();
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "teams") return;
+      if (!connector) return;
+      if (!message.threadKey) {
+        throw new Error("Teams callback message is missing threadKey.");
+      }
+
+      const { serviceUrl, conversationId } = parseTeamsThreadKey(message.threadKey);
+      const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
+      const previous = deliveryByKey.get(statusKey) ?? Promise.resolve();
+      // Swallow a prior failure so a transient error on one update does not permanently
+      // break the edit chain for the subsequent progress/final messages of the same run.
+      const current = previous.catch(() => {}).then(async () => {
+        const existingActivityId = activityIdByKey.get(statusKey);
+        // status_update edit chain: POST the first message, PUT (edit) the same one after.
+        if (existingActivityId) {
+          await connector.updateMessage({ serviceUrl, conversationId, activityId: existingActivityId, text: message.body });
+        } else {
+          const { activityId } = await connector.postMessage({ serviceUrl, conversationId, text: message.body });
+          activityIdByKey.set(statusKey, activityId);
+        }
+        if (message.kind === "final") {
+          activityIdByKey.delete(statusKey);
         }
       });
       deliveryByKey.set(statusKey, current);

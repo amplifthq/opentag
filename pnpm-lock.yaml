@@ -349,6 +349,9 @@ importers:
       '@opentag/store':
         specifier: workspace:*
         version: link:../store
+      '@opentag/teams':
+        specifier: workspace:*
+        version: link:../teams
       '@opentag/telegram':
         specifier: workspace:*
         version: link:../telegram

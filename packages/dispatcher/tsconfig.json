@@ -10,6 +10,7 @@
     { "path": "../github" },
     { "path": "../lark" },
     { "path": "../slack" },
+    { "path": "../teams" },
     { "path": "../telegram" },
     { "path": "../store" }
   ]
