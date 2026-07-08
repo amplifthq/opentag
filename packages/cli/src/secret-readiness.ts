@@ -80,5 +80,9 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     add("platforms.discord.botToken", ["platforms", "discord", "botToken"]);
   }
 
+  if (hasPath(redactedConfig, ["platforms", "teams"])) {
+    add("platforms.teams.appPassword", ["platforms", "teams", "appPassword"]);
+  }
+
   return rows;
 }

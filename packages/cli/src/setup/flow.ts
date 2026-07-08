@@ -18,7 +18,7 @@ import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
 import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp, formatTelegramCredentialHelp } from "./guides.js";
+import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp, formatTeamsCredentialHelp, formatTelegramCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
 import type {
   BindingMethod,
@@ -32,6 +32,7 @@ import type {
   SetupDefaults,
   SlackSetupInput,
   SlackSetupMode,
+  TeamsSetupInput,
   TelegramSetupInput,
   TelegramSetupMode
 } from "./types.js";
@@ -40,6 +41,7 @@ const DEFAULT_HERMES_PROFILE_TEMPLATE =
   "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
 const DEFAULT_TELEGRAM_AGENT_ID = "opentag";
 const DEFAULT_DISCORD_WEBHOOK_PATH = "/discord/interactions";
+const DEFAULT_TEAMS_WEBHOOK_PATH = "/teams/messages";
 
 type LarkCredentialInput = {
   appId: string;
@@ -90,6 +92,10 @@ export type SetupCommandOptions = {
   discordPublicKey?: string;
   discordBotToken?: string;
   discordWebhookPath?: string;
+  teamsAppId?: string;
+  teamsAppPassword?: string;
+  teamsTenantId?: string;
+  teamsWebhookPath?: string;
   hermesCommand?: string;
   hermesProfile?: string;
   hermesProfileTemplate?: string;
@@ -1054,6 +1060,44 @@ async function collectDiscordSetup(
   };
 }
 
+async function collectTeamsSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<TeamsSetupInput> {
+  if (!options.teamsAppId || !options.teamsAppPassword) {
+    prompts.note(formatTeamsCredentialHelp(language));
+  }
+  const appId = nonEmpty(
+    options.teamsAppId ?? (await prompts.text({ message: t(language, "teamsAppId") })),
+    "Microsoft Teams app ID"
+  );
+  const appPassword = nonEmpty(
+    options.teamsAppPassword ?? (await prompts.password({ message: t(language, "teamsAppPassword") })),
+    "Microsoft Teams app password"
+  );
+  const tenantId = optionalTrimmed(
+    options.teamsTenantId ??
+      (options.yes
+        ? defaults.teamsTenantId
+        : await prompts.text({
+            message: t(language, "teamsTenantId"),
+            ...(defaults.teamsTenantId ? { initialValue: defaults.teamsTenantId } : {})
+          }))
+  );
+  const webhookPath = parseWebhookPath(
+    options.teamsWebhookPath ?? defaults.teamsWebhookPath ?? DEFAULT_TEAMS_WEBHOOK_PATH,
+    "Microsoft Teams webhook path"
+  );
+  return {
+    appId,
+    appPassword,
+    ...(tenantId ? { tenantId } : {}),
+    webhookPath
+  };
+}
+
 async function collectBindingMethod(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
@@ -1131,6 +1175,7 @@ export async function collectSetupInput(
   const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const telegramSetup = platform === "telegram" ? await collectTelegramSetup(options, defaults, prompts, language) : undefined;
   const discordSetup = platform === "discord" ? await collectDiscordSetup(options, defaults, prompts, language) : undefined;
+  const teamsSetup = platform === "teams" ? await collectTeamsSetup(options, defaults, prompts, language) : undefined;
   const larkPersistedCredentials = larkCredentials
     ? {
         appId: larkCredentials.appId,
@@ -1161,7 +1206,8 @@ export async function collectSetupInput(
     ...(githubSetup ? { github: githubSetup } : {}),
     ...(gitlabSetup ? { gitlab: gitlabSetup } : {}),
     ...(telegramSetup ? { telegram: telegramSetup } : {}),
-    ...(discordSetup ? { discord: discordSetup } : {})
+    ...(discordSetup ? { discord: discordSetup } : {}),
+    ...(teamsSetup ? { teams: teamsSetup } : {})
   };
 
   prompts.note(formatSetupReview(setupInput, configPath));
