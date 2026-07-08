@@ -265,7 +265,7 @@ opentag-dev setup
 | [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / 飞书入口、Personal Agent 注册和回复 |
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook 规范化、bot 回复和 source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions 和频道回复 |
-| [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework ingest, channel replies, and action apply |
+| [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework 入口、频道回复和 action apply |
 | [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor 契约，以及 Echo、Claude Code、Codex 适配器 |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite 持久化 |
 | [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | 可嵌入 dispatcher 和 callback sink |
