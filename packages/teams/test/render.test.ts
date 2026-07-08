@@ -20,4 +20,23 @@ describe("teams render", () => {
     expect(text).toContain("Opened PR #12");
     expect(text).toContain("opentag status --run run-1");
   });
+
+  it("renders verification and next-action sections", () => {
+    const text = renderTeamsFinalResult(
+      {
+        conclusion: "success",
+        summary: "All checks passed.",
+        verification: [{ command: "pnpm test", outcome: "passed" }],
+        nextAction: "Review the PR."
+      } as never,
+      { auditRunId: "run-1" }
+    );
+    expect(text).toContain("Finished with success.");
+    expect(text).toContain("All checks passed.");
+    expect(text).toContain("Verification:");
+    expect(text).toContain("pnpm test");
+    expect(text).toContain("passed");
+    expect(text).toContain("Next action: Review the PR.");
+    expect(text).toContain("opentag status --run run-1");
+  });
 });
