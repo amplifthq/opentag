@@ -27,7 +27,7 @@
 
 OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs Codex or Claude Code locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
 
-The concrete setup still connects Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
+The concrete setup still connects Slack, GitHub, GitLab, Lark / Feishu, Telegram, Discord, or Microsoft Teams to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
 
 ## Demo
 
@@ -103,7 +103,7 @@ Help me set up OpenTag from https://github.com/amplifthq/opentag.
 Use the published OpenTag CLI. Please:
 1. Check that Node.js 20 or newer is available.
 2. Install or run the published OpenTag CLI.
-3. Run opentag setup and help me choose Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord, a coding agent, and a local project.
+3. Run opentag setup and help me choose Slack, GitHub, GitLab, Lark / Feishu, Telegram, Discord, or Microsoft Teams, a coding agent, and a local project.
 4. When platform credentials are needed, open the matching setup guide in the repository and walk me through it.
 5. When setup asks how OpenTag should run, choose the recommended background service option. Then verify with opentag service status and opentag doctor. If service mode is unsupported or I choose terminal mode, use opentag start and keep that terminal open.
 
@@ -212,7 +212,7 @@ rm -rf ~/.config/opentag ~/.local/state/opentag
 
 ```mermaid
 flowchart LR
-    A["Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord"] --> B["OpenTag listener"]
+    A["Slack, GitHub, GitLab, Lark / Feishu, Telegram, Discord, or Microsoft Teams"] --> B["OpenTag listener"]
     B --> C["Local dispatcher"]
     C --> D["Local runner"]
     D --> E["Codex, Claude Code, or custom executor"]
