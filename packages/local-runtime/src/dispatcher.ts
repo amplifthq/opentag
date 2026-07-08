@@ -12,11 +12,18 @@ import {
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
+  createTeamsCallbackSink,
   createTelegramCallbackSink
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions } from "@opentag/dispatcher";
 import { createDiscordInteractionsApp, startDiscordGateway } from "@opentag/discord";
 import { createGitLabWebhookApp } from "@opentag/gitlab";
+import {
+  createTeamsAuthenticator,
+  createTeamsConnector,
+  createTeamsTokenProvider,
+  createTeamsWebhookApp
+} from "@opentag/teams";
 import {
   TELEGRAM_DOCTOR_TITLE,
   TELEGRAM_STATUS_TITLE,
@@ -65,6 +72,18 @@ export type LocalDispatcherRuntimeInput = {
   discordPublicKey?: string;
   discordBotToken?: string;
   discordWebhookPath?: string;
+  teamsAppId?: string;
+  teamsAppPassword?: string;
+  teamsTenantId?: string;
+  teamsWebhookPath?: string;
+  /**
+   * Overrides the Bot Framework JWKS document URL (defaults to
+   * https://login.botframework.com/v1/.well-known/keys inside
+   * `createTeamsAuthenticator`). Legitimate in production for sovereign
+   * clouds (e.g. Azure Government) and lets tests point at a local JWKS
+   * server instead of stubbing JWT verification.
+   */
+  teamsOpenIdMetadataUrl?: string;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
 };
@@ -414,6 +433,11 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_DISCORD_PUBLIC_KEY ? { discordPublicKey: env.OPENTAG_DISCORD_PUBLIC_KEY } : {}),
     ...(env.OPENTAG_DISCORD_BOT_TOKEN ? { discordBotToken: env.OPENTAG_DISCORD_BOT_TOKEN } : {}),
     ...(env.OPENTAG_DISCORD_WEBHOOK_PATH ? { discordWebhookPath: env.OPENTAG_DISCORD_WEBHOOK_PATH } : {}),
+    ...(env.OPENTAG_TEAMS_APP_ID ? { teamsAppId: env.OPENTAG_TEAMS_APP_ID } : {}),
+    ...(env.OPENTAG_TEAMS_APP_PASSWORD ? { teamsAppPassword: env.OPENTAG_TEAMS_APP_PASSWORD } : {}),
+    ...(env.OPENTAG_TEAMS_TENANT_ID ? { teamsTenantId: env.OPENTAG_TEAMS_TENANT_ID } : {}),
+    ...(env.OPENTAG_TEAMS_WEBHOOK_PATH ? { teamsWebhookPath: env.OPENTAG_TEAMS_WEBHOOK_PATH } : {}),
+    ...(env.OPENTAG_TEAMS_OPENID_METADATA_URL ? { teamsOpenIdMetadataUrl: env.OPENTAG_TEAMS_OPENID_METADATA_URL } : {}),
     ...hardening
   };
 }
@@ -596,6 +620,11 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       }),
       createDiscordCallbackSink({
         ...(input.discordBotToken ? { token: input.discordBotToken } : {})
+      }),
+      createTeamsCallbackSink({
+        ...(input.teamsAppId ? { appId: input.teamsAppId } : {}),
+        ...(input.teamsAppPassword ? { appPassword: input.teamsAppPassword } : {}),
+        ...(input.teamsTenantId ? { tenantId: input.teamsTenantId } : {})
       })
     ])
   });
@@ -884,6 +913,70 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       now: () => new Date().toISOString()
     });
     backgroundHandles.push(gatewayHandle);
+  }
+
+  if (input.teamsAppId && input.teamsAppPassword) {
+    if (input.port === 0) {
+      throw new Error("Teams webhook mount requires a fixed dispatcher port.");
+    }
+    const dispatcherClient = createOpenTagClient({
+      dispatcherUrl: `http://127.0.0.1:${input.port}`,
+      ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
+    });
+    const teamsAppId = input.teamsAppId;
+    const teamsAppPassword = input.teamsAppPassword;
+    // Built once and reused for every notifyConversation call — the token
+    // provider is a caching closure, and the connector is stateless, so there
+    // is no reason to rebuild either per call.
+    const teamsTokenProvider = createTeamsTokenProvider({
+      appId: teamsAppId,
+      appPassword: teamsAppPassword,
+      ...(input.teamsTenantId ? { tenantId: input.teamsTenantId } : {})
+    });
+    const teamsConnector = createTeamsConnector({ getToken: () => teamsTokenProvider.getToken() });
+    app.route(
+      "/",
+      createTeamsWebhookApp({
+        authenticator: createTeamsAuthenticator({
+          appId: teamsAppId,
+          ...(input.teamsOpenIdMetadataUrl ? { openIdMetadataUrl: input.teamsOpenIdMetadataUrl } : {})
+        }),
+        ...(input.teamsWebhookPath ? { webhookPath: input.teamsWebhookPath } : {}),
+        async resolveChannelBinding({ tenantId, conversationId }) {
+          try {
+            const { binding } = await dispatcherClient.getChannelBinding({
+              provider: "teams",
+              accountId: tenantId,
+              conversationId
+            });
+            return {
+              tenantId,
+              conversationId,
+              owner: binding.owner,
+              repo: binding.repo,
+              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+            };
+          } catch (error) {
+            // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
+            // from a genuinely unbound channel — log it so operators can tell them apart.
+            console.error("teams.resolveChannelBinding failed", error);
+            return null;
+          }
+        },
+        async createRun(event) {
+          const runId = `run_${randomUUID()}`;
+          const created = await dispatcherClient.createRun({ runId, event });
+          return created.outcome === "run_created" ? { runId: created.run.id } : {};
+        },
+        async submitThreadAction(action) {
+          await dispatcherClient.submitThreadAction(action);
+        },
+        async notifyConversation({ serviceUrl, conversationId, text }) {
+          await teamsConnector.postMessage({ serviceUrl, conversationId, text });
+        },
+        now: () => new Date().toISOString()
+      })
+    );
   }
 
   const server: ClosableServer = serve({

@@ -72,11 +72,13 @@
     "@opentag/dispatcher": "workspace:*",
     "@opentag/gitlab": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/teams": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/runner": "workspace:*",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "jose": "^5.9.6",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2"
   }

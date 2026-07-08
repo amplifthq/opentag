@@ -467,6 +467,9 @@ importers:
       '@opentag/runner':
         specifier: workspace:*
         version: link:../runner
+      '@opentag/teams':
+        specifier: workspace:*
+        version: link:../teams
       '@opentag/telegram':
         specifier: workspace:*
         version: link:../telegram
@@ -474,6 +477,9 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
     devDependencies:
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.15)(tsx@4.22.4)(typescript@5.9.3)(yaml@2.9.0)
