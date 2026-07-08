@@ -943,12 +943,23 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         }),
         ...(input.teamsWebhookPath ? { webhookPath: input.teamsWebhookPath } : {}),
         async resolveChannelBinding({ tenantId, conversationId }) {
-          try {
+          const lookup = async (id: string) => {
             const { binding } = await dispatcherClient.getChannelBinding({
               provider: "teams",
               accountId: tenantId,
-              conversationId
+              conversationId: id
             });
+            return binding;
+          };
+          try {
+            let binding;
+            try {
+              binding = await lookup(conversationId);
+            } catch (error) {
+              const baseConversationId = conversationId.replace(/;messageid=[^;]+$/i, "");
+              if (baseConversationId === conversationId) throw error;
+              binding = await lookup(baseConversationId);
+            }
             return {
               tenantId,
               conversationId,

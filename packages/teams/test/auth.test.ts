@@ -45,12 +45,12 @@ describe("teams inbound JWT authentication", () => {
     expect(result).toEqual({ ok: false, reason: expect.stringMatching(/serviceUrl/i) });
   });
 
-  it("rejects a validly-signed token that omits the serviceUrl claim (fail closed)", async () => {
+  it("accepts a valid Bot Framework token that omits the optional serviceUrl claim", async () => {
     const { jwksClient, mint } = await setup();
     const auth = createTeamsAuthenticator({ appId: "app-123", jwksClient });
     const token = await mint({ aud: "app-123" });
     const result = await auth.verify({ authorizationHeader: `Bearer ${token}`, bodyServiceUrl: "https://smba/" });
-    expect(result).toEqual({ ok: false, reason: expect.stringMatching(/serviceUrl/i) });
+    expect(result.ok).toBe(true);
   });
 
   it("rejects a token minted with a different issuer", async () => {

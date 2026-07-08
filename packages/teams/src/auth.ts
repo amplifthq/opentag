@@ -45,11 +45,14 @@ export function createTeamsAuthenticator(config: TeamsAuthConfig) {
         return { ok: false, reason: "invalid_token" };
       }
 
-      // Fail closed: a missing or non-string serviceUrl claim is treated as a mismatch, so a
-      // validly-signed token with correct aud/iss cannot bypass this anti-redirection check.
+      // Real Bot Framework/Teams channel tokens may omit the serviceUrl claim.
+      // When the claim is present, keep the anti-redirection check strict; when it is absent,
+      // rely on Bot Framework signature + issuer + audience validation and use the Activity
+      // serviceUrl for replies (the same trust model used by Bot Framework SDKs).
       if (
-        typeof payload.serviceUrl !== "string" ||
-        normalizeUrl(payload.serviceUrl) !== normalizeUrl(input.bodyServiceUrl)
+        payload.serviceUrl !== undefined &&
+        (typeof payload.serviceUrl !== "string" ||
+          normalizeUrl(payload.serviceUrl) !== normalizeUrl(input.bodyServiceUrl))
       ) {
         return { ok: false, reason: "serviceUrl_mismatch" };
       }
