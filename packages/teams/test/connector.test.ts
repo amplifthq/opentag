@@ -45,4 +45,19 @@ describe("teams connector", () => {
     await connector.postMessage({ serviceUrl: "https://smba/amer/", conversationId: "19:c", text: "x" });
     expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/amer/v3/conversations/19:c/activities");
   });
+
+  it("handles serviceUrl without a trailing slash", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ id: "reply-1" }, 200));
+    const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
+    await connector.postMessage({ serviceUrl: "https://smba", conversationId: "19:conv", text: "hello" });
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/v3/conversations/19:conv/activities");
+  });
+
+  it("throws when POST response is 2xx but has no activity id", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({}, 200));
+    const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
+    await expect(
+      connector.postMessage({ serviceUrl: "https://smba/", conversationId: "19:conv", text: "hello" })
+    ).rejects.toThrow(/missing a string activity id/);
+  });
 });
