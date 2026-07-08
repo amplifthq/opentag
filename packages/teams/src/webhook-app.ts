@@ -41,6 +41,14 @@ function actionId(activityId: string, rawBody: string): string {
   return `approval_teams_${activityId}_${bodyHash}`;
 }
 
+function rootActivityIdForThreadAction(input: { conversationId: string; activityId: string }): string {
+  // Teams channel replies carry the root thread id in `conversation.id` as
+  // `...;messageid=<root activity id>`, while the action Activity's own `id` is
+  // the reply message id. Source-thread action lookup must use the original run
+  // thread key, so prefer the root message id when Teams provides it.
+  return /;messageid=([^;]+)$/i.exec(input.conversationId)?.[1] ?? input.activityId;
+}
+
 export function createTeamsWebhookApp(input: TeamsWebhookAppInput) {
   const app = new Hono();
   const webhookPath = input.webhookPath ?? "/teams/messages";
@@ -125,7 +133,10 @@ export function createTeamsWebhookApp(input: TeamsWebhookAppInput) {
           threadKey: encodeTeamsThreadKey({
             serviceUrl: message.serviceUrl,
             conversationId: message.conversationId,
-            activityId: message.activityId
+            activityId: rootActivityIdForThreadAction({
+              conversationId: message.conversationId,
+              activityId: message.activityId
+            })
           })
         },
         metadata: {

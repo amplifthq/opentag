@@ -53,11 +53,17 @@ describe("teams webhook app", () => {
     expect(event.id).toBe("evt_teams_act-1");
   });
 
-  it("routes `apply N` to submitThreadAction, not createRun", async () => {
+  it("routes `apply N` to submitThreadAction using the root Teams thread activity id", async () => {
     const input = baseInput();
-    const res = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> apply 1"));
+    const activity = channelActivity("<at>OpenTag</at> apply 1");
+    activity.id = "reply-activity";
+    activity.conversation.id = "19:conv@thread.tacv2;messageid=root-activity";
+    const res = await post(createTeamsWebhookApp(input), activity);
     expect(res.status).toBe(200);
     await vi.waitFor(() => expect(input.submitThreadAction).toHaveBeenCalledTimes(1));
+    expect(input.submitThreadAction.mock.calls[0][0].callback.threadKey).toBe(
+      "https://smba/|19:conv@thread.tacv2;messageid=root-activity|root-activity"
+    );
     expect(input.createRun).not.toHaveBeenCalled();
   });
 
