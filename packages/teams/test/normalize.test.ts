@@ -46,6 +46,10 @@ describe("extractTeamsMessage", () => {
     expect(extractTeamsMessage(channelActivity({ entities: [] }))).toBeNull();
   });
 
+  it("ignores malformed entity values instead of throwing", () => {
+    expect(extractTeamsMessage(channelActivity({ entities: [null, "bad", 42] }))).toBeNull();
+  });
+
   it("returns null when the sender is the bot itself", () => {
     expect(
       extractTeamsMessage(channelActivity({ from: { id: "28:bot", name: "OpenTag" } }))
@@ -112,6 +116,7 @@ describe("normalizeTeamsActivity", () => {
       serviceUrl: "https://smba.trafficmanager.net/amer/",
       repoProvider: "github", owner: "acme", repo: "demo"
     });
+    expect(event.context[0]).toMatchObject({ provider: "teams", kind: "url", title: "Teams message" });
     // review intent → no write permissions
     expect(event.permissions.some((p) => p.scope === "repo:write")).toBe(false);
   });

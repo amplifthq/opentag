@@ -100,10 +100,12 @@ export function extractTeamsMessage(activity: Record<string, unknown>): TeamsExt
   }
   if (fromId === botId) return null; // defence-in-depth: never act on our own messages.
 
-  const entities = Array.isArray(activity.entities) ? (activity.entities as Array<Record<string, unknown>>) : [];
-  const botMention = entities.find(
-    (e) => e.type === "mention" && (e.mentioned as { id?: unknown } | undefined)?.id === botId
-  );
+  const entities = Array.isArray(activity.entities) ? activity.entities : [];
+  const botMention = entities.find((entity): entity is Record<string, unknown> => {
+    if (!entity || typeof entity !== "object") return false;
+    const mention = entity as Record<string, unknown>;
+    return mention.type === "mention" && (mention.mentioned as { id?: unknown } | undefined)?.id === botId;
+  });
   if (!botMention) return null; // bot was not addressed.
 
   const text = stripMention(rawText, asString(botMention.text) ?? "");
@@ -207,7 +209,7 @@ export function normalizeTeamsActivity(input: TeamsActivityInput): OpenTagEvent 
     context: [
       {
         provider: "teams",
-        kind: "message",
+        kind: "url",
         uri: `teams://team/${input.teamId ?? "unknown"}/channel/${input.channelId ?? input.conversationId}/message/${input.activityId}`,
         visibility: "organization",
         title: "Teams message"

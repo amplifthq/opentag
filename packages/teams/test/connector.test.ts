@@ -16,8 +16,9 @@ describe("teams connector", () => {
     });
     expect(result).toEqual({ activityId: "reply-1" });
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(String(url)).toBe("https://smba/v3/conversations/19:conv/activities");
+    expect(String(url)).toBe("https://smba/v3/conversations/19%3Aconv/activities");
     expect((init as RequestInit).method).toBe("POST");
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
     expect((init as any).headers.authorization).toBe("Bearer tok");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ type: "message", text: "hello" });
   });
@@ -27,7 +28,7 @@ describe("teams connector", () => {
     const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
     await connector.updateMessage({ serviceUrl: "https://smba/", conversationId: "19:conv", activityId: "reply-1", text: "edited" });
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(String(url)).toBe("https://smba/v3/conversations/19:conv/activities/reply-1");
+    expect(String(url)).toBe("https://smba/v3/conversations/19%3Aconv/activities/reply-1");
     expect((init as RequestInit).method).toBe("PUT");
   });
 
@@ -43,14 +44,14 @@ describe("teams connector", () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ id: "r" }, 200));
     const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
     await connector.postMessage({ serviceUrl: "https://smba/amer/", conversationId: "19:c", text: "x" });
-    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/amer/v3/conversations/19:c/activities");
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/amer/v3/conversations/19%3Ac/activities");
   });
 
   it("handles serviceUrl without a trailing slash", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ id: "reply-1" }, 200));
     const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
     await connector.postMessage({ serviceUrl: "https://smba", conversationId: "19:conv", text: "hello" });
-    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/v3/conversations/19:conv/activities");
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://smba/v3/conversations/19%3Aconv/activities");
   });
 
   it("throws when POST response is 2xx but has no activity id", async () => {

@@ -305,16 +305,19 @@ export function createTeamsCallbackSink(input: {
       // Swallow a prior failure so a transient error on one update does not permanently
       // break the edit chain for the subsequent progress/final messages of the same run.
       const current = previous.catch(() => {}).then(async () => {
-        const existingActivityId = activityIdByKey.get(statusKey);
-        // status_update edit chain: POST the first message, PUT (edit) the same one after.
-        if (existingActivityId) {
-          await connector.updateMessage({ serviceUrl, conversationId, activityId: existingActivityId, text: message.body });
-        } else {
-          const { activityId } = await connector.postMessage({ serviceUrl, conversationId, text: message.body });
-          activityIdByKey.set(statusKey, activityId);
-        }
-        if (message.kind === "final") {
-          activityIdByKey.delete(statusKey);
+        try {
+          const existingActivityId = activityIdByKey.get(statusKey);
+          // status_update edit chain: POST the first message, PUT (edit) the same one after.
+          if (existingActivityId) {
+            await connector.updateMessage({ serviceUrl, conversationId, activityId: existingActivityId, text: message.body });
+          } else {
+            const { activityId } = await connector.postMessage({ serviceUrl, conversationId, text: message.body });
+            activityIdByKey.set(statusKey, activityId);
+          }
+        } finally {
+          if (message.kind === "final") {
+            activityIdByKey.delete(statusKey);
+          }
         }
       });
       deliveryByKey.set(statusKey, current);

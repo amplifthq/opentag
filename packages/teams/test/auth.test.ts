@@ -53,6 +53,18 @@ describe("teams inbound JWT authentication", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("rejects a token signed with an unexpected algorithm", async () => {
+    const { jwksClient } = await setup();
+    const auth = createTeamsAuthenticator({ appId: "app-123", jwksClient });
+    const token = await new SignJWT({ aud: "app-123" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuer(ISSUER)
+      .setExpirationTime("5m")
+      .sign(new TextEncoder().encode("shared-secret"));
+    const result = await auth.verify({ authorizationHeader: `Bearer ${token}`, bodyServiceUrl: "https://smba/" });
+    expect(result.ok).toBe(false);
+  });
+
   it("rejects a token minted with a different issuer", async () => {
     const { jwksClient, mint } = await setup();
     const auth = createTeamsAuthenticator({ appId: "app-123", jwksClient });

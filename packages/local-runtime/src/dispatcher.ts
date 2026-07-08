@@ -139,6 +139,15 @@ function parseAgentTokenMap(name: string, raw: string | undefined): Record<strin
   }
 }
 
+
+function isNotFoundError(error: unknown): boolean {
+  if (error && typeof error === "object") {
+    const maybeStatus = error as { status?: unknown; response?: { status?: unknown } };
+    if (maybeStatus.status === 404 || maybeStatus.response?.status === 404) return true;
+  }
+  return error instanceof Error && /(?:^|\D)404(?:\D|$)/.test(error.message);
+}
+
 function parseStringList(name: string, raw: string | undefined): string[] | undefined {
   if (!raw) return undefined;
   try {
@@ -956,9 +965,15 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             try {
               binding = await lookup(conversationId);
             } catch (error) {
+              if (!isNotFoundError(error)) throw error;
               const baseConversationId = conversationId.replace(/;messageid=[^;]+$/i, "");
-              if (baseConversationId === conversationId) throw error;
-              binding = await lookup(baseConversationId);
+              if (baseConversationId === conversationId) return null;
+              try {
+                binding = await lookup(baseConversationId);
+              } catch (fallbackError) {
+                if (isNotFoundError(fallbackError)) return null;
+                throw fallbackError;
+              }
             }
             return {
               tenantId,
@@ -968,10 +983,10 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
               ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
             };
           } catch (error) {
-            // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
-            // from a genuinely unbound channel — log it so operators can tell them apart.
+            // A real backend failure (network/5xx/timeout) is not the same as an
+            // unbound channel; rethrow so the webhook sends a generic failure notice.
             console.error("teams.resolveChannelBinding failed", error);
-            return null;
+            throw error;
           }
         },
         async createRun(event) {

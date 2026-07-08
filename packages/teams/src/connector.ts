@@ -5,9 +5,11 @@ export type TeamsConnector = {
   updateMessage(input: { serviceUrl: string; conversationId: string; activityId: string; text: string }): Promise<void>;
 };
 
+const CONNECTOR_REQUEST_TIMEOUT_MS = 15_000;
+
 function activitiesUrl(serviceUrl: string, conversationId: string): string {
   const base = serviceUrl.endsWith("/") ? serviceUrl : `${serviceUrl}/`;
-  return `${base}v3/conversations/${conversationId}/activities`;
+  return `${base}v3/conversations/${encodeURIComponent(conversationId)}/activities`;
 }
 
 export function createTeamsConnector(input: { getToken: () => Promise<string>; fetchImpl?: FetchLike }): TeamsConnector {
@@ -18,7 +20,8 @@ export function createTeamsConnector(input: { getToken: () => Promise<string>; f
     const response = await fetchImpl(url, {
       method,
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ type: "message", text })
+      body: JSON.stringify({ type: "message", text }),
+      signal: AbortSignal.timeout(CONNECTOR_REQUEST_TIMEOUT_MS)
     });
     if (!response.ok) {
       throw new Error(`Teams connector ${method} ${url} failed with status ${response.status}`);

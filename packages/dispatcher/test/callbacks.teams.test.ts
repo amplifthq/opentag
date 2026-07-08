@@ -6,6 +6,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 const threadKey = "https://smba.example.com|19:conv@thread.tacv2|act-1";
+const encodedConversationId = "19%3Aconv%40thread.tacv2";
 const uri = "https://smba.example.com";
 
 describe("createTeamsCallbackSink", () => {
@@ -40,6 +41,7 @@ describe("createTeamsCallbackSink", () => {
     expect(connectorCalls).toHaveLength(2);
     expect(connectorCalls[0]?.[1]?.method).toBe("POST");
     expect(connectorCalls[1]?.[1]?.method).toBe("PUT");
+    expect(String(connectorCalls[0]?.[0])).toContain(`/v3/conversations/${encodedConversationId}/activities`);
     expect(String(connectorCalls[1]?.[0])).toContain("/activities/reply-1");
   });
 
@@ -72,6 +74,29 @@ describe("createTeamsCallbackSink", () => {
     await Promise.allSettled([first, second]);
 
     expect(connectorCalls).toBe(2);
+  });
+
+  it("cleans up the edit chain when final delivery fails", async () => {
+    let connectorCalls = 0;
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/oauth2/")) return jsonResponse({ access_token: "tok", expires_in: 3600 });
+      connectorCalls += 1;
+      if (connectorCalls === 1 && init?.method === "POST") return jsonResponse({ id: "reply-1" }, 201);
+      if (connectorCalls === 2 && init?.method === "PUT") return new Response("boom", { status: 500 });
+      if (connectorCalls === 3 && init?.method === "POST") return jsonResponse({ id: "reply-2" }, 201);
+      return jsonResponse({}, 200);
+    });
+    const sink = createTeamsCallbackSink({ appId: "app", appPassword: "s", fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await sink.deliver({ runId: "run_cleanup", kind: "acknowledgement", provider: "teams", uri, threadKey, body: "ack" });
+    await expect(
+      sink.deliver({ runId: "run_cleanup", kind: "final", provider: "teams", uri, threadKey, body: "final" })
+    ).rejects.toThrow(/500/);
+    await sink.deliver({ runId: "run_cleanup", kind: "progress", provider: "teams", uri, threadKey, body: "later" });
+
+    const connectorRequests = fetchImpl.mock.calls.filter(([callUrl]) => String(callUrl).includes("/v3/conversations/"));
+    expect(connectorRequests.map(([, init]) => init?.method)).toEqual(["POST", "PUT", "POST"]);
   });
 
   it("ignores non-Teams callback messages", async () => {

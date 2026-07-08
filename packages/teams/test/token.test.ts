@@ -13,6 +13,7 @@ describe("teams outbound token provider", () => {
     expect(token).toBe("tok-1");
     const [url, init] = fetchImpl.mock.calls[0];
     expect(String(url)).toBe("https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token");
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
     const body = new URLSearchParams((init as RequestInit).body as string);
     expect(body.get("grant_type")).toBe("client_credentials");
     expect(body.get("client_id")).toBe("app");
@@ -38,6 +39,24 @@ describe("teams outbound token provider", () => {
     now = 3600 * 1000; // past refresh window
     await provider.getToken();
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("shares one pending token request across concurrent callers", async () => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchImpl = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+    const provider = createTeamsTokenProvider({ appId: "a", appPassword: "s", fetchImpl });
+
+    const first = provider.getToken();
+    const second = provider.getToken();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    resolveFetch?.(jsonResponse({ access_token: "shared-token", expires_in: 3600 }));
+    await expect(Promise.all([first, second])).resolves.toEqual(["shared-token", "shared-token"]);
   });
 
   it("throws on a non-2xx token response", async () => {

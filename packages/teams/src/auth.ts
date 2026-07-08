@@ -31,7 +31,8 @@ export function createTeamsAuthenticator(config: TeamsAuthConfig) {
       try {
         const verified = await jwtVerify(token, jwks, {
           issuer: BOT_FRAMEWORK_ISSUER,
-          audience: config.appId
+          audience: config.appId,
+          algorithms: ["RS256"]
         });
         payload = verified.payload as Record<string, unknown>;
       } catch (error) {
