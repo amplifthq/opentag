@@ -179,15 +179,24 @@ OpenTag 的 CLI 路径是本地优先的。
 | `opentag setup` | 创建或更新本地 OpenTag 配置，并询问是否立即启动 |
 | `opentag setup --service` | 创建或更新本地 OpenTag 配置，并安装、启动后台服务 |
 | `opentag start` | 在当前终端启动本地 OpenTag stack |
+| `opentag pair` | 将本地 runner 与远程 relay 配对 |
+| `opentag service install` | 安装 OpenTag 后台服务 |
 | `opentag service start` | 启动已安装的后台服务 |
 | `opentag service stop` | 停止已安装的后台服务 |
+| `opentag service restart` | 重启已安装的后台服务 |
 | `opentag service status` | 查看后台服务状态和 runtime readiness |
 | `opentag service logs` | 查看近期后台服务日志 |
+| `opentag service uninstall` | 卸载 OpenTag 后台服务 |
+| `opentag service autostart enable` | 启用后台服务的登录自启动 |
+| `opentag service autostart disable` | 禁用后台服务的登录自启动 |
 | `opentag status` | 查看本地配置和运行状态；可以加 `--run <run_id>` 或 `--channel provider:account/conversation` 查看局部详情 |
 | `opentag cancel` | 请求取消某个 run，或取消 source container 中的 active run |
-| `opentag doctor` | 做更深入的 setup 检查 |
+| `opentag doctor` | 检查 dispatcher、bindings、checkout 和 executor |
+| `opentag ingest` | 上报本地外部 agent 的进度或完成事件 |
+| `opentag ingest-template` | 打印外部 agent hook ingest 的 shell 模板或 manifest |
 | `opentag platforms` | 查看平台 setup 支持状态 |
 | `opentag executors` | 查看可用 coding agent |
+| `opentag maintenance prune-source-deliveries` | 清理已终结 run 的 source delivery 重放 key |
 | `opentag config path` | 输出本地配置文件路径 |
 | `opentag config show` | 输出脱敏后的本地配置 |
 
