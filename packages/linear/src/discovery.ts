@@ -248,7 +248,8 @@ async function discoverLinearMetadataConnection(input: {
 }): Promise<unknown[]> {
   const nodes: unknown[] = [];
   let after: string | undefined;
-  for (;;) {
+  const maxPages = 200;
+  for (let page = 0; page < maxPages; page += 1) {
     const data = await linearGraphql<Record<string, unknown>>({
       token: input.token,
       ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
@@ -268,6 +269,7 @@ async function discoverLinearMetadataConnection(input: {
     if (!endCursor) throw new Error(`Linear metadata ${input.connectionName} pageInfo did not include endCursor.`);
     after = endCursor;
   }
+  throw new Error(`Linear metadata ${input.connectionName} pagination exceeded ${maxPages} pages.`);
 }
 
 export function createLinearAdapterMappingDrafts(snapshot: LinearMetadataSnapshot): LinearAdapterMappingDraft[] {

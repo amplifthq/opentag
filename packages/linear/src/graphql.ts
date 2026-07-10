@@ -2,6 +2,8 @@ import { DEFAULT_LINEAR_GRAPHQL_URL } from "./normalize.js";
 
 export type FetchLike = typeof fetch;
 
+export const DEFAULT_LINEAR_REQUEST_TIMEOUT_MS = 15_000;
+
 function linearAuthorizationHeader(token: string): string {
   const trimmed = token.trim();
   if (/^bearer\s+/i.test(trimmed)) return trimmed;
@@ -19,6 +21,7 @@ export async function linearGraphql<T>(input: {
   query: string;
   variables: Record<string, unknown>;
   fetchImpl: FetchLike;
+  timeoutMs?: number;
 }): Promise<T> {
   const operationName = graphqlOperationName(input.query);
   const response = await input.fetchImpl(input.graphqlUrl ?? DEFAULT_LINEAR_GRAPHQL_URL, {
@@ -27,11 +30,12 @@ export async function linearGraphql<T>(input: {
       authorization: linearAuthorizationHeader(input.token),
       "content-type": "application/json"
     },
-    body: JSON.stringify({ query: input.query, variables: input.variables })
+    body: JSON.stringify({ query: input.query, variables: input.variables }),
+    signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_LINEAR_REQUEST_TIMEOUT_MS)
   });
-  const payload = (await response.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string }> };
+  const payload = (await response.json().catch(() => ({}))) as { data?: T; errors?: Array<{ message?: string } | null | undefined> };
   if (!response.ok || payload.errors?.length) {
-    const errorMessage = payload.errors?.map((error) => error.message).filter(Boolean).join("; ");
+    const errorMessage = payload.errors?.map((error) => error?.message).filter(Boolean).join("; ");
     throw new Error(`Linear GraphQL${operationName ? ` ${operationName}` : ""} failed: ${response.status} ${errorMessage ?? "unknown_error"}`);
   }
   if (!payload.data) {

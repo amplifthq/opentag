@@ -309,6 +309,7 @@ const LinearPlatformSchema = z
         repo: z.string().min(1)
       })
       .strict()
+      .optional()
   })
   .strict()
   .superRefine((value, context) => {

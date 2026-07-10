@@ -98,7 +98,8 @@ function isAbortError(error: unknown): boolean {
 
 async function resolveLinearToken(input: { token?: string; getToken?: LinearTokenProvider }): Promise<string | undefined> {
   const token = input.getToken ? await input.getToken() : input.token;
-  return token?.trim() ? token : undefined;
+  const trimmed = token?.trim();
+  return trimmed ? trimmed : undefined;
 }
 
 function linearAgentSessionPlanFor(message: CallbackMessage) {

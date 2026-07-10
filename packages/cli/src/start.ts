@@ -362,7 +362,7 @@ export function dispatcherRuntimeInputFromCliConfig(
           linearToken: linear.token,
           ...(linear.graphqlUrl ? { linearGraphqlUrl: linear.graphqlUrl } : {}),
           ...(linear.mappings ? { linearMappings: linear.mappings } : {}),
-          linearProjectTarget: linear.projectTarget
+          ...(linear.projectTarget ? { linearProjectTarget: linear.projectTarget } : {})
         }
       : {}),
     ...(lark
@@ -509,12 +509,22 @@ export function linearIngressConfigFromCliConfig(config: OpenTagCliConfig): Line
     webhookSecret: linear.webhookSecret,
     linearToken: linear.token,
     ...(linear.graphqlUrl ? { graphqlUrl: linear.graphqlUrl } : {}),
-    projectTarget: linear.projectTarget,
+    projectTarget: requireLinearProjectTarget(linear.projectTarget, "Linear local ingress"),
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     port: linear.port ?? DEFAULT_LINEAR_WEBHOOK_PORT,
     ...(linear.webhookPath ? { webhookPath: linear.webhookPath } : {})
   };
+}
+
+function requireLinearProjectTarget(
+  projectTarget: { repoProvider: string; owner: string; repo: string } | undefined,
+  purpose: string
+): { repoProvider: string; owner: string; repo: string } {
+  if (!projectTarget) {
+    throw new Error(`${purpose} requires platforms.linear.projectTarget.`);
+  }
+  return projectTarget;
 }
 
 const LINEAR_OAUTH_REFRESH_SKEW_MS = 5 * 60 * 1000;
@@ -636,11 +646,12 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
   }
   const linear = config.platforms.linear;
   if (linear?.mappings?.length && admin.upsertRepoMutationMapping) {
+    const mappingTarget = requireLinearProjectTarget(linear.projectTarget, "Linear mutation mapping upload");
     for (const mapping of linear.mappings) {
       await admin.upsertRepoMutationMapping({
-        provider: linear.projectTarget.repoProvider,
-        owner: linear.projectTarget.owner,
-        repo: linear.projectTarget.repo,
+        provider: mappingTarget.repoProvider,
+        owner: mappingTarget.owner,
+        repo: mappingTarget.repo,
         mapping
       });
     }
@@ -649,10 +660,11 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
     if (!admin.createLinearOAuthInstallation) {
       throw new Error("This dispatcher client cannot create hosted Linear OAuth installations.");
     }
+    const installTarget = requireLinearProjectTarget(linear.projectTarget, "Linear hosted OAuth install");
     const started = await admin.createLinearOAuthInstallation({
-      repoProvider: linear.projectTarget.repoProvider,
-      owner: linear.projectTarget.owner,
-      repo: linear.projectTarget.repo,
+      repoProvider: installTarget.repoProvider,
+      owner: installTarget.owner,
+      repo: installTarget.repo,
       ...(linear.teamId ? { teamId: linear.teamId } : {}),
       ...(linear.teamKey ? { teamKey: linear.teamKey } : {}),
       ...(linear.graphqlUrl ? { graphqlUrl: linear.graphqlUrl } : {}),
@@ -676,6 +688,7 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
       if (!linear.token || !linear.webhookSecret) {
         throw new Error("Linear relay installation upload requires platforms.linear.token and platforms.linear.webhookSecret.");
       }
+      const relayTarget = requireLinearProjectTarget(linear.projectTarget, "Linear relay installation upload");
       await admin.upsertLinearRelayInstallation({
         id: linear.webhookPath.slice("/linear/webhooks/".length),
         webhookPath: linear.webhookPath,
@@ -694,9 +707,9 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
             }
           : {}),
         ...(linear.graphqlUrl ? { graphqlUrl: linear.graphqlUrl } : {}),
-        repoProvider: linear.projectTarget.repoProvider,
-        owner: linear.projectTarget.owner,
-        repo: linear.projectTarget.repo,
+        repoProvider: relayTarget.repoProvider,
+        owner: relayTarget.owner,
+        repo: relayTarget.repo,
         ...(linear.teamId ? { teamId: linear.teamId } : {}),
         ...(linear.teamKey ? { teamKey: linear.teamKey } : {})
       });

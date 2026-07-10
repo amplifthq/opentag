@@ -2419,6 +2419,138 @@ describe("dispatcher API", () => {
     }
   });
 
+  it("deduplicates concurrent OAuth relay installation refreshes into a single token request", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        now: () => new Date("2026-07-07T00:10:00.000Z"),
+        refreshSkewMs: 0
+      }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    const stored = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_oauth",
+        webhookPath: "/linear/webhooks/install_oauth",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_old",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_old",
+          accessTokenExpiresAt: "2026-07-07T00:00:00.000Z",
+          scopes: ["read", "comments:create"]
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(stored.status).toBe(201);
+
+    const originalFetch = globalThis.fetch;
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlAuthorizations: Array<string | null | undefined> = [];
+    globalThis.fetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return Response.json({
+          access_token: "linear_access_refreshed",
+          refresh_token: "linear_refresh_new",
+          expires_in: 3600,
+          scope: "read,comments:create"
+        });
+      }
+      if (requestUrl === "https://linear.example/graphql") {
+        graphqlAuthorizations.push(
+          init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization
+        );
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+    }) as typeof fetch;
+
+    try {
+      const webhookRequest = (input: { webhookId: string; commentId: string }) => {
+        const rawBody = JSON.stringify({
+          type: "Comment",
+          action: "create",
+          webhookId: input.webhookId,
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:00.000Z",
+          webhookTimestamp: Date.now(),
+          data: {
+            id: input.commentId,
+            body: "@opentag run concurrent oauth refresh smoke",
+            url: `https://linear.app/acme/issue/ENG-1/demo#${input.commentId}`,
+            issue: {
+              id: "issue_1",
+              identifier: "ENG-1",
+              title: "Demo",
+              url: "https://linear.app/acme/issue/ENG-1/demo",
+              team: { id: "team_1", key: "ENG" }
+            },
+            user: { id: "user_1", name: "Ada" }
+          }
+        });
+        return app.request("/linear/webhooks/install_oauth", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
+          },
+          body: rawBody
+        });
+      };
+
+      const [first, second] = await Promise.all([
+        webhookRequest({ webhookId: "linear_delivery_concurrent_1", commentId: "comment_concurrent_1" }),
+        webhookRequest({ webhookId: "linear_delivery_concurrent_2", commentId: "comment_concurrent_2" })
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          refresh_token: "linear_refresh_old",
+          grant_type: "refresh_token",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlAuthorizations).toHaveLength(2);
+      expect(graphqlAuthorizations).toEqual(["Bearer linear_access_refreshed", "Bearer linear_access_refreshed"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("records management audit events for repo policy and mutation mapping changes without rule details", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

@@ -34,7 +34,7 @@ Hooks, verify `X-Gitlab-Token` using `platforms.gitlab.webhookSecret`. For
 Linear workspace webhooks, verify `Linear-Signature` and the webhook timestamp
 using `platforms.linear.webhookSecret` for static self-hosted ingress, or the
 per-install secret selected by a unique `/linear/webhooks/<install-id>` path for
-static dynamic relay ingress. Hosted Linear OAuth App ingress uses a fixed
+dynamic relay ingress. Hosted Linear OAuth App ingress uses a fixed
 `/linear/oauth/webhooks` path: verify that shared OAuth App signing secret
 first, then route the verified payload by `organizationId` to the completed
 OAuth installation. Do not accept unsigned source events on `/github/webhooks`,

@@ -108,9 +108,9 @@ export function formatLinearRelayProvisioningHint(config: OpenTagCliConfig): str
     "  OPENTAG_LINEAR_API_KEY=<Linear OAuth access token or raw lin_api_... key>",
     "  OPENTAG_LINEAR_WEBHOOK_SECRET=<copy platforms.linear.webhookSecret from the local OpenTag config>",
     `  OPENTAG_LINEAR_WEBHOOK_PATH=${linear.webhookPath ?? "/linear/webhooks"}`,
-    `  OPENTAG_LINEAR_REPO_PROVIDER=${target.repoProvider}`,
-    `  OPENTAG_LINEAR_REPO_OWNER=${target.owner}`,
-    `  OPENTAG_LINEAR_REPO_NAME=${target.repo}`,
+    `  OPENTAG_LINEAR_REPO_PROVIDER=${target?.repoProvider ?? "<Project Target repo provider>"}`,
+    `  OPENTAG_LINEAR_REPO_OWNER=${target?.owner ?? "<Project Target owner>"}`,
+    `  OPENTAG_LINEAR_REPO_NAME=${target?.repo ?? "<Project Target repo>"}`,
     ...formatOptionalRelayEnv("OPENTAG_LINEAR_GRAPHQL_URL", linear.graphqlUrl),
     "Secrets are intentionally not printed here."
   ].join("\n");

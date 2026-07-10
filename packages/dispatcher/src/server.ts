@@ -2530,50 +2530,79 @@ export function createDispatcherApp(input: {
     const installationId = event.metadata["linearRelayInstallationId"];
     return typeof installationId === "string" && installationId.length > 0 ? await repo.getLinearRelayInstallation({ id: installationId }) : null;
   }
+  function linearInstallationTokenIsFresh(input: { accessTokenExpiresAt?: string; now: Date; refreshSkewMs: number }): boolean {
+    const expiresAtMs = input.accessTokenExpiresAt ? Date.parse(input.accessTokenExpiresAt) : Number.NaN;
+    return Number.isFinite(expiresAtMs) && expiresAtMs - input.now.getTime() > input.refreshSkewMs;
+  }
+  const inFlightLinearInstallationTokenRefreshes = new Map<string, Promise<string>>();
   async function resolveLinearRelayInstallationToken(
     installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationFromEvent>>>
   ): Promise<string> {
     const auth = installation.auth;
     if (!linearOAuthInstall || auth?.method !== "oauth_app" || !auth.refreshToken) return installation.token;
 
-    const now = linearOAuthInstall.now?.() ?? new Date();
-    const refreshSkewMs = linearOAuthInstall.refreshSkewMs ?? DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS;
-    const expiresAtMs = auth.accessTokenExpiresAt ? Date.parse(auth.accessTokenExpiresAt) : Number.NaN;
-    if (Number.isFinite(expiresAtMs) && expiresAtMs - now.getTime() > refreshSkewMs) {
+    const oauthInstall = linearOAuthInstall;
+    const now = oauthInstall.now?.() ?? new Date();
+    const refreshSkewMs = oauthInstall.refreshSkewMs ?? DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS;
+    if (linearInstallationTokenIsFresh({ ...(auth.accessTokenExpiresAt ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}), now, refreshSkewMs })) {
       return installation.token;
     }
 
-    const refreshed = await refreshLinearOAuthToken({
-      clientId: auth.clientId ?? linearOAuthInstall.clientId,
-      ...(linearOAuthInstall.clientSecret ? { clientSecret: linearOAuthInstall.clientSecret } : {}),
-      refreshToken: auth.refreshToken,
-      ...(linearOAuthInstall.tokenUrl ? { tokenUrl: linearOAuthInstall.tokenUrl } : {}),
-      ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
-    });
-    const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token: refreshed, now });
-    const refreshedAuth = {
-      method: "oauth_app" as const,
-      actor: "app" as const,
-      clientId: auth.clientId ?? linearOAuthInstall.clientId,
-      refreshToken: refreshed.refreshToken ?? auth.refreshToken,
-      ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
-      ...(refreshed.scope?.length ? { scopes: refreshed.scope } : auth.scopes?.length ? { scopes: auth.scopes } : {})
-    };
-    const updated = await repo.upsertLinearRelayInstallation({
-      id: installation.id,
-      webhookPath: installation.webhookPath,
-      webhookSecret: installation.webhookSecret,
-      token: refreshed.accessToken,
-      auth: refreshedAuth,
-      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
-      repoProvider: installation.repoProvider,
-      owner: installation.owner,
-      repo: installation.repo,
-      ...(installation.organizationId ? { organizationId: installation.organizationId } : {}),
-      ...(installation.teamId ? { teamId: installation.teamId } : {}),
-      ...(installation.teamKey ? { teamKey: installation.teamKey } : {})
-    });
-    return updated.token;
+    const inFlight = inFlightLinearInstallationTokenRefreshes.get(installation.id);
+    if (inFlight) return inFlight;
+
+    const refresh = (async () => {
+      const latest = (await repo.getLinearRelayInstallation({ id: installation.id })) ?? installation;
+      const latestAuth = latest.auth;
+      if (latestAuth?.method !== "oauth_app" || !latestAuth.refreshToken) return latest.token;
+      if (
+        linearInstallationTokenIsFresh({
+          ...(latestAuth.accessTokenExpiresAt ? { accessTokenExpiresAt: latestAuth.accessTokenExpiresAt } : {}),
+          now,
+          refreshSkewMs
+        })
+      ) {
+        return latest.token;
+      }
+
+      const refreshed = await refreshLinearOAuthToken({
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        ...(oauthInstall.clientSecret ? { clientSecret: oauthInstall.clientSecret } : {}),
+        refreshToken: latestAuth.refreshToken,
+        ...(oauthInstall.tokenUrl ? { tokenUrl: oauthInstall.tokenUrl } : {}),
+        ...(oauthInstall.fetchImpl ? { fetchImpl: oauthInstall.fetchImpl } : {})
+      });
+      const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token: refreshed, now });
+      const refreshedAuth = {
+        method: "oauth_app" as const,
+        actor: "app" as const,
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        refreshToken: refreshed.refreshToken ?? latestAuth.refreshToken,
+        ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(refreshed.scope?.length ? { scopes: refreshed.scope } : latestAuth.scopes?.length ? { scopes: latestAuth.scopes } : {})
+      };
+      const updated = await repo.upsertLinearRelayInstallation({
+        id: latest.id,
+        webhookPath: latest.webhookPath,
+        webhookSecret: latest.webhookSecret,
+        token: refreshed.accessToken,
+        auth: refreshedAuth,
+        ...(latest.graphqlUrl ? { graphqlUrl: latest.graphqlUrl } : {}),
+        repoProvider: latest.repoProvider,
+        owner: latest.owner,
+        repo: latest.repo,
+        ...(latest.organizationId ? { organizationId: latest.organizationId } : {}),
+        ...(latest.teamId ? { teamId: latest.teamId } : {}),
+        ...(latest.teamKey ? { teamKey: latest.teamKey } : {})
+      });
+      return updated.token;
+    })();
+    inFlightLinearInstallationTokenRefreshes.set(installation.id, refresh);
+    try {
+      return await refresh;
+    } finally {
+      inFlightLinearInstallationTokenRefreshes.delete(installation.id);
+    }
   }
   async function linearRelayInstallationForCallback(message: CallbackMessage) {
     if (message.provider !== "linear") return null;

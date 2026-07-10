@@ -1,4 +1,4 @@
-import { linearGraphql, type FetchLike } from "./graphql.js";
+import { DEFAULT_LINEAR_REQUEST_TIMEOUT_MS, linearGraphql, type FetchLike } from "./graphql.js";
 
 export const LINEAR_AUTHORIZATION_URL = "https://linear.app/oauth/authorize";
 export const LINEAR_OAUTH_TOKEN_URL = "https://api.linear.app/oauth/token";
@@ -103,6 +103,7 @@ export async function exchangeLinearOAuthCode(input: {
   codeVerifier?: string;
   tokenUrl?: string;
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 }): Promise<LinearOAuthTokenResponse> {
   const body = new URLSearchParams({
     client_id: input.clientId,
@@ -115,7 +116,8 @@ export async function exchangeLinearOAuthCode(input: {
   const response = await (input.fetchImpl ?? fetch)(input.tokenUrl ?? LINEAR_OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    body
+    body,
+    signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_LINEAR_REQUEST_TIMEOUT_MS)
   });
   return parseTokenResponse(response);
 }
@@ -126,6 +128,7 @@ export async function refreshLinearOAuthToken(input: {
   refreshToken: string;
   tokenUrl?: string;
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 }): Promise<LinearOAuthTokenResponse> {
   const body = new URLSearchParams({
     client_id: input.clientId,
@@ -136,7 +139,8 @@ export async function refreshLinearOAuthToken(input: {
   const response = await (input.fetchImpl ?? fetch)(input.tokenUrl ?? LINEAR_OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    body
+    body,
+    signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_LINEAR_REQUEST_TIMEOUT_MS)
   });
   return parseTokenResponse(response);
 }
@@ -147,6 +151,7 @@ export async function createLinearClientCredentialsToken(input: {
   scopes?: readonly string[];
   tokenUrl?: string;
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 }): Promise<LinearOAuthTokenResponse> {
   const body = new URLSearchParams({
     client_id: input.clientId,
@@ -157,7 +162,8 @@ export async function createLinearClientCredentialsToken(input: {
   const response = await (input.fetchImpl ?? fetch)(input.tokenUrl ?? LINEAR_OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-    body
+    body,
+    signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_LINEAR_REQUEST_TIMEOUT_MS)
   });
   return parseTokenResponse(response);
 }
@@ -169,6 +175,7 @@ export async function revokeLinearOAuthToken(input: {
   tokenTypeHint?: "access_token" | "refresh_token";
   revokeUrl?: string;
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 }): Promise<void> {
   const body = new URLSearchParams({ token: input.token });
   if (input.tokenTypeHint) body.set("token_type_hint", input.tokenTypeHint);
@@ -178,7 +185,8 @@ export async function revokeLinearOAuthToken(input: {
       "content-type": "application/x-www-form-urlencoded",
       authorization: `Basic ${Buffer.from(`${input.clientId}:${input.clientSecret}`).toString("base64")}`
     },
-    body
+    body,
+    signal: AbortSignal.timeout(input.timeoutMs ?? DEFAULT_LINEAR_REQUEST_TIMEOUT_MS)
   });
   if (!response.ok) {
     throw new Error(`Linear OAuth revoke failed: ${response.status}`);
