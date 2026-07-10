@@ -456,13 +456,20 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
     const agentStopContext = agentSessionStopContext({ payload: linearPayload, app: input });
     if (agentStopContext) {
       if (input.submitThreadAction) {
-        await input.submitThreadAction({
-          id: `linear_control_${agentActivityIdFromPayload(linearPayload) ?? agentSessionIdFromPayload(linearPayload) ?? randomUUID()}`,
-          rawText: agentStopContext.rawText,
-          actor: agentStopContext.actor,
-          callback: agentStopContext.callback,
-          metadata: agentStopContext.metadata
-        });
+        try {
+          await input.submitThreadAction({
+            id: `linear_control_${agentActivityIdFromPayload(linearPayload) ?? agentSessionIdFromPayload(linearPayload) ?? randomUUID()}`,
+            rawText: agentStopContext.rawText,
+            actor: agentStopContext.actor,
+            callback: agentStopContext.callback,
+            metadata: agentStopContext.metadata
+          });
+        } catch (error) {
+          // A rejected thread action (no active run, stale proposal, dispatcher 4xx) is a
+          // user-level outcome, not a delivery failure — never let it escape the webhook.
+          console.error(`Linear stop control failed: ${error instanceof Error ? error.message : String(error)}`);
+          return c.json({ ok: false, action: "stop", error: "thread_action_failed" });
+        }
       }
       return c.json({ ok: true, action: "stop" });
     }
@@ -476,13 +483,18 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
       const actionIdSuffix = isCommentCreatePayload(linearPayload)
         ? linearPayload.data.id
         : (agentActivityIdFromPayload(linearPayload) ?? randomUUID());
-      await input.submitThreadAction({
-        id: `linear_${control ? "control" : "action"}_${actionIdSuffix}`,
-        rawText: threadContext.rawText,
-        actor: threadContext.actor,
-        callback: threadContext.callback,
-        metadata: threadContext.metadata
-      });
+      try {
+        await input.submitThreadAction({
+          id: `linear_${control ? "control" : "action"}_${actionIdSuffix}`,
+          rawText: threadContext.rawText,
+          actor: threadContext.actor,
+          callback: threadContext.callback,
+          metadata: threadContext.metadata
+        });
+      } catch (error) {
+        console.error(`Linear thread action failed: ${error instanceof Error ? error.message : String(error)}`);
+        return c.json({ ok: false, action: control?.verb ?? action?.verb, error: "thread_action_failed" });
+      }
       return c.json({ ok: true, action: control?.verb ?? action?.verb });
     }
 

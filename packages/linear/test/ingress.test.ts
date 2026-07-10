@@ -751,3 +751,49 @@ describe("Linear agent session prompted thread actions", () => {
     );
   });
 });
+
+describe("Linear ingress thread-action failure handling", () => {
+  it("responds gracefully when the dispatcher rejects a thread action", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const submitThreadAction = vi.fn(async () => {
+      throw new Error("submitThreadAction failed: 404 no_proposal");
+    });
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      submitThreadAction,
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_1",
+      organizationId: "org_acme",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: WEBHOOK_TIMESTAMP,
+      data: {
+        id: "comment_apply_orphan",
+        body: "apply 1",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: false, action: "apply", error: "thread_action_failed" });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+});
