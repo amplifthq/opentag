@@ -58,6 +58,7 @@ import {
   createLinearIssueCommentRecord,
   createLinearMutationCompiler,
   createLinearWebhookApp,
+  DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS,
   DEFAULT_LINEAR_AGENT_OAUTH_SCOPES,
   discoverLinearMetadata,
   exchangeLinearOAuthCode,
@@ -330,6 +331,7 @@ export type LinearOAuthInstallOptions = {
   tokenUrl?: string;
   installStateTtlMs?: number;
   refreshSkewMs?: number;
+  commentRunDeferMs?: number;
   fetchImpl?: LinearFetchLike;
   now?(): Date;
 };
@@ -2654,6 +2656,11 @@ export function createDispatcherApp(input: {
         repo: input.installation.repo
       },
       webhookPath: input.webhookPath,
+      // OAuth-app installs receive both Comment and AgentSessionEvent webhooks for one
+      // mention; defer comment runs so the session channel can claim them.
+      ...(input.installation.auth?.method === "oauth_app"
+        ? { commentRunDeferMs: linearOAuthInstall?.commentRunDeferMs ?? DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS }
+        : {}),
       onAgentSessionAccepted: async ({ agentSessionId, runId }) => {
         const token = await resolveLinearRelayInstallationToken(input.installation);
         await acknowledgeLinearAgentSession({

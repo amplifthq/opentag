@@ -40,6 +40,7 @@ type LinearCommentData = {
   url?: unknown;
   parentId?: unknown;
   isArtificialAgentSessionRoot?: unknown;
+  userId?: unknown;
   issue?: LinearIssue;
   user?: LinearUser;
   creator?: LinearUser;
@@ -105,8 +106,12 @@ export type LinearWebhookAppInput = {
   onAgentSessionAccepted?(input: { agentSessionId: string; runId?: string; action?: string }): Promise<unknown> | unknown;
   maxRequestBodyBytes?: number;
   maxWebhookTimestampSkewMs?: number;
+  appUserId?: string;
+  commentRunDeferMs?: number;
   now(): string;
 };
+
+export const DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS = 2_500;
 
 export type LinearIngressConfig = {
   webhookSecret: string;
@@ -121,6 +126,8 @@ export type LinearIngressConfig = {
   webhookPath?: string;
   maxRequestBodyBytes?: number;
   maxWebhookTimestampSkewMs?: number;
+  appUserId?: string;
+  commentRunDeferMs?: number;
 };
 
 export type LinearIngressHandle = {
@@ -200,6 +207,24 @@ function agentActivityIdFromPayload(payload: LinearWebhookPayload): string | und
   return stringValue(payload.agentActivity.id);
 }
 
+function agentSessionRootCommentIdFromPayload(payload: LinearWebhookPayload): string | undefined {
+  if (payload.type !== "AgentSessionEvent" || !isRecord(payload.agentSession)) return undefined;
+  return stringValue(payload.agentSession.commentId);
+}
+
+// OAuth app actors post with a synthetic @oauthapp.linear.app email. Comments they author —
+// our own callbacks included — must never be treated as new invocations, or a final summary
+// that quotes "@opentag" re-triggers a run and the loop never ends.
+const LINEAR_OAUTH_APP_ACTOR_EMAIL_SUFFIX = "@oauthapp.linear.app";
+
+function isLinearAppActorComment(input: { data: LinearCommentData; appUserId?: string }): boolean {
+  const author = input.data.user ?? input.data.creator;
+  const authorId = stringValue(author?.id) ?? stringValue(input.data.userId);
+  if (input.appUserId && authorId === input.appUserId) return true;
+  const email = stringValue(author?.email);
+  return typeof email === "string" && email.toLowerCase().endsWith(LINEAR_OAUTH_APP_ACTOR_EMAIL_SUFFIX);
+}
+
 function isAgentSessionStopSignalPayload(payload: LinearWebhookPayload): boolean {
   return isAgentSessionEventPayload(payload) && agentActivitySignal(payload.agentActivity) === "stop";
 }
@@ -211,6 +236,7 @@ function normalizePayload(input: { payload: LinearWebhookPayload; app: LinearWeb
     // also created an Agent Session for it; the AgentSessionEvent channel owns that
     // invocation, so the comment channel must not start a second run.
     if (data.isArtificialAgentSessionRoot === true) return null;
+    if (isLinearAppActorComment({ data, ...(input.app.appUserId ? { appUserId: input.app.appUserId } : {}) })) return null;
     const issue = data.issue!;
     const team = issue.team!;
     const actor = data.user ?? data.creator;
@@ -282,6 +308,7 @@ function agentSessionStopContext(input: { payload: LinearWebhookPayload; app: Li
 function commentPayloadContext(input: { payload: LinearWebhookPayload; app: LinearWebhookAppInput }): LinearThreadActionContext | null {
   if (!isCommentCreatePayload(input.payload)) return null;
   const data = input.payload.data;
+  if (isLinearAppActorComment({ data, ...(input.app.appUserId ? { appUserId: input.app.appUserId } : {}) })) return null;
   const issue = data.issue;
   const team = issue.team;
   const actor = data.user ?? data.creator;
@@ -347,6 +374,31 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
   const app = new Hono();
   const webhookPath = input.webhookPath ?? "/linear/webhooks";
   const maxBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  // Comment-vs-AgentSession dedupe: a real user mention arrives twice when Agent session
+  // events are enabled — first as a Comment webhook, then (~1s later) as an AgentSessionEvent
+  // whose agentSession.commentId points back at the mention comment. The Comment event carries
+  // no marker of its own, so when commentRunDeferMs > 0 mention runs are deferred briefly and
+  // dropped if the session claims the comment inside the window.
+  const commentRunDeferMs = input.commentRunDeferMs ?? 0;
+  const pendingCommentRuns = new Map<string, ReturnType<typeof setTimeout>>();
+  const sessionClaimedComments = new Map<string, number>();
+  const SESSION_COMMENT_CLAIM_TTL_MS = 60_000;
+  function claimCommentForAgentSession(commentId: string): void {
+    const nowMs = nowMsFrom(input);
+    for (const [id, expiresAt] of sessionClaimedComments) {
+      if (expiresAt <= nowMs) sessionClaimedComments.delete(id);
+    }
+    sessionClaimedComments.set(commentId, nowMs + SESSION_COMMENT_CLAIM_TTL_MS);
+    const pending = pendingCommentRuns.get(commentId);
+    if (pending) {
+      clearTimeout(pending);
+      pendingCommentRuns.delete(commentId);
+    }
+  }
+  function commentClaimedByAgentSession(commentId: string): boolean {
+    const expiresAt = sessionClaimedComments.get(commentId);
+    return typeof expiresAt === "number" && expiresAt > nowMsFrom(input);
+  }
 
   app.post(webhookPath, async (c) => {
     let rawBody: string;
@@ -415,6 +467,25 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
     const event = normalizePayload({ payload: linearPayload, app: input });
     if (!event) return c.json({ ok: true, ignored: true });
 
+    const sessionRootCommentId = agentSessionRootCommentIdFromPayload(linearPayload);
+    if (sessionRootCommentId) {
+      claimCommentForAgentSession(sessionRootCommentId);
+    }
+
+    if (commentRunDeferMs > 0 && isCommentCreatePayload(linearPayload)) {
+      const commentId = linearPayload.data.id;
+      if (commentClaimedByAgentSession(commentId)) {
+        return c.json({ ok: true, ignored: true, reason: "agent_session_owns_comment" });
+      }
+      const timer = setTimeout(() => {
+        pendingCommentRuns.delete(commentId);
+        if (commentClaimedByAgentSession(commentId)) return;
+        void input.createRun(event).catch(() => {});
+      }, commentRunDeferMs);
+      pendingCommentRuns.set(commentId, timer);
+      return c.json({ ok: true, deferred: true });
+    }
+
     const created = await input.createRun(event);
     const agentSessionId = agentSessionIdFromPayload(linearPayload);
     if (agentSessionId && input.onAgentSessionAccepted) {
@@ -447,6 +518,8 @@ export function startLinearIngress(config: LinearIngressConfig): LinearIngressHa
     webhookPath,
     ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
     ...(config.maxWebhookTimestampSkewMs ? { maxWebhookTimestampSkewMs: config.maxWebhookTimestampSkewMs } : {}),
+    ...(config.appUserId ? { appUserId: config.appUserId } : {}),
+    ...(config.commentRunDeferMs !== undefined ? { commentRunDeferMs: config.commentRunDeferMs } : {}),
     ...(config.linearToken || config.getLinearToken
       ? {
           onAgentSessionAccepted: async ({ agentSessionId, runId }) => {

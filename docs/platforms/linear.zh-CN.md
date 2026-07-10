@@ -175,9 +175,14 @@ Relay mode: Linear should call the relay URL above; no ngrok/cloudflared tunnel 
 - Signing secret：把 OAuth app Webhooks 生成的 signing secret 写回 OpenTag config 的
   `platforms.linear.webhookSecret`（或 setup 的 `--linear-webhook-secret`）
 
-当同一次 @提及 同时产生 Comment 和 Agent Session 事件时，OpenTag 会用 Linear 在
-comment payload 上标记的 `isArtificialAgentSessionRoot` 去重，只从 Agent Session
-通道创建 run，不会双触发。
+当同一次 @提及 同时产生 Comment 和 Agent Session 事件时，OpenTag 双重去重：
+delegate 场景下 Linear 会把合成的锚点评论标记为 `isArtificialAgentSessionRoot`，
+comment 通道直接跳过；真人评论没有该标记，且 Comment 事件比对应的
+AgentSessionEvent 早到约 1 秒，因此 OAuth App 模式下 comment run 会延迟一个短暂
+的宽限窗口（默认 2.5s）——窗口内若收到 `agentSession.commentId` 指向该评论的
+session 事件，run 由 Agent Session 通道独占创建，不会双触发。OpenTag 也会忽略
+OAuth app actor（`@oauthapp.linear.app` 邮箱）自己发出的评论，避免回写的总结里
+出现 `@opentag` 字样时把自己再次触发。
 
 **API key 兼容模式**：在 Linear API / Webhooks 设置页创建 workspace webhook：
 

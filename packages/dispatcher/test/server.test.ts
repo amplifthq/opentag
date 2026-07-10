@@ -1526,7 +1526,8 @@ describe("dispatcher API", () => {
         tokenUrl: "https://linear.example/oauth/token",
         fetchImpl: linearFetch,
         now: () => now,
-        refreshSkewMs: 0
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
       }
     });
 
@@ -2296,7 +2297,8 @@ describe("dispatcher API", () => {
         redirectUri: "https://relay.example/linear/oauth/callback",
         tokenUrl: "https://linear.example/oauth/token",
         now: () => new Date("2026-07-07T00:10:00.000Z"),
-        refreshSkewMs: 0
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
       }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
@@ -2428,7 +2430,8 @@ describe("dispatcher API", () => {
         redirectUri: "https://relay.example/linear/oauth/callback",
         tokenUrl: "https://linear.example/oauth/token",
         now: () => new Date("2026-07-07T00:10:00.000Z"),
-        refreshSkewMs: 0
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
       }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));

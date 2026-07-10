@@ -161,6 +161,230 @@ describe("Linear webhook ingress", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 
+  it("ignores comments authored by OAuth app actors so callbacks never re-trigger runs", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      submitThreadAction,
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_1",
+      organizationId: "org_acme",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: WEBHOOK_TIMESTAMP,
+      data: {
+        id: "comment_from_app",
+        body: "OpenTag finished with **success**. The user asked: @opentag investigate this",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "app_user_1", name: "OpenTag", email: "c996@oauthapp.linear.app" }
+      }
+    });
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, ignored: true });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).not.toHaveBeenCalled();
+  });
+
+  it("defers mention comment runs and drops them when an agent session claims the comment", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_session_1" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      commentRunDeferMs: 40,
+      now: () => new Date().toISOString()
+    });
+    const nowTimestamp = Date.now();
+    const commentBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: nowTimestamp,
+      data: {
+        id: "comment_mention_1",
+        body: "@opentag investigate this",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+    const sessionBody = JSON.stringify({
+      type: "AgentSessionEvent",
+      action: "created",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: nowTimestamp,
+      agentSession: {
+        id: "agent_session_1",
+        commentId: "comment_mention_1",
+        creator: { id: "user_alice", name: "Alice" },
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        }
+      }
+    });
+
+    const commentResponse = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", commentBody),
+      body: commentBody
+    });
+    await expect(commentResponse.json()).resolves.toEqual({ ok: true, deferred: true });
+
+    const sessionResponse = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", sessionBody),
+      body: sessionBody
+    });
+    await expect(sessionResponse.json()).resolves.toMatchObject({ ok: true, runId: "run_session_1" });
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(createRun.mock.calls[0]?.[0]).toMatchObject({ sourceEventId: "agent_session_1" });
+  });
+
+  it("creates the deferred comment run when no agent session claims it within the window", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_comment_1" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      commentRunDeferMs: 20,
+      now: () => new Date().toISOString()
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: Date.now(),
+      data: {
+        id: "comment_mention_2",
+        body: "@opentag investigate this",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+    await expect(response.json()).resolves.toEqual({ ok: true, deferred: true });
+    expect(createRun).not.toHaveBeenCalled();
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(createRun.mock.calls[0]?.[0]).toMatchObject({ sourceEventId: "comment_mention_2" });
+  });
+
+  it("skips comments that arrive after their agent session already claimed them", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_session_2" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      commentRunDeferMs: 20,
+      now: () => new Date().toISOString()
+    });
+    const nowTimestamp = Date.now();
+    const sessionBody = JSON.stringify({
+      type: "AgentSessionEvent",
+      action: "created",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: nowTimestamp,
+      agentSession: {
+        id: "agent_session_2",
+        commentId: "comment_mention_3",
+        creator: { id: "user_alice", name: "Alice" },
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        }
+      }
+    });
+    const commentBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: nowTimestamp,
+      data: {
+        id: "comment_mention_3",
+        body: "@opentag investigate this",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+
+    await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", sessionBody),
+      body: sessionBody
+    });
+    const commentResponse = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", commentBody),
+      body: commentBody
+    });
+
+    await expect(commentResponse.json()).resolves.toEqual({ ok: true, ignored: true, reason: "agent_session_owns_comment" });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(createRun).toHaveBeenCalledTimes(1);
+    expect(createRun.mock.calls[0]?.[0]).toMatchObject({ sourceEventId: "agent_session_2" });
+  });
+
   it("creates a run for signed AgentSessionEvent webhooks", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_linear_agent_1" }));
     const onAgentSessionAccepted = vi.fn(async () => undefined);

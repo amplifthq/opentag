@@ -12,6 +12,7 @@ import { startGitHubIngress, type GitHubIngressConfig, type GitHubIngressHandle 
 import { startGitLabIngress, type GitLabIngressConfig, type GitLabIngressHandle } from "@opentag/gitlab";
 import { DEFAULT_AGENT_ID, startLarkIngress, type LarkIngressConfig, type LarkIngressHandle } from "@opentag/lark";
 import {
+  DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS,
   refreshLinearOAuthToken,
   startLinearIngress,
   type LinearIngressConfig,
@@ -513,7 +514,10 @@ export function linearIngressConfigFromCliConfig(config: OpenTagCliConfig): Line
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     port: linear.port ?? DEFAULT_LINEAR_WEBHOOK_PORT,
-    ...(linear.webhookPath ? { webhookPath: linear.webhookPath } : {})
+    ...(linear.webhookPath ? { webhookPath: linear.webhookPath } : {}),
+    // OAuth-app installs get both Comment and AgentSessionEvent webhooks for one mention;
+    // defer comment runs so the agent-session channel can claim them.
+    ...(linear.auth?.method === "oauth_app" ? { commentRunDeferMs: DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS } : {})
   };
 }
 

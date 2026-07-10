@@ -183,9 +183,15 @@ app settings:
   setup's `--linear-webhook-secret`)
 
 When one mention produces both a Comment and an Agent Session event, OpenTag
-deduplicates using the `isArtificialAgentSessionRoot` marker Linear puts on the
-comment payload: only the Agent Session channel creates the run, so nothing
-double-triggers.
+deduplicates twice over: delegation flows mark Linear's synthetic anchor
+comment with `isArtificialAgentSessionRoot`, which the comment channel skips
+outright; real user comments carry no such marker and arrive about a second
+before their AgentSessionEvent, so in OAuth App mode comment runs are deferred
+for a short grace window (2.5s by default) — if a session event whose
+`agentSession.commentId` points at the comment lands inside the window, the
+Agent Session channel owns the run and nothing double-triggers. OpenTag also
+ignores comments authored by OAuth app actors (`@oauthapp.linear.app` emails),
+so a posted summary that quotes `@opentag` can never re-trigger the agent.
 
 **API key compatibility mode**: create a workspace webhook in Linear API /
 Webhooks settings:
