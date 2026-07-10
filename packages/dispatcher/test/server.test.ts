@@ -2057,7 +2057,7 @@ describe("dispatcher API", () => {
           callback: {
             provider: "linear",
             uri: "linear://agent-session/agent_session_prompted_1/activities",
-            threadKey: "ENG|agent-session|agent_session_prompted_1"
+            threadKey: "ENG|issue|ENG-1"
           },
           metadata: {
             repoProvider: "github",
@@ -2203,7 +2203,7 @@ describe("dispatcher API", () => {
             callback: {
               provider: "linear",
               uri: "linear://agent-session/agent_session_stop_1/activities",
-              threadKey: "ENG|agent-session|agent_session_stop_1"
+              threadKey: "ENG|issue|ENG-1"
             },
             metadata: {
               repoProvider: "github",

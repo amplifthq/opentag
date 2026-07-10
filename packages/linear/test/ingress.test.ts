@@ -532,7 +532,7 @@ describe("Linear webhook ingress", () => {
         callback: {
           provider: "linear",
           uri: "linear://agent-session/agent_session_1/activities",
-          threadKey: "ENG|agent-session|agent_session_1"
+          threadKey: "ENG|issue|ENG-123"
         },
         metadata: expect.objectContaining({
           linearAgentActivitySignal: "stop",
@@ -658,5 +658,96 @@ describe("Linear webhook ingress", () => {
       body: "{"
     });
     expect(response.status).toBe(401);
+  });
+});
+
+describe("Linear agent session prompted thread actions", () => {
+  function promptedPayload(body: string): string {
+    return JSON.stringify({
+      type: "AgentSessionEvent",
+      action: "prompted",
+      webhookId: "webhook_agent_prompted",
+      organizationId: "org_acme",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: WEBHOOK_TIMESTAMP,
+      agentActivity: {
+        id: "activity_prompted_apply",
+        body
+      },
+      agentSession: {
+        id: "agent_session_apply",
+        creator: { id: "user_alice", name: "Alice" },
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        }
+      }
+    });
+  }
+
+  it("routes prompted apply replies to the thread-action pipeline instead of a new run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      submitThreadAction,
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = promptedPayload("apply 1");
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, action: "apply" });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(submitThreadAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "linear_action_activity_prompted_apply",
+        rawText: "apply 1",
+        callback: {
+          provider: "linear",
+          uri: "linear://agent-session/agent_session_apply/activities",
+          threadKey: "ENG|issue|ENG-123"
+        }
+      })
+    );
+  });
+
+  it("still creates follow-up runs for prompted texts that are not thread actions", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_follow_up" }));
+    const submitThreadAction = vi.fn(async () => ({}));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      submitThreadAction,
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = promptedPayload("please also add a regression test");
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, runId: "run_follow_up" });
+    expect(submitThreadAction).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.objectContaining({ rawText: "please also add a regression test" }),
+        callback: expect.objectContaining({ threadKey: "ENG|issue|ENG-123" })
+      })
+    );
   });
 });

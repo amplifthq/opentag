@@ -163,7 +163,13 @@ export function normalizeLinearAgentSessionEvent(input: {
     action === "prompted"
       ? (promptedActivityBody ?? promptContext ?? fallbackPrompt)
       : (rootCommentPrompt ?? promptContext ?? promptedActivityBody ?? fallbackPrompt);
-  const threadKey = `${teamKey ?? teamId ?? organizationId ?? "linear"}|agent-session|${agentSessionId}`;
+  // Agent sessions live on an issue; keying the conversation by that issue (matching the
+  // comment channel's thread key) keeps proposals, follow-up queueing, and thread actions
+  // shared across both channels instead of splitting per session.
+  const issueThreadRef = issueIdentifier ?? issueId;
+  const threadKey = issueThreadRef
+    ? `${teamKey ?? teamId ?? organizationId ?? "linear"}|issue|${issueThreadRef}`
+    : `${teamKey ?? teamId ?? organizationId ?? "linear"}|agent-session|${agentSessionId}`;
   const agentActivityId = isRecord(input.payload.agentActivity) ? stringValue(input.payload.agentActivity.id) : undefined;
   const eventId = agentActivityId ?? agentSessionId;
 

@@ -1240,13 +1240,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async findCancelableRunForConversation(input: { conversationKeys: string[] }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
       const keys = [...new Set(input.conversationKeys.filter((key) => key.length > 0))];
       if (keys.length === 0) return null;
-      const row = await db
+      const rows = await db
         .select()
         .from(runs)
         .where(and(inArray(runs.conversationKey, keys), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
-        .orderBy(asc(runs.createdAt))
-        .limit(1)
-        .get();
+        .orderBy(asc(runs.createdAt));
+      // A run parked in needs_approval can sit in the conversation indefinitely; the run
+      // that is actually executing (or about to) is the one status/stop should target.
+      const row = rows.find((candidate) => candidate.status !== "needs_approval") ?? rows[0];
       if (!row) return null;
       return {
         run: runFromRow(row),

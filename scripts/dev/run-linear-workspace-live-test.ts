@@ -556,7 +556,7 @@ async function assertAgentSessionQueuedFollowUp(input: {
       callback: {
         provider: "linear",
         uri: `linear://agent-session/${input.agentSessionId}/activities`,
-        threadKey: `${input.issue.team.key ?? input.issue.team.id}|agent-session|${input.agentSessionId}`
+        threadKey: `${input.issue.team.key ?? input.issue.team.id}|issue|${input.issue.identifier}`
       },
       metadata: {
         repoProvider: provider,

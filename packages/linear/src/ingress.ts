@@ -275,8 +275,28 @@ function normalizePayload(input: { payload: LinearWebhookPayload; app: LinearWeb
 
 function agentSessionStopContext(input: { payload: LinearWebhookPayload; app: LinearWebhookAppInput }): LinearThreadActionContext | null {
   if (!isAgentSessionStopSignalPayload(input.payload)) return null;
+  return agentSessionActionContext({ ...input, rawText: "/stop", metadata: { linearAgentActivitySignal: "stop" } });
+}
+
+// A prompted Agent Activity whose body is a thread action ("apply 1") must resolve against
+// the issue's pending proposals instead of spawning a run that executes the literal text.
+function agentSessionPromptedActionContext(input: { payload: LinearWebhookPayload; app: LinearWebhookAppInput }): LinearThreadActionContext | null {
+  if (!isAgentSessionEventPayload(input.payload)) return null;
+  if (stringValue(input.payload.action) !== "prompted") return null;
+  if (isAgentSessionStopSignalPayload(input.payload)) return null;
+  const body = isRecord(input.payload.agentActivity) ? stringValue(input.payload.agentActivity.body) : undefined;
+  if (!body) return null;
+  return agentSessionActionContext({ ...input, rawText: body, metadata: {} });
+}
+
+function agentSessionActionContext(input: {
+  payload: LinearWebhookPayload;
+  app: LinearWebhookAppInput;
+  rawText: string;
+  metadata: Record<string, unknown>;
+}): LinearThreadActionContext | null {
   const event = normalizeLinearAgentSessionEvent({
-    payload: input.payload,
+    payload: input.payload as LinearWebhookPayload & LinearAgentSessionEventPayload,
     ...(input.app.projectTarget ? { projectTarget: input.app.projectTarget } : {}),
     graphqlUrl: input.app.graphqlUrl ?? DEFAULT_LINEAR_GRAPHQL_URL
   });
@@ -285,7 +305,7 @@ function agentSessionStopContext(input: { payload: LinearWebhookPayload; app: Li
   const threadKey = event.callback.threadKey;
   if (!threadKey) return null;
   return {
-    rawText: "/stop",
+    rawText: input.rawText,
     actor: {
       provider: "linear" as const,
       providerUserId: event.actor.providerUserId,
@@ -300,7 +320,7 @@ function agentSessionStopContext(input: { payload: LinearWebhookPayload; app: Li
     },
     metadata: {
       ...event.metadata,
-      linearAgentActivitySignal: "stop"
+      ...input.metadata
     }
   };
 }
@@ -447,13 +467,15 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
       return c.json({ ok: true, action: "stop" });
     }
 
-    const threadContext = commentPayloadContext({ payload: linearPayload, app: input });
+    const threadContext =
+      commentPayloadContext({ payload: linearPayload, app: input }) ??
+      agentSessionPromptedActionContext({ payload: linearPayload, app: input });
     const control = threadContext ? parseThreadControlCommand(threadContext.rawText) : null;
     const action = threadContext ? parseThreadActionCommand(threadContext.rawText) : null;
     if ((control || action) && threadContext && input.submitThreadAction) {
       const actionIdSuffix = isCommentCreatePayload(linearPayload)
         ? linearPayload.data.id
-        : randomUUID();
+        : (agentActivityIdFromPayload(linearPayload) ?? randomUUID());
       await input.submitThreadAction({
         id: `linear_${control ? "control" : "action"}_${actionIdSuffix}`,
         rawText: threadContext.rawText,

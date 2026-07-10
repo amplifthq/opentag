@@ -43,7 +43,7 @@ describe("Linear agent session helpers", () => {
       callback: {
         provider: "linear",
         uri: "linear://agent-session/agent_session_1/activities",
-        threadKey: "ENG|agent-session|agent_session_1"
+        threadKey: "ENG|issue|ENG-1"
       },
       metadata: {
         agentSessionId: "agent_session_1",
