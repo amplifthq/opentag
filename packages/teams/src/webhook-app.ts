@@ -14,7 +14,9 @@ export type TeamsThreadActionInput = {
 };
 
 export type TeamsWebhookAppInput = {
-  authenticator: { verify(input: { authorizationHeader: string | undefined; bodyServiceUrl: string }): Promise<TeamsAuthResult> };
+  authenticator: {
+    verify(input: { authorizationHeader: string | undefined; activity: Record<string, unknown> }): Promise<TeamsAuthResult>;
+  };
   webhookPath?: string;
   resolveChannelBinding(input: { tenantId: string; conversationId: string }): Promise<TeamsChannelBinding | null>;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
@@ -84,10 +86,9 @@ export function createTeamsWebhookApp(input: TeamsWebhookAppInput) {
       return c.json({ error: "invalid_json" }, 400);
     }
 
-    const bodyServiceUrl = typeof payload.serviceUrl === "string" ? payload.serviceUrl : "";
     const auth = await input.authenticator.verify({
       authorizationHeader: c.req.header("authorization"),
-      bodyServiceUrl
+      activity: payload
     });
     if (!auth.ok) {
       return c.json({ error: "unauthorized", reason: auth.reason }, 401);

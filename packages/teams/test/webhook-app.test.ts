@@ -1,5 +1,52 @@
-import { describe, expect, it, vi } from "vitest";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SignJWT, exportJWK, generateKeyPair, type JWK } from "jose";
+import { createTeamsAuthenticator } from "../src/auth.js";
 import { createTeamsWebhookApp } from "../src/webhook-app.js";
+
+const ISSUER = "https://api.botframework.com";
+const SERVICE_URL = "https://smba/";
+
+const openServers: HttpServer[] = [];
+
+async function closeServer(server: HttpServer): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+afterEach(async () => {
+  await Promise.all(openServers.splice(0).map(closeServer));
+});
+
+async function startOpenIdServer(jwk: JWK): Promise<string> {
+  let baseUrl = "";
+  const server = createHttpServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/openid") {
+      res.end(JSON.stringify({ issuer: ISSUER, jwks_uri: `${baseUrl}/keys`, id_token_signing_alg_values_supported: ["RS256"] }));
+      return;
+    }
+    if (req.url === "/keys") {
+      res.end(JSON.stringify({ keys: [jwk] }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: "not_found" }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  openServers.push(server);
+  const address = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${address.port}`;
+  return `${baseUrl}/openid`;
+}
 
 function baseInput(overrides: Partial<Parameters<typeof createTeamsWebhookApp>[0]> = {}) {
   return {
@@ -18,7 +65,7 @@ function baseInput(overrides: Partial<Parameters<typeof createTeamsWebhookApp>[0
 
 function channelActivity(text: string) {
   return {
-    type: "message", id: "act-1", text, serviceUrl: "https://smba/",
+    type: "message", id: "act-1", channelId: "msteams", text, serviceUrl: SERVICE_URL,
     from: { id: "29:user", name: "Alice", aadObjectId: "aad-1" },
     recipient: { id: "28:bot", name: "OpenTag" },
     conversation: { id: "19:conv@thread.tacv2", conversationType: "channel", tenantId: "t1" },
@@ -35,12 +82,62 @@ async function post(app: ReturnType<typeof createTeamsWebhookApp>, body: unknown
   });
 }
 
+async function realAuth(overrides: { endorsements?: string[] | null; claims?: Record<string, unknown> } = {}) {
+  const { publicKey, privateKey } = await generateKeyPair("RS256");
+  const jwk = await exportJWK(publicKey);
+  jwk.kid = "test-key";
+  jwk.alg = "RS256";
+  if (overrides.endorsements !== null) {
+    (jwk as JWK & { endorsements?: string[] }).endorsements = overrides.endorsements ?? ["msteams"];
+  }
+  const openIdMetadataUrl = await startOpenIdServer(jwk);
+  const token = await new SignJWT({ aud: "app-123", serviceurl: SERVICE_URL, ...(overrides.claims ?? {}) })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(ISSUER)
+    .setExpirationTime("5m")
+    .sign(privateKey);
+  return { authenticator: createTeamsAuthenticator({ appId: "app-123", openIdMetadataUrl }), token };
+}
+
 describe("teams webhook app", () => {
-  it("returns 401 when authentication fails", async () => {
+  it("returns 401 when authentication fails without side effects", async () => {
     const input = baseInput({ authenticator: { verify: vi.fn(async () => ({ ok: false as const, reason: "audience_mismatch" })) } });
-    const res = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> investigate"));
+    const res = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> apply 1"));
     expect(res.status).toBe(401);
+    expect(input.resolveChannelBinding).not.toHaveBeenCalled();
     expect(input.createRun).not.toHaveBeenCalled();
+    expect(input.submitThreadAction).not.toHaveBeenCalled();
+    expect(input.notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing serviceUrl claims before any outbound notice or run/action side effect", async () => {
+    const { authenticator, token } = await realAuth({ claims: { serviceurl: undefined } });
+    const input = baseInput({ authenticator });
+
+    const res = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> investigate"), {
+      authorization: `Bearer ${token}`
+    });
+
+    expect(res.status).toBe(401);
+    expect(input.resolveChannelBinding).not.toHaveBeenCalled();
+    expect(input.createRun).not.toHaveBeenCalled();
+    expect(input.submitThreadAction).not.toHaveBeenCalled();
+    expect(input.notifyConversation).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-Teams-endorsed keys before any outbound notice or run/action side effect", async () => {
+    const { authenticator, token } = await realAuth({ endorsements: ["webchat"] });
+    const input = baseInput({ authenticator });
+
+    const res = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> apply 1"), {
+      authorization: `Bearer ${token}`
+    });
+
+    expect(res.status).toBe(401);
+    expect(input.resolveChannelBinding).not.toHaveBeenCalled();
+    expect(input.createRun).not.toHaveBeenCalled();
+    expect(input.submitThreadAction).not.toHaveBeenCalled();
+    expect(input.notifyConversation).not.toHaveBeenCalled();
   });
 
   it("acknowledges a mention with 200 and creates a run", async () => {

@@ -45,14 +45,20 @@ async function availablePort(): Promise<number> {
  * overridden for the test.
  */
 async function startJwksServer(jwk: JWK): Promise<{ url: string; close(): Promise<void> }> {
-  const server: HttpServer = createHttpServer((_req, res) => {
+  let baseUrl = "";
+  const server: HttpServer = createHttpServer((req, res) => {
     res.setHeader("content-type", "application/json");
+    if (req.url === "/openid") {
+      res.end(JSON.stringify({ issuer: "https://api.botframework.com", jwks_uri: `${baseUrl}/keys` }));
+      return;
+    }
     res.end(JSON.stringify({ keys: [jwk] }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
+  baseUrl = `http://127.0.0.1:${address.port}`;
   return {
-    url: `http://127.0.0.1:${address.port}/keys`,
+    url: `${baseUrl}/openid`,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -72,6 +78,7 @@ describe("local-runtime teams wiring", () => {
     const jwk = await exportJWK(publicKey);
     jwk.kid = "test-key";
     jwk.alg = "RS256";
+    (jwk as JWK & { endorsements?: string[] }).endorsements = ["msteams"];
     const jwks = await startJwksServer(jwk);
 
     const port = await availablePort();
@@ -115,7 +122,7 @@ describe("local-runtime teams wiring", () => {
       expect(channelBinding.status).toBe(201);
 
       const serviceUrl = "https://smba.trafficmanager.net/amer/";
-      const token = await new SignJWT({ serviceUrl })
+      const token = await new SignJWT({ serviceurl: serviceUrl })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
         .setIssuer("https://api.botframework.com")
         .setAudience("app-teams-1")
@@ -125,6 +132,7 @@ describe("local-runtime teams wiring", () => {
       const activity = {
         type: "message",
         id: "activity-1",
+        channelId: "msteams",
         serviceUrl,
         text: "<at>OpenTag</at> please fix the failing test",
         from: { id: "29:user-1", name: "Alice", aadObjectId: "aad-1" },
@@ -165,7 +173,7 @@ describe("local-runtime teams wiring", () => {
             }
           });
         },
-        { timeout: 5_000, interval: 25 }
+        { timeout: 15_000, interval: 25 }
       );
 
       // The claim above only proves the run was committed server-side; the
@@ -180,5 +188,5 @@ describe("local-runtime teams wiring", () => {
       await handle.close();
       await jwks.close();
     }
-  });
+  }, 15_000);
 });

@@ -43,13 +43,17 @@ Azure Bot and Microsoft 365 tenant.
 - Expected issuer validation is required.
 - Expected audience validation is required; it must match the Microsoft App ID
   configured for the bot.
-- Real Teams Bot Framework tokens may omit a `serviceUrl` claim. When the claim
-  is present, it must match the incoming activity `serviceUrl`; when it is
-  absent, signature / issuer / audience validation still decides trust.
+- The inbound activity `channelId` must be `msteams`.
+- The JWT `serviceUrl` claim is required and must match the Activity body
+  `serviceUrl`. OpenTag never trusts a body-controlled reply URL unless the
+  Bot Framework token binds the same URL.
+- The signing JWK must include a Teams endorsement (`msteams`) before the
+  request can create a run, submit an action, or trigger any outbound Connector
+  call.
 
 For local JWT simulation, `OPENTAG_TEAMS_OPENID_METADATA_URL` can point at a
-local OpenID metadata endpoint and JWKS. This override is for tests and local
-smoke runs; production should use Microsoft metadata.
+local JWKS endpoint. Test JWKS keys must include `endorsements: ["msteams"]`.
+Production should use Microsoft metadata.
 
 ### Conversation IDs and bindings
 
