@@ -159,7 +159,8 @@ export function normalizeLinearAgentSessionEvent(input: {
       ? (promptedActivityBody ?? promptContext ?? fallbackPrompt)
       : (promptContext ?? promptedActivityBody ?? fallbackPrompt);
   const threadKey = `${teamKey ?? teamId ?? organizationId ?? "linear"}|agent-session|${agentSessionId}`;
-  const eventId = stringValue(input.payload.webhookId) ?? agentSessionId;
+  const agentActivityId = isRecord(input.payload.agentActivity) ? stringValue(input.payload.agentActivity.id) : undefined;
+  const eventId = agentActivityId ?? agentSessionId;
 
   return {
     id: `evt_linear_agent_session_${eventId}`,

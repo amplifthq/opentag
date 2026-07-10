@@ -193,6 +193,11 @@ function agentActivitySignal(value: unknown): string | undefined {
   return stringValue(value.signal);
 }
 
+function agentActivityIdFromPayload(payload: LinearWebhookPayload): string | undefined {
+  if (!isRecord(payload.agentActivity)) return undefined;
+  return stringValue(payload.agentActivity.id);
+}
+
 function isAgentSessionStopSignalPayload(payload: LinearWebhookPayload): boolean {
   return isAgentSessionEventPayload(payload) && agentActivitySignal(payload.agentActivity) === "stop";
 }
@@ -205,7 +210,7 @@ function normalizePayload(input: { payload: LinearWebhookPayload; app: LinearWeb
     const actor = data.user ?? data.creator;
     const actorId = stringValue(actor?.id) ?? "unknown";
     return normalizeLinearIssueComment({
-      id: stringValue(input.payload.webhookId) ?? data.id!,
+      id: data.id!,
       commentBody: data.body!,
       ...(stringValue(data.url) ? { commentUrl: stringValue(data.url)! } : {}),
       issueId: issue.id!,
@@ -373,7 +378,7 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
     if (agentStopContext) {
       if (input.submitThreadAction) {
         await input.submitThreadAction({
-          id: `linear_control_${stringValue(linearPayload.webhookId) ?? agentSessionIdFromPayload(linearPayload) ?? randomUUID()}`,
+          id: `linear_control_${agentActivityIdFromPayload(linearPayload) ?? agentSessionIdFromPayload(linearPayload) ?? randomUUID()}`,
           rawText: agentStopContext.rawText,
           actor: agentStopContext.actor,
           callback: agentStopContext.callback,
@@ -388,7 +393,7 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
     const action = threadContext ? parseThreadActionCommand(threadContext.rawText) : null;
     if ((control || action) && threadContext && input.submitThreadAction) {
       const actionIdSuffix = isCommentCreatePayload(linearPayload)
-        ? (stringValue(linearPayload.webhookId) ?? linearPayload.data.id)
+        ? linearPayload.data.id
         : randomUUID();
       await input.submitThreadAction({
         id: `linear_${control ? "control" : "action"}_${actionIdSuffix}`,

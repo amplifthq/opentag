@@ -38,7 +38,7 @@ describe("Linear agent session helpers", () => {
 
     expect(event).toMatchObject({
       source: "linear",
-      sourceEventId: "webhook_agent_1",
+      sourceEventId: "agent_session_1",
       command: { intent: "run" },
       callback: {
         provider: "linear",
@@ -85,7 +85,7 @@ describe("Linear agent session helpers", () => {
 
     expect(event).toMatchObject({
       source: "linear",
-      sourceEventId: "webhook_agent_prompted_1",
+      sourceEventId: "activity_prompt_1",
       command: {
         rawText: "Please also add a regression test for the auth callback.",
         intent: "run"

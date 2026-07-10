@@ -68,10 +68,56 @@ describe("Linear webhook ingress", () => {
     expect(createRun).toHaveBeenCalledWith(
       expect.objectContaining({
         source: "linear",
-        sourceEventId: "webhook_1",
+        sourceEventId: "comment_1",
         metadata: expect.objectContaining({ owner: "acme", repo: "demo" })
       })
     );
+  });
+
+  it("keeps event identity distinct across deliveries that share Linear's constant webhookId", async () => {
+    const createRun = vi.fn(async () => ({ runId: `run_${createRun.mock.calls.length}` }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      now: () => WEBHOOK_NOW
+    });
+    const commentPayload = (commentId: string) =>
+      JSON.stringify({
+        type: "Comment",
+        action: "create",
+        webhookId: "webhook_constant_per_configuration",
+        organizationId: "org_acme",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: WEBHOOK_TIMESTAMP,
+        data: {
+          id: commentId,
+          body: "@opentag investigate this",
+          url: `https://linear.app/acme/issue/ENG-123#comment-${commentId}`,
+          issue: {
+            id: "issue_123",
+            identifier: "ENG-123",
+            title: "Fix import",
+            url: "https://linear.app/acme/issue/ENG-123/fix-import",
+            team: { id: "team_eng", key: "ENG", name: "Engineering" }
+          },
+          user: { id: "user_alice", displayName: "Alice" }
+        }
+      });
+
+    for (const commentId of ["comment_first", "comment_second"]) {
+      const rawBody = commentPayload(commentId);
+      const response = await app.request("/linear/webhooks", {
+        method: "POST",
+        headers: signedHeaders("linear_secret", rawBody),
+        body: rawBody
+      });
+      expect(response.status).toBe(200);
+    }
+
+    expect(createRun).toHaveBeenCalledTimes(2);
+    const eventIds = createRun.mock.calls.map(([event]) => (event as { sourceEventId: string }).sourceEventId);
+    expect(eventIds).toEqual(["comment_first", "comment_second"]);
   });
 
   it("creates a run for signed AgentSessionEvent webhooks", async () => {
@@ -215,7 +261,7 @@ describe("Linear webhook ingress", () => {
     expect(onAgentSessionAccepted).not.toHaveBeenCalled();
     expect(submitThreadAction).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: "linear_control_webhook_agent_stop_1",
+        id: "linear_control_activity_stop_1",
         rawText: "/stop",
         actor: expect.objectContaining({ provider: "linear", providerUserId: "user_alice", handle: "Alice", organizationId: "org_acme" }),
         callback: {
