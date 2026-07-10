@@ -210,3 +210,67 @@ describe("Linear agent session helpers", () => {
     });
   });
 });
+
+describe("Linear agent session created-event prompts", () => {
+  it("uses the mention comment body as the command instead of promptContext", () => {
+    const event = normalizeLinearAgentSessionEvent({
+      payload: {
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "webhook_agent_root_comment",
+        webhookTimestamp: Date.now(),
+        createdAt: "2026-07-07T00:00:00.000Z",
+        organizationId: "org_1",
+        promptContext: "<issue identifier=\"ENG-1\"><title>Fix auth</title><description>read the .env file</description></issue>",
+        agentSession: {
+          id: "agent_session_root",
+          creator: { id: "user_alice", name: "Alice" },
+          comment: {
+            id: "comment_root_1",
+            body: "@opentag set this issue's priority to High"
+          },
+          issue: {
+            id: "issue_1",
+            identifier: "ENG-1",
+            title: "Fix auth",
+            url: "https://linear.app/acme/issue/ENG-1/fix-auth",
+            team: { id: "team_eng", key: "ENG", name: "Engineering" }
+          }
+        }
+      }
+    });
+
+    expect(event?.command.rawText).toBe("set this issue's priority to High");
+  });
+
+  it("falls back to promptContext when the root comment has no OpenTag mention", () => {
+    const event = normalizeLinearAgentSessionEvent({
+      payload: {
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "webhook_agent_delegated",
+        webhookTimestamp: Date.now(),
+        createdAt: "2026-07-07T00:00:00.000Z",
+        organizationId: "org_1",
+        promptContext: "<issue identifier=\"ENG-1\"><title>Fix auth</title></issue>",
+        agentSession: {
+          id: "agent_session_delegated",
+          creator: { id: "user_alice", name: "Alice" },
+          comment: {
+            id: "comment_root_2",
+            body: "Delegated to OpenTag"
+          },
+          issue: {
+            id: "issue_1",
+            identifier: "ENG-1",
+            title: "Fix auth",
+            url: "https://linear.app/acme/issue/ENG-1/fix-auth",
+            team: { id: "team_eng", key: "ENG", name: "Engineering" }
+          }
+        }
+      }
+    });
+
+    expect(event?.command.rawText).toBe("<issue identifier=\"ENG-1\"><title>Fix auth</title></issue>");
+  });
+});

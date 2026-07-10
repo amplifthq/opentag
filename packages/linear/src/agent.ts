@@ -1,4 +1,4 @@
-import type { ContextPointer, OpenTagEvent, PermissionGrant, WorkItemReference } from "@opentag/core";
+import { parseOpenTagMention, type ContextPointer, type OpenTagEvent, type PermissionGrant, type WorkItemReference } from "@opentag/core";
 import { linearGraphql, type FetchLike } from "./graphql.js";
 import { DEFAULT_LINEAR_GRAPHQL_URL, type LinearProjectTarget } from "./normalize.js";
 
@@ -154,10 +154,15 @@ export function normalizeLinearAgentSessionEvent(input: {
   const promptContext = stringValue(input.payload.promptContext);
   const promptedActivityBody = activityBody(input.payload.agentActivity);
   const fallbackPrompt = stringValue(issue?.title) ?? `Linear agent session ${agentSessionId}`;
+  // For mention-created sessions, the root comment holds the user's actual request;
+  // promptContext is the surrounding issue XML and belongs in context, not in the command.
+  const rootComment = isRecord(agentSession.comment) ? agentSession.comment : undefined;
+  const rootCommentMention = stringValue(rootComment?.body) ? parseOpenTagMention(stringValue(rootComment?.body)!) : undefined;
+  const rootCommentPrompt = rootCommentMention?.matched ? rootCommentMention.rawText : undefined;
   const prompt =
     action === "prompted"
       ? (promptedActivityBody ?? promptContext ?? fallbackPrompt)
-      : (promptContext ?? promptedActivityBody ?? fallbackPrompt);
+      : (rootCommentPrompt ?? promptContext ?? promptedActivityBody ?? fallbackPrompt);
   const threadKey = `${teamKey ?? teamId ?? organizationId ?? "linear"}|agent-session|${agentSessionId}`;
   const agentActivityId = isRecord(input.payload.agentActivity) ? stringValue(input.payload.agentActivity.id) : undefined;
   const eventId = agentActivityId ?? agentSessionId;
