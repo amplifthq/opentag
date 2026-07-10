@@ -196,7 +196,7 @@ export async function runOneDaemonIteration(input: {
     });
     return true;
   }
-  const executorId = binding.defaultExecutor ?? claimed.event.target.executorHint ?? "echo";
+  const executorId = claimed.event.target.executorHint ?? binding.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
     await input.client.complete(claimed.run.id, {
