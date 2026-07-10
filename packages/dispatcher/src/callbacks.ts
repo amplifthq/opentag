@@ -13,6 +13,7 @@ import {
   createLinearIssueCommentRecord,
   linearAgentSessionIdFromCallbackUri,
   linearIssueIdFromCallbackUri,
+  linearParentCommentIdFromCallbackUri,
   updateLinearAgentSession,
   updateLinearComment,
   type FetchLike as LinearFetchLike
@@ -286,6 +287,7 @@ export function createLinearCallbackSink(input: {
         token,
         issueId,
         body: message.body,
+        ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
         ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
         ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
       });

@@ -155,7 +155,7 @@ opentag start
 Linear local webhook: http://127.0.0.1:3070/linear/webhooks
 Linear webhook URL: https://<your-tunnel-host>/linear/webhooks
 Linear settings: https://linear.app/settings/api
-Linear events: Comment events
+Linear events: Comment and Agent session events (enable Webhooks on the Linear OAuth app and point them at the webhook URL above)
 Tunnel example: ngrok http 3070
 ```
 
@@ -166,11 +166,24 @@ Webhook URL: https://<your-relay-host>/linear/oauth/webhooks
 Relay mode: Linear should call the relay URL above; no ngrok/cloudflared tunnel is needed.
 ```
 
-本地和 static-token relay setup 需要在 Linear API / Webhooks 设置页创建 webhook：
+**默认路径（OAuth App 安装）**：webhook 配置在 **OAuth app 本身**，不是 workspace webhook。
+在 Linear 的 OAuth app 设置里启用 Webhooks：
+
+- URL：公网 tunnel 加 `/linear/webhooks`
+- Events：**Comment 和 Agent session events**——Agent session events 让 @提及 走
+  Linear 原生 Agent Session 面板（plan、活动时间线、stop），而不是散落的普通评论
+- Signing secret：把 OAuth app Webhooks 生成的 signing secret 写回 OpenTag config 的
+  `platforms.linear.webhookSecret`（或 setup 的 `--linear-webhook-secret`）
+
+当同一次 @提及 同时产生 Comment 和 Agent Session 事件时，OpenTag 会用 Linear 在
+comment payload 上标记的 `isArtificialAgentSessionRoot` 去重，只从 Agent Session
+通道创建 run，不会双触发。
+
+**API key 兼容模式**：在 Linear API / Webhooks 设置页创建 workspace webhook：
 
 - URL：本地模式使用公网 tunnel 加 `/linear/webhooks`；动态 relay 模式使用 setup 打印的完整 `/linear/webhooks/<install-id>` URL
-- Resource/event：Comment events
-- Signing secret：OpenTag config 里的 `platforms.linear.webhookSecret`
+- Resource/event：Comment events（API key 模式没有 Agent Session 面板，OpenTag 回复以嵌套评论形式出现在触发评论的 thread 里）
+- Signing secret：与 OpenTag config 里的 `platforms.linear.webhookSecret` 保持一致；如果 Linear 不允许自定义 secret，把 Linear 生成的值写回 config
 
 Hosted OAuth App install 的 webhook delivery 是在 OAuth app 本身配置，而不是从本地
 OpenTag config 里读取。relay / app 运营方需要在分发 install URL 前配置 app

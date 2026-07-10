@@ -128,6 +128,46 @@ describe("createGitHubCallbackSink", () => {
     expect(String((requests[0]!.body as { query: string }).query)).toContain("commentCreate");
   });
 
+  it("threads Linear callback comments under the mention's thread-root comment", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_2", url: "https://linear.app/acme/issue/ENG-1#comment_2" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments?parent=comment_root",
+      body: "done"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            issueId: "issue_123",
+            body: "done",
+            parentId: "comment_root"
+          }
+        }
+      }
+    });
+  });
+
   it("uses the Linear token provider for callback delivery", async () => {
     const requests: { authorization: string | null }[] = [];
     const sink = createLinearCallbackSink({

@@ -159,7 +159,7 @@ In local mode, OpenTag prints values like:
 Linear local webhook: http://127.0.0.1:3070/linear/webhooks
 Linear webhook URL: https://<your-tunnel-host>/linear/webhooks
 Linear settings: https://linear.app/settings/api
-Linear events: Comment events
+Linear events: Comment and Agent session events (enable Webhooks on the Linear OAuth app and point them at the webhook URL above)
 Tunnel example: ngrok http 3070
 ```
 
@@ -170,12 +170,29 @@ Webhook URL: https://<your-relay-host>/linear/oauth/webhooks
 Relay mode: Linear should call the relay URL above; no ngrok/cloudflared tunnel is needed.
 ```
 
-For local and static-token relay setups, create a webhook in Linear API /
+**Default path (OAuth App install)**: the webhook is configured on the **OAuth
+app itself**, not as a workspace webhook. Enable Webhooks in the Linear OAuth
+app settings:
+
+- URL: your public tunnel plus `/linear/webhooks`
+- Events: **Comment and Agent session events** — Agent session events route
+  mentions through Linear's native Agent Session panel (plan, activity
+  timeline, stop) instead of loose top-level comments
+- Signing secret: copy the signing secret the OAuth app's Webhooks settings
+  generate into `platforms.linear.webhookSecret` in your OpenTag config (or
+  setup's `--linear-webhook-secret`)
+
+When one mention produces both a Comment and an Agent Session event, OpenTag
+deduplicates using the `isArtificialAgentSessionRoot` marker Linear puts on the
+comment payload: only the Agent Session channel creates the run, so nothing
+double-triggers.
+
+**API key compatibility mode**: create a workspace webhook in Linear API /
 Webhooks settings:
 
 - URL: in local mode, your public tunnel plus `/linear/webhooks`; in dynamic relay mode, the exact `/linear/webhooks/<install-id>` URL printed by setup
-- Resource/event: Comment events
-- Signing secret: the `platforms.linear.webhookSecret` value from your OpenTag config
+- Resource/event: Comment events (API key mode has no Agent Session panel; OpenTag replies appear as threaded replies under the triggering comment)
+- Signing secret: must match `platforms.linear.webhookSecret` in your OpenTag config; if Linear does not accept a custom secret, copy the value Linear generates back into the config
 
 For hosted OAuth App installs, webhook delivery is configured on the OAuth app
 itself rather than from the local OpenTag config. The relay/app operator should

@@ -12,6 +12,7 @@ export type LinearIssueCommentInput = {
   id: string;
   commentBody: string;
   commentUrl?: string;
+  parentCommentId?: string;
   issueId: string;
   issueIdentifier: string;
   issueTitle?: string;
@@ -122,8 +123,9 @@ function actorHandle(input: LinearIssueCommentInput): string | undefined {
   return input.actorDisplayName ?? input.actorName ?? input.actorEmail;
 }
 
-export function linearIssueCallbackUri(issueId: string): string {
-  return `linear://issue/${encodeURIComponent(issueId)}/comments`;
+export function linearIssueCallbackUri(issueId: string, options?: { parentCommentId?: string }): string {
+  const base = `linear://issue/${encodeURIComponent(issueId)}/comments`;
+  return options?.parentCommentId ? `${base}?parent=${encodeURIComponent(options.parentCommentId)}` : base;
 }
 
 export function linearIssueIdFromCallbackUri(uri: string): string | null {
@@ -132,6 +134,16 @@ export function linearIssueIdFromCallbackUri(uri: string): string | null {
     if (parsed.protocol !== "linear:" || parsed.hostname !== "issue") return null;
     const issueId = parsed.pathname.split("/").filter(Boolean)[0];
     return issueId ? decodeURIComponent(issueId) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function linearParentCommentIdFromCallbackUri(uri: string): string | null {
+  try {
+    const parsed = new URL(uri);
+    if (parsed.protocol !== "linear:" || parsed.hostname !== "issue") return null;
+    return parsed.searchParams.get("parent");
   } catch {
     return null;
   }
@@ -191,7 +203,9 @@ export function normalizeLinearIssueComment(input: LinearIssueCommentInput): Ope
     permissions: permissionsForIntent(mention.intent),
     callback: {
       provider: "linear",
-      uri: linearIssueCallbackUri(input.issueId),
+      // Thread replies under the mention's comment thread: the mention itself when it is
+      // a top-level comment, or its parent when the mention was already a reply.
+      uri: linearIssueCallbackUri(input.issueId, { parentCommentId: input.parentCommentId ?? input.id }),
       threadKey
     },
     metadata: {

@@ -960,7 +960,11 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
         logger.log(`Linear local webhook: ${linearLocalWebhookUrl({ port: linear.port, webhookPath: ingress.webhookPath })}`);
         logger.log(`Linear webhook URL: ${linearPublicWebhookUrlPlaceholder(ingress.webhookPath)}`);
         logger.log(`Linear settings: ${linearWebhookSettingsUrl()}`);
-        logger.log("Linear events: Comment events");
+        if (linear.auth?.method === "oauth_app") {
+          logger.log("Linear events: Comment and Agent session events (enable Webhooks on the Linear OAuth app and point them at the webhook URL above)");
+        } else {
+          logger.log("Linear events: Comment events");
+        }
         logger.log(`Tunnel example: ngrok http ${linear.port ?? DEFAULT_LINEAR_WEBHOOK_PORT}`);
       } else {
         logger.log("Lark / Feishu: connected through Personal Agent long connection");

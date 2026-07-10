@@ -38,6 +38,8 @@ type LinearCommentData = {
   id?: unknown;
   body?: unknown;
   url?: unknown;
+  parentId?: unknown;
+  isArtificialAgentSessionRoot?: unknown;
   issue?: LinearIssue;
   user?: LinearUser;
   creator?: LinearUser;
@@ -205,12 +207,17 @@ function isAgentSessionStopSignalPayload(payload: LinearWebhookPayload): boolean
 function normalizePayload(input: { payload: LinearWebhookPayload; app: LinearWebhookAppInput }): OpenTagEvent | null {
   if (isCommentCreatePayload(input.payload)) {
     const data = input.payload.data;
+    // Linear marks the mention comment with isArtificialAgentSessionRoot=true when it
+    // also created an Agent Session for it; the AgentSessionEvent channel owns that
+    // invocation, so the comment channel must not start a second run.
+    if (data.isArtificialAgentSessionRoot === true) return null;
     const issue = data.issue!;
     const team = issue.team!;
     const actor = data.user ?? data.creator;
     const actorId = stringValue(actor?.id) ?? "unknown";
     return normalizeLinearIssueComment({
       id: data.id!,
+      ...(stringValue(data.parentId) ? { parentCommentId: stringValue(data.parentId)! } : {}),
       commentBody: data.body!,
       ...(stringValue(data.url) ? { commentUrl: stringValue(data.url)! } : {}),
       issueId: issue.id!,

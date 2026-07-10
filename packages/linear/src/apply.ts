@@ -304,6 +304,7 @@ export async function createLinearIssueCommentRecord(input: {
   token: string;
   issueId: string;
   body: string;
+  parentId?: string;
   graphqlUrl?: string;
   fetchImpl?: FetchLike;
 }): Promise<LinearIssueCommentRecord> {
@@ -325,7 +326,8 @@ export async function createLinearIssueCommentRecord(input: {
     variables: {
       input: {
         issueId: input.issueId,
-        body: input.body
+        body: input.body,
+        ...(input.parentId ? { parentId: input.parentId } : {})
       }
     }
   });

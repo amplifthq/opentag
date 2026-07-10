@@ -120,6 +120,47 @@ describe("Linear webhook ingress", () => {
     expect(eventIds).toEqual(["comment_first", "comment_second"]);
   });
 
+  it("ignores mention comments that Linear marked as agent session roots", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_1",
+      organizationId: "org_acme",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: WEBHOOK_TIMESTAMP,
+      data: {
+        id: "comment_session_root",
+        body: "@opentag investigate this",
+        isArtificialAgentSessionRoot: true,
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, ignored: true });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
   it("creates a run for signed AgentSessionEvent webhooks", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_linear_agent_1" }));
     const onAgentSessionAccepted = vi.fn(async () => undefined);

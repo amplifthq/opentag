@@ -64,6 +64,7 @@ import {
   fetchLinearWorkspaceIdentity,
   linearAgentSessionIdFromCallbackUri,
   linearIssueIdFromCallbackUri,
+  linearParentCommentIdFromCallbackUri,
   refreshLinearOAuthToken,
   updateLinearAgentSession,
   updateLinearComment,
@@ -2754,6 +2755,7 @@ export function createDispatcherApp(input: {
       token,
       issueId,
       body: message.body,
+      ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
       ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
     });
     return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
