@@ -12,6 +12,6 @@ Use these guides when `opentag setup` asks for platform credentials:
 | GitLab | Use a project Note Hook and GitLab access token | [English](gitlab.en.md) / [简体中文](gitlab.zh-CN.md) |
 | Telegram | Use BotFather token with local getUpdates polling | [English](telegram.en.md) / [简体中文](telegram.zh-CN.md) |
 | Discord | Use a bot token with local Gateway delivery | [English](discord.en.md) / [简体中文](discord.zh-CN.md) |
-| Microsoft Teams | Use an Azure Bot, Teams tenant, and public HTTPS tunnel | [English](teams.en.md) / [简体中文](teams.zh-CN.md) |
+| Microsoft Teams | Use an Azure Bot and public HTTPS tunnel to the local dispatcher (relay mode is not supported) | [English](teams.en.md) / [简体中文](teams.zh-CN.md) |
 
 Most guides only cover the values the OpenTag CLI asks for. Microsoft Teams has extra setup because Bot Framework requires a public HTTPS Messaging endpoint and a Teams app installed in a tenant. For deeper integration debugging, see [Real integration smoke test](../real-integration-smoke-test.md).

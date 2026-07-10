@@ -104,6 +104,8 @@ Key points to verify with the user:
   **Value**, and the Microsoft Teams channel enabled on the Azure Bot.
 - The Azure Bot Messaging endpoint must be public HTTPS and must end with the
   OpenTag Teams path, usually `https://<tunnel-host>/teams/messages`.
+- Teams ingress currently requires local runtime (background service or terminal
+  mode); hosted/custom relay mode is not supported.
 - For local testing, `ngrok http 3030` is easiest because `http://127.0.0.1:4040`
   shows incoming `POST /teams/messages` requests. If using `devtunnel`, it must
   be started with `devtunnel host -p 3030 --allow-anonymous`.
@@ -119,7 +121,9 @@ Key points to verify with the user:
   produce a plan.
 - `@OpenTag apply 1` requires the channel to be bound to a GitHub/GitLab repo
   and apply credentials to be configured. A local-only repo binding can produce
-  a branch/patch but cannot create a pull request from Teams.
+  a branch/patch but cannot create a pull request from Teams. Historical
+  apply/reject actions are rejected if the current Teams channel binding was
+  removed or rebound away from the proposal repository.
 
 Common Teams troubleshooting shortcuts:
 

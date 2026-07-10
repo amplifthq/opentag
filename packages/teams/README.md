@@ -7,7 +7,7 @@ normalizes supported messages into `OpenTagEvent`s, verifies Bot Framework JWTs,
 renders OpenTag callback updates, and posts replies back to the source Teams
 conversation through the Bot Connector REST API. It is mounted by the
 `local-runtime` dispatcher; this package does not run a standalone service by
-itself.
+itself, and Teams relay ingress is not currently supported.
 
 ## v1 scope
 
@@ -72,6 +72,9 @@ reply-specific suffix:
 
 `local-runtime` also has a fallback that strips `;messageid=...` so an incoming
 full conversation id can still match a binding created with the base id.
+Dispatcher source-thread lookup keeps both the full reply identity and a
+canonical base-conversation alias, while callback delivery retains the full
+conversation id needed to reply to the correct Teams thread.
 
 The binding identity is effectively:
 
@@ -88,6 +91,10 @@ a proposal, the original proposal/root activity id is carried in
 `webhook-app.ts` must route source-thread actions with the root activity id, not
 the reply activity id. Otherwise dispatcher lookup cannot find the action
 receipt and the user sees a generic failure for `apply 1` / `reject 1`.
+Before recording a decision, creating an ApplyPlan, or executing an adapter
+mutation, Dispatcher revalidates the tenant/channel stored on the proposal and
+requires the current Teams channel binding to still target the same repository.
+Removed, rebound, or identity-incomplete bindings fail closed.
 
 ### Callback replies
 

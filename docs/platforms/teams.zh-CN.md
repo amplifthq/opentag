@@ -234,13 +234,13 @@ setup 和绑定完成后，在目标 channel 里 mention bot：
 预期行为：
 
 - Teams 通过 tunnel 把 Activity 发送到你的 Messaging endpoint。
-- OpenTag 在处理前校验入站 Bot Framework JWT 的签名、issuer 和 audience。真实 Teams token 可能没有 `serviceUrl` claim；如果存在，OpenTag 会校验它和 Activity body 是否一致。
+- OpenTag 在处理前校验入站 Bot Framework JWT 的签名、issuer、audience、必需的 `serviceUrl` claim，以及签名 key 的 `msteams` endorsement。签名保护的 `serviceUrl` 必须与 Activity body 完全一致，避免把 bot Connector token 发往 body 控制的地址。
 - 本地 runner 针对已绑定 checkout 启动。
 - OpenTag 在同一个 Teams channel/thread 中以纯文本回复。
 
 ## Apply Action 和创建 Pull Request
 
-Teams thread 中支持 `@OpenTag apply 1`，但创建 pull request 需要 GitHub 或 GitLab repository binding 和 apply credentials。
+Teams thread 中支持 `@OpenTag apply 1`，但创建 pull request 需要 GitHub 或 GitLab repository binding 和 apply credentials。在记录 apply/reject 决定或执行 adapter mutation 之前，OpenTag 会使用 proposal 中保存的 Teams tenant/channel 重新检查当前 channel binding，并要求它仍然指向同一个 repository。如果 channel 已解绑或重绑，历史 thread action 会 fail closed。
 
 如果要使用 GitHub pull request apply，请把 repository 配置成 GitHub，而不是只配置成本地 repo：
 
@@ -311,7 +311,7 @@ repo: <github-repo>
 已支持：
 
 - `opentag setup --platform teams` CLI setup。
-- `/teams/messages` 上的 Bot Framework webhook ingest，包含入站 JWT 校验（JWKS、issuer、audience；如果 token 包含 `serviceUrl` claim，也会校验）。
+- `/teams/messages` 上的 Bot Framework webhook ingest，包含 fail-closed JWT 校验（JWKS 签名、issuer、audience、必需且匹配的 `serviceUrl`，以及 `msteams` key endorsement）。
 - **channel** 会话中的 `@OpenTag` mention 处理。
 - Teams thread 中的 `@OpenTag apply N` action 路由。
 - 纯文本 channel 回复。
@@ -320,4 +320,5 @@ repo: <github-repo>
 
 - Adaptive Cards 或可点击的 Apply 按钮。
 - 私聊（personal chat）和群聊（group chat），当前只支持 channel。
-- 独立的 Teams events service——webhook 运行在本地 dispatcher 内部。
+- Teams hosted/custom relay ingress——webhook 目前只运行在本地 dispatcher 内部。
+- 独立的 Teams events service。

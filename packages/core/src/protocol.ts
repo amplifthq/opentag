@@ -388,6 +388,26 @@ function callbackConversationKey(callback: OpenTagEvent["callback"]): string {
   return `${callback.provider}:${callback.threadKey ?? callback.uri}`;
 }
 
+function canonicalTeamsConversationKey(callback: OpenTagEvent["callback"]): string | undefined {
+  if (callback.provider !== "teams" || !callback.threadKey) return undefined;
+  const firstSeparator = callback.threadKey.indexOf("|");
+  const lastSeparator = callback.threadKey.lastIndexOf("|");
+  if (firstSeparator <= 0 || lastSeparator <= firstSeparator + 1 || lastSeparator === callback.threadKey.length - 1) {
+    return undefined;
+  }
+
+  const serviceUrl = callback.threadKey.slice(0, firstSeparator);
+  const conversationId = callback.threadKey.slice(firstSeparator + 1, lastSeparator);
+  const activityId = callback.threadKey.slice(lastSeparator + 1);
+  const baseConversationId = conversationId.replace(/;messageid=[^;]+$/i, "");
+  if (baseConversationId === conversationId) return undefined;
+  return `teams:${serviceUrl}|${baseConversationId}|${activityId}`;
+}
+
+export function conversationKeysFromCallback(callback: OpenTagEvent["callback"]): string[] {
+  return [...new Set([callbackConversationKey(callback), canonicalTeamsConversationKey(callback)].filter((key): key is string => Boolean(key)))];
+}
+
 function metadataRecordString(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -415,7 +435,7 @@ export function conversationKeyFromEvent(event: OpenTagEvent): string {
 }
 
 export function conversationKeysFromEvent(event: OpenTagEvent): string[] {
-  return [...new Set([conversationKeyFromEvent(event), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
+  return [...new Set([...conversationKeysFromCallback(event.callback), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
 }
 
 export function workThreadFromEvent(event: OpenTagEvent): WorkThread | undefined {

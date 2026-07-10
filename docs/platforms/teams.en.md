@@ -4,6 +4,8 @@ Use this guide when `opentag setup --platform teams` asks for Microsoft Teams va
 
 OpenTag receives Microsoft Teams channel messages through a Bot Framework webhook. Teams only delivers activities over HTTPS, so this platform always needs a public HTTPS Messaging endpoint pointed at your local dispatcher (unlike Discord's default Gateway mode or Telegram's default polling mode).
 
+Teams ingress currently runs only in OpenTag's local runtime (background service or terminal mode). Hosted/custom relay mode does not yet mount the Teams webhook and is reported as unsupported by `opentag status` and `opentag doctor`.
+
 ## End-To-End Setup Checklist
 
 Use this checklist before diving into the detailed sections:
@@ -234,13 +236,13 @@ If you omit `fix` or `run`, Claude Code may run in plan mode and return a plan w
 Expected behavior:
 
 - Teams posts the Activity to your Messaging endpoint over the tunnel.
-- OpenTag validates the inbound Bot Framework JWT signature, issuer, and audience before processing. Real Teams tokens may omit a `serviceUrl` claim; when present, OpenTag checks it against the Activity body.
+- OpenTag validates the inbound Bot Framework JWT signature, issuer, audience, required `serviceUrl` claim, and the signing key's `msteams` endorsement before processing. The signed `serviceUrl` must exactly match the Activity body, so a body-controlled reply URL cannot receive the bot Connector token.
 - The local runner starts against the bound checkout.
 - OpenTag replies in the same Teams channel/thread as plain text.
 
 ## Apply Actions And Create Pull Requests
 
-`@OpenTag apply 1` is supported from Teams threads, but creating a pull request requires a GitHub or GitLab repository binding and apply credentials.
+`@OpenTag apply 1` is supported from Teams threads, but creating a pull request requires a GitHub or GitLab repository binding and apply credentials. Before any apply/reject decision or adapter mutation, OpenTag revalidates the proposal's stored Teams tenant/channel against the current channel binding and requires it to still point at the same repository. Historical actions fail closed if the channel was unbound or rebound.
 
 For GitHub pull request apply, configure the repository as GitHub, not local-only:
 
@@ -297,7 +299,7 @@ If the receipt says direct apply is not configured, check that the channel bindi
 | `spawn claude ENOENT` | Background service cannot find `claude` on `PATH` | Set `daemon.claudeCode.command` to the absolute Claude path and restart |
 | Claude returns only a plan | The command did not request write permission | Use `@OpenTag fix ...` or `@OpenTag run ...` |
 | Receipt says direct apply is not configured | Repo binding is local-only or apply token is missing | Bind the channel to a GitHub/GitLab repo and configure apply credentials |
-| `apply 1` cannot find an action | The command was not posted in the same Teams thread, or the service is outdated | Reply in the same thread and update to a build that maps Teams actions to the root message id |
+| `apply 1` cannot find or authorize an action | The command is outside the proposal thread, the service is outdated, or the channel was unbound/rebound after the proposal | Reply in the same thread, confirm the current channel binding still targets the proposal repository, and update OpenTag |
 
 ## Official References
 
@@ -311,7 +313,7 @@ If the receipt says direct apply is not configured, check that the channel bindi
 Supported now:
 
 - CLI setup through `opentag setup --platform teams`.
-- Bot Framework webhook ingest at `/teams/messages`, with inbound JWT validation (JWKS, issuer, and audience; optional `serviceUrl` claim checked when present).
+- Bot Framework webhook ingest at `/teams/messages`, with fail-closed JWT validation (JWKS signature, issuer, audience, required matching `serviceUrl`, and `msteams` key endorsement).
 - `@OpenTag` mention handling in **channel** conversations.
 - `@OpenTag apply N` action routing from Teams threads.
 - Plain-text channel replies.
@@ -320,4 +322,5 @@ Not yet implemented / out of scope for v1:
 
 - Adaptive Cards or clickable Apply buttons.
 - Personal chats and group chats (channels only).
-- A standalone Teams events service — the webhook runs inside the local dispatcher.
+- Hosted/custom relay ingress for Teams — the webhook currently runs only inside the local dispatcher.
+- A standalone Teams events service.

@@ -124,7 +124,7 @@ Use the guide for the platform you choose in `opentag setup`.
 | Lark / Feishu | Scan the Personal Agent QR code from setup | [Lark / Feishu setup](docs/platforms/lark.en.md) |
 | Telegram | Use BotFather token with local getUpdates polling | [Telegram setup](docs/platforms/telegram.en.md) |
 | Discord | Use a bot token with local Gateway delivery | [Discord setup](docs/platforms/discord.en.md) |
-| Microsoft Teams | Use an Azure Bot, Teams tenant, and public HTTPS tunnel | [Microsoft Teams setup](docs/platforms/teams.en.md) |
+| Microsoft Teams | Use an Azure Bot and public HTTPS tunnel to the local dispatcher (relay mode is not supported) | [Microsoft Teams setup](docs/platforms/teams.en.md) |
 
 ## What Runs Locally
 

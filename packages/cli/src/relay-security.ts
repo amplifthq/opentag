@@ -116,19 +116,11 @@ export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySe
     });
   }
 
-  if (config.platforms.teams) {
-    const webhookPath = config.platforms.teams.webhookPath ?? "/teams/messages";
-    checks.push({
-      status: "ok",
-      name: "Microsoft Teams Bot Framework JWT",
-      message: `Configured locally; the relay ${webhookPath} endpoint must verify the inbound Bot Framework JWT before creating runs.`
-    });
-  }
-
-  if (config.platforms.slack || config.platforms.lark) {
+  if (config.platforms.slack || config.platforms.lark || config.platforms.teams) {
     const unsupported = [
       config.platforms.slack ? "Slack" : undefined,
-      config.platforms.lark ? "Lark / Feishu" : undefined
+      config.platforms.lark ? "Lark / Feishu" : undefined,
+      config.platforms.teams ? "Microsoft Teams" : undefined
     ]
       .filter((value): value is string => Boolean(value))
       .join(", ");
