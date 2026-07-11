@@ -33,11 +33,14 @@ describe("teams connector", () => {
   });
 
   it("throws on a non-2xx response (never a silent success)", async () => {
-    const fetchImpl = vi.fn(async () => new Response("forbidden", { status: 403 }));
+    const response = new Response("forbidden", { status: 403 });
+    const readBody = vi.spyOn(response, "text");
+    const fetchImpl = vi.fn(async () => response);
     const connector = createTeamsConnector({ getToken: async () => "tok", fetchImpl });
     await expect(
       connector.postMessage({ serviceUrl: "https://smba/", conversationId: "19:conv", text: "x" })
     ).rejects.toThrow(/403/);
+    expect(readBody).toHaveBeenCalledTimes(1);
   });
 
   it("joins serviceUrl and path without a double slash", async () => {

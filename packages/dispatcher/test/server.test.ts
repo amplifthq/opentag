@@ -6917,7 +6917,10 @@ describe("dispatcher API", () => {
     expect(githubRequests.length).toBeGreaterThan(0);
   });
 
-  it("authorizes Teams actions against a base channel binding when the stored proposal has a full reply conversation id", async () => {
+  it.each([
+    { name: "authorizes Teams actions through a base conversation binding", includeExactBinding: false },
+    { name: "authorizes Teams actions when exact and base bindings point to the same repository", includeExactBinding: true }
+  ])("$name", async ({ includeExactBinding }) => {
     const githubRequests: string[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -6967,6 +6970,16 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    if (includeExactBinding) {
+      await app.request("/v1/channel-bindings", jsonRequest({
+        provider: "teams",
+        accountId: "tenant-1",
+        conversationId: fullConversationId,
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }));
+    }
     githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
@@ -6986,6 +6999,84 @@ describe("dispatcher API", () => {
       plan: { proposalId: "proposal_thread_teams_base_binding" }
     });
     expect(githubRequests).toEqual(["https://api.github.com/repos/acme/demo/issues/1/labels"]);
+  });
+
+  it("rejects Teams actions when exact and base conversation bindings point to different repositories", async () => {
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return Response.json({});
+        }
+      }
+    });
+    const baseConversationId = "19:conflicting-bindings@thread.tacv2";
+    const fullConversationId = `${baseConversationId};messageid=root-activity`;
+    const threadKey = `https://smba.trafficmanager.net/amer/|${fullConversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: fullConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: baseConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "other-repo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_conflicting_bindings",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_conflicting_bindings",
+        sourceEventId: "teams_thread_conflicting_bindings",
+        conversationId: fullConversationId,
+        threadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_conflicting_bindings",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_conflicting_bindings",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "channel_binding_mismatch"
+    });
+    expect(githubRequests).toHaveLength(0);
   });
 
   it("fails closed for Teams proposals missing stored channel identity metadata", async () => {

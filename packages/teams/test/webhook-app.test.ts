@@ -181,6 +181,79 @@ describe("teams webhook app", () => {
     expect(input.createRun).not.toHaveBeenCalled();
   });
 
+  it("reports a deferred failure without a notifier or an unhandled rejection", async () => {
+    const onBackgroundError = vi.fn();
+    const unhandledRejections: unknown[] = [];
+    const captureUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    const input = baseInput({
+      resolveChannelBinding: vi.fn(async () => {
+        throw new Error("binding lookup failed");
+      }),
+      notifyConversation: undefined,
+      onBackgroundError
+    });
+
+    process.on("unhandledRejection", captureUnhandledRejection);
+    try {
+      const response = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> investigate"));
+
+      expect(response.status).toBe(200);
+      await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(onBackgroundError).toHaveBeenCalledWith(expect.objectContaining({ message: "binding lookup failed" }));
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", captureUnhandledRejection);
+    }
+  });
+
+  it("reports a synchronous failure from the optional failure notifier", async () => {
+    const onBackgroundError = vi.fn();
+    const notifyConversation = vi.fn(() => {
+      throw new Error("failure notice failed");
+    }) as unknown as NonNullable<Parameters<typeof createTeamsWebhookApp>[0]["notifyConversation"]>;
+    const input = baseInput({
+      resolveChannelBinding: vi.fn(async () => {
+        throw new Error("binding lookup failed");
+      }),
+      notifyConversation,
+      onBackgroundError
+    });
+
+    const response = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> investigate"));
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledTimes(2));
+    expect(onBackgroundError.mock.calls.map(([error]) => (error as Error).message)).toEqual([
+      "binding lookup failed",
+      "failure notice failed"
+    ]);
+  });
+
+  it("reports an asynchronous rejection from the optional failure notifier", async () => {
+    const onBackgroundError = vi.fn();
+    const input = baseInput({
+      resolveChannelBinding: vi.fn(async () => {
+        throw new Error("binding lookup failed");
+      }),
+      notifyConversation: vi.fn(async () => {
+        throw new Error("failure notice rejected");
+      }),
+      onBackgroundError
+    });
+
+    const response = await post(createTeamsWebhookApp(input), channelActivity("<at>OpenTag</at> investigate"));
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(onBackgroundError).toHaveBeenCalledTimes(2));
+    expect(onBackgroundError.mock.calls.map(([error]) => (error as Error).message)).toEqual([
+      "binding lookup failed",
+      "failure notice rejected"
+    ]);
+  });
+
   it("returns 413 for an over-limit body", async () => {
     const input = baseInput();
     const big = { ...channelActivity("<at>OpenTag</at> x"), padding: "z".repeat(1_100_000) };

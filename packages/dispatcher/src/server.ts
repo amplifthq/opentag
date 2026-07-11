@@ -1505,16 +1505,26 @@ async function getTeamsThreadActionChannelBinding(input: {
     accountId: input.tenantId,
     conversationId: input.conversationId
   });
-  if (exactBinding) return exactBinding;
 
   const baseConversationId = baseTeamsConversationId(input.conversationId);
-  if (baseConversationId === input.conversationId) return null;
+  if (baseConversationId === input.conversationId) return exactBinding;
 
-  return input.repo.getChannelBinding({
+  const baseBinding = await input.repo.getChannelBinding({
     provider: "teams",
     accountId: input.tenantId,
     conversationId: baseConversationId
   });
+  if (
+    exactBinding &&
+    baseBinding &&
+    (exactBinding.repoProvider !== baseBinding.repoProvider ||
+      exactBinding.owner !== baseBinding.owner ||
+      exactBinding.repo !== baseBinding.repo)
+  ) {
+    return null;
+  }
+
+  return exactBinding ?? baseBinding;
 }
 
 async function authorizeThreadAction(input: {

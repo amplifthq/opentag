@@ -24,6 +24,7 @@ export function createTeamsConnector(input: { getToken: () => Promise<string>; f
       signal: AbortSignal.timeout(CONNECTOR_REQUEST_TIMEOUT_MS)
     });
     if (!response.ok) {
+      await response.text().catch(() => {});
       throw new Error(`Teams connector ${method} ${url} failed with status ${response.status}`);
     }
     try {

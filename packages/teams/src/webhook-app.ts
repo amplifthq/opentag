@@ -106,9 +106,16 @@ export function createTeamsWebhookApp(input: TeamsWebhookAppInput) {
         .then(work)
         .catch((error) => {
           safelyReport(error);
-          input
-            .notifyConversation?.({ serviceUrl: message.serviceUrl, conversationId: message.conversationId, text: failureNotice })
-            .catch(safelyReport);
+          try {
+            const notice = input.notifyConversation?.({
+              serviceUrl: message.serviceUrl,
+              conversationId: message.conversationId,
+              text: failureNotice
+            });
+            if (notice) void notice.catch(safelyReport);
+          } catch (reportError) {
+            safelyReport(reportError);
+          }
         });
     };
 

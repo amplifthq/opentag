@@ -1020,10 +1020,15 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     }
     if (config.platforms.teams) {
       const teams = config.platforms.teams;
-      logger.log(`Microsoft Teams local messaging endpoint: ${teamsLocalWebhookUrl({ webhookPath: teams.webhookPath })}`);
+      logger.log(
+        `Microsoft Teams local messaging endpoint: ${teamsLocalWebhookUrl({
+          webhookPath: teams.webhookPath,
+          dispatcherPort: dispatcherPortFromUrl(config.daemon.dispatcherUrl)
+        })}`
+      );
       logger.log(`Microsoft Teams Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(teams.webhookPath ?? "/teams/messages")}`);
       logger.log("Microsoft Teams: install the app into the target Teams tenant.");
-      logger.log("Tunnel example: ngrok http 3030");
+      logger.log(`Tunnel example: ngrok http ${dispatcherPortFromUrl(config.daemon.dispatcherUrl)}`);
     }
     logger.log("Press Ctrl-C to stop.");
 

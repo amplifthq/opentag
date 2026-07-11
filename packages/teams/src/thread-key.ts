@@ -14,9 +14,10 @@ export function parseTeamsThreadKey(threadKey: string): {
   conversationId: string;
   activityId: string;
 } {
-  const [serviceUrl, conversationId, activityId] = threadKey.split("|");
-  if (!serviceUrl || !conversationId || !activityId) {
+  const parts = threadKey.split("|");
+  if (parts.length !== 3 || !parts.every(Boolean)) {
     throw new Error(`Invalid Teams thread key: ${threadKey}`);
   }
+  const [serviceUrl, conversationId, activityId] = parts as [string, string, string];
   return { serviceUrl, conversationId, activityId };
 }

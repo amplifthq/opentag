@@ -590,7 +590,7 @@ importers:
         specifier: ^4.23.3
         version: 4.23.3
       hono:
-        specifier: ^4.6.15
+        specifier: ^4.12.27
         version: 4.12.27
     devDependencies:
       jose:

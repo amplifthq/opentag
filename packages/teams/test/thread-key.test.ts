@@ -22,4 +22,8 @@ describe("teams thread key", () => {
   it("throws on a key missing a segment", () => {
     expect(() => parseTeamsThreadKey("https://x|19:abc")).toThrow(/Invalid Teams thread key/);
   });
+
+  it("throws on a key with extra segments", () => {
+    expect(() => parseTeamsThreadKey("https://x|19:abc|activity-1|unexpected")).toThrow(/Invalid Teams thread key/);
+  });
 });
