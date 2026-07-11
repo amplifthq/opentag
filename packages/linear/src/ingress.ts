@@ -10,7 +10,7 @@ import {
   type OpenTagEvent
 } from "@opentag/core";
 import { Hono } from "hono";
-import { acknowledgeLinearAgentSession, normalizeLinearAgentSessionEvent, type LinearAgentSessionEventPayload } from "./agent.js";
+import { acknowledgeLinearAgentSession, linearAgentActivityBody, normalizeLinearAgentSessionEvent, type LinearAgentSessionEventPayload } from "./agent.js";
 import { DEFAULT_LINEAR_GRAPHQL_URL, normalizeLinearIssueComment, type LinearProjectTarget } from "./normalize.js";
 
 type LinearUser = {
@@ -284,7 +284,7 @@ function agentSessionPromptedActionContext(input: { payload: LinearWebhookPayloa
   if (!isAgentSessionEventPayload(input.payload)) return null;
   if (stringValue(input.payload.action) !== "prompted") return null;
   if (isAgentSessionStopSignalPayload(input.payload)) return null;
-  const body = isRecord(input.payload.agentActivity) ? stringValue(input.payload.agentActivity.body) : undefined;
+  const body = linearAgentActivityBody(input.payload.agentActivity);
   if (!body) return null;
   return agentSessionActionContext({ ...input, rawText: body, metadata: {} });
 }

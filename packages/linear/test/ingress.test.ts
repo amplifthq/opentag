@@ -672,7 +672,7 @@ describe("Linear agent session prompted thread actions", () => {
       webhookTimestamp: WEBHOOK_TIMESTAMP,
       agentActivity: {
         id: "activity_prompted_apply",
-        body
+        content: { type: "prompt", body }
       },
       agentSession: {
         id: "agent_session_apply",

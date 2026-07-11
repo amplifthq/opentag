@@ -70,12 +70,16 @@ function userFromAgentSession(value: unknown): Record<string, unknown> | undefin
   return value.creator;
 }
 
-function activityBody(value: unknown): string | undefined {
+export function linearAgentActivityBody(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined;
   const directBody = stringValue(value.body);
   if (directBody) return directBody;
   if (!isRecord(value.content)) return undefined;
   return stringValue(value.content.body);
+}
+
+function activityBody(value: unknown): string | undefined {
+  return linearAgentActivityBody(value);
 }
 
 function issueWorkItem(input: { issue: Record<string, unknown>; organizationId?: string }): WorkItemReference | undefined {
