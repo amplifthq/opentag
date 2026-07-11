@@ -27,8 +27,11 @@ import {
 import { runSetupCommand } from "./commands/setup.js";
 import { runStartCommand } from "./start.js";
 import { runStatusCommand } from "./status.js";
+import { CLI_VERSION } from "./version.js";
 
 const program = new Command();
+
+program.version(CLI_VERSION);
 
 function handleError(error: unknown): never {
   console.error(formatCliConfigError(error));
