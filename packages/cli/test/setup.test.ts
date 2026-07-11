@@ -1279,7 +1279,7 @@ describe("OpenTag CLI setup", () => {
     ).rejects.toThrow("Discord application public key is only used with --discord-mode webhook.");
   });
 
-  it("writes Hermes setup options into daemon config", async () => {
+  it("writes only the supported Hermes command into daemon config", async () => {
     const configPath = join(tempDir(), "config.json");
 
     await runSetupCommand(
@@ -1291,8 +1291,6 @@ describe("OpenTag CLI setup", () => {
         githubRepository: "acme/demo",
         githubToken: "ghp_test",
         hermesCommand: "custom-hermes",
-        hermesProfile: "opentag-fixed",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
         force: true,
         yes: true
       },
@@ -1301,11 +1299,7 @@ describe("OpenTag CLI setup", () => {
 
     const config = readCliConfig(configPath);
     expect(config.daemon.repositories[0]?.defaultExecutor).toBe("hermes");
-    expect(config.daemon.hermes).toEqual({
-      command: "custom-hermes",
-      profile: "opentag-fixed",
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
-    });
+    expect(config.daemon.hermes).toEqual({ command: "custom-hermes" });
   });
 
   it("writes generic agent session profile options into daemon config", async () => {
@@ -1371,7 +1365,7 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
-  it("defaults Hermes profileTemplate when no fixed profile is provided", async () => {
+  it("does not generate removed Hermes profile settings", async () => {
     const configPath = join(tempDir(), "config.json");
 
     await runSetupCommand(
@@ -1388,48 +1382,7 @@ describe("OpenTag CLI setup", () => {
       { prompts: testPrompts() }
     );
 
-    expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate:
-        "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}"
-    });
-  });
-
-  it("does not keep an inherited Hermes fixed profile when a profileTemplate is explicitly provided", async () => {
-    const configPath = join(tempDir(), "config.json");
-    const projectPath = tempDir();
-
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfile: "opentag-fixed",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
-    });
+    expect(readCliConfig(configPath).daemon.hermes).toBeUndefined();
   });
 
   it("rejects Slack setup without an initial channel binding", async () => {

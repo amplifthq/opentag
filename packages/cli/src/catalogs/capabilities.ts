@@ -69,7 +69,7 @@ export const EXECUTOR_CAPABILITIES: Record<ExecutorId, ExecutorCapabilityDescrip
   hermes: {
     id: "hermes",
     invocation: "spawn",
-    supportsProfile: true,
+    supportsProfile: false,
     supportsStreaming: false,
     supportsCancel: false,
     supportsHookCompletion: false,

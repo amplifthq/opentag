@@ -59,8 +59,6 @@ program
   .option("--language <language>", "Setup language: en or zh-CN")
   .option("--executor <executor>", "Default executor: echo, codex, claude-code, or hermes")
   .option("--hermes-command <command>", "Hermes CLI command")
-  .option("--hermes-profile <profile>", "Hermes profile")
-  .option("--hermes-profile-template <template>", "Hermes profile template")
   .option("--agent-profile <profile>", "Executor-neutral agent session profile")
   .option("--agent-profile-template <template>", "Executor-neutral agent session profile template")
   .option("--lark-setup <method>", "Lark setup method: saved, scan, or manual")

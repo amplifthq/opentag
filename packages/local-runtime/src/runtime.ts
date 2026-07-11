@@ -17,6 +17,11 @@ export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityP
   return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
+export function hermesProfileMigrationWarning(config: OpenTagDaemonConfig): string | undefined {
+  if (!config.hermes?.profile && !config.hermes?.profileTemplate) return undefined;
+  return "Hermes configuration warning: daemon.hermes.profile and daemon.hermes.profileTemplate are deprecated and ignored because Hermes CLI 0.18 removed per-invocation profiles. Run `hermes profile use <name>` before starting OpenTag.";
+}
+
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
   const security = securityFromConfig(config);
 
@@ -35,9 +40,7 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(security ? { security } : {})
     }),
     hermes: createHermesExecutor({
-      ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
-      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {}),
-      ...(config.hermes?.profileTemplate ? { profileTemplate: config.hermes.profileTemplate } : {})
+      ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {})
     })
   };
 }

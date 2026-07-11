@@ -847,6 +847,10 @@ describe("OpenTag CLI start wiring", () => {
       relayProvider: "custom"
     };
     built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.hermes = {
+      profile: "legacy-fixed",
+      profileTemplate: "legacy-{provider}-{owner}-{repo}"
+    };
     const calls: string[] = [];
     const logs: string[] = [];
     const dispatcherHandle = {
@@ -893,6 +897,8 @@ describe("OpenTag CLI start wiring", () => {
 
     expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
     expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("daemon.hermes.profile and daemon.hermes.profileTemplate are deprecated and ignored");
+    expect(logs.join("\n")).toContain("hermes profile use <name>");
     expect(logs.join("\n")).toContain("Local dispatcher: disabled");
     expect(logs.join("\n")).toContain("Security: only pair with a relay you operate or trust");
     expect(logs.join("\n")).toContain("GitHub webhook URL: https://relay.example/github/webhooks");

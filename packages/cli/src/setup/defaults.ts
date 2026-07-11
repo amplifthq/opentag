@@ -50,8 +50,6 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
-    ...(hermes?.profile ? { hermesProfile: hermes.profile } : {}),
-    ...(hermes?.profileTemplate ? { hermesProfileTemplate: hermes.profileTemplate } : {}),
     ...(agentSessionProfile?.profile ? { agentProfile: agentSessionProfile.profile } : {}),
     ...(agentSessionProfile?.profileTemplate ? { agentProfileTemplate: agentSessionProfile.profileTemplate } : {}),
     ...(lastSetup?.larkSetupMethod ? { larkSetupMethod: lastSetup.larkSetupMethod } : {}),

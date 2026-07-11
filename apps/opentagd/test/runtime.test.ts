@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OpenTagDaemonConfig } from "../src/config.js";
-import { createDaemonRuntimeInput, pullRequestOptionsFromConfig, securityFromConfig } from "../src/runtime.js";
+import { createDaemonRuntimeInput, hermesProfileMigrationWarning, pullRequestOptionsFromConfig, securityFromConfig } from "../src/runtime.js";
 
 const config: OpenTagDaemonConfig = {
   runnerId: "runner_local",
@@ -40,6 +40,16 @@ describe("opentagd runtime helpers", () => {
       allowUnsafePrompts: false,
       extraSafeEnv: ["OPENTAG_DEBUG"]
     });
+  });
+
+  it("explains how to migrate legacy Hermes profile configuration", () => {
+    expect(
+      hermesProfileMigrationWarning({
+        ...config,
+        hermes: { profile: "legacy-fixed" }
+      })
+    ).toContain("hermes profile use <name>");
+    expect(hermesProfileMigrationWarning(config)).toBeUndefined();
   });
 
   it("omits pull request options when GitHub PR creation is not configured", () => {

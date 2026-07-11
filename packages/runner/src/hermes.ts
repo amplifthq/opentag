@@ -4,12 +4,13 @@ import { executorPolicyPromptLines } from "./executor-report.js";
 import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
-import { resolveAgentSessionProfile } from "./session-profile.js";
 
 export type HermesExecutorOptions = {
   runner?: CommandRunner;
   hermesCommand?: string;
+  /** @deprecated Hermes CLI >= 0.18 manages profiles outside one-shot invocations. */
   profile?: string;
+  /** @deprecated Hermes CLI >= 0.18 manages profiles outside one-shot invocations. */
   profileTemplate?: string;
 };
 
@@ -36,7 +37,6 @@ function buildPrompt(input: {
     "Context pointers:",
     contextLines(input.context),
     "",
-    "Use only the selected Hermes profile for tools, skills, memory, and session behavior.",
     ...executorPolicyPromptLines()
   ].join("\n");
 }
@@ -51,7 +51,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
     capability: {
       id: "hermes",
       invocation: "spawn",
-      supportsProfile: true,
+      supportsProfile: false,
       supportsStreaming: false,
       supportsCancel: false,
       supportsHookCompletion: false,
@@ -127,17 +127,11 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
         contextPacket: input.contextPacket
       });
 
-      const profile = resolveAgentSessionProfile({
-        ...(options.profile ? { profile: options.profile } : {}),
-        ...(options.profileTemplate ? { profileTemplate: options.profileTemplate } : {}),
-        metadata: {
-          ...(input.metadata ?? {}),
-          runId: input.runId
-        },
-        ...(input.sessionProfile ? { fallback: input.sessionProfile } : {})
-      });
-
-      const args = [...(profile ? ["-p", profile.id] : []), "-z", prompt];
+      // Hermes CLI (>= 0.18) has no `-p`/`--profile` flag; profiles are managed
+      // through the `hermes profile` subcommand, not per-invocation selection.
+      // OpenTag already isolates each run at the workspace/branch level, so a
+      // plain one-shot invocation is sufficient.
+      const args = ["-z", prompt];
 
       let hermesResult: CommandResult | undefined;
       try {

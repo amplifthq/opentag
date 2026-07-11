@@ -30,7 +30,7 @@ describe("executor catalog", () => {
     expect(output).toContain("raw_context=no");
     expect(output).toContain("write_actions=none");
     expect(output).toContain("secrets=openai_api_key");
-    expect(output).toContain("Hermes: invocation=spawn, profile=yes");
+    expect(output).toContain("Hermes: invocation=spawn, profile=no");
     expect(output).toContain("completion=process_exit");
   });
 

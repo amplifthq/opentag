@@ -168,7 +168,7 @@ use `--permission-mode plan`.
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
-| `hermes` | none | Hermes executor command/profile settings; `profile` and `profileTemplate` still override the Hermes CLI `-p` argument |
+| `hermes` | none | Hermes executor command settings. Legacy `profile` and `profileTemplate` fields remain accepted for compatibility but are not forwarded because Hermes CLI 0.18 removed per-invocation `-p`; select the sticky default with `hermes profile use`. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
@@ -178,6 +178,8 @@ use `--permission-mode plan`.
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 | `runTimeoutMs` | none | Optional hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
+
+For Hermes, new `opentag setup` runs only write the optional `command` setting and no longer expose or generate per-run profile settings. Existing `daemon.hermes.profile` and `daemon.hermes.profileTemplate` values still parse so upgrades do not fail, but startup warns that they are ignored. Select the long-lived Hermes default before starting OpenTag with `hermes profile use <name>`.
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the
 runner has marked the run as running, the command prefers the run-specific

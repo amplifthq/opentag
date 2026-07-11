@@ -46,8 +46,6 @@ import type {
   TelegramSetupMode
 } from "./types.js";
 
-const DEFAULT_HERMES_PROFILE_TEMPLATE =
-  "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}";
 const DEFAULT_TELEGRAM_AGENT_ID = "opentag";
 const DEFAULT_DISCORD_WEBHOOK_PATH = "/discord/interactions";
 
@@ -120,8 +118,6 @@ export type SetupCommandOptions = {
   discordBotToken?: string;
   discordWebhookPath?: string;
   hermesCommand?: string;
-  hermesProfile?: string;
-  hermesProfileTemplate?: string;
   agentProfile?: string;
   agentProfileTemplate?: string;
   binding?: string;
@@ -322,32 +318,16 @@ function optionalTrimmed(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
-function hasHermesOptions(options: SetupCommandOptions): boolean {
-  return Boolean(options.hermesCommand || options.hermesProfile || options.hermesProfileTemplate);
-}
-
 function collectHermesSetup(options: SetupCommandOptions, defaults: SetupDefaults, executor: string): HermesSetupInput | undefined {
   if (executor !== "hermes") {
-    if (hasHermesOptions(options)) {
-      throw new Error("--hermes-command, --hermes-profile, and --hermes-profile-template can only be used with --executor hermes.");
+    if (options.hermesCommand) {
+      throw new Error("--hermes-command can only be used with --executor hermes.");
     }
     return undefined;
   }
 
-  const explicitProfile = optionalTrimmed(options.hermesProfile);
-  const explicitProfileTemplate = optionalTrimmed(options.hermesProfileTemplate);
   const command = optionalTrimmed(options.hermesCommand) ?? defaults.hermesCommand;
-  const profile = explicitProfileTemplate ? explicitProfile : explicitProfile ?? defaults.hermesProfile;
-  const profileTemplate =
-    explicitProfileTemplate ??
-    (explicitProfile ? undefined : defaults.hermesProfileTemplate) ??
-    (profile ? undefined : DEFAULT_HERMES_PROFILE_TEMPLATE);
-
-  return {
-    ...(command ? { command } : {}),
-    ...(profile ? { profile } : {}),
-    ...(profileTemplate ? { profileTemplate } : {})
-  };
+  return command ? { command } : undefined;
 }
 
 function collectAgentSessionProfileSetup(options: SetupCommandOptions, defaults: SetupDefaults) {

@@ -38,7 +38,7 @@ describe("executor capability contracts", () => {
     expect(createCodexExecutor().capability?.workspaceIsolation).toBe("worktree");
     expect(createClaudeCodeExecutor().capability?.workspaceIsolation).toBe("worktree");
     expect(createHermesExecutor().capability).toMatchObject({
-      supportsProfile: true,
+      supportsProfile: false,
       workspaceIsolation: "branch"
     });
     expect(createEchoExecutor().capability?.workspaceIsolation).toBe("none");

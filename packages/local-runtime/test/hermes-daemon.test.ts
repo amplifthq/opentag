@@ -107,7 +107,7 @@ describe("Hermes daemon integration", () => {
       profileTemplate: "opentag-{provider}-{accountId}-{conversationId}",
       expectedProfile: "opentag-telegram-bot_123-456"
     }
-  ])("selects an isolated Hermes profile for $source events", async ({ source, metadata, profileTemplate, expectedProfile }) => {
+  ])("does not pass the removed Hermes profile flag for $source events", async ({ source, metadata, profileTemplate, expectedProfile }) => {
     const { calls, completed } = await runForEvent({
       event: eventWithMetadata(source, metadata),
       profileTemplate
@@ -115,8 +115,8 @@ describe("Hermes daemon integration", () => {
 
     const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
     expect(hermesCall, JSON.stringify({ calls, completed })).toBeDefined();
-    expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain(expectedProfile);
+    expect(hermesCall?.args).not.toContain("-p");
+    expect(hermesCall?.args).not.toContain(expectedProfile);
     expect(completed?.conclusion).toBe("success");
   });
 });

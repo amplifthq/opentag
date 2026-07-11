@@ -22,6 +22,7 @@ import {
 import {
   createDaemonRuntimeInput,
   dispatcherRuntimeHardeningInputFromEnv,
+  hermesProfileMigrationWarning,
   normalizeChannelBindings,
   serveDaemon,
   startDispatcher,
@@ -1085,6 +1086,8 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
   ensurePrivateDirectory(input.config.state.worktreeRoot);
 
   const dependencies = defaultStartDependencies(input.dependencies);
+  const hermesWarning = hermesProfileMigrationWarning(input.config.daemon);
+  if (hermesWarning) dependencies.logger.log(hermesWarning);
   if (runtimeModeFromConfig(input.config) === "local") {
     await dependencies.assertStartPortsAvailable(input.config);
   }

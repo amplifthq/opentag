@@ -171,9 +171,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       ...(input.hermes
         ? {
             hermes: {
-              ...(input.hermes.command ? { command: input.hermes.command } : {}),
-              ...(input.hermes.profile ? { profile: input.hermes.profile } : {}),
-              ...(input.hermes.profileTemplate ? { profileTemplate: input.hermes.profileTemplate } : {})
+              ...(input.hermes.command ? { command: input.hermes.command } : {})
             }
           }
         : {}),
