@@ -5,6 +5,7 @@ import {
   createDiscordCallbackSink,
   createGitHubCallbackSink,
   createGitLabCallbackSink,
+  createLinearCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
@@ -77,6 +78,338 @@ describe("createGitHubCallbackSink", () => {
         body: { body: "done" }
       }
     ]);
+  });
+
+  it("posts Linear callback messages as new issue comments", async () => {
+    const requests: { url: string; method: string; body: unknown; authorization: string | null }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "done"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://linear.example/graphql",
+      method: "POST",
+      authorization: "lin_api_test",
+      body: {
+        variables: {
+          input: {
+            issueId: "issue_123",
+            body: "done"
+          }
+        }
+      }
+    });
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("commentCreate");
+  });
+
+  it("threads Linear callback comments under the mention's thread-root comment", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_2", url: "https://linear.app/acme/issue/ENG-1#comment_2" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments?parent=comment_root",
+      body: "done"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            issueId: "issue_123",
+            body: "done",
+            parentId: "comment_root"
+          }
+        }
+      }
+    });
+  });
+
+  it("uses the Linear token provider for callback delivery", async () => {
+    const requests: { authorization: string | null }[] = [];
+    const sink = createLinearCallbackSink({
+      async getToken() {
+        return "Bearer refreshed_app_token";
+      },
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ authorization: new Headers(init?.headers).get("authorization") });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "done"
+    });
+
+    expect(requests).toEqual([{ authorization: "Bearer refreshed_app_token" }]);
+  });
+
+  it("updates an existing Linear status comment when the status key repeats", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          data: {
+            commentUpdate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "progress",
+        provider: "linear",
+        uri: "linear://issue/issue_123/comments",
+        body: "still working",
+        statusMessageKey: "run_1:status",
+        externalMessageId: "comment_1"
+      })
+    ).resolves.toEqual({ externalMessageId: "comment_1" });
+
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("commentUpdate");
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          id: "comment_1",
+          input: { body: "still working" }
+        }
+      }
+    });
+  });
+
+  it("creates then reuses one Linear status comment for repeated status updates", async () => {
+    const requests: Array<{ query: string; variables: unknown }> = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string; variables: unknown };
+        requests.push(body);
+        if (body.query.includes("commentCreate")) {
+          return Response.json({
+            data: {
+              commentCreate: {
+                success: true,
+                comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+              }
+            }
+          });
+        }
+        return Response.json({
+          data: {
+            commentUpdate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    const first = await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "OpenTag picked this up.",
+      statusMessageKey: "run_1:status"
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "progress",
+        provider: "linear",
+        uri: "linear://issue/issue_123/comments",
+        body: "OpenTag is still working.",
+        statusMessageKey: "run_1:status",
+        externalMessageId: first?.externalMessageId
+      })
+    ).resolves.toEqual({ externalMessageId: "comment_1" });
+
+    expect(first).toEqual({ externalMessageId: "comment_1" });
+    expect(requests.map((request) => request.query)).toEqual([expect.stringContaining("commentCreate"), expect.stringContaining("commentUpdate")]);
+    expect(requests[0]?.variables).toMatchObject({
+      input: {
+        issueId: "issue_123",
+        body: "OpenTag picked this up."
+      }
+    });
+    expect(requests[1]?.variables).toMatchObject({
+      id: "comment_1",
+      input: {
+        body: "OpenTag is still working."
+      }
+    });
+  });
+
+  it("updates Linear agent-session plans and posts callbacks as agent activities", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "Bearer app_access",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        requests.push({ body });
+        if (body.query.includes("agentSessionUpdate")) {
+          return Response.json({
+            data: {
+              agentSessionUpdate: {
+                success: true
+              }
+            }
+          });
+        }
+        return Response.json({
+          data: {
+            agentActivityCreate: {
+              success: true,
+              agentActivity: { id: "activity_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "linear",
+        uri: "linear://agent-session/agent_session_1/activities",
+        body: "done"
+      })
+    ).resolves.toEqual({ externalMessageId: "activity_1" });
+
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("agentSessionUpdate");
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          agentSessionId: "agent_session_1",
+          input: {
+            plan: [
+              { content: "Accept the Linear agent session", status: "completed" },
+              { content: "Run OpenTag on the paired local checkout", status: "completed" },
+              { content: "Report the result back to Linear", status: "completed" }
+            ]
+          }
+        }
+      }
+    });
+    expect(String((requests[1]!.body as { query: string }).query)).toContain("agentActivityCreate");
+    expect(requests[1]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            agentSessionId: "agent_session_1",
+            content: { type: "response", body: "done" }
+          }
+        }
+      }
+    });
+  });
+
+  it("marks Linear agent-session plans in progress before final completion", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "Bearer app_access",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        requests.push({ body });
+        if (body.query.includes("agentSessionUpdate")) {
+          return Response.json({ data: { agentSessionUpdate: { success: true } } });
+        }
+        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: "activity_ack" } } } });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "acknowledgement",
+        provider: "linear",
+        uri: "linear://agent-session/agent_session_1/activities",
+        body: "OpenTag picked this up."
+      })
+    ).resolves.toEqual({ externalMessageId: "activity_ack" });
+
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            plan: [
+              { content: "Accept the Linear agent session", status: "completed" },
+              { content: "Run OpenTag on the paired local checkout", status: "inProgress" },
+              { content: "Report the result back to Linear", status: "pending" }
+            ]
+          }
+        }
+      }
+    });
   });
 
   it("ignores non-GitLab callback messages in the GitLab sink", async () => {

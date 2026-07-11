@@ -1,4 +1,5 @@
 import type { LarkDomain } from "@opentag/lark";
+import type { AdapterMutationMapping } from "@opentag/core";
 import type { CliLanguage } from "../catalogs/languages.js";
 import type { PlatformId } from "../catalogs/platforms.js";
 import type { SavedLarkCredentials } from "../platforms/lark/saved-config.js";
@@ -7,6 +8,7 @@ export type LarkSetupMethod = "saved" | "scan" | "manual";
 export type SlackSetupMode = "socket_mode" | "events_api";
 export type TelegramSetupMode = "polling" | "webhook";
 export type DiscordSetupMode = "gateway" | "webhook";
+export type LinearAuthMethod = "api_key" | "oauth_app";
 
 export type BindingMethod = "default_project" | "bind_later";
 
@@ -49,6 +51,36 @@ export type GitLabSetupInput = {
   baseUrl: string;
   webhookPath: string;
   port: number;
+};
+
+export type LinearSetupInput = {
+  token?: string;
+  auth?: {
+    method: "api_key";
+  } | {
+    method: "oauth_app";
+    actor: "app";
+    clientId: string;
+    clientSecret?: string;
+    redirectUri?: string;
+    refreshToken?: string;
+    accessTokenExpiresAt?: string;
+    scopes?: string[];
+  } | {
+    method: "hosted_oauth_app";
+    actor: "app";
+    installationId?: string;
+    authorizationUrl?: string;
+    stateExpiresAt?: string;
+    scopes?: string[];
+  };
+  webhookSecret?: string;
+  teamId?: string;
+  teamKey?: string;
+  graphqlUrl?: string;
+  webhookPath: string;
+  port: number;
+  mappings?: AdapterMutationMapping[];
 };
 
 export type TelegramSetupInput = {
@@ -97,6 +129,7 @@ export type OpenTagSetupInput = {
   slack?: SlackSetupInput;
   github?: GitHubSetupInput;
   gitlab?: GitLabSetupInput;
+  linear?: LinearSetupInput;
   telegram?: TelegramSetupInput;
   discord?: DiscordSetupInput;
   teams?: TeamsSetupInput;
@@ -127,6 +160,13 @@ export type SetupDefaults = Partial<{
   gitlabPort: number;
   gitlabWebhookSecret: string;
   gitlabWebhookPath: string;
+  linearAuth: LinearAuthMethod;
+  linearTeamId: string;
+  linearTeamKey: string;
+  linearPort: number;
+  linearWebhookSecret: string;
+  linearWebhookPath: string;
+  linearGraphqlUrl: string;
   telegramBotId: string;
   telegramMode: TelegramSetupMode;
   telegramBotUsername: string;

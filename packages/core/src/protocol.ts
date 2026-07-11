@@ -317,6 +317,15 @@ export const DefaultCapabilityContracts = [
     requiredExecutorConditions: ["isolated branch exists"]
   },
   {
+    id: "create_issue",
+    semanticAction: "create_issue",
+    capabilityClass: "external_write",
+    requiresExplicitIntent: true,
+    mayAutoApplyByPolicy: false,
+    adapterTargets: ["linear"],
+    requiredPermissionScopes: ["issue:create"]
+  },
+  {
     id: "set_status",
     semanticAction: "transition_status",
     capabilityClass: "external_write",
@@ -473,19 +482,21 @@ export function capabilityForMutationIntent(
   const capabilityId =
     intent.action === "create_pull_request"
       ? "create_pr"
-      : intent.action === "request_review"
-        ? "request_review"
-        : intent.action === "link_artifact"
-          ? "attach_artifact"
-          : intent.domain === "status"
-            ? "set_status"
-            : intent.domain === "assignee"
-              ? "set_assignee"
-              : intent.domain === "priority"
-                ? "set_priority"
-                : intent.domain === "labels"
-                  ? "set_labels"
-                  : undefined;
+      : intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")
+        ? "create_issue"
+        : intent.action === "request_review"
+          ? "request_review"
+          : intent.action === "link_artifact"
+            ? "attach_artifact"
+            : intent.domain === "status"
+              ? "set_status"
+              : intent.domain === "assignee"
+                ? "set_assignee"
+                : intent.domain === "priority"
+                  ? "set_priority"
+                  : intent.domain === "labels"
+                    ? "set_labels"
+                    : undefined;
 
   return capabilityId ? capabilities.find((capability) => capability.id === capabilityId) : undefined;
 }

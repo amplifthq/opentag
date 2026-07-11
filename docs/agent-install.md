@@ -67,7 +67,7 @@ opentag setup
 
 Help the user choose:
 
-- Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
+- Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
 - Coding agent: Codex, Claude Code, or Echo.
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
@@ -78,6 +78,7 @@ walk the user through the provider console:
 - Slack: `docs/platforms/slack.en.md`
 - GitHub: `docs/platforms/github.en.md`
 - GitLab: `docs/platforms/gitlab.en.md`
+- Linear: `docs/platforms/linear.en.md`
 - Lark / Feishu: `docs/platforms/lark.en.md`
 - Telegram: `docs/platforms/telegram.en.md`
 - Discord: `docs/platforms/discord.en.md`

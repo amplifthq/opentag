@@ -1,4 +1,4 @@
-export type OpenTagPlatformId = "github" | "gitlab" | "slack" | "lark" | "telegram" | "discord" | "teams";
+export type OpenTagPlatformId = "github" | "gitlab" | "linear" | "slack" | "lark" | "telegram" | "discord" | "teams";
 
 export type PlatformLivenessStrategy = "source_receipt" | "status_update" | "thread_reply" | "pull_status";
 
@@ -26,6 +26,16 @@ export const OPEN_TAG_PLATFORM_CAPABILITIES: Record<OpenTagPlatformId, PlatformC
   },
   gitlab: {
     id: "gitlab",
+    receivesEvents: true,
+    repliesToSourceThread: true,
+    supportsStatusUpdates: false,
+    supportsRichPresentation: false,
+    supportsActionReplies: true,
+    requiresExplicitAddressing: true,
+    livenessStrategy: "thread_reply"
+  },
+  linear: {
+    id: "linear",
     receivesEvents: true,
     repliesToSourceThread: true,
     supportsStatusUpdates: false,

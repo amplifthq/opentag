@@ -28,6 +28,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
   const checkoutPath = realpathSync.native(input.projectPath);
   const target = projectTargetRefFromLocalPath(checkoutPath);
   const gitlabTarget = input.gitlab ? ownerRepoFromGitLabProjectPath(input.gitlab.projectPathWithNamespace) : undefined;
+  const linearAuth = input.linear?.auth ?? { method: "api_key" as const };
   const stateDirectory = input.stateDirectory ?? defaultStateDirectory(env);
   const worktreeRoot = join(stateDirectory, "worktrees");
   const databasePath = join(stateDirectory, "opentag.db");
@@ -129,6 +130,14 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               gitlabProjectPathWithNamespace: input.gitlab.projectPathWithNamespace,
               gitlabBaseUrl: input.gitlab.baseUrl,
               gitlabPort: input.gitlab.port
+            }
+          : {}),
+        ...(input.linear
+          ? {
+              ...(input.linear.teamId ? { linearTeamId: input.linear.teamId } : {}),
+              ...(input.linear.teamKey ? { linearTeamKey: input.linear.teamKey } : {}),
+              linearAuth: linearAuth.method === "hosted_oauth_app" ? "oauth_app" : linearAuth.method,
+              linearPort: input.linear.port
             }
           : {}),
         ...(input.telegram
@@ -236,6 +245,26 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               baseUrl: input.gitlab.baseUrl,
               webhookPath: input.gitlab.webhookPath,
               port: input.gitlab.port
+            }
+          }
+        : {}),
+      ...(input.linear
+        ? {
+            linear: {
+              ...(input.linear.token ? { token: input.linear.token } : {}),
+              auth: linearAuth,
+              ...(input.linear.webhookSecret ? { webhookSecret: input.linear.webhookSecret } : {}),
+              ...(input.linear.teamId ? { teamId: input.linear.teamId } : {}),
+              ...(input.linear.teamKey ? { teamKey: input.linear.teamKey } : {}),
+              ...(input.linear.graphqlUrl ? { graphqlUrl: input.linear.graphqlUrl } : {}),
+              webhookPath: input.linear.webhookPath,
+              port: input.linear.port,
+              ...(input.linear.mappings ? { mappings: input.linear.mappings } : {}),
+              projectTarget: {
+                repoProvider: target.provider,
+                owner: target.owner,
+                repo: target.repo
+              }
             }
           }
         : {}),

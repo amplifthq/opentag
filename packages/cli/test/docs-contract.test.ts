@@ -72,7 +72,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("npm cache metadata exists");
     expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
-    expect(skill).toContain("Platform: Slack, GitHub, GitLab, Lark / Feishu, Telegram, or Discord");
+    expect(skill).toContain("Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord");
     expect(skill).toContain("Coding agent: Codex, Claude Code, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
@@ -176,5 +176,25 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("--discord-mode webhook");
     expect(combined).toContain("--discord-public-key");
     expect(combined).toContain("--discord-webhook-path");
+  });
+
+  it("keeps Linear setup docs aligned with GraphQL, webhooks, and issue apply requirements", () => {
+    const english = repoFile("docs/platforms/linear.en.md");
+    const chinese = repoFile("docs/platforms/linear.zh-CN.md");
+    const combined = `${english}\n${chinese}`;
+
+    expect(combined).toContain("https://linear.app/settings/api");
+    expect(combined).toContain("https://linear.app/developers/graphql");
+    expect(combined).toContain("https://linear.app/developers/webhooks");
+    expect(combined).toContain("Comment events");
+    expect(combined).toContain("Linear-Signature");
+    expect(combined).toContain("webhook timestamp");
+    expect(combined).toContain("/linear/webhooks");
+    expect(combined).toContain("3070");
+    expect(combined).toContain("--linear-token");
+    expect(combined).toContain("--linear-team-id");
+    expect(combined).toContain("apply 1");
+    expect(combined).toContain("state id");
+    expect(combined).toContain("label id");
   });
 });

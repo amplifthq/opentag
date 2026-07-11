@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
@@ -14,6 +14,7 @@ import {
   type ActorIdentity,
   type ActionReceiptCapability,
   type ActionReceiptContext,
+  type AdapterMutationMapping,
   type ApplyIntentOutcome,
   type ApplyPlan,
   type MutationIntent,
@@ -49,8 +50,36 @@ import {
   type FetchLike as GitLabFetchLike
 } from "@opentag/gitlab";
 import type { GitLabMutationOperation } from "@opentag/gitlab";
+import {
+  acknowledgeLinearAgentSession,
+  applyLinearMutationOperation,
+  buildLinearOAuthAuthorizationUrl,
+  createLinearAgentActivity,
+  createLinearAdapterMappingDrafts,
+  createLinearIssueCommentRecord,
+  createLinearMutationCompiler,
+  createLinearWebhookApp,
+  DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS,
+  DEFAULT_LINEAR_AGENT_OAUTH_SCOPES,
+  discoverLinearMetadata,
+  exchangeLinearOAuthCode,
+  fetchLinearWorkspaceIdentity,
+  linearAgentSessionIdFromCallbackUri,
+  linearIssueIdFromCallbackUri,
+  linearParentCommentIdFromCallbackUri,
+  refreshLinearOAuthToken,
+  updateLinearAgentSession,
+  updateLinearComment,
+  verifyLinearSignature,
+  verifyLinearWebhookTimestamp,
+  type FetchLike as LinearFetchLike,
+  type LinearWebhookPayload,
+  type LinearOAuthTokenResponse,
+  type LinearMutationOperation
+} from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
 import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
@@ -70,6 +99,35 @@ export type DispatcherRateLimitOptions = {
   windowMs: number;
   maxRequests: number;
   now?(): number;
+};
+
+export type RelayPlatformCapability = {
+  provider: string;
+  ingress?: {
+    enabled: boolean;
+    path?: string;
+    signatureVerification?: "configured" | "not_configured" | "not_required";
+    reason?: string;
+  };
+  callback?: {
+    enabled: boolean;
+    reason?: string;
+  };
+  apply?: {
+    enabled: boolean;
+    reason?: string;
+  };
+  oauthInstall?: {
+    enabled: boolean;
+    path?: string;
+    reason?: string;
+  };
+};
+
+export type RelayCapabilities = {
+  schemaVersion: 1;
+  relay: true;
+  platforms: RelayPlatformCapability[];
 };
 
 type DispatcherRateLimitBucket = {
@@ -263,6 +321,22 @@ export type LarkDelayedStatusCardOptions = {
   clearTimeout?(handle: DelayedLarkStatusTimer): void;
 };
 
+export type LinearOAuthInstallOptions = {
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  scopes?: readonly string[];
+  webhookSecret?: string;
+  webhookPath?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  installStateTtlMs?: number;
+  refreshSkewMs?: number;
+  commentRunDeferMs?: number;
+  fetchImpl?: LinearFetchLike;
+  now?(): Date;
+};
+
 type DelayedLarkStatusState = {
   timer?: DelayedLarkStatusTimer;
   cardCreated: boolean;
@@ -292,7 +366,32 @@ function shouldDeliverRunStatusUpdate(
 }
 
 function lifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
-  return input.provider === "lark" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
+  return input.provider === "lark" || input.provider === "linear" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
+}
+
+const DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+function generateLinearRelayInstallationId(): string {
+  return `install_${randomBytes(12).toString("hex")}`;
+}
+
+function generateLinearRelayWebhookSecret(): string {
+  return `linear_whsec_${randomBytes(24).toString("hex")}`;
+}
+
+function generateLinearOAuthState(): string {
+  return `linear_${randomBytes(24).toString("hex")}`;
+}
+
+function linearAccessTokenExpiresAt(input: { token: LinearOAuthTokenResponse; now: Date }): string | undefined {
+  return typeof input.token.expiresIn === "number" && Number.isFinite(input.token.expiresIn)
+    ? new Date(input.now.getTime() + input.token.expiresIn * 1000).toISOString()
+    : undefined;
 }
 
 function isTerminalRun(run: OpenTagRun): boolean {
@@ -348,6 +447,73 @@ const UpsertPolicyRuleSchema = z.object({
 const UpsertMutationMappingSchema = z.object({
   mapping: AdapterMutationMappingSchema
 });
+
+const LinearRelayInstallationAuthSchema = z.union([
+  z
+    .object({
+      method: z.literal("api_key")
+    })
+    .strict(),
+  z
+    .object({
+      method: z.literal("oauth_app"),
+      actor: z.literal("app"),
+      clientId: z.string().min(1).optional(),
+      refreshToken: z.string().min(1).optional(),
+      accessTokenExpiresAt: z.string().min(1).optional(),
+      scopes: z.array(z.string().min(1)).optional()
+    })
+    .strict()
+]);
+
+const LinearRelayInstallationSchema = z
+  .object({
+    id: z.string().min(1).max(128).regex(/^[a-zA-Z0-9._-]+$/),
+    webhookPath: z
+      .string()
+      .min(1)
+      .refine((value) => value.startsWith("/linear/webhooks/"), {
+        message: "Linear relay webhook path must start with /linear/webhooks/."
+      }),
+    webhookSecret: z.string().min(1),
+    token: z.string().min(1),
+    auth: LinearRelayInstallationAuthSchema.optional(),
+    graphqlUrl: z.string().url().optional(),
+    repoProvider: z.string().min(1),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    organizationId: z.string().min(1).optional(),
+    teamId: z.string().min(1).optional(),
+    teamKey: z.string().min(1).optional()
+  })
+  .strict();
+
+type ParsedLinearRelayInstallationAuth = z.infer<typeof LinearRelayInstallationAuthSchema>;
+
+function linearRelayInstallationAuthFromParsed(auth: ParsedLinearRelayInstallationAuth | undefined): LinearRelayInstallationAuth {
+  if (!auth || auth.method === "api_key") return { method: "api_key" };
+  return {
+    method: "oauth_app",
+    actor: "app",
+    ...(auth.clientId ? { clientId: auth.clientId } : {}),
+    ...(auth.refreshToken ? { refreshToken: auth.refreshToken } : {}),
+    ...(auth.accessTokenExpiresAt ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}),
+    ...(auth.scopes?.length ? { scopes: auth.scopes } : {})
+  };
+}
+
+const CreateLinearOAuthInstallationSchema = z
+  .object({
+    repoProvider: z.string().min(1).default("github"),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    teamId: z.string().min(1).optional(),
+    teamKey: z.string().min(1).optional(),
+    graphqlUrl: z.string().url().optional(),
+    redirectUri: z.string().url().optional(),
+    scopes: z.array(z.string().min(1)).optional()
+  })
+  .strict();
 
 const CreateRunSchema = z.object({
   runId: z.string().min(1),
@@ -501,6 +667,17 @@ function mappingsFromAdapterPlan(adapterPlan: unknown) {
   const mappings = (adapterPlan as { mappings?: unknown }).mappings;
   if (!Array.isArray(mappings)) return [];
   return mappings.map((mapping) => AdapterMutationMappingSchema.parse(mapping));
+}
+
+function mappingsForAdapterPlan(adapterPlan: unknown, defaults: AdapterMutationMapping[] = []): AdapterMutationMapping[] {
+  const planMappings = mappingsFromAdapterPlan(adapterPlan);
+  if (planMappings.length === 0) return defaults;
+  const planMappingIds = new Set(planMappings.map((mapping) => mapping.id));
+  return [...planMappings, ...defaults.filter((mapping) => !planMappingIds.has(mapping.id))];
+}
+
+function conversationKeyFromCallback(input: { provider: string; uri: string; threadKey?: string | undefined }): string {
+  return `${input.provider}:${input.threadKey ?? input.uri}`;
 }
 
 function metadataIssueNumber(metadata: Record<string, unknown> | undefined): string | undefined {
@@ -790,12 +967,46 @@ function hasGitLabRepoTarget(event: OpenTagEvent): boolean {
   return gitlabProjectPathFromEvent(event) !== null;
 }
 
+function isLinearIssueEvent(event: OpenTagEvent): boolean {
+  return event.source === "linear" || event.callback.provider === "linear";
+}
+
+function hasLinearIssueTarget(event: OpenTagEvent): boolean {
+  return isLinearIssueEvent(event) && typeof event.metadata["issueId"] === "string" && event.metadata["issueId"].length > 0;
+}
+
 function hasGitHubIssueOrPullTarget(event: OpenTagEvent): boolean {
   return typeof event.metadata["issueNumber"] === "number" || typeof event.metadata["pullRequestNumber"] === "number";
 }
 
 function isRepoLevelGitHubIntent(intent: MutationIntent): boolean {
   return intent.action === "create_pull_request";
+}
+
+function stringIntentParam(intent: MutationIntent, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = intent.params?.[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function targetAdapterForIntent(intent: MutationIntent): string | undefined {
+  return stringIntentParam(intent, "targetAdapter", "target_adapter", "adapter", "provider")?.toLowerCase();
+}
+
+function isCreateIssueIntent(intent: MutationIntent): boolean {
+  return intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create");
+}
+
+function isLinearIssueCreateIntent(intent: MutationIntent): boolean {
+  if (!isCreateIssueIntent(intent)) return false;
+  const targetAdapter = targetAdapterForIntent(intent);
+  return !targetAdapter || targetAdapter === "linear";
+}
+
+function isLinearIssueIntent(intent: MutationIntent): boolean {
+  return isLinearIssueCreateIntent(intent) || intent.action !== "create_pull_request";
 }
 
 function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string; selectedIntents: MutationIntent[] }): string {
@@ -805,8 +1016,14 @@ function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string
   ) {
     return "github";
   }
+  if (input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isLinearIssueCreateIntent(intent))) {
+    return "linear";
+  }
   if (hasGitLabRepoTarget(input.event)) {
     return "gitlab";
+  }
+  if (hasLinearIssueTarget(input.event) && input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isLinearIssueIntent(intent))) {
+    return "linear";
   }
   return input.callbackProvider;
 }
@@ -1088,6 +1305,7 @@ async function directApplyReceiptCapability(input: {
   intent: MutationIntent;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
   preflightCache?: GitHubPreflightCache;
   gitlabPreflightCache?: GitLabPreflightCache;
 }): Promise<ActionReceiptCapability> {
@@ -1110,7 +1328,7 @@ async function directApplyReceiptCapability(input: {
     callbackProvider: input.callbackProvider,
     selectedIntents: [input.intent]
   });
-  if (adapter !== "github" && adapter !== "gitlab") {
+  if (adapter !== "github" && adapter !== "gitlab" && adapter !== "linear") {
     return {
       state: "needs_setup",
       setupReason: `Direct apply for ${adapter} actions is not configured on this dispatcher.`
@@ -1179,6 +1397,32 @@ async function directApplyReceiptCapability(input: {
     return { state: "ready_to_apply" };
   }
 
+  if (adapter === "linear") {
+    if (!input.linearApply) {
+      return {
+        state: "needs_setup",
+        setupReason: "Linear apply is not configured on this dispatcher."
+      };
+    }
+    const compilation = createLinearMutationCompiler({
+      ...(input.linearApply.mappings ? { mappings: input.linearApply.mappings } : {})
+    }).compile(input.intent);
+    if (!compilation.ok) {
+      return {
+        state: compilation.outcome.outcome === "unsupported" ? "unsupported" : "needs_setup",
+        setupReason: compilation.outcome.message ?? "Linear cannot apply this action from the current source thread."
+      };
+    }
+    const operation = compilation.operation as LinearMutationOperation;
+    if (operation.kind !== "create_issue" && !linearTargetFromEvent(input.event)) {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a Linear issue target."
+      };
+    }
+    return { state: "ready_to_apply", targetLabel: "Linear issue" };
+  }
+
   if (!input.gitlabApply) {
     return {
       state: "needs_setup",
@@ -1215,6 +1459,7 @@ async function actionReceiptContextForFinal(input: {
   result: OpenTagRunResult;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<ActionReceiptContext> {
   const preflightCache: GitHubPreflightCache = new Map();
   const gitlabPreflightCache: GitLabPreflightCache = new Map();
@@ -1227,6 +1472,7 @@ async function actionReceiptContextForFinal(input: {
           intent,
           ...(input.githubApply ? { githubApply: input.githubApply } : {}),
           ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          ...(input.linearApply ? { linearApply: input.linearApply } : {}),
           preflightCache,
           gitlabPreflightCache
         });
@@ -1469,6 +1715,16 @@ function gitlabTargetFromEvent(event: OpenTagEvent): { projectPathWithNamespace:
   return projectPathWithNamespace ? { projectPathWithNamespace } : null;
 }
 
+function linearTargetFromEvent(event: OpenTagEvent): { issueId: string; graphqlUrl?: string } | null {
+  const issueId = event.metadata["issueId"];
+  if (typeof issueId !== "string" || issueId.length === 0) return null;
+  const graphqlUrl = event.metadata["graphqlUrl"];
+  return {
+    issueId,
+    ...(typeof graphqlUrl === "string" && graphqlUrl.length > 0 ? { graphqlUrl } : {})
+  };
+}
+
 function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandidates"]): string {
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
 }
@@ -1652,6 +1908,7 @@ async function selectedDirectApplyStatus(input: {
   candidates: ResolvedThreadAction["selectedCandidates"];
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<{ ready: boolean; reason?: string }> {
   if (input.candidates.length === 0) return { ready: false, reason: "No selected action was found." };
   const preflightCache: GitHubPreflightCache = new Map();
@@ -1663,6 +1920,7 @@ async function selectedDirectApplyStatus(input: {
       intent: candidate.intent,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
       ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(input.linearApply ? { linearApply: input.linearApply } : {}),
       preflightCache,
       gitlabPreflightCache
     });
@@ -1830,6 +2088,19 @@ export type GitLabApplyOptions = {
   fetchImpl?: GitLabFetchLike;
 };
 
+export type LinearApplyOptions = {
+  token?: string;
+  getToken?: () => Promise<string | undefined> | string | undefined;
+  graphqlUrl?: string;
+  mappings?: AdapterMutationMapping[];
+  fetchImpl?: LinearFetchLike;
+};
+
+async function resolveLinearApplyToken(input: LinearApplyOptions): Promise<string | undefined> {
+  const token = input.getToken ? await input.getToken() : input.token;
+  return token?.trim() ? token : undefined;
+}
+
 function executableIntentsForPlan(input: { plan: ApplyPlan; resolved: ResolvedThreadAction }): MutationIntent[] {
   const preflightOutcomeByIntentId = new Map((input.plan.outcomes ?? []).map((outcome) => [outcome.intentId, outcome]));
   return input.resolved.proposal.snapshot.intents.filter((intent) => {
@@ -1872,8 +2143,9 @@ async function executeDirectApplyPlan(input: {
   resolved: ResolvedThreadAction;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
-  if (input.plan.adapter !== "github" && input.plan.adapter !== "gitlab") {
+  if (input.plan.adapter !== "github" && input.plan.adapter !== "gitlab" && input.plan.adapter !== "linear") {
     return { plan: input.plan, executed: false, fallbackReason: `Adapter ${input.plan.adapter ?? "unknown"} is not directly executable yet.` };
   }
 
@@ -1907,6 +2179,52 @@ async function executeDirectApplyPlan(input: {
           },
           operation: compilation.operation as GitLabMutationOperation,
           ...(input.gitlabApply.fetchImpl ? { fetchImpl: input.gitlabApply.fetchImpl } : {})
+        })
+      );
+    }
+    return await updateExecutedApplyPlan({ repo: input.repo, plan: input.plan, resolved: input.resolved, executedOutcomes });
+  }
+
+  if (input.plan.adapter === "linear") {
+    if (!input.linearApply) {
+      return { plan: input.plan, executed: false, fallbackReason: "Linear apply is not configured on this dispatcher." };
+    }
+    const linearToken = await resolveLinearApplyToken(input.linearApply);
+    if (!linearToken) {
+      return { plan: input.plan, executed: false, fallbackReason: "Linear apply token is not available on this dispatcher." };
+    }
+    const target = linearTargetFromEvent(input.resolved.proposal.event);
+
+    const executedOutcomes: ApplyIntentOutcome[] = [];
+    const compilerRegistry = createAdapterMutationCompilerRegistry([
+      createLinearMutationCompiler({
+        mappings: mappingsForAdapterPlan(input.plan.adapterPlan, input.linearApply.mappings)
+      })
+    ]);
+    for (const compilation of compilerRegistry.compile("linear", executableIntents)) {
+      if (!compilation.ok) {
+        executedOutcomes.push(compilation.outcome);
+        continue;
+      }
+      const operation = compilation.operation as LinearMutationOperation;
+      if (operation.kind !== "create_issue" && !target) {
+        executedOutcomes.push({
+          intentId: compilation.intentId,
+          outcome: "failed",
+          message: "The source run does not include a Linear issue target."
+        });
+        continue;
+      }
+      const linearGraphqlUrl = input.linearApply.graphqlUrl ?? target?.graphqlUrl;
+      executedOutcomes.push(
+        await applyLinearMutationOperation({
+          target: {
+            token: linearToken,
+            ...(target?.issueId ? { issueId: target.issueId } : {}),
+            ...(linearGraphqlUrl ? { graphqlUrl: linearGraphqlUrl } : {})
+          },
+          operation,
+          ...(input.linearApply.fetchImpl ? { fetchImpl: input.linearApply.fetchImpl } : {})
         })
       );
     }
@@ -2233,17 +2551,22 @@ export function createDispatcherApp(input: {
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
+  linearOAuthInstall?: LinearOAuthInstallOptions;
   callbackRetry?: CallbackRetryOptions;
   larkStatusCards?: LarkDelayedStatusCardOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
+  relayCapabilities?: {
+    platforms?: RelayPlatformCapability[];
+  };
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
-  const callbackSink = input.callbackSink ?? noopCallbackSink;
+  const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
   const callbackRetry = input.callbackRetry ?? {};
@@ -2258,6 +2581,276 @@ export function createDispatcherApp(input: {
   const runnerTokens = configuredRunnerTokens(input);
   const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
   const requestEndpoint = (c: Context) => normalizeRateLimitedEndpoint(c.req.method, new URL(c.req.url).pathname);
+  const linearOAuthInstall = input.linearOAuthInstall;
+  async function linearRelayInstallationFromEvent(event: OpenTagEvent) {
+    const installationId = event.metadata["linearRelayInstallationId"];
+    return typeof installationId === "string" && installationId.length > 0 ? await repo.getLinearRelayInstallation({ id: installationId }) : null;
+  }
+  function linearInstallationTokenIsFresh(input: { accessTokenExpiresAt?: string; now: Date; refreshSkewMs: number }): boolean {
+    const expiresAtMs = input.accessTokenExpiresAt ? Date.parse(input.accessTokenExpiresAt) : Number.NaN;
+    return Number.isFinite(expiresAtMs) && expiresAtMs - input.now.getTime() > input.refreshSkewMs;
+  }
+  const inFlightLinearInstallationTokenRefreshes = new Map<string, Promise<string>>();
+  async function resolveLinearRelayInstallationToken(
+    installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationFromEvent>>>
+  ): Promise<string> {
+    const auth = installation.auth;
+    if (!linearOAuthInstall || auth?.method !== "oauth_app" || !auth.refreshToken) return installation.token;
+
+    const oauthInstall = linearOAuthInstall;
+    const now = oauthInstall.now?.() ?? new Date();
+    const refreshSkewMs = oauthInstall.refreshSkewMs ?? DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS;
+    if (linearInstallationTokenIsFresh({ ...(auth.accessTokenExpiresAt ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}), now, refreshSkewMs })) {
+      return installation.token;
+    }
+
+    const inFlight = inFlightLinearInstallationTokenRefreshes.get(installation.id);
+    if (inFlight) return inFlight;
+
+    const refresh = (async () => {
+      const latest = (await repo.getLinearRelayInstallation({ id: installation.id })) ?? installation;
+      const latestAuth = latest.auth;
+      if (latestAuth?.method !== "oauth_app" || !latestAuth.refreshToken) return latest.token;
+      if (
+        linearInstallationTokenIsFresh({
+          ...(latestAuth.accessTokenExpiresAt ? { accessTokenExpiresAt: latestAuth.accessTokenExpiresAt } : {}),
+          now,
+          refreshSkewMs
+        })
+      ) {
+        return latest.token;
+      }
+
+      const refreshed = await refreshLinearOAuthToken({
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        ...(oauthInstall.clientSecret ? { clientSecret: oauthInstall.clientSecret } : {}),
+        refreshToken: latestAuth.refreshToken,
+        ...(oauthInstall.tokenUrl ? { tokenUrl: oauthInstall.tokenUrl } : {}),
+        ...(oauthInstall.fetchImpl ? { fetchImpl: oauthInstall.fetchImpl } : {})
+      });
+      const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token: refreshed, now });
+      const refreshedAuth = {
+        method: "oauth_app" as const,
+        actor: "app" as const,
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        refreshToken: refreshed.refreshToken ?? latestAuth.refreshToken,
+        ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(refreshed.scope?.length ? { scopes: refreshed.scope } : latestAuth.scopes?.length ? { scopes: latestAuth.scopes } : {})
+      };
+      const updated = await repo.upsertLinearRelayInstallation({
+        id: latest.id,
+        webhookPath: latest.webhookPath,
+        webhookSecret: latest.webhookSecret,
+        token: refreshed.accessToken,
+        auth: refreshedAuth,
+        ...(latest.graphqlUrl ? { graphqlUrl: latest.graphqlUrl } : {}),
+        repoProvider: latest.repoProvider,
+        owner: latest.owner,
+        repo: latest.repo,
+        ...(latest.organizationId ? { organizationId: latest.organizationId } : {}),
+        ...(latest.teamId ? { teamId: latest.teamId } : {}),
+        ...(latest.teamKey ? { teamKey: latest.teamKey } : {})
+      });
+      return updated.token;
+    })();
+    inFlightLinearInstallationTokenRefreshes.set(installation.id, refresh);
+    try {
+      return await refresh;
+    } finally {
+      inFlightLinearInstallationTokenRefreshes.delete(installation.id);
+    }
+  }
+  async function linearRelayInstallationForCallback(message: CallbackMessage) {
+    if (message.provider !== "linear") return null;
+    const stored = await repo.getRun({ runId: message.runId });
+    return stored ? linearRelayInstallationFromEvent(stored.event) : null;
+  }
+  async function linearApplyOptionsForEvent(event: OpenTagEvent): Promise<LinearApplyOptions | undefined> {
+    if (input.linearApply) return input.linearApply;
+    const installation = await linearRelayInstallationFromEvent(event);
+    if (!installation) return undefined;
+    const mappings = await repo.listRepoMutationMappings({
+      provider: installation.repoProvider,
+      owner: installation.owner,
+      repo: installation.repo
+    });
+    const token = await resolveLinearRelayInstallationToken(installation);
+    return {
+      token,
+      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+      ...(mappings.length ? { mappings } : {})
+    };
+  }
+  async function postInternalDispatcher(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (input.pairingToken) headers.authorization = `Bearer ${input.pairingToken}`;
+    const response = await app.request(path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+    const responseBody = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error(`internal dispatcher request ${path} failed: ${response.status}`);
+    }
+    return { status: response.status, body: responseBody };
+  }
+  // The webhook app owns the comment-vs-agent-session claim state, so it must live
+  // across deliveries: recreating it per request would let one mention double-trigger.
+  // Cached per installation and rebuilt when the installation row changes.
+  const linearRelayWebhookApps = new Map<string, { fingerprint: string; app: Hono }>();
+  function linearRelayWebhookAppForInstallation(input: {
+    installation: LinearRelayInstallation;
+    webhookSecret: string;
+    webhookPath: string;
+  }): Hono {
+    const fingerprint = JSON.stringify([input.installation.updatedAt, input.webhookSecret, input.webhookPath]);
+    const cached = linearRelayWebhookApps.get(input.installation.id);
+    if (cached && cached.fingerprint === fingerprint) return cached.app;
+    const app = createLinearRelayWebhookAppForInstallation(input);
+    linearRelayWebhookApps.set(input.installation.id, { fingerprint, app });
+    return app;
+  }
+  function createLinearRelayWebhookAppForInstallation(input: {
+    installation: LinearRelayInstallation;
+    webhookSecret: string;
+    webhookPath: string;
+  }) {
+    return createLinearWebhookApp({
+      webhookSecret: input.webhookSecret,
+      ...(input.installation.graphqlUrl ? { graphqlUrl: input.installation.graphqlUrl } : {}),
+      projectTarget: {
+        repoProvider: input.installation.repoProvider,
+        owner: input.installation.owner,
+        repo: input.installation.repo
+      },
+      webhookPath: input.webhookPath,
+      // OAuth-app installs receive both Comment and AgentSessionEvent webhooks for one
+      // mention; defer comment runs so the session channel can claim them.
+      ...(input.installation.auth?.method === "oauth_app"
+        ? { commentRunDeferMs: linearOAuthInstall?.commentRunDeferMs ?? DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS }
+        : {}),
+      ...(input.installation.auth?.method === "oauth_app" && input.installation.auth.appUserId
+        ? { appUserId: input.installation.auth.appUserId }
+        : {}),
+      onAgentSessionAccepted: async ({ agentSessionId, runId }) => {
+        const token = await resolveLinearRelayInstallationToken(input.installation);
+        await acknowledgeLinearAgentSession({
+          token,
+          agentSessionId,
+          ...(runId ? { runId } : {}),
+          ...(input.installation.graphqlUrl ? { graphqlUrl: input.installation.graphqlUrl } : {})
+        });
+      },
+      async createRun(event) {
+        const runId = `run_${randomUUID()}`;
+        const eventWithInstallation: OpenTagEvent = {
+          ...event,
+          metadata: {
+            ...event.metadata,
+            linearRelayInstallationId: input.installation.id
+          }
+        };
+        const created = await postInternalDispatcher("/v1/runs", { runId, event: eventWithInstallation });
+        const run = created.body["run"];
+        if (run && typeof run === "object" && "id" in run && typeof (run as { id?: unknown }).id === "string") {
+          return { runId: (run as { id: string }).id };
+        }
+        return {};
+      },
+      async submitThreadAction(action) {
+        await postInternalDispatcher("/v1/thread-actions", action);
+      },
+      now: () => new Date().toISOString()
+    });
+  }
+  function parseLinearWebhookPayload(rawBody: string): LinearWebhookPayload | null {
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as LinearWebhookPayload) : null;
+    } catch {
+      return null;
+    }
+  }
+  function stringPayloadValue(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  }
+  function numberPayloadValue(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  }
+  function isLinearOAuthAppRevokedPayload(payload: LinearWebhookPayload): boolean {
+    return payload.type === "OAuthApp" && payload.action === "revoked";
+  }
+  function linearAgentSessionPlanFor(message: CallbackMessage) {
+    const finished = message.kind === "final";
+    return [
+      { content: "Accept the Linear agent session", status: "completed" as const },
+      { content: "Run OpenTag on the paired local checkout", status: finished ? ("completed" as const) : ("inProgress" as const) },
+      { content: "Report the result back to Linear", status: finished ? ("completed" as const) : ("pending" as const) }
+    ];
+  }
+  async function deliverLinearRelayCallback(
+    message: CallbackMessage,
+    installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationForCallback>>>
+  ): Promise<CallbackDeliveryResult | void> {
+    const token = await resolveLinearRelayInstallationToken(installation);
+    const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
+    if (agentSessionId) {
+      await updateLinearAgentSession({
+        token,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+        agentSessionId,
+        plan: linearAgentSessionPlanFor(message)
+      });
+      const activityId = await createLinearAgentActivity({
+        token,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+        activity: {
+          agentSessionId,
+          type: message.kind === "final" ? "response" : "thought",
+          body: message.body,
+          ephemeral: message.kind === "progress"
+        }
+      });
+      return activityId ? { externalMessageId: activityId } : undefined;
+    }
+
+    const issueId = linearIssueIdFromCallbackUri(message.uri);
+    if (!issueId) {
+      throw new Error(`deliver Linear relay callback failed: invalid callback URI ${message.uri}`);
+    }
+    if (message.statusMessageKey && message.externalMessageId) {
+      await updateLinearComment({
+        token,
+        commentId: message.externalMessageId,
+        body: message.body,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
+      });
+      return { externalMessageId: message.externalMessageId };
+    }
+    const comment = await createLinearIssueCommentRecord({
+      token,
+      issueId,
+      body: message.body,
+      ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
+      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
+    });
+    return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
+  }
+  const callbackSink: CallbackSink = {
+    async deliver(message) {
+      const installation = await linearRelayInstallationForCallback(message);
+      if (installation) return deliverLinearRelayCallback(message, installation);
+      return configuredCallbackSink.deliver(message);
+    }
+  };
+  const relayCapabilities: RelayCapabilities = {
+    schemaVersion: 1,
+    relay: true,
+    platforms: [...(input.relayCapabilities?.platforms ?? [])].sort((left, right) => left.provider.localeCompare(right.provider))
+  };
   const recordControlPlaneEvent = async (input: {
     type: string;
     severity?: "info" | "warn" | "error" | undefined;
@@ -2595,7 +3188,289 @@ export function createDispatcherApp(input: {
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {})
   });
 
+  function linearInstallationSummary(input: {
+    id: string;
+    webhookPath: string;
+    repoProvider: string;
+    owner: string;
+    repo: string;
+    graphqlUrl?: string;
+    organizationId?: string;
+    teamId?: string;
+    teamKey?: string;
+  }) {
+    return {
+      id: input.id,
+      webhookPath: input.webhookPath,
+      projectTarget: {
+        repoProvider: input.repoProvider,
+        owner: input.owner,
+        repo: input.repo
+      },
+      ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+      ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+      ...(input.teamId ? { teamId: input.teamId } : {}),
+      ...(input.teamKey ? { teamKey: input.teamKey } : {})
+    };
+  }
+
+  function linearMappingsFromMetadata(snapshot: Awaited<ReturnType<typeof discoverLinearMetadata>>): AdapterMutationMapping[] {
+    return createLinearAdapterMappingDrafts(snapshot).map((draft) => ({
+      id: `linear_${draft.domain}_${draft.strategy}`,
+      ...draft,
+      description: `Discovered from Linear ${draft.domain} metadata during hosted OAuth install.`
+    }));
+  }
+
+  function singleDiscoveredLinearTeam(input: { snapshot: Awaited<ReturnType<typeof discoverLinearMetadata>>; teamId?: string; teamKey?: string }) {
+    const team =
+      (input.teamId ? input.snapshot.teams.find((candidate) => candidate.id === input.teamId) : undefined) ??
+      (input.teamKey ? input.snapshot.teams.find((candidate) => candidate.key === input.teamKey) : undefined) ??
+      (input.snapshot.teams.length === 1 ? input.snapshot.teams[0] : undefined);
+    return {
+      ...(!input.teamId && team?.id ? { teamId: team.id } : {}),
+      ...(!input.teamKey && team?.key ? { teamKey: team.key } : {})
+    };
+  }
+
   app.get("/healthz", (c) => c.json({ ok: true }));
+  app.get("/v1/relay/capabilities", (c) => c.json(relayCapabilities));
+
+  app.get("/linear/oauth/callback", async (c) => {
+    if (!linearOAuthInstall) return c.json({ error: "linear_oauth_install_not_configured" }, 404);
+
+    const error = c.req.query("error");
+    if (error) {
+      return c.json(
+        {
+          error: "linear_oauth_error",
+          linearError: error,
+          ...(c.req.query("error_description") ? { description: c.req.query("error_description") } : {})
+        },
+        400
+      );
+    }
+
+    const state = c.req.query("state");
+    const code = c.req.query("code");
+    if (!state || !code) return c.json({ error: "missing_linear_oauth_code_or_state" }, 400);
+
+    const pending = await repo.getLinearOAuthInstallState({ state });
+    if (!pending) return c.json({ error: "linear_oauth_state_not_found" }, 400);
+    if (pending.completedAt) return c.json({ error: "linear_oauth_state_already_completed" }, 409);
+
+    const now = linearOAuthInstall.now?.() ?? new Date();
+    const expiresAtMs = Date.parse(pending.expiresAt);
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now.getTime()) {
+      return c.json({ error: "linear_oauth_state_expired" }, 410);
+    }
+
+    const token = await exchangeLinearOAuthCode({
+      clientId: linearOAuthInstall.clientId,
+      ...(linearOAuthInstall.clientSecret ? { clientSecret: linearOAuthInstall.clientSecret } : {}),
+      code,
+      redirectUri: pending.redirectUri,
+      ...(linearOAuthInstall.tokenUrl ? { tokenUrl: linearOAuthInstall.tokenUrl } : {}),
+      ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+    });
+    const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token, now });
+    let organizationId: string | undefined;
+    let appUserId: string | undefined;
+    try {
+      const identity = await fetchLinearWorkspaceIdentity({
+        token: token.accessToken,
+        ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+        ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+      });
+      organizationId = identity.organization?.id;
+      appUserId = identity.viewer.id;
+    } catch (error) {
+      await recordControlPlaneEvent({
+        type: "linear.oauth_install.identity_failed",
+        severity: "warn",
+        subject: pending.installationId,
+        payload: {
+          installationId: pending.installationId,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+    let discoveredTeam: { teamId?: string; teamKey?: string } = {};
+    let discoverySummary: Record<string, unknown> | undefined;
+    try {
+      const snapshot = await discoverLinearMetadata({
+        token: token.accessToken,
+        ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+        ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+      });
+      discoveredTeam = singleDiscoveredLinearTeam({
+        snapshot,
+        ...(pending.teamId ? { teamId: pending.teamId } : {}),
+        ...(pending.teamKey ? { teamKey: pending.teamKey } : {})
+      });
+      const mappings = linearMappingsFromMetadata(snapshot);
+      for (const mapping of mappings) {
+        await repo.upsertRepoMutationMapping({
+          provider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          mapping
+        });
+      }
+      discoverySummary = {
+        teamCount: snapshot.teams.length,
+        stateCount: snapshot.workflowStates.length,
+        userCount: snapshot.users.length,
+        labelCount: snapshot.issueLabels.length,
+        mappingCount: mappings.length
+      };
+    } catch (error) {
+      await recordControlPlaneEvent({
+        type: "linear.oauth_install.discovery_failed",
+        severity: "warn",
+        subject: pending.installationId,
+        payload: {
+          installationId: pending.installationId,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+    const installation = await repo.upsertLinearRelayInstallation({
+      id: pending.installationId,
+      webhookPath: pending.webhookPath,
+      webhookSecret: pending.webhookSecret,
+      token: token.accessToken,
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: linearOAuthInstall.clientId,
+        ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
+        ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(appUserId ? { appUserId } : {}),
+        ...((token.scope ?? pending.scopes).length ? { scopes: token.scope ?? pending.scopes } : {})
+      },
+      ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+      repoProvider: pending.repoProvider,
+      owner: pending.owner,
+      repo: pending.repo,
+      ...(organizationId ? { organizationId } : {}),
+      ...(pending.teamId ?? discoveredTeam.teamId ? { teamId: pending.teamId ?? discoveredTeam.teamId } : {}),
+      ...(pending.teamKey ?? discoveredTeam.teamKey ? { teamKey: pending.teamKey ?? discoveredTeam.teamKey } : {})
+    });
+    await repo.completeLinearOAuthInstallState({ state, completedAt: now.toISOString() });
+    await recordControlPlaneEvent({
+      type: "linear.oauth_install.completed",
+      severity: "info",
+      subject: installation.id,
+      payload: {
+        installationId: installation.id,
+        webhookPath: installation.webhookPath,
+        repoProvider: installation.repoProvider,
+        owner: installation.owner,
+        repo: installation.repo,
+        ...(organizationId ? { organizationId } : {}),
+        ...(appUserId ? { appUserId } : {}),
+        hasRefreshToken: Boolean(token.refreshToken),
+        hasAccessTokenExpiresAt: Boolean(accessTokenExpiresAt),
+        ...(discoverySummary ? { discovery: discoverySummary } : {})
+      }
+    });
+    return c.json({ ok: true, installation: linearInstallationSummary(installation) });
+  });
+
+  if (linearOAuthInstall?.webhookSecret) {
+    const oauthWebhookPath = linearOAuthInstall.webhookPath ?? "/linear/oauth/webhooks";
+    const oauthWebhookSecret = linearOAuthInstall.webhookSecret;
+    app.post(oauthWebhookPath, async (c) => {
+      let rawBody: string;
+      try {
+        rawBody = await readRequestTextWithLimit(c.req.raw, { maxBytes: maxRequestBodyBytes });
+      } catch (error) {
+        if (error instanceof RequestBodyTooLargeError) {
+          return c.json({ error: "request_body_too_large", maxBytes: error.maxBytes }, 413);
+        }
+        throw error;
+      }
+
+      const signature = c.req.header("linear-signature") ?? c.req.header("Linear-Signature");
+      if (!signature || !verifyLinearSignature({ webhookSecret: oauthWebhookSecret, rawBody, signature })) {
+        return c.json({ error: "invalid_signature" }, 401);
+      }
+
+      const payload = parseLinearWebhookPayload(rawBody);
+      if (!payload) return c.json({ error: "invalid_json_body" }, 400);
+      if (
+        !verifyLinearWebhookTimestamp({
+          timestampMs: numberPayloadValue(payload.webhookTimestamp),
+          nowMs: Date.now()
+        })
+      ) {
+        return c.json({ error: "invalid_timestamp" }, 400);
+      }
+
+      const organizationId = stringPayloadValue(payload.organizationId);
+      if (!organizationId) return c.json({ error: "missing_linear_organization_id" }, 400);
+
+      const installation = await repo.getLinearRelayInstallationByOrganizationId({ organizationId });
+      if (!installation) {
+        if (isLinearOAuthAppRevokedPayload(payload)) {
+          return c.json({ ok: true, revoked: true, installationFound: false });
+        }
+        return c.json({ error: "linear_relay_installation_not_found", organizationId }, 404);
+      }
+
+      if (isLinearOAuthAppRevokedPayload(payload)) {
+        if (installation.auth?.method === "oauth_app") {
+          await repo.deleteLinearRelayInstallation({ id: installation.id });
+          linearRelayWebhookApps.delete(installation.id);
+          await recordControlPlaneEvent({
+            type: "linear.oauth_install.revoked",
+            severity: "warn",
+            subject: installation.id,
+            payload: {
+              installationId: installation.id,
+              organizationId,
+              ...(stringPayloadValue(payload.oauthClientId) ? { oauthClientId: stringPayloadValue(payload.oauthClientId) } : {})
+            }
+          });
+          return c.json({ ok: true, revoked: true, installationId: installation.id });
+        }
+        return c.json({ ok: true, ignored: true, reason: "linear_installation_not_oauth_app" });
+      }
+
+      const linearApp = linearRelayWebhookAppForInstallation({
+        installation,
+        webhookSecret: oauthWebhookSecret,
+        webhookPath: oauthWebhookPath
+      });
+      return linearApp.request(oauthWebhookPath, {
+        method: "POST",
+        headers: c.req.raw.headers,
+        body: rawBody
+      });
+    });
+  }
+
+  app.post("/linear/webhooks/:installationId", async (c) => {
+    const webhookPath = new URL(c.req.url).pathname;
+    const installation = await repo.getLinearRelayInstallationByWebhookPath({ webhookPath });
+    if (!installation) {
+      return c.json({ error: "linear_relay_installation_not_found" }, 404);
+    }
+
+    const linearApp = linearRelayWebhookAppForInstallation({
+      installation,
+      webhookSecret: installation.webhookSecret,
+      webhookPath
+    });
+    return linearApp.fetch(c.req.raw);
+  });
 
   if (input.rateLimit) {
     app.use("/v1/*", createDispatcherRateLimitMiddleware(input.rateLimit));
@@ -2818,6 +3693,113 @@ export function createDispatcherApp(input: {
       repo: c.req.param("repo")
     });
     return c.json({ mappings });
+  });
+
+  app.post("/v1/linear-oauth-installations", async (c) => {
+    if (!linearOAuthInstall) return c.json({ error: "linear_oauth_install_not_configured" }, 422);
+    const parsed = await parseDispatcherBody(c, CreateLinearOAuthInstallationSchema);
+    const now = linearOAuthInstall.now?.() ?? new Date();
+    const installationId = generateLinearRelayInstallationId();
+    const webhookPath = `/linear/webhooks/${installationId}`;
+    const scopes = uniqueStrings(parsed.scopes ?? linearOAuthInstall.scopes ?? DEFAULT_LINEAR_AGENT_OAUTH_SCOPES);
+    const redirectUri = parsed.redirectUri ?? linearOAuthInstall.redirectUri;
+    const state = generateLinearOAuthState();
+    const expiresAt = new Date(now.getTime() + (linearOAuthInstall.installStateTtlMs ?? DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS)).toISOString();
+    const pending = await repo.createLinearOAuthInstallState({
+      state,
+      installationId,
+      webhookPath,
+      webhookSecret: generateLinearRelayWebhookSecret(),
+      redirectUri,
+      ...(parsed.graphqlUrl ? { graphqlUrl: parsed.graphqlUrl } : {}),
+      repoProvider: parsed.repoProvider,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(parsed.teamId ? { teamId: parsed.teamId } : {}),
+      ...(parsed.teamKey ? { teamKey: parsed.teamKey } : {}),
+      scopes,
+      expiresAt
+    });
+    const authorizationUrl = buildLinearOAuthAuthorizationUrl({
+      clientId: linearOAuthInstall.clientId,
+      redirectUri,
+      state,
+      scopes,
+      actor: "app",
+      prompt: "consent",
+      ...(linearOAuthInstall.authorizationUrl ? { authorizationUrl: linearOAuthInstall.authorizationUrl } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "linear.oauth_install.started",
+      severity: "info",
+      subject: pending.installationId,
+      payload: {
+        installationId: pending.installationId,
+        webhookPath: pending.webhookPath,
+        repoProvider: pending.repoProvider,
+        owner: pending.owner,
+        repo: pending.repo,
+        scopeCount: scopes.length,
+        expiresAt
+      }
+    });
+    return c.json(
+      {
+        authorizationUrl,
+        stateExpiresAt: expiresAt,
+        oauthWebhookPath: linearOAuthInstall.webhookPath ?? "/linear/oauth/webhooks",
+        installation: linearInstallationSummary({
+          id: pending.installationId,
+          webhookPath: pending.webhookPath,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+          ...(pending.teamId ? { teamId: pending.teamId } : {}),
+          ...(pending.teamKey ? { teamKey: pending.teamKey } : {})
+        })
+      },
+      201
+    );
+  });
+
+  app.post("/v1/linear-relay-installations", async (c) => {
+    const parsed = await parseDispatcherBody(c, LinearRelayInstallationSchema);
+    const installation = await repo.upsertLinearRelayInstallation({
+      id: parsed.id,
+      webhookPath: parsed.webhookPath,
+      webhookSecret: parsed.webhookSecret,
+      token: parsed.token,
+      auth: linearRelayInstallationAuthFromParsed(parsed.auth),
+      ...(parsed.graphqlUrl ? { graphqlUrl: parsed.graphqlUrl } : {}),
+      repoProvider: parsed.repoProvider,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(parsed.organizationId ? { organizationId: parsed.organizationId } : {}),
+      ...(parsed.teamId ? { teamId: parsed.teamId } : {}),
+      ...(parsed.teamKey ? { teamKey: parsed.teamKey } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "linear.relay_installation.upserted",
+      severity: "info",
+      subject: installation.id,
+      payload: {
+        installationId: installation.id,
+        webhookPath: installation.webhookPath,
+        repoProvider: installation.repoProvider,
+        owner: installation.owner,
+        repo: installation.repo,
+        hasGraphqlUrl: Boolean(installation.graphqlUrl),
+        hasTeamId: Boolean(installation.teamId),
+        hasTeamKey: Boolean(installation.teamKey)
+      }
+    });
+    return c.json(
+      {
+        installation: linearInstallationSummary(installation)
+      },
+      201
+    );
   });
 
   app.get("/v1/repo-bindings/:provider/:owner/:repo/metrics", async (c) => {
@@ -3270,12 +4252,14 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
+      const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
       const directApply = await selectedDirectApplyStatus({
         event: resolved.resolved.proposal.event,
         callbackProvider: parsed.callback.provider,
         candidates: resolved.resolved.selectedCandidates,
         ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
+        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+        ...(linearApply ? { linearApply } : {})
       });
       const body = renderThreadActionRecordedBody({
         verb: "approve",
@@ -3383,13 +4367,15 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: isStale ? "stale" : "already_planned", decision, plan: planResult.plan }, 200);
     }
     const plan = planResult.plan;
+    const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
 
     const execution = await executeDirectApplyPlan({
       repo,
       plan,
       resolved: resolved.resolved,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(linearApply ? { linearApply } : {})
     });
     if (execution.executed) {
       const outcomes = execution.plan.outcomes ?? [];
@@ -3692,11 +4678,13 @@ export function createDispatcherApp(input: {
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     cancelPendingDelayedLarkStatusCard(runId);
+    const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
       result: parsed.result,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(linearApply ? { linearApply } : {})
     });
     if (
       parsed.result.conclusion === "needs_human" &&
@@ -3827,15 +4815,20 @@ export function createDispatcherApp(input: {
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
           target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
         }
-      | {
+        | {
           adapter: "gitlab";
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
           target: NonNullable<ReturnType<typeof gitlabTargetFromEvent>>;
         }
+        | {
+          adapter: "linear";
+          proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
+          target?: NonNullable<ReturnType<typeof linearTargetFromEvent>>;
+        }
       | undefined;
 
     if (body.execute) {
-      if (body.adapter !== "github" && body.adapter !== "gitlab") {
+      if (body.adapter !== "github" && body.adapter !== "gitlab" && body.adapter !== "linear") {
         return c.json({ error: "apply_execution_adapter_not_supported" }, 422);
       }
       if (body.adapter === "github" && !input.githubApply) {
@@ -3854,12 +4847,21 @@ export function createDispatcherApp(input: {
           return c.json({ error: "github_target_missing" }, 422);
         }
         executableTarget = { adapter: "github", proposal, target };
-      } else {
+      } else if (body.adapter === "gitlab") {
         const target = gitlabTargetFromEvent(stored.event);
         if (!target) {
           return c.json({ error: "gitlab_target_missing" }, 422);
         }
         executableTarget = { adapter: "gitlab", proposal, target };
+      } else {
+        const target = linearTargetFromEvent(stored.event);
+        const selectedIntentIds = body.selectedIntentIds ?? proposal.snapshot.intents.map((intent) => intent.intentId);
+        const selectedIntents = proposal.snapshot.intents.filter((intent) => selectedIntentIds.includes(intent.intentId));
+        const needsExistingLinearIssue = selectedIntents.some((intent) => !isLinearIssueCreateIntent(intent));
+        if (needsExistingLinearIssue && !target) {
+          return c.json({ error: "linear_target_missing" }, 422);
+        }
+        executableTarget = { adapter: "linear", proposal, ...(target ? { target } : {}) };
       }
     }
 
@@ -3921,7 +4923,7 @@ export function createDispatcherApp(input: {
             })
           );
         }
-      } else {
+      } else if (executableTarget.adapter === "gitlab") {
         const gitlabApply = input.gitlabApply;
         if (!gitlabApply) {
           return c.json({ error: "gitlab_apply_not_configured" }, 422);
@@ -3941,6 +4943,48 @@ export function createDispatcherApp(input: {
               },
               operation: compilation.operation as GitLabMutationOperation,
               ...(gitlabApply.fetchImpl ? { fetchImpl: gitlabApply.fetchImpl } : {})
+            })
+          );
+        }
+      } else {
+        const sourceRun = await repo.getRun({ runId: executableTarget.proposal.runId });
+        const linearApply = sourceRun ? await linearApplyOptionsForEvent(sourceRun.event) : input.linearApply;
+        if (!linearApply) {
+          return c.json({ error: "linear_apply_not_configured" }, 422);
+        }
+        const linearToken = await resolveLinearApplyToken(linearApply);
+        if (!linearToken) {
+          return c.json({ error: "linear_apply_token_unavailable" }, 422);
+        }
+        const compilerRegistry = createAdapterMutationCompilerRegistry([
+          createLinearMutationCompiler({
+            mappings: mappingsForAdapterPlan(plan.adapterPlan, linearApply.mappings)
+          })
+        ]);
+        for (const compilation of compilerRegistry.compile("linear", executableIntents)) {
+          if (!compilation.ok) {
+            executedOutcomes.push(compilation.outcome);
+            continue;
+          }
+          const operation = compilation.operation as LinearMutationOperation;
+          if (operation.kind !== "create_issue" && !executableTarget.target) {
+            executedOutcomes.push({
+              intentId: compilation.intentId,
+              outcome: "failed",
+              message: "The source run does not include a Linear issue target."
+            });
+            continue;
+          }
+          const linearGraphqlUrl = linearApply.graphqlUrl ?? executableTarget.target?.graphqlUrl;
+          executedOutcomes.push(
+            await applyLinearMutationOperation({
+              target: {
+                token: linearToken,
+                ...(executableTarget.target?.issueId ? { issueId: executableTarget.target.issueId } : {}),
+                ...(linearGraphqlUrl ? { graphqlUrl: linearGraphqlUrl } : {})
+              },
+              operation,
+              ...(linearApply.fetchImpl ? { fetchImpl: linearApply.fetchImpl } : {})
             })
           );
         }

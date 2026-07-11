@@ -9,15 +9,18 @@ import {
   createGitHubCallbackSink,
   createGitLabCallbackSink,
   createLarkCallbackSink,
+  createLinearCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTeamsCallbackSink,
-  createTelegramCallbackSink
+  createTelegramCallbackSink,
+  type LinearTokenProvider
 } from "@opentag/dispatcher";
-import type { DispatcherRateLimitOptions } from "@opentag/dispatcher";
+import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
 import { createDiscordInteractionsApp, startDiscordGateway } from "@opentag/discord";
 import { createGitLabWebhookApp } from "@opentag/gitlab";
+import { createLinearWebhookApp, type LinearProjectTarget } from "@opentag/linear";
 import {
   createTeamsAuthenticator,
   createTeamsConnector,
@@ -36,6 +39,7 @@ import {
   createDoctorSummaryPresentation,
   createSourceThreadStatusPresentation,
   renderOpenTagPresentationPlainText,
+  type AdapterMutationMapping,
   type OpenTagSourceThreadQueuedFollowUp
 } from "@opentag/core";
 
@@ -57,6 +61,14 @@ export type LocalDispatcherRuntimeInput = {
   gitlabBaseUrl?: string;
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
+  linearToken?: string;
+  linearTokenProvider?: LinearTokenProvider;
+  linearGraphqlUrl?: string;
+  linearMappings?: AdapterMutationMapping[];
+  linearOAuthInstall?: LinearOAuthInstallOptions;
+  linearWebhookSecret?: string;
+  linearWebhookPath?: string;
+  linearProjectTarget?: LinearProjectTarget;
   lark?: {
     appId: string;
     appSecret: string;
@@ -115,6 +127,70 @@ type ClosableServer = ReturnType<typeof serve> & {
   closeAllConnections?: () => void;
   closeIdleConnections?: () => void;
 };
+
+function relayCapabilitiesFromInput(input: LocalDispatcherRuntimeInput): RelayPlatformCapability[] {
+  const linearTokenConfigured = Boolean(input.linearToken || input.linearTokenProvider);
+  const linearHostedOAuthConfigured = Boolean(input.linearOAuthInstall);
+  const linearHostedOAuthWebhookConfigured = Boolean(input.linearOAuthInstall?.webhookSecret);
+  const linearCapability =
+    input.linearWebhookSecret || input.linearOAuthInstall
+      ? {
+          provider: "linear",
+          ...(input.linearWebhookSecret || linearHostedOAuthWebhookConfigured
+            ? {
+                ingress: {
+                  enabled: true,
+                  path: input.linearWebhookSecret ? (input.linearWebhookPath ?? "/linear/webhooks") : (input.linearOAuthInstall?.webhookPath ?? "/linear/oauth/webhooks"),
+                  signatureVerification: "configured" as const
+                },
+                callback: {
+                  enabled: linearTokenConfigured || linearHostedOAuthConfigured,
+                  ...(!linearTokenConfigured && !linearHostedOAuthConfigured
+                    ? { reason: "OPENTAG_LINEAR_API_KEY, OPENTAG_LINEAR_TOKEN, or hosted Linear OAuth install is not configured." }
+                    : {})
+                },
+                apply: {
+                  enabled: linearTokenConfigured || linearHostedOAuthConfigured,
+                  ...(!linearTokenConfigured && !linearHostedOAuthConfigured
+                    ? { reason: "OPENTAG_LINEAR_API_KEY, OPENTAG_LINEAR_TOKEN, or hosted Linear OAuth install is not configured." }
+                    : {})
+                }
+              }
+            : {}),
+          ...(input.linearOAuthInstall
+            ? {
+                oauthInstall: {
+                  enabled: true,
+                  path: "/v1/linear-oauth-installations"
+                }
+              }
+            : {})
+        }
+      : undefined;
+  return [
+    ...(input.gitlabWebhookSecret
+      ? [
+          {
+            provider: "gitlab",
+            ingress: {
+              enabled: true,
+              path: input.gitlabWebhookPath ?? "/gitlab/webhooks",
+              signatureVerification: "configured" as const
+            },
+            callback: {
+              enabled: Boolean(input.gitlabToken),
+              ...(!input.gitlabToken ? { reason: "OPENTAG_GITLAB_TOKEN is not configured." } : {})
+            },
+            apply: {
+              enabled: Boolean(input.gitlabToken),
+              ...(!input.gitlabToken ? { reason: "OPENTAG_GITLAB_TOKEN is not configured." } : {})
+            }
+          }
+        ]
+      : []),
+    ...(linearCapability ? [linearCapability] : [])
+  ];
+}
 
 function parseAgentTokenMap(name: string, raw: string | undefined): Record<string, string> | undefined {
   if (!raw) return undefined;
@@ -175,6 +251,14 @@ function parseCsvList(raw: string | undefined): string[] | undefined {
   return items?.length ? items : undefined;
 }
 
+function parseScopeList(raw: string | undefined): string[] | undefined {
+  const items = raw
+    ?.split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items?.length ? [...new Set(items)] : undefined;
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item): item is string => typeof item === "string");
 }
@@ -189,6 +273,21 @@ function parseDiscordMode(name: string, raw: unknown): "gateway" | "webhook" | u
   if (raw === undefined || raw === "") return undefined;
   if (raw === "gateway" || raw === "webhook") return raw;
   throw new Error(`${name} must be gateway or webhook`);
+}
+
+function linearProjectTargetFromEnv(env: NodeJS.ProcessEnv): LinearProjectTarget | undefined {
+  const owner = env.OPENTAG_LINEAR_REPO_OWNER ?? env.OPENTAG_REPO_OWNER;
+  const repo = env.OPENTAG_LINEAR_REPO_NAME ?? env.OPENTAG_REPO_NAME;
+  const repoProvider = env.OPENTAG_LINEAR_REPO_PROVIDER ?? env.OPENTAG_REPO_PROVIDER ?? env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
+  if (!owner && !repo) return undefined;
+  if (!owner || !repo) {
+    throw new Error("OPENTAG_LINEAR_REPO_OWNER and OPENTAG_LINEAR_REPO_NAME must be configured together.");
+  }
+  return {
+    repoProvider,
+    owner,
+    repo
+  };
 }
 
 function telegramBotsFromEnv(env: NodeJS.ProcessEnv): LocalTelegramBotConfig[] | undefined {
@@ -401,6 +500,23 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
   const telegramSendTimeoutMs = parsePositiveIntegerEnv("OPENTAG_TELEGRAM_SEND_TIMEOUT_MS", env.OPENTAG_TELEGRAM_SEND_TIMEOUT_MS);
   const discordMode = parseDiscordMode("OPENTAG_DISCORD_MODE", env.OPENTAG_DISCORD_MODE);
   const hardening = dispatcherRuntimeHardeningInputFromEnv(env);
+  const linearToken = env.OPENTAG_LINEAR_API_KEY ?? env.OPENTAG_LINEAR_TOKEN;
+  const linearProjectTarget = linearProjectTargetFromEnv(env);
+  const linearOAuthScopes = parseScopeList(env.OPENTAG_LINEAR_OAUTH_SCOPES);
+  if (Boolean(env.OPENTAG_LINEAR_OAUTH_CLIENT_ID) !== Boolean(env.OPENTAG_LINEAR_OAUTH_REDIRECT_URI)) {
+    throw new Error("OPENTAG_LINEAR_OAUTH_CLIENT_ID and OPENTAG_LINEAR_OAUTH_REDIRECT_URI must be configured together.");
+  }
+  const linearOAuthInstall =
+    env.OPENTAG_LINEAR_OAUTH_CLIENT_ID && env.OPENTAG_LINEAR_OAUTH_REDIRECT_URI
+      ? {
+          clientId: env.OPENTAG_LINEAR_OAUTH_CLIENT_ID,
+          ...(env.OPENTAG_LINEAR_OAUTH_CLIENT_SECRET ? { clientSecret: env.OPENTAG_LINEAR_OAUTH_CLIENT_SECRET } : {}),
+          redirectUri: env.OPENTAG_LINEAR_OAUTH_REDIRECT_URI,
+          ...(env.OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET ? { webhookSecret: env.OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET } : {}),
+          ...(env.OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH ? { webhookPath: env.OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH } : {}),
+          ...(linearOAuthScopes ? { scopes: linearOAuthScopes } : {})
+        }
+      : undefined;
 
   const githubApplyToken =
     env.OPENTAG_GITHUB_APPLY_DISABLED === "true"
@@ -423,6 +539,12 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_GITLAB_BASE_URL ? { gitlabBaseUrl: env.OPENTAG_GITLAB_BASE_URL } : {}),
     ...(env.OPENTAG_GITLAB_WEBHOOK_SECRET ? { gitlabWebhookSecret: env.OPENTAG_GITLAB_WEBHOOK_SECRET } : {}),
     ...(env.OPENTAG_GITLAB_WEBHOOK_PATH ? { gitlabWebhookPath: env.OPENTAG_GITLAB_WEBHOOK_PATH } : {}),
+    ...(linearToken ? { linearToken } : {}),
+    ...(env.OPENTAG_LINEAR_GRAPHQL_URL ? { linearGraphqlUrl: env.OPENTAG_LINEAR_GRAPHQL_URL } : {}),
+    ...(linearOAuthInstall ? { linearOAuthInstall } : {}),
+    ...(env.OPENTAG_LINEAR_WEBHOOK_SECRET ? { linearWebhookSecret: env.OPENTAG_LINEAR_WEBHOOK_SECRET } : {}),
+    ...(env.OPENTAG_LINEAR_WEBHOOK_PATH ? { linearWebhookPath: env.OPENTAG_LINEAR_WEBHOOK_PATH } : {}),
+    ...(linearProjectTarget ? { linearProjectTarget } : {}),
     ...(env.LARK_APP_ID && env.LARK_APP_SECRET
       ? {
           lark: {
@@ -579,6 +701,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
     ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
     ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
+    relayCapabilities: {
+      platforms: relayCapabilitiesFromInput(input)
+    },
     ...(githubApplyToken ? { githubApply: { token: githubApplyToken } } : {}),
     ...(input.gitlabToken
       ? {
@@ -588,6 +713,17 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           }
         }
       : {}),
+    ...(input.linearToken || input.linearTokenProvider
+      ? {
+          linearApply: {
+            ...(input.linearToken ? { token: input.linearToken } : {}),
+            ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {}),
+            ...(input.linearGraphqlUrl ? { graphqlUrl: input.linearGraphqlUrl } : {}),
+            ...(input.linearMappings ? { mappings: input.linearMappings } : {})
+          }
+        }
+      : {}),
+    ...(input.linearOAuthInstall ? { linearOAuthInstall: input.linearOAuthInstall } : {}),
     sourceReceiptSink: createCompositeSourceReceiptSink([
       createSlackSourceReceiptSink({
         ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
@@ -609,6 +745,11 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
       }),
       createGitLabCallbackSink({
         ...(input.gitlabToken ? { token: input.gitlabToken } : {})
+      }),
+      createLinearCallbackSink({
+        ...(input.linearToken ? { token: input.linearToken } : {}),
+        ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {}),
+        ...(input.linearGraphqlUrl ? { graphqlUrl: input.linearGraphqlUrl } : {})
       }),
       createSlackCallbackSink({
         ...(input.slackBotToken ? { botToken: input.slackBotToken } : {}),
@@ -652,6 +793,34 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
         webhookSecret: input.gitlabWebhookSecret,
         ...(input.gitlabBaseUrl ? { baseUrl: input.gitlabBaseUrl } : {}),
         ...(input.gitlabWebhookPath ? { webhookPath: input.gitlabWebhookPath } : {}),
+        async createRun(event) {
+          const runId = `run_${randomUUID()}`;
+          const created = await dispatcherClient.createRun({ runId, event });
+          return created.outcome === "run_created" ? { runId: created.run.id } : {};
+        },
+        async submitThreadAction(action) {
+          await dispatcherClient.submitThreadAction(action);
+        },
+        now: () => new Date().toISOString()
+      })
+    );
+  }
+
+  if (input.linearWebhookSecret) {
+    if (input.port === 0) {
+      throw new Error("Linear relay webhook mount requires a fixed dispatcher port.");
+    }
+    const dispatcherClient = createOpenTagClient({
+      dispatcherUrl: `http://127.0.0.1:${input.port}`,
+      ...(input.pairingToken ? { pairingToken: input.pairingToken } : {})
+    });
+    app.route(
+      "/",
+      createLinearWebhookApp({
+        webhookSecret: input.linearWebhookSecret,
+        ...(input.linearGraphqlUrl ? { graphqlUrl: input.linearGraphqlUrl } : {}),
+        ...(input.linearWebhookPath ? { webhookPath: input.linearWebhookPath } : {}),
+        ...(input.linearProjectTarget ? { projectTarget: input.linearProjectTarget } : {}),
         async createRun(event) {
           const runId = `run_${randomUUID()}`;
           const created = await dispatcherClient.createRun({ runId, event });

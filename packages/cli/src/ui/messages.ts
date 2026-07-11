@@ -1,5 +1,5 @@
 import type { CliLanguage } from "../catalogs/languages.js";
-import type { BindingMethod, LarkSetupMethod, SlackSetupMode } from "../setup/types.js";
+import type { BindingMethod, LarkSetupMethod, LinearAuthMethod, SlackSetupMode } from "../setup/types.js";
 
 type MessageKey =
   | "intro"
@@ -29,6 +29,15 @@ type MessageKey =
   | "gitlabProject"
   | "gitlabToken"
   | "gitlabPort"
+  | "linearAuth"
+  | "linearToken"
+  | "linearOAuthClientId"
+  | "linearOAuthClientSecret"
+  | "linearOAuthRedirectUri"
+  | "linearOAuthCode"
+  | "linearTeamId"
+  | "linearTeamKey"
+  | "linearPort"
   | "telegramBotToken"
   | "telegramBotUsername"
   | "telegramBindingAdminUserIds"
@@ -73,6 +82,15 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab project (group/project or group/subgroup/project)",
     gitlabToken: "GitLab access token for source-thread replies",
     gitlabPort: "Local GitLab webhook port",
+    linearAuth: "How should OpenTag authenticate with Linear?",
+    linearToken: "Linear API key for source-thread replies",
+    linearOAuthClientId: "Linear OAuth app client ID",
+    linearOAuthClientSecret: "Linear OAuth app client secret",
+    linearOAuthRedirectUri: "Linear OAuth redirect URI",
+    linearOAuthCode: "Linear OAuth authorization code",
+    linearTeamId: "Linear team ID (optional)",
+    linearTeamKey: "Linear team key (optional)",
+    linearPort: "Local Linear webhook port",
     telegramBotToken: "Telegram bot token",
     telegramBotUsername: "Telegram bot username (optional)",
     telegramBindingAdminUserIds: "Telegram group binding admin user IDs, comma-separated (optional)",
@@ -116,6 +134,15 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     gitlabProject: "GitLab 项目（group/project 或 group/subgroup/project）",
     gitlabToken: "GitLab access token（用于回写 source thread）",
     gitlabPort: "本地 GitLab webhook 端口",
+    linearAuth: "OpenTag 要如何认证 Linear？",
+    linearToken: "Linear API key（用于回写 source thread）",
+    linearOAuthClientId: "Linear OAuth app client ID",
+    linearOAuthClientSecret: "Linear OAuth app client secret",
+    linearOAuthRedirectUri: "Linear OAuth redirect URI",
+    linearOAuthCode: "Linear OAuth authorization code",
+    linearTeamId: "Linear team ID（可选）",
+    linearTeamKey: "Linear team key（可选）",
+    linearPort: "本地 Linear webhook 端口",
     telegramBotToken: "Telegram bot token",
     telegramBotUsername: "Telegram bot username（可选）",
     telegramBindingAdminUserIds: "Telegram 群聊绑定管理员 user id，逗号分隔（可选）",
@@ -167,6 +194,24 @@ export function slackModeHint(language: CliLanguage, mode: SlackSetupMode): stri
     return mode === "socket_mode" ? "适合本机运行，不需要公网 URL" : "适合云端部署或 tunnel 测试";
   }
   return mode === "socket_mode" ? "Best for this computer; no public URL" : "Best for hosted OpenTag or tunnel testing";
+}
+
+export function linearAuthLabel(language: CliLanguage, method: LinearAuthMethod): string {
+  if (language === "zh-CN") {
+    return method === "oauth_app" ? "OAuth App 安装（actor=app，推荐）" : "手动 API key（兼容模式）";
+  }
+  return method === "oauth_app" ? "OAuth App install (actor=app, recommended)" : "Manual API key (compatibility mode)";
+}
+
+export function linearAuthHint(language: CliLanguage, method: LinearAuthMethod): string {
+  if (language === "zh-CN") {
+    return method === "oauth_app"
+      ? "用 Linear OAuth app 安装得到 workspace access token，适合正式集成。"
+      : "保留已有 API key 流程，适合快速本地验证。";
+  }
+  return method === "oauth_app"
+    ? "Installs a Linear OAuth app and uses an app actor workspace access token."
+    : "Keeps the existing API-key path for quick local validation.";
 }
 
 export function bindingMethodLabel(language: CliLanguage, method: BindingMethod, platform: "lark" | "slack" = "lark"): string {

@@ -4,6 +4,7 @@ import {
   buildActionReceipt,
   parseThreadActionCommand,
   parseThreadControlCommand,
+  parseWorkContextMutationCommand,
   suggestedActionCandidatesFromResult
 } from "../src/action.js";
 
@@ -221,5 +222,37 @@ describe("suggested action candidates", () => {
       { index: 1, proposalId: "proposal_1", intentId: "intent_label" },
       { index: 2, proposalId: "proposal_1", intentId: "intent_review" }
     ]);
+  });
+});
+
+describe("parseWorkContextMutationCommand", () => {
+  it("parses a single priority mutation with mention prefix", () => {
+    expect(parseWorkContextMutationCommand("@opentag set this issue's priority to High")).toEqual([
+      { domain: "priority", value: "High" }
+    ]);
+  });
+
+  it("parses status, assignee, and label clauses joined with and", () => {
+    expect(parseWorkContextMutationCommand("set status to In Progress and assign to alice and add label bug")).toEqual([
+      { domain: "status", value: "In Progress" },
+      { domain: "assignee", value: "alice" },
+      { domain: "label", value: "bug" }
+    ]);
+  });
+
+  it("parses move-to as a status mutation and strips quotes", () => {
+    expect(parseWorkContextMutationCommand('move this issue to "In Review"')).toEqual([
+      { domain: "status", value: "In Review" }
+    ]);
+  });
+
+  it("returns null for mixed requests that include non-mutation work", () => {
+    expect(parseWorkContextMutationCommand("fix the flaky test and set priority to High")).toBeNull();
+    expect(parseWorkContextMutationCommand("summarize this issue")).toBeNull();
+    expect(parseWorkContextMutationCommand("")).toBeNull();
+  });
+
+  it("returns null for multi-line requests", () => {
+    expect(parseWorkContextMutationCommand("set priority to High\nthen do something else")).toBeNull();
   });
 });

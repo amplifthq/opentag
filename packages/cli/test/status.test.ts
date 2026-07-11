@@ -87,6 +87,29 @@ function gitlabRelayConfig() {
   return built;
 }
 
+function linearRelayConfig() {
+  const built = createSetupConfig({
+    language: "en",
+    platform: "linear",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    linear: {
+      token: "lin_api_token",
+      webhookSecret: "linear_webhook_secret",
+      webhookPath: "/linear/webhooks",
+      port: 3070
+    }
+  });
+  built.runtime = {
+    mode: "relay",
+    relayUrl: "https://relay.example",
+    relayProvider: "custom"
+  };
+  built.daemon.dispatcherUrl = "https://relay.example";
+  return built;
+}
+
 function discordWebhookRelayConfig() {
   const built = createSetupConfig({
     language: "en",
@@ -295,6 +318,21 @@ describe("OpenTag CLI status", () => {
     const formatted = formatStatus(summary);
     expect(formatted).toContain("FAIL relay platform support: Microsoft Teams relay mode is not supported in this MVP; use local mode for those ingress paths.");
     expect(formatted).not.toContain("OK Microsoft Teams Bot Framework JWT");
+  });
+
+  it("formats Linear relay security as supported when a Linear webhook secret is configured", async () => {
+    const summary = await statusFromConfig({
+      config: linearRelayConfig(),
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: vi.fn(async () => Response.json({ ok: true }))
+    });
+
+    const formatted = formatStatus(summary);
+    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain(
+      "OK Linear webhook secret: Configured locally; the relay /linear/webhooks endpoint must verify Linear-Signature and webhook timestamp before creating runs."
+    );
+    expect(formatted).not.toContain("Linear relay mode is not supported");
   });
 
   it("formats Discord relay signature requirements for webhook mode", async () => {

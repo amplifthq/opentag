@@ -21,13 +21,15 @@ opentag doctor
 `opentag setup` walks through the local governed-loop configuration:
 
 - Choose a language.
-- Choose a platform: Lark / Feishu, Slack, GitHub, GitLab, Telegram, or Discord.
+- Choose a platform: Lark / Feishu, Slack, GitHub, GitLab, Linear, Telegram, or Discord.
 - Choose a coding agent: Codex, Claude Code, or Echo for local testing, including its executor capability boundary.
 - Configure platform credentials.
 - Bind the selected project.
 - Choose how OpenTag should run.
 
 The recommended setup option keeps OpenTag running after the terminal closes. It installs and starts a background service on macOS and Linux. If background service mode is unsupported or you choose terminal mode, use `opentag start` and keep that terminal open.
+
+For GitHub, GitLab, Linear, or Discord webhook deployments that use an already configured relay, `opentag setup --relay https://<relay-host>` writes relay mode directly and pairs the local checkout with that relay.
 
 `opentag status --run <run_id>` shows the local context packet, agent work ledger, produced artifacts, callback delivery, and safe next actions without turning the source thread into an agent log stream.
 
@@ -68,6 +70,7 @@ The setup wizard links to the matching guide for each platform:
 - Slack: `docs/platforms/slack.en.md`
 - GitHub: `docs/platforms/github.en.md`
 - GitLab: `docs/platforms/gitlab.en.md`
+- Linear: `docs/platforms/linear.en.md`
 - Telegram: `docs/platforms/telegram.en.md`
 - Discord: `docs/platforms/discord.en.md`
 

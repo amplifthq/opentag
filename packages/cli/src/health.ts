@@ -30,3 +30,177 @@ export async function probeDispatcherHealth(input: {
     return false;
   }
 }
+
+export type RelayIngressRequirement = {
+  provider: string;
+  path: string;
+  requireCallback?: boolean;
+  requireApply?: boolean;
+};
+
+export type RelayPlatformCapability = {
+  provider: string;
+  ingress?: {
+    enabled?: boolean;
+    path?: string;
+    reason?: string;
+  };
+  callback?: {
+    enabled?: boolean;
+    reason?: string;
+  };
+  apply?: {
+    enabled?: boolean;
+    reason?: string;
+  };
+  oauthInstall?: {
+    enabled?: boolean;
+    path?: string;
+    reason?: string;
+  };
+};
+
+export type RelayCapabilitiesDocument = {
+  schemaVersion: 1;
+  relay: true;
+  platforms: RelayPlatformCapability[];
+};
+
+export type RelayCapabilitiesProbeResult =
+  | {
+      status: "available";
+      capabilities: RelayCapabilitiesDocument;
+    }
+  | {
+      status: "unknown";
+      reason: string;
+    };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseRelayCapabilitiesDocument(value: unknown): RelayCapabilitiesDocument | null {
+  if (!isRecord(value) || value["schemaVersion"] !== 1 || value["relay"] !== true || !Array.isArray(value["platforms"])) {
+    return null;
+  }
+  const platforms: RelayPlatformCapability[] = [];
+  for (const rawPlatform of value["platforms"]) {
+    if (!isRecord(rawPlatform) || typeof rawPlatform["provider"] !== "string" || !rawPlatform["provider"].trim()) continue;
+    const ingress = isRecord(rawPlatform["ingress"]) ? rawPlatform["ingress"] : undefined;
+    const callback = isRecord(rawPlatform["callback"]) ? rawPlatform["callback"] : undefined;
+    const apply = isRecord(rawPlatform["apply"]) ? rawPlatform["apply"] : undefined;
+    const oauthInstall = isRecord(rawPlatform["oauthInstall"]) ? rawPlatform["oauthInstall"] : undefined;
+    platforms.push({
+      provider: rawPlatform["provider"],
+      ...(ingress
+        ? {
+            ingress: {
+              ...(typeof ingress["enabled"] === "boolean" ? { enabled: ingress["enabled"] } : {}),
+              ...(typeof ingress["path"] === "string" ? { path: ingress["path"] } : {}),
+              ...(typeof ingress["reason"] === "string" ? { reason: ingress["reason"] } : {})
+            }
+          }
+        : {}),
+      ...(callback
+        ? {
+            callback: {
+              ...(typeof callback["enabled"] === "boolean" ? { enabled: callback["enabled"] } : {}),
+              ...(typeof callback["reason"] === "string" ? { reason: callback["reason"] } : {})
+            }
+          }
+        : {}),
+      ...(apply
+        ? {
+            apply: {
+              ...(typeof apply["enabled"] === "boolean" ? { enabled: apply["enabled"] } : {}),
+              ...(typeof apply["reason"] === "string" ? { reason: apply["reason"] } : {})
+            }
+          }
+        : {}),
+      ...(oauthInstall
+        ? {
+            oauthInstall: {
+              ...(typeof oauthInstall["enabled"] === "boolean" ? { enabled: oauthInstall["enabled"] } : {}),
+              ...(typeof oauthInstall["path"] === "string" ? { path: oauthInstall["path"] } : {}),
+              ...(typeof oauthInstall["reason"] === "string" ? { reason: oauthInstall["reason"] } : {})
+            }
+          }
+        : {})
+    });
+  }
+  return {
+    schemaVersion: 1,
+    relay: true,
+    platforms
+  };
+}
+
+export async function probeRelayCapabilities(input: {
+  dispatcherUrl: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs: number;
+}): Promise<RelayCapabilitiesProbeResult> {
+  const capabilitiesUrl = `${input.dispatcherUrl.replace(/\/$/, "")}/v1/relay/capabilities`;
+  let response: Response;
+  try {
+    response = await fetchWithTimeout({
+      url: capabilitiesUrl,
+      ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+      timeoutMs: input.timeoutMs
+    });
+  } catch (error) {
+    return {
+      status: "unknown",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  if (!response.ok) {
+    return {
+      status: "unknown",
+      reason: `HTTP ${response.status}`
+    };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return {
+      status: "unknown",
+      reason: "capabilities response was not JSON"
+    };
+  }
+
+  const capabilities = parseRelayCapabilitiesDocument(body);
+  return capabilities
+    ? { status: "available", capabilities }
+    : { status: "unknown", reason: "capabilities response did not match the OpenTag relay schema" };
+}
+
+export function evaluateRelayIngressCapability(
+  capabilities: RelayCapabilitiesDocument,
+  requirement: RelayIngressRequirement
+): { ok: true } | { ok: false; reason: string } {
+  const platform = capabilities.platforms.find((candidate) => candidate.provider === requirement.provider);
+  if (!platform) {
+    return { ok: false, reason: `${requirement.provider} is not listed in relay capabilities.` };
+  }
+  if (platform.ingress?.enabled !== true) {
+    return { ok: false, reason: platform.ingress?.reason ?? `${requirement.provider} ingress is not enabled.` };
+  }
+  if (platform.ingress.path && platform.ingress.path !== requirement.path) {
+    return {
+      ok: false,
+      reason: `${requirement.provider} ingress path is ${platform.ingress.path}, but config expects ${requirement.path}.`
+    };
+  }
+  if (requirement.requireCallback && platform.callback?.enabled !== true) {
+    return { ok: false, reason: platform.callback?.reason ?? `${requirement.provider} callback is not enabled.` };
+  }
+  if (requirement.requireApply && platform.apply?.enabled !== true) {
+    return { ok: false, reason: platform.apply?.reason ?? `${requirement.provider} apply is not enabled.` };
+  }
+  return { ok: true };
+}

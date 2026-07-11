@@ -21,6 +21,11 @@ export const OFFICIAL_SETUP_LINKS = {
   gitlabWebhookEventsDocs: "https://docs.gitlab.com/user/project/integrations/webhook_events/",
   gitlabNotesApiDocs: "https://docs.gitlab.com/api/notes/",
   gitlabMergeRequestsApiDocs: "https://docs.gitlab.com/api/merge_requests/",
+  linearApiSettings: "https://linear.app/settings/api",
+  linearOAuthDocs: "https://linear.app/developers/oauth-2-0-authentication",
+  linearAgentDocs: "https://linear.app/developers/agents",
+  linearDeveloperDocs: "https://linear.app/developers/graphql",
+  linearWebhooksDocs: "https://linear.app/developers/webhooks",
   telegramBotApiDocs: "https://core.telegram.org/bots/api",
   telegramBotFather: "https://t.me/BotFather",
   discordApplications: "https://discord.com/developers/applications",
@@ -44,6 +49,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
         return ["GitHub 仓库 owner/repo", "GitHub token（用于回写评论；你回复 apply 1 后也用于创建 PR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3050", "需要一个公网 tunnel 转发 GitHub webhook"];
       case "gitlab":
         return ["GitLab 项目 path_with_namespace，例如 group/project", "GitLab access token（用于回写 issue/MR note；你回复 apply 1 后也用于创建 MR）", "OpenTag 会自动生成 webhook secret", "本地 webhook 端口，默认 3060", "需要一个公网 tunnel 转发 GitLab Note Hook"];
+      case "linear":
+        return ["推荐使用 Linear OAuth App / actor=app 安装", "兼容手动 API key（用于快速本地验证）", "Webhook 建议配置在 OAuth app 上并启用 Comment 和 Agent session 事件；signing secret 从 Linear 复制", "可选自动发现 Linear team/state/user/label mapping", "本地 webhook 端口，默认 3070", "需要一个公网 tunnel 或已配置 Linear 的 relay 转发 webhook"];
       case "telegram":
         return ["Telegram bot token（从 BotFather 获取）", "OpenTag 会从 bot token 推导 bot id", "默认使用 getUpdates polling，不需要公网 tunnel", "可选 bot username（群聊里用于 @botname 或 /opentag@botname）", "高级 webhook 模式才需要公网 HTTPS tunnel 和 secret token"];
       case "discord":
@@ -62,6 +69,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       return ["GitHub repository owner/repo", "GitHub token for comments and PR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3050", "A public tunnel is required for GitHub webhook delivery"];
     case "gitlab":
       return ["GitLab project path_with_namespace, for example group/project", "GitLab access token for issue/MR note replies and MR creation after you reply `apply 1`", "OpenTag generates the webhook secret", "Local webhook port, default 3060", "A public tunnel is required for GitLab Note Hook delivery"];
+    case "linear":
+      return ["Linear OAuth App / actor=app install is recommended", "Manual API keys remain supported for quick local validation", "Configure the webhook on the OAuth app with Comment and Agent session events; copy the signing secret from Linear", "Optional Linear team/state/user/label mapping discovery", "Local webhook port, default 3070", "A public tunnel or configured Linear relay is required for webhook delivery"];
     case "telegram":
       return ["Telegram bot token from BotFather", "OpenTag derives the bot id from the bot token", "Default getUpdates polling does not need a public tunnel", "Optional bot username for @botname or /opentag@botname in group chats", "Advanced webhook mode needs a public HTTPS tunnel and secret token"];
     case "discord":
@@ -95,6 +104,14 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
           `GitLab webhook 事件文档: ${OFFICIAL_SETUP_LINKS.gitlabWebhookEventsDocs}`,
           `GitLab Notes API 文档: ${OFFICIAL_SETUP_LINKS.gitlabNotesApiDocs}`,
           `GitLab Merge Requests API 文档: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
+        ];
+      case "linear":
+        return [
+          `Linear API / Webhooks 设置页: ${OFFICIAL_SETUP_LINKS.linearApiSettings}`,
+          `Linear OAuth 文档: ${OFFICIAL_SETUP_LINKS.linearOAuthDocs}`,
+          `Linear Agent 文档: ${OFFICIAL_SETUP_LINKS.linearAgentDocs}`,
+          `Linear GraphQL API 文档: ${OFFICIAL_SETUP_LINKS.linearDeveloperDocs}`,
+          `Linear Webhooks 文档: ${OFFICIAL_SETUP_LINKS.linearWebhooksDocs}`
         ];
       case "telegram":
         return [
@@ -141,6 +158,14 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
         `GitLab webhook event docs: ${OFFICIAL_SETUP_LINKS.gitlabWebhookEventsDocs}`,
         `GitLab Notes API docs: ${OFFICIAL_SETUP_LINKS.gitlabNotesApiDocs}`,
         `GitLab Merge Requests API docs: ${OFFICIAL_SETUP_LINKS.gitlabMergeRequestsApiDocs}`
+      ];
+    case "linear":
+      return [
+        `Linear API / Webhooks settings: ${OFFICIAL_SETUP_LINKS.linearApiSettings}`,
+        `Linear OAuth docs: ${OFFICIAL_SETUP_LINKS.linearOAuthDocs}`,
+        `Linear Agent docs: ${OFFICIAL_SETUP_LINKS.linearAgentDocs}`,
+        `Linear GraphQL API docs: ${OFFICIAL_SETUP_LINKS.linearDeveloperDocs}`,
+        `Linear Webhooks docs: ${OFFICIAL_SETUP_LINKS.linearWebhooksDocs}`
       ];
     case "telegram":
       return [
@@ -336,6 +361,54 @@ export function formatGitLabTokenHelp(language: CliLanguage, input: { baseUrl: s
     "- api: lets OpenTag post issue / merge request replies through the Notes API and create MRs through the Merge Requests API after apply",
     "",
     "In the project webhook, enable Note events and paste the secret token generated by OpenTag."
+  ].join("\n");
+}
+
+export function formatLinearTokenHelp(language: CliLanguage): string {
+  if (language === "zh-CN") {
+    return [
+      "Linear API key 兼容模式:",
+      `- API 设置页: ${OFFICIAL_SETUP_LINKS.linearApiSettings}`,
+      `- GraphQL API 文档: ${OFFICIAL_SETUP_LINKS.linearDeveloperDocs}`,
+      "",
+      "创建 workspace API key 后粘贴到下一步。Webhook 用 workspace webhook：订阅 Comment 事件，并把 Linear 生成的 signing secret 写回 OpenTag config。",
+      "API key 模式只支持普通评论回复，没有 Linear Agent Session 面板；推荐改用 OAuth App 安装（--linear-auth oauth_app）获得原生 agent 体验。"
+    ].join("\n");
+  }
+
+  return [
+    "Where to create the Linear API key:",
+    `- API settings: ${OFFICIAL_SETUP_LINKS.linearApiSettings}`,
+    `- GraphQL API docs: ${OFFICIAL_SETUP_LINKS.linearDeveloperDocs}`,
+    "",
+    "Create a workspace API key, then paste it into the next prompt. Use a workspace webhook: subscribe to Comment events and copy the signing secret Linear generates back into the OpenTag config.",
+    "API key mode only supports plain comment replies and has no Linear Agent Session panel; prefer the OAuth App install (--linear-auth oauth_app) for the native agent experience."
+  ].join("\n");
+}
+
+export function formatLinearOAuthInstallHelp(language: CliLanguage, input: { authorizationUrl: string }): string {
+  if (language === "zh-CN") {
+    return [
+      "Linear OAuth App 安装:",
+      `- 打开授权 URL: ${input.authorizationUrl}`,
+      "- 确认 OAuth app 使用 actor=app，并包含 read, write, comments:create, app:assignable, app:mentionable scopes。",
+      "- 授权后把 redirect URL 中的 code 粘贴回 setup。",
+      "- 在 OAuth app 设置里启用 Webhooks：URL 指向公网 tunnel 的 Linear webhook 路径，事件勾选 Comment 和 Agent session。",
+      "- 把 OAuth app Webhooks 生成的 signing secret 写入 platforms.linear.webhookSecret（--linear-webhook-secret）。",
+      `- 官方 OAuth 文档: ${OFFICIAL_SETUP_LINKS.linearOAuthDocs}`,
+      `- Linear Agent 文档: ${OFFICIAL_SETUP_LINKS.linearAgentDocs}`
+    ].join("\n");
+  }
+
+  return [
+    "Linear OAuth App install:",
+    `- Open authorization URL: ${input.authorizationUrl}`,
+    "- Confirm the OAuth app uses actor=app and includes read, write, comments:create, app:assignable, app:mentionable scopes.",
+    "- After approval, paste the code from the redirect URL back into setup.",
+    "- Enable Webhooks on the OAuth app: point the URL at your public tunnel's Linear webhook path and select Comment and Agent session events.",
+    "- Copy the signing secret from the OAuth app's Webhooks settings into platforms.linear.webhookSecret (--linear-webhook-secret).",
+    `- OAuth docs: ${OFFICIAL_SETUP_LINKS.linearOAuthDocs}`,
+    `- Linear Agent docs: ${OFFICIAL_SETUP_LINKS.linearAgentDocs}`
   ].join("\n");
 }
 

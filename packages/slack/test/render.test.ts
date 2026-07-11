@@ -448,6 +448,66 @@ describe("Slack callback rendering", () => {
     ]);
   });
 
+  it("renders interactive Slack actions for Linear issue creation", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_linear_issue_1",
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a Linear issue proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_linear_issue",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Create a Linear issue.",
+            intents: [
+              {
+                intentId: "intent_create_linear_issue",
+                domain: "issue",
+                action: "create_issue",
+                summary: "Create a Linear issue for the OAuth callback error.",
+                params: {
+                  title: "Fix OAuth callback error",
+                  body: "Created from a Slack thread.",
+                  teamKey: "ENG"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_create_linear_issue: { state: "ready_to_apply" }
+        }
+      }
+    });
+
+    const text = renderSlackFinalSummaryPresentation(presentation);
+    const blocks = createSlackFinalSummaryBlocks(presentation);
+
+    expect(text).toContain("Ready to apply");
+    expect(text).toContain("1. *Create a Linear issue for the OAuth callback error.*");
+    expect(text).toContain("Reply: `apply 1` / `reject 1`");
+    expect(text).not.toContain("Description: Created from a Slack thread.");
+    expect(JSON.stringify(blocks)).toContain("Create a Linear issue");
+    const actionsBlock = blocks.find((block) => block.type === "actions");
+    if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
+    expect(actionsBlock.elements.map((element) => parseSlackSuggestedActionButtonValue(element.value))).toEqual([
+      {
+        version: 1,
+        command: "apply 1",
+        proposalId: "proposal_linear_issue",
+        intentId: "intent_create_linear_issue"
+      },
+      {
+        version: 1,
+        command: "reject 1",
+        proposalId: "proposal_linear_issue",
+        intentId: "intent_create_linear_issue"
+      }
+    ]);
+  });
+
   it("groups mixed action receipts and keeps Slack text fallback readable", () => {
     const presentation = createFinalSummaryPresentation({
       auditRunId: "run_slack_mixed",

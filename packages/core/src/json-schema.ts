@@ -27,6 +27,23 @@ import {
   WorkItemReferenceSchema,
   WorkThreadSchema
 } from "./schema.js";
+import {
+  OpenTagExecutorProtocolEventSchema,
+  OpenTagExecutorRunRequestSchema
+} from "./executor-protocol.js";
+import {
+  OpenTagActorRefSchema,
+  OpenTagChannelRefSchema,
+  OpenTagChangeRequestRefSchema,
+  OpenTagContextRefSchema,
+  OpenTagIntegrationManifestSchema,
+  OpenTagReplyTargetRefSchema,
+  OpenTagRepoRefSchema,
+  OpenTagRunSourceRefSchema,
+  OpenTagRunTargetsSchema,
+  OpenTagThreadRefSchema,
+  OpenTagWorkItemRefSchema
+} from "./integration-protocol.js";
 
 export const OpenTagJsonSchemas = {
   OpenTagEvent: zodToJsonSchema(OpenTagEventSchema, "OpenTagEvent"),
@@ -38,6 +55,19 @@ export const OpenTagJsonSchemas = {
   ConversationAnchor: zodToJsonSchema(ConversationAnchorSchema, "ConversationAnchor"),
   WorkThread: zodToJsonSchema(WorkThreadSchema, "WorkThread"),
   ContextPacket: zodToJsonSchema(ContextPacketSchema, "ContextPacket"),
+  OpenTagIntegrationManifest: zodToJsonSchema(OpenTagIntegrationManifestSchema, "OpenTagIntegrationManifest"),
+  OpenTagActorRef: zodToJsonSchema(OpenTagActorRefSchema, "OpenTagActorRef"),
+  OpenTagChannelRef: zodToJsonSchema(OpenTagChannelRefSchema, "OpenTagChannelRef"),
+  OpenTagThreadRef: zodToJsonSchema(OpenTagThreadRefSchema, "OpenTagThreadRef"),
+  OpenTagRepoRef: zodToJsonSchema(OpenTagRepoRefSchema, "OpenTagRepoRef"),
+  OpenTagChangeRequestRef: zodToJsonSchema(OpenTagChangeRequestRefSchema, "OpenTagChangeRequestRef"),
+  OpenTagWorkItemRef: zodToJsonSchema(OpenTagWorkItemRefSchema, "OpenTagWorkItemRef"),
+  OpenTagContextRef: zodToJsonSchema(OpenTagContextRefSchema, "OpenTagContextRef"),
+  OpenTagRunSourceRef: zodToJsonSchema(OpenTagRunSourceRefSchema, "OpenTagRunSourceRef"),
+  OpenTagRunTargets: zodToJsonSchema(OpenTagRunTargetsSchema, "OpenTagRunTargets"),
+  OpenTagReplyTargetRef: zodToJsonSchema(OpenTagReplyTargetRefSchema, "OpenTagReplyTargetRef"),
+  OpenTagExecutorRunRequest: zodToJsonSchema(OpenTagExecutorRunRequestSchema, "OpenTagExecutorRunRequest"),
+  OpenTagExecutorProtocolEvent: zodToJsonSchema(OpenTagExecutorProtocolEventSchema, "OpenTagExecutorProtocolEvent"),
   RunEventVisibility: zodToJsonSchema(RunEventVisibilitySchema, "RunEventVisibility"),
   RunEventImportance: zodToJsonSchema(RunEventImportanceSchema, "RunEventImportance"),
   RunEvent: zodToJsonSchema(RunEventSchema, "RunEvent"),

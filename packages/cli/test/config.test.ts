@@ -159,6 +159,23 @@ describe("OpenTag CLI config", () => {
       botToken: "discord_bot_secret",
       webhookPath: "/discord/interactions"
     };
+    source.platforms.linear = {
+      token: "linear_api_secret",
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: "linear_client_id",
+        clientSecret: "linear_client_secret",
+        refreshToken: "linear_refresh_secret"
+      },
+      webhookSecret: "linear_webhook_secret",
+      webhookPath: "/linear/webhooks",
+      projectTarget: {
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }
+    };
     const redacted = redactedCliConfig(source);
 
     expect(JSON.stringify(redacted)).toContain("[REDACTED]");
@@ -169,6 +186,11 @@ describe("OpenTag CLI config", () => {
     expect(JSON.stringify(redacted)).not.toContain("telegram_bot_secret");
     expect(JSON.stringify(redacted)).not.toContain("telegram_webhook_secret");
     expect(JSON.stringify(redacted)).not.toContain("discord_bot_secret");
+    expect(JSON.stringify(redacted)).not.toContain("linear_api_secret");
+    expect(JSON.stringify(redacted)).not.toContain("linear_client_secret");
+    expect(JSON.stringify(redacted)).not.toContain("linear_refresh_secret");
+    expect(JSON.stringify(redacted)).not.toContain("linear_webhook_secret");
+    expect(JSON.stringify(redacted)).toContain("linear_client_id");
     expect(JSON.stringify(redacted)).toContain("discord_public_key");
   });
 

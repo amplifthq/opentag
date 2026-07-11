@@ -88,6 +88,10 @@ const DOMAIN_ALIASES: Record<string, string> = {
   reviews: "review",
   artifact: "artifact_links",
   artifacts: "artifact_links",
+  issue: "issue",
+  issues: "issue",
+  ticket: "issue",
+  tickets: "issue",
   pr: "pull_request",
   prs: "pull_request",
   pull_request: "pull_request",
@@ -227,6 +231,7 @@ export function suggestedActionCandidatesFromResult(result: OpenTagRunResult): S
 
 function defaultActionTargetLabel(intent: MutationIntent): string {
   if (intent.action === "create_pull_request") return "GitHub pull request";
+  if (intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")) return "Linear issue";
   if (intent.domain === "labels") return "GitHub labels";
   if (intent.domain === "assignee" || intent.domain === "assignees") return "GitHub assignees";
   if (intent.domain === "review") return "GitHub review request";
@@ -296,4 +301,67 @@ export function buildActionReceipt(candidate: SuggestedActionCandidate, context:
 
 export function buildActionReceiptsFromResult(result: OpenTagRunResult, context: ActionReceiptContext = {}): ActionReceipt[] {
   return suggestedActionCandidatesFromResult(result).map((candidate) => buildActionReceipt(candidate, context));
+}
+
+export type WorkContextMutationDomain = "priority" | "status" | "assignee" | "label";
+
+export type WorkContextMutationRequest = {
+  domain: WorkContextMutationDomain;
+  value: string;
+};
+
+const WORK_CONTEXT_MUTATION_CLAUSES: Array<{ domain: WorkContextMutationDomain; pattern: RegExp }> = [
+  {
+    domain: "priority",
+    pattern: /^set\s+(?:the\s+)?(?:(?:this|the)\s+)?(?:issue(?:'s)?\s+)?priority\s+(?:to\s+)?(.+)$/i
+  },
+  {
+    domain: "status",
+    pattern: /^(?:set\s+(?:the\s+)?(?:(?:this|the)\s+)?(?:issue(?:'s)?\s+)?(?:status|state)\s+(?:to\s+)?|move\s+(?:(?:this|the)\s+issue\s+)?to\s+)(.+)$/i
+  },
+  {
+    domain: "assignee",
+    pattern: /^(?:assign\s+(?:(?:this|the)\s+issue\s+)?(?:to\s+)?|set\s+(?:the\s+)?(?:issue(?:'s)?\s+)?assignee\s+(?:to\s+)?)(.+)$/i
+  },
+  {
+    domain: "label",
+    pattern: /^(?:add|set)\s+(?:the\s+)?label(?:s)?\s+(?:to\s+)?(.+)$/i
+  }
+];
+
+function cleanMutationValue(raw: string): string | undefined {
+  const value = raw
+    .trim()
+    .replace(/^["'`「『]+|["'`」』]+$/gu, "")
+    .replace(/[.,;:!?，。；：！？]+$/u, "")
+    .trim();
+  return value.length > 0 && value.length <= 120 ? value : undefined;
+}
+
+/**
+ * Parse a source-thread command that consists purely of work-context mutation
+ * statements ("set priority to High", "assign to alice and add label bug").
+ * Returns null unless every clause is a recognized mutation, so anything that
+ * mixes in other work ("fix the bug and set priority high") still routes to an
+ * executor run.
+ */
+export function parseWorkContextMutationCommand(rawText: string): WorkContextMutationRequest[] | null {
+  const text = threadCommandText(rawText);
+  if (!text || /[\n\r]/.test(text)) return null;
+
+  const clauses = text
+    .split(/\s+(?:and\s+then|and|then)\s+|[;；]/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  if (clauses.length === 0) return null;
+
+  const requests: WorkContextMutationRequest[] = [];
+  for (const clause of clauses) {
+    const matched = WORK_CONTEXT_MUTATION_CLAUSES.find((candidate) => candidate.pattern.test(clause));
+    if (!matched) return null;
+    const value = cleanMutationValue(clause.match(matched.pattern)?.[1] ?? "");
+    if (!value) return null;
+    requests.push({ domain: matched.domain, value });
+  }
+  return requests.length > 0 ? requests : null;
 }
