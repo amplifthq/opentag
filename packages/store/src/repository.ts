@@ -182,6 +182,7 @@ export type LinearRelayInstallationAuth =
       clientId?: string;
       refreshToken?: string;
       accessTokenExpiresAt?: string;
+      appUserId?: string;
       scopes?: string[];
     };
 
@@ -632,6 +633,7 @@ function parseLinearRelayInstallationAuth(value: string | null): LinearRelayInst
     ...(typeof record.accessTokenExpiresAt === "string" && record.accessTokenExpiresAt.length > 0
       ? { accessTokenExpiresAt: record.accessTokenExpiresAt }
       : {}),
+    ...(typeof record.appUserId === "string" && record.appUserId.length > 0 ? { appUserId: record.appUserId } : {}),
     ...(scopes?.length ? { scopes } : {})
   };
 }

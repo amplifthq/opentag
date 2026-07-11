@@ -797,3 +797,89 @@ describe("Linear ingress thread-action failure handling", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 });
+
+describe("Linear ingress deferred-run edge cases", () => {
+  it("reuses one timer when the same comment is redelivered inside the defer window", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_once" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      commentRunDeferMs: 30,
+      now: () => new Date().toISOString()
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_constant",
+      organizationId: "org_acme",
+      createdAt: new Date().toISOString(),
+      webhookTimestamp: Date.now(),
+      data: {
+        id: "comment_redelivered",
+        body: "@opentag investigate this",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "user_alice", displayName: "Alice" }
+      }
+    });
+
+    for (let delivery = 0; delivery < 2; delivery += 1) {
+      const response = await app.request("/linear/webhooks", {
+        method: "POST",
+        headers: signedHeaders("linear_secret", rawBody),
+        body: rawBody
+      });
+      await expect(response.json()).resolves.toEqual({ ok: true, deferred: true });
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(createRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores comments authored by the configured appUserId even without an actor email", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const app = createLinearWebhookApp({
+      webhookSecret: "linear_secret",
+      projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+      createRun,
+      appUserId: "app_user_42",
+      now: () => WEBHOOK_NOW
+    });
+    const rawBody = JSON.stringify({
+      type: "Comment",
+      action: "create",
+      webhookId: "webhook_1",
+      organizationId: "org_acme",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: WEBHOOK_TIMESTAMP,
+      data: {
+        id: "comment_from_app_by_id",
+        body: "@opentag investigate this",
+        userId: "app_user_42",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-123",
+          title: "Fix import",
+          url: "https://linear.app/acme/issue/ENG-123/fix-import",
+          team: { id: "team_eng", key: "ENG", name: "Engineering" }
+        },
+        user: { id: "app_user_42", name: "OpenTag" }
+      }
+    });
+
+    const response = await app.request("/linear/webhooks", {
+      method: "POST",
+      headers: signedHeaders("linear_secret", rawBody),
+      body: rawBody
+    });
+
+    await expect(response.json()).resolves.toEqual({ ok: true, ignored: true });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+});

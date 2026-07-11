@@ -511,10 +511,21 @@ export function createLinearWebhookApp(input: LinearWebhookAppInput): Hono {
       if (commentClaimedByAgentSession(commentId)) {
         return c.json({ ok: true, ignored: true, reason: "agent_session_owns_comment" });
       }
+      // Linear retries deliveries; reuse the pending timer so a redelivered comment
+      // cannot leave multiple timers racing to create the same run.
+      const existingTimer = pendingCommentRuns.get(commentId);
+      if (existingTimer) clearTimeout(existingTimer);
+      // The defer window is in-memory by design: the webhook is acked immediately, so a
+      // process restart inside the ~2.5s window drops the invocation. That trade-off is
+      // documented; creation failures after the window must at least be visible.
       const timer = setTimeout(() => {
         pendingCommentRuns.delete(commentId);
         if (commentClaimedByAgentSession(commentId)) return;
-        void input.createRun(event).catch(() => {});
+        void input.createRun(event).catch((error) => {
+          console.error(
+            `Linear deferred comment run creation failed for comment ${commentId}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        });
       }, commentRunDeferMs);
       pendingCommentRuns.set(commentId, timer);
       return c.json({ ok: true, deferred: true });

@@ -2421,6 +2421,133 @@ describe("dispatcher API", () => {
     }
   });
 
+  it("shares claim state across relay deliveries so a mention's comment and session events yield one run", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        now: () => new Date("2026-07-07T00:10:00.000Z"),
+        refreshSkewMs: 0,
+        commentRunDeferMs: 40
+      }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    );
+    const stored = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_dedupe",
+        webhookPath: "/linear/webhooks/install_dedupe",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_fresh",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_fresh",
+          accessTokenExpiresAt: "2026-07-08T00:00:00.000Z"
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(stored.status).toBe(201);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url) => {
+      if (String(url) === "https://linear.example/graphql") {
+        return Response.json({
+          data: {
+            agentSessionUpdate: { success: true },
+            agentActivityCreate: { success: true, agentActivity: { id: "activity_ack_1" } }
+          }
+        });
+      }
+      throw new Error(`Unexpected request: ${String(url)}`);
+    }) as typeof fetch;
+
+    try {
+      const issue = {
+        id: "issue_1",
+        identifier: "ENG-1",
+        title: "Demo",
+        url: "https://linear.app/acme/issue/ENG-1/demo",
+        team: { id: "team_1", key: "ENG" }
+      };
+      const commentBody = JSON.stringify({
+        type: "Comment",
+        action: "create",
+        webhookId: "webhook_constant",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:10:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_mention_dedupe",
+          body: "@opentag run relay dedupe smoke",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue,
+          user: { id: "user_1", name: "Ada" }
+        }
+      });
+      const sessionBody = JSON.stringify({
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "webhook_constant",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:10:00.000Z",
+        webhookTimestamp: Date.now(),
+        agentSession: {
+          id: "agent_session_dedupe",
+          commentId: "comment_mention_dedupe",
+          creator: { id: "user_1", name: "Ada" },
+          comment: { id: "comment_mention_dedupe", body: "@opentag run relay dedupe smoke" },
+          issue
+        }
+      });
+
+      const commentResponse = await app.request("/linear/webhooks/install_dedupe", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: commentBody })
+        },
+        body: commentBody
+      });
+      await expect(commentResponse.json()).resolves.toEqual({ ok: true, deferred: true });
+
+      const sessionResponse = await app.request("/linear/webhooks/install_dedupe", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: sessionBody })
+        },
+        body: sessionBody
+      });
+      const sessionResult = (await sessionResponse.json()) as { runId?: string };
+      expect(sessionResult.runId).toBeTruthy();
+
+      await new Promise((resolve) => setTimeout(resolve, 90));
+
+      const firstClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      expect(firstClaim.status).toBe(200);
+      const firstClaimBody = (await firstClaim.json()) as { run: { id: string } };
+      expect(firstClaimBody.run.id).toBe(sessionResult.runId);
+
+      const secondClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      expect(secondClaim.status).toBe(204);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("deduplicates concurrent OAuth relay installation refreshes into a single token request", async () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",

@@ -2642,6 +2642,22 @@ export function createDispatcherApp(input: {
     }
     return { status: response.status, body: responseBody };
   }
+  // The webhook app owns the comment-vs-agent-session claim state, so it must live
+  // across deliveries: recreating it per request would let one mention double-trigger.
+  // Cached per installation and rebuilt when the installation row changes.
+  const linearRelayWebhookApps = new Map<string, { fingerprint: string; app: Hono }>();
+  function linearRelayWebhookAppForInstallation(input: {
+    installation: LinearRelayInstallation;
+    webhookSecret: string;
+    webhookPath: string;
+  }): Hono {
+    const fingerprint = JSON.stringify([input.installation.updatedAt, input.webhookSecret, input.webhookPath]);
+    const cached = linearRelayWebhookApps.get(input.installation.id);
+    if (cached && cached.fingerprint === fingerprint) return cached.app;
+    const app = createLinearRelayWebhookAppForInstallation(input);
+    linearRelayWebhookApps.set(input.installation.id, { fingerprint, app });
+    return app;
+  }
   function createLinearRelayWebhookAppForInstallation(input: {
     installation: LinearRelayInstallation;
     webhookSecret: string;
@@ -2660,6 +2676,9 @@ export function createDispatcherApp(input: {
       // mention; defer comment runs so the session channel can claim them.
       ...(input.installation.auth?.method === "oauth_app"
         ? { commentRunDeferMs: linearOAuthInstall?.commentRunDeferMs ?? DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS }
+        : {}),
+      ...(input.installation.auth?.method === "oauth_app" && input.installation.auth.appUserId
+        ? { appUserId: input.installation.auth.appUserId }
         : {}),
       onAgentSessionAccepted: async ({ agentSessionId, runId }) => {
         const token = await resolveLinearRelayInstallationToken(input.installation);
@@ -3280,6 +3299,7 @@ export function createDispatcherApp(input: {
         clientId: linearOAuthInstall.clientId,
         ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
         ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(appUserId ? { appUserId } : {}),
         ...((token.scope ?? pending.scopes).length ? { scopes: token.scope ?? pending.scopes } : {})
       },
       ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
@@ -3355,6 +3375,7 @@ export function createDispatcherApp(input: {
       if (isLinearOAuthAppRevokedPayload(payload)) {
         if (installation.auth?.method === "oauth_app") {
           await repo.deleteLinearRelayInstallation({ id: installation.id });
+          linearRelayWebhookApps.delete(installation.id);
           await recordControlPlaneEvent({
             type: "linear.oauth_install.revoked",
             severity: "warn",
@@ -3370,7 +3391,7 @@ export function createDispatcherApp(input: {
         return c.json({ ok: true, ignored: true, reason: "linear_installation_not_oauth_app" });
       }
 
-      const linearApp = createLinearRelayWebhookAppForInstallation({
+      const linearApp = linearRelayWebhookAppForInstallation({
         installation,
         webhookSecret: oauthWebhookSecret,
         webhookPath: oauthWebhookPath
@@ -3390,7 +3411,7 @@ export function createDispatcherApp(input: {
       return c.json({ error: "linear_relay_installation_not_found" }, 404);
     }
 
-    const linearApp = createLinearRelayWebhookAppForInstallation({
+    const linearApp = linearRelayWebhookAppForInstallation({
       installation,
       webhookSecret: installation.webhookSecret,
       webhookPath
