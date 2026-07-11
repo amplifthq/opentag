@@ -402,6 +402,7 @@ for repeatable setups.
 | `OPENTAG_CONFIG_PATH` | none | Path to daemon JSON config. Takes precedence over Project Target env fallback |
 | `OPENTAG_RUNNER_ID` | `runner_local` | Runner identity |
 | `OPENTAG_DISPATCHER_URL` | `http://localhost:3030` | Dispatcher URL |
+| `OPENTAG_REPO_PROVIDER` | `OPENTAG_SLACK_REPO_PROVIDER`, then `github` | Project Target provider for env-derived repository binding |
 | `OPENTAG_REPO_OWNER` | none | Required for env-derived Project Target binding |
 | `OPENTAG_REPO_NAME` | none | Required for env-derived Project Target binding |
 | `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived Project Target binding |
@@ -412,7 +413,7 @@ for repeatable setups.
 | `OPENTAG_KEEP_WORKTREE` | `on_failure` | `always`, `on_failure`, or `never` |
 | `OPENTAG_SLACK_TEAM_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
 | `OPENTAG_SLACK_CHANNEL_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
-| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Project Target provider used for the env-derived Slack channel binding |
+| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Legacy Project Target provider fallback used by the env-derived Slack channel binding |
 | `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_CLAUDE_COMMAND` | `claude` in executor default | Claude Code CLI command |
@@ -435,6 +436,91 @@ for repeatable setups.
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |
 | `OPENTAG_HEARTBEAT_INTERVAL_MS` | `15000` | Heartbeat interval |
 | `OPENTAG_RUN_TIMEOUT_MS` | none | Optional hard timeout for one executor run |
+
+## Linear Dispatcher / Relay Environment
+
+`apps/dispatcher` and `opentag start` can mount Linear webhook ingress in the
+dispatcher process when `OPENTAG_LINEAR_WEBHOOK_SECRET` is set. That enables the
+static global `/linear/webhooks` path. In relay mode, the local runner polls the
+dispatcher without opening an inbound local port, and Linear calls either the
+static global path or a dynamic `/linear/webhooks/<install-id>` path depending
+on how the relay was provisioned.
+
+Static-token relays can also accept per-install Linear configuration through
+`POST /v1/linear-relay-installations`. In that path, `opentag setup --relay`
+generates a unique `/linear/webhooks/<install-id>` path for new Linear configs
+and uploads the Linear token, signing secret, Project Target, and optional
+GraphQL URL during relay bootstrap. When the local config uses
+`auth.method: "oauth_app"`, the upload also carries OAuth refresh metadata
+without the OAuth client secret, allowing the relay to refresh the Linear access
+token before callbacks and direct apply. Responses intentionally omit the token,
+refresh token, and signing secret. Webhooks delivered to the unique path are
+verified with the stored secret, and later Linear callbacks / Agent Activities /
+direct apply use the non-secret `linearRelayInstallationId` stored on the run to
+resolve the stored token.
+
+When `OPENTAG_LINEAR_OAUTH_CLIENT_ID` and `OPENTAG_LINEAR_OAUTH_REDIRECT_URI`
+are configured, the dispatcher also exposes a hosted-install backend:
+authenticated callers can start an install with
+`POST /v1/linear-oauth-installations`, and Linear returns to the public
+`/linear/oauth/callback` endpoint. The callback exchanges the code, stores the
+per-install token and installation record, keeps a generated per-install
+webhook secret for dynamic relay compatibility, runs best-effort Linear metadata
+discovery for team/state/user/label mappings, and only returns the non-secret
+installation summary. When `OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` is also
+configured, the same relay exposes a fixed OAuth App webhook ingress at
+`OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH` (default `/linear/oauth/webhooks`). Linear
+OAuth App webhook settings should point to that fixed path; the relay verifies
+the app-level `Linear-Signature`, then routes the payload to the completed
+install by the webhook payload's `organizationId`. If Linear sends an
+`OAuthApp` `revoked` webhook, the relay deletes the matching hosted OAuth
+installation record and records a `linear.oauth_install.revoked` control-plane
+event so later callbacks fail closed.
+
+When a trusted relay advertises this capability, `opentag setup --relay
+<url> --platform linear` defaults Linear auth to hosted OAuth App install. The
+CLI does not ask for a Linear API key, webhook signing secret, or local
+authorization code in that path; instead it asks the relay to create a pending
+install, stores the returned installation id and Linear authorization URL in the
+local config, and prints the install URL as the next step. The user-facing
+webhook path remains the fixed OAuth App webhook path, not the internal dynamic
+install path. The relay stores the token and generated signing secret only after
+Linear returns to `/linear/oauth/callback`.
+
+Dispatcher relays expose `/v1/relay/capabilities` so `opentag setup --relay`
+and `opentag pair --relay` can confirm Linear ingress, callback delivery, and
+direct apply readiness when the relay supports capability discovery. With
+`OPENTAG_LINEAR_WEBHOOK_SECRET` configured, the capability response advertises
+`provider: "linear"` with ingress enabled at `OPENTAG_LINEAR_WEBHOOK_PATH`.
+With `OPENTAG_LINEAR_API_KEY` or `OPENTAG_LINEAR_TOKEN` configured, the same
+response advertises Linear callback and apply readiness. With
+`OPENTAG_LINEAR_OAUTH_CLIENT_ID`, `OPENTAG_LINEAR_OAUTH_REDIRECT_URI`, and
+`OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` configured, the capability response
+advertises `oauthInstall.enabled=true` and Linear ingress at the fixed OAuth App
+webhook path for hosted Linear OAuth App installs.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `OPENTAG_LINEAR_API_KEY` / `OPENTAG_LINEAR_TOKEN` | none | Linear OAuth access token or raw `lin_api_...` API key used for callbacks and direct issue apply; OAuth tokens may include or omit the `Bearer ` prefix |
+| `OPENTAG_LINEAR_GRAPHQL_URL` | `https://api.linear.app/graphql` | Optional Linear GraphQL endpoint override |
+| `OPENTAG_LINEAR_WEBHOOK_SECRET` | none | Enables dispatcher-mounted Linear webhook ingress and verifies `Linear-Signature` |
+| `OPENTAG_LINEAR_WEBHOOK_PATH` | `/linear/webhooks` | Public Linear webhook path |
+| `OPENTAG_LINEAR_OAUTH_CLIENT_ID` | none | Linear OAuth App client id; enables hosted install start/callback endpoints when paired with `OPENTAG_LINEAR_OAUTH_REDIRECT_URI` |
+| `OPENTAG_LINEAR_OAUTH_CLIENT_SECRET` | none | Optional Linear OAuth App client secret used for authorization-code and refresh-token exchanges |
+| `OPENTAG_LINEAR_OAUTH_REDIRECT_URI` | none | Public redirect URI registered on the Linear OAuth App, usually `https://<relay-host>/linear/oauth/callback` |
+| `OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` | none | Linear OAuth App webhook signing secret; enables fixed hosted OAuth webhook ingress |
+| `OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH` | `/linear/oauth/webhooks` | Public webhook URL path configured on the Linear OAuth App for hosted installs |
+| `OPENTAG_LINEAR_OAUTH_SCOPES` | `read,write,comments:create,app:assignable,app:mentionable` | Optional comma- or space-separated scope override for hosted OAuth install starts |
+| `OPENTAG_LINEAR_REPO_PROVIDER` | `OPENTAG_REPO_PROVIDER`, then `OPENTAG_SLACK_REPO_PROVIDER`, then `github` | Project Target provider embedded into Linear-created runs |
+| `OPENTAG_LINEAR_REPO_OWNER` | `OPENTAG_REPO_OWNER` | Project Target owner embedded into Linear-created runs |
+| `OPENTAG_LINEAR_REPO_NAME` | `OPENTAG_REPO_NAME` | Project Target repo embedded into Linear-created runs |
+
+`OPENTAG_LINEAR_REPO_OWNER` and `OPENTAG_LINEAR_REPO_NAME` must be configured
+together, either directly or through the generic `OPENTAG_REPO_OWNER` /
+`OPENTAG_REPO_NAME` fallback. The resulting Project Target must match a
+repository binding registered on the dispatcher by `opentag setup --relay` or
+`opentag pair --relay`; otherwise the local runner rejects the run before
+executor startup.
 
 ## Dispatcher Environment
 

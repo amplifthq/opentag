@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { computeLinearSignature } from "@opentag/linear";
 import { z } from "zod";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp } from "../src/server.js";
@@ -33,6 +34,14 @@ function jsonRequest(body: unknown) {
   return {
     method: "POST",
     headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  };
+}
+
+function authorizedJsonRequest(body: unknown, token = "pairing_token") {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify(body)
   };
 }
@@ -132,6 +141,49 @@ function gitlabIssueEvent(input: { id: string; sourceEventId: string; threadKey?
       projectVisibility: "private",
       issueIid: 1,
       noteableType: "Issue"
+    }
+  };
+}
+
+function linearIssueEvent(input: { id: string; sourceEventId: string; threadKey?: string }) {
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "linear",
+    sourceEventId: input.sourceEventId,
+    context: [{ provider: "linear", kind: "issue", uri: "https://linear.app/acme/issue/ENG-1/demo", visibility: "organization" }],
+    workItem: {
+      provider: "linear",
+      kind: "issue",
+      externalId: "ENG-1",
+      uri: "https://linear.app/acme/issue/ENG-1/demo",
+      ownerContainer: {
+        provider: "linear",
+        id: "team_eng",
+        uri: "https://linear.app/acme/team/ENG"
+      }
+    },
+    permissions: [
+      { scope: "issue:comment", reason: "reply to the source Linear issue" },
+      { scope: "runner:local", reason: "execute the run on a paired local daemon" },
+      { scope: "repo:read", reason: "inspect the repository in the paired local checkout" },
+      { scope: "repo:write", reason: "commit code changes on an isolated run branch" },
+      { scope: "pr:create", reason: "open a pull request for completed code changes" }
+    ],
+    callback: {
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      ...(input.threadKey ? { threadKey: input.threadKey } : {})
+    },
+    metadata: {
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo",
+      issueId: "issue_123",
+      issueIdentifier: "ENG-1",
+      teamId: "team_eng",
+      teamKey: "ENG",
+      graphqlUrl: "https://linear.example/graphql"
     }
   };
 }
@@ -1299,6 +1351,1334 @@ describe("dispatcher API", () => {
     await expect(listResponse.json()).resolves.toMatchObject({
       mappings: [{ id: "github_status_labels", domain: "status" }]
     });
+  });
+
+  it("stores Linear relay installations without echoing token or webhook secret", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const response = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        webhookSecret: "linear_webhook_secret",
+        token: "lin_api_token",
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        teamKey: "ENG"
+      })
+    );
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      installation: {
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+        graphqlUrl: "https://linear.example/graphql",
+        teamKey: "ENG"
+      }
+    });
+    expect(JSON.stringify(body)).not.toContain("linear_webhook_secret");
+    expect(JSON.stringify(body)).not.toContain("lin_api_token");
+  });
+
+  it("starts hosted Linear OAuth app installations without leaking generated secrets", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pairing_token",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        scopes: ["read", "comments:create", "app:assignable"],
+        authorizationUrl: "https://linear.example/oauth/authorize",
+        webhookPath: "/linear/custom/oauth/webhooks",
+        now: () => new Date("2026-07-07T00:00:00.000Z"),
+        installStateTtlMs: 600_000
+      }
+    });
+
+    const unauthenticated = await app.request(
+      "/v1/linear-oauth-installations",
+      jsonRequest({
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(unauthenticated.status).toBe(401);
+
+    const response = await app.request(
+      "/v1/linear-oauth-installations",
+      authorizedJsonRequest({
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        teamKey: "ENG",
+        graphqlUrl: "https://linear.example/graphql"
+      })
+    );
+
+    expect(response.status).toBe(201);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      oauthWebhookPath: "/linear/custom/oauth/webhooks",
+      stateExpiresAt: "2026-07-07T00:10:00.000Z",
+      installation: {
+        id: expect.stringMatching(/^install_[0-9a-f]{24}$/),
+        webhookPath: expect.stringMatching(/^\/linear\/webhooks\/install_[0-9a-f]{24}$/),
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+        graphqlUrl: "https://linear.example/graphql",
+        teamKey: "ENG"
+      }
+    });
+    expect(String(body.authorizationUrl)).toContain("https://linear.example/oauth/authorize?");
+    const authorizationUrl = new URL(String(body.authorizationUrl));
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("linear_client");
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe("https://relay.example/linear/oauth/callback");
+    expect(authorizationUrl.searchParams.get("response_type")).toBe("code");
+    expect(authorizationUrl.searchParams.get("actor")).toBe("app");
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent");
+    expect(authorizationUrl.searchParams.get("scope")).toBe("read,comments:create,app:assignable");
+    expect(authorizationUrl.searchParams.get("state")).toMatch(/^linear_[0-9a-f]{48}$/);
+    expect(JSON.stringify(body)).not.toContain("linear_whsec_");
+  });
+
+  it("completes hosted Linear OAuth installs and refreshes relay tokens for callbacks", async () => {
+    let now = new Date("2026-07-07T00:00:00.000Z");
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
+    const linearFetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        if (body.get("grant_type") === "authorization_code") {
+          return Response.json({
+            access_token: "linear_access_token",
+            refresh_token: "linear_refresh_token",
+            expires_in: 1,
+            scope: "read,write,comments:create,app:assignable,app:mentionable"
+          });
+        }
+        return Response.json({
+          access_token: "linear_refreshed_token",
+          refresh_token: "linear_refresh_token_2",
+          expires_in: 3600,
+          scope: "read,write,comments:create,app:assignable,app:mentionable"
+        });
+      }
+      if (requestUrl === "https://linear.example/graphql") {
+        const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+        graphqlRequests.push({ authorization: new Headers(init?.headers).get("authorization"), body });
+        if (body.query?.includes("OpenTagLinearWorkspaceIdentity")) {
+          return Response.json({
+            data: {
+              viewer: { id: "app_user_1", name: "OpenTag", app: true },
+              organization: { id: "org_linear_1", name: "Acme", urlKey: "acme" }
+            }
+          });
+        }
+        if (body.query?.includes("OpenTagLinearMetadata")) {
+          return Response.json({
+            data: {
+              teams: {
+                nodes: [{ id: "team_eng", key: "ENG", name: "Engineering" }]
+              },
+              users: {
+                nodes: [{ id: "user_ada", name: "Ada Lovelace", displayName: "Ada", email: "ada@example.com", active: true, app: false }]
+              },
+              workflowStates: {
+                nodes: [{ id: "state_progress", name: "In Progress", type: "started", team: { id: "team_eng", key: "ENG" } }]
+              },
+              issueLabels: {
+                nodes: [{ id: "label_bug", name: "Bug", color: "#ff0000", isGroup: false, team: { id: "team_eng", key: "ENG" } }]
+              }
+            }
+          });
+        }
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: {
+                id: "linear_comment_1",
+                url: "https://linear.app/acme/issue/ENG-1/demo#comment"
+              }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+    }) as typeof fetch;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = linearFetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pairing_token",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        webhookSecret: "linear_app_webhook_secret",
+        authorizationUrl: "https://linear.example/oauth/authorize",
+        tokenUrl: "https://linear.example/oauth/token",
+        fetchImpl: linearFetch,
+        now: () => now,
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
+      }
+    });
+
+    try {
+      await app.request("/v1/runners", authorizedJsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+      await app.request(
+        "/v1/repo-bindings",
+        authorizedJsonRequest({
+          provider: "github",
+          owner: "acme",
+          repo: "demo",
+          runnerId: "runner_1"
+        })
+      );
+
+      const start = await app.request(
+        "/v1/linear-oauth-installations",
+        authorizedJsonRequest({
+          owner: "acme",
+          repo: "demo",
+          graphqlUrl: "https://linear.example/graphql"
+        })
+      );
+      expect(start.status).toBe(201);
+      const started = await start.json();
+      const state = new URL(String(started.authorizationUrl)).searchParams.get("state");
+      expect(state).toBeTruthy();
+
+      const callback = await app.request(`/linear/oauth/callback?state=${encodeURIComponent(state!)}&code=code_123`);
+      expect(callback.status).toBe(200);
+      const completed = await callback.json();
+      expect(completed).toMatchObject({
+        ok: true,
+        installation: {
+          id: started.installation.id,
+          webhookPath: started.installation.webhookPath,
+          projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" },
+          graphqlUrl: "https://linear.example/graphql",
+          organizationId: "org_linear_1",
+          teamId: "team_eng",
+          teamKey: "ENG"
+        }
+      });
+      expect(JSON.stringify(completed)).not.toContain("linear_access_token");
+      expect(JSON.stringify(completed)).not.toContain("linear_refresh_token");
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          code: "code_123",
+          redirect_uri: "https://relay.example/linear/oauth/callback",
+          grant_type: "authorization_code",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlRequests).toHaveLength(5);
+      expect(graphqlRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            authorization: "Bearer linear_access_token",
+            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearWorkspaceIdentity") })
+          }),
+          expect.objectContaining({
+            authorization: "Bearer linear_access_token",
+            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataTeams") })
+          }),
+          expect.objectContaining({
+            authorization: "Bearer linear_access_token",
+            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataUsers") })
+          }),
+          expect.objectContaining({
+            authorization: "Bearer linear_access_token",
+            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataWorkflowStates") })
+          }),
+          expect.objectContaining({
+            authorization: "Bearer linear_access_token",
+            body: expect.objectContaining({ query: expect.stringContaining("OpenTagLinearMetadataIssueLabels") })
+          })
+        ])
+      );
+      const mappingsResponse = await app.request("/v1/repo-bindings/github/acme/demo/mutation-mappings", {
+        headers: { authorization: "Bearer pairing_token" }
+      });
+      expect(mappingsResponse.status).toBe(200);
+      await expect(mappingsResponse.json()).resolves.toMatchObject({
+        mappings: expect.arrayContaining([
+          expect.objectContaining({
+            id: "linear_status_state_id",
+            values: expect.objectContaining({ in_progress: "state_progress" })
+          }),
+          expect.objectContaining({
+            id: "linear_assignee_user_id",
+            values: expect.objectContaining({ "ada@example.com": "user_ada" })
+          }),
+          expect.objectContaining({
+            id: "linear_label_label_id",
+            values: expect.objectContaining({ bug: "label_bug" })
+          })
+        ])
+      });
+
+      graphqlRequests.length = 0;
+      const payload = {
+        type: "Comment",
+        action: "create",
+        webhookId: "linear_oauth_webhook_delivery_1",
+        organizationId: "org_linear_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_oauth_1",
+          body: "@opentag run from hosted OAuth webhook",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue: {
+            id: "issue_123",
+            identifier: "ENG-1",
+            title: "Demo",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: { id: "team_eng", key: "ENG" }
+          },
+          user: { id: "user_ada", name: "Ada Lovelace" }
+        }
+      };
+      const rawBody = JSON.stringify(payload);
+      const hostedWebhook = await app.request("/linear/oauth/webhooks", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_app_webhook_secret", rawBody })
+        },
+        body: rawBody
+      });
+
+      expect(hostedWebhook.status).toBe(200);
+      await expect(hostedWebhook.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
+      expect(graphqlRequests).toHaveLength(1);
+      expect(graphqlRequests[0]).toMatchObject({
+        authorization: "Bearer linear_access_token"
+      });
+      expect(graphqlRequests[0]!.body.query).toContain("commentCreate");
+
+      graphqlRequests.length = 0;
+      now = new Date("2026-07-07T00:00:10.000Z");
+      const event = linearIssueEvent({ id: "evt_linear_oauth", sourceEventId: "linear_oauth_comment" });
+      const createRun = await app.request(
+        "/v1/runs",
+        authorizedJsonRequest({
+          runId: "run_linear_oauth",
+          event: {
+            ...event,
+            metadata: {
+              ...event.metadata,
+              linearRelayInstallationId: started.installation.id
+            }
+          }
+        })
+      );
+
+      expect(createRun.status).toBe(201);
+      expect(tokenRequests.map((request) => request["grant_type"])).toEqual(["authorization_code", "refresh_token"]);
+      expect(tokenRequests[1]).toMatchObject({
+        client_id: "linear_client",
+        refresh_token: "linear_refresh_token",
+        grant_type: "refresh_token",
+        client_secret: "linear_secret"
+      });
+      expect(graphqlRequests).toHaveLength(1);
+      expect(graphqlRequests[0]).toMatchObject({
+        authorization: "Bearer linear_refreshed_token"
+      });
+      expect(graphqlRequests[0]!.body.query).toContain("commentCreate");
+      expect(graphqlRequests[0]!.body.variables).toMatchObject({
+        input: {
+          issueId: "issue_123"
+        }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("removes hosted Linear OAuth installations when Linear sends OAuthApp revoked", async () => {
+    const graphqlRequests: Array<{ authorization: string | null; body: { query?: string; variables?: unknown } }> = [];
+    const linearFetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        return Response.json({
+          access_token: "linear_access_token",
+          refresh_token: "linear_refresh_token",
+          expires_in: 3600,
+          scope: "read,write,comments:create,app:assignable,app:mentionable"
+        });
+      }
+      if (requestUrl === "https://linear.example/graphql") {
+        const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+        graphqlRequests.push({ authorization: new Headers(init?.headers).get("authorization"), body });
+        if (body.query?.includes("OpenTagLinearWorkspaceIdentity")) {
+          return Response.json({
+            data: {
+              viewer: { id: "app_user_1", name: "OpenTag", app: true },
+              organization: { id: "org_linear_1", name: "Acme", urlKey: "acme" }
+            }
+          });
+        }
+        if (body.query?.includes("OpenTagLinearMetadata")) {
+          return Response.json({
+            data: {
+              teams: { nodes: [] },
+              users: { nodes: [] },
+              workflowStates: { nodes: [] },
+              issueLabels: { nodes: [] }
+            }
+          });
+        }
+      }
+      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+    }) as typeof fetch;
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pairing_token",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        webhookSecret: "linear_app_webhook_secret",
+        authorizationUrl: "https://linear.example/oauth/authorize",
+        tokenUrl: "https://linear.example/oauth/token",
+        fetchImpl: linearFetch
+      }
+    });
+
+    const start = await app.request(
+      "/v1/linear-oauth-installations",
+      authorizedJsonRequest({
+        owner: "acme",
+        repo: "demo",
+        graphqlUrl: "https://linear.example/graphql"
+      })
+    );
+    expect(start.status).toBe(201);
+    const started = await start.json();
+    const state = new URL(String(started.authorizationUrl)).searchParams.get("state");
+    const callback = await app.request(`/linear/oauth/callback?state=${encodeURIComponent(state!)}&code=code_123`);
+    expect(callback.status).toBe(200);
+
+    const revokedPayload = {
+      type: "OAuthApp",
+      action: "revoked",
+      webhookId: "linear_oauth_revoked_1",
+      webhookTimestamp: Date.now(),
+      organizationId: "org_linear_1",
+      oauthClientId: "linear_client"
+    };
+    const revokedRawBody = JSON.stringify(revokedPayload);
+    const revoked = await app.request("/linear/oauth/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-signature": computeLinearSignature({ webhookSecret: "linear_app_webhook_secret", rawBody: revokedRawBody })
+      },
+      body: revokedRawBody
+    });
+
+    expect(revoked.status).toBe(200);
+    await expect(revoked.json()).resolves.toEqual({ ok: true, revoked: true, installationId: started.installation.id });
+
+    const events = await app.request("/v1/control-plane-events?type=linear.oauth_install.revoked", {
+      headers: { authorization: "Bearer pairing_token" }
+    });
+    expect(events.status).toBe(200);
+    await expect(events.json()).resolves.toMatchObject({
+      events: [
+        {
+          type: "linear.oauth_install.revoked",
+          severity: "warn",
+          subject: started.installation.id,
+          payload: {
+            installationId: started.installation.id,
+            organizationId: "org_linear_1",
+            oauthClientId: "linear_client"
+          }
+        }
+      ]
+    });
+
+    const graphQlRequestCountAfterRevoke = graphqlRequests.length;
+    const commentPayload = {
+      type: "Comment",
+      action: "create",
+      webhookId: "linear_oauth_after_revoke",
+      organizationId: "org_linear_1",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      webhookTimestamp: Date.now(),
+      data: {
+        id: "comment_after_revoke",
+        body: "@opentag should not run after revoke",
+        issue: {
+          id: "issue_123",
+          identifier: "ENG-1",
+          url: "https://linear.app/acme/issue/ENG-1/demo",
+          team: { id: "team_eng", key: "ENG" }
+        },
+        user: { id: "user_ada", name: "Ada Lovelace" }
+      }
+    };
+    const commentRawBody = JSON.stringify(commentPayload);
+    const afterRevoke = await app.request("/linear/oauth/webhooks", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-signature": computeLinearSignature({ webhookSecret: "linear_app_webhook_secret", rawBody: commentRawBody })
+      },
+      body: commentRawBody
+    });
+
+    expect(afterRevoke.status).toBe(404);
+    await expect(afterRevoke.json()).resolves.toMatchObject({ error: "linear_relay_installation_not_found" });
+    expect(graphqlRequests).toHaveLength(graphQlRequestCountAfterRevoke);
+  });
+
+  it("routes dynamic Linear relay webhooks through stored installation credentials", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        webhookSecret: "linear_webhook_secret",
+        token: "lin_api_token",
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ url: string; authorization?: string | null; body?: unknown }> = [];
+    globalThis.fetch = (async (url, init) => {
+      requests.push({
+        url: String(url),
+        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+      });
+      return Response.json({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
+          }
+        }
+      });
+    }) as typeof fetch;
+
+    try {
+      const payload = {
+        type: "Comment",
+        action: "create",
+        webhookId: "linear_delivery_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_1",
+          body: "@opentag run dynamic relay smoke",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue: {
+            id: "issue_1",
+            identifier: "ENG-1",
+            title: "Demo",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: { id: "team_1", key: "ENG" }
+          },
+          user: { id: "user_1", name: "Ada" }
+        }
+      };
+      const rawBody = JSON.stringify(payload);
+      const response = await app.request("/linear/webhooks/install_123", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
+        },
+        body: rawBody
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        url: "https://linear.example/graphql",
+        authorization: "lin_api_token"
+      });
+      expect(String((requests[0]!.body as { query: string }).query)).toContain("commentCreate");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("queues prompted Linear Agent Session events behind an active Agent Session run", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_agent_prompted",
+        webhookPath: "/linear/webhooks/install_agent_prompted",
+        webhookSecret: "linear_webhook_secret",
+        token: "lin_api_token",
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+
+    const originalFetch = globalThis.fetch;
+    const graphqlRequests: Array<{ authorization?: string | null; body?: { query?: string; variables?: unknown } }> = [];
+    globalThis.fetch = (async (url, init) => {
+      if (String(url) !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${String(url)}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+      graphqlRequests.push({
+        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
+        body
+      });
+      if (body.query?.includes("agentActivityCreate")) {
+        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: `activity_${graphqlRequests.length}` } } } });
+      }
+      return Response.json({ data: { agentSessionUpdate: { success: true } } });
+    }) as typeof fetch;
+
+    try {
+      const agentSession = {
+        id: "agent_session_prompted_1",
+        creator: { id: "user_1", name: "Ada" },
+        issue: {
+          id: "issue_1",
+          identifier: "ENG-1",
+          title: "Demo",
+          url: "https://linear.app/acme/issue/ENG-1/demo",
+          team: { id: "team_1", key: "ENG", name: "Engineering" }
+        }
+      };
+      const createdPayload = {
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "linear_agent_prompted_created_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        promptContext: "<issue identifier=\"ENG-1\">Initial prompt</issue>",
+        agentSession
+      };
+      const createdRawBody = JSON.stringify(createdPayload);
+      const created = await app.request("/linear/webhooks/install_agent_prompted", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: createdRawBody })
+        },
+        body: createdRawBody
+      });
+
+      expect(created.status).toBe(200);
+      const createdBody = await created.json();
+      const activeRunId = String(createdBody.runId);
+      expect(activeRunId).toMatch(/^run_/);
+      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      await app.request(`/v1/runners/runner_1/runs/${activeRunId}/running`, jsonRequest({ executor: "echo" }));
+      for (let attempt = 0; attempt < 20 && graphqlRequests.length < 2; attempt += 1) {
+        await wait(10);
+      }
+      graphqlRequests.length = 0;
+
+      const promptText = "Please also update the regression coverage.";
+      const promptedPayload = {
+        type: "AgentSessionEvent",
+        action: "prompted",
+        webhookId: "linear_agent_prompted_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:01.000Z",
+        webhookTimestamp: Date.now(),
+        promptContext: "This context should not override the prompted activity body.",
+        agentActivity: {
+          id: "activity_prompted_1",
+          body: promptText
+        },
+        agentSession
+      };
+      const promptedRawBody = JSON.stringify(promptedPayload);
+      const prompted = await app.request("/linear/webhooks/install_agent_prompted", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: promptedRawBody })
+        },
+        body: promptedRawBody
+      });
+
+      expect(prompted.status).toBe(200);
+      await expect(prompted.json()).resolves.toEqual({ ok: true });
+      const status = await app.request(
+        "/v1/thread-actions",
+        jsonRequest({
+          rawText: "/status",
+          actor: { provider: "linear", providerUserId: "user_1", handle: "Ada", organizationId: "org_1" },
+          callback: {
+            provider: "linear",
+            uri: "linear://agent-session/agent_session_prompted_1/activities",
+            threadKey: "ENG|issue|ENG-1"
+          },
+          metadata: {
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo",
+            agentSessionId: "agent_session_prompted_1",
+            linearRelayInstallationId: "install_agent_prompted",
+            graphqlUrl: "https://linear.example/graphql"
+          }
+        })
+      );
+      expect(status.status).toBe(200);
+      await expect(status.json()).resolves.toMatchObject({
+        outcome: "status",
+        activeRun: { id: activeRunId, status: "running" },
+        queuedFollowUps: [
+          {
+            status: "queued",
+            activeRunId,
+            event: {
+              command: {
+                rawText: promptText
+              },
+              metadata: {
+                action: "prompted",
+                agentSessionId: "agent_session_prompted_1"
+              }
+            }
+          }
+        ]
+      });
+      expect(graphqlRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            authorization: "lin_api_token",
+            body: expect.objectContaining({
+              query: expect.stringContaining("agentActivityCreate"),
+              variables: expect.objectContaining({
+                input: expect.objectContaining({
+                  agentSessionId: "agent_session_prompted_1",
+                  content: expect.objectContaining({
+                    type: "thought",
+                    body: expect.stringContaining("Queued follow-up")
+                  })
+                })
+              })
+            })
+          })
+        ])
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("cancels an active Linear Agent Session run when Linear sends a stop signal", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_agent_stop",
+        webhookPath: "/linear/webhooks/install_agent_stop",
+        webhookSecret: "linear_webhook_secret",
+        token: "lin_api_token",
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+
+    const originalFetch = globalThis.fetch;
+    const graphqlRequests: Array<{ authorization?: string | null; body?: { query?: string; variables?: unknown } }> = [];
+    globalThis.fetch = (async (url, init) => {
+      if (String(url) !== "https://linear.example/graphql") {
+        throw new Error(`Unexpected Linear test request: ${String(url)}`);
+      }
+      const body = JSON.parse(String(init?.body)) as { query?: string; variables?: unknown };
+      graphqlRequests.push({
+        authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
+        body
+      });
+      if (body.query?.includes("agentActivityCreate")) {
+        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: `activity_${graphqlRequests.length}` } } } });
+      }
+      return Response.json({ data: { agentSessionUpdate: { success: true } } });
+    }) as typeof fetch;
+
+    try {
+      const createdPayload = {
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "linear_agent_created_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        promptContext: "<issue identifier=\"ENG-1\">Demo</issue>",
+        agentSession: {
+          id: "agent_session_stop_1",
+          creator: { id: "user_1", name: "Ada" },
+          issue: {
+            id: "issue_1",
+            identifier: "ENG-1",
+            title: "Demo",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: { id: "team_1", key: "ENG", name: "Engineering" }
+          }
+        }
+      };
+      const createdRawBody = JSON.stringify(createdPayload);
+      const created = await app.request("/linear/webhooks/install_agent_stop", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: createdRawBody })
+        },
+        body: createdRawBody
+      });
+
+      expect(created.status).toBe(200);
+      const createdBody = await created.json();
+      const runId = String(createdBody.runId);
+      expect(runId).toMatch(/^run_/);
+
+      await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      await app.request(`/v1/runners/runner_1/runs/${runId}/running`, jsonRequest({ executor: "echo" }));
+      const followUp = await app.request(
+        "/v1/runs",
+        jsonRequest({
+          runId: "follow_up_linear_agent_stop",
+          event: {
+            ...linearIssueEvent({ id: "evt_linear_agent_stop_follow_up", sourceEventId: "linear_agent_stop_follow_up" }),
+            callback: {
+              provider: "linear",
+              uri: "linear://agent-session/agent_session_stop_1/activities",
+              threadKey: "ENG|issue|ENG-1"
+            },
+            metadata: {
+              repoProvider: "github",
+              owner: "acme",
+              repo: "demo",
+              agentSessionId: "agent_session_stop_1",
+              linearRelayInstallationId: "install_agent_stop",
+              graphqlUrl: "https://linear.example/graphql"
+            }
+          }
+        })
+      );
+      expect(followUp.status).toBe(202);
+      graphqlRequests.length = 0;
+
+      const stopPayload = {
+        type: "AgentSessionEvent",
+        action: "prompted",
+        webhookId: "linear_agent_stop_1",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:01.000Z",
+        webhookTimestamp: Date.now(),
+        agentActivity: {
+          id: "activity_stop_1",
+          body: "Stop",
+          signal: "stop"
+        },
+        agentSession: createdPayload.agentSession
+      };
+      const stopRawBody = JSON.stringify(stopPayload);
+      const stopped = await app.request("/linear/webhooks/install_agent_stop", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: stopRawBody })
+        },
+        body: stopRawBody
+      });
+
+      expect(stopped.status).toBe(200);
+      await expect(stopped.json()).resolves.toEqual({ ok: true, action: "stop" });
+      const stored = await app.request(`/v1/runs/${runId}`);
+      await expect(stored.json()).resolves.toMatchObject({
+        run: {
+          id: runId,
+          status: "cancelled",
+          result: { conclusion: "cancelled" }
+        }
+      });
+      const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_linear_agent_stop");
+      await expect(queuedFollowUp.json()).resolves.toMatchObject({
+        followUpRequest: {
+          id: "follow_up_linear_agent_stop",
+          status: "queued"
+        }
+      });
+      expect(graphqlRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            authorization: "lin_api_token",
+            body: expect.objectContaining({ query: expect.stringContaining("agentSessionUpdate") })
+          }),
+          expect.objectContaining({
+            authorization: "lin_api_token",
+            body: expect.objectContaining({
+              query: expect.stringContaining("agentActivityCreate"),
+              variables: expect.objectContaining({
+                input: expect.objectContaining({
+                  agentSessionId: "agent_session_stop_1",
+                  content: expect.objectContaining({
+                    type: "response",
+                    body: expect.stringContaining("Cancellation requested for run")
+                  })
+                })
+              })
+            })
+          })
+        ])
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("refreshes OAuth relay installations uploaded through the static relay endpoint", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        now: () => new Date("2026-07-07T00:10:00.000Z"),
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
+      }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    const stored = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_oauth",
+        webhookPath: "/linear/webhooks/install_oauth",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_old",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_old",
+          accessTokenExpiresAt: "2026-07-07T00:00:00.000Z",
+          scopes: ["read", "comments:create"]
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(stored.status).toBe(201);
+    const storedBody = await stored.json();
+    expect(JSON.stringify(storedBody)).not.toContain("linear_access_old");
+    expect(JSON.stringify(storedBody)).not.toContain("linear_refresh_old");
+
+    const originalFetch = globalThis.fetch;
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlRequests: Array<{ authorization?: string | null; body?: unknown }> = [];
+    globalThis.fetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        return Response.json({
+          access_token: "linear_access_refreshed",
+          refresh_token: "linear_refresh_new",
+          expires_in: 3600,
+          scope: "read,comments:create"
+        });
+      }
+      if (requestUrl === "https://linear.example/graphql") {
+        graphqlRequests.push({
+          authorization: init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization,
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+    }) as typeof fetch;
+
+    try {
+      const payload = {
+        type: "Comment",
+        action: "create",
+        webhookId: "linear_delivery_oauth",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_1",
+          body: "@opentag run dynamic oauth relay smoke",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue: {
+            id: "issue_1",
+            identifier: "ENG-1",
+            title: "Demo",
+            url: "https://linear.app/acme/issue/ENG-1/demo",
+            team: { id: "team_1", key: "ENG" }
+          },
+          user: { id: "user_1", name: "Ada" }
+        }
+      };
+      const rawBody = JSON.stringify(payload);
+      const response = await app.request("/linear/webhooks/install_oauth", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
+        },
+        body: rawBody
+      });
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, runId: expect.any(String) });
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          refresh_token: "linear_refresh_old",
+          grant_type: "refresh_token",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlRequests).toHaveLength(1);
+      expect(graphqlRequests[0]).toMatchObject({
+        authorization: "Bearer linear_access_refreshed"
+      });
+      expect(String((graphqlRequests[0]!.body as { query: string }).query)).toContain("commentCreate");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("shares claim state across relay deliveries so a mention's comment and session events yield one run", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        now: () => new Date("2026-07-07T00:10:00.000Z"),
+        refreshSkewMs: 0,
+        commentRunDeferMs: 40
+      }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    );
+    const stored = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_dedupe",
+        webhookPath: "/linear/webhooks/install_dedupe",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_fresh",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_fresh",
+          accessTokenExpiresAt: "2026-07-08T00:00:00.000Z"
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(stored.status).toBe(201);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url) => {
+      if (String(url) === "https://linear.example/graphql") {
+        return Response.json({
+          data: {
+            agentSessionUpdate: { success: true },
+            agentActivityCreate: { success: true, agentActivity: { id: "activity_ack_1" } }
+          }
+        });
+      }
+      throw new Error(`Unexpected request: ${String(url)}`);
+    }) as typeof fetch;
+
+    try {
+      const issue = {
+        id: "issue_1",
+        identifier: "ENG-1",
+        title: "Demo",
+        url: "https://linear.app/acme/issue/ENG-1/demo",
+        team: { id: "team_1", key: "ENG" }
+      };
+      const commentBody = JSON.stringify({
+        type: "Comment",
+        action: "create",
+        webhookId: "webhook_constant",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:10:00.000Z",
+        webhookTimestamp: Date.now(),
+        data: {
+          id: "comment_mention_dedupe",
+          body: "@opentag run relay dedupe smoke",
+          url: "https://linear.app/acme/issue/ENG-1/demo#comment",
+          issue,
+          user: { id: "user_1", name: "Ada" }
+        }
+      });
+      const sessionBody = JSON.stringify({
+        type: "AgentSessionEvent",
+        action: "created",
+        webhookId: "webhook_constant",
+        organizationId: "org_1",
+        createdAt: "2026-07-07T00:10:00.000Z",
+        webhookTimestamp: Date.now(),
+        agentSession: {
+          id: "agent_session_dedupe",
+          commentId: "comment_mention_dedupe",
+          creator: { id: "user_1", name: "Ada" },
+          comment: { id: "comment_mention_dedupe", body: "@opentag run relay dedupe smoke" },
+          issue
+        }
+      });
+
+      const commentResponse = await app.request("/linear/webhooks/install_dedupe", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: commentBody })
+        },
+        body: commentBody
+      });
+      await expect(commentResponse.json()).resolves.toEqual({ ok: true, deferred: true });
+
+      const sessionResponse = await app.request("/linear/webhooks/install_dedupe", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody: sessionBody })
+        },
+        body: sessionBody
+      });
+      const sessionResult = (await sessionResponse.json()) as { runId?: string };
+      expect(sessionResult.runId).toBeTruthy();
+
+      await new Promise((resolve) => setTimeout(resolve, 90));
+
+      const firstClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      expect(firstClaim.status).toBe(200);
+      const firstClaimBody = (await firstClaim.json()) as { run: { id: string } };
+      expect(firstClaimBody.run.id).toBe(sessionResult.runId);
+
+      const secondClaim = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+      expect(secondClaim.status).toBe(204);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("deduplicates concurrent OAuth relay installation refreshes into a single token request", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      linearOAuthInstall: {
+        clientId: "linear_client",
+        clientSecret: "linear_secret",
+        redirectUri: "https://relay.example/linear/oauth/callback",
+        tokenUrl: "https://linear.example/oauth/token",
+        now: () => new Date("2026-07-07T00:10:00.000Z"),
+        refreshSkewMs: 0,
+        commentRunDeferMs: 0
+      }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Runner 1" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        runnerId: "runner_1"
+      })
+    );
+    const stored = await app.request(
+      "/v1/linear-relay-installations",
+      jsonRequest({
+        id: "install_oauth",
+        webhookPath: "/linear/webhooks/install_oauth",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_old",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_old",
+          accessTokenExpiresAt: "2026-07-07T00:00:00.000Z",
+          scopes: ["read", "comments:create"]
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    );
+    expect(stored.status).toBe(201);
+
+    const originalFetch = globalThis.fetch;
+    const tokenRequests: Array<Record<string, string>> = [];
+    const graphqlAuthorizations: Array<string | null | undefined> = [];
+    globalThis.fetch = (async (url, init) => {
+      const requestUrl = String(url);
+      if (requestUrl === "https://linear.example/oauth/token") {
+        const body = new URLSearchParams(String(init?.body ?? ""));
+        tokenRequests.push(Object.fromEntries(body.entries()));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        return Response.json({
+          access_token: "linear_access_refreshed",
+          refresh_token: "linear_refresh_new",
+          expires_in: 3600,
+          scope: "read,comments:create"
+        });
+      }
+      if (requestUrl === "https://linear.example/graphql") {
+        graphqlAuthorizations.push(
+          init?.headers instanceof Headers ? init.headers.get("authorization") : (init?.headers as Record<string, string> | undefined)?.authorization
+        );
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "linear_comment_1", url: "https://linear.app/acme/issue/ENG-1#comment" }
+            }
+          }
+        });
+      }
+      throw new Error(`Unexpected Linear test request: ${requestUrl}`);
+    }) as typeof fetch;
+
+    try {
+      const webhookRequest = (input: { webhookId: string; commentId: string }) => {
+        const rawBody = JSON.stringify({
+          type: "Comment",
+          action: "create",
+          webhookId: input.webhookId,
+          organizationId: "org_1",
+          createdAt: "2026-07-07T00:00:00.000Z",
+          webhookTimestamp: Date.now(),
+          data: {
+            id: input.commentId,
+            body: "@opentag run concurrent oauth refresh smoke",
+            url: `https://linear.app/acme/issue/ENG-1/demo#${input.commentId}`,
+            issue: {
+              id: "issue_1",
+              identifier: "ENG-1",
+              title: "Demo",
+              url: "https://linear.app/acme/issue/ENG-1/demo",
+              team: { id: "team_1", key: "ENG" }
+            },
+            user: { id: "user_1", name: "Ada" }
+          }
+        });
+        return app.request("/linear/webhooks/install_oauth", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "linear-signature": computeLinearSignature({ webhookSecret: "linear_webhook_secret", rawBody })
+          },
+          body: rawBody
+        });
+      };
+
+      const [first, second] = await Promise.all([
+        webhookRequest({ webhookId: "linear_delivery_concurrent_1", commentId: "comment_concurrent_1" }),
+        webhookRequest({ webhookId: "linear_delivery_concurrent_2", commentId: "comment_concurrent_2" })
+      ]);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(tokenRequests).toEqual([
+        {
+          client_id: "linear_client",
+          refresh_token: "linear_refresh_old",
+          grant_type: "refresh_token",
+          client_secret: "linear_secret"
+        }
+      ]);
+      expect(graphqlAuthorizations).toHaveLength(2);
+      expect(graphqlAuthorizations).toEqual(["Bearer linear_access_refreshed", "Bearer linear_access_refreshed"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("records management audit events for repo policy and mutation mapping changes without rule details", async () => {
@@ -6006,6 +7386,117 @@ describe("dispatcher API", () => {
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://gitlab.example.com/acme/demo/-/merge_requests/42"))).toBe(true);
   });
 
+  it("applies a model-suggested Linear issue priority update from a Linear source-thread reply", async () => {
+    const linearRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      linearApply: {
+        async getToken() {
+          return "Bearer refreshed_app_token";
+        },
+        mappings: [
+          {
+            id: "linear_priority_priority",
+            adapter: "linear",
+            domain: "priority",
+            strategy: "priority",
+            values: { high: "2" }
+          }
+        ],
+        fetchImpl: async (url, init) => {
+          linearRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return Response.json({
+            data: {
+              issueUpdate: {
+                success: true,
+                issue: { id: "issue_123", url: "https://linear.app/acme/issue/ENG-1/demo" }
+              }
+            }
+          });
+        }
+      }
+    });
+
+    await seedCompletedProposal({
+      app,
+      runId: "run_linear_comment",
+      event: linearIssueEvent({ id: "evt_linear_comment", sourceEventId: "linear_comment_1", threadKey: "ENG|issue|ENG-1" }),
+      repoBinding: { provider: "github", owner: "acme", repo: "demo" },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_linear_comment",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Update Linear issue priority.",
+          intents: [
+            {
+              intentId: "intent_linear_comment",
+              domain: "priority",
+              action: "set_priority",
+              summary: "Set Linear issue priority to high.",
+              params: {
+                priority: "high"
+              }
+            }
+          ]
+        }
+      ]
+    });
+    linearRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "linear", providerUserId: "user_1", handle: "alice" },
+      callback: {
+        provider: "linear",
+        uri: "linear://issue/issue_123/comments",
+        threadKey: "ENG|issue|ENG-1"
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        adapter: "linear",
+        proposalId: "proposal_linear_comment",
+        outcomes: [
+          {
+            intentId: "intent_linear_comment",
+            outcome: "applied",
+            externalUri: "https://linear.app/acme/issue/ENG-1/demo"
+          }
+        ]
+      }
+    });
+    expect(linearRequests).toHaveLength(1);
+    expect(linearRequests[0]).toMatchObject({
+      url: "https://linear.example/graphql",
+      method: "POST",
+      authorization: "Bearer refreshed_app_token",
+      body: {
+        variables: {
+          id: "issue_123",
+          input: {
+            priority: 2
+          }
+        }
+      }
+    });
+    expect(String((linearRequests[0]!.body as { query: string }).query)).toContain("issueUpdate");
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://linear.app/acme/issue/ENG-1/demo"))).toBe(true);
+  });
+
   it("falls back with a quiet receipt when GitLab MR creation fails", async () => {
     const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
     const delivered: Array<{ kind: string; body: string }> = [];
@@ -6228,6 +7719,174 @@ describe("dispatcher API", () => {
     expect(finalMessage?.body).not.toContain("..");
     expect(finalMessage?.body).not.toContain("proposal_slack_create_pr");
     expect(finalMessage?.body).not.toContain("intent_slack_create_pr");
+  });
+
+  it("routes Slack source-thread Linear issue creation through the Linear adapter", async () => {
+    const linearRequests: Array<{ url: string; method?: string; body?: unknown; authorization?: string | null }> = [];
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push({ kind: message.kind, body: message.body });
+        }
+      },
+      linearApply: {
+        token: "Bearer linear_app_token",
+        graphqlUrl: "https://linear.example/graphql",
+        mappings: [
+          {
+            id: "linear_team",
+            adapter: "linear",
+            domain: "team",
+            strategy: "team_id",
+            values: { eng: "team_eng" }
+          },
+          {
+            id: "linear_priority",
+            adapter: "linear",
+            domain: "priority",
+            strategy: "priority",
+            values: { high: "2" }
+          },
+          {
+            id: "linear_label",
+            adapter: "linear",
+            domain: "label",
+            strategy: "label_id",
+            values: { bug: "label_bug" }
+          }
+        ],
+        fetchImpl: async (url, init) => {
+          linearRequests.push({
+            url: String(url),
+            method: init?.method,
+            ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+            authorization: new Headers(init?.headers).get("authorization")
+          });
+          return Response.json({
+            data: {
+              issueCreate: {
+                success: true,
+                issue: {
+                  id: "issue_created",
+                  url: "https://linear.app/acme/issue/ENG-456/fix-oauth-callback-error"
+                }
+              }
+            }
+          });
+        }
+      }
+    });
+
+    const event = slackRepoEvent({
+      id: "evt_slack_create_linear_issue",
+      sourceEventId: "slack_thread_create_linear_issue",
+      threadKey: "T123|C123|1710000000.000100"
+    });
+    await seedCompletedProposal({
+      app,
+      runId: "run_slack_create_linear_issue",
+      event: {
+        ...event,
+        permissions: [
+          ...event.permissions,
+          { scope: "issue:create", reason: "create a Linear issue after source-thread approval" }
+        ]
+      },
+      suggestedChanges: [
+        {
+          proposalId: "proposal_slack_create_linear_issue",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Create a Linear issue from the Slack thread.",
+          intents: [
+            {
+              intentId: "intent_slack_create_linear_issue",
+              domain: "issue",
+              action: "create_issue",
+              summary: "Create a Linear issue for the OAuth callback error.",
+              params: {
+                title: "Fix OAuth callback error",
+                body: "Created from a Slack thread.",
+                teamKey: "ENG",
+                priority: "high",
+                labels: ["bug"]
+              }
+            }
+          ]
+        }
+      ]
+    });
+    const bindingResponse = await app.request("/v1/slack-channel-bindings", jsonRequest({
+      teamId: "T123",
+      channelId: "C123",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    expect(bindingResponse.status).toBe(201);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Ready to apply"))).toBe(true);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("Create a Linear issue"))).toBe(true);
+    linearRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100"
+      }
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      plan: {
+        adapter: "linear",
+        proposalId: "proposal_slack_create_linear_issue",
+        outcomes: [
+          {
+            intentId: "intent_slack_create_linear_issue",
+            outcome: "applied",
+            externalId: "issue_created",
+            externalUri: "https://linear.app/acme/issue/ENG-456/fix-oauth-callback-error"
+          }
+        ]
+      }
+    });
+    expect(linearRequests).toHaveLength(1);
+    expect(linearRequests[0]).toMatchObject({
+      url: "https://linear.example/graphql",
+      method: "POST",
+      authorization: "Bearer linear_app_token",
+      body: {
+        variables: {
+          input: {
+            title: "Fix OAuth callback error",
+            description: "Created from a Slack thread.",
+            teamId: "team_eng",
+            priority: 2,
+            labelIds: ["label_bug"]
+          }
+        }
+      }
+    });
+    expect(String((linearRequests[0]!.body as { query: string }).query)).toContain("issueCreate");
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("https://linear.app/acme/issue/ENG-456/fix-oauth-callback-error"))).toBe(true);
+
+    const repeated = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
+      callback: {
+        provider: "slack",
+        uri: "https://slack.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100"
+      }
+    }));
+    expect(repeated.status).toBe(200);
+    await expect(repeated.json()).resolves.toMatchObject({ outcome: "already_applied" });
+    expect(linearRequests).toHaveLength(1);
+    expect(delivered.some((message) => message.kind === "final" && message.body.includes("No external write was repeated."))).toBe(true);
   });
 
   it("falls back to a child run when a PR review request lacks reviewer params", async () => {

@@ -1,5 +1,6 @@
 import {
   formatProjectTargetRef,
+  parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
   type OpenTagEvent,
   type OpenTagRun,
@@ -10,6 +11,7 @@ import {
   assessRunnerSecurity,
   formatSecurityAssessment,
   createAgentSessionProfileForEvent,
+  createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
   type ExecutorAdapter,
   type RunnerSecurityPolicy,
@@ -194,6 +196,17 @@ export async function runOneDaemonIteration(input: {
       conclusion: "needs_human",
       summary: "No local workspace mapping is configured for this run's repository."
     });
+    return true;
+  }
+  // Pure work-context mutation requests ("set priority to High") never need an
+  // executor: compile them into a suggested-changes proposal so the source thread
+  // gets an action receipt and the mutation stays behind the governed apply path.
+  const mutationRequests = parseWorkContextMutationCommand(claimed.event.command.rawText);
+  if (mutationRequests) {
+    await input.client.complete(
+      claimed.run.id,
+      createWorkContextMutationRunResult({ runId: claimed.run.id, requests: mutationRequests })
+    );
     return true;
   }
   const executorId = claimed.event.target.executorHint ?? binding.defaultExecutor ?? "echo";

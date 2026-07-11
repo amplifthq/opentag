@@ -341,7 +341,7 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
   const owner = process.env.OPENTAG_REPO_OWNER;
   const repo = process.env.OPENTAG_REPO_NAME;
   const checkoutPath = process.env.OPENTAG_WORKSPACE_PATH;
-  const repositoryProvider = process.env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
+  const repositoryProvider = process.env.OPENTAG_REPO_PROVIDER ?? process.env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
   const claudePermissionMode = claudePermissionModeFromEnv(process.env.OPENTAG_CLAUDE_PERMISSION_MODE);
   const runnerTokens = stringListFromJsonEnv("OPENTAG_RUNNER_TOKENS_JSON");
   const revokedRunnerTokenFingerprints = stringListFromJsonEnv("OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON");

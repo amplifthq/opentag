@@ -33,6 +33,7 @@ const PERMISSION_SCOPES = new Set<PermissionGrant["scope"]>([
   "repo:read",
   "repo:write",
   "issue:comment",
+  "issue:create",
   "chat:postMessage",
   "reactions:write",
   "pr:create",

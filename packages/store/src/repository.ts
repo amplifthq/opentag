@@ -44,6 +44,8 @@ import {
   approvalDecisions,
   channelBindings,
   controlPlaneEvents,
+  linearOAuthInstallStates,
+  linearRelayInstallations,
   repoBindings,
   repoMutationMappings,
   repoPolicyRules,
@@ -151,6 +153,55 @@ export type SlackChannelBinding = {
   repoProvider?: string;
   owner: string;
   repo: string;
+};
+
+export type LinearRelayInstallation = {
+  id: string;
+  webhookPath: string;
+  webhookSecret: string;
+  token: string;
+  auth?: LinearRelayInstallationAuth;
+  graphqlUrl?: string;
+  repoProvider: string;
+  owner: string;
+  repo: string;
+  organizationId?: string;
+  teamId?: string;
+  teamKey?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LinearRelayInstallationAuth =
+  | {
+      method: "api_key";
+    }
+  | {
+      method: "oauth_app";
+      actor: "app";
+      clientId?: string;
+      refreshToken?: string;
+      accessTokenExpiresAt?: string;
+      appUserId?: string;
+      scopes?: string[];
+    };
+
+export type LinearOAuthInstallState = {
+  state: string;
+  installationId: string;
+  webhookPath: string;
+  webhookSecret: string;
+  redirectUri: string;
+  graphqlUrl?: string;
+  repoProvider: string;
+  owner: string;
+  repo: string;
+  teamId?: string;
+  teamKey?: string;
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string;
+  completedAt?: string;
 };
 
 export type RunnerRegistration = {
@@ -549,6 +600,81 @@ function channelBindingFromRow(row: typeof channelBindings.$inferSelect): Channe
     owner: row.owner,
     repo: row.repo,
     ...(metadata ? { metadata } : {})
+  };
+}
+
+function stringArrayFromJson(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseLinearRelayInstallationAuth(value: string | null): LinearRelayInstallationAuth | undefined {
+  if (!value) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (record.method === "api_key") return { method: "api_key" };
+  if (record.method !== "oauth_app" || record.actor !== "app") return undefined;
+  const scopes = Array.isArray(record.scopes) ? record.scopes.filter((item): item is string => typeof item === "string" && item.length > 0) : undefined;
+  return {
+    method: "oauth_app",
+    actor: "app",
+    ...(typeof record.clientId === "string" && record.clientId.length > 0 ? { clientId: record.clientId } : {}),
+    ...(typeof record.refreshToken === "string" && record.refreshToken.length > 0 ? { refreshToken: record.refreshToken } : {}),
+    ...(typeof record.accessTokenExpiresAt === "string" && record.accessTokenExpiresAt.length > 0
+      ? { accessTokenExpiresAt: record.accessTokenExpiresAt }
+      : {}),
+    ...(typeof record.appUserId === "string" && record.appUserId.length > 0 ? { appUserId: record.appUserId } : {}),
+    ...(scopes?.length ? { scopes } : {})
+  };
+}
+
+function linearRelayInstallationFromRow(row: typeof linearRelayInstallations.$inferSelect): LinearRelayInstallation {
+  const auth = parseLinearRelayInstallationAuth(row.authJson);
+  return {
+    id: row.id,
+    webhookPath: row.webhookPath,
+    webhookSecret: row.webhookSecret,
+    token: row.token,
+    ...(auth ? { auth } : {}),
+    ...(row.graphqlUrl ? { graphqlUrl: row.graphqlUrl } : {}),
+    repoProvider: row.repoProvider,
+    owner: row.owner,
+    repo: row.repo,
+    ...(row.organizationId ? { organizationId: row.organizationId } : {}),
+    ...(row.teamId ? { teamId: row.teamId } : {}),
+    ...(row.teamKey ? { teamKey: row.teamKey } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function linearOAuthInstallStateFromRow(row: typeof linearOAuthInstallStates.$inferSelect): LinearOAuthInstallState {
+  return {
+    state: row.state,
+    installationId: row.installationId,
+    webhookPath: row.webhookPath,
+    webhookSecret: row.webhookSecret,
+    redirectUri: row.redirectUri,
+    ...(row.graphqlUrl ? { graphqlUrl: row.graphqlUrl } : {}),
+    repoProvider: row.repoProvider,
+    owner: row.owner,
+    repo: row.repo,
+    ...(row.teamId ? { teamId: row.teamId } : {}),
+    ...(row.teamKey ? { teamKey: row.teamKey } : {}),
+    scopes: stringArrayFromJson(row.scopesJson),
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+    ...(row.completedAt ? { completedAt: row.completedAt } : {})
   };
 }
 
@@ -1116,13 +1242,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async findCancelableRunForConversation(input: { conversationKeys: string[] }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
       const keys = [...new Set(input.conversationKeys.filter((key) => key.length > 0))];
       if (keys.length === 0) return null;
-      const row = await db
+      const rows = await db
         .select()
         .from(runs)
         .where(and(inArray(runs.conversationKey, keys), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
-        .orderBy(asc(runs.createdAt))
-        .limit(1)
-        .get();
+        .orderBy(asc(runs.createdAt));
+      // A run parked in needs_approval can sit in the conversation indefinitely; the run
+      // that is actually executing (or about to) is the one status/stop should target.
+      const row = rows.find((candidate) => candidate.status !== "needs_approval") ?? rows[0];
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -1446,6 +1573,165 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .where(and(eq(repoMutationMappings.provider, input.provider), eq(repoMutationMappings.owner, input.owner), eq(repoMutationMappings.repo, input.repo)))
         .orderBy(asc(repoMutationMappings.createdAt));
       return rows.map((row) => AdapterMutationMappingSchema.parse(JSON.parse(row.mappingJson)));
+    },
+
+    async upsertLinearRelayInstallation(input: {
+      id: string;
+      webhookPath: string;
+      webhookSecret: string;
+      token: string;
+      auth?: LinearRelayInstallationAuth;
+      graphqlUrl?: string;
+      repoProvider: string;
+      owner: string;
+      repo: string;
+      organizationId?: string;
+      teamId?: string;
+      teamKey?: string;
+    }): Promise<LinearRelayInstallation> {
+      const createdAt = nowIso();
+      const authJson = input.auth ? JSON.stringify(input.auth) : null;
+      await db
+        .insert(linearRelayInstallations)
+        .values({
+          id: input.id,
+          webhookPath: input.webhookPath,
+          webhookSecret: input.webhookSecret,
+          token: input.token,
+          authJson,
+          graphqlUrl: input.graphqlUrl ?? null,
+          repoProvider: input.repoProvider,
+          owner: input.owner,
+          repo: input.repo,
+          organizationId: input.organizationId ?? null,
+          teamId: input.teamId ?? null,
+          teamKey: input.teamKey ?? null,
+          createdAt,
+          updatedAt: createdAt
+        })
+        .onConflictDoUpdate({
+          target: linearRelayInstallations.id,
+          set: {
+            webhookPath: input.webhookPath,
+            webhookSecret: input.webhookSecret,
+            token: input.token,
+            authJson,
+            graphqlUrl: input.graphqlUrl ?? null,
+            repoProvider: input.repoProvider,
+            owner: input.owner,
+            repo: input.repo,
+            organizationId: input.organizationId ?? null,
+            teamId: input.teamId ?? null,
+            teamKey: input.teamKey ?? null,
+            updatedAt: createdAt
+          }
+        });
+      const [row] = await db.select().from(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id)).limit(1);
+      if (!row) {
+        throw new Error(`Linear relay installation ${input.id} was not stored.`);
+      }
+      return linearRelayInstallationFromRow(row);
+    },
+
+    async getLinearRelayInstallation(input: { id: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db.select().from(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id)).limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async getLinearRelayInstallationByOrganizationId(input: { organizationId: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db
+        .select()
+        .from(linearRelayInstallations)
+        .where(eq(linearRelayInstallations.organizationId, input.organizationId))
+        .limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async getLinearRelayInstallationByWebhookPath(input: { webhookPath: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db
+        .select()
+        .from(linearRelayInstallations)
+        .where(eq(linearRelayInstallations.webhookPath, input.webhookPath))
+        .limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async deleteLinearRelayInstallation(input: { id: string }): Promise<boolean> {
+      const result = await db.delete(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id));
+      return result.changes > 0;
+    },
+
+    async createLinearOAuthInstallState(input: {
+      state: string;
+      installationId: string;
+      webhookPath: string;
+      webhookSecret: string;
+      redirectUri: string;
+      graphqlUrl?: string;
+      repoProvider: string;
+      owner: string;
+      repo: string;
+      teamId?: string;
+      teamKey?: string;
+      scopes: string[];
+      expiresAt: string;
+    }): Promise<LinearOAuthInstallState> {
+      const createdAt = nowIso();
+      await db
+        .insert(linearOAuthInstallStates)
+        .values({
+          state: input.state,
+          installationId: input.installationId,
+          webhookPath: input.webhookPath,
+          webhookSecret: input.webhookSecret,
+          redirectUri: input.redirectUri,
+          graphqlUrl: input.graphqlUrl ?? null,
+          repoProvider: input.repoProvider,
+          owner: input.owner,
+          repo: input.repo,
+          teamId: input.teamId ?? null,
+          teamKey: input.teamKey ?? null,
+          scopesJson: JSON.stringify(input.scopes),
+          createdAt,
+          expiresAt: input.expiresAt,
+          completedAt: null
+        })
+        .onConflictDoUpdate({
+          target: linearOAuthInstallStates.state,
+          set: {
+            installationId: input.installationId,
+            webhookPath: input.webhookPath,
+            webhookSecret: input.webhookSecret,
+            redirectUri: input.redirectUri,
+            graphqlUrl: input.graphqlUrl ?? null,
+            repoProvider: input.repoProvider,
+            owner: input.owner,
+            repo: input.repo,
+            teamId: input.teamId ?? null,
+            teamKey: input.teamKey ?? null,
+            scopesJson: JSON.stringify(input.scopes),
+            createdAt,
+            expiresAt: input.expiresAt,
+            completedAt: null
+          }
+        });
+      const [row] = await db.select().from(linearOAuthInstallStates).where(eq(linearOAuthInstallStates.state, input.state)).limit(1);
+      if (!row) {
+        throw new Error(`Linear OAuth install state ${input.state} was not stored.`);
+      }
+      return linearOAuthInstallStateFromRow(row);
+    },
+
+    async getLinearOAuthInstallState(input: { state: string }): Promise<LinearOAuthInstallState | null> {
+      const [row] = await db.select().from(linearOAuthInstallStates).where(eq(linearOAuthInstallStates.state, input.state)).limit(1);
+      return row ? linearOAuthInstallStateFromRow(row) : null;
+    },
+
+    async completeLinearOAuthInstallState(input: { state: string; completedAt?: string }): Promise<void> {
+      await db
+        .update(linearOAuthInstallStates)
+        .set({ completedAt: input.completedAt ?? nowIso() })
+        .where(eq(linearOAuthInstallStates.state, input.state));
     },
 
     async upsertChannelBinding(input: ChannelBinding): Promise<void> {

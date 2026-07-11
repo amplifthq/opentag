@@ -13,6 +13,7 @@ describe("platform catalog command", () => {
     expect(output).toContain("Lark / Feishu: events=yes");
     expect(output).toContain("Slack: events=yes");
     expect(output).toContain("GitHub: events=yes");
+    expect(output).toContain("Linear: events=yes");
     expect(output).toContain("Telegram: events=yes");
     expect(output).toContain("Discord: events=yes");
     expect(output).toContain("rich=yes");

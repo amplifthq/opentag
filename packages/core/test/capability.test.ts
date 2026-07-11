@@ -11,6 +11,7 @@ describe("platform capability catalog", () => {
   it("declares source-thread liveness strategies for built-in platforms", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.github.livenessStrategy).toBe("status_update");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.gitlab.livenessStrategy).toBe("thread_reply");
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.linear.livenessStrategy).toBe("thread_reply");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.slack.livenessStrategy).toBe("source_receipt");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.lark.livenessStrategy).toBe("source_receipt");
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.telegram.livenessStrategy).toBe("status_update");
@@ -23,11 +24,14 @@ describe("platform capability catalog", () => {
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.slack.supportsActionReplies).toBe(true);
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.gitlab.supportsRichPresentation).toBe(false);
     expect(OPEN_TAG_PLATFORM_CAPABILITIES.gitlab.supportsActionReplies).toBe(true);
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.linear.supportsRichPresentation).toBe(false);
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.linear.supportsActionReplies).toBe(true);
   });
 
   it("maps liveness strategies to callback delivery behavior", () => {
     expect(shouldDeliverCallbackRunStatus("github")).toBe(true);
     expect(shouldDeliverCallbackRunStatus("gitlab")).toBe(true);
+    expect(shouldDeliverCallbackRunStatus("linear")).toBe(true);
     expect(shouldDeliverCallbackRunStatus("telegram")).toBe(true);
     expect(shouldDeliverCallbackRunStatus("slack")).toBe(false);
     expect(shouldDeliverCallbackRunStatus("lark")).toBe(false);
@@ -35,6 +39,7 @@ describe("platform capability catalog", () => {
 
     expect(shouldDeliverCallbackProgress("github")).toBe(true);
     expect(shouldDeliverCallbackProgress("gitlab")).toBe(false);
+    expect(shouldDeliverCallbackProgress("linear")).toBe(false);
     expect(shouldDeliverCallbackProgress("telegram")).toBe(true);
     expect(shouldDeliverCallbackProgress("slack")).toBe(false);
     expect(shouldDeliverCallbackProgress("lark")).toBe(false);

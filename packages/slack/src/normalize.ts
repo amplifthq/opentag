@@ -74,9 +74,18 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
 const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i;
 const REPO_WRITE_TARGET_PATTERN =
   /\b(repo|repository|code|file|files|branch|commit|diff|patch|readme|pr|pull\s+request|package\.json|pnpm|npm|test|build)\b|(?:^|\s)[./\w-]+\.(?:cjs|css|gitignore|go|html|js|json|jsx|lock|md|mjs|py|rb|rs|sh|toml|ts|tsx|txt|yaml|yml)\b|(?:^|[\s`'"(])(?:[./\w-]+\/)?(?:Dockerfile|Makefile|Procfile|Rakefile|Gemfile|Brewfile|Justfile|Taskfile|\.dockerignore|\.env(?:\.[\w-]+)?|\.gitignore|\.npmrc)(?=$|[\s`'",.):])/i;
+const LINEAR_ISSUE_CREATE_PATTERN = /(?=.*\blinear\b)(?=.*\b(?:issue|task|ticket)\b)(?=.*\b(?:add|create|file|open)\b)/i;
 
 function commandLooksRepoWriteCapable(command: OpenTagCommand): boolean {
   return UNKNOWN_WRITE_VERB_PATTERN.test(command.rawText) && REPO_WRITE_TARGET_PATTERN.test(command.rawText);
+}
+
+function commandLooksLinearIssueCreateCapable(command: OpenTagCommand): boolean {
+  return LINEAR_ISSUE_CREATE_PATTERN.test(command.rawText);
+}
+
+function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGrant): void {
+  if (!permissions.some((permission) => permission.scope === grant.scope)) permissions.push(grant);
 }
 
 function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
@@ -96,20 +105,32 @@ function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
   ];
 
   if (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksRepoWriteCapable(command))) {
-    permissions.push(
-      {
-        scope: "repo:read",
-        reason: "inspect the repository in the paired local checkout"
-      },
-      {
-        scope: "repo:write",
-        reason: "commit code changes on an isolated run branch"
-      },
-      {
-        scope: "pr:create",
-        reason: "open a pull request for completed code changes"
-      }
-    );
+    addPermissionGrant(permissions, {
+      scope: "repo:read",
+      reason: "inspect the repository in the paired local checkout"
+    });
+    addPermissionGrant(permissions, {
+      scope: "repo:write",
+      reason: "commit code changes on an isolated run branch"
+    });
+    addPermissionGrant(permissions, {
+      scope: "pr:create",
+      reason: "open a pull request for completed code changes"
+    });
+  }
+
+  if (commandLooksLinearIssueCreateCapable(command)) {
+    addPermissionGrant(permissions, {
+      scope: "issue:create",
+      reason: "create a Linear issue after explicit source-thread approval"
+    });
+  }
+
+  for (const scope of command.parsed?.requestedScopes ?? []) {
+    addPermissionGrant(permissions, {
+      scope,
+      reason: "requested explicitly in the source-thread command"
+    });
   }
 
   return permissions;

@@ -247,6 +247,39 @@ describe("parseDaemonConfig secret refs", () => {
     }
   });
 
+  it("uses OPENTAG_REPO_PROVIDER for env-derived Project Target bindings", () => {
+    const previous = {
+      OPENTAG_CONFIG_PATH: process.env.OPENTAG_CONFIG_PATH,
+      OPENTAG_REPO_PROVIDER: process.env.OPENTAG_REPO_PROVIDER,
+      OPENTAG_REPO_OWNER: process.env.OPENTAG_REPO_OWNER,
+      OPENTAG_REPO_NAME: process.env.OPENTAG_REPO_NAME,
+      OPENTAG_WORKSPACE_PATH: process.env.OPENTAG_WORKSPACE_PATH
+    };
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_PROVIDER = "gitlab";
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/acme-demo";
+    try {
+      const config = loadConfigFromEnv();
+
+      expect(config.repositories[0]).toMatchObject({
+        provider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/acme-demo"
+      });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
   it("resolves keychain secret refs through the macOS security command", () => {
     const calls: Array<{ args: readonly string[]; file: string; options: { encoding: "utf8" } }> = [];
     const value = readKeychainSecret({ kind: "keychain", service: "opentag", account: "pairing-token" }, (file, args, options) => {

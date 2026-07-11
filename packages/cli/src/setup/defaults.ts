@@ -19,6 +19,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const slack = config.platforms.slack;
   const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
+  const linear = config.platforms.linear;
   const telegram = config.platforms.telegram;
   const discord = config.platforms.discord;
   const hermes = config.daemon.hermes;
@@ -39,11 +40,13 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
             ? { platform: "github" }
             : gitlab
               ? { platform: "gitlab" }
-              : telegram
-                ? { platform: "telegram" }
-                : discord
-                  ? { platform: "discord" }
-              : {}),
+              : linear
+                ? { platform: "linear" }
+                : telegram
+                  ? { platform: "telegram" }
+                  : discord
+                    ? { platform: "discord" }
+                    : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
@@ -77,6 +80,17 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
     ...(lastSetup?.gitlabPort ? { gitlabPort: lastSetup.gitlabPort } : gitlab?.port ? { gitlabPort: gitlab.port } : {}),
     ...(gitlab?.webhookSecret ? { gitlabWebhookSecret: gitlab.webhookSecret } : {}),
     ...(gitlab?.webhookPath ? { gitlabWebhookPath: gitlab.webhookPath } : {}),
+    ...(lastSetup?.linearTeamId ? { linearTeamId: lastSetup.linearTeamId } : linear?.teamId ? { linearTeamId: linear.teamId } : {}),
+    ...(lastSetup?.linearTeamKey ? { linearTeamKey: lastSetup.linearTeamKey } : linear?.teamKey ? { linearTeamKey: linear.teamKey } : {}),
+    ...(lastSetup?.linearAuth
+      ? { linearAuth: lastSetup.linearAuth }
+      : linear?.auth?.method
+        ? { linearAuth: linear.auth.method === "hosted_oauth_app" ? "oauth_app" : linear.auth.method }
+        : {}),
+    ...(lastSetup?.linearPort ? { linearPort: lastSetup.linearPort } : linear?.port ? { linearPort: linear.port } : {}),
+    ...(linear?.webhookSecret ? { linearWebhookSecret: linear.webhookSecret } : {}),
+    ...(linear?.webhookPath ? { linearWebhookPath: linear.webhookPath } : {}),
+    ...(linear?.graphqlUrl ? { linearGraphqlUrl: linear.graphqlUrl } : {}),
     ...(lastSetup?.telegramMode ? { telegramMode: lastSetup.telegramMode } : telegram?.mode ? { telegramMode: telegram.mode } : {}),
     ...(lastSetup?.telegramBotId ? { telegramBotId: lastSetup.telegramBotId } : telegram?.botId ? { telegramBotId: telegram.botId } : {}),
     ...(lastSetup?.telegramBotUsername

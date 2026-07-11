@@ -82,6 +82,125 @@ describe("OpenTag repository", () => {
     expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
   });
 
+  it("migrates legacy Linear relay installations before OAuth auth metadata", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE linear_relay_installations (
+        id TEXT PRIMARY KEY,
+        webhook_path TEXT NOT NULL,
+        webhook_secret TEXT NOT NULL,
+        token TEXT NOT NULL,
+        graphql_url TEXT,
+        repo_provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        team_id TEXT,
+        team_key TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const relayColumns = sqlite.prepare("PRAGMA table_info(linear_relay_installations)").all() as { name: string }[];
+    expect(relayColumns.map((column) => column.name)).toContain("auth_json");
+    expect(relayColumns.map((column) => column.name)).toContain("organization_id");
+    const relayIndexes = sqlite.prepare("PRAGMA index_list(linear_relay_installations)").all() as { name: string }[];
+    expect(relayIndexes.map((index) => index.name)).toContain("linear_relay_installations_organization_idx");
+    const oauthStateColumns = sqlite.prepare("PRAGMA table_info(linear_oauth_install_states)").all() as { name: string }[];
+    expect(oauthStateColumns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(["state", "installation_id", "webhook_secret", "redirect_uri", "scopes_json", "expires_at"])
+    );
+  });
+
+  it("stores Linear relay OAuth auth and install state", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await expect(
+      repo.upsertLinearRelayInstallation({
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_access_token",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_token",
+          accessTokenExpiresAt: "2026-07-07T01:00:00.000Z",
+          scopes: ["read", "write", "comments:create"]
+        },
+        graphqlUrl: "https://linear.example/graphql",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        organizationId: "org_linear_1",
+        teamKey: "ENG"
+      })
+    ).resolves.toMatchObject({
+      id: "install_123",
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: "linear_client",
+        refreshToken: "linear_refresh_token",
+        scopes: ["read", "write", "comments:create"]
+      },
+      graphqlUrl: "https://linear.example/graphql",
+      organizationId: "org_linear_1",
+      teamKey: "ENG"
+    });
+
+    await expect(repo.getLinearRelayInstallationByWebhookPath({ webhookPath: "/linear/webhooks/install_123" })).resolves.toMatchObject({
+      id: "install_123",
+      token: "linear_access_token",
+      auth: {
+        method: "oauth_app",
+        refreshToken: "linear_refresh_token"
+      }
+    });
+    await expect(repo.getLinearRelayInstallationByOrganizationId({ organizationId: "org_linear_1" })).resolves.toMatchObject({
+      id: "install_123",
+      token: "linear_access_token"
+    });
+
+    await expect(repo.deleteLinearRelayInstallation({ id: "install_123" })).resolves.toBe(true);
+    await expect(repo.getLinearRelayInstallationByOrganizationId({ organizationId: "org_linear_1" })).resolves.toBeNull();
+    await expect(repo.deleteLinearRelayInstallation({ id: "install_123" })).resolves.toBe(false);
+
+    await repo.createLinearOAuthInstallState({
+      state: "linear_state",
+      installationId: "install_456",
+      webhookPath: "/linear/webhooks/install_456",
+      webhookSecret: "linear_webhook_secret_456",
+      redirectUri: "https://relay.example/linear/oauth/callback",
+      graphqlUrl: "https://linear.example/graphql",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo",
+      teamId: "team_eng",
+      scopes: ["read", "comments:create"],
+      expiresAt: "2026-07-07T00:10:00.000Z"
+    });
+
+    await expect(repo.getLinearOAuthInstallState({ state: "linear_state" })).resolves.toMatchObject({
+      state: "linear_state",
+      installationId: "install_456",
+      webhookPath: "/linear/webhooks/install_456",
+      redirectUri: "https://relay.example/linear/oauth/callback",
+      scopes: ["read", "comments:create"],
+      teamId: "team_eng"
+    });
+
+    await repo.completeLinearOAuthInstallState({ state: "linear_state", completedAt: "2026-07-07T00:01:00.000Z" });
+    await expect(repo.getLinearOAuthInstallState({ state: "linear_state" })).resolves.toMatchObject({
+      completedAt: "2026-07-07T00:01:00.000Z"
+    });
+  });
+
   it("creates and claims a run once", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

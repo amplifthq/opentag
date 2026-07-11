@@ -6,6 +6,7 @@
     { "path": "packages/dispatcher" },
     { "path": "packages/github" },
     { "path": "packages/lark" },
+    { "path": "packages/linear" },
     { "path": "packages/local-runtime" },
     { "path": "packages/slack" },
     { "path": "packages/telegram" },

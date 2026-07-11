@@ -47,6 +47,22 @@ function gitlabConfig() {
   });
 }
 
+function linearConfig() {
+  return createSetupConfig({
+    language: "en",
+    platform: "linear",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    linear: {
+      token: "lin_api_token",
+      webhookSecret: "linear_webhook_secret",
+      webhookPath: "/linear/webhooks",
+      port: 3070
+    }
+  });
+}
+
 function discordWebhookConfig() {
   return createSetupConfig({
     language: "en",
@@ -79,6 +95,21 @@ function discordGatewayConfig() {
 
 function okFetch(): typeof fetch {
   return vi.fn(async () => Response.json({ ok: true })) as unknown as typeof fetch;
+}
+
+function relayCapabilityFetch(platforms: unknown[]): typeof fetch {
+  return vi.fn(async (url) => {
+    const href = String(url);
+    if (href.endsWith("/healthz")) return Response.json({ ok: true });
+    if (href.endsWith("/v1/relay/capabilities")) {
+      return Response.json({
+        schemaVersion: 1,
+        relay: true,
+        platforms
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }) as unknown as typeof fetch;
 }
 
 describe("OpenTag CLI pair relay", () => {
@@ -230,6 +261,111 @@ describe("OpenTag CLI pair relay", () => {
     expect(readCliConfig(configPath).daemon.dispatcherUrl).toBe(source.daemon.dispatcherUrl);
   });
 
+  it("accepts a Linear relay when capabilities advertise the configured ingress", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const source = linearConfig();
+    writeCliConfigAtomic(configPath, source);
+    const fetchImpl = relayCapabilityFetch([
+      {
+        provider: "linear",
+        ingress: {
+          enabled: true,
+          path: "/linear/webhooks",
+          signatureVerification: "configured"
+        },
+        callback: { enabled: true },
+        apply: { enabled: true }
+      }
+    ]);
+
+    await runPairCommand(
+      { config: configPath, relay: "https://relay.example", register: false },
+      {
+        fetchImpl,
+        logger: {
+          log() {},
+          warn() {}
+        }
+      }
+    );
+
+    expect(readCliConfig(configPath).runtime).toEqual({
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    });
+    expect(fetchImpl).toHaveBeenCalledWith("https://relay.example/v1/relay/capabilities", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("rejects a Linear relay when capabilities do not advertise Linear ingress", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const source = linearConfig();
+    writeCliConfigAtomic(configPath, source);
+
+    await expect(
+      runPairCommand(
+        { config: configPath, relay: "https://relay.example", register: false },
+        {
+          fetchImpl: relayCapabilityFetch([])
+        }
+      )
+    ).rejects.toThrow("Relay https://relay.example is not ready for Linear at /linear/webhooks");
+
+    expect(readCliConfig(configPath).daemon.dispatcherUrl).toBe(source.daemon.dispatcherUrl);
+    expect(readCliConfig(configPath).runtime).toEqual(source.runtime);
+  });
+
+  it("rejects a Linear relay when capabilities advertise ingress without callback/apply readiness", async () => {
+    const configPath = join(tempDir(), "config.json");
+    const source = linearConfig();
+    writeCliConfigAtomic(configPath, source);
+
+    let message = "";
+    try {
+      await runPairCommand(
+        { config: configPath, relay: "https://relay.example", register: false },
+        {
+          fetchImpl: relayCapabilityFetch([
+            {
+              provider: "linear",
+              ingress: {
+                enabled: true,
+                path: "/linear/webhooks",
+                signatureVerification: "configured"
+              },
+              callback: {
+                enabled: false,
+                reason: "OPENTAG_LINEAR_API_KEY or OPENTAG_LINEAR_TOKEN is not configured."
+              },
+              apply: {
+                enabled: false,
+                reason: "OPENTAG_LINEAR_API_KEY or OPENTAG_LINEAR_TOKEN is not configured."
+              }
+            }
+          ])
+        }
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain(
+      "Relay https://relay.example is not ready for Linear at /linear/webhooks: OPENTAG_LINEAR_API_KEY or OPENTAG_LINEAR_TOKEN is not configured."
+    );
+    expect(message).toContain("OPENTAG_LINEAR_API_KEY=<Linear OAuth access token or raw lin_api_... key>");
+    expect(message).toContain("OPENTAG_LINEAR_WEBHOOK_SECRET=<copy platforms.linear.webhookSecret from the local OpenTag config>");
+    expect(message).toContain("OPENTAG_LINEAR_WEBHOOK_PATH=/linear/webhooks");
+    expect(message).toContain(`OPENTAG_LINEAR_REPO_PROVIDER=${source.platforms.linear!.projectTarget.repoProvider}`);
+    expect(message).toContain(`OPENTAG_LINEAR_REPO_OWNER=${source.platforms.linear!.projectTarget.owner}`);
+    expect(message).toContain(`OPENTAG_LINEAR_REPO_NAME=${source.platforms.linear!.projectTarget.repo}`);
+    expect(message).toContain("Secrets are intentionally not printed here.");
+    expect(message).not.toContain("lin_api_token");
+    expect(message).not.toContain("linear_webhook_secret");
+
+    expect(readCliConfig(configPath).daemon.dispatcherUrl).toBe(source.daemon.dispatcherUrl);
+    expect(readCliConfig(configPath).runtime).toEqual(source.runtime);
+  });
+
   it("formats project targets and next steps", () => {
     const source = githubConfig();
     const checkoutPath = source.daemon.repositories[0]?.checkoutPath;
@@ -259,6 +395,20 @@ describe("OpenTag CLI pair relay", () => {
 
     expect(formatted).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
     expect(formatted).toContain("gitlab:acme/team/demo (hasWorkspacePath=yes)");
+  });
+
+  it("includes the Linear relay webhook URL when pairing a Linear config", () => {
+    const source = linearConfig();
+
+    const formatted = formatPairRelaySummary({
+      configPath: "/tmp/config.json",
+      config: source,
+      relayUrl: "https://relay.example",
+      registered: true
+    });
+
+    expect(formatted).toContain("Linear webhook URL: https://relay.example/linear/webhooks");
+    expect(formatted).toContain("local:");
   });
 
   it("includes the Discord relay Interactions Endpoint URL only for webhook mode", () => {

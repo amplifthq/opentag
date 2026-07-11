@@ -2,6 +2,14 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { normalizeGitLabBaseUrl } from "@opentag/gitlab";
+import {
+  buildLinearOAuthAuthorizationUrl,
+  createLinearAdapterMappingDrafts,
+  discoverLinearMetadata,
+  exchangeLinearOAuthCode,
+  type LinearMetadataSnapshot,
+  type LinearOAuthTokenResponse
+} from "@opentag/linear";
 import { validateLarkCredentials, type LarkDomain, type RegisteredLarkPersonalAgent } from "@opentag/lark";
 import {
   defaultExecutorId,
@@ -14,11 +22,11 @@ import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalog
 import { formatPlatformStatus, PLATFORM_CATALOG, parsePlatformId, platformById, type PlatformId } from "../catalogs/platforms.js";
 import { formatSavedLarkCredentialsHint } from "../platforms/lark/display.js";
 import { readLegacyLarkCredentials, type SavedLarkCredentials } from "../platforms/lark/saved-config.js";
-import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
+import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEAR_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT, parseLocalPort } from "../platforms/ports.js";
 import type { PromptAdapter, PromptOption } from "../ui/prompts.js";
-import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
+import { bindingMethodHint, bindingMethodLabel, larkSetupHint, larkSetupLabel, linearAuthHint, linearAuthLabel, slackModeHint, slackModeLabel, t } from "../ui/messages.js";
 import { loadSetupDefaults } from "./defaults.js";
-import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatPlatformSetupGuide, formatSlackCredentialHelp, formatTelegramCredentialHelp } from "./guides.js";
+import { formatDiscordCredentialHelp, formatGitHubTokenHelp, formatGitLabTokenHelp, formatLarkManualCredentialHelp, formatLinearOAuthInstallHelp, formatLinearTokenHelp, formatPlatformSetupGuide, formatSlackCredentialHelp, formatTelegramCredentialHelp } from "./guides.js";
 import { formatSetupReview } from "./summary.js";
 import type {
   BindingMethod,
@@ -28,6 +36,8 @@ import type {
   GitLabSetupInput,
   HermesSetupInput,
   LarkSetupMethod,
+  LinearAuthMethod,
+  LinearSetupInput,
   OpenTagSetupInput,
   SetupDefaults,
   SlackSetupInput,
@@ -79,6 +89,25 @@ export type SetupCommandOptions = {
   gitlabWebhookSecret?: string;
   gitlabWebhookPath?: string;
   gitlabPort?: string;
+  linearAuth?: string;
+  linearToken?: string;
+  linearOauthClientId?: string;
+  linearOauthClientSecret?: string;
+  linearOauthRedirectUri?: string;
+  linearOauthCode?: string;
+  linearOauthAccessToken?: string;
+  linearOauthRefreshToken?: string;
+  linearOauthExpiresAt?: string;
+  linearOauthScopes?: string;
+  linearOauthState?: string;
+  linearDiscoverMetadata?: boolean;
+  linearDiscoveryLimit?: string;
+  linearTeamId?: string;
+  linearTeamKey?: string;
+  linearWebhookSecret?: string;
+  linearWebhookPath?: string;
+  linearPort?: string;
+  linearGraphqlUrl?: string;
   telegramMode?: string;
   telegramBotToken?: string;
   telegramBotId?: string;
@@ -97,6 +126,7 @@ export type SetupCommandOptions = {
   agentProfileTemplate?: string;
   binding?: string;
   force?: boolean;
+  relay?: string;
   yes?: boolean;
   start?: boolean;
   service?: boolean;
@@ -108,6 +138,9 @@ export type SetupFlowDependencies = {
   prompts: PromptAdapter;
   scanLarkPersonalAgent(input: { language: CliLanguage }): Promise<RegisteredLarkPersonalAgent>;
   validateLarkCredentials?(input: { appId: string; appSecret: string; domain: LarkDomain }): Promise<{ botOpenId: string; botName: string }>;
+  exchangeLinearOAuthCode?: typeof exchangeLinearOAuthCode;
+  discoverLinearMetadata?: typeof discoverLinearMetadata;
+  now?: () => Date;
   defaults?: SetupDefaults;
 };
 
@@ -139,6 +172,12 @@ function parseDiscordSetupMode(value: string): DiscordSetupMode {
   throw new Error("Discord mode must be gateway or webhook.");
 }
 
+function parseLinearAuthMethod(value: string): LinearAuthMethod {
+  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized === "api_key" || normalized === "oauth_app") return normalized;
+  throw new Error("Linear auth must be api_key or oauth_app.");
+}
+
 function parseBindingMethod(value: string): BindingMethod {
   if (value === "default_project" || value === "bind_later") return value;
   throw new Error("Binding method must be default_project or bind_later.");
@@ -150,6 +189,7 @@ function parseGitHubRepository(value: string): { owner: string; repo: string } {
   if (!match) {
     throw new Error("GitHub repository must use owner/repo.");
   }
+
   return {
     owner: match[1]!,
     repo: match[2]!.replace(/\.git$/, "")
@@ -194,6 +234,20 @@ function parseGitLabProject(value: string): { projectPathWithNamespace: string; 
 
 function parsePortInput(value: string | undefined, label: string): number | undefined {
   return value === undefined ? undefined : parseLocalPort(value, label);
+}
+
+function parsePositiveIntegerInput(value: string | undefined, label: string): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function splitLinearScopes(value: string | undefined): string[] | undefined {
+  const scopes = value?.split(/[,\s]+/u).map((scope) => scope.trim()).filter(Boolean);
+  return scopes?.length ? scopes : undefined;
 }
 
 function githubRepositoryFromRemote(projectPath: string): string | undefined {
@@ -316,6 +370,14 @@ function generateGitLabWebhookSecret(): string {
   return randomBytes(32).toString("hex");
 }
 
+function generateLinearWebhookSecret(): string {
+  return randomBytes(32).toString("hex");
+}
+
+function generateLinearRelayWebhookPath(): string {
+  return `/linear/webhooks/${randomBytes(12).toString("hex")}`;
+}
+
 function parseGitHubWebhookPath(value: string): string {
   const trimmed = nonEmpty(value, "GitHub webhook path");
   if (!trimmed.startsWith("/")) {
@@ -328,6 +390,14 @@ function parseGitLabWebhookPath(value: string): string {
   const trimmed = nonEmpty(value, "GitLab webhook path");
   if (!trimmed.startsWith("/")) {
     throw new Error("GitLab webhook path must start with /.");
+  }
+  return trimmed;
+}
+
+function parseLinearWebhookPath(value: string): string {
+  const trimmed = nonEmpty(value, "Linear webhook path");
+  if (!trimmed.startsWith("/")) {
+    throw new Error("Linear webhook path must start with /.");
   }
   return trimmed;
 }
@@ -955,6 +1025,332 @@ async function collectGitLabSetup(
   };
 }
 
+function hasLinearOAuthOptions(options: SetupCommandOptions): boolean {
+  return Boolean(
+    options.linearOauthClientId ||
+      options.linearOauthClientSecret ||
+      options.linearOauthRedirectUri ||
+      options.linearOauthCode ||
+      options.linearOauthAccessToken ||
+      options.linearOauthRefreshToken ||
+      options.linearOauthExpiresAt ||
+      options.linearOauthScopes
+  );
+}
+
+function hasLinearLocalOAuthCredentialOptions(options: SetupCommandOptions): boolean {
+  return Boolean(
+    options.linearOauthClientId ||
+      options.linearOauthClientSecret ||
+      options.linearOauthCode ||
+      options.linearOauthAccessToken ||
+      options.linearOauthRefreshToken ||
+      options.linearOauthExpiresAt
+  );
+}
+
+function shouldUseHostedLinearOAuthInstall(options: SetupCommandOptions, authMethod: LinearAuthMethod): boolean {
+  return Boolean(options.relay && authMethod === "oauth_app" && !hasLinearLocalOAuthCredentialOptions(options));
+}
+
+async function collectLinearAuthMethod(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<LinearAuthMethod> {
+  if (options.linearAuth) return parseLinearAuthMethod(options.linearAuth);
+  if (hasLinearOAuthOptions(options)) return "oauth_app";
+  if (options.linearToken) return "api_key";
+  if (options.yes) return defaults.linearAuth ?? (options.relay ? "oauth_app" : "api_key");
+  const initialValue = defaults.linearAuth ?? "oauth_app";
+  return await prompts.select({
+    message: t(language, "linearAuth"),
+    initialValue,
+    options: (["oauth_app", "api_key"] as const).map((method) => ({
+      value: method,
+      label: linearAuthLabel(language, method),
+      hint: linearAuthHint(language, method)
+    }))
+  });
+}
+
+function linearAccessTokenExpiresAt(input: { token: LinearOAuthTokenResponse; fallback?: string; now: () => Date }): string | undefined {
+  if (input.fallback) return input.fallback;
+  if (typeof input.token.expiresIn !== "number" || !Number.isFinite(input.token.expiresIn)) return undefined;
+  return new Date(input.now().getTime() + input.token.expiresIn * 1000).toISOString();
+}
+
+async function collectLinearApiKeyAuth(
+  options: SetupCommandOptions,
+  prompts: PromptAdapter,
+  language: CliLanguage
+): Promise<{ token: string; auth: LinearSetupInput["auth"] }> {
+  return {
+    token: nonEmpty(options.linearToken ?? (await prompts.password({ message: t(language, "linearToken") })), "Linear API key"),
+    auth: { method: "api_key" }
+  };
+}
+
+function collectLinearHostedOAuthAuth(options: SetupCommandOptions): { token?: string; auth: LinearSetupInput["auth"] } {
+  const scopes = splitLinearScopes(options.linearOauthScopes);
+  return {
+    auth: {
+      method: "hosted_oauth_app",
+      actor: "app",
+      ...(scopes ? { scopes } : {})
+    }
+  };
+}
+
+async function collectLinearOAuthAuth(
+  options: SetupCommandOptions,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  dependencies: SetupFlowDependencies
+): Promise<{ token: string; auth: LinearSetupInput["auth"] }> {
+  const clientId = nonEmpty(
+    options.linearOauthClientId ??
+      (options.yes
+        ? ""
+        : await prompts.text({
+            message: t(language, "linearOAuthClientId")
+          })),
+    "Linear OAuth client ID"
+  );
+  const clientSecret = optionalTrimmed(
+    options.linearOauthClientSecret ??
+      (options.yes
+        ? undefined
+        : await prompts.password({
+            message: t(language, "linearOAuthClientSecret")
+          }))
+  );
+  const redirectUri = nonEmpty(
+    options.linearOauthRedirectUri ??
+      (options.yes
+        ? ""
+        : await prompts.text({
+            message: t(language, "linearOAuthRedirectUri")
+          })),
+    "Linear OAuth redirect URI"
+  );
+  const scopes = splitLinearScopes(options.linearOauthScopes);
+  const state = options.linearOauthState ?? `opentag_${randomBytes(12).toString("hex")}`;
+  prompts.note(
+    formatLinearOAuthInstallHelp(language, {
+      authorizationUrl: buildLinearOAuthAuthorizationUrl({
+        clientId,
+        redirectUri,
+        state,
+        ...(scopes ? { scopes } : {}),
+        actor: "app"
+      })
+    })
+  );
+
+  const directAccessToken = optionalTrimmed(options.linearOauthAccessToken);
+  if (directAccessToken) {
+    return {
+      token: directAccessToken,
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId,
+        ...(clientSecret ? { clientSecret } : {}),
+        redirectUri,
+        ...(options.linearOauthRefreshToken ? { refreshToken: nonEmpty(options.linearOauthRefreshToken, "Linear OAuth refresh token") } : {}),
+        ...(options.linearOauthExpiresAt ? { accessTokenExpiresAt: options.linearOauthExpiresAt } : {}),
+        ...(scopes ? { scopes } : {})
+      }
+    };
+  }
+
+  const code = nonEmpty(
+    options.linearOauthCode ??
+      (options.yes
+        ? ""
+        : await prompts.text({
+            message: t(language, "linearOAuthCode")
+          })),
+    "Linear OAuth authorization code"
+  );
+  const token = await (dependencies.exchangeLinearOAuthCode ?? exchangeLinearOAuthCode)({
+    clientId,
+    ...(clientSecret ? { clientSecret } : {}),
+    code,
+    redirectUri
+  });
+  const accessTokenExpiresAt = linearAccessTokenExpiresAt({
+    token,
+    ...(options.linearOauthExpiresAt ? { fallback: options.linearOauthExpiresAt } : {}),
+    now: dependencies.now ?? (() => new Date())
+  });
+  const resolvedScopes = token.scope ?? scopes;
+  return {
+    token: token.accessToken,
+    auth: {
+      method: "oauth_app",
+      actor: "app",
+      clientId,
+      ...(clientSecret ? { clientSecret } : {}),
+      redirectUri,
+      ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
+      ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+      ...(resolvedScopes ? { scopes: resolvedScopes } : {})
+    }
+  };
+}
+
+function adapterMappingsFromLinearMetadata(snapshot: LinearMetadataSnapshot): NonNullable<LinearSetupInput["mappings"]> {
+  return createLinearAdapterMappingDrafts(snapshot).map((draft) => ({
+    id: `linear_${draft.domain}_${draft.strategy}`,
+    ...draft,
+    description: `Discovered from Linear ${draft.domain} metadata during setup.`
+  }));
+}
+
+function discoveredLinearTeam(input: {
+  snapshot: LinearMetadataSnapshot;
+  teamId?: string;
+  teamKey?: string;
+}): { teamId?: string; teamKey?: string } {
+  const team =
+    (input.teamId ? input.snapshot.teams.find((candidate) => candidate.id === input.teamId) : undefined) ??
+    (input.teamKey ? input.snapshot.teams.find((candidate) => candidate.key === input.teamKey) : undefined) ??
+    (input.snapshot.teams.length === 1 ? input.snapshot.teams[0] : undefined);
+  return {
+    ...(!input.teamId && team?.id ? { teamId: team.id } : {}),
+    ...(!input.teamKey && team?.key ? { teamKey: team.key } : {})
+  };
+}
+
+function formatLinearDiscoveryResult(language: CliLanguage, input: { snapshot: LinearMetadataSnapshot; mappingCount: number }): string {
+  if (language === "zh-CN") {
+    return `Linear metadata discovery 完成：${input.snapshot.teams.length} teams, ${input.snapshot.workflowStates.length} states, ${input.snapshot.users.length} users, ${input.snapshot.issueLabels.length} labels, ${input.mappingCount} mappings。`;
+  }
+  return `Linear metadata discovery completed: ${input.snapshot.teams.length} teams, ${input.snapshot.workflowStates.length} states, ${input.snapshot.users.length} users, ${input.snapshot.issueLabels.length} labels, ${input.mappingCount} mappings.`;
+}
+
+async function collectLinearDiscovery(input: {
+  options: SetupCommandOptions;
+  authMethod: LinearAuthMethod;
+  token?: string;
+  graphqlUrl?: string;
+  teamId?: string;
+  teamKey?: string;
+  prompts: PromptAdapter;
+  language: CliLanguage;
+  dependencies: SetupFlowDependencies;
+}): Promise<{ mappings?: LinearSetupInput["mappings"]; teamId?: string; teamKey?: string }> {
+  if (!input.token) return {};
+  const shouldDiscover = input.options.linearDiscoverMetadata ?? input.authMethod === "oauth_app";
+  if (!shouldDiscover) return {};
+  const first = parsePositiveIntegerInput(input.options.linearDiscoveryLimit, "Linear metadata discovery limit") ?? 100;
+  try {
+    const snapshot = await (input.dependencies.discoverLinearMetadata ?? discoverLinearMetadata)({
+      token: input.token,
+      ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+      first
+    });
+    const mappings = adapterMappingsFromLinearMetadata(snapshot);
+    input.prompts.note(formatLinearDiscoveryResult(input.language, { snapshot, mappingCount: mappings.length }));
+    return {
+      mappings,
+      ...discoveredLinearTeam({ snapshot, ...(input.teamId ? { teamId: input.teamId } : {}), ...(input.teamKey ? { teamKey: input.teamKey } : {}) })
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    input.prompts.note(input.language === "zh-CN" ? `Linear metadata discovery 跳过：${detail}` : `Linear metadata discovery skipped: ${detail}`);
+    return {};
+  }
+}
+
+async function collectLinearSetup(
+  options: SetupCommandOptions,
+  defaults: SetupDefaults,
+  prompts: PromptAdapter,
+  language: CliLanguage,
+  dependencies: SetupFlowDependencies
+): Promise<LinearSetupInput> {
+  const authMethod = await collectLinearAuthMethod(options, defaults, prompts, language);
+  const graphqlUrl = optionalTrimmed(options.linearGraphqlUrl ?? defaults.linearGraphqlUrl);
+  if (authMethod === "api_key" && !options.linearToken) {
+    prompts.note(formatLinearTokenHelp(language));
+  }
+  const hostedOAuth = shouldUseHostedLinearOAuthInstall(options, authMethod);
+  const auth =
+    hostedOAuth
+      ? collectLinearHostedOAuthAuth(options)
+      : authMethod === "oauth_app"
+      ? await collectLinearOAuthAuth(options, prompts, language, dependencies)
+      : await collectLinearApiKeyAuth(options, prompts, language);
+  const explicitTeamId = optionalTrimmed(
+    options.linearTeamId ??
+      (options.yes
+        ? defaults.linearTeamId
+        : await prompts.text({
+            message: t(language, "linearTeamId"),
+            ...(defaults.linearTeamId ? { initialValue: defaults.linearTeamId, placeholder: defaults.linearTeamId } : {})
+          }))
+  );
+  const explicitTeamKey = optionalTrimmed(
+    options.linearTeamKey ??
+      (options.yes
+        ? defaults.linearTeamKey
+        : await prompts.text({
+            message: t(language, "linearTeamKey"),
+            ...(defaults.linearTeamKey ? { initialValue: defaults.linearTeamKey, placeholder: defaults.linearTeamKey } : {})
+          }))
+  );
+  const discovery = await collectLinearDiscovery({
+    options,
+    authMethod,
+    ...(auth.token ? { token: auth.token } : {}),
+    ...(graphqlUrl ? { graphqlUrl } : {}),
+    ...(explicitTeamId ? { teamId: explicitTeamId } : {}),
+    ...(explicitTeamKey ? { teamKey: explicitTeamKey } : {}),
+    prompts,
+    language,
+    dependencies
+  });
+  const teamId = explicitTeamId ?? discovery.teamId;
+  const teamKey = explicitTeamKey ?? discovery.teamKey;
+  const webhookSecret = hostedOAuth
+    ? undefined
+    : options.linearWebhookSecret
+      ? nonEmpty(options.linearWebhookSecret, "Linear webhook secret")
+      : defaults.linearWebhookSecret ?? generateLinearWebhookSecret();
+  const port =
+    parsePortInput(options.linearPort, "Linear webhook port") ??
+    (options.yes
+      ? defaults.linearPort ?? DEFAULT_LINEAR_WEBHOOK_PORT
+      : parseLocalPort(
+          await prompts.text({
+            message: t(language, "linearPort"),
+            initialValue: String(defaults.linearPort ?? DEFAULT_LINEAR_WEBHOOK_PORT),
+            placeholder: String(DEFAULT_LINEAR_WEBHOOK_PORT)
+          }),
+          "Linear webhook port"
+        ));
+
+  const defaultWebhookPath = hostedOAuth ? "/linear/oauth/webhooks" : options.relay ? generateLinearRelayWebhookPath() : "/linear/webhooks";
+
+  return {
+    ...(auth.token ? { token: auth.token } : {}),
+    auth: auth.auth ?? { method: "api_key" },
+    ...(webhookSecret ? { webhookSecret } : {}),
+    ...(teamId ? { teamId } : {}),
+    ...(teamKey ? { teamKey } : {}),
+    ...(graphqlUrl ? { graphqlUrl } : {}),
+    webhookPath: parseLinearWebhookPath(
+      options.linearWebhookPath ?? defaults.linearWebhookPath ?? defaultWebhookPath
+    ),
+    port,
+    ...(discovery.mappings ? { mappings: discovery.mappings } : {})
+  };
+}
+
 async function collectTelegramSetup(
   options: SetupCommandOptions,
   defaults: SetupDefaults,
@@ -1129,6 +1525,7 @@ export async function collectSetupInput(
   const slackSetup = platform === "slack" ? await collectSlackSetup(options, defaults, prompts, language) : undefined;
   const githubSetup = platform === "github" ? await collectGitHubSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
   const gitlabSetup = platform === "gitlab" ? await collectGitLabSetup(options, defaults, prompts, language, resolvedProjectPath) : undefined;
+  const linearSetup = platform === "linear" ? await collectLinearSetup(options, defaults, prompts, language, dependencies) : undefined;
   const telegramSetup = platform === "telegram" ? await collectTelegramSetup(options, defaults, prompts, language) : undefined;
   const discordSetup = platform === "discord" ? await collectDiscordSetup(options, defaults, prompts, language) : undefined;
   const larkPersistedCredentials = larkCredentials
@@ -1160,6 +1557,7 @@ export async function collectSetupInput(
     ...(slackSetup ? { slack: slackSetup } : {}),
     ...(githubSetup ? { github: githubSetup } : {}),
     ...(gitlabSetup ? { gitlab: gitlabSetup } : {}),
+    ...(linearSetup ? { linear: linearSetup } : {}),
     ...(telegramSetup ? { telegram: telegramSetup } : {}),
     ...(discordSetup ? { discord: discordSetup } : {})
   };

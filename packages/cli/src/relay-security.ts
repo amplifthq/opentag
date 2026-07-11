@@ -107,6 +107,15 @@ export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySe
     });
   }
 
+  if (config.platforms.linear) {
+    const webhookPath = config.platforms.linear.webhookPath ?? "/linear/webhooks";
+    checks.push({
+      status: "ok",
+      name: "Linear webhook secret",
+      message: `Configured locally; the relay ${webhookPath} endpoint must verify Linear-Signature and webhook timestamp before creating runs.`
+    });
+  }
+
   if (config.platforms.discord?.mode === "webhook") {
     const webhookPath = config.platforms.discord.webhookPath ?? "/discord/interactions";
     checks.push({
