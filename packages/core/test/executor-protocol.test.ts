@@ -127,4 +127,17 @@ describe("OpenTag executor protocol schemas", () => {
       })
     ).toThrow();
   });
+
+  it("accepts RFC 3339 event timestamps with explicit timezone offsets", () => {
+    expect(
+      OpenTagExecutorProtocolEventSchema.parse({
+        type: "started",
+        message: "started outside UTC",
+        at: "2026-07-07T19:00:00+02:00"
+      })
+    ).toMatchObject({
+      type: "started",
+      at: "2026-07-07T19:00:00+02:00"
+    });
+  });
 });

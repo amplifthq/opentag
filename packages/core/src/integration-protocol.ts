@@ -7,17 +7,17 @@ export const OpenTagExecutorRoleProtocolVersionSchema = z.literal("opentag.execu
 export const OpenTagStdioJsonlBindingKindSchema = z.literal("stdio-jsonl");
 export const OpenTagExecutorProfileSchema = z.literal("stdio-jsonl-basic");
 
-export const OpenTagExecutorWorkspaceIsolationSchema = z.enum(["branch", "worktree"]);
-export const OpenTagExecutorProgressEventModeSchema = z.enum(["none", "audit", "human"]);
-export const OpenTagExecutorConversationAccessSchema = z.enum(["none", "request", "thread_transcript"]);
+export const OpenTagExecutorWorkspaceIsolationSchema = z.literal("worktree");
+export const OpenTagExecutorProgressEventModeSchema = z.literal("audit");
+export const OpenTagExecutorConversationAccessSchema = z.literal("request");
 
 export const OpenTagExecutorProtocolCapabilitiesSchema = z
   .object({
     workspaceIsolation: OpenTagExecutorWorkspaceIsolationSchema.default("worktree"),
     conversationAccess: OpenTagExecutorConversationAccessSchema.default("request"),
     progressEvents: OpenTagExecutorProgressEventModeSchema.default("audit"),
-    supportsCancel: z.boolean().default(false),
-    supportsStreaming: z.boolean().default(false)
+    supportsCancel: z.literal(false).default(false),
+    supportsStreaming: z.literal(false).default(false)
   })
   .strict();
 
@@ -226,12 +226,15 @@ export type OpenTagExecutorWorkspaceIsolation = z.infer<typeof OpenTagExecutorWo
 export type OpenTagExecutorProgressEventMode = z.infer<typeof OpenTagExecutorProgressEventModeSchema>;
 export type OpenTagExecutorConversationAccess = z.infer<typeof OpenTagExecutorConversationAccessSchema>;
 export type OpenTagExecutorProtocolCapabilities = z.infer<typeof OpenTagExecutorProtocolCapabilitiesSchema>;
+export type OpenTagStdioJsonlBindingInput = z.input<typeof OpenTagStdioJsonlBindingSchema>;
 export type OpenTagStdioJsonlBinding = z.infer<typeof OpenTagStdioJsonlBindingSchema>;
 export type OpenTagIntegrationBinding = z.infer<typeof OpenTagIntegrationBindingSchema>;
+export type OpenTagExecutorIntegrationRoleInput = z.input<typeof OpenTagExecutorIntegrationRoleSchema>;
 export type OpenTagExecutorIntegrationRole = z.infer<typeof OpenTagExecutorIntegrationRoleSchema>;
 export type OpenTagIntegrationRoles = z.infer<typeof OpenTagIntegrationRolesSchema>;
 export type OpenTagResourceCapability = z.infer<typeof OpenTagResourceCapabilitySchema>;
 export type OpenTagIntegrationResources = z.infer<typeof OpenTagIntegrationResourcesSchema>;
+export type OpenTagIntegrationManifestInput = z.input<typeof OpenTagIntegrationManifestSchema>;
 export type OpenTagIntegrationManifest = z.infer<typeof OpenTagIntegrationManifestSchema>;
 export type OpenTagActorRef = z.infer<typeof OpenTagActorRefSchema>;
 export type OpenTagChannelRef = z.infer<typeof OpenTagChannelRefSchema>;

@@ -1,13 +1,20 @@
 import { resolve } from "node:path";
 import type {
-  ContextPacket,
-  ContextPointer,
-  OpenTagCommand,
-  OpenTagReplyTargetRef,
-  OpenTagRunSourceRef,
-  OpenTagRunTargets,
-  PermissionGrant,
-  ResultArtifact
+  OpenTagExecutorCompletedEvent,
+  OpenTagExecutorFailedEvent,
+  OpenTagExecutorIntegrationRoleInput,
+  OpenTagExecutorProtocolCapabilities,
+  OpenTagExecutorProtocolEvent,
+  OpenTagExecutorProtocolVerification,
+  OpenTagExecutorRunRequest,
+  OpenTagIntegrationManifestInput,
+  OpenTagStdioJsonlBindingInput,
+  OpenTagStdioJsonlBinding
+} from "@opentag/core";
+import {
+  OpenTagExecutorProtocolEventSchema,
+  OpenTagExecutorRunRequestSchema,
+  OpenTagIntegrationManifestSchema
 } from "@opentag/core";
 import { nodeCommandRunner, type CommandEnvironment, type CommandResult, type CommandRunner } from "./command.js";
 import { type ExecutorAdapter, type ExecutorEventSink, type ExecutorRunInput } from "./executor.js";
@@ -17,57 +24,21 @@ import {
   changedFiles,
   cleanupInternalArtifacts,
   commitRunChanges,
-  createRunBranch,
   createRunWorktree,
   deleteRunBranch,
   removeRunWorktree,
   worktreePathForRun
 } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
+import { scrubEnvironment } from "./security.js";
 
 const SOURCE_CONTROL_FORBIDDEN_COMMANDS = ["git add", "git commit", "git push", "gh pr create"];
 
-export type ProtocolExecutorCapabilities = {
-  workspaceIsolation: "branch" | "worktree";
-  conversationAccess: "none" | "request" | "thread_transcript";
-  progressEvents: "none" | "audit" | "human";
-  supportsCancel: boolean;
-  supportsStreaming: boolean;
-};
-
-export type ProtocolExecutorStdioJsonlBindingInput = {
-  kind: "stdio-jsonl";
-  command: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-};
-
-export type ProtocolExecutorRoleInput = {
-  protocol: "opentag.executor.v1";
-  profile: "stdio-jsonl-basic";
-  binding: string;
-  capabilities?: Partial<ProtocolExecutorCapabilities>;
-};
-
-export type ProtocolExecutorManifestInput = {
-  protocol: "opentag.integration.v1";
-  id: string;
-  label: string;
-  bindings: Record<string, ProtocolExecutorStdioJsonlBindingInput>;
-  roles: {
-    executor?: ProtocolExecutorRoleInput;
-  };
-  resources?: Record<string, unknown>;
-};
-
-export type ProtocolExecutorStdioJsonlBinding = {
-  kind: "stdio-jsonl";
-  command: string;
-  args: string[];
-  cwd?: string;
-  env: Record<string, string>;
-};
+export type ProtocolExecutorStdioJsonlBindingInput = OpenTagStdioJsonlBindingInput;
+export type ProtocolExecutorRoleInput = OpenTagExecutorIntegrationRoleInput;
+export type ProtocolExecutorManifestInput = OpenTagIntegrationManifestInput;
+export type ProtocolExecutorCapabilities = OpenTagExecutorProtocolCapabilities;
+export type ProtocolExecutorStdioJsonlBinding = OpenTagStdioJsonlBinding;
 
 export type ProtocolExecutorManifest = {
   protocol: "opentag.integration.v1";
@@ -79,72 +50,11 @@ export type ProtocolExecutorManifest = {
   capabilities: ProtocolExecutorCapabilities;
 };
 
-export type ProtocolExecutorRunRequest = {
-  protocol: "opentag.executor.v1";
-  runId: string;
-  workspace: {
-    path: string;
-    baseBranch: string;
-    branchName: string;
-    isolation: "branch" | "worktree";
-  };
-  session: {
-    scope: "run";
-    key: string;
-  };
-  command: OpenTagCommand;
-  source?: OpenTagRunSourceRef;
-  targets?: OpenTagRunTargets;
-  replyTo: OpenTagReplyTargetRef[];
-  context: ContextPointer[];
-  contextPacket?: ContextPacket;
-  permissions: PermissionGrant[];
-  metadata: Record<string, unknown>;
-  sourceControl: {
-    owner: "opentag";
-    forbiddenCommands: string[];
-  };
-};
-
-export type ProtocolExecutorVerification = {
-  command?: string;
-  outcome: "passed" | "failed" | "not_run";
-  summary?: string;
-};
-
-type ProtocolBaseEvent = {
-  message: string;
-  at?: string;
-};
-
-export type ProtocolExecutorStartedEvent = ProtocolBaseEvent & {
-  type: "started";
-};
-
-export type ProtocolExecutorProgressEvent = ProtocolBaseEvent & {
-  type: "progress";
-};
-
-export type ProtocolExecutorCompletedEvent = ProtocolBaseEvent & {
-  type: "completed";
-  actualWorkspacePath: string;
-  summary: string;
-  verification: ProtocolExecutorVerification[];
-  artifacts: ResultArtifact[];
-  notes: string[];
-  risks: string[];
-};
-
-export type ProtocolExecutorFailedEvent = ProtocolBaseEvent & {
-  type: "failed";
-  actualWorkspacePath?: string;
-};
-
-export type ProtocolExecutorEvent =
-  | ProtocolExecutorStartedEvent
-  | ProtocolExecutorProgressEvent
-  | ProtocolExecutorCompletedEvent
-  | ProtocolExecutorFailedEvent;
+export type ProtocolExecutorRunRequest = OpenTagExecutorRunRequest;
+export type ProtocolExecutorVerification = OpenTagExecutorProtocolVerification;
+export type ProtocolExecutorCompletedEvent = OpenTagExecutorCompletedEvent;
+export type ProtocolExecutorFailedEvent = OpenTagExecutorFailedEvent;
+export type ProtocolExecutorEvent = OpenTagExecutorProtocolEvent;
 
 export type ProtocolExecutorOptions = {
   manifest: ProtocolExecutorManifestInput;
@@ -161,141 +71,34 @@ function eventAt(event: ProtocolExecutorEvent): string {
   return event.at ?? new Date().toISOString();
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
 function normalizeManifest(input: ProtocolExecutorManifestInput): ProtocolExecutorManifest {
-  if (input.protocol !== "opentag.integration.v1") {
-    throw new Error("Protocol executor manifest must use opentag.integration.v1.");
-  }
-  const executor = input.roles?.executor;
+  const parsed = OpenTagIntegrationManifestSchema.parse(input);
+  const executor = parsed.roles.executor;
   if (!executor) {
     throw new Error("Protocol executor manifest must declare roles.executor.");
   }
-  if (executor.protocol !== "opentag.executor.v1") {
-    throw new Error("Protocol executor role must use opentag.executor.v1.");
-  }
-  if (executor.profile !== "stdio-jsonl-basic") {
-    throw new Error("Protocol executor prototype only supports the stdio-jsonl-basic profile.");
-  }
-  const bindingName = executor.binding.trim();
-  if (!bindingName) {
-    throw new Error("Protocol executor role binding must not be empty.");
-  }
-  const binding = input.bindings?.[bindingName];
-  if (!binding) {
-    throw new Error(`Protocol executor role references missing binding '${bindingName}'.`);
-  }
-  if (binding.kind !== "stdio-jsonl") {
-    throw new Error("Protocol executor prototype only supports stdio-jsonl bindings.");
-  }
-  const capabilities = executor.capabilities ?? {};
-  const cwd = binding.cwd?.trim();
+  const bindingName = executor.binding;
+  const binding = parsed.bindings[bindingName];
+  if (!binding) throw new Error(`Protocol executor role references missing binding '${bindingName}'.`);
   return {
-    protocol: input.protocol,
-    id: input.id.trim(),
-    label: input.label.trim(),
+    protocol: parsed.protocol,
+    id: parsed.id,
+    label: parsed.label,
     profile: executor.profile,
     bindingName,
-    binding: {
-      kind: binding.kind,
-      command: binding.command.trim(),
-      args: binding.args ?? [],
-      ...(cwd ? { cwd } : {}),
-      env: binding.env ?? {}
-    },
-    capabilities: {
-      workspaceIsolation: capabilities.workspaceIsolation ?? "worktree",
-      conversationAccess: capabilities.conversationAccess ?? "request",
-      progressEvents: capabilities.progressEvents ?? "audit",
-      supportsCancel: capabilities.supportsCancel ?? false,
-      supportsStreaming: capabilities.supportsStreaming ?? false
-    }
+    binding,
+    capabilities: executor.capabilities
   };
 }
 
-function assertValidManifest(manifest: ProtocolExecutorManifest): void {
-  if (manifest.protocol !== "opentag.integration.v1") throw new Error("Protocol executor manifest must use opentag.integration.v1.");
-  if (!manifest.id) throw new Error("Protocol executor manifest id must not be empty.");
-  if (!manifest.label) throw new Error("Protocol executor manifest label must not be empty.");
-  if (!manifest.binding.command) throw new Error("Protocol executor stdio-jsonl binding command must not be empty.");
-}
-
-function parseVerification(value: unknown): ProtocolExecutorVerification[] {
-  if (!Array.isArray(value)) return [];
-  const allowedOutcomes = new Set(["passed", "failed", "not_run"]);
-  return value.flatMap((item) => {
-    const record = asRecord(item);
-    const outcome = record ? nonEmptyString(record["outcome"]) : undefined;
-    if (!record || !outcome || !allowedOutcomes.has(outcome)) return [];
-    const command = nonEmptyString(record["command"]);
-    const summary = nonEmptyString(record["summary"]);
-    return [
-      {
-        outcome: outcome as "passed" | "failed" | "not_run",
-        ...(command ? { command } : {}),
-        ...(summary ? { summary } : {})
-      }
-    ];
-  });
-}
-
-function parseProtocolArtifacts(value: unknown): ResultArtifact[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    const record = asRecord(item);
-    const title = record ? nonEmptyString(record["title"]) : undefined;
-    const uri = record ? nonEmptyString(record["uri"]) : undefined;
-    if (!record || !title || !uri) return [];
-    return [record as ResultArtifact];
-  });
-}
-
 function parseProtocolEventValue(value: unknown, lineNumber: number): ProtocolExecutorEvent {
-  const record = asRecord(value);
-  const type = record ? nonEmptyString(record["type"]) : undefined;
-  const message = record ? nonEmptyString(record["message"]) : undefined;
-  if (!record || !type || !message) {
-    throw new Error(`Protocol executor emitted invalid event at line ${lineNumber}: missing type or message.`);
+  try {
+    return OpenTagExecutorProtocolEventSchema.parse(value);
+  } catch (error) {
+    throw new Error(
+      `Protocol executor emitted invalid event at line ${lineNumber}: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
-  const at = nonEmptyString(record["at"]);
-  const base = { message, ...(at ? { at } : {}) };
-
-  if (type === "started" || type === "progress") {
-    return { type, ...base };
-  }
-  if (type === "failed") {
-    const actualWorkspacePath = nonEmptyString(record["actualWorkspacePath"]);
-    return { type, ...base, ...(actualWorkspacePath ? { actualWorkspacePath } : {}) };
-  }
-  if (type === "completed") {
-    const actualWorkspacePath = nonEmptyString(record["actualWorkspacePath"]);
-    const summary = nonEmptyString(record["summary"]);
-    if (!actualWorkspacePath || !summary) {
-      throw new Error(`Protocol executor emitted invalid completed event at line ${lineNumber}: missing actualWorkspacePath or summary.`);
-    }
-    return {
-      type,
-      ...base,
-      actualWorkspacePath,
-      summary,
-      verification: parseVerification(record["verification"]),
-      artifacts: parseProtocolArtifacts(record["artifacts"]),
-      notes: stringArray(record["notes"]),
-      risks: stringArray(record["risks"])
-    };
-  }
-
-  throw new Error(`Protocol executor emitted invalid event at line ${lineNumber}: unknown type ${type}.`);
 }
 
 async function emitProtocolEvent(sink: ExecutorEventSink, event: ProtocolExecutorEvent): Promise<void> {
@@ -355,7 +158,7 @@ function requestForRun(input: {
   branchName: string;
   baseBranch: string;
 }): ProtocolExecutorRunRequest {
-  return {
+  return OpenTagExecutorRunRequestSchema.parse({
     protocol: "opentag.executor.v1",
     runId: input.run.runId,
     workspace: {
@@ -380,7 +183,7 @@ function requestForRun(input: {
       owner: "opentag",
       forbiddenCommands: SOURCE_CONTROL_FORBIDDEN_COMMANDS
     }
-  };
+  });
 }
 
 function outputForCompletedEvent(input: { completed: ProtocolExecutorCompletedEvent; changedFiles: string[] }): string {
@@ -410,7 +213,6 @@ async function cleanupAfterChild(input: {
   runner: CommandRunner;
   workspacePath: string;
   sink: ExecutorEventSink;
-  primaryError?: unknown;
 }): Promise<void> {
   try {
     const cleanedArtifacts = await cleanupInternalArtifacts({ runner: input.runner, workspacePath: input.workspacePath });
@@ -422,7 +224,6 @@ async function cleanupAfterChild(input: {
       });
     }
   } catch (cleanupError) {
-    if (!input.primaryError) throw cleanupError;
     await input.sink.emit({
       type: "executor.progress",
       message: `Failed to clean internal artifacts: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
@@ -434,20 +235,9 @@ async function cleanupAfterChild(input: {
 async function createIsolation(input: {
   runner: CommandRunner;
   run: ExecutorRunInput;
-  manifest: ProtocolExecutorManifest;
   branchName: string;
   baseBranch: string;
 }): Promise<string> {
-  if (input.manifest.capabilities.workspaceIsolation === "branch") {
-    await createRunBranch({
-      runner: input.runner,
-      workspacePath: input.run.workspacePath,
-      branchName: input.branchName,
-      startPoint: input.baseBranch
-    });
-    return input.run.workspacePath;
-  }
-
   const worktreePath = worktreePathForRun({
     workspacePath: input.run.workspacePath,
     runId: input.run.runId,
@@ -466,14 +256,12 @@ async function createIsolation(input: {
 async function maybeRemoveIsolation(input: {
   runner: CommandRunner;
   run: ExecutorRunInput;
-  manifest: ProtocolExecutorManifest;
   workspacePath: string;
   branchName: string;
   completed: boolean;
   changedFileCount: number | undefined;
   sink: ExecutorEventSink;
 }): Promise<void> {
-  if (input.manifest.capabilities.workspaceIsolation !== "worktree") return;
   const keepWorktree = input.run.keepWorktree ?? "on_failure";
   const shouldRemove = keepWorktree === "never" || (keepWorktree === "on_failure" && input.completed);
   if (!shouldRemove) return;
@@ -497,14 +285,12 @@ function childFailure(input: { manifest: ProtocolExecutorManifest; result: Comma
   return new Error(`protocol executor ${input.manifest.id} failed with exit code ${input.result.exitCode}: ${input.result.stderr || input.result.stdout}`);
 }
 
-function envForBinding(binding: ProtocolExecutorStdioJsonlBinding): CommandEnvironment | undefined {
-  if (Object.keys(binding.env).length === 0) return undefined;
-  return { ...process.env, ...binding.env };
+function envForBinding(binding: ProtocolExecutorStdioJsonlBinding): CommandEnvironment {
+  return { ...scrubEnvironment(), ...binding.env };
 }
 
 export function createProtocolExecutor(options: ProtocolExecutorOptions): ExecutorAdapter {
   const manifest = normalizeManifest(options.manifest);
-  assertValidManifest(manifest);
   const runner = options.runner ?? nodeCommandRunner;
 
   return {
@@ -564,29 +350,29 @@ export function createProtocolExecutor(options: ProtocolExecutorOptions): Execut
       });
 
       try {
-        workspacePath = await createIsolation({ runner, run: input, manifest, branchName, baseBranch });
+        workspacePath = await createIsolation({ runner, run: input, branchName, baseBranch });
         const request = requestForRun({ run: input, manifest, workspacePath, branchName, baseBranch });
-        const bindingEnv = envForBinding(manifest.binding);
         const childResult = await runner.run(manifest.binding.command, manifest.binding.args, {
           cwd: manifest.binding.cwd ?? workspacePath,
           input: `${JSON.stringify(request)}\n`,
-          ...(bindingEnv ? { env: bindingEnv } : {})
+          env: envForBinding(manifest.binding)
         });
 
         let primaryError: unknown = childFailure({ manifest, result: childResult });
         let events: ProtocolExecutorEvent[] = [];
-        if (!primaryError) {
-          try {
-            events = parseProtocolEvents(childResult.stdout);
-          } catch (error) {
-            primaryError = error;
-          }
+        let eventParseError: unknown;
+        try {
+          events = parseProtocolEvents(childResult.stdout);
+        } catch (error) {
+          eventParseError = error;
         }
 
+        for (const event of events) {
+          await emitProtocolEvent(sink, event);
+        }
+        primaryError ??= eventParseError;
+
         if (!primaryError) {
-          for (const event of events) {
-            await emitProtocolEvent(sink, event);
-          }
           const final = finalEvent(events);
           if (!final) {
             primaryError = new Error(`Protocol executor ${manifest.id} exited without a completed or failed event.`);
@@ -601,7 +387,7 @@ export function createProtocolExecutor(options: ProtocolExecutorOptions): Execut
           }
         }
 
-        await cleanupAfterChild({ runner, workspacePath, sink, ...(primaryError ? { primaryError } : {}) });
+        await cleanupAfterChild({ runner, workspacePath, sink });
         if (primaryError) throw primaryError;
 
         const completedEvent = finalEvent(events);
@@ -643,7 +429,6 @@ export function createProtocolExecutor(options: ProtocolExecutorOptions): Execut
         await maybeRemoveIsolation({
           runner,
           run: input,
-          manifest,
           workspacePath,
           branchName,
           completed,

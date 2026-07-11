@@ -68,7 +68,7 @@ export const OpenTagExecutorProtocolVerificationSchema = z
 const BaseProtocolEventSchema = z
   .object({
     message: z.string().min(1),
-    at: z.string().datetime().optional()
+    at: z.string().datetime({ offset: true }).optional()
   })
   .strict();
 

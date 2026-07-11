@@ -12,7 +12,7 @@ Today each built-in executor translates an OpenTag run into a vendor-specific
 CLI invocation. That keeps the first integration simple, but it also repeats the
 same hard parts in every adapter:
 
-- Create an isolated branch or worktree.
+- Create an isolated worktree.
 - Assemble the request, context packet, policy text, and report expectations.
 - Ensure the agent's real file tools use the OpenTag run workspace.
 - Ensure session or conversation history is scoped to the current run unless
@@ -37,10 +37,17 @@ Only one profile is implemented in this prototype:
   stdin, then reads JSON Lines events from stdout. Stderr is treated as diagnostic
   text. The child must emit one terminal `completed` or `failed` event.
 
+This profile is deliberately narrow: it is worktree-only, request-context-only,
+uses audit progress events, and does not claim cancellation or streaming. A
+manifest that advertises broader capabilities is rejected by the canonical
+manifest schema.
+
 Only one binding kind is implemented in this prototype:
 
 - `stdio-jsonl`: a local command, optional args, optional cwd, and optional
-  non-secret environment values. Future bindings can add HTTP, long-running
+  explicitly configured environment values. The child inherits only OpenTag's
+  safe environment allowlist, never the complete host process environment.
+  Future bindings can add HTTP, long-running
   runtimes, MCP, containers, or hook-ingest callbacks without changing the run
   contract.
 
@@ -202,8 +209,10 @@ The generic OpenTag protocol executor must:
 - Accept an `opentag.integration.v1` manifest with `roles.executor.profile` set
   to `stdio-jsonl-basic`.
 - Resolve the executor role's named `stdio-jsonl` binding.
-- Create the run branch or worktree before launching the shim.
+- Create the run worktree before launching the shim.
 - Validate protocol events and fail on malformed JSONL.
+- Preserve valid structured progress and failure diagnostics even when the child
+  exits non-zero.
 - Reject workspace mismatches.
 - Clean internal `.omx`, `.codex`, and `.claude` artifacts.
 - Preserve the primary child failure if cleanup also fails.
