@@ -150,6 +150,32 @@ executor where the request came from, what it is acting on, and where progress o
 final output should return. They do not carry provider credentials, workspace or
 account connection state, raw webhook payloads, or API tokens.
 
+### Reply Routing
+
+`replyTo` is a runner-owned delivery plan, not permission for a shim to call
+Slack, GitHub, or another provider. The runner or control plane selects every
+entry whose `purpose` is either `all` or the purpose assigned to the event:
+
+| Executor event | Delivery purpose | Matching `replyTo` entries |
+| --- | --- | --- |
+| `started` | `progress` | `all`, `progress` |
+| `progress` | `progress` | `all`, `progress` |
+| `completed` | `final` | `all`, `final` |
+| `failed` | `error` | `all`, `error` |
+
+The canonical core helpers `replyDeliveryPurposeForExecutorEventType` and
+`selectReplyTargetsForExecutorEventType` define this mapping for runners and
+conformance tests. `approval` follows the same general selection rule (`all` or
+`approval`) for control-plane approval deliveries, but `opentag.executor.v1`
+does not currently define an approval event.
+
+Each matching entry is an independent delivery target and keeps its request
+order. The event payload remains flat: the same semantic progress, completion,
+or failure result is rendered appropriately for each selected channel. Version
+1 does not split `summary`, `artifacts`, `risks`, or `verification` into
+target-specific deliverables. A shim must not perform these deliveries or
+receive provider credentials to do so.
+
 ## Events
 
 The child stdout is JSON Lines. Each line is one event.

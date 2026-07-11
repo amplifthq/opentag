@@ -152,3 +152,9 @@ credentials:
 
 The executor receives sanitized semantic refs. The runner or future control
 plane resolves connection IDs, credentials, permissions, and concrete API calls.
+It also owns response routing: for each semantic delivery, it selects every
+`replyTo` entry whose purpose is `all` or the matching `progress`, `final`,
+`error`, or `approval` purpose. Executor `started` and `progress` events map to
+`progress`, `completed` maps to `final`, and `failed` maps to `error`. The flat
+event result is shared across the selected targets and rendered by their channel
+adapters; executors do not split payloads or deliver to providers directly.

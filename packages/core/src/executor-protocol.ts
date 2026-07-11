@@ -10,7 +10,10 @@ import {
   OpenTagExecutorWorkspaceIsolationSchema,
   OpenTagReplyTargetRefSchema,
   OpenTagRunSourceRefSchema,
-  OpenTagRunTargetsSchema
+  OpenTagRunTargetsSchema,
+  selectReplyTargetsForPurpose,
+  type OpenTagReplyDeliveryPurpose,
+  type OpenTagReplyTargetRef
 } from "./integration-protocol.js";
 
 export const OpenTagExecutorProtocolVersionSchema = z.literal("opentag.executor.v1");
@@ -113,3 +116,25 @@ export type OpenTagExecutorProgressEvent = z.infer<typeof OpenTagExecutorProgres
 export type OpenTagExecutorCompletedEvent = z.infer<typeof OpenTagExecutorCompletedEventSchema>;
 export type OpenTagExecutorFailedEvent = z.infer<typeof OpenTagExecutorFailedEventSchema>;
 export type OpenTagExecutorProtocolEvent = z.infer<typeof OpenTagExecutorProtocolEventSchema>;
+export type OpenTagExecutorReplyDeliveryPurpose = Exclude<OpenTagReplyDeliveryPurpose, "approval">;
+
+export function replyDeliveryPurposeForExecutorEventType(
+  eventType: OpenTagExecutorProtocolEvent["type"]
+): OpenTagExecutorReplyDeliveryPurpose {
+  switch (eventType) {
+    case "started":
+    case "progress":
+      return "progress";
+    case "completed":
+      return "final";
+    case "failed":
+      return "error";
+  }
+}
+
+export function selectReplyTargetsForExecutorEventType(
+  replyTo: readonly OpenTagReplyTargetRef[],
+  eventType: OpenTagExecutorProtocolEvent["type"]
+): OpenTagReplyTargetRef[] {
+  return selectReplyTargetsForPurpose(replyTo, replyDeliveryPurposeForExecutorEventType(eventType));
+}

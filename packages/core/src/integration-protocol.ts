@@ -208,6 +208,7 @@ export const OpenTagRunTargetsSchema = z
   .strict();
 
 export const OpenTagReplyPurposeSchema = z.enum(["all", "progress", "final", "error", "approval"]);
+export const OpenTagReplyDeliveryPurposeSchema = OpenTagReplyPurposeSchema.exclude(["all"]);
 
 export const OpenTagReplyTargetRefSchema = z
   .object({
@@ -248,4 +249,12 @@ export type OpenTagRunSourceKind = z.infer<typeof OpenTagRunSourceKindSchema>;
 export type OpenTagRunSourceRef = z.infer<typeof OpenTagRunSourceRefSchema>;
 export type OpenTagRunTargets = z.infer<typeof OpenTagRunTargetsSchema>;
 export type OpenTagReplyPurpose = z.infer<typeof OpenTagReplyPurposeSchema>;
+export type OpenTagReplyDeliveryPurpose = z.infer<typeof OpenTagReplyDeliveryPurposeSchema>;
 export type OpenTagReplyTargetRef = z.infer<typeof OpenTagReplyTargetRefSchema>;
+
+export function selectReplyTargetsForPurpose(
+  replyTo: readonly OpenTagReplyTargetRef[],
+  purpose: OpenTagReplyDeliveryPurpose
+): OpenTagReplyTargetRef[] {
+  return replyTo.filter((target) => target.purpose === "all" || target.purpose === purpose);
+}

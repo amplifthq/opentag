@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   OpenTagExecutorProtocolEventSchema,
-  OpenTagExecutorRunRequestSchema
+  OpenTagExecutorRunRequestSchema,
+  replyDeliveryPurposeForExecutorEventType,
+  selectReplyTargetsForExecutorEventType
 } from "../src/executor-protocol.js";
-import { OpenTagIntegrationManifestSchema } from "../src/integration-protocol.js";
+import {
+  OpenTagIntegrationManifestSchema,
+  selectReplyTargetsForPurpose,
+  type OpenTagReplyTargetRef
+} from "../src/integration-protocol.js";
 
 describe("OpenTag executor protocol schemas", () => {
   it("models integration manifests with an executor role and stdio-jsonl binding", () => {
@@ -100,6 +106,64 @@ describe("OpenTag executor protocol schemas", () => {
     expect(request.source?.channel?.provider).toBe("slack");
     expect(request.targets?.repo?.name).toBe("opentag");
     expect(request.replyTo[0]?.purpose).toBe("all");
+  });
+
+  it("selects every reply target whose purpose matches the delivery", () => {
+    const replyTo: OpenTagReplyTargetRef[] = [
+      { channel: { provider: "slack", id: "all-1" }, purpose: "all" },
+      { channel: { provider: "slack", id: "progress-1" }, purpose: "progress" },
+      { channel: { provider: "github", id: "final" }, purpose: "final" },
+      { channel: { provider: "github", id: "all-2" }, purpose: "all" },
+      { channel: { provider: "github", id: "error" }, purpose: "error" },
+      { channel: { provider: "slack", id: "progress-2" }, purpose: "progress" },
+      { channel: { provider: "slack", id: "approval" }, purpose: "approval" },
+      { channel: { provider: "slack", id: "progress-3" }, purpose: "progress" }
+    ];
+
+    expect(selectReplyTargetsForPurpose(replyTo, "progress").map((target) => target.channel.id)).toEqual([
+      "all-1",
+      "progress-1",
+      "all-2",
+      "progress-2",
+      "progress-3"
+    ]);
+    expect(selectReplyTargetsForPurpose(replyTo, "final").map((target) => target.channel.id)).toEqual([
+      "all-1",
+      "final",
+      "all-2"
+    ]);
+    expect(selectReplyTargetsForPurpose(replyTo, "error").map((target) => target.channel.id)).toEqual([
+      "all-1",
+      "all-2",
+      "error"
+    ]);
+    expect(selectReplyTargetsForPurpose(replyTo, "approval").map((target) => target.channel.id)).toEqual([
+      "all-1",
+      "all-2",
+      "approval"
+    ]);
+  });
+
+  it("maps executor events to canonical reply delivery purposes", () => {
+    expect(replyDeliveryPurposeForExecutorEventType("started")).toBe("progress");
+    expect(replyDeliveryPurposeForExecutorEventType("progress")).toBe("progress");
+    expect(replyDeliveryPurposeForExecutorEventType("completed")).toBe("final");
+    expect(replyDeliveryPurposeForExecutorEventType("failed")).toBe("error");
+
+    const replyTo: OpenTagReplyTargetRef[] = [
+      { channel: { provider: "slack", id: "all-1" }, purpose: "all" },
+      { channel: { provider: "slack", id: "progress" }, purpose: "progress" },
+      { channel: { provider: "github", id: "final-1" }, purpose: "final" },
+      { channel: { provider: "slack", id: "all-2" }, purpose: "all" },
+      { channel: { provider: "github", id: "error" }, purpose: "error" },
+      { channel: { provider: "github", id: "final-2" }, purpose: "final" }
+    ];
+    expect(selectReplyTargetsForExecutorEventType(replyTo, "completed").map((target) => target.channel.id)).toEqual([
+      "all-1",
+      "final-1",
+      "all-2",
+      "final-2"
+    ]);
   });
 
   it("requires completed events to acknowledge the actual workspace", () => {
