@@ -1,4 +1,14 @@
-import { contextPointerLabel, type ContextPacket, type ContextPointer, type OpenTagCommand, type OpenTagRunResult, type PermissionGrant } from "@opentag/core";
+import {
+  contextPointerLabel,
+  type ContextPacket,
+  type ContextPointer,
+  type OpenTagCommand,
+  type OpenTagReplyTargetRef,
+  type OpenTagRunResult,
+  type OpenTagRunSourceRef,
+  type OpenTagRunTargets,
+  type PermissionGrant
+} from "@opentag/core";
 import type { AgentSessionProfile } from "./session-profile.js";
 
 export type ExecutorEvent = {
@@ -15,6 +25,9 @@ export type ExecutorRunInput = {
   runId: string;
   workspacePath: string;
   command: OpenTagCommand;
+  source?: OpenTagRunSourceRef;
+  targets?: OpenTagRunTargets;
+  replyTo?: OpenTagReplyTargetRef[];
   context: ContextPointer[];
   contextPacket?: ContextPacket;
   permissions?: PermissionGrant[];
