@@ -71,11 +71,17 @@ type NormalizedAcpManifest = {
 };
 
 type ActiveRun = {
+  runId: string;
+  attemptId?: string;
   child?: ChildProcessWithoutNullStreams;
   client?: acp.ClientContext;
   sessionId?: string;
   cancelRequested: boolean;
 };
+
+function activeRunKey(runId: string, attemptId?: string): string {
+  return `${runId}\u0000${attemptId ?? "legacy"}`;
+}
 
 function normalizeManifest(input: OpenTagIntegrationManifestInput): NormalizedAcpManifest {
   const manifest = OpenTagIntegrationManifestSchema.parse(input);
@@ -343,11 +349,13 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
     },
     async run(input, sink) {
       const workspace = assertExplicitWorkspace(input);
-      if (activeRuns.has(input.runId)) throw new Error(`ACP run ${input.runId} is already active.`);
-      const active: ActiveRun = { cancelRequested: false };
-      activeRuns.set(input.runId, active);
+      const activeKey = activeRunKey(input.runId, input.attemptId);
+      if (activeRuns.has(activeKey)) throw new Error(`ACP attempt ${input.attemptId ?? input.runId} is already active.`);
+      const active: ActiveRun = { runId: input.runId, ...(input.attemptId ? { attemptId: input.attemptId } : {}), cancelRequested: false };
+      activeRuns.set(activeKey, active);
       const baseBranch = input.baseBranch ?? "main";
-      const branchName = branchNameForRun(input.runId);
+      const executionId = input.attemptId ? `${input.runId}-${input.attemptId}` : input.runId;
+      const branchName = branchNameForRun(executionId);
       let executionPath = workspace.path;
       let repositoryCompleted = false;
       let worktreeCreated = false;
@@ -356,7 +364,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         if (workspace.kind === "repository") {
           executionPath = worktreePathForRun({
             workspacePath: workspace.path,
-            runId: input.runId,
+            runId: executionId,
             ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
           });
           await sink.emit({
@@ -500,7 +508,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         });
         throw error;
       } finally {
-        activeRuns.delete(input.runId);
+        activeRuns.delete(activeKey);
         if (active.child) await terminateChild(active.child);
         if (workspace.kind === "repository" && worktreeCreated) {
           const keepWorktree = input.keepWorktree ?? "on_failure";
@@ -522,8 +530,10 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
       }
     },
-    async cancel(runId) {
-      const active = activeRuns.get(runId);
+    async cancel(runId, attemptId) {
+      const active = attemptId
+        ? activeRuns.get(activeRunKey(runId, attemptId))
+        : [...activeRuns.values()].find((candidate) => candidate.runId === runId);
       if (!active) return;
       active.cancelRequested = true;
       const child = active.child;

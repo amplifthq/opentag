@@ -1,5 +1,5 @@
 import { createDispatcherClient } from "@opentag/client";
-import { createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, createHermesExecutor, type RunnerSecurityPolicy } from "@opentag/runner";
+import { createAcpExecutor, createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, createHermesExecutor, type ExecutorAdapter, type RunnerSecurityPolicy } from "@opentag/runner";
 import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
@@ -20,7 +20,7 @@ export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityP
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
   const security = securityFromConfig(config);
 
-  return {
+  const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),
     codex: createCodexExecutor({
       ...(security ? { security } : {})
@@ -40,6 +40,10 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(config.hermes?.profileTemplate ? { profileTemplate: config.hermes.profileTemplate } : {})
     })
   };
+  for (const manifest of Object.values(config.agents)) {
+    executors[manifest.id] = createAcpExecutor({ manifest });
+  }
+  return executors;
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
@@ -71,6 +75,8 @@ export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
     runnerId: config.runnerId,
     repositories: config.repositories,
     executors: executorsFromConfig(config),
+    scratchRoot: config.scratchRoot,
+    keepScratch: config.keepScratch,
     ...(security ? { security } : {}),
     ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),

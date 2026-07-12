@@ -99,7 +99,7 @@ describe("daemon Project Target allowlist", () => {
 
     expect(completed).toMatchObject({
       conclusion: "needs_human",
-      summary: "No Project Target metadata is configured for this run."
+      summary: "Repository-bearing events require complete Project Target metadata."
     });
   });
 });

@@ -56,6 +56,34 @@ Minimal local config:
 }
 ```
 
+Named ACP agents use the same manifest-backed runtime path. Hermes is an
+ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
+
+```json
+{
+  "agents": {
+    "hermes-acp": {
+      "protocol": "opentag.integration.v1",
+      "id": "hermes-acp",
+      "label": "Hermes ACP",
+      "bindings": {
+        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"], "env": {} }
+      },
+      "roles": {
+        "agent": {
+          "protocol": "agent-client-protocol",
+          "protocolVersion": 1,
+          "binding": "agent"
+        }
+      },
+      "resources": {}
+    }
+  },
+  "scratchRoot": "/absolute/path/to/opentag-state/scratch",
+  "keepScratch": "on_failure"
+}
+```
+
 Add Slack channel bindings when a chat surface should route work to a Project Target:
 
 ```json
@@ -164,6 +192,9 @@ use `--permission-mode plan`.
 | `runnerTokens` | none | Additional runner-scoped tokens accepted by the local dispatcher during a rotation window |
 | `revokedRunnerTokenFingerprints` | none | SHA-256 fingerprints of revoked runner tokens that must fail closed |
 | `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
+| `agents` | `{}` | Named `opentag.integration.v1` manifests whose ACP agent role is hosted by the generic ACP executor |
+| `scratchRoot` | local OpenTag state directory | Absolute root for attempt-scoped non-repository workspaces |
+| `keepScratch` | `on_failure` | Scratch retention: `always`, `on_failure`, or `never`; failed attempts retain evidence |
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |

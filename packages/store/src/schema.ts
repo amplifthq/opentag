@@ -255,9 +255,9 @@ export const channelBindings = sqliteTable(
     provider: text("provider").notNull(),
     accountId: text("account_id").notNull(),
     conversationId: text("conversation_id").notNull(),
-    repoProvider: text("repo_provider").notNull(),
-    owner: text("owner").notNull(),
-    repo: text("repo").notNull(),
+    repoProvider: text("repo_provider"),
+    owner: text("owner"),
+    repo: text("repo"),
     metadataJson: text("metadata_json"),
     createdAt: text("created_at").notNull()
   },
@@ -477,9 +477,9 @@ export function migrateSchema(sqlite: Database.Database): void {
       provider TEXT NOT NULL,
       account_id TEXT NOT NULL,
       conversation_id TEXT NOT NULL,
-      repo_provider TEXT NOT NULL,
-      owner TEXT NOT NULL,
-      repo TEXT NOT NULL,
+      repo_provider TEXT,
+      owner TEXT,
+      repo TEXT,
       metadata_json TEXT,
       created_at TEXT NOT NULL
     );
@@ -542,6 +542,32 @@ export function migrateSchema(sqlite: Database.Database): void {
   }
   if (!channelBindingColumnNames.has("metadata_json")) {
     sqlite.exec("ALTER TABLE channel_bindings ADD COLUMN metadata_json TEXT");
+  }
+  const repositoryColumns = channelBindingColumns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name));
+  if (repositoryColumns.some((column) => (column as { notnull?: number }).notnull === 1)) {
+    sqlite.exec(`
+      DROP INDEX IF EXISTS channel_bindings_provider_account_conversation_idx;
+      CREATE TABLE channel_bindings_nullable_repo (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        repo_provider TEXT,
+        owner TEXT,
+        repo TEXT,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO channel_bindings_nullable_repo (
+        id, provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      )
+      SELECT id, provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      FROM channel_bindings;
+      DROP TABLE channel_bindings;
+      ALTER TABLE channel_bindings_nullable_repo RENAME TO channel_bindings;
+      CREATE UNIQUE INDEX channel_bindings_provider_account_conversation_idx
+        ON channel_bindings(provider, account_id, conversation_id);
+    `);
   }
   const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
   const runColumnNames = new Set(runColumns.map((column) => column.name));

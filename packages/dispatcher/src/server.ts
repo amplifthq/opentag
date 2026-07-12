@@ -429,15 +429,26 @@ const CreateSlackChannelBindingSchema = z.object({
   repo: z.string().min(1)
 });
 
-const CreateChannelBindingSchema = z.object({
-  provider: z.string().min(1),
-  accountId: z.string().min(1),
-  conversationId: z.string().min(1),
-  repoProvider: z.string().min(1),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
+const CreateChannelBindingSchema = z
+  .object({
+    provider: z.string().min(1),
+    accountId: z.string().min(1),
+    conversationId: z.string().min(1),
+    repoProvider: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    repo: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional()
+  })
+  .superRefine((binding, ctx) => {
+    const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
+    if (present !== 0 && present !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repoProvider"],
+        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
+      });
+    }
+  });
 
 const UpsertPolicyRuleSchema = z.object({
   rule: PolicyRuleSchema
@@ -3778,9 +3789,9 @@ export function createDispatcherApp(input: {
       provider: parsed.provider,
       accountId: parsed.accountId,
       conversationId: parsed.conversationId,
-      repoProvider: parsed.repoProvider,
-      owner: parsed.owner,
-      repo: parsed.repo,
+      ...(parsed.repoProvider && parsed.owner && parsed.repo
+        ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+        : {}),
       ...(parsed.metadata ? { metadata: parsed.metadata } : {})
     });
     await recordControlPlaneEvent({
@@ -3791,9 +3802,9 @@ export function createDispatcherApp(input: {
         provider: parsed.provider,
         accountId: parsed.accountId,
         conversationId: parsed.conversationId,
-        repoProvider: parsed.repoProvider,
-        owner: parsed.owner,
-        repo: parsed.repo,
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
         hasMetadata: Boolean(parsed.metadata)
       }
     });
@@ -3818,9 +3829,9 @@ export function createDispatcherApp(input: {
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     const queuedFollowUps = active ? await repo.listQueuedFollowUpsForActiveRun({ activeRunId: active.run.id }) : [];
@@ -3865,9 +3876,9 @@ export function createDispatcherApp(input: {
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     if (!active) return c.json({ error: "active_run_not_found" }, 404);

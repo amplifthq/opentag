@@ -82,6 +82,36 @@ describe("OpenTag repository", () => {
     expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
   });
 
+  it("migrates repository-required channel bindings to nullable repository fields without losing rows", async () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE channel_bindings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        repo_provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES ('slack', 'T123', 'C456', 'github', 'acme', 'demo', NULL, '2026-07-12T00:00:00.000Z');
+    `);
+
+    migrateSchema(sqlite);
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name)).every((column) => column.notnull === 0)).toBe(true);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toMatchObject({
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+  });
+
   it("migrates legacy Linear relay installations before OAuth auth metadata", () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`
@@ -2441,5 +2471,81 @@ describe("OpenTag repository", () => {
       expect.objectContaining({ intentId: "intent_priority_p1", outcome: "stale" }),
       expect.objectContaining({ intentId: "intent_assignee_alice", outcome: "skipped" })
     ]);
+  });
+});
+
+describe("non-repository runner eligibility", () => {
+  function ordinaryEvent(id: string, metadata: Record<string, unknown> = {}) {
+    return {
+      id: `evt_${id}`,
+      source: "slack",
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata
+    } as const;
+  }
+
+  it("lets a registered runner claim an ordinary run without a Project Target", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRun({ id: "run_scratch", event: ordinaryEvent("scratch") });
+
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
+    expect(claimed).toMatchObject({ run: { id: "run_scratch" }, event: { id: "evt_scratch" }, attemptNumber: 1 });
+  });
+
+  it("does not let an unbound repository target fall back to scratch eligibility", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRun({
+      id: "run_unbound_repo",
+      event: ordinaryEvent("unbound_repo", { repoProvider: "github", owner: "acme", repo: "private" })
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toBeNull();
+  });
+});
+
+describe("repository-optional channel bindings", () => {
+  it("stores a generic channel binding with no repository target", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toEqual({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456"
+    });
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name)).every((column) => column.notnull === 0)).toBe(true);
+  });
+
+  it("rejects partial repository fields at the store boundary", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await expect(
+      repo.upsertChannelBinding({
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        owner: "acme"
+      })
+    ).rejects.toThrow(/repository|repoProvider|owner|repo/u);
   });
 });

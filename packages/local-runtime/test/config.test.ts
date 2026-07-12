@@ -3,12 +3,81 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
+import { executorsFromConfig } from "../src/runtime.js";
 
 const baseRepository = {
   owner: "acme",
   repo: "widgets",
   checkoutPath: "/tmp/acme-widgets"
 };
+
+function acpManifest(input: { id: string; label: string; command: string; args?: string[] }) {
+  return {
+    protocol: "opentag.integration.v1" as const,
+    id: input.id,
+    label: input.label,
+    bindings: {
+      agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [], env: {} }
+    },
+    roles: {
+      agent: { protocol: "agent-client-protocol" as const, protocolVersion: 1 as const, binding: "agent" }
+    },
+    resources: {}
+  };
+}
+
+describe("parseDaemonConfig ACP agents", () => {
+  it("creates differently named agents through the generic ACP executor path", () => {
+    const config = parseDaemonConfig({
+      agents: {
+        "hermes-acp": acpManifest({ id: "hermes-acp", label: "Hermes ACP", command: "hermes", args: ["acp"] }),
+        reviewer: acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" })
+      }
+    });
+
+    expect(config.agents?.["hermes-acp"]?.bindings.agent).toMatchObject({ command: "hermes", args: ["acp"] });
+    const executors = executorsFromConfig(config);
+    expect(executors["hermes-acp"]).toMatchObject({ id: "hermes-acp", displayName: "Hermes ACP" });
+    expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
+    expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(
+      executors.reviewer?.capability?.completionSignals
+    );
+  });
+
+  it("requires the configured name to match the manifest id", () => {
+    expect(() =>
+      parseDaemonConfig({
+        agents: {
+          reviewer: acpManifest({ id: "different-id", label: "Review Agent", command: "review-agent" })
+        }
+      })
+    ).toThrow(/reviewer|different-id/u);
+  });
+});
+
+describe("parseDaemonConfig generic channel bindings", () => {
+  it("accepts a channel binding without repository fields", () => {
+    const config = parseDaemonConfig({
+      channelBindings: [{ provider: "slack", accountId: "T123", conversationId: "C456" }]
+    });
+
+    expect(config.channelBindings).toEqual([{ provider: "slack", accountId: "T123", conversationId: "C456" }]);
+  });
+
+  it.each([
+    { repoProvider: "github" },
+    { owner: "acme" },
+    { repo: "demo" },
+    { repoProvider: "github", owner: "acme" },
+    { owner: "acme", repo: "demo" }
+  ])("rejects a partial repository target: $repoProvider $owner $repo", (partial) => {
+    expect(() =>
+      parseDaemonConfig({
+        channelBindings: [{ provider: "slack", accountId: "T123", conversationId: "C456", ...partial }]
+      })
+    ).toThrow();
+  });
+});
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "opentag-local-runtime-test-"));

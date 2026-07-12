@@ -98,11 +98,14 @@ describe("source-thread replay harness", () => {
 
       const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
       expect(claimResponse.status).toBe(200);
+      const lease = (await claimResponse.json()) as { attemptId: string; fencingToken: string };
 
       const runningResponse = await app.request(
         `/v1/runners/runner_1/runs/${fixture.runId}/running`,
         jsonRequest({
           executor: "echo",
+          attemptId: lease.attemptId,
+          fencingToken: lease.fencingToken,
           executorCapability: fixture.executorCapability,
           idempotencyKey: `runner_1:${fixture.runId}:running`
         })
@@ -113,6 +116,8 @@ describe("source-thread replay harness", () => {
         `/v1/runners/runner_1/runs/${fixture.runId}/complete`,
         jsonRequest({
           result: fixture.result,
+          attemptId: lease.attemptId,
+          fencingToken: lease.fencingToken,
           idempotencyKey: `runner_1:${fixture.runId}:complete`
         })
       );

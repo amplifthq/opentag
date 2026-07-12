@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { OpenTagIntegrationManifestSchema } from "@opentag/core";
 import { z } from "zod";
 
 // Accept any trimmed non-empty executor id. The built-ins are echo, codex,
@@ -10,6 +13,14 @@ import { z } from "zod";
 const ExecutorSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
+
+function defaultLocalStateDirectory(): string {
+  if (process.env.OPENTAG_STATE_DIR) return resolve(process.env.OPENTAG_STATE_DIR);
+  if (process.env.XDG_STATE_HOME) return resolve(process.env.XDG_STATE_HOME, "opentag");
+  return join(homedir(), ".local", "state", "opentag");
+}
+
+const AbsolutePathSchema = z.string().min(1).refine(isAbsolute, "Path must be absolute.");
 
 const SecretRefSchema = z.discriminatedUnion("kind", [
   z
@@ -129,15 +140,26 @@ export const SlackChannelBindingConfigSchema = z.object({
   repo: z.string().min(1)
 });
 
-export const ChannelBindingConfigSchema = z.object({
-  provider: z.string().min(1),
-  accountId: z.string().min(1),
-  conversationId: z.string().min(1),
-  repoProvider: z.string().min(1).default("github"),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
+export const ChannelBindingConfigSchema = z
+  .object({
+    provider: z.string().min(1),
+    accountId: z.string().min(1),
+    conversationId: z.string().min(1),
+    repoProvider: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    repo: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional()
+  })
+  .superRefine((binding, ctx) => {
+    const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
+    if (present !== 0 && present !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repoProvider"],
+        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
+      });
+    }
+  });
 
 export const LarkChannelBindingConfigSchema = z.object({
   tenantKey: z.string().min(1),
@@ -147,29 +169,44 @@ export const LarkChannelBindingConfigSchema = z.object({
   repo: z.string().min(1)
 });
 
-export const OpenTagDaemonConfigSchema = z.object({
-  runnerId: z.string().min(1).default("runner_local"),
-  dispatcherUrl: z.string().url().default("http://localhost:3030"),
-  repositories: z.array(RepositoryBindingConfigSchema).default([]),
-  channelBindings: z.array(ChannelBindingConfigSchema).optional(),
-  slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
-  larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
-  claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
-  hermes: HermesExecutorConfigSchema.optional(),
-  agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
-  security: RunnerSecurityPolicySchema.optional(),
-  githubToken: SecretStringSchema.optional(),
-  githubApplyToken: SecretStringSchema.nullable().optional(),
-  preparePullRequestBranch: z.boolean().optional(),
-  allowAutoCreatePullRequest: z.boolean().optional(),
-  runnerToken: SecretStringSchema.optional(),
-  runnerTokens: z.array(SecretStringSchema).optional(),
-  revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
-  pairingToken: SecretStringSchema.optional(),
-  pollIntervalMs: PositiveIntegerSchema.default(5000),
-  heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
-  runTimeoutMs: PositiveIntegerSchema.optional()
-});
+export const OpenTagDaemonConfigSchema = z
+  .object({
+    runnerId: z.string().min(1).default("runner_local"),
+    dispatcherUrl: z.string().url().default("http://localhost:3030"),
+    repositories: z.array(RepositoryBindingConfigSchema).default([]),
+    agents: z.record(OpenTagIntegrationManifestSchema).default({}),
+    scratchRoot: AbsolutePathSchema.default(join(defaultLocalStateDirectory(), "scratch")),
+    keepScratch: KeepWorktreeSchema.default("on_failure"),
+    channelBindings: z.array(ChannelBindingConfigSchema).optional(),
+    slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
+    larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
+    claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
+    hermes: HermesExecutorConfigSchema.optional(),
+    agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
+    security: RunnerSecurityPolicySchema.optional(),
+    githubToken: SecretStringSchema.optional(),
+    githubApplyToken: SecretStringSchema.nullable().optional(),
+    preparePullRequestBranch: z.boolean().optional(),
+    allowAutoCreatePullRequest: z.boolean().optional(),
+    runnerToken: SecretStringSchema.optional(),
+    runnerTokens: z.array(SecretStringSchema).optional(),
+    revokedRunnerTokenFingerprints: z.array(z.string().trim().min(1)).optional(),
+    pairingToken: SecretStringSchema.optional(),
+    pollIntervalMs: PositiveIntegerSchema.default(5000),
+    heartbeatIntervalMs: PositiveIntegerSchema.default(15000),
+    runTimeoutMs: PositiveIntegerSchema.optional()
+  })
+  .superRefine((config, ctx) => {
+    for (const [name, manifest] of Object.entries(config.agents)) {
+      if (manifest.id !== name) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["agents", name, "id"],
+          message: `Configured agent name '${name}' must match manifest id '${manifest.id}'.`
+        });
+      }
+    }
+  });
 
 export type RepositoryBindingConfig = z.infer<typeof RepositoryBindingConfigSchema>;
 export type ChannelBindingConfig = z.infer<typeof ChannelBindingConfigSchema>;
@@ -188,6 +225,12 @@ function formatChannelBindingIdentity(binding: Pick<ChannelBindingConfig, "provi
 
 function sameChannelBindingTarget(left: ChannelBindingConfig, right: ChannelBindingConfig): boolean {
   return left.repoProvider === right.repoProvider && left.owner === right.owner && left.repo === right.repo;
+}
+
+function formatChannelBindingTarget(binding: ChannelBindingConfig): string {
+  return binding.repoProvider && binding.owner && binding.repo
+    ? `${binding.repoProvider}:${binding.owner}/${binding.repo}`
+    : "no repository target";
 }
 
 export function normalizeChannelBindings(config: OpenTagDaemonConfig): ChannelBindingConfig[] {
@@ -221,7 +264,7 @@ export function normalizeChannelBindings(config: OpenTagDaemonConfig): ChannelBi
     const existing = normalized.get(key);
     if (existing && !sameChannelBindingTarget(existing, binding)) {
       throw new Error(
-        `Conflicting channel binding for ${formatChannelBindingIdentity(binding)}: ${existing.repoProvider}:${existing.owner}/${existing.repo} and ${binding.repoProvider}:${binding.owner}/${binding.repo}`
+        `Conflicting channel binding for ${formatChannelBindingIdentity(binding)}: ${formatChannelBindingTarget(existing)} and ${formatChannelBindingTarget(binding)}`
       );
     }
     if (!existing) {

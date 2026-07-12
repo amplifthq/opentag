@@ -149,11 +149,11 @@ export type ChannelBinding = {
   provider: string;
   accountId: string;
   conversationId: string;
-  repoProvider: string;
-  owner: string;
-  repo: string;
   metadata?: Record<string, unknown>;
-};
+} & (
+  | { repoProvider: string; owner: string; repo: string }
+  | { repoProvider?: never; owner?: never; repo?: never }
+);
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -634,15 +634,33 @@ function runProvenance(input: {
 
 function channelBindingFromRow(row: typeof channelBindings.$inferSelect): ChannelBinding {
   const metadata = recordFromJson(row.metadataJson);
+  const repositoryValues = [row.repoProvider, row.owner, row.repo];
+  const repositoryFieldCount = repositoryValues.filter((value) => value !== null).length;
+  if (repositoryFieldCount !== 0 && repositoryFieldCount !== 3) {
+    throw new Error("Stored channel binding has partial repository fields.");
+  }
   return {
     provider: row.provider,
     accountId: row.accountId,
     conversationId: row.conversationId,
-    repoProvider: row.repoProvider,
-    owner: row.owner,
-    repo: row.repo,
+    ...(row.repoProvider && row.owner && row.repo
+      ? { repoProvider: row.repoProvider, owner: row.owner, repo: row.repo }
+      : {}),
     ...(metadata ? { metadata } : {})
   };
+}
+
+function channelBindingRepositoryFields(input: ChannelBinding):
+  | { repoProvider: string; owner: string; repo: string }
+  | { repoProvider: null; owner: null; repo: null } {
+  const values = [input.repoProvider, input.owner, input.repo];
+  const present = values.filter((value) => value !== undefined).length;
+  if (present !== 0 && present !== 3) {
+    throw new Error("Channel binding repository fields repoProvider, owner, and repo must be provided together.");
+  }
+  return input.repoProvider && input.owner && input.repo
+    ? { repoProvider: input.repoProvider, owner: input.owner, repo: input.repo }
+    : { repoProvider: null, owner: null, repo: null };
 }
 
 function stringArrayFromJson(value: string): string[] {
@@ -1326,23 +1344,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async findCancelableRunForSourceContainer(input: {
       source: string;
-      repoProvider: string;
-      owner: string;
-      repo: string;
+      repoProvider?: string;
+      owner?: string;
+      repo?: string;
       metadata: Record<string, string>;
     }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
-      const rows = await db
-        .select()
-        .from(runs)
-        .where(
-          and(
-            eq(runs.repoProvider, input.repoProvider),
-            eq(runs.repoOwner, input.owner),
-            eq(runs.repoName, input.repo),
-            inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])
-          )
-        )
-        .orderBy(asc(runs.createdAt));
+      const targetFields = [input.repoProvider, input.owner, input.repo];
+      const targetFieldCount = targetFields.filter((value) => value !== undefined).length;
+      if (targetFieldCount !== 0 && targetFieldCount !== 3) {
+        throw new Error("Cancelable source-container lookup repository fields must be provided together.");
+      }
+      const activeStatus = inArray(runs.status, ["queued", "assigned", "running", "needs_approval"]);
+      const rows = input.repoProvider && input.owner && input.repo
+        ? await db
+            .select()
+            .from(runs)
+            .where(
+              and(
+                eq(runs.repoProvider, input.repoProvider),
+                eq(runs.repoOwner, input.owner),
+                eq(runs.repoName, input.repo),
+                activeStatus
+              )
+            )
+            .orderBy(asc(runs.createdAt))
+        : await db.select().from(runs).where(activeStatus).orderBy(asc(runs.createdAt));
       for (const row of rows) {
         const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
         if (sourceContainerMetadataMatches({ event, source: input.source, metadata: input.metadata })) {
@@ -1813,24 +1839,21 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     },
 
     async upsertChannelBinding(input: ChannelBinding): Promise<void> {
+      const repositoryFields = channelBindingRepositoryFields(input);
       await db
         .insert(channelBindings)
         .values({
           provider: input.provider,
           accountId: input.accountId,
           conversationId: input.conversationId,
-          repoProvider: input.repoProvider,
-          owner: input.owner,
-          repo: input.repo,
+          ...repositoryFields,
           metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
           createdAt: nowIso()
         })
         .onConflictDoUpdate({
           target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
           set: {
-            repoProvider: input.repoProvider,
-            owner: input.owner,
-            repo: input.repo,
+            ...repositoryFields,
             metadataJson: input.metadata ? JSON.stringify(input.metadata) : null
           }
         });
@@ -2154,7 +2177,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const row = queuedRows.find((candidate) => {
         const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
         const repoKey = projectTargetRefFromEvent(event);
-        if (!repoKey) return false;
+        if (!repoKey) {
+          return Boolean(db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get());
+        }
         const binding = db
           .select()
           .from(repoBindings)
@@ -2310,6 +2335,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .get();
       if (!row) return null;
       const binding = channelBindingFromRow(row);
+      if (!binding.repoProvider || !binding.owner || !binding.repo) return null;
       return {
         teamId: binding.accountId,
         channelId: binding.conversationId,

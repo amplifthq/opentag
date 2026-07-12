@@ -5349,6 +5349,65 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("stores a generic channel binding without fabricating a repository target", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const create = await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      metadata: { title: "General" }
+    }));
+    expect(create.status).toBe(201);
+
+    const get = await app.request("/v1/channel-bindings/slack/T123/C456");
+    await expect(get.json()).resolves.toEqual({
+      binding: {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        metadata: { title: "General" }
+      }
+    });
+  });
+
+  it("rejects partial repository fields on generic channel bindings", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+
+    const response = await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      owner: "acme"
+    }));
+
+    expect(response.status).toBe(400);
+  });
+
+  it("lets a registered runner claim a non-repository run", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_scratch", name: "Scratch Runner" }));
+    const ordinaryEvent = {
+      id: "evt_scratch_dispatcher",
+      source: "slack",
+      sourceEventId: "message_scratch_dispatcher",
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    };
+    const created = await app.request("/v1/runs", jsonRequest({ runId: "run_scratch_dispatcher", event: ordinaryEvent }));
+    expect([201, 202]).toContain(created.status);
+
+    const claim = await app.request("/v1/runners/runner_scratch/claim", { method: "POST" });
+    expect(claim.status).toBe(200);
+    await expect(claim.json()).resolves.toMatchObject({ run: { id: "run_scratch_dispatcher" } });
+  });
+
   it("deletes generic channel bindings", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

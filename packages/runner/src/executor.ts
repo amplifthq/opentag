@@ -27,6 +27,7 @@ export type ExecutorWorkspace =
 
 type ExecutorRunInputBase = {
   runId: string;
+  attemptId?: string;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;
   targets?: OpenTagRunTargets;
@@ -145,5 +146,5 @@ export type ExecutorAdapter = {
   capability?: ExecutorCapabilityContract;
   canRun(input: ExecutorRunInput): Promise<ExecutorReadiness>;
   run(input: ExecutorRunInput, sink: ExecutorEventSink): Promise<OpenTagRunResult>;
-  cancel(runId: string): Promise<void>;
+  cancel(runId: string, attemptId?: string): Promise<void>;
 };

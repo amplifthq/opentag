@@ -35,7 +35,7 @@ export type AdmitRunResult =
   | {
       outcome: "start";
       decision: RunAdmissionDecision;
-      binding: RepoBinding;
+      binding?: RepoBinding;
     }
   | {
       outcome: "drop_duplicate";
@@ -163,55 +163,60 @@ export function createAdmissionRuntime(input: {
       }
 
       const repoKey = projectTargetRefFromEvent(request.event);
+      let binding: RepoBinding | undefined;
       if (!repoKey) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: "The event did not resolve to a repository context.",
-            reasonCode: "repo_context_missing",
-            event: request.event
-          })
-        };
-      }
+        const metadata = request.event.metadata ?? {};
+        const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
+        if (request.event.source === "github" || hasRepositoryMetadata) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: "The repository-bearing event did not resolve to a complete repository context.",
+              reasonCode: "repo_context_missing",
+              event: request.event
+            })
+          };
+        }
+      } else {
+        binding = (await input.repo.getRepoBinding(repoKey)) ?? undefined;
+        if (!binding) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: "No repository binding is configured for this work context.",
+              reasonCode: "repo_not_bound",
+              event: request.event
+            })
+          };
+        }
 
-      const binding = await input.repo.getRepoBinding(repoKey);
-      if (!binding) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: "No repository binding is configured for this work context.",
-            reasonCode: "repo_not_bound",
-            event: request.event
-          })
-        };
-      }
+        const actorGate = evaluateActorGate(request.event, binding.allowedActors);
+        if (!actorGate.allowed) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: actorGate.reason,
+              reasonCode: actorGate.reasonCode,
+              event: request.event
+            })
+          };
+        }
 
-      const actorGate = evaluateActorGate(request.event, binding.allowedActors);
-      if (!actorGate.allowed) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: actorGate.reason,
-            reasonCode: actorGate.reasonCode,
-            event: request.event
-          })
-        };
-      }
-
-      const accessDecision = await agentAccessProfileCheck({ event: request.event, binding });
-      if (!accessDecision.allowed) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: accessDecision.reason,
-            reasonCode: accessDecision.reasonCode ?? "agent_access_profile_denied",
-            event: request.event
-          })
-        };
+        const accessDecision = await agentAccessProfileCheck({ event: request.event, binding });
+        if (!accessDecision.allowed) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: accessDecision.reason,
+              reasonCode: accessDecision.reasonCode ?? "agent_access_profile_denied",
+              event: request.event
+            })
+          };
+        }
       }
 
       let activeRun: { run: OpenTagRun; event: OpenTagEvent } | null = null;
@@ -258,7 +263,7 @@ export function createAdmissionRuntime(input: {
           reasonCode: "new_event",
           event: request.event
         }),
-        binding
+        ...(binding ? { binding } : {})
       };
     }
   };

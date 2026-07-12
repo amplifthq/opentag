@@ -28,6 +28,8 @@ export type ClaimedOpenTagRun = {
   fencingToken: string;
 };
 
+export type OpenTagRunRecord = Pick<ClaimedOpenTagRun, "run" | "event">;
+
 export type AttemptLease = Pick<ClaimedOpenTagRun, "attemptId" | "fencingToken">;
 
 export type RepoBindingInput = {
@@ -358,7 +360,7 @@ export type OpenTagClient = {
     reason?: string;
     requestedBy?: string;
   }): Promise<CancelRunResult>;
-  getRun(input: { runId: string }): Promise<ClaimedOpenTagRun>;
+  getRun(input: { runId: string }): Promise<OpenTagRunRecord>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
   getRunLedger(input: { runId: string }): Promise<{ ledger: { runId: string; entries: unknown[] } }>;
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
@@ -821,7 +823,11 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: authHeaders(options.pairingToken)
       });
       await assertOk(response, "getRun");
-      return parseClaimedRun((await response.json()) as { run: unknown; event: unknown });
+      const body = (await response.json()) as { run: unknown; event: unknown };
+      return {
+        run: OpenTagRunSchema.parse(body.run),
+        event: OpenTagEventSchema.parse(body.event)
+      };
     },
 
     async listRunEvents(input) {

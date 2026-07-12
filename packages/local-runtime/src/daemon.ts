@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { mkdir, rm } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   formatProjectTargetRef,
   parseWorkContextMutationCommand,
@@ -14,6 +17,7 @@ import {
   createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
   type ExecutorAdapter,
+  type ExecutorWorkspace,
   type RunnerSecurityPolicy,
   worktreePathForRun
 } from "@opentag/runner";
@@ -67,10 +71,13 @@ function claimedProjectTargetFailure(input: {
   repositories: RepositoryBindingConfig[];
 }): OpenTagRunResult | null {
   if (!input.projectTargetRef) {
+    const metadata = input.event.metadata ?? {};
+    const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
+    if (input.event.source !== "github" && !hasRepositoryMetadata) return null;
     return {
       conclusion: "needs_human",
-      summary: "No Project Target metadata is configured for this run.",
-      nextAction: "Reject this run or replay it from a source that includes repoProvider, owner, and repo metadata."
+      summary: "Repository-bearing events require complete Project Target metadata.",
+      nextAction: "Replay this event with repoProvider, owner, and repo metadata before allowing repository execution."
     };
   }
 
@@ -97,6 +104,12 @@ function claimedProjectTargetFailure(input: {
   }
 
   return null;
+}
+
+function scratchPathForAttempt(root: string, attemptId: string): string {
+  if (!isAbsolute(root)) throw new Error(`Scratch root must be absolute: ${root}`);
+  const segment = createHash("sha256").update(attemptId).digest("hex").slice(0, 24);
+  return join(resolve(root), `attempt-${segment}`);
 }
 
 function errorMessage(error: unknown): string {
@@ -176,6 +189,8 @@ export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
+  scratchRoot?: string;
+  keepScratch?: "always" | "on_failure" | "never";
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -197,17 +212,8 @@ export async function runOneDaemonIteration(input: {
     await input.client.complete(claimed.run.id, lease, claimedTargetFailure);
     return true;
   }
-  const binding = resolveRepositoryBinding(claimed.event, input.repositories);
-  if (!binding) {
-    await input.client.complete(claimed.run.id, lease, {
-      conclusion: "needs_human",
-      summary: "No local workspace mapping is configured for this run's repository."
-    });
-    return true;
-  }
-  // Pure work-context mutation requests ("set priority to High") never need an
-  // executor: compile them into a suggested-changes proposal so the source thread
-  // gets an action receipt and the mutation stays behind the governed apply path.
+  // Pure source-thread mutations stay on the governed apply path and do not
+  // allocate either a repository worktree or a scratch attempt directory.
   const mutationRequests = parseWorkContextMutationCommand(claimed.event.command.rawText);
   if (mutationRequests) {
     await input.client.complete(
@@ -217,7 +223,24 @@ export async function runOneDaemonIteration(input: {
     );
     return true;
   }
-  const executorId = claimed.event.target.executorHint ?? binding.defaultExecutor ?? "echo";
+  const binding = resolveRepositoryBinding(claimed.event, input.repositories);
+  if (projectTargetRef && !binding) {
+    await input.client.complete(claimed.run.id, lease, {
+      conclusion: "needs_human",
+      summary: "No local workspace mapping is configured for this run's repository."
+    });
+    return true;
+  }
+  const workspace: ExecutorWorkspace = binding
+    ? { kind: "repository", path: binding.checkoutPath }
+    : {
+        kind: "scratch",
+        path: scratchPathForAttempt(input.scratchRoot ?? join(process.cwd(), ".opentag", "scratch"), claimed.attemptId)
+      };
+  if (workspace.kind === "scratch") {
+    await mkdir(workspace.path, { recursive: true, mode: 0o700 });
+  }
+  const executorId = claimed.event.target.executorHint ?? binding?.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
     await input.client.complete(claimed.run.id, lease, {
@@ -247,17 +270,17 @@ export async function runOneDaemonIteration(input: {
     : fallbackSessionProfile;
 
   const executionPath =
-    executorId === "codex"
+    binding && executorId === "codex"
       ? worktreePathForRun({
           workspacePath: binding.checkoutPath,
           runId: claimed.run.id,
           ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {})
         })
-      : binding.checkoutPath;
+      : workspace.path;
 
   const securityAssessment = assessRunnerSecurity({
     executorId,
-    workspacePath: binding.checkoutPath,
+    workspacePath: workspace.path,
     executionPath,
     command: claimed.event.command,
     context: claimed.event.context,
@@ -284,16 +307,17 @@ export async function runOneDaemonIteration(input: {
   try {
     readiness = await executor.canRun({
       runId: claimed.run.id,
-      workspacePath: binding.checkoutPath,
+      attemptId: claimed.attemptId,
+      workspace,
       command: claimed.event.command,
       context: claimed.event.context,
       ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
       permissions: claimed.event.permissions,
       metadata,
       ...(sessionProfile ? { sessionProfile } : {}),
-      ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
-      ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
-      ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
+      ...(binding?.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+      ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+      ...(binding?.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
     });
   } catch (error) {
     await input.client.complete(claimed.run.id, lease, failedRunResult(`${executor.displayName} readiness check`, error));
@@ -309,6 +333,7 @@ export async function runOneDaemonIteration(input: {
   }
 
   const runId = claimed.run.id;
+  const attemptId = claimed.attemptId;
   const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
   const runTimeoutMs = input.runTimeoutMs;
@@ -327,7 +352,7 @@ export async function runOneDaemonIteration(input: {
       return;
     }
     cancellationDetected = true;
-    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
+    cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
       console.warn(`OpenTag executor cancellation failed for ${runId}:`, cancelError);
     });
   }
@@ -341,16 +366,17 @@ export async function runOneDaemonIteration(input: {
     .run(
       {
         runId,
-        workspacePath: binding.checkoutPath,
+        attemptId: claimed.attemptId,
+        workspace,
         command: claimed.event.command,
         context: claimed.event.context,
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
         metadata,
         ...(sessionProfile ? { sessionProfile } : {}),
-        ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
-        ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
-        ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
+        ...(binding?.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+        ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+        ...(binding?.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
       },
       {
         emit: async (event) => {
@@ -397,7 +423,7 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     cancellationDetected = true;
-    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
+    cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
       console.warn(`OpenTag executor cancellation failed after timeout for ${runId}:`, cancelError);
     });
     await cancelPromise;
@@ -435,14 +461,16 @@ export async function runOneDaemonIteration(input: {
   const executorResult = executorOutcome.result;
   let result: OpenTagRunResult;
   try {
-    result = await maybeCreatePullRequest({
-      run: claimed.run,
-      executor: executorId,
-      event: claimed.event,
-      binding,
-      result: executorResult,
-      options: input.pullRequestOptions ?? {}
-    });
+    result = binding
+      ? await maybeCreatePullRequest({
+          run: claimed.run,
+          executor: executorId,
+          event: claimed.event,
+          binding,
+          result: executorResult,
+          options: input.pullRequestOptions ?? {}
+        })
+      : executorResult;
   } catch (error) {
     result = pullRequestPreparationFailureResult(executorResult, error);
   }
@@ -453,6 +481,13 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     throw error;
+  }
+  if (workspace.kind === "scratch" && result.conclusion === "success" && (input.keepScratch ?? "on_failure") !== "always") {
+    try {
+      await rm(workspace.path, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`OpenTag could not clean scratch workspace ${workspace.path}:`, error);
+    }
   }
   return true;
 }
@@ -479,6 +514,8 @@ export async function serveDaemon(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
+  scratchRoot?: string;
+  keepScratch?: "always" | "on_failure" | "never";
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -495,6 +532,8 @@ export async function serveDaemon(input: {
         runnerId: input.runnerId,
         repositories: input.repositories,
         executors: input.executors,
+        ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
+        ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
         ...(input.security ? { security: input.security } : {}),
         ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
         ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
