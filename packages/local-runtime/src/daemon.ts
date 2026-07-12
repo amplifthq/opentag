@@ -314,6 +314,12 @@ export async function runOneDaemonIteration(input: {
       scratchAttemptCreated = true;
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      await input.client.complete(claimed.run.id, lease, {
+        conclusion: "needs_human",
+        summary: "Scratch attempt workspace already exists; refusing to reuse it.",
+        nextAction: "Inspect and preserve the existing attempt path, then retry the Run with a new Attempt."
+      });
+      return true;
     }
   }
   async function cleanupUnexecutedScratch(): Promise<void> {

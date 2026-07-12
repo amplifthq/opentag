@@ -18,3 +18,4 @@ Plan: `docs/superpowers/plans/2026-07-12-acp-first-agent-runtime.md`
 - Task 3 approved after hardening cancellation, diagnostics, cwd containment, strict framing, and failure-delta retention.
 - Task 4 implementation is complete pending independent review; named ACP agents, attempt-scoped scratch and repository workspaces, non-repository claims, and optional channel repository bindings are covered by focused tests.
 - Task 4 review changes are addressed pending re-review: scratch security and early cleanup are workspace-aware, ACP PR preparation follows the canonical result intent and capability contract, and client/channel bindings carry repository targets only as an all-or-none group.
+- Task 4 high re-review finding is addressed pending re-review: deterministic scratch attempt allocation now fails closed on any pre-existing path and preserves symlinks, files, directories, and their targets without invoking an executor.

@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -50,6 +51,11 @@ function claimed(input: { event: OpenTagEvent; attemptId?: string }) {
     attemptNumber: 1,
     fencingToken: "fence_1"
   };
+}
+
+function scratchAttemptPath(root: string, attemptId: string): string {
+  const segment = createHash("sha256").update(attemptId).digest("hex").slice(0, 24);
+  return join(root, `attempt-${segment}`);
 }
 
 function clientFor(input: {
@@ -251,6 +257,45 @@ describe("ACP daemon workspaces", () => {
     expect(existsSync(sibling)).toBe(true);
     expect(readdirSync(scratchRoot)).toEqual(["attempt-existing-evidence"]);
   });
+
+  it.each(["symlink", "file", "directory"] as const)(
+    "fails closed without touching a pre-existing scratch attempt %s",
+    async (existingKind) => {
+      const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-scratch-parent-")), "scratch");
+      const outside = mkdtempSync(join(tmpdir(), "opentag-scratch-outside-"));
+      const marker = join(outside, "evidence.txt");
+      writeFileSync(marker, "outside evidence");
+      mkdirSync(scratchRoot, { recursive: true });
+      const attemptPath = scratchAttemptPath(scratchRoot, "attempt_01J_TEST");
+      if (existingKind === "symlink") symlinkSync(outside, attemptPath, "dir");
+      if (existingKind === "file") writeFileSync(attemptPath, "existing file");
+      if (existingKind === "directory") mkdirSync(attemptPath);
+      const runs: ExecutorRunInput[] = [];
+      const completed: OpenTagRunResult[] = [];
+
+      await runOneDaemonIteration({
+        runnerId: "runner_local",
+        repositories: [],
+        executors: { reviewer: recordingExecutor({ runs }) },
+        scratchRoot,
+        heartbeatIntervalMs: 0,
+        client: clientFor({ claimed: claimed({ event: event({ id: `evt_existing_${existingKind}` }) }), completed })
+      });
+
+      expect(runs).toEqual([]);
+      expect(completed).toEqual([
+        {
+          conclusion: "needs_human",
+          summary: "Scratch attempt workspace already exists; refusing to reuse it.",
+          nextAction: "Inspect and preserve the existing attempt path, then retry the Run with a new Attempt."
+        }
+      ]);
+      expect(readFileSync(marker, "utf8")).toBe("outside evidence");
+      expect(existsSync(attemptPath)).toBe(true);
+      if (existingKind === "symlink") expect(lstatSync(attemptPath).isSymbolicLink()).toBe(true);
+      if (existingKind === "file") expect(readFileSync(attemptPath, "utf8")).toBe("existing file");
+    }
+  );
 
   it("preserves scratch evidence after failure", async () => {
     const root = join(mkdtempSync(join(tmpdir(), "opentag-scratch-root-")), "scratch");
