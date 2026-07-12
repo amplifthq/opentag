@@ -703,20 +703,43 @@ describe("OpenTag repository", () => {
       fencingToken: second!.fencingToken
     };
     await expect(repo.heartbeat(activeLease)).resolves.toBe("updated");
-    await expect(repo.recordProgress({ ...activeLease, message: "current progress" })).resolves.toBe("recorded");
+    await expect(repo.markRunning({
+      ...activeLease,
+      executor: first!.fencingToken,
+      executorCapability: { nested: { historicalFence: first!.fencingToken } },
+      idempotencyKey: first!.fencingToken
+    })).resolves.toBe("running");
+    await expect(repo.recordProgress({
+      ...activeLease,
+      message: `current progress ${first!.fencingToken}`,
+      type: first!.fencingToken,
+      idempotencyKey: first!.fencingToken
+    })).resolves.toBe("recorded");
     await expect(
-      repo.completeRun({ ...activeLease, result: { conclusion: "success", summary: "current completion" } })
+      repo.completeRun({
+        ...activeLease,
+        result: {
+          conclusion: "success",
+          summary: `current completion ${first!.fencingToken}`,
+          artifacts: [{ title: "result", uri: "workspace/result.md", metadata: { historicalFence: first!.fencingToken } }],
+          verification: [{ command: "verify", outcome: "passed", excerpt: first!.fencingToken }]
+        },
+        idempotencyKey: first!.fencingToken
+      })
     ).resolves.toBe("completed");
 
-    await expect(repo.listAttempts({ runId: "run_fenced" })).resolves.toMatchObject([
+    const storedRun = await repo.getRun({ runId: "run_fenced" });
+    const storedAttempts = await repo.listAttempts({ runId: "run_fenced" });
+    expect(storedAttempts).toMatchObject([
       { id: first!.attemptId, number: 1, status: "interrupted" },
       { id: second!.attemptId, number: 2, status: "succeeded" }
     ]);
     const events = await repo.listRunEvents({ runId: "run_fenced" });
     expect(events.filter((event) => event.type === "run.progress")).toHaveLength(1);
     expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
-    expect(JSON.stringify(events)).not.toContain(first!.fencingToken);
-    expect(JSON.stringify(events)).not.toContain(second!.fencingToken);
+    const durable = JSON.stringify({ storedRun, storedAttempts, events });
+    expect(durable).not.toContain(first!.fencingToken);
+    expect(durable).not.toContain(second!.fencingToken);
   });
 
   it("sanitizes runner output and callback payloads before any durable write", async () => {

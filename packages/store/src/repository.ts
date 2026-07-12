@@ -1305,12 +1305,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     return sanitize(value) as T;
   }
 
-  async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
+  async function attemptFencingTokensForRun(runId: string): Promise<string[]> {
     const knownAttempts = await db
       .select({ fencingToken: attempts.fencingToken })
       .from(attempts)
-      .where(eq(attempts.runId, input.runId));
-    const safeInput = sanitizeRunEventValue(input, knownAttempts.map((attempt) => attempt.fencingToken));
+      .where(eq(attempts.runId, runId));
+    return knownAttempts.map((attempt) => attempt.fencingToken);
+  }
+
+  async function sanitizeRunnerControlledInputForRun<T>(runId: string, input: T): Promise<T> {
+    return sanitizeCredentialLikeValue(input, {
+      secrets: await attemptFencingTokensForRun(runId)
+    });
+  }
+
+  async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
+    const safeInput = sanitizeRunEventValue(input, await attemptFencingTokensForRun(input.runId));
     await db.insert(runEvents).values(runEventValues(safeInput));
   }
 
@@ -2679,13 +2689,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       idempotencyKey?: string;
     }): Promise<MarkRunningOutcome> {
       const updatedAt = nowIso();
-      const safeFields = sanitizeCredentialLikeValue({
-        executor: input.executor,
-        ...(input.executorCapability !== undefined ? { executorCapability: input.executorCapability } : {}),
-        ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
-      }, {
-        ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-      });
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const conditions = [eq(runs.id, input.runId)];
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
@@ -2699,12 +2703,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         conditions.push(eq(runs.assignedRunnerId, input.runnerId));
         conditions.push(eq(runs.currentAttemptId, input.attemptId));
       }
-      if (safeFields.idempotencyKey) {
+      if (safeInput.idempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
         for (const event of existing) {
           if (event.type !== "run.running") continue;
           const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === safeFields.idempotencyKey) return "duplicate";
+          if (payload?.["idempotencyKey"] === safeInput.idempotencyKey) return "duplicate";
         }
       }
       const mutationOutcome =
@@ -2726,7 +2730,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 return "stale_attempt" as const;
               }
               tx.update(runs)
-                .set({ status: "running", executor: safeFields.executor, updatedAt })
+                .set({ status: "running", executor: safeInput.executor, updatedAt })
                 .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId!)))
                 .run();
               tx.update(attempts)
@@ -2737,7 +2741,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             })
           : (await db
               .update(runs)
-              .set({ status: "running", executor: safeFields.executor, updatedAt })
+              .set({ status: "running", executor: safeInput.executor, updatedAt })
               .where(and(...conditions))).changes > 0
             ? ("running" as const)
             : ("not_found" as const);
@@ -2746,27 +2750,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         runId: input.runId,
         type: "run.running",
         payload: {
-          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
-          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-          ...(safeFields.idempotencyKey ? { idempotencyKey: safeFields.idempotencyKey } : {}),
-          executor: safeFields.executor,
-          ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {})
+          ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
+          ...(safeInput.attemptId ? { attemptId: safeInput.attemptId } : {}),
+          ...(safeInput.idempotencyKey ? { idempotencyKey: safeInput.idempotencyKey } : {}),
+          executor: safeInput.executor,
+          ...(safeInput.runTimeoutMs ? { runTimeoutMs: safeInput.runTimeoutMs } : {})
         },
         visibility: "audit",
         importance: "normal",
         createdAt: updatedAt
       });
-      if (safeFields.executorCapability) {
+      if (safeInput.executorCapability) {
         await appendRunEvent({
           runId: input.runId,
           type: "executor.capability.snapshot",
           payload: {
-            executor: safeFields.executor,
-            capability: safeFields.executorCapability
+            executor: safeInput.executor,
+            capability: safeInput.executorCapability
           },
           visibility: "audit",
           importance: "normal",
-          message: `Executor capability snapshot recorded for ${safeFields.executor}.`,
+          message: `Executor capability snapshot recorded for ${safeInput.executor}.`,
           createdAt: updatedAt
         });
       }
@@ -2781,16 +2785,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<CompleteRunOutcome> {
-      const safeIdempotencyKey = input.idempotencyKey
-        ? sanitizeCredentialLikeValue(input.idempotencyKey, {
-            ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-          })
-        : undefined;
-      const parsedResult = OpenTagRunResultSchema.parse(
-        sanitizeCredentialLikeValue(input.result, {
-          ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-        })
-      );
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const safeIdempotencyKey = safeInput.idempotencyKey;
+      const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
       const updatedAt = nowIso();
       const result = OpenTagRunResultSchema.parse({
         ...parsedResult,
@@ -3750,22 +3747,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<RecordProgressOutcome> {
-      const safeMessage = sanitizeCredentialLikeValue(input.message, {
-        ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-      });
-      const safeType = input.type
-        ? sanitizeCredentialLikeValue(input.type, {
-            ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-          })
-        : undefined;
-      const safeIdempotencyKey = input.idempotencyKey
-        ? sanitizeCredentialLikeValue(input.idempotencyKey, {
-            ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
-          })
-        : undefined;
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const safeMessage = safeInput.message;
+      const safeType = safeInput.type;
+      const safeIdempotencyKey = safeInput.idempotencyKey;
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
-        const createdAt = input.at ?? nowIso();
+        const createdAt = safeInput.at ?? nowIso();
         return db.transaction((tx) => {
           const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
           const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get();
@@ -3795,15 +3783,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               runId: input.runId,
               type: "run.progress",
               payloadJson: JSON.stringify({
-                runnerId: input.runnerId,
-                attemptId: input.attemptId,
+                runnerId: safeInput.runnerId,
+                attemptId: safeInput.attemptId,
                 ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
                 type: safeType ?? "progress",
                 message: safeMessage,
                 at: createdAt
               }),
-              visibility: input.visibility ?? "audit",
-              importance: input.importance ?? "normal",
+              visibility: safeInput.visibility ?? "audit",
+              importance: safeInput.importance ?? "normal",
               message: safeMessage,
               createdAt
             })
@@ -3823,16 +3811,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         runId: input.runId,
         type: "run.progress",
         payload: {
-          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
+          ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
           ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
           type: safeType ?? "progress",
           message: safeMessage,
-          at: input.at ?? nowIso()
+          at: safeInput.at ?? nowIso()
         },
-        visibility: input.visibility ?? "audit",
-        importance: input.importance ?? "normal",
+        visibility: safeInput.visibility ?? "audit",
+        importance: safeInput.importance ?? "normal",
         message: safeMessage,
-        createdAt: input.at ?? nowIso()
+        createdAt: safeInput.at ?? nowIso()
       });
       return "recorded";
     },
@@ -4147,12 +4135,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!row) return;
-      const knownAttempts = await db
-        .select({ fencingToken: attempts.fencingToken })
-        .from(attempts)
-        .where(eq(attempts.runId, row.runId));
       const safeError = sanitizeCredentialLikeValue(input.error, {
-        secrets: knownAttempts.map((attempt) => attempt.fencingToken)
+        secrets: await attemptFencingTokensForRun(row.runId)
       });
       const attemptCount = row.attempts + 1;
       await db

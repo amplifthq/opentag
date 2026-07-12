@@ -4870,7 +4870,7 @@ export function createDispatcherApp(input: {
       const runningPresentation = presentation.runStatusPresentation({
         runId,
         state: "running",
-        message: `Running with ${safeRunningFields.executor}.`,
+        message: `Running with ${safeExecutorLabel(stored.run.executor)}.`,
         nextAction: "Wait for the final reply, send a follow-up to queue more context, or request cancellation with /stop.",
         detailVisibility: "source_thread"
       });
@@ -4947,7 +4947,13 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const progressPresentation = presentation.progressPresentation({ runId, message: safeProgressFields.message });
+      const recordedProgress = (await repo.listRunEvents({ runId }))
+        .reverse()
+        .find((event) => event.type === "run.progress");
+      const progressPresentation = presentation.progressPresentation({
+        runId,
+        message: recordedProgress?.message ?? "Progress update recorded."
+      });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
         ...larkRenderLocaleRenderOption(stored.event),
@@ -5024,17 +5030,18 @@ export function createDispatcherApp(input: {
     if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
-      result: safeResult,
+      result: completedResult,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
       ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
       ...(linearApply ? { linearApply } : {})
     });
     if (
-      safeResult.conclusion === "needs_human" &&
+      completedResult.conclusion === "needs_human" &&
       shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
     ) {
       const waitingPresentation = presentation.runStatusPresentation({
@@ -5068,7 +5075,7 @@ export function createDispatcherApp(input: {
       });
     }
     const finalPresentation = presentation.finalPresentation({
-      result: safeResult,
+      result: completedResult,
       runId,
       receiptContext
     });
@@ -5096,7 +5103,7 @@ export function createDispatcherApp(input: {
       }
     });
     clearDelayedLarkStatusCard(runId);
-    const shouldPromoteFollowUp = safeResult.conclusion !== "needs_human" && safeResult.conclusion !== "cancelled";
+    const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,

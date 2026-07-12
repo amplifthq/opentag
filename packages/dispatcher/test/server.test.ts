@@ -3342,6 +3342,7 @@ describe("dispatcher API", () => {
     const delivered: unknown[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
+      runnerLeaseSeconds: 0,
       callbackSink: {
         async deliver(message) {
           delivered.push(message);
@@ -3364,31 +3365,39 @@ describe("dispatcher API", () => {
       threadKey: "T123|C123|1710000000.000100"
     });
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_safe_runner_ingress", event }))).status).toBe(201);
-    const claim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
-    const lease = await claim.json() as { attemptId: string; fencingToken: string };
+    const firstClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
+    const firstLease = await firstClaim.json() as { attemptId: string; fencingToken: string };
+    const secondClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
+    const lease = await secondClaim.json() as { attemptId: string; fencingToken: string };
 
     expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/running", jsonRequest({
       ...lease,
-      executor: lease.fencingToken,
-      executorCapability: { nested: { fence: lease.fencingToken, accessToken: "opaque-ingress-token" } },
-      idempotencyKey: lease.fencingToken
+      executor: firstLease.fencingToken,
+      executorCapability: { nested: { historicalFence: firstLease.fencingToken, accessToken: "opaque-ingress-token" } },
+      idempotencyKey: firstLease.fencingToken
     }))).status).toBe(200);
     expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/progress", jsonRequest({
       ...lease,
-      message: "safe progress",
-      type: lease.fencingToken,
+      message: `safe progress ${firstLease.fencingToken}`,
+      type: firstLease.fencingToken,
       visibility: "human",
-      idempotencyKey: lease.fencingToken
+      idempotencyKey: firstLease.fencingToken
     }))).status).toBe(200);
     expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/complete", jsonRequest({
       ...lease,
-      result: { conclusion: "success", summary: "safe completion" },
-      idempotencyKey: lease.fencingToken
+      result: {
+        conclusion: "success",
+        summary: `safe completion ${firstLease.fencingToken}`,
+        artifacts: [{ title: "result", uri: "workspace/result.md", metadata: { historicalFence: firstLease.fencingToken } }],
+        verification: [{ command: "verify", outcome: "passed", excerpt: firstLease.fencingToken }]
+      },
+      idempotencyKey: firstLease.fencingToken
     }))).status).toBe(200);
 
     const run = await (await app.request("/v1/runs/run_safe_runner_ingress")).json();
     const events = await (await app.request("/v1/runs/run_safe_runner_ingress/events")).json();
     const durableAndPresented = JSON.stringify({ run, events, delivered });
+    expect(durableAndPresented).not.toContain(firstLease.fencingToken);
     expect(durableAndPresented).not.toContain(lease.fencingToken);
     expect(durableAndPresented).not.toContain("opaque-ingress-token");
     expect(durableAndPresented).toContain("[redacted]");
