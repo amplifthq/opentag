@@ -57,9 +57,10 @@ export type ExecutorMaterialActionReport = {
   reportedOutcome?: "completed" | "failed";
 };
 
-type ExecutorRunInputBase = {
+export type ExecutorRunInput = {
   runId: string;
   attemptId?: string;
+  workspace: ExecutorWorkspace;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;
   targets?: OpenTagRunTargets;
@@ -76,18 +77,8 @@ type ExecutorRunInputBase = {
   materialActionReporter?: (report: ExecutorMaterialActionReport) => Promise<void>;
 };
 
-export type ExecutorRunInput = ExecutorRunInputBase &
-  (
-    | { workspace: ExecutorWorkspace; workspacePath?: never }
-    | { workspace?: never; workspacePath: string }
-  );
-
-export function executorWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
-  return input.workspace ?? { kind: "repository", path: input.workspacePath };
-}
-
 export function executorWorkspacePath(input: ExecutorRunInput): string {
-  return executorWorkspace(input).path;
+  return input.workspace.path;
 }
 
 export function renderContextPacketForPrompt(packet?: ContextPacket): string[] {

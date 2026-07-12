@@ -43,8 +43,7 @@ function manifest(mode = "success") {
       agent: {
         kind: "stdio" as const,
         command: process.execPath,
-        args: [fixture],
-        env: { OPENTAG_ACP_TEST_MODE: mode }
+        args: [fixture, mode]
       }
     },
     roles: {
@@ -71,17 +70,14 @@ function manifestWithCwd(cwd: string, mode = "success") {
   };
 }
 
-function permissionManifest(env: Record<string, string>) {
-  const configured = manifest("permission");
-  return {
-    ...configured,
-    bindings: {
-      agent: {
-        ...configured.bindings.agent,
-        env: { ...configured.bindings.agent.env, ...env }
-      }
-    }
-  };
+function permissionManifest() {
+  return manifest("permission");
+}
+
+function permissionWorkspace(name: string, config: Record<string, string>): string {
+  const scratch = tempDir(name);
+  writeFileSync(join(scratch, ".acp-test-config.json"), `${JSON.stringify(config)}\n`);
+  return scratch;
 }
 
 function input(workspace: { kind: "repository" | "scratch"; path: string }, runId = "run_acp") {
@@ -204,9 +200,9 @@ describe("ACP executor", () => {
       { OPENTAG_ACP_TEST_SECRET: "secret-two", OPENTAG_ACP_TEST_RESOURCE: "@acme/report" },
       { OPENTAG_ACP_TEST_SECRET: "secret-two", OPENTAG_ACP_TEST_RESOURCE: "@acme/other" }
     ].entries()) {
-      const executor = createAcpExecutor({ manifest: permissionManifest(env) });
+      const executor = createAcpExecutor({ manifest: permissionManifest() });
       await executor.run({
-        ...input({ kind: "scratch", path: tempDir(`safe-target-${index}`) }, `run_safe_target_${index}`),
+        ...input({ kind: "scratch", path: permissionWorkspace(`safe-target-${index}`, env) }, `run_safe_target_${index}`),
         permissionResolver: async (request) => {
           requests.push(request);
           return { actionId: `action_${index}`, decision: "allow_once", material: true };
@@ -236,9 +232,9 @@ describe("ACP executor", () => {
       "https://example.test/deploy?environment=staging&force=true"
     ];
     for (const [index, resource] of resources.entries()) {
-      const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+      const executor = createAcpExecutor({ manifest: permissionManifest() });
       await executor.run({
-        ...input({ kind: "scratch", path: tempDir(`query-identity-${index}`) }, `run_query_identity_${index}`),
+        ...input({ kind: "scratch", path: permissionWorkspace(`query-identity-${index}`, { OPENTAG_ACP_TEST_RESOURCE: resource }) }, `run_query_identity_${index}`),
         permissionResolver: async (request) => {
           requests.push(request);
           return { actionId: `action_query_${index}`, decision: "allow_once", material: true };
@@ -264,9 +260,9 @@ describe("ACP executor", () => {
       "https://operator:password@example.test/deploy",
       "https://example test/deploy"
     ].entries()) {
-      const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+      const executor = createAcpExecutor({ manifest: permissionManifest() });
       await executor.run({
-        ...input({ kind: "scratch", path: tempDir(`query-deny-${index}`) }, `run_query_deny_${index}`),
+        ...input({ kind: "scratch", path: permissionWorkspace(`query-deny-${index}`, { OPENTAG_ACP_TEST_RESOURCE: resource }) }, `run_query_deny_${index}`),
         permissionResolver: async (request) => {
           requests.push(request);
           return { actionId: `action_query_deny_${index}`, decision: "allow_once", material: true };
@@ -303,9 +299,9 @@ describe("ACP executor", () => {
       { OPENTAG_ACP_TEST_PROVIDER: "registry" }
     ];
     for (const [index, env] of variants.entries()) {
-      const executor = createAcpExecutor({ manifest: permissionManifest(env) });
+      const executor = createAcpExecutor({ manifest: permissionManifest() });
       await executor.run({
-        ...input({ kind: "scratch", path: tempDir(`exact-generic-scope-${index}`) }, `run_exact_generic_scope_${index}`),
+        ...input({ kind: "scratch", path: permissionWorkspace(`exact-generic-scope-${index}`, env) }, `run_exact_generic_scope_${index}`),
         permissionResolver: async (request) => {
           fingerprints.push(request.targetFingerprint!);
           return { actionId: `action_exact_${index}`, decision: "allow_once", material: true };
@@ -317,13 +313,14 @@ describe("ACP executor", () => {
 
   it("normalizes URL resources and bounds structured target labels before policy or presentation", async () => {
     let captured: Record<string, unknown> | undefined;
-    const executor = createAcpExecutor({ manifest: permissionManifest({
+    const executor = createAcpExecutor({ manifest: permissionManifest() });
+    const workspace = permissionWorkspace("safe-url-target", {
       OPENTAG_ACP_TEST_RESOURCE: `https://user:password@example.test/reports/latest?access_token=secret#credential=${"x".repeat(600)}`,
       OPENTAG_ACP_TEST_CONNECTION: `npm:team\n${"x".repeat(300)}`,
       OPENTAG_ACP_TEST_VERSION: `next\t${"y".repeat(300)}`
-    }) });
+    });
     await executor.run({
-      ...input({ kind: "scratch", path: tempDir("safe-url-target") }, "run_safe_url_target"),
+      ...input({ kind: "scratch", path: workspace }, "run_safe_url_target"),
       permissionResolver: async (request) => {
         captured = request;
         return { actionId: "action_safe_url", decision: "allow_once", material: true };
@@ -348,9 +345,9 @@ describe("ACP executor", () => {
     ["token path", "https://example.test/acme/token=secret/report.git", undefined]
   ])("sanitizes or rejects %s resource URLs before identity and presentation", async (_label, resource, expected) => {
     let captured: Record<string, unknown> | undefined;
-    const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+    const executor = createAcpExecutor({ manifest: permissionManifest() });
     await executor.run({
-      ...input({ kind: "scratch", path: tempDir(`safe-scheme-${_label}`) }, `run_safe_scheme_${_label}`),
+      ...input({ kind: "scratch", path: permissionWorkspace(`safe-scheme-${_label}`, { OPENTAG_ACP_TEST_RESOURCE: resource }) }, `run_safe_scheme_${_label}`),
       permissionResolver: async (request) => {
         captured = request;
         return { actionId: `action_${_label}`, decision: "allow_once", material: true };
@@ -364,12 +361,13 @@ describe("ACP executor", () => {
   it("redacts credential-like tool titles before progress or durable permission paths", async () => {
     const requests: Array<Record<string, unknown>> = [];
     const progress: string[] = [];
-    const executor = createAcpExecutor({ manifest: permissionManifest({
+    const executor = createAcpExecutor({ manifest: permissionManifest() });
+    const workspace = permissionWorkspace("safe-title", {
       OPENTAG_ACP_TEST_TOOL_TITLE: "Write with password=hunter2",
       OPENTAG_ACP_TEST_PERMISSION_TITLE: "Publish with token=fixture-secret"
-    }) });
+    });
     await executor.run({
-      ...input({ kind: "scratch", path: tempDir("safe-title") }, "run_safe_title"),
+      ...input({ kind: "scratch", path: workspace }, "run_safe_title"),
       permissionResolver: async (request) => {
         requests.push(request);
         return { actionId: "action_safe_title", decision: "allow_once", material: true };
@@ -478,10 +476,12 @@ describe("ACP executor", () => {
   it("strictly rejects malformed NDJSON and kills a child that stays alive", async () => {
     const scratch = tempDir("malformed");
     const executor = createAcpExecutor({ manifest: manifest("malformed-live"), cancelGraceMs: 100 });
+    const events: string[] = [];
 
     await expect(
-      executor.run(input({ kind: "scratch", path: scratch }, "run_malformed"), { emit: async () => undefined })
+      executor.run(input({ kind: "scratch", path: scratch }, "run_malformed"), { emit: async (event) => void events.push(event.message) })
     ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
+    expect(events.join("\n")).toMatch(/ACP diagnostic \(protocol\).*invalid NDJSON/iu);
     const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
     expect(() => process.kill(pid, 0)).toThrow();
   }, 15_000);
@@ -502,7 +502,22 @@ describe("ACP executor", () => {
     expect(thrown).toMatch(/ACP agent fixture-agent.*(?:protocol|exit)/i);
     expect(thrown).not.toContain("SENTINEL_CHILD_STDERR_SECRET");
     expect(events.join("\n")).not.toContain("SENTINEL_CHILD_STDERR_SECRET");
+    expect(events.join("\n")).toMatch(/ACP diagnostic \(exit\).*exitCode=7.*\[redacted\]/iu);
   }, 15_000);
+
+  it("records a sanitized spawn diagnostic while keeping the public error stable", async () => {
+    const scratch = tempDir("missing-executable");
+    const configured = manifest();
+    configured.bindings.agent.command = "definitely-missing-opentag-acp-executable";
+    const executor = createAcpExecutor({ manifest: configured, cancelGraceMs: 100 });
+    const events: string[] = [];
+
+    await expect(executor.run(input({ kind: "scratch", path: scratch }, "run_missing_executable"), {
+      emit: async (event) => void events.push(event.message)
+    })).rejects.toThrow("ACP agent fixture-agent protocol or exit failure.");
+    expect(events.join("\n")).toMatch(/ACP diagnostic \(spawn\).*spawnCode=ENOENT/iu);
+    expect(events.join("\n")).not.toContain(scratch);
+  });
 
   it("uses an absolute scratch cwd without invoking repository isolation", async () => {
     const scratch = tempDir("scratch");
@@ -565,21 +580,24 @@ describe("ACP executor", () => {
     ).rejects.toThrow(/binding cwd/i);
   }, 15_000);
 
-  it("scrubs inherited secrets while preserving explicitly configured binding environment", async () => {
+  it("scrubs inherited secrets and rejects literal binding environment", async () => {
     const scratch = tempDir("environment");
     const previous = process.env.OPENTAG_ACP_HOST_SECRET;
     process.env.OPENTAG_ACP_HOST_SECRET = "must-not-reach-agent";
-    const configured = manifest();
-    configured.bindings.agent.env = {
-      ...configured.bindings.agent.env,
-      OPENTAG_ACP_EXPLICIT: "configured-value"
-    };
     try {
-      const executor = createAcpExecutor({ manifest: configured });
+      expect(() => createAcpExecutor({
+        manifest: {
+          ...manifest(),
+          bindings: {
+            agent: { ...manifest().bindings.agent, env: { OPENTAG_ACP_EXPLICIT: "configured-value" } }
+          }
+        }
+      })).toThrow();
+      const executor = createAcpExecutor({ manifest: manifest() });
       await executor.run(input({ kind: "scratch", path: scratch }, "run_env"), { emit: async () => undefined });
       const session = JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"));
       expect(session.inheritedSecret).toBeNull();
-      expect(session.explicitValue).toBe("configured-value");
+      expect(session.explicitValue).toBeNull();
     } finally {
       if (previous === undefined) delete process.env.OPENTAG_ACP_HOST_SECRET;
       else process.env.OPENTAG_ACP_HOST_SECRET = previous;

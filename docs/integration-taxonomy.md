@@ -25,8 +25,7 @@ The manifest is not a runtime event stream and must not contain credentials.
     "agent": {
       "kind": "stdio",
       "command": "hermes",
-      "args": ["acp"],
-      "env": {}
+      "args": ["acp"]
     }
   },
   "roles": {

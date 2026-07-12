@@ -367,6 +367,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
         ...(parsedValue ? { proposalId: parsedValue.proposalId, intentId: parsedValue.intentId } : {}),
         ...(parsedValue?.permissionDecision ? { permissionDecision: parsedValue.permissionDecision } : {}),
         ...(parsedValue?.proposalHash ? { proposalHash: parsedValue.proposalHash } : {}),
+        ...(parsedValue?.approvalEpoch ? { approvalEpoch: parsedValue.approvalEpoch } : {}),
         ...(parsedValue?.actionId ? { governedActionId: parsedValue.actionId } : {}),
         repoProvider: binding.repoProvider ?? "github",
         owner: binding.owner,

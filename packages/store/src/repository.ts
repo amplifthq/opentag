@@ -33,6 +33,7 @@ import {
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   SuggestedChangesSnapshotSchema,
+  VerificationEvidenceSchema,
   type ApprovalDecision,
   type Action,
   type ActionPermissionRequest,
@@ -346,7 +347,10 @@ export type OpenTagAggregateMetrics = {
 
 export type AttemptMutationConflict = "stale_attempt";
 export type HeartbeatOutcome = "updated" | AttemptMutationConflict | "not_found";
-export type RecordProgressOutcome = "recorded" | "duplicate" | AttemptMutationConflict | "not_found";
+export type RecordProgressOutcome =
+  | { outcome: "recorded" | "duplicate"; event: OpenTagAuditEvent }
+  | AttemptMutationConflict
+  | "not_found";
 export type MarkRunningOutcome = "running" | "duplicate" | AttemptMutationConflict | "not_found";
 export type CompleteRunOutcome = "completed" | "duplicate" | AttemptMutationConflict | "not_found";
 
@@ -453,12 +457,30 @@ function stableActionJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-const SAFE_RECEIPT_METADATA_KEYS = new Set(["assurance", "agentReportedOutcome", "toolCallId", "providerOperationId", "statusCode"]);
+const SAFE_RECEIPT_METADATA_KEYS = new Set([
+  "assurance",
+  "agentReportedOutcome",
+  "toolCallId",
+  "providerOperationId",
+  "statusCode",
+  "reconciliationIdempotencyKey",
+  "reconciliationSource",
+  "reconciliationActorId"
+]);
 
-function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt): MaterialActionReceipt {
-  if (receipt.evidence?.length) {
+function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt, options: { allowEvidence?: boolean } = {}): MaterialActionReceipt {
+  if (receipt.evidence?.length && !options.allowEvidence) {
     throw new Error("Material action receipt evidence is not accepted until each evidence field has a durable safe-list policy.");
   }
+  const evidence = options.allowEvidence ? receipt.evidence?.map((item) => VerificationEvidenceSchema.parse({
+    id: sanitizeCredentialLikeValue(item.id).toString().slice(0, 256),
+    kind: sanitizeCredentialLikeValue(item.kind).toString().slice(0, 128),
+    assurance: item.assurance,
+    subjectRef: sanitizeCredentialLikeValue(item.subjectRef).toString().slice(0, 512),
+    summary: sanitizeCredentialLikeValue(item.summary).toString().slice(0, 1_000),
+    ...(item.sourceRef ? { sourceRef: sanitizeCredentialLikeValue(item.sourceRef).toString().slice(0, 512) } : {}),
+    createdAt: item.createdAt
+  })) : undefined;
   if (containsCredentialLikeData(receipt.receiptRef)) {
     throw new Error("Material action receiptRef contains credential-like data.");
   }
@@ -494,6 +516,7 @@ function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt): Material
     ...(receipt.externalId ? { externalId: receipt.externalId.slice(0, 256) } : {}),
     ...(externalUri ? { externalUri } : {}),
     observedAt: receipt.observedAt,
+    ...(evidence?.length ? { evidence } : {}),
     ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {})
   });
 }
@@ -1282,6 +1305,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       message: input.message ?? null,
       payloadJson: JSON.stringify(input.payload),
       createdAt: input.createdAt ?? nowIso()
+    };
+  }
+
+  function runEventFromRow(row: typeof runEvents.$inferSelect): OpenTagAuditEvent {
+    return {
+      id: row.id,
+      runId: row.runId,
+      type: row.type,
+      visibility: RunEventVisibilitySchema.parse(row.visibility),
+      importance: RunEventImportanceSchema.parse(row.importance),
+      ...(row.message ? { message: row.message } : {}),
+      payload: JSON.parse(row.payloadJson) as unknown,
+      createdAt: row.createdAt
     };
   }
 
@@ -2427,6 +2463,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               .set({ status: "unknown", updatedAt })
               .where(and(eq(materialActions.attemptId, current.currentAttemptId), eq(materialActions.status, "executing")))
               .run();
+            tx.update(materialActions)
+              .set({ status: "cancelled", updatedAt })
+              .where(and(eq(materialActions.attemptId, current.currentAttemptId), eq(materialActions.status, "waiting_approval")))
+              .run();
           }
           tx.update(runs)
             .set({
@@ -3041,11 +3081,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         target: normalized.target
       });
       const idempotencyKey = `action:${sha256(semanticKey)}`;
-      const actionId = `action_${sha256(semanticKey).slice(0, 24)}`;
+      const actionId = `action_${sha256(stableActionJson({ semanticKey, attemptId: input.attemptId })).slice(0, 24)}`;
       const candidateProposalHash = sha256(stableActionJson({ actionId, normalized }));
-      const existing = await db.select().from(materialActions).where(eq(materialActions.idempotencyKey, idempotencyKey)).limit(1).get();
+      const existing = await db
+        .select()
+        .from(materialActions)
+        .where(eq(materialActions.idempotencyKey, idempotencyKey))
+        .orderBy(desc(materialActions.createdAt))
+        .limit(1)
+        .get();
       if (existing) {
-        let action = actionFromRow(existing);
+        const action = actionFromRow(existing);
         if (action.status === "succeeded" && action.receipt) {
           return ActionPermissionResolutionSchema.parse({ state: "reconciled", action, decision: "deny", receipt: action.receipt, reason: "Known success reused; the ACP tool must not execute again." });
         }
@@ -3054,27 +3100,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
         if (action.status === "failed") {
           return ActionPermissionResolutionSchema.parse({ state: "denied", action, decision: "deny", reason: "Known failure is not automatically retried without a new policy decision." });
-        }
-        if (action.status === "waiting_approval" && (action.attemptId !== input.attemptId || action.attemptFenceDigest !== sha256(input.fencingToken))) {
-          const rebound = db.transaction((tx) => {
-            const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-            const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-            if (
-              !currentAttempt || !currentRun || currentAttempt.runId !== input.runId ||
-              currentAttempt.runnerId !== input.runnerId || currentAttempt.fencingToken !== input.fencingToken ||
-              !["assigned", "running"].includes(currentAttempt.status) ||
-              currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
-            ) return undefined;
-            const changed = tx.update(materialActions).set({
-              attemptId: input.attemptId,
-              attemptFenceDigest: sha256(input.fencingToken),
-              updatedAt: nowIso()
-            }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "waiting_approval"))).run();
-            if (changed.changes !== 1) return undefined;
-            return tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
-          });
-          if (!rebound) return null;
-          action = actionFromRow(rebound);
         }
         if (action.status === "authorized" || action.status === "executing") {
           const sameOwner = action.attemptId === input.attemptId && action.attemptFenceDigest === sha256(input.fencingToken);
@@ -3118,13 +3143,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           });
           return unknown ? { state: "unknown", action: actionFromRow(unknown), reason: "Execution ownership changed or a duplicate arrived before a trusted receipt; reconciliation is required." } : null;
         }
-        return this.resolveActionPermission({
-          runnerId: input.runnerId,
-          runId: input.runId,
-          attemptId: input.attemptId,
-          fencingToken: input.fencingToken,
-          actionId: action.id
-        });
+        if (!(action.status === "cancelled" && action.attemptId !== input.attemptId)) {
+          return this.resolveActionPermission({
+            runnerId: input.runnerId,
+            runId: input.runId,
+            attemptId: input.attemptId,
+            fencingToken: input.fencingToken,
+            actionId: action.id
+          });
+        }
+        // An expired approval belongs to its originating Attempt. A replacement
+        // Attempt gets a fresh proposal epoch while retaining the provider
+        // idempotency key represented by semanticKey.
       }
 
       let inserted:
@@ -3156,6 +3186,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           const createdAt = nowIso();
           const proposalId = policy.outcome === "needs_approval" ? `proposal_${actionId}` : undefined;
           const proposalHash = proposalId ? candidateProposalHash : undefined;
+          const approvalEpoch = proposalHash
+            ? sha256(stableActionJson({ actionId, attemptId: input.attemptId, proposalHash }))
+            : undefined;
           const status = policy.outcome === "authorized"
             ? normalized.material ? "executing" : "authorized"
             : policy.outcome === "blocked" ? "cancelled" : "waiting_approval";
@@ -3180,7 +3213,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                   }
                 }],
                 preconditions: ["The originating Attempt must remain active.", "The normalized action family and scope must not change."],
-                metadata: { kind: "acp_permission", actionId, approvalMode: request.mode, proposalHash }
+                metadata: { kind: "acp_permission", actionId, approvalMode: request.mode, proposalHash, approvalEpoch }
               })
             : undefined;
           const result = tx.insert(materialActions).values({
@@ -3446,6 +3479,91 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           : { state: "denied", action, decision: "deny", ...(action.receipt ? { receipt: action.receipt } : {}) };
     },
 
+    async reconcileUnknownMaterialAction(input: {
+      actionId: string;
+      outcome: "succeeded" | "failed";
+      idempotencyKey: string;
+      receiptRef: string;
+      source: "control_plane_admin" | "trusted_provider";
+      actorId: string;
+      evidence?: MaterialActionReceipt["evidence"];
+    }): Promise<{
+      outcome: "reconciled" | "replayed" | "conflict" | "not_found";
+      action?: ReturnType<typeof actionFromRow>;
+    }> {
+      const updatedAt = nowIso();
+      const safeInput = sanitizeCredentialLikeValue(input) as typeof input;
+      return db.transaction((tx) => {
+        const row = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        const current = actionFromRow(row);
+        const sameReconciliation =
+          current.receipt?.metadata?.["reconciliationIdempotencyKey"] === safeInput.idempotencyKey &&
+          current.status === safeInput.outcome;
+        if (row.status !== "unknown") {
+          return {
+            outcome: sameReconciliation ? "replayed" as const : "conflict" as const,
+            action: current
+          };
+        }
+
+        const provider = String(current.target["provider"] ?? "");
+        const connectionId = current.target["connectionId"];
+        const targetFingerprint = current.target["targetFingerprint"];
+        const receipt = sanitizeMaterialActionReceipt(MaterialActionReceiptSchema.parse({
+          id: `reconciliation_${sha256(stableActionJson({ actionId: input.actionId, idempotencyKey: safeInput.idempotencyKey })).slice(0, 24)}`,
+          actionId: input.actionId,
+          provider,
+          ...(typeof connectionId === "string" ? { connectionId } : {}),
+          ...(typeof targetFingerprint === "string" ? { targetFingerprint } : {}),
+          receiptRef: safeInput.receiptRef,
+          outcome: safeInput.outcome,
+          observedAt: updatedAt,
+          ...(safeInput.evidence ? { evidence: safeInput.evidence } : {}),
+          metadata: {
+            reconciliationIdempotencyKey: safeInput.idempotencyKey,
+            reconciliationSource: safeInput.source,
+            reconciliationActorId: safeInput.actorId
+          }
+        }), { allowEvidence: true });
+        const changed = tx.update(materialActions)
+          .set({ status: safeInput.outcome, receiptJson: JSON.stringify(receipt), updatedAt })
+          .where(and(eq(materialActions.id, input.actionId), eq(materialActions.status, "unknown")))
+          .run();
+        if (changed.changes !== 1) {
+          const winner = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+          return winner ? { outcome: "conflict" as const, action: actionFromRow(winner) } : { outcome: "not_found" as const };
+        }
+        const auditPayload = sanitizeCredentialLikeValue({
+          actionId: input.actionId,
+          runId: row.runId,
+          outcome: safeInput.outcome,
+          idempotencyKey: safeInput.idempotencyKey,
+          source: safeInput.source,
+          actorId: safeInput.actorId,
+          receipt
+        });
+        tx.insert(runEvents).values(runEventValues({
+          runId: row.runId,
+          type: "material_action.reconciled",
+          payload: auditPayload,
+          visibility: "human",
+          importance: "high",
+          message: `Material action ${input.actionId} reconciled as ${safeInput.outcome}.`,
+          createdAt: updatedAt
+        })).run();
+        tx.insert(controlPlaneEvents).values({
+          type: "material_action.reconciled",
+          severity: "info",
+          subject: input.actionId,
+          payloadJson: JSON.stringify(auditPayload),
+          createdAt: updatedAt
+        }).run();
+        const updated = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return { outcome: "reconciled" as const, action: actionFromRow(updated!) };
+      });
+    },
+
     async getSuggestedChanges(input: { proposalId: string }): Promise<StoredSuggestedChangesSnapshot | null> {
       const row = await db.select().from(suggestedChanges).where(eq(suggestedChanges.proposalId, input.proposalId)).limit(1).get();
       if (!row) return null;
@@ -3531,24 +3649,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!storedProposalRow) return null;
       const snapshot = SuggestedChangesSnapshotSchema.parse(JSON.parse(storedProposalRow.snapshotJson));
       if (snapshot.metadata?.["kind"] === "acp_permission") {
-        const existingRow = await db.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, decision.proposalId)).orderBy(asc(approvalDecisions.createdAt)).limit(1).get();
-        if (existingRow) return ApprovalDecisionSchema.parse(JSON.parse(existingRow.decisionJson));
         const actionId = snapshot.metadata["actionId"];
         const proposalHash = snapshot.metadata["proposalHash"];
+        const approvalEpoch = snapshot.metadata["approvalEpoch"];
         const intentId = typeof actionId === "string" ? `intent_${actionId}` : undefined;
         const permissionDecision = decision.metadata?.["permissionDecision"];
         const approved = intentId ? decision.approvedIntentIds.includes(intentId) : false;
         const rejected = intentId ? (decision.rejectedIntentIds ?? []).includes(intentId) : false;
         if (
-          typeof actionId !== "string" || typeof proposalHash !== "string" ||
+          typeof actionId !== "string" || typeof proposalHash !== "string" || typeof approvalEpoch !== "string" ||
           decision.metadata?.["actionId"] !== actionId || decision.metadata?.["proposalHash"] !== proposalHash ||
+          decision.metadata?.["approvalEpoch"] !== approvalEpoch ||
           !intentId || !snapshot.intents.some((intent) => intent.intentId === intentId) ||
           (permissionDecision !== "allow_once" && permissionDecision !== "allow_run" && permissionDecision !== "deny") ||
           (permissionDecision === "deny" ? !rejected || approved : !approved || rejected)
         ) return null;
         const winner = db.transaction((tx) => {
           const actionRow = tx.select().from(materialActions).where(and(eq(materialActions.id, actionId), eq(materialActions.proposalId, decision.proposalId))).limit(1).get();
-          if (!actionRow) return null;
+          if (!actionRow || actionRow.status !== "waiting_approval" || actionRow.proposalHash !== proposalHash) return null;
+          const runRow = tx.select().from(runs).where(eq(runs.id, actionRow.runId)).limit(1).get();
+          const attemptRow = tx.select().from(attempts).where(eq(attempts.id, actionRow.attemptId)).limit(1).get();
+          if (
+            !runRow || !attemptRow || runRow.status !== "needs_approval" ||
+            runRow.currentAttemptId !== actionRow.attemptId || attemptRow.runId !== runRow.id ||
+            !["assigned", "running"].includes(attemptRow.status) || isIsoExpired(attemptRow.leaseExpiresAt, new Date())
+          ) return null;
           if (actionRow.decisionSnapshotHash) {
             const existing = tx.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, decision.proposalId)).orderBy(asc(approvalDecisions.createdAt)).limit(1).get();
             return existing ? ApprovalDecisionSchema.parse(JSON.parse(existing.decisionJson)) : null;
@@ -3775,10 +3900,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             for (const event of existing) {
               if (event.type !== "run.progress") continue;
               const payload = recordFromJson(event.payloadJson);
-              if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate" as const;
+              if (payload?.["idempotencyKey"] === safeIdempotencyKey) {
+                return { outcome: "duplicate" as const, event: runEventFromRow(event) };
+              }
             }
           }
-          tx.insert(runEvents)
+          const inserted = tx.insert(runEvents)
             .values({
               runId: input.runId,
               type: "run.progress",
@@ -3795,8 +3922,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               message: safeMessage,
               createdAt
             })
-            .run();
-          return "recorded" as const;
+            .returning()
+            .get();
+          return { outcome: "recorded" as const, event: runEventFromRow(inserted) };
         });
       }
       if (safeIdempotencyKey) {
@@ -3804,10 +3932,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         for (const event of existing) {
           if (event.type !== "run.progress") continue;
           const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate";
+          if (payload?.["idempotencyKey"] === safeIdempotencyKey) {
+            return { outcome: "duplicate" as const, event: runEventFromRow(event) };
+          }
         }
       }
-      await appendRunEvent({
+      const inserted = await db.insert(runEvents).values(runEventValues({
         runId: input.runId,
         type: "run.progress",
         payload: {
@@ -3821,8 +3951,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         importance: safeInput.importance ?? "normal",
         message: safeMessage,
         createdAt: safeInput.at ?? nowIso()
-      });
-      return "recorded";
+      })).returning();
+      const event = inserted[0];
+      if (!event) return "not_found";
+      return { outcome: "recorded", event: runEventFromRow(event) };
     },
 
     async listAttempts(input: { runId: string }): Promise<Attempt[]> {

@@ -29,6 +29,7 @@ describe("Slack callback rendering", () => {
       intentId: "intent_action_1",
       actionId: "action_1",
       proposalHash: "hash_1",
+      approvalEpoch: "epoch_1",
       title: "Allow publish?",
       summary: "Publish the package.",
       target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,6 +62,17 @@ function claimed(input: { event: OpenTagEvent; attemptId?: string }) {
 function scratchAttemptPath(root: string, attemptId: string): string {
   const segment = createHash("sha256").update(attemptId).digest("hex").slice(0, 24);
   return join(root, `attempt-${segment}`);
+}
+
+function repositoryCheckout(): string {
+  const checkout = mkdtempSync(join(tmpdir(), "opentag-acp-checkout-"));
+  execFileSync("git", ["init", "-b", "main"], { cwd: checkout });
+  execFileSync("git", ["config", "user.email", "opentag@example.test"], { cwd: checkout });
+  execFileSync("git", ["config", "user.name", "OpenTag Test"], { cwd: checkout });
+  writeFileSync(join(checkout, "README.md"), "# test\n");
+  execFileSync("git", ["add", "README.md"], { cwd: checkout });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: checkout });
+  return checkout;
 }
 
 function clientFor(input: {
@@ -166,6 +178,7 @@ describe("ACP daemon workspaces", () => {
         const resolution = await realClient.requestActionPermission(runId, lease, request);
         approvedAction = resolution.action;
         if (resolution.state === "waiting") {
+          const proposal = await admin.getProposal({ proposalId: resolution.action.proposalId! });
           await admin.approveProposal({
             proposalId: resolution.action.proposalId!,
             id: "approval_e2e_once",
@@ -176,7 +189,8 @@ describe("ACP daemon workspaces", () => {
             metadata: {
               permissionDecision: "allow_once",
               actionId: resolution.action.id,
-              proposalHash: resolution.action.proposalHash
+              proposalHash: resolution.action.proposalHash,
+              approvalEpoch: proposal.snapshot.metadata?.["approvalEpoch"]
             }
           });
         }
@@ -197,8 +211,7 @@ describe("ACP daemon workspaces", () => {
           agent: {
             kind: "stdio",
             command: process.execPath,
-            args: [acpFixture],
-            env: { OPENTAG_ACP_TEST_MODE: "permission" }
+            args: [acpFixture, "permission"]
           }
         },
         roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
@@ -338,6 +351,84 @@ describe("ACP daemon workspaces", () => {
 
     expect(runs).toEqual([]);
     expect(completed[0]?.summary).toContain("workspace.outside_allowed_root");
+  });
+
+  it("denies a generic ACP worktree root outside the allowed workspace before creating a worktree or agent process", async () => {
+    const checkout = repositoryCheckout();
+    const outsideParent = mkdtempSync(join(tmpdir(), "opentag-acp-outside-worktree-"));
+    const outsideWorktreeRoot = join(outsideParent, "worktrees");
+    const completed: OpenTagRunResult[] = [];
+    const targetEvent = event({ id: "evt_acp_worktree_escape", project: { provider: "github", owner: "acme", repo: "demo" } });
+    const executor = createAcpExecutor({
+      manifest: {
+        protocol: "opentag.integration.v1",
+        id: "fixture-agent",
+        label: "Fixture ACP Agent",
+        bindings: { agent: { kind: "stdio", command: process.execPath, args: [acpFixture] } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        resources: {}
+      }
+    });
+
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [{
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: checkout,
+        defaultExecutor: "reviewer",
+        worktreeRoot: outsideWorktreeRoot
+      }],
+      executors: { reviewer: executor },
+      security: { allowedWorkspaceRoot: checkout },
+      heartbeatIntervalMs: 0,
+      client: clientFor({ claimed: claimed({ event: targetEvent }), completed })
+    });
+
+    expect(existsSync(outsideWorktreeRoot)).toBe(false);
+    expect(completed[0]).toMatchObject({ conclusion: "needs_human" });
+    expect(completed[0]?.summary).toContain("execution.outside_allowed_root");
+  });
+
+  it("denies an ACP worktree root symlink whose resolved parent escapes the allowed workspace", async () => {
+    const checkout = repositoryCheckout();
+    const outside = mkdtempSync(join(tmpdir(), "opentag-acp-symlink-outside-"));
+    const linkedWorktreeRoot = join(checkout, "linked-worktrees");
+    symlinkSync(outside, linkedWorktreeRoot, "dir");
+    const completed: OpenTagRunResult[] = [];
+    const executor = createAcpExecutor({
+      manifest: {
+        protocol: "opentag.integration.v1",
+        id: "fixture-agent",
+        label: "Fixture ACP Agent",
+        bindings: { agent: { kind: "stdio", command: process.execPath, args: [acpFixture] } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        resources: {}
+      }
+    });
+
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [{
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: checkout,
+        defaultExecutor: "reviewer",
+        worktreeRoot: linkedWorktreeRoot
+      }],
+      executors: { reviewer: executor },
+      security: { allowedWorkspaceRoot: checkout },
+      heartbeatIntervalMs: 0,
+      client: clientFor({
+        claimed: claimed({ event: event({ id: "evt_acp_worktree_symlink", project: { provider: "github", owner: "acme", repo: "demo" } }) }),
+        completed
+      })
+    });
+
+    expect(readdirSync(outside)).toEqual([]);
+    expect(completed[0]?.summary).toContain("execution.outside_allowed_root");
   });
 
   it.each([
@@ -634,6 +725,12 @@ describe("ACP daemon workspaces", () => {
     const log = vi.spyOn(console, "log").mockImplementation((...args) => {
       logged.push(args);
     });
+    const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-safe-acp-root-")), "scratch");
+    const fixtureConfigPath = join(mkdtempSync(join(tmpdir(), "opentag-safe-acp-config-")), "config.json");
+    writeFileSync(fixtureConfigPath, JSON.stringify({
+      OPENTAG_ACP_TEST_TOOL_TITLE: `Inspect with ${providerToken} and ${activeFence}`,
+      OPENTAG_ACP_TEST_OUTPUT: `ACP completed with ${providerToken} and ${activeFence}`
+    }));
     const executor = createAcpExecutor({
       manifest: {
         protocol: "opentag.integration.v1",
@@ -643,11 +740,7 @@ describe("ACP daemon workspaces", () => {
           agent: {
             kind: "stdio",
             command: process.execPath,
-            args: [acpFixture],
-            env: {
-              OPENTAG_ACP_TEST_TOOL_TITLE: `Inspect with ${providerToken} and ${activeFence}`,
-              OPENTAG_ACP_TEST_OUTPUT: `ACP completed with ${providerToken} and ${activeFence}`
-            }
+            args: [acpFixture, "success", fixtureConfigPath]
           }
         },
         roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
@@ -660,7 +753,7 @@ describe("ACP daemon workspaces", () => {
         runnerId: "runner_local",
         repositories: [],
         executors: { reviewer: executor },
-        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-safe-acp-root-")), "scratch"),
+        scratchRoot,
         heartbeatIntervalMs: 0,
         client: clientFor({
           claimed: claimed({ event: event({ id: "evt_safe_acp", permissions: [] }) }),

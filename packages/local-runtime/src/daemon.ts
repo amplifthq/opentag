@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, rm } from "node:fs/promises";
+import { lstat, mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import {
   formatProjectTargetRef,
@@ -21,11 +21,12 @@ import {
   createAgentSessionProfileForEvent,
   createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
+  resolveRunnerSecurityPaths,
   type ExecutorAdapter,
   type ExecutorMaterialActionReport,
   type ExecutorWorkspace,
   type RunnerSecurityPolicy,
-  worktreePathForRun
+  executionPathForAttempt
 } from "@opentag/runner";
 import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
@@ -284,27 +285,48 @@ export async function runOneDaemonIteration(input: {
       })
     : fallbackSessionProfile;
 
-  const executionPath =
-    binding && executorId === "codex"
-      ? worktreePathForRun({
-          workspacePath: binding.checkoutPath,
-          runId: claimed.run.id,
-          ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {})
-        })
-      : workspace.path;
+  const executionPath = executionPathForAttempt({
+    workspace,
+    runId: claimed.run.id,
+    attemptId: claimed.attemptId,
+    ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {})
+  });
+  if (workspace.kind === "scratch") {
+    const existing = await lstat(workspace.path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (existing) {
+      await input.client.complete(claimed.run.id, lease, {
+        conclusion: "needs_human",
+        summary: "Scratch attempt workspace already exists; refusing to reuse it.",
+        nextAction: "Inspect and preserve the existing attempt path, then retry the Run with a new Attempt."
+      });
+      return true;
+    }
+  }
+  const securityPaths = await resolveRunnerSecurityPaths({
+    workspacePath: workspace.path,
+    executionPath,
+    ...(workspace.kind === "scratch"
+      ? { allowedWorkspaceRoot: scratchRoot }
+      : input.security?.allowedWorkspaceRoot
+        ? { allowedWorkspaceRoot: input.security.allowedWorkspaceRoot }
+        : {})
+  });
 
   const securityAssessment = assessRunnerSecurity({
     executorId,
     workspaceKind: workspace.kind,
-    workspacePath: workspace.path,
-    executionPath,
+    workspacePath: securityPaths.workspacePath,
+    executionPath: securityPaths.executionPath,
     command: claimed.event.command,
     context: claimed.event.context,
     permissions: claimed.event.permissions,
     ...(workspace.kind === "scratch"
-      ? { policy: { ...(input.security ?? {}), allowedWorkspaceRoot: scratchRoot } }
+      ? { policy: { ...(input.security ?? {}), allowedWorkspaceRoot: securityPaths.allowedWorkspaceRoot ?? scratchRoot } }
       : input.security
-        ? { policy: input.security }
+        ? { policy: { ...input.security, ...(securityPaths.allowedWorkspaceRoot ? { allowedWorkspaceRoot: securityPaths.allowedWorkspaceRoot } : {}) } }
         : {})
   });
   if (securityAssessment.findings.length > 0) {

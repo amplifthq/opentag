@@ -45,10 +45,7 @@ Add a named `opentag.integration.v1` manifest under `agents`:
           "kind": "stdio",
           "command": "example-agent",
           "args": ["acp"],
-          "cwd": "/absolute/path/if-required",
-          "env": {
-            "EXAMPLE_NON_SECRET_MODE": "1"
-          }
+          "cwd": "relative/subdirectory"
         }
       },
       "roles": {
@@ -64,10 +61,11 @@ Add a named `opentag.integration.v1` manifest under `agents`:
 }
 ```
 
-The command may be an executable name or an absolute path. Relative paths with
-`.` or `..` are rejected. Manifest `env` is non-secret launch configuration;
-credentials belong in an administrator-controlled secret or connection store,
-not in a reusable manifest.
+The command may be an executable name or an absolute path. Binding `cwd`, when
+present, must be relative to the explicit Attempt workspace and must resolve
+inside it. Stdio bindings reject literal `env` maps. The child receives a
+scrubbed process environment; credentials belong in an administrator-controlled
+Connection or secret-reference resolver, not in a reusable manifest.
 
 The map key, manifest `id`, and executor selection name must match. Selecting
 `example-acp` causes the Generic ACP Host to launch the declared binding.
@@ -121,6 +119,18 @@ For a material external action, authorization and execution are separate:
 If execution may have happened but the outcome cannot be trusted, the Action is
 `unknown` and automatic retry stops. An agent self-report alone is not trusted
 evidence of external success.
+
+Approval proposals are Attempt epochs. If the owning lease expires, an
+unconsumed `allow_once` decision and its proposal are cancelled; a replacement
+Attempt receives a new proposal and approval epoch. An explicit `allow_run`
+grant remains Run-scoped. Decisions are accepted only while the proposal's
+Attempt is current, active, unexpired, and the submitted epoch matches.
+
+An operator can reconcile an `unknown` Action through the pairing-authenticated
+control-plane endpoint. Reconciliation is a compare-and-set transition to
+`succeeded` or `failed`, carries a stable idempotency key and sanitized evidence,
+and writes both the Run audit event and control-plane audit record before a
+single source-thread receipt callback is delivered.
 
 ## Channel integration
 
@@ -194,8 +204,7 @@ runtime identities:
         "agent": {
           "kind": "stdio",
           "command": "hermes",
-          "args": ["acp"],
-          "env": {}
+          "args": ["acp"]
         }
       },
       "roles": {

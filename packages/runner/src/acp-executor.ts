@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
@@ -10,6 +10,7 @@ import {
   isCredentialFieldName,
   isCredentialSafeText,
   OpenTagIntegrationManifestSchema,
+  redactCredentialLikeData,
   type OpenTagIntegrationManifestInput,
   type OpenTagStdioBinding
 } from "@opentag/core";
@@ -28,14 +29,21 @@ import {
   commitRunChanges,
   createRunWorktree,
   deleteRunBranch,
-  removeRunWorktree,
-  worktreePathForRun
+  executionPathForAttempt,
+  removeRunWorktree
 } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
 import { scrubEnvironment } from "./security.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
 const CHILD_EXIT_GRACE_MS = 500;
+const MAX_ACP_DIAGNOSTIC_BYTES = 16 * 1024;
+
+class AcpPublicFailure extends Error {}
+
+function safeDiagnosticFragment(value: string): string {
+  return redactCredentialLikeData(value.replace(CONTROL_CHARACTER_PATTERN, " ").trim()).slice(0, 2_000);
+}
 
 export type AcpPermissionOption = {
   optionId: string;
@@ -505,7 +513,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       supportsStreaming: true,
       supportsCancel: true,
       supportsHookCompletion: false,
-      progressEvents: "human",
+      progressEvents: "audit",
       approvalMode: "opentag_policy",
       contextAccess: ["context_packet", "context_pointers", "workspace"],
       promptAssembly: "opentag",
@@ -550,9 +558,10 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       let changedFileCount: number | undefined;
       try {
         if (workspace.kind === "repository") {
-          executionPath = worktreePathForRun({
-            workspacePath: workspace.path,
-            runId: executionId,
+          executionPath = executionPathForAttempt({
+            workspace,
+            runId: input.runId,
+            attemptId: input.attemptId ?? input.runId,
             ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
           });
           await sink.emit({
@@ -582,11 +591,23 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
         const child = spawn(manifest.binding.command, manifest.binding.args, {
           cwd: childCwd,
-          env: { ...scrubEnvironment(), ...manifest.binding.env },
+          env: scrubEnvironment(),
           stdio: ["pipe", "pipe", "pipe"]
         });
         active.child = child;
-        child.stderr.resume();
+        const stderrChunks: Buffer[] = [];
+        let stderrBytes = 0;
+        let spawnErrorCode: string | undefined;
+        child.stderr.on("data", (chunk: Buffer | string) => {
+          if (stderrBytes >= MAX_ACP_DIAGNOSTIC_BYTES) return;
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          const bounded = buffer.subarray(0, MAX_ACP_DIAGNOSTIC_BYTES - stderrBytes);
+          stderrChunks.push(bounded);
+          stderrBytes += bounded.length;
+        });
+        child.once("error", (error: NodeJS.ErrnoException) => {
+          spawnErrorCode = error.code ?? "spawn_error";
+        });
         if (active.cancelRequested) {
           await terminateChild(child, cancelGraceMs);
           return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
@@ -702,9 +723,34 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 }
               });
             });
-        } catch {
+        } catch (error) {
           if (active.cancelRequested) stopReason = "cancelled";
-          else throw new Error(`ACP agent ${manifest.id} protocol or exit failure.`);
+          else {
+            await waitForExit(child, 100);
+            const rawCause = error instanceof Error ? error.message : String(error);
+            const reason = spawnErrorCode
+              ? "spawn"
+              : /invalid NDJSON|unsupported ACP protocol/iu.test(rawCause)
+                ? "protocol"
+                : child.exitCode !== null && child.exitCode !== 0
+                  ? "exit"
+                  : "transport";
+            const stderr = safeDiagnosticFragment(Buffer.concat(stderrChunks).toString("utf8"));
+            const cause = safeDiagnosticFragment(rawCause);
+            await sink.emit({
+              type: "executor.failed",
+              message: [
+                `ACP diagnostic (${reason})`,
+                `command=${basename(manifest.binding.command)}`,
+                ...(spawnErrorCode ? [`spawnCode=${spawnErrorCode}`] : []),
+                ...(child.exitCode !== null ? [`exitCode=${child.exitCode}`] : []),
+                ...(cause ? [`detail=${cause}`] : []),
+                ...(stderr ? [`stderr=${stderr}`] : [])
+              ].join("; "),
+              at: new Date().toISOString()
+            });
+            throw new AcpPublicFailure(`ACP agent ${manifest.id} protocol or exit failure.`);
+          }
         }
 
         await terminateChild(child);
@@ -753,11 +799,13 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         });
         return result;
       } catch (error) {
-        await sink.emit({
-          type: "executor.failed",
-          message: `ACP agent ${manifest.id} failed`,
-          at: new Date().toISOString()
-        });
+        if (!(error instanceof AcpPublicFailure)) {
+          await sink.emit({
+            type: "executor.failed",
+            message: `ACP agent ${manifest.id} failed`,
+            at: new Date().toISOString()
+          });
+        }
         throw error;
       } finally {
         activeRuns.delete(activeKey);

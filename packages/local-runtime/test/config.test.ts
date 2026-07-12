@@ -17,7 +17,7 @@ function acpManifest(input: { id: string; label: string; command: string; args?:
     id: input.id,
     label: input.label,
     bindings: {
-      agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [], env: {} }
+      agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [] }
     },
     roles: {
       agent: { protocol: "agent-client-protocol" as const, protocolVersion: 1 as const, binding: "agent" }
@@ -52,6 +52,18 @@ describe("parseDaemonConfig ACP agents", () => {
         }
       })
     ).toThrow(/reviewer|different-id/u);
+  });
+
+  it("rejects literal environment values in ACP bindings", () => {
+    const configured = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
+    expect(() => parseDaemonConfig({
+      agents: {
+        reviewer: {
+          ...configured,
+          bindings: { agent: { ...configured.bindings.agent, env: { TOKEN: "literal" } } }
+        }
+      }
+    })).toThrow(/env|unrecognized/iu);
   });
 });
 

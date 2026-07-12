@@ -49,6 +49,7 @@ export const OpenTagApprovalPromptPresentationSchema = z
     intentId: z.string().min(1),
     actionId: z.string().min(1),
     proposalHash: z.string().min(1),
+    approvalEpoch: z.string().min(1),
     title: CredentialSafePresentationTextSchema,
     summary: CredentialSafePresentationTextSchema,
     target: z.object({

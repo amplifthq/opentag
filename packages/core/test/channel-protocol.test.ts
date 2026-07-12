@@ -86,6 +86,7 @@ describe("opentag.channel.v1", () => {
       intentId: "intent-action-1",
       actionId: "action-1",
       proposalHash: "sha256:abc123",
+      approvalEpoch: "epoch_1",
       title: "Deploy the verified build?",
       summary: "This will update the production service.",
       target: { provider: "deploy", connectionId: "deploy:prod", operation: "update", resource: "service:web", resourceVersion: "build-42" },

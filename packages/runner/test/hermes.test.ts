@@ -45,7 +45,7 @@ describe("Hermes executor", () => {
     await expect(
       executor.canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [],
         metadata: { provider: "slack", accountId: "T123", conversationId: 456 }
@@ -54,7 +54,7 @@ describe("Hermes executor", () => {
 
     const result = await executor.run({
       runId: "run_1",
-      workspacePath: "/tmp/demo",
+      workspace: { kind: "repository", path: "/tmp/demo" },
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
       contextPacket: {
@@ -124,7 +124,7 @@ describe("Hermes executor", () => {
     await expect(
       createHermesExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/missing",
+        workspace: { kind: "repository", path: "/tmp/missing" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -154,7 +154,7 @@ describe("Hermes executor", () => {
 
     await createHermesExecutor({ runner }).run({
       runId: "run_1",
-      workspacePath: "/tmp/demo",
+      workspace: { kind: "repository", path: "/tmp/demo" },
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [],
       sessionProfile: {
@@ -199,7 +199,7 @@ describe("Hermes executor", () => {
     await expect(
       createHermesExecutor({ runner }).run({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       }, {

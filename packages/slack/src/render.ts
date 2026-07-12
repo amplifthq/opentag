@@ -60,6 +60,7 @@ export type SlackSuggestedActionButtonValue = {
   intentId: string;
   permissionDecision?: "allow_once" | "allow_run" | "deny";
   proposalHash?: string;
+  approvalEpoch?: string;
   actionId?: string;
 };
 
@@ -114,6 +115,7 @@ export function parseSlackSuggestedActionButtonValue(value: string): SlackSugges
         ? { permissionDecision: parsed.permissionDecision }
         : {}),
       ...(typeof parsed.proposalHash === "string" && parsed.proposalHash.length > 0 ? { proposalHash: parsed.proposalHash } : {}),
+      ...(typeof parsed.approvalEpoch === "string" && parsed.approvalEpoch.length > 0 ? { approvalEpoch: parsed.approvalEpoch } : {}),
       ...(typeof parsed.actionId === "string" && parsed.actionId.length > 0 ? { actionId: parsed.actionId } : {})
     };
   } catch {
@@ -147,6 +149,7 @@ export function createSlackApprovalPromptBlocks(presentation: OpenTagApprovalPro
           intentId: presentation.intentId,
           permissionDecision,
           proposalHash: presentation.proposalHash,
+          approvalEpoch: presentation.approvalEpoch,
           actionId: presentation.actionId
         }),
         ...(permissionDecision === "allow_once" ? { style: "primary" as const } : {}),

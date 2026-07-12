@@ -84,6 +84,7 @@ export type LarkThreadActionButtonValue = {
   intentId?: string;
   permissionDecision?: "allow_once" | "allow_run" | "deny";
   proposalHash?: string;
+  approvalEpoch?: string;
   actionId?: string;
 };
 
@@ -127,6 +128,7 @@ export function parseLarkThreadActionButtonValue(value: unknown): LarkThreadActi
       ? { permissionDecision: record["permissionDecision"] }
       : {}),
     ...(typeof record["proposalHash"] === "string" && record["proposalHash"].length > 0 ? { proposalHash: record["proposalHash"] } : {}),
+    ...(typeof record["approvalEpoch"] === "string" && record["approvalEpoch"].length > 0 ? { approvalEpoch: record["approvalEpoch"] } : {}),
     ...(typeof record["actionId"] === "string" && record["actionId"].length > 0 ? { actionId: record["actionId"] } : {})
   };
 }
@@ -168,6 +170,7 @@ export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPrompt
             intentId: presentation.intentId,
             permissionDecision,
             proposalHash: presentation.proposalHash,
+            approvalEpoch: presentation.approvalEpoch,
             actionId: presentation.actionId
           }
         }))

@@ -419,6 +419,10 @@ describe("dispatcher API", () => {
     expect(runnerCanReadRun.status).toBe(200);
     const runnerCanReadAlerts = await app.request("/v1/control-plane-alerts", { headers: runnerAuth });
     expect(runnerCanReadAlerts.status).toBe(200);
+    const runnerCannotReconcileUnknownAction = await app.request("/v1/material-actions/action_missing/reconcile", runnerJson({
+      outcome: "succeeded", idempotencyKey: "admin_only", receiptRef: "provider:lookup"
+    }));
+    expect(runnerCannotReconcileUnknownAction.status).toBe(401);
 
     const audit = await app.request("/v1/control-plane-events?type=security.auth_failed", {
       headers: { authorization: "Bearer pair_test" }
@@ -5072,14 +5076,28 @@ describe("dispatcher API", () => {
     expect(replay.status).toBe(200);
     await expect(replay.json()).resolves.toEqual({ ok: true, replayed: true });
 
-    expect(delivered).toEqual([
+    const [concurrentA, concurrentB] = await Promise.all([
+      app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({
+        ...body, message: "parallel A", idempotencyKey: "runner_1:run_progress_replay:progress:A"
+      })),
+      app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({
+        ...body, message: "parallel B", idempotencyKey: "runner_1:run_progress_replay:progress:B"
+      }))
+    ]);
+    expect([concurrentA.status, concurrentB.status]).toEqual([200, 200]);
+
+    expect(delivered.slice(0, 2)).toEqual([
       { kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_progress_replay`" },
       { kind: "progress", body: "OpenTag progress for `run_progress_replay`: working" }
     ]);
+    expect(delivered.slice(2).map((message) => message.body).sort()).toEqual([
+      "OpenTag progress for `run_progress_replay`: parallel A",
+      "OpenTag progress for `run_progress_replay`: parallel B"
+    ]);
     const eventsResponse = await app.request("/v1/runs/run_progress_replay/events");
     const { events } = await eventsResponse.json();
-    expect(events.filter((event: { type: string }) => event.type === "run.progress")).toHaveLength(1);
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(1);
+    expect(events.filter((event: { type: string }) => event.type === "run.progress")).toHaveLength(3);
+    expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(3);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
       payload: expect.objectContaining({ idempotencyKey: "runner_1:run_progress_replay:progress:1" })
     });
@@ -7863,7 +7881,8 @@ describe("dispatcher API", () => {
       proposalId,
       intentId: `intent_${actionId}`,
       actionId,
-      proposalHash: requestedBody.resolution.action.proposalHash
+      proposalHash: requestedBody.resolution.action.proposalHash,
+      approvalEpoch: expect.any(String)
     });
 
     const actionRequest = {
@@ -7877,6 +7896,7 @@ describe("dispatcher API", () => {
         intentId: allowRunPayload!.intentId,
         permissionDecision: allowRunPayload!.permissionDecision,
         proposalHash: allowRunPayload!.proposalHash,
+        approvalEpoch: allowRunPayload!.approvalEpoch,
         governedActionId: allowRunPayload!.actionId
       }
     };
@@ -7916,6 +7936,63 @@ describe("dispatcher API", () => {
     }));
     expect(duplicate.status).toBe(200);
     await expect(duplicate.json()).resolves.toMatchObject({ resolution: { state: "reconciled", decision: "deny", receipt: { id: "receipt_connector_publish" } } });
+
+    const unknownRequest = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
+      ...lease,
+      request: {
+        ...permissionRequest,
+        toolCallId: "tool_publish_unknown",
+        resource: "report:unknown",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        mode: "autonomous"
+      }
+    }));
+    const unknownBody = await unknownRequest.json() as { resolution: { action: { id: string } } };
+    expect(unknownRequest.status).toBe(200);
+    const unknownReceipt = await app.request(`/v1/runners/runner_1/runs/run_acp_permission/material-actions/${unknownBody.resolution.action.id}/receipt`, jsonRequest({
+      ...lease,
+      receipt: {
+        id: "receipt_acp_unknown",
+        actionId: unknownBody.resolution.action.id,
+        provider: "acp",
+        receiptRef: "acp:session:tool_publish_unknown",
+        outcome: "unknown",
+        observedAt: new Date().toISOString()
+      }
+    }));
+    expect(unknownReceipt.status).toBe(200);
+    const deliveriesBeforeReconciliation = delivered.length;
+    const reconciliationBody = {
+      outcome: "succeeded",
+      idempotencyKey: "provider-check-report-unknown",
+      receiptRef: "connector:publish:report-unknown",
+      evidence: [{
+        id: "provider-check-1",
+        kind: "provider_lookup",
+        assurance: "verified",
+        subjectRef: "report:unknown",
+        summary: `Provider confirms success; stale fence ${lease.fencingToken}; authorization=Bearer callback-secret`,
+        createdAt: new Date().toISOString()
+      }]
+    };
+    const [reconciled, replayed] = await Promise.all([
+      app.request(`/v1/material-actions/${unknownBody.resolution.action.id}/reconcile`, jsonRequest(reconciliationBody)),
+      app.request(`/v1/material-actions/${unknownBody.resolution.action.id}/reconcile`, jsonRequest(reconciliationBody))
+    ]);
+    expect([reconciled.status, replayed.status]).toEqual([200, 200]);
+    expect(delivered).toHaveLength(deliveriesBeforeReconciliation + 1);
+    const reconciliationCallback = delivered.at(-1)?.body ?? "";
+    expect(reconciliationCallback).toContain("reconciled as succeeded");
+    expect(reconciliationCallback).not.toContain(lease.fencingToken);
+    expect(reconciliationCallback).not.toContain("callback-secret");
+    expect(reconciliationCallback).not.toContain("provider-check-1");
+    const conflictingReconciliation = await app.request(`/v1/material-actions/${unknownBody.resolution.action.id}/reconcile`, jsonRequest({
+      ...reconciliationBody,
+      outcome: "failed",
+      idempotencyKey: "provider-check-conflict"
+    }));
+    expect(conflictingReconciliation.status).toBe(409);
+    expect(delivered).toHaveLength(deliveriesBeforeReconciliation + 1);
   });
 
   it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {

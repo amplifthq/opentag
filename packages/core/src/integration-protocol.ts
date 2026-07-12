@@ -25,8 +25,7 @@ export const OpenTagStdioBindingSchema = z
       .min(1)
       .refine(isExecutableNameOrAbsolutePath, "Stdio command must be an executable name or an absolute path."),
     args: z.array(z.string()).default([]),
-    cwd: z.string().trim().min(1).optional(),
-    env: z.record(z.string()).default({})
+    cwd: z.string().trim().min(1).optional()
   })
   .strict();
 

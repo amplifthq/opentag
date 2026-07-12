@@ -8,7 +8,7 @@ describe("echo executor", () => {
     const result = await executor.run(
       {
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "scratch", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       },

@@ -1,11 +1,13 @@
 import {
   FollowUpRequestSchema,
+  ActionSchema,
   ActionPermissionResolutionSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
   RunAdmissionDecisionSchema,
   type ActorIdentity,
+  type Action,
   type ActionPermissionRequest,
   type ActionPermissionResolution,
   type MaterialActionReceipt,
@@ -22,7 +24,8 @@ import {
   type ProposalLineage,
   type RunEventImportance,
   type RunEventVisibility,
-  type SuggestedChangesSnapshot
+  type SuggestedChangesSnapshot,
+  type VerificationEvidence
 } from "@opentag/core";
 
 export type ClaimedOpenTagRun = {
@@ -142,6 +145,14 @@ export type RunProgressInput = {
   visibility?: RunEventVisibility;
   importance?: RunEventImportance;
   idempotencyKey?: string;
+};
+
+export type ReconcileMaterialActionInput = {
+  actionId: string;
+  outcome: "succeeded" | "failed";
+  idempotencyKey: string;
+  receiptRef: string;
+  evidence?: VerificationEvidence[];
 };
 
 export type RunTimeoutPolicy = {
@@ -356,6 +367,7 @@ export type OpenTagClient = {
   requestActionPermission(input: { runnerId: string; runId: string } & AttemptLease & { request: ActionPermissionRequest }): Promise<ActionPermissionResolution>;
   resolveActionPermission(input: { runnerId: string; runId: string; actionId: string } & AttemptLease): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(input: { runnerId: string; runId: string; actionId: string; receipt: MaterialActionReceipt } & AttemptLease): Promise<ActionPermissionResolution>;
+  reconcileMaterialAction(input: ReconcileMaterialActionInput): Promise<{ action: Action; replayed: boolean }>;
   markRunning(input: {
     runnerId: string;
     runId: string;
@@ -794,6 +806,22 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       await assertOk(response, "recordMaterialActionReceipt");
       const body = (await response.json()) as { resolution: unknown };
       return ActionPermissionResolutionSchema.parse(body.resolution);
+    },
+
+    async reconcileMaterialAction(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/material-actions/${input.actionId}/reconcile`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({
+          outcome: input.outcome,
+          idempotencyKey: input.idempotencyKey,
+          receiptRef: input.receiptRef,
+          ...(input.evidence ? { evidence: input.evidence } : {})
+        })
+      });
+      await assertOk(response, "reconcileMaterialAction");
+      const body = (await response.json()) as { result: { action: unknown }; replayed: boolean };
+      return { action: ActionSchema.parse(body.result.action), replayed: body.replayed };
     },
 
     async markRunning(input) {

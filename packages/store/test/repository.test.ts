@@ -714,7 +714,7 @@ describe("OpenTag repository", () => {
       message: `current progress ${first!.fencingToken}`,
       type: first!.fencingToken,
       idempotencyKey: first!.fencingToken
-    })).resolves.toBe("recorded");
+    })).resolves.toMatchObject({ outcome: "recorded", event: { type: "run.progress" } });
     await expect(
       repo.completeRun({
         ...activeLease,
@@ -774,7 +774,7 @@ describe("OpenTag repository", () => {
         type: claimed.fencingToken,
         idempotencyKey: claimed.fencingToken
       })
-    ).resolves.toBe("recorded");
+    ).resolves.toMatchObject({ outcome: "recorded", event: { message: "using [redacted] and [redacted]" } });
     const providerFailure = `provider failed ${claimed.fencingToken} Bearer ${providerToken} -----BEGIN PRIVATE KEY----- secret`;
     await repo.appendRunEvent({
       runId: "run_safe_output",
@@ -2080,7 +2080,7 @@ describe("OpenTag repository", () => {
         at: "2026-06-24T00:00:01.000Z",
         idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
       })
-    ).resolves.toBe("recorded");
+    ).resolves.toMatchObject({ outcome: "recorded", event: { message: "external hook progress" } });
     await expect(
       repo.recordProgress({
         runId: "run_progress_replay",
@@ -2089,7 +2089,7 @@ describe("OpenTag repository", () => {
         at: "2026-06-24T00:00:02.000Z",
         idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
       })
-    ).resolves.toBe("duplicate");
+    ).resolves.toMatchObject({ outcome: "duplicate", event: { message: "external hook progress" } });
 
     await expect(repo.listRunEvents({ runId: "run_progress_replay" })).resolves.toEqual([
       expect.objectContaining({
@@ -2868,6 +2868,17 @@ describe("durable ACP material actions", () => {
     return { sqlite, repo, claimed };
   }
 
+  async function approvalIdentity(
+    repo: ReturnType<typeof createOpenTagRepository>,
+    action: { id: string; proposalId?: string; proposalHash?: string }
+  ) {
+    if (!action.proposalId || !action.proposalHash) throw new Error("expected governed approval action");
+    const proposal = await repo.getSuggestedChanges({ proposalId: action.proposalId });
+    const approvalEpoch = proposal?.snapshot.metadata?.["approvalEpoch"];
+    if (typeof approvalEpoch !== "string") throw new Error("expected approval epoch");
+    return { actionId: action.id, proposalHash: action.proposalHash, approvalEpoch };
+  }
+
   it("waits on the existing proposal approval path, creates an attempt grant, and reuses a known-success receipt", async () => {
     const { repo, claimed } = await claimedRepository();
     const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
@@ -2889,7 +2900,7 @@ describe("durable ACP material actions", () => {
     expect(waiting?.action.attemptFenceDigest).not.toBe(claimed.fencingToken);
     await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
     await expect(repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("updated");
-    await expect(repo.recordProgress({ ...lease, message: "Waiting for the governed decision." })).resolves.toBe("recorded");
+    await expect(repo.recordProgress({ ...lease, message: "Waiting for the governed decision." })).resolves.toMatchObject({ outcome: "recorded" });
     await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
 
     const premature = await repo.recordMaterialActionReceipt({
@@ -2917,8 +2928,7 @@ describe("durable ACP material actions", () => {
       metadata: {
         source: "thread_action",
         permissionDecision: "allow_once",
-        actionId: waiting!.action.id,
-        proposalHash: waiting!.action.proposalHash
+        ...await approvalIdentity(repo, waiting!.action)
       }
     });
     const allowed = await repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id });
@@ -2990,8 +3000,7 @@ describe("durable ACP material actions", () => {
       metadata: {
         source: "thread_action",
         permissionDecision: "allow_once",
-        proposalHash: first!.action.proposalHash,
-        actionId: first!.action.id
+        ...await approvalIdentity(repo, first!.action)
       }
     });
     await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
@@ -3027,8 +3036,7 @@ describe("durable ACP material actions", () => {
       scope: "manual",
       metadata: {
         permissionDecision: "allow_run",
-        actionId: first!.action.id,
-        proposalHash: first!.action.proposalHash
+        ...await approvalIdentity(repo, first!.action)
       }
     });
     await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_run" });
@@ -3100,7 +3108,7 @@ describe("durable ACP material actions", () => {
       approvedBy: { provider: "slack", providerUserId: "U123" },
       approvedAt: "2026-07-12T00:01:00.000Z",
       scope: "manual",
-      metadata: { permissionDecision: "allow_run", actionId: waiting!.action.id, proposalHash: waiting!.action.proposalHash }
+      metadata: { permissionDecision: "allow_run", ...await approvalIdentity(repo, waiting!.action) }
     });
     await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
     expect(sqlite.prepare("SELECT attempt_id AS attemptId FROM grants").get()).toEqual({ attemptId: claimed.attemptId });
@@ -3126,7 +3134,7 @@ describe("durable ACP material actions", () => {
         approvedBy: { provider: "slack", providerUserId: "U123" },
         approvedAt: "2026-07-12T00:01:00.000Z",
         scope: "manual",
-        metadata: { permissionDecision: "allow_run", actionId: first!.action.id, proposalHash: first!.action.proposalHash }
+        metadata: { permissionDecision: "allow_run", ...await approvalIdentity(repo, first!.action) }
       });
       await repo.resolveActionPermission({ ...lease, actionId: first!.action.id });
       sqlite.exec(interleaving === "revoke_grant" ? `
@@ -3194,8 +3202,7 @@ describe("durable ACP material actions", () => {
       }
     });
     const identity = {
-      actionId: waiting!.action.id,
-      proposalHash: waiting!.action.proposalHash,
+      ...await approvalIdentity(repo, waiting!.action),
       permissionDecision: "allow_once"
     };
     const invalid = await repo.recordApprovalDecision({
@@ -3232,7 +3239,7 @@ describe("durable ACP material actions", () => {
     await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
   });
 
-  it("rebinds an immutable waiting proposal after reassignment but turns released execution into unknown", async () => {
+  it("cancels an expired waiting proposal and creates a new approval epoch for the replacement Attempt", async () => {
     const waitingFixture = await claimedRepository(0);
     const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: waitingFixture.claimed.attemptId, fencingToken: waitingFixture.claimed.fencingToken };
     const request = {
@@ -3247,11 +3254,14 @@ describe("durable ACP material actions", () => {
     const waiting = await waitingFixture.repo.requestActionPermission({ ...firstLease, request });
     const secondClaim = await waitingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: secondClaim!.attemptId, fencingToken: secondClaim!.fencingToken };
-    const rebound = await waitingFixture.repo.requestActionPermission({ ...secondLease, request: { ...request, toolCallId: "tool_rebound" } });
-    expect(rebound).toMatchObject({
+    const replacement = await waitingFixture.repo.requestActionPermission({ ...secondLease, request: { ...request, toolCallId: "tool_replacement" } });
+    expect(replacement).toMatchObject({
       state: "waiting",
-      action: { id: waiting!.action.id, proposalId: waiting!.action.proposalId, proposalHash: waiting!.action.proposalHash, attemptId: secondClaim!.attemptId }
+      action: { status: "waiting_approval", attemptId: secondClaim!.attemptId }
     });
+    expect(replacement!.action.id).not.toBe(waiting!.action.id);
+    expect(replacement!.action.proposalId).not.toBe(waiting!.action.proposalId);
+    expect(replacement!.action.proposalHash).not.toBe(waiting!.action.proposalHash);
     const stale = await waitingFixture.repo.resolveActionPermission({ ...firstLease, actionId: waiting!.action.id });
     expect(stale).toMatchObject({ state: "stale" });
     expect(stale).not.toHaveProperty("decision");
@@ -3293,6 +3303,156 @@ describe("durable ACP material actions", () => {
     });
   });
 
+  it("rejects a decision submitted after its approval Attempt lease expired", async () => {
+    const fixture = await claimedRepository(60);
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const waiting = await fixture.repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_late_decision", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+    });
+    const proposal = await fixture.repo.getSuggestedChanges({ proposalId: waiting!.action.proposalId! });
+    await fixture.repo.heartbeat({ ...lease, leaseSeconds: 0 });
+
+    await expect(fixture.repo.recordApprovalDecision({
+      id: "approval_after_expiry",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: {
+        permissionDecision: "allow_once",
+        actionId: waiting!.action.id,
+        proposalHash: waiting!.action.proposalHash,
+        approvalEpoch: proposal!.snapshot.metadata!["approvalEpoch"]
+      }
+    })).resolves.toBeNull();
+  });
+
+  it("does not let an unconsumed allow_once decision authorize a replacement Attempt", async () => {
+    const fixture = await claimedRepository(60);
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_unconsumed_once",
+      title: "Publish package",
+      kind: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const first = await fixture.repo.requestActionPermission({ ...firstLease, request });
+    await fixture.repo.recordApprovalDecision({
+      id: "approval_unconsumed_once",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(fixture.repo, first!.action) }
+    });
+    await fixture.repo.heartbeat({ ...firstLease, leaseSeconds: 0 });
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const replacement = await fixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim!.attemptId,
+      fencingToken: secondClaim!.fencingToken,
+      request: { ...request, toolCallId: "tool_replacement_once" }
+    });
+
+    expect(replacement).toMatchObject({ state: "waiting", action: { status: "waiting_approval", attemptId: secondClaim!.attemptId } });
+    expect(replacement!.action.id).not.toBe(first!.action.id);
+  });
+
+  it("keeps an explicit allow_run grant valid across replacement Attempts", async () => {
+    const fixture = await claimedRepository(60);
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const grantScope = { package: "@acme/report", versions: "*" };
+    const first = await fixture.repo.requestActionPermission({
+      ...firstLease,
+      request: {
+        toolCallId: "tool_allow_run_next", title: "Publish report next", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next",
+        targetFingerprint: `sha256:${"6".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "ask"
+      }
+    });
+    await fixture.repo.recordApprovalDecision({
+      id: "approval_cross_attempt_run",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_run", ...await approvalIdentity(fixture.repo, first!.action) }
+    });
+    await expect(fixture.repo.resolveActionPermission({ ...firstLease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_run" });
+    await fixture.repo.heartbeat({ ...firstLease, leaseSeconds: 0 });
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const second = await fixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim!.attemptId,
+      fencingToken: secondClaim!.fencingToken,
+      request: {
+        toolCallId: "tool_allow_run_stable", title: "Publish report stable", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "stable",
+        targetFingerprint: `sha256:${"7".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "auto"
+      }
+    });
+
+    expect(second).toMatchObject({ state: "authorized", decision: "allow_run", action: { status: "executing", attemptId: secondClaim!.attemptId } });
+  });
+
+  it("reconciles an unknown action once with sanitized, auditable evidence", async () => {
+    const fixture = await claimedRepository(0);
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const executing = await fixture.repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_unknown_reconcile", title: "Publish report", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report",
+        targetFingerprint: `sha256:${"8".repeat(64)}`, permissionScopes: ["npm:publish"], mode: "autonomous"
+      }
+    });
+    await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
+    const first = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "succeeded",
+      idempotencyKey: "reconcile_provider_check_1",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin",
+      evidence: [{
+        id: "evidence_provider_1", kind: "provider_lookup", assurance: "verified", subjectRef: "@acme/report",
+        summary: "Provider confirms the package was published.", createdAt: new Date().toISOString(),
+        metadata: { authorization: "Bearer must-not-persist" }
+      }]
+    });
+    const replay = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "succeeded",
+      idempotencyKey: "reconcile_provider_check_1",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin"
+    });
+    const conflict = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "failed",
+      idempotencyKey: "reconcile_conflict",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin"
+    });
+
+    expect(first).toMatchObject({ outcome: "reconciled", action: { status: "succeeded" } });
+    expect(replay).toMatchObject({ outcome: "replayed", action: { status: "succeeded" } });
+    expect(conflict).toMatchObject({ outcome: "conflict", action: { status: "succeeded" } });
+    expect(JSON.stringify(first)).not.toContain("must-not-persist");
+    await expect(fixture.repo.listControlPlaneEvents({ type: "material_action.reconciled" })).resolves.toHaveLength(1);
+  });
+
   it("rolls back grant creation and execution release when ownership changes inside the authorization transaction", async () => {
     const { sqlite, repo, claimed } = await claimedRepository();
     const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
@@ -3307,7 +3467,7 @@ describe("durable ACP material actions", () => {
       approvedBy: { provider: "slack", providerUserId: "U123" },
       approvedAt: "2026-07-12T00:01:00.000Z",
       scope: "manual",
-      metadata: { permissionDecision: "allow_once", actionId: waiting!.action.id, proposalHash: waiting!.action.proposalHash }
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, waiting!.action) }
     });
     sqlite.exec(`
       CREATE TRIGGER force_action_reassignment

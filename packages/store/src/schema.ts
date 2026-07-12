@@ -182,7 +182,7 @@ export const materialActions = sqliteTable(
     updatedAt: text("updated_at").notNull()
   },
   (table) => ({
-    idempotencyIdx: uniqueIndex("material_actions_idempotency_idx").on(table.idempotencyKey),
+    idempotencyIdx: index("material_actions_idempotency_idx").on(table.idempotencyKey),
     runIdx: index("material_actions_run_idx").on(table.runId),
     proposalIdx: index("material_actions_proposal_idx").on(table.proposalId)
   })
@@ -449,7 +449,8 @@ export function migrateSchema(sqlite: Database.Database): void {
       decision_snapshot_hash TEXT, attempt_fence_digest TEXT NOT NULL, receipt_json TEXT,
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS material_actions_idempotency_idx ON material_actions(idempotency_key);
+    DROP INDEX IF EXISTS material_actions_idempotency_idx;
+    CREATE INDEX IF NOT EXISTS material_actions_idempotency_idx ON material_actions(idempotency_key);
     CREATE INDEX IF NOT EXISTS material_actions_run_idx ON material_actions(run_id);
     CREATE INDEX IF NOT EXISTS material_actions_proposal_idx ON material_actions(proposal_id);
     CREATE TABLE IF NOT EXISTS apply_plans (

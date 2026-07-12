@@ -1,10 +1,13 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
-const mode = process.env.OPENTAG_ACP_TEST_MODE ?? "success";
+const mode = process.argv[2] ?? "success";
+const fixtureConfig = await readFile(process.argv[3] ?? join(process.cwd(), ".acp-test-config.json"), "utf8")
+  .then((value) => JSON.parse(value))
+  .catch(() => ({}));
 
 if (mode === "malformed-live") {
   await writeFile(join(process.cwd(), "acp-child-pid.txt"), `${process.pid}\n`);
@@ -13,7 +16,7 @@ if (mode === "malformed-live") {
 }
 
 if (mode === "child-exit") {
-  process.stderr.write("SENTINEL_CHILD_STDERR_SECRET\n");
+  process.stderr.write("publish failed: token=SENTINEL_CHILD_STDERR_SECRET\n");
   process.exit(7);
 }
 
@@ -68,7 +71,7 @@ const app = acp
       update: {
         sessionUpdate: "tool_call",
         toolCallId: "tool-1",
-        title: process.env.OPENTAG_ACP_TEST_TOOL_TITLE ?? "Write ACP output",
+        title: fixtureConfig.OPENTAG_ACP_TEST_TOOL_TITLE ?? "Write ACP output",
         kind: "edit",
         status: "in_progress"
       }
@@ -79,18 +82,18 @@ const app = acp
         sessionId: ctx.params.sessionId,
         toolCall: {
           toolCallId: "material-1",
-          title: process.env.OPENTAG_ACP_TEST_PERMISSION_TITLE ?? "Publish report",
+          title: fixtureConfig.OPENTAG_ACP_TEST_PERMISSION_TITLE ?? "Publish report",
           kind: "execute",
           status: "pending",
           rawInput: {
-            provider: process.env.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
-            connectionId: process.env.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
-            package: process.env.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
-            tag: process.env.OPENTAG_ACP_TEST_VERSION ?? "next",
-            ...(process.env.OPENTAG_ACP_TEST_ENVIRONMENT ? { environment: process.env.OPENTAG_ACP_TEST_ENVIRONMENT } : {}),
-            ...(process.env.OPENTAG_ACP_TEST_FORCE ? { force: process.env.OPENTAG_ACP_TEST_FORCE === "true" } : {}),
-            ...(process.env.OPENTAG_ACP_TEST_VISIBILITY ? { visibility: process.env.OPENTAG_ACP_TEST_VISIBILITY } : {}),
-            authorization: `Bearer ${process.env.OPENTAG_ACP_TEST_SECRET ?? "fixture-secret-token"}`
+            provider: fixtureConfig.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
+            connectionId: fixtureConfig.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
+            package: fixtureConfig.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
+            tag: fixtureConfig.OPENTAG_ACP_TEST_VERSION ?? "next",
+            ...(fixtureConfig.OPENTAG_ACP_TEST_ENVIRONMENT ? { environment: fixtureConfig.OPENTAG_ACP_TEST_ENVIRONMENT } : {}),
+            ...(fixtureConfig.OPENTAG_ACP_TEST_FORCE ? { force: fixtureConfig.OPENTAG_ACP_TEST_FORCE === "true" } : {}),
+            ...(fixtureConfig.OPENTAG_ACP_TEST_VISIBILITY ? { visibility: fixtureConfig.OPENTAG_ACP_TEST_VISIBILITY } : {}),
+            authorization: `Bearer ${fixtureConfig.OPENTAG_ACP_TEST_SECRET ?? "fixture-secret-token"}`
           }
         },
         options: [
@@ -136,7 +139,7 @@ const app = acp
         sessionUpdate: "agent_message_chunk",
         content: {
           type: "text",
-          text: process.env.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."
+          text: fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."
         }
       }
     });

@@ -27,7 +27,7 @@ const executor: ExecutorAdapter = {
 
     return {
       conclusion: "success",
-      summary: `Custom runner handled '${input.command.rawText}' in ${input.workspacePath}`,
+      summary: `Custom runner handled '${input.command.rawText}' in ${input.workspace.path}`,
       verification: [
         {
           command: "custom-runner",
@@ -57,7 +57,7 @@ const lease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken
 
 const readiness = await executor.canRun({
   runId: claimed.run.id,
-  workspacePath,
+  workspace: { kind: "repository", path: workspacePath },
   command: claimed.event.command,
   context: claimed.event.context
 });
@@ -80,7 +80,7 @@ await client.markRunning({ runnerId, runId: claimed.run.id, ...lease, executor: 
 const result = await executor.run(
   {
     runId: claimed.run.id,
-    workspacePath,
+    workspace: { kind: "repository", path: workspacePath },
     command: claimed.event.command,
     context: claimed.event.context
   },

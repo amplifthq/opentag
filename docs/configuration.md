@@ -67,7 +67,7 @@ ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
       "id": "hermes-acp",
       "label": "Hermes ACP",
       "bindings": {
-        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"], "env": {} }
+        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"] }
       },
       "roles": {
         "agent": {
@@ -446,7 +446,7 @@ manifest instead of a shell script:
 opentag ingest-template --source hermes --format manifest
 ```
 
-The manifest declares required environment variables, event aliases,
+The ingest manifest declares required runtime references, event aliases,
 idempotency suffixes, terminal-event semantics, and the hook ingest permission
 boundary. Hook ingest itself does not request source-thread transcript access,
 does not mutate prompts, does not read raw provider context, and does not

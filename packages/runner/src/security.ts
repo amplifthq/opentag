@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { isAbsolute, relative, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import type { ContextPointer, OpenTagCommand, PermissionGrant } from "@opentag/core";
 import type { CommandEnvironment } from "./command.js";
 
@@ -100,6 +101,39 @@ function isPathInside(childPath: string, parentPath: string): boolean {
   const parent = resolve(parentPath);
   const pathFromParent = relative(parent, child);
   return pathFromParent === "" || (!pathFromParent.startsWith("..") && !isAbsolute(pathFromParent));
+}
+
+async function resolvePlannedPath(path: string): Promise<string> {
+  let cursor = resolve(path);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return resolve(await realpath(cursor), ...suffix);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) throw error;
+      suffix.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+export async function resolveRunnerSecurityPaths(input: {
+  workspacePath: string;
+  executionPath: string;
+  allowedWorkspaceRoot?: string;
+}): Promise<{ workspacePath: string; executionPath: string; allowedWorkspaceRoot?: string }> {
+  const [workspacePath, executionPath, allowedWorkspaceRoot] = await Promise.all([
+    resolvePlannedPath(input.workspacePath),
+    resolvePlannedPath(input.executionPath),
+    input.allowedWorkspaceRoot ? resolvePlannedPath(input.allowedWorkspaceRoot) : Promise.resolve(undefined)
+  ]);
+  return {
+    workspacePath,
+    executionPath,
+    ...(allowedWorkspaceRoot ? { allowedWorkspaceRoot } : {})
+  };
 }
 
 function fileContextPath(pointer: ContextPointer, workspacePath: string): string | null {

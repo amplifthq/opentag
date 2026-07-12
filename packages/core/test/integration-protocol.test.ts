@@ -51,8 +51,7 @@ describe("OpenTag integration manifest", () => {
     expect(manifest.bindings.hermesAcp).toEqual({
       kind: "stdio",
       command: "hermes",
-      args: ["acp"],
-      env: {}
+      args: ["acp"]
     });
     expect(manifest.roles.agent).toEqual({
       protocol: "agent-client-protocol",
@@ -161,6 +160,23 @@ describe("OpenTag integration manifest", () => {
             profile: removedProfile,
             capabilities: { supportsStreaming: false }
           }
+        }
+      })
+    ).toThrow();
+  });
+
+  it.each([
+    { OPENTAG_MODE: "safe" },
+    { GITHUB_TOKEN: "github_pat_literal-must-never-be-in-a-manifest" }
+  ])("rejects literal environment values in reusable bindings: %j", (env) => {
+    const manifest = acpManifest();
+
+    expect(() =>
+      OpenTagIntegrationManifestSchema.parse({
+        ...manifest,
+        bindings: {
+          ...manifest.bindings,
+          hermesAcp: { ...manifest.bindings.hermesAcp, env }
         }
       })
     ).toThrow();

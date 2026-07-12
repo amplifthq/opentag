@@ -8,6 +8,7 @@ import {
   OpenTagApprovalPromptPresentationSchema,
   OpenTagManagedChannelBindingOwnershipSchema,
   MaterialActionReceiptSchema,
+  VerificationEvidenceSchema,
   capabilityForMutationIntent,
   channelProgressVisibility,
   conversationKeysFromEvent,
@@ -642,6 +643,12 @@ const AttemptLeaseSchema = z.object({
 const ActionPermissionInputSchema = AttemptLeaseSchema.extend({ request: ActionPermissionRequestSchema });
 const ActionPermissionResolutionInputSchema = AttemptLeaseSchema;
 const MaterialActionReceiptInputSchema = AttemptLeaseSchema.extend({ receipt: MaterialActionReceiptSchema });
+const ReconcileUnknownMaterialActionSchema = z.object({
+  outcome: z.enum(["succeeded", "failed"]),
+  idempotencyKey: z.string().min(1).max(256),
+  receiptRef: z.string().min(1).max(512),
+  evidence: z.array(VerificationEvidenceSchema).max(20).optional()
+}).strict();
 
 const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
@@ -4326,11 +4333,13 @@ export function createDispatcherApp(input: {
     if (governedPermission) {
       const expectedActionId = proposalMetadata?.["actionId"];
       const expectedProposalHash = proposalMetadata?.["proposalHash"];
+      const expectedApprovalEpoch = proposalMetadata?.["approvalEpoch"];
       const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
       const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
       if (
         (requestedPermissionDecision !== "allow_once" && requestedPermissionDecision !== "allow_run" && requestedPermissionDecision !== "deny") ||
         parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
+        parsed.metadata?.["approvalEpoch"] !== expectedApprovalEpoch ||
         parsed.metadata?.["governedActionId"] !== expectedActionId ||
         parsed.metadata?.["proposalId"] !== resolved.resolved.proposal.snapshot.proposalId ||
         parsed.metadata?.["intentId"] !== expectedIntentId ||
@@ -4434,7 +4443,8 @@ export function createDispatcherApp(input: {
           ? {
               permissionDecision: requestedPermissionDecision,
               actionId: proposalMetadata?.["actionId"],
-              proposalHash: proposalMetadata?.["proposalHash"]
+              proposalHash: proposalMetadata?.["proposalHash"],
+              approvalEpoch: proposalMetadata?.["approvalEpoch"]
             }
           : parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
             ? { permissionDecision: "allow_run" }
@@ -4744,7 +4754,8 @@ export function createDispatcherApp(input: {
     if (resolution.state === "waiting" && resolution.action.proposalId) {
       const stored = await repo.getRun({ runId });
       const proposal = await repo.getSuggestedChanges({ proposalId: resolution.action.proposalId });
-      if (stored && proposal && resolution.action.proposalHash) {
+      const approvalEpoch = proposal?.snapshot.metadata?.["approvalEpoch"];
+      if (stored && proposal && resolution.action.proposalHash && typeof approvalEpoch === "string") {
         const approvalPrompt = OpenTagApprovalPromptPresentationSchema.parse({
           kind: "approval_prompt",
           runId,
@@ -4753,6 +4764,7 @@ export function createDispatcherApp(input: {
           intentId: `intent_${resolution.action.id}`,
           actionId: resolution.action.id,
           proposalHash: resolution.action.proposalHash,
+          approvalEpoch,
           title: `Allow ${resolution.action.actionFamily}?`,
           summary: proposal.snapshot.summary,
           target: {
@@ -4818,6 +4830,42 @@ export function createDispatcherApp(input: {
     if (!resolution) return c.json({ error: "action_not_found" }, 404);
     if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
     return c.json({ resolution }, 200);
+  });
+
+  app.post("/v1/material-actions/:actionId/reconcile", async (c) => {
+    const body = await parseDispatcherBody(c, ReconcileUnknownMaterialActionSchema);
+    const result = await repo.reconcileUnknownMaterialAction({
+      actionId: c.req.param("actionId"),
+      outcome: body.outcome,
+      idempotencyKey: body.idempotencyKey,
+      receiptRef: body.receiptRef,
+      source: "control_plane_admin",
+      actorId: "pairing-authenticated-admin",
+      ...(body.evidence ? { evidence: body.evidence } : {})
+    });
+    if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
+    if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
+    if (result.outcome === "reconciled" && result.action) {
+      const stored = await repo.getRun({ runId: result.action.runId });
+      if (stored) {
+        const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: result.action.runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: bodyText,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            idempotencyKey: `material-action-reconciliation:${body.idempotencyKey}`
+          }
+        });
+      }
+    }
+    return c.json({ result, replayed: result.outcome === "replayed" }, 200);
   });
 
   app.post("/v1/runs/:runId/running", async (c) => {
@@ -4942,17 +4990,14 @@ export function createDispatcherApp(input: {
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
-    if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
+    if (typeof progressOutcome === "object" && progressOutcome.outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const recordedProgress = (await repo.listRunEvents({ runId }))
-        .reverse()
-        .find((event) => event.type === "run.progress");
       const progressPresentation = presentation.progressPresentation({
         runId,
-        message: recordedProgress?.message ?? "Progress update recorded."
+        message: typeof progressOutcome === "object" ? progressOutcome.event.message ?? "Progress update recorded." : "Progress update recorded."
       });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
@@ -4973,6 +5018,7 @@ export function createDispatcherApp(input: {
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
           ...(progress.blocks?.length ? { blocks: progress.blocks } : {}),
           ...(progress.rich ? { rich: progress.rich } : {}),
+          ...(typeof progressOutcome === "object" ? { idempotencyKey: `run-progress:${progressOutcome.event.id}` } : {}),
           statusMessageKey: `${runId}:status`
         }
       });
