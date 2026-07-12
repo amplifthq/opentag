@@ -1,6 +1,6 @@
 export * from "./action.js";
 export * from "./capability.js";
-export * from "./executor-protocol.js";
+export * from "./channel-protocol.js";
 export * from "./integration-protocol.js";
 export * from "./json-schema.js";
 export * from "./mention.js";

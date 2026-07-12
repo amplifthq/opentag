@@ -3,48 +3,59 @@ import { z } from "zod";
 const ProviderDataSchema = z.record(z.unknown());
 
 export const OpenTagIntegrationProtocolVersionSchema = z.literal("opentag.integration.v1");
-export const OpenTagExecutorRoleProtocolVersionSchema = z.literal("opentag.executor.v1");
-export const OpenTagStdioJsonlBindingKindSchema = z.literal("stdio-jsonl");
-export const OpenTagExecutorProfileSchema = z.literal("stdio-jsonl-basic");
+export const OpenTagAgentProtocolSchema = z.literal("agent-client-protocol");
+export const OpenTagAgentProtocolVersionSchema = z.literal(1);
+export const OpenTagChannelProtocolSchema = z.literal("opentag.channel.v1");
+export const OpenTagStdioBindingKindSchema = z.literal("stdio");
 
-export const OpenTagExecutorWorkspaceIsolationSchema = z.literal("worktree");
-export const OpenTagExecutorProgressEventModeSchema = z.literal("audit");
-export const OpenTagExecutorConversationAccessSchema = z.literal("request");
+function isExecutableNameOrAbsolutePath(command: string): boolean {
+  if (!command.includes("/") && !command.includes("\\")) return true;
+  return command.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(command);
+}
 
-export const OpenTagExecutorProtocolCapabilitiesSchema = z
+export const OpenTagStdioBindingSchema = z
   .object({
-    workspaceIsolation: OpenTagExecutorWorkspaceIsolationSchema.default("worktree"),
-    conversationAccess: OpenTagExecutorConversationAccessSchema.default("request"),
-    progressEvents: OpenTagExecutorProgressEventModeSchema.default("audit"),
-    supportsCancel: z.literal(false).default(false),
-    supportsStreaming: z.literal(false).default(false)
-  })
-  .strict();
-
-export const OpenTagStdioJsonlBindingSchema = z
-  .object({
-    kind: OpenTagStdioJsonlBindingKindSchema,
-    command: z.string().trim().min(1),
+    kind: OpenTagStdioBindingKindSchema,
+    command: z
+      .string()
+      .trim()
+      .min(1)
+      .refine(isExecutableNameOrAbsolutePath, "Stdio command must be an executable name or an absolute path."),
     args: z.array(z.string()).default([]),
     cwd: z.string().trim().min(1).optional(),
     env: z.record(z.string()).default({})
   })
   .strict();
 
-export const OpenTagIntegrationBindingSchema = OpenTagStdioJsonlBindingSchema;
+export const OpenTagIntegrationBindingSchema = OpenTagStdioBindingSchema;
 
-export const OpenTagExecutorIntegrationRoleSchema = z
+export const OpenTagAgentIntegrationRoleSchema = z
   .object({
-    protocol: OpenTagExecutorRoleProtocolVersionSchema,
-    profile: OpenTagExecutorProfileSchema,
+    protocol: OpenTagAgentProtocolSchema,
+    protocolVersion: OpenTagAgentProtocolVersionSchema,
+    binding: z.string().trim().min(1)
+  })
+  .strict();
+
+export const OpenTagManagedChannelOwnershipSchema = z
+  .object({
+    mode: z.literal("managed"),
+    exclusive: z.literal(true)
+  })
+  .strict();
+
+export const OpenTagChannelIntegrationRoleSchema = z
+  .object({
+    protocol: OpenTagChannelProtocolSchema,
     binding: z.string().trim().min(1),
-    capabilities: OpenTagExecutorProtocolCapabilitiesSchema.default({})
+    ownership: OpenTagManagedChannelOwnershipSchema
   })
   .strict();
 
 export const OpenTagIntegrationRolesSchema = z
   .object({
-    executor: OpenTagExecutorIntegrationRoleSchema.optional()
+    agent: OpenTagAgentIntegrationRoleSchema.optional(),
+    channel: OpenTagChannelIntegrationRoleSchema.optional()
   })
   .strict();
 
@@ -58,16 +69,7 @@ export const OpenTagResourceCapabilitySchema = z
   })
   .strict();
 
-export const OpenTagIntegrationResourcesSchema = z
-  .object({
-    repo: OpenTagResourceCapabilitySchema.optional(),
-    changeRequest: OpenTagResourceCapabilitySchema.optional(),
-    workItem: OpenTagResourceCapabilitySchema.optional(),
-    context: OpenTagResourceCapabilitySchema.optional(),
-    identity: OpenTagResourceCapabilitySchema.optional()
-  })
-  .strict()
-  .default({});
+export const OpenTagIntegrationResourcesSchema = z.record(OpenTagResourceCapabilitySchema).default({});
 
 export const OpenTagIntegrationManifestSchema = z
   .object({
@@ -87,23 +89,15 @@ export const OpenTagIntegrationManifestSchema = z
         message: "Integration manifest must declare at least one binding."
       });
     }
-    const executor = manifest.roles.executor;
-    if (!executor) return;
-    const binding = manifest.bindings[executor.binding];
-    if (!binding) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["roles", "executor", "binding"],
-        message: `Executor role references missing binding '${executor.binding}'.`
-      });
-      return;
-    }
-    if (executor.profile === "stdio-jsonl-basic" && binding.kind !== "stdio-jsonl") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["roles", "executor", "binding"],
-        message: "Executor profile stdio-jsonl-basic requires a stdio-jsonl binding."
-      });
+    for (const roleName of ["agent", "channel"] as const) {
+      const role = manifest.roles[roleName];
+      if (role && !manifest.bindings[role.binding]) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["roles", roleName, "binding"],
+          message: `${roleName === "agent" ? "Agent" : "Channel"} role references missing binding '${role.binding}'.`
+        });
+      }
     }
   });
 
@@ -220,18 +214,18 @@ export const OpenTagReplyTargetRefSchema = z
   .strict();
 
 export type OpenTagIntegrationProtocolVersion = z.infer<typeof OpenTagIntegrationProtocolVersionSchema>;
-export type OpenTagExecutorRoleProtocolVersion = z.infer<typeof OpenTagExecutorRoleProtocolVersionSchema>;
-export type OpenTagStdioJsonlBindingKind = z.infer<typeof OpenTagStdioJsonlBindingKindSchema>;
-export type OpenTagExecutorProfile = z.infer<typeof OpenTagExecutorProfileSchema>;
-export type OpenTagExecutorWorkspaceIsolation = z.infer<typeof OpenTagExecutorWorkspaceIsolationSchema>;
-export type OpenTagExecutorProgressEventMode = z.infer<typeof OpenTagExecutorProgressEventModeSchema>;
-export type OpenTagExecutorConversationAccess = z.infer<typeof OpenTagExecutorConversationAccessSchema>;
-export type OpenTagExecutorProtocolCapabilities = z.infer<typeof OpenTagExecutorProtocolCapabilitiesSchema>;
-export type OpenTagStdioJsonlBindingInput = z.input<typeof OpenTagStdioJsonlBindingSchema>;
-export type OpenTagStdioJsonlBinding = z.infer<typeof OpenTagStdioJsonlBindingSchema>;
+export type OpenTagAgentProtocol = z.infer<typeof OpenTagAgentProtocolSchema>;
+export type OpenTagAgentProtocolVersion = z.infer<typeof OpenTagAgentProtocolVersionSchema>;
+export type OpenTagChannelProtocol = z.infer<typeof OpenTagChannelProtocolSchema>;
+export type OpenTagStdioBindingKind = z.infer<typeof OpenTagStdioBindingKindSchema>;
+export type OpenTagStdioBindingInput = z.input<typeof OpenTagStdioBindingSchema>;
+export type OpenTagStdioBinding = z.infer<typeof OpenTagStdioBindingSchema>;
 export type OpenTagIntegrationBinding = z.infer<typeof OpenTagIntegrationBindingSchema>;
-export type OpenTagExecutorIntegrationRoleInput = z.input<typeof OpenTagExecutorIntegrationRoleSchema>;
-export type OpenTagExecutorIntegrationRole = z.infer<typeof OpenTagExecutorIntegrationRoleSchema>;
+export type OpenTagAgentIntegrationRoleInput = z.input<typeof OpenTagAgentIntegrationRoleSchema>;
+export type OpenTagAgentIntegrationRole = z.infer<typeof OpenTagAgentIntegrationRoleSchema>;
+export type OpenTagManagedChannelOwnership = z.infer<typeof OpenTagManagedChannelOwnershipSchema>;
+export type OpenTagChannelIntegrationRoleInput = z.input<typeof OpenTagChannelIntegrationRoleSchema>;
+export type OpenTagChannelIntegrationRole = z.infer<typeof OpenTagChannelIntegrationRoleSchema>;
 export type OpenTagIntegrationRoles = z.infer<typeof OpenTagIntegrationRolesSchema>;
 export type OpenTagResourceCapability = z.infer<typeof OpenTagResourceCapabilitySchema>;
 export type OpenTagIntegrationResources = z.infer<typeof OpenTagIntegrationResourcesSchema>;

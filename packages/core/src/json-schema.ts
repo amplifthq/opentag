@@ -28,9 +28,9 @@ import {
   WorkThreadSchema
 } from "./schema.js";
 import {
-  OpenTagExecutorProtocolEventSchema,
-  OpenTagExecutorRunRequestSchema
-} from "./executor-protocol.js";
+  OpenTagChannelInboundMessageSchema,
+  OpenTagChannelPresentationCommandSchema
+} from "./channel-protocol.js";
 import {
   OpenTagActorRefSchema,
   OpenTagChannelRefSchema,
@@ -66,8 +66,8 @@ export const OpenTagJsonSchemas = {
   OpenTagRunSourceRef: zodToJsonSchema(OpenTagRunSourceRefSchema, "OpenTagRunSourceRef"),
   OpenTagRunTargets: zodToJsonSchema(OpenTagRunTargetsSchema, "OpenTagRunTargets"),
   OpenTagReplyTargetRef: zodToJsonSchema(OpenTagReplyTargetRefSchema, "OpenTagReplyTargetRef"),
-  OpenTagExecutorRunRequest: zodToJsonSchema(OpenTagExecutorRunRequestSchema, "OpenTagExecutorRunRequest"),
-  OpenTagExecutorProtocolEvent: zodToJsonSchema(OpenTagExecutorProtocolEventSchema, "OpenTagExecutorProtocolEvent"),
+  OpenTagChannelInboundMessage: zodToJsonSchema(OpenTagChannelInboundMessageSchema, "OpenTagChannelInboundMessage"),
+  OpenTagChannelPresentationCommand: zodToJsonSchema(OpenTagChannelPresentationCommandSchema, "OpenTagChannelPresentationCommand"),
   RunEventVisibility: zodToJsonSchema(RunEventVisibilitySchema, "RunEventVisibility"),
   RunEventImportance: zodToJsonSchema(RunEventImportanceSchema, "RunEventImportance"),
   RunEvent: zodToJsonSchema(RunEventSchema, "RunEvent"),
