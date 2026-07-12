@@ -22,6 +22,7 @@ describe("OpenTagPresentation", () => {
       proposalHash: "sha256:abc123",
       title: "Deploy the verified build?",
       summary: "This will update the production service.",
+      target: { provider: "deploy", connectionId: "deploy:prod", operation: "update", resource: "service:web", resourceVersion: "build-42" },
       decisions: ["allow_once", "allow_run", "deny"]
     });
 

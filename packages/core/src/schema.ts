@@ -222,6 +222,8 @@ export const MaterialActionReceiptSchema = z
     id: z.string().min(1),
     actionId: z.string().min(1),
     provider: ProviderSchema,
+    connectionId: z.string().min(1).max(128).optional(),
+    targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
     receiptRef: z.string().min(1),
     outcome: z.enum(["succeeded", "failed", "unknown"]),
     externalId: z.string().min(1).optional(),
@@ -259,10 +261,14 @@ export const ActionPermissionRequestSchema = z
     toolCallId: z.string().min(1),
     title: z.string().min(1),
     kind: z.string().min(1).nullable().optional(),
+    connectionId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).default("acp:agent-managed"),
+    operation: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/u).default("tool"),
+    resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
+    resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
     targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
     permissionScopes: z.array(z.string().min(1)).default([]),
     mode: ApprovalModeSchema.default("auto"),
-    provider: z.string().min(1).default("acp")
+    provider: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/u).default("acp")
   })
   .strict();
 

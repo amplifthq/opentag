@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
-import type { ExecutorAdapter, ExecutorRunInput } from "@opentag/runner";
+import { createDispatcherClient, createOpenTagClient } from "@opentag/client";
+import { createDispatcherApp } from "@opentag/dispatcher";
+import { createAcpExecutor, type ExecutorAdapter, type ExecutorRunInput } from "@opentag/runner";
 import { runOneDaemonIteration, type DaemonClient } from "../src/daemon.js";
+
+const acpFixture = fileURLToPath(new URL("../../runner/test/fixtures/acp-agent.mjs", import.meta.url));
 
 function event(input: {
   id: string;
@@ -108,6 +113,104 @@ function recordingExecutor(input: {
 }
 
 describe("ACP daemon workspaces", () => {
+  it("runs a governed ACP mutation end to end and reconciles a duplicate from its trusted receipt", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", pairingToken: "pair_e2e" });
+    const fetchImpl = ((input: string | URL | Request, init?: RequestInit) => app.fetch(new Request(input, init))) as typeof fetch;
+    const admin = createOpenTagClient({ dispatcherUrl: "http://opentag.test", pairingToken: "pair_e2e", fetchImpl });
+    await admin.registerRunner({ runnerId: "runner_local", name: "Local Runner" });
+    await admin.bindChannel({ provider: "slack", accountId: "T123", conversationId: "C456" });
+    const governedEvent = {
+      ...event({ id: "evt_governed_e2e", permissions: [] }),
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" as const }
+    };
+    await admin.createRun({ runId: "run_acp", event: governedEvent });
+
+    const realClient = createDispatcherClient({
+      dispatcherUrl: "http://opentag.test",
+      pairingToken: "pair_e2e",
+      runnerId: "runner_local",
+      fetchImpl
+    });
+    let approvedRequest: Parameters<DaemonClient["requestActionPermission"]>[2] | undefined;
+    let approvedAction: Awaited<ReturnType<DaemonClient["requestActionPermission"]>>["action"] | undefined;
+    let duplicateResolution: Awaited<ReturnType<DaemonClient["requestActionPermission"]>> | undefined;
+    const client: DaemonClient = {
+      ...realClient,
+      requestActionPermission: async (runId, lease, request) => {
+        approvedRequest = request;
+        const resolution = await realClient.requestActionPermission(runId, lease, request);
+        approvedAction = resolution.action;
+        if (resolution.state === "waiting") {
+          await admin.approveProposal({
+            proposalId: resolution.action.proposalId!,
+            id: "approval_e2e_once",
+            approvedIntentIds: [`intent_${resolution.action.id}`],
+            approvedBy: { provider: "slack", providerUserId: "U123" },
+            approvedAt: "2026-07-12T00:01:00.000Z",
+            scope: "manual",
+            metadata: {
+              permissionDecision: "allow_once",
+              actionId: resolution.action.id,
+              proposalHash: resolution.action.proposalHash
+            }
+          });
+        }
+        return resolution;
+      },
+      recordMaterialActionReceipt: async (runId, lease, actionId, receipt) => {
+        const resolution = await realClient.recordMaterialActionReceipt(runId, lease, actionId, receipt);
+        duplicateResolution = await realClient.requestActionPermission(runId, lease, approvedRequest!);
+        return resolution;
+      }
+    };
+    const executor = createAcpExecutor({
+      manifest: {
+        protocol: "opentag.integration.v1",
+        id: "fixture-agent",
+        label: "Fixture ACP Agent",
+        bindings: {
+          agent: {
+            kind: "stdio",
+            command: process.execPath,
+            args: [acpFixture],
+            env: { OPENTAG_ACP_TEST_MODE: "permission" }
+          }
+        },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        resources: {}
+      }
+    });
+    let providerMutations = 0;
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: { custom: executor },
+      scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-governed-e2e-")), "scratch"),
+      heartbeatIntervalMs: 50,
+      trustedMaterialActionReceipt: async ({ report }) => {
+        providerMutations += 1;
+        return {
+          id: "receipt_e2e_npm",
+          actionId: report.actionId,
+          provider: String(approvedAction!.target["provider"]),
+          connectionId: String(approvedAction!.target["connectionId"]),
+          targetFingerprint: String(approvedAction!.target["targetFingerprint"]),
+          receiptRef: "npm:publish:@acme/report@next",
+          outcome: "succeeded",
+          observedAt: "2026-07-12T00:02:00.000Z",
+          metadata: { assurance: "trusted_provider", providerOperationId: "npm-op-e2e" }
+        };
+      },
+      client
+    });
+
+    expect(providerMutations).toBe(1);
+    expect(duplicateResolution).toMatchObject({ state: "reconciled", decision: "deny", receipt: { id: "receipt_e2e_npm", outcome: "succeeded" } });
+    await expect(admin.getRun({ runId: "run_acp" })).resolves.toMatchObject({ run: { status: "succeeded" } });
+    const { events } = await admin.listRunEvents({ runId: "run_acp" });
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "material_action.receipt.recorded" })]));
+  }, 20_000);
+
   it("passes an explicit repository workspace to a repository-targeted ACP run", async () => {
     const runs: ExecutorRunInput[] = [];
     const completed: OpenTagRunResult[] = [];

@@ -31,9 +31,11 @@ describe("Slack callback rendering", () => {
       proposalHash: "hash_1",
       title: "Allow publish?",
       summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },
       decisions: ["allow_once", "allow_run", "deny"]
     });
     const blocks = createSlackApprovalPromptBlocks(prompt);
+    expect(JSON.stringify(blocks)).toContain("npm / npm:team / publish / @acme/report / next");
     const actions = blocks.find((block) => block.type === "actions");
     expect(actions).toMatchObject({
       type: "actions",

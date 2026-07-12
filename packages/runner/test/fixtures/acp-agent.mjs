@@ -82,7 +82,13 @@ const app = acp
           title: "Publish report",
           kind: "execute",
           status: "pending",
-          rawInput: { package: "@acme/report", tag: "next", authorization: "Bearer fixture-secret-token" }
+          rawInput: {
+            provider: process.env.OPENTAG_ACP_TEST_PROVIDER ?? "npm",
+            connectionId: process.env.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
+            package: process.env.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
+            tag: process.env.OPENTAG_ACP_TEST_VERSION ?? "next",
+            authorization: `Bearer ${process.env.OPENTAG_ACP_TEST_SECRET ?? "fixture-secret-token"}`
+          }
         },
         options: [
           { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
@@ -91,6 +97,14 @@ const app = acp
         ]
       });
       await record(session.cwd, "acp-permission.json", permission);
+      await ctx.client.notify(acp.methods.client.session.update, {
+        sessionId: ctx.params.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "material-1",
+          status: "completed"
+        }
+      });
     }
 
     if (mode === "cancel" || mode === "cancel-notify-failure") {

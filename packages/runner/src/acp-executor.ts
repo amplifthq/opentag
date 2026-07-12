@@ -53,7 +53,54 @@ export type AcpPermissionRequest = {
   permissionScopes: string[];
 };
 
-function canonicalCredentialSafeFingerprint(value: unknown): string | undefined {
+const CREDENTIAL_KEY_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[_-]?key|secret|token|api[_-]?key)/iu;
+const CREDENTIAL_VALUE_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key|\b(?:gh[pousr]|github_pat|xox[baprs]|sk_live|sk_test)_[a-z0-9_-]{8,})/iu;
+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/gu;
+
+function safeLabel(value: unknown, maximumLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(CONTROL_CHARACTER_PATTERN, "").trim().slice(0, maximumLength);
+  if (!normalized || CREDENTIAL_VALUE_PATTERN.test(normalized)) return undefined;
+  return normalized;
+}
+
+function safeProvider(value: unknown): string | undefined {
+  const normalized = safeLabel(value, 64)?.toLowerCase();
+  return normalized && /^[a-z0-9][a-z0-9._-]*$/u.test(normalized) ? normalized : undefined;
+}
+
+function safeResource(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(CONTROL_CHARACTER_PATTERN, "").trim().slice(0, 512);
+  if (!normalized) return undefined;
+  try {
+    const url = new URL(normalized);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return normalized;
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/u, url.pathname === "/" ? "/" : "");
+  } catch {
+    return CREDENTIAL_VALUE_PATTERN.test(normalized) ? undefined : normalized;
+  }
+}
+
+function credentialSafeTarget(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(credentialSafeTarget).filter((child) => child !== undefined);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !CREDENTIAL_KEY_PATTERN.test(key))
+      .map(([key, child]) => [key, credentialSafeTarget(child)])
+      .filter((entry): entry is [string, unknown] => entry[1] !== undefined));
+  }
+  if (typeof value === "string" && CREDENTIAL_VALUE_PATTERN.test(value)) {
+    return safeResource(value);
+  }
+  return value;
+}
+
+function canonicalTargetFingerprint(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   const canonical = (child: unknown): string => {
     if (Array.isArray(child)) return `[${child.map(canonical).join(",")}]`;
@@ -66,6 +113,52 @@ function canonicalCredentialSafeFingerprint(value: unknown): string | undefined 
     return JSON.stringify(child) ?? "null";
   };
   return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
+
+function structuredPermissionTarget(rawInput: unknown, kind: string | null | undefined): {
+  provider: string;
+  connectionId: string;
+  operation: string;
+  resource?: string;
+  resourceVersion?: string;
+  targetFingerprint?: string;
+} {
+  const safeTarget = credentialSafeTarget(rawInput);
+  const record = safeTarget && typeof safeTarget === "object" && !Array.isArray(safeTarget)
+    ? safeTarget as Record<string, unknown>
+    : {};
+  const firstString = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return undefined;
+  };
+  const provider = safeProvider(record["provider"]) ?? "acp";
+  const connectionId = safeLabel(record["connectionId"], 128) ?? `${provider}:agent-managed`;
+  const operation = safeLabel(record["operation"], 64)?.toLowerCase()
+    ?? safeLabel(kind, 64)?.toLowerCase()
+    ?? "tool";
+  const resource = safeResource(firstString("resource", "package", "repository", "repo", "path", "url", "id"));
+  const resourceVersion = safeLabel(firstString("resourceVersion", "version", "tag", "ref"), 128);
+  const fingerprintTarget: Record<string, unknown> = { ...record };
+  for (const key of ["resource", "package", "repository", "repo", "path", "url", "id"]) delete fingerprintTarget[key];
+  for (const key of ["resourceVersion", "version", "tag", "ref"]) delete fingerprintTarget[key];
+  Object.assign(fingerprintTarget, {
+    provider,
+    connectionId,
+    operation,
+    ...(resource ? { resource } : {}),
+    ...(resourceVersion ? { resourceVersion } : {})
+  });
+  return {
+    provider,
+    connectionId,
+    operation,
+    ...(resource ? { resource } : {}),
+    ...(resourceVersion ? { resourceVersion } : {}),
+    ...(rawInput === undefined ? {} : { targetFingerprint: canonicalTargetFingerprint(fingerprintTarget)! })
+  };
 }
 
 export type AcpPermissionDecision =
@@ -441,6 +534,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 kind: option.kind
               }));
               const governedResolver = input.permissionResolver;
+              const target = structuredPermissionTarget(ctx.params.toolCall.rawInput, ctx.params.toolCall.kind);
               const request = {
                 runId: input.runId,
                 toolCall: {
@@ -448,7 +542,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   title: ctx.params.toolCall.title ?? "Untitled tool call",
                   ...(ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
                   ...(ctx.params.toolCall.status ? { status: ctx.params.toolCall.status } : {}),
-                  ...(ctx.params.toolCall.rawInput === undefined ? {} : { targetFingerprint: canonicalCredentialSafeFingerprint(ctx.params.toolCall.rawInput)! })
+                  ...(target.targetFingerprint ? { targetFingerprint: target.targetFingerprint } : {})
                 },
                 options: requestOptions,
                 permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
@@ -458,7 +552,11 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
                   ...(request.toolCall.kind ? { kind: request.toolCall.kind } : {}),
-                  provider: "acp",
+                  provider: target.provider,
+                  connectionId: target.connectionId,
+                  operation: target.operation,
+                  ...(target.resource ? { resource: target.resource } : {}),
+                  ...(target.resourceVersion ? { resourceVersion: target.resourceVersion } : {}),
                   ...(request.toolCall.targetFingerprint ? { targetFingerprint: request.toolCall.targetFingerprint } : {}),
                   permissionScopes: request.permissionScopes
                 });

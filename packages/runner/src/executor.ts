@@ -30,6 +30,10 @@ export type ExecutorPermissionRequest = {
   title: string;
   kind?: string | null;
   provider: string;
+  connectionId: string;
+  operation: string;
+  resource?: string;
+  resourceVersion?: string;
   targetFingerprint?: string;
   permissionScopes: string[];
 };

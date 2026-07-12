@@ -48,6 +48,13 @@ export const OpenTagApprovalPromptPresentationSchema = z
     proposalHash: z.string().min(1),
     title: z.string().min(1),
     summary: z.string().min(1),
+    target: z.object({
+      provider: z.string().min(1),
+      connectionId: z.string().min(1),
+      operation: z.string().min(1),
+      resource: z.string().min(1),
+      resourceVersion: z.string().min(1).optional()
+    }).strict(),
     decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
   })
   .strict();

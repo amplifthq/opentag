@@ -120,13 +120,16 @@ export function parseSlackSuggestedActionButtonValue(value: string): SlackSugges
 }
 
 export function renderSlackApprovalPrompt(presentation: OpenTagApprovalPromptPresentation): string {
-  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nChoose Allow once, Allow for run, or Deny.`;
+  const target = [presentation.target.provider, presentation.target.connectionId, presentation.target.operation, presentation.target.resource, presentation.target.resourceVersion]
+    .filter((value) => value !== undefined)
+    .join(" / ");
+  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nTarget: ${markdownToSlackMrkdwn(target)}\nChoose Allow once, Allow for run, or Deny.`;
 }
 
 export function createSlackApprovalPromptBlocks(presentation: OpenTagApprovalPromptPresentation): SlackBlock[] {
   const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
   return [
-    slackSection(`*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}`),
+    slackSection(renderSlackApprovalPrompt(presentation).split("\nChoose Allow once")[0]!),
     {
       type: "actions",
       block_id: `opentag_permission_${presentation.actionId}`,

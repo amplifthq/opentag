@@ -27,12 +27,15 @@ describe("governed material actions", () => {
     expect(evaluateActionPermission({ mode: "auto", action: read }).outcome).toBe("authorized");
   });
 
-  it("treats opaque ACP operations as material in auto mode and keys authority to provider and target fingerprint", () => {
+  it("treats opaque ACP operations as material and separates exact identity from bounded run scope", () => {
     for (const kind of ["execute", "tool", "fetch", "edit", "delete", "move", "other"]) {
       const opaque = normalizeMaterialActionRequest({
         title: "Do work",
         kind,
         provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: kind,
+        resource: "workspace:report",
         targetFingerprint: `sha256:${kind.padEnd(64, "0").slice(0, 64)}`
       });
       expect(evaluateActionPermission({ mode: "auto", action: opaque }).outcome).toBe("needs_approval");
@@ -42,16 +45,42 @@ describe("governed material actions", () => {
       title: "Publish package",
       kind: "execute",
       provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next",
       targetFingerprint: `sha256:${"a".repeat(64)}`
     });
     const second = normalizeMaterialActionRequest({
       title: "Publish package",
       kind: "execute",
       provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "stable",
       targetFingerprint: `sha256:${"b".repeat(64)}`
     });
-    expect(first.scope).not.toEqual(second.scope);
+    const outside = normalizeMaterialActionRequest({
+      title: "Publish package",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/other",
+      resourceVersion: "stable",
+      targetFingerprint: `sha256:${"c".repeat(64)}`
+    });
+    expect(first.scope).toEqual(second.scope);
     expect(first.target).not.toEqual(second.target);
+    expect(first.scope).not.toEqual(outside.scope);
+    expect(first.target).toMatchObject({
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next"
+    });
     expect(JSON.stringify(first)).not.toContain("secret-value");
   });
 
@@ -82,6 +111,40 @@ describe("governed material actions", () => {
         action: normalizeMaterialActionRequest({ title: "Deploy app", kind: "deploy", permissionScopes: ["deploy:write"] })
       })
     ).toBe(false);
+
+    const scoped = normalizeMaterialActionRequest({
+      title: "Publish report next",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next",
+      targetFingerprint: `sha256:${"a".repeat(64)}`
+    });
+    const boundedRunGrant = { ...runGrant, capability: scoped.actionFamily, resourceScope: scoped.scope };
+    const distinctInsideScope = normalizeMaterialActionRequest({
+      title: "Publish report stable",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "stable",
+      targetFingerprint: `sha256:${"b".repeat(64)}`
+    });
+    const outsideScope = normalizeMaterialActionRequest({
+      title: "Publish other stable",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/other",
+      resourceVersion: "stable",
+      targetFingerprint: `sha256:${"c".repeat(64)}`
+    });
+    expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: distinctInsideScope })).toBe(true);
+    expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: outsideScope })).toBe(false);
   });
 
   it("keeps internal guardrails active in autonomous mode", () => {

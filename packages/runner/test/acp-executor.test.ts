@@ -71,6 +71,19 @@ function manifestWithCwd(cwd: string, mode = "success") {
   };
 }
 
+function permissionManifest(env: Record<string, string>) {
+  const configured = manifest("permission");
+  return {
+    ...configured,
+    bindings: {
+      agent: {
+        ...configured.bindings.agent,
+        env: { ...configured.bindings.agent.env, ...env }
+      }
+    }
+  };
+}
+
 function input(workspace: { kind: "repository" | "scratch"; path: string }, runId = "run_acp") {
   return {
     runId,
@@ -167,7 +180,7 @@ describe("ACP executor", () => {
         expect(request).toMatchObject({
           toolCallId: "material-1",
           title: "Publish report",
-          provider: "acp",
+          provider: "npm",
           targetFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u)
         });
         expect(JSON.stringify(request)).not.toContain("fixture-secret-token");
@@ -182,6 +195,75 @@ describe("ACP executor", () => {
     expect(reports).toEqual([
       expect.objectContaining({ actionId: "action_publish", outcome: "unknown", receiptRef: expect.stringContaining("material-1") })
     ]);
+  }, 15_000);
+
+  it("removes credential values from ACP target identity while retaining structured resource changes", async () => {
+    const requests: Array<{ provider?: string; targetFingerprint?: string; connectionId?: string; operation?: string; resource?: string; resourceVersion?: string }> = [];
+    for (const [index, env] of [
+      { OPENTAG_ACP_TEST_SECRET: "secret-one", OPENTAG_ACP_TEST_RESOURCE: "@acme/report" },
+      { OPENTAG_ACP_TEST_SECRET: "secret-two", OPENTAG_ACP_TEST_RESOURCE: "@acme/report" },
+      { OPENTAG_ACP_TEST_SECRET: "secret-two", OPENTAG_ACP_TEST_RESOURCE: "@acme/other" }
+    ].entries()) {
+      const executor = createAcpExecutor({ manifest: permissionManifest(env) });
+      await executor.run({
+        ...input({ kind: "scratch", path: tempDir(`safe-target-${index}`) }, `run_safe_target_${index}`),
+        permissionResolver: async (request) => {
+          requests.push(request);
+          return { actionId: `action_${index}`, decision: "allow_once", material: true };
+        }
+      }, { emit: async () => undefined });
+    }
+
+    expect(requests[0]).toMatchObject({
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "execute",
+      resource: "@acme/report",
+      resourceVersion: "next"
+    });
+    expect(requests[0]?.targetFingerprint).toBe(requests[1]?.targetFingerprint);
+    expect(requests[2]?.targetFingerprint).not.toBe(requests[1]?.targetFingerprint);
+    expect(JSON.stringify(requests)).not.toContain("secret-one");
+    expect(JSON.stringify(requests)).not.toContain("secret-two");
+  }, 15_000);
+
+  it("normalizes URL resources and bounds structured target labels before policy or presentation", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const executor = createAcpExecutor({ manifest: permissionManifest({
+      OPENTAG_ACP_TEST_RESOURCE: `https://user:password@example.test/reports/latest?access_token=secret#credential=${"x".repeat(600)}`,
+      OPENTAG_ACP_TEST_CONNECTION: `npm:team\n${"x".repeat(300)}`,
+      OPENTAG_ACP_TEST_VERSION: `next\t${"y".repeat(300)}`
+    }) });
+    await executor.run({
+      ...input({ kind: "scratch", path: tempDir("safe-url-target") }, "run_safe_url_target"),
+      permissionResolver: async (request) => {
+        captured = request;
+        return { actionId: "action_safe_url", decision: "allow_once", material: true };
+      }
+    }, { emit: async () => undefined });
+
+    expect(captured).toMatchObject({ provider: "npm", resource: "https://example.test/reports/latest" });
+    expect(String(captured?.["connectionId"])).not.toMatch(/[\r\n]/u);
+    expect(String(captured?.["connectionId"]).length).toBeLessThanOrEqual(128);
+    expect(String(captured?.["resourceVersion"])).not.toMatch(/[\u0000-\u001f\u007f]/u);
+    expect(String(captured?.["resourceVersion"]).length).toBeLessThanOrEqual(128);
+    expect(JSON.stringify(captured)).not.toContain("access_token");
+    expect(JSON.stringify(captured)).not.toContain("password");
+    expect(JSON.stringify(captured)).not.toContain("credential=");
+  }, 15_000);
+
+  it("fails the Attempt after both durable unknown-report attempts fail", async () => {
+    let reportAttempts = 0;
+    const executor = createAcpExecutor({ manifest: manifest("permission") });
+    await expect(executor.run({
+      ...input({ kind: "scratch", path: tempDir("report-failure") }, "run_report_failure"),
+      permissionResolver: async () => ({ actionId: "action_report_failure", decision: "allow_once", material: true }),
+      materialActionReporter: async () => {
+        reportAttempts += 1;
+        throw new Error("dispatcher unavailable");
+      }
+    }, { emit: async () => undefined })).rejects.toThrow("dispatcher unavailable");
+    expect(reportAttempts).toBe(2);
   }, 15_000);
 
   it("rejects a reconciled known-success permission so the ACP tool cannot execute twice", async () => {

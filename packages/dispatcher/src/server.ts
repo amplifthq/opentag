@@ -4555,6 +4555,13 @@ export function createDispatcherApp(input: {
           proposalHash: resolution.action.proposalHash,
           title: `Allow ${resolution.action.actionFamily}?`,
           summary: proposal.snapshot.summary,
+          target: {
+            provider: resolution.action.target["provider"],
+            connectionId: resolution.action.target["connectionId"],
+            operation: resolution.action.target["operation"],
+            resource: resolution.action.target["resource"],
+            ...(typeof resolution.action.target["resourceVersion"] === "string" ? { resourceVersion: resolution.action.target["resourceVersion"] } : {})
+          },
           decisions: ["allow_once", "allow_run", "deny"]
         });
         const rendered = presentation.render({

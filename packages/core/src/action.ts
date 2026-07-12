@@ -13,6 +13,10 @@ export type MaterialActionRequestInput = {
   kind?: string | null;
   permissionScopes?: string[];
   provider?: string;
+  connectionId?: string;
+  operation?: string;
+  resource?: string;
+  resourceVersion?: string;
   targetFingerprint?: string;
   target?: Record<string, unknown>;
 };
@@ -31,6 +35,10 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
   const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
   const provider = input.provider?.trim().toLowerCase() || "acp";
+  const connectionId = input.connectionId?.trim() || `${provider}:agent-managed`;
+  const operation = input.operation?.trim().toLowerCase() || actionFamily || kind;
+  const resource = input.resource?.trim() || title;
+  const resourceVersion = input.resourceVersion?.trim();
   const targetFingerprint = input.targetFingerprint?.trim().toLowerCase();
   const probe = `${actionFamily} ${title} ${permissionScopes.join(" ")}`;
   const internallyBlocked = CRITICAL_ACTION_PATTERN.test(probe);
@@ -38,8 +46,18 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
   return {
     actionFamily: actionFamily || "tool",
-    scope: normalizedRecord({ permissionScopes, provider, ...(targetFingerprint ? { targetFingerprint } : {}) }),
-    target: normalizedRecord({ title, provider, ...(targetFingerprint ? { targetFingerprint } : {}), ...(input.target ?? {}), ...(input.kind ? { kind } : {}) }),
+    scope: normalizedRecord({ permissionScopes, provider, connectionId, operation, resource }),
+    target: normalizedRecord({
+      title,
+      provider,
+      connectionId,
+      operation,
+      resource,
+      ...(resourceVersion ? { resourceVersion } : {}),
+      ...(targetFingerprint ? { targetFingerprint } : {}),
+      ...(input.target ?? {}),
+      ...(input.kind ? { kind } : {})
+    }),
     riskTier,
     material,
     internallyBlocked,

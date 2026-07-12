@@ -7474,7 +7474,18 @@ describe("dispatcher API", () => {
     const lease = { attemptId: claim.attemptId, fencingToken: claim.fencingToken };
     await app.request("/v1/runners/runner_1/runs/run_acp_permission/running", jsonRequest({ ...lease, executor: "fixture-agent" }));
 
-    const permissionRequest = { toolCallId: "tool_publish", title: "Publish report", kind: "publish", targetFingerprint: `sha256:${"a".repeat(64)}`, permissionScopes: ["report:publish"], mode: "ask", provider: "acp" };
+    const permissionRequest = {
+      toolCallId: "tool_publish",
+      title: "Publish report",
+      kind: "publish",
+      provider: "connector",
+      connectionId: "connector:team",
+      operation: "publish",
+      resource: "report:123",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      permissionScopes: ["report:publish"],
+      mode: "ask"
+    };
     const requested = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
       ...lease,
       request: permissionRequest
@@ -7530,6 +7541,8 @@ describe("dispatcher API", () => {
         id: "receipt_connector_publish",
         actionId,
         provider: "connector",
+        connectionId: "connector:team",
+        targetFingerprint: `sha256:${"a".repeat(64)}`,
         receiptRef: "connector:publish:report-123",
         outcome: "succeeded",
         observedAt: "2026-07-12T00:02:00.000Z",

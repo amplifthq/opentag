@@ -34,8 +34,10 @@ describe("renderLarkAcknowledgement", () => {
       proposalHash: "hash_1",
       title: "Allow publish?",
       summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },
       decisions: ["allow_once", "allow_run", "deny"]
     }));
+    expect(JSON.stringify(card)).toContain("npm / npm:team / publish / @acme/report / next");
     const action = card.elements.find((element) => element.tag === "action");
     expect(action).toMatchObject({ tag: "action", actions: [{ text: { content: "Allow once" } }, { text: { content: "Allow for run" } }, { text: { content: "Deny" } }] });
     if (!action || action.tag !== "action") throw new Error("expected action");

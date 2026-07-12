@@ -131,7 +131,10 @@ export function parseLarkThreadActionButtonValue(value: unknown): LarkThreadActi
 }
 
 export function renderLarkApprovalPrompt(presentation: OpenTagApprovalPromptPresentation): string {
-  return [presentation.title, presentation.summary, "Choose Allow once, Allow for run, or Deny."].join("\n");
+  const target = [presentation.target.provider, presentation.target.connectionId, presentation.target.operation, presentation.target.resource, presentation.target.resourceVersion]
+    .filter((value) => value !== undefined)
+    .join(" / ");
+  return [presentation.title, presentation.summary, `Target: ${target}`, "Choose Allow once, Allow for run, or Deny."].join("\n");
 }
 
 export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPromptPresentation): LarkCard {
@@ -140,7 +143,7 @@ export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPrompt
     config: { wide_screen_mode: true },
     header: { template: "yellow", title: { tag: "plain_text", content: presentation.title } },
     elements: [
-      { tag: "div", text: { tag: "lark_md", content: presentation.summary } },
+      { tag: "div", text: { tag: "lark_md", content: renderLarkApprovalPrompt(presentation).split("\nChoose Allow once")[0]! } },
       {
         tag: "action",
         layout: "trisection",
