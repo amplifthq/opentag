@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
@@ -204,17 +205,18 @@ export const GrantSchema = z
 export const ApprovalModeSchema = z.enum(["ask", "auto", "autonomous"]);
 export const PermissionDecisionKindSchema = z.enum(["allow_once", "allow_run", "deny"]);
 export const ActionRiskTierSchema = z.enum(["low", "medium", "high", "critical"]);
+const CredentialSafeRecordSchema = z.record(z.unknown()).refine(isCredentialSafeValue, {
+  message: "Record must not contain credential-like keys or values."
+});
 const CredentialSafeActionTitleSchema = z.string().min(1).max(240)
   .regex(/^[^\u0000-\u001f\u007f]+$/u)
-  .refine((value) => !/(?:authorization|authentication|bearer|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key)/iu.test(value), {
-    message: "Action title must not contain credential-like data."
-  });
+  .refine(isCredentialSafeText, { message: "Action title must not contain credential-like data." });
 
 export const NormalizedMaterialActionSchema = z
   .object({
     actionFamily: z.string().min(1),
-    scope: z.record(z.unknown()),
-    target: z.record(z.unknown()),
+    scope: CredentialSafeRecordSchema,
+    target: CredentialSafeRecordSchema,
     riskTier: ActionRiskTierSchema,
     material: z.boolean(),
     internallyBlocked: z.boolean(),
@@ -246,8 +248,8 @@ export const ActionSchema = z
     attemptId: z.string().min(1),
     actionFamily: z.string().min(1),
     capability: z.string().min(1),
-    scope: z.record(z.unknown()),
-    target: z.record(z.unknown()),
+    scope: CredentialSafeRecordSchema,
+    target: CredentialSafeRecordSchema,
     riskTier: ActionRiskTierSchema,
     status: z.enum(["proposed", "waiting_approval", "authorized", "executing", "succeeded", "failed", "unknown", "cancelled"]),
     idempotencyKey: z.string().min(1),
@@ -266,12 +268,13 @@ export const ActionPermissionRequestSchema = z
     toolCallId: z.string().min(1),
     title: CredentialSafeActionTitleSchema,
     kind: z.string().min(1).nullable().optional(),
-    connectionId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).default("acp:agent-managed"),
-    operation: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/u).default("tool"),
-    resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
-    resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
+    connectionId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).default("acp:agent-managed"),
+    operation: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).default("tool"),
+    resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeDisplayResource).optional(),
+    resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).optional(),
     targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
-    grantScope: z.record(z.unknown()).optional(),
+    targetConstraints: CredentialSafeRecordSchema.optional(),
+    grantScope: CredentialSafeRecordSchema.optional(),
     permissionScopes: z.array(z.string().min(1)).default([]),
     mode: ApprovalModeSchema.default("auto"),
     provider: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/u).default("acp")

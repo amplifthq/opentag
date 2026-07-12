@@ -4,6 +4,7 @@ import {
   ActionPermissionRequestSchema,
   ActionPermissionResolutionSchema,
   ActionSchema,
+  actionScopeAllowsRunReuse,
   MaterialActionReceiptSchema,
   ApplyIntentOutcomeSchema,
   ApplyPlanSchema,
@@ -19,6 +20,8 @@ import {
   preflightMutationIntent,
   evaluateActionPermission,
   grantMatchesAction,
+  containsCredentialLikeData,
+  isCredentialFieldName,
   normalizeMaterialActionRequest,
   formatProjectTargetRef,
   projectTargetRefFromEvent,
@@ -441,17 +444,16 @@ function stableActionJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-const SECRET_LIKE_RECEIPT_PATTERN = /(?:authorization|authentication|auth[_-]?(?:header|token)|cookie|set-cookie|bearer\s+|password|passphrase|secret|credential|private[_ -]?key|(?:access[_-]?|refresh[_-]?)?token|client[_-]?secret|api[_-]?key|\b(?:gh[pousr]|github_pat|xox[baprs]|sk_live|sk_test)_[a-z0-9_-]{8,})/iu;
 const SAFE_RECEIPT_METADATA_KEYS = new Set(["assurance", "agentReportedOutcome", "toolCallId", "providerOperationId", "statusCode"]);
 
 function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt): MaterialActionReceipt {
   if (receipt.evidence?.length) {
     throw new Error("Material action receipt evidence is not accepted until each evidence field has a durable safe-list policy.");
   }
-  if (SECRET_LIKE_RECEIPT_PATTERN.test(receipt.receiptRef)) {
+  if (containsCredentialLikeData(receipt.receiptRef)) {
     throw new Error("Material action receiptRef contains credential-like data.");
   }
-  if (receipt.externalId && SECRET_LIKE_RECEIPT_PATTERN.test(receipt.externalId)) {
+  if (receipt.externalId && containsCredentialLikeData(receipt.externalId)) {
     throw new Error("Material action externalId contains credential-like data.");
   }
   let externalUri = receipt.externalUri;
@@ -460,15 +462,16 @@ function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt): Material
     url.search = "";
     url.hash = "";
     externalUri = url.toString();
-    if (SECRET_LIKE_RECEIPT_PATTERN.test(externalUri)) {
+    if (containsCredentialLikeData(externalUri)) {
       throw new Error("Material action externalUri contains credential-like data.");
     }
   }
   const metadata = receipt.metadata
     ? Object.fromEntries(Object.entries(receipt.metadata).filter(([key, value]) =>
         SAFE_RECEIPT_METADATA_KEYS.has(key) &&
+        !isCredentialFieldName(key) &&
         (typeof value === "string" || typeof value === "number" || typeof value === "boolean") &&
-        !SECRET_LIKE_RECEIPT_PATTERN.test(`${key}:${String(value)}`)
+        !containsCredentialLikeData(`${key}:${String(value)}`)
       ))
     : undefined;
   return MaterialActionReceiptSchema.parse({
@@ -2843,6 +2846,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         ...(request.resource ? { resource: request.resource } : {}),
         ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
         ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
+        ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
         ...(request.grantScope ? { grantScope: request.grantScope } : {})
       });
       const semanticKey = stableActionJson({
@@ -2987,7 +2991,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                     scope: normalized.scope,
                     target: normalized.target,
                     riskTier: normalized.riskTier,
-                    decisions: ["allow_once", "allow_run", "deny"]
+                    decisions: actionScopeAllowsRunReuse(normalized.scope) ? ["allow_once", "allow_run", "deny"] : ["allow_once", "deny"]
                   }
                 }],
                 preconditions: ["The originating Attempt must remain active.", "The normalized action family and scope must not change."],
@@ -3124,7 +3128,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           const decision = ApprovalDecisionSchema.parse(JSON.parse(decisionRow.decisionJson));
           const intentId = `intent_${action.id}`;
           const approved = decision.approvedIntentIds.includes(intentId) && !(decision.rejectedIntentIds ?? []).includes(intentId);
-          const decisionKind = approved && decision.metadata?.["permissionDecision"] === "allow_run" ? "allow_run" as const : approved ? "allow_once" as const : "deny" as const;
+          const decisionKind = approved && decision.metadata?.["permissionDecision"] === "allow_run" && actionScopeAllowsRunReuse(action.scope)
+            ? "allow_run" as const
+            : approved ? "allow_once" as const : "deny" as const;
           const updatedAt = nowIso();
           if (decisionKind === "deny") {
             const cancelled = tx.update(materialActions).set({ status: "cancelled", decisionSnapshotHash: sha256(stableActionJson(decision)), updatedAt }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "waiting_approval"))).run();

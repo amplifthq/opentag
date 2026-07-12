@@ -30,6 +30,33 @@ describe("ActionPermissionRequestSchema", () => {
     expect(ActionPermissionRequestSchema.parse(base)).toMatchObject({ title: "Publish package" });
     expect(() => ActionPermissionRequestSchema.parse({ ...base, title: "Publish with token=fixture-secret" })).toThrow(/credential-like/u);
   });
+
+  it.each([
+    { title: "Publish xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz" },
+    { title: "Publish ghp\x5fabcdefghijklmnopqrstuvwxyz123456" },
+    { title: "Publish sk\x5flive_abcdefghijklmnopqrstuvwxyz" },
+    { title: "Publish eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123" },
+    { title: "Publish Bearer abcdefghijklmnopqrstuvwxyz" },
+    { title: "Publish AKIAIOSFODNN7EXAMPLE" },
+    { title: "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----" },
+    { resource: "https://user:password@example.test/deploy" },
+    { resource: "https://example.test/deploy?X-Amz-Signature=signed-secret" },
+    { resource: "https://example.test/deploy?environment=staging" },
+    { resource: "https://example.test/token=secret/deploy" },
+    { grantScope: { accessToken: "hidden" } },
+    { targetConstraints: { authorization: "Bearer abcdefghijklmnopqrstuvwxyz" } }
+  ])("rejects credential-bearing direct permission input %#", (unsafe) => {
+    expect(() => ActionPermissionRequestSchema.parse({
+      toolCallId: "tool_unsafe",
+      title: "Publish package",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask",
+      ...unsafe
+    })).toThrow();
+  });
 });
 
 describe("OpenTagEventSchema", () => {

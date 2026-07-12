@@ -32,6 +32,25 @@ describe("OpenTagPresentation", () => {
     expect(renderOpenTagPresentationPlainText(presentation)).toContain('grantScope={"environment":"production","services":"*"}');
   });
 
+  it("rejects credential-bearing approval snapshots before channel rendering", () => {
+    const base = {
+      kind: "approval_prompt" as const,
+      runId: "run_unsafe",
+      approvalId: "approval_unsafe",
+      proposalId: "proposal_unsafe",
+      intentId: "intent_unsafe",
+      actionId: "action_unsafe",
+      proposalHash: "sha256:unsafe",
+      title: "Allow publish?",
+      summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report" },
+      runScope: { provider: "npm", targetConstraints: { environment: "staging" } },
+      decisions: ["allow_once", "allow_run", "deny"] as const
+    };
+    expect(() => OpenTagApprovalPromptPresentationSchema.parse({ ...base, title: "Publish ghp\x5fabcdefghijklmnopqrstuvwxyz123456" })).toThrow();
+    expect(() => OpenTagApprovalPromptPresentationSchema.parse({ ...base, runScope: { authorization: "Bearer abcdefghijklmnopqrstuvwxyz" } })).toThrow();
+  });
+
   it("creates a provider-neutral final summary presentation", () => {
     const presentation = createFinalSummaryPresentation({
       result: {

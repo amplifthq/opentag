@@ -437,6 +437,7 @@ export async function runOneDaemonIteration(input: {
             ...(request.resource ? { resource: request.resource } : {}),
             ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
             ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
+            ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
             ...(request.grantScope ? { grantScope: request.grantScope } : {}),
             permissionScopes: request.permissionScopes,
             mode: input.approvalMode ?? "auto",

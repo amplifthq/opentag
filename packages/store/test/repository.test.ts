@@ -2609,6 +2609,7 @@ describe("durable ACP material actions", () => {
       connectionId: "npm:team",
       operation: "publish",
       resource: "@acme/pkg",
+      targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } },
       targetFingerprint: `sha256:${"1".repeat(64)}`
     };
     const waiting = await repo.requestActionPermission({ ...lease, request });
@@ -2629,6 +2630,11 @@ describe("durable ACP material actions", () => {
 
     const proposalId = waiting?.action.proposalId;
     expect(proposalId).toBeTruthy();
+    const storedProposal = await repo.getSuggestedChanges({ proposalId: proposalId! });
+    expect(storedProposal?.snapshot.intents[0]?.params).toMatchObject({
+      target: { targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } } }
+    });
+    expect(JSON.stringify(storedProposal)).not.toMatch(/authorization|password|secret|token=/iu);
     await repo.recordApprovalDecision({
       id: "approval_once",
       proposalId: proposalId!,
@@ -2792,6 +2798,40 @@ describe("durable ACP material actions", () => {
         mode: "auto"
       }
     })).resolves.toMatchObject({ state: "waiting", action: { status: "waiting_approval" } });
+  });
+
+  it("does not offer or persist run reuse for an unsafe or unclassified exact target", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_non_reusable",
+        title: "Publish signed target",
+        kind: "execute",
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        resource: "https://example.test/report",
+        targetFingerprint: `sha256:${"9".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", queryFingerprint: `sha256:${"8".repeat(64)}`, reuse: "deny" },
+        permissionScopes: ["npm:publish"],
+        mode: "ask"
+      }
+    });
+    const proposal = await repo.getSuggestedChanges({ proposalId: waiting!.action.proposalId! });
+    expect(proposal?.snapshot.intents[0]?.params?.["decisions"]).toEqual(["allow_once", "deny"]);
+    await repo.recordApprovalDecision({
+      id: "approval_non_reusable",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_run", actionId: waiting!.action.id, proposalHash: waiting!.action.proposalHash }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+    expect(sqlite.prepare("SELECT attempt_id AS attemptId FROM grants").get()).toEqual({ attemptId: claimed.attemptId });
   });
 
   it("rolls back grant-based authorization when the grant is revoked or Attempt is reassigned during creation", async () => {

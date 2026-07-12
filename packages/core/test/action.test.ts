@@ -179,6 +179,20 @@ describe("governed material actions", () => {
     });
     expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: distinctInsideScope })).toBe(true);
     expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: outsideScope })).toBe(false);
+
+    const nonReusable = normalizeMaterialActionRequest({
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetFingerprint: `sha256:${"d".repeat(64)}`,
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny" },
+      grantScope: { package: "@acme/report", versions: "*" }
+    });
+    const deniedReuseGrant = { ...runGrant, capability: nonReusable.actionFamily, resourceScope: nonReusable.scope };
+    expect(grantMatchesAction(deniedReuseGrant, { runId: "run_1", attemptId: "attempt_2", action: nonReusable })).toBe(false);
   });
 
   it("keeps internal guardrails active in autonomous mode", () => {

@@ -3,6 +3,7 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  actionScopeAllowsRunReuse,
   ActionPermissionRequestSchema,
   OpenTagApprovalPromptPresentationSchema,
   MaterialActionReceiptSchema,
@@ -11,6 +12,7 @@ import {
   parseThreadActionCommand,
   parseThreadControlCommand,
   permissionScopesAllowCapability,
+  redactCredentialLikeData,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
@@ -1802,11 +1804,7 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
 }
 
 function sanitizeApplyFailureDetail(detail: unknown): string {
-  return String(detail ?? "")
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
-    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+  return redactCredentialLikeData(String(detail ?? ""))
     .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
@@ -4563,7 +4561,7 @@ export function createDispatcherApp(input: {
             ...(typeof resolution.action.target["resourceVersion"] === "string" ? { resourceVersion: resolution.action.target["resourceVersion"] } : {})
           },
           runScope: resolution.action.scope,
-          decisions: ["allow_once", "allow_run", "deny"]
+          decisions: actionScopeAllowsRunReuse(resolution.action.scope) ? ["allow_once", "allow_run", "deny"] : ["allow_once", "deny"]
         });
         const rendered = presentation.render({
           provider: stored.event.callback.provider,

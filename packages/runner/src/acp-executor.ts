@@ -5,7 +5,10 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
+  containsCredentialLikeData,
   contextPointerLabel,
+  isCredentialFieldName,
+  isCredentialSafeText,
   OpenTagIntegrationManifestSchema,
   type OpenTagIntegrationManifestInput,
   type OpenTagStdioBinding
@@ -53,15 +56,14 @@ export type AcpPermissionRequest = {
   permissionScopes: string[];
 };
 
-const CREDENTIAL_KEY_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[_-]?key|secret|token|api[_-]?key)/iu;
-const CREDENTIAL_VALUE_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key|\b(?:gh[pousr]|github_pat|xox[baprs]|sk_live|sk_test)_[a-z0-9_-]{8,})/iu;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/gu;
 const SAFE_RESOURCE_PROTOCOLS = new Set(["http:", "https:", "ssh:", "git:", "git+http:", "git+https:", "git+ssh:"]);
+const REUSABLE_QUERY_KEYS = new Set(["branch", "dry_run", "environment", "force", "mode", "ref", "region", "stage", "tag", "version", "visibility"]);
 
 function safeLabel(value: unknown, maximumLength: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.replace(CONTROL_CHARACTER_PATTERN, "").trim().slice(0, maximumLength);
-  if (!normalized || CREDENTIAL_VALUE_PATTERN.test(normalized)) return undefined;
+  if (!normalized || !isCredentialSafeText(normalized)) return undefined;
   return normalized;
 }
 
@@ -70,13 +72,45 @@ function safeProvider(value: unknown): string | undefined {
   return normalized && /^[a-z0-9][a-z0-9._-]*$/u.test(normalized) ? normalized : undefined;
 }
 
-function safeResource(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
+function safeResourceIdentity(value: unknown): { resource?: string; constraints?: Record<string, unknown> } {
+  if (typeof value !== "string") return {};
   const normalized = value.replace(CONTROL_CHARACTER_PATTERN, "").trim().slice(0, 512);
-  if (!normalized) return undefined;
+  if (!normalized) return {};
+  if (!/^[a-z][a-z0-9+.-]*:\/\//iu.test(normalized)) {
+    return containsCredentialLikeData(normalized)
+      ? { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } }
+      : { resource: normalized };
+  }
   try {
     const url = new URL(normalized);
-    if (!SAFE_RESOURCE_PROTOCOLS.has(url.protocol)) return undefined;
+    if (!SAFE_RESOURCE_PROTOCOLS.has(url.protocol)) {
+      return { constraints: { resourceMode: "unsupported_scheme", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+    }
+    const hadUserInfo = Boolean(url.username || url.password);
+    const hadCredentialFragment = Boolean(url.hash && containsCredentialLikeData(url.hash));
+    const queryEntries = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    const disclosedQuery: Record<string, string | string[]> = {};
+    let denyReuse = hadUserInfo || hadCredentialFragment;
+    let strippedCredentials = false;
+    let hasUnclassifiedQuery = false;
+    for (const [key, queryValue] of queryEntries) {
+      if (isCredentialFieldName(key) || containsCredentialLikeData(queryValue)) {
+        strippedCredentials = true;
+        denyReuse = true;
+        continue;
+      }
+      if (!isCredentialSafeText(key) || !isCredentialSafeText(queryValue)) {
+        denyReuse = true;
+        continue;
+      }
+      if (!REUSABLE_QUERY_KEYS.has(key.toLowerCase())) {
+        hasUnclassifiedQuery = true;
+        denyReuse = true;
+      }
+      const existing = disclosedQuery[key];
+      disclosedQuery[key] = existing === undefined ? queryValue : Array.isArray(existing) ? [...existing, queryValue] : [existing, queryValue];
+    }
     url.username = "";
     url.password = "";
     url.search = "";
@@ -85,12 +119,34 @@ function safeResource(value: unknown): string | undefined {
     try {
       decodedPath = decodeURIComponent(url.pathname);
     } catch {
-      return undefined;
+      return { constraints: { resourceMode: "invalid_encoding", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
     }
-    if (CREDENTIAL_VALUE_PATTERN.test(decodedPath)) return undefined;
-    return url.toString().replace(/\/$/u, url.pathname === "/" ? "/" : "");
+    if (containsCredentialLikeData(decodedPath)) {
+      return { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+    }
+    const resource = url.toString().replace(/\/$/u, url.pathname === "/" ? "/" : "");
+    const constraints = queryEntries.length > 0 || hadUserInfo || hadCredentialFragment
+      ? {
+          ...(hadUserInfo || hadCredentialFragment
+            ? { resourceMode: "credential_stripped", resourceFingerprint: canonicalTargetFingerprint(normalized) }
+            : {}),
+          ...(Object.keys(disclosedQuery).length > 0 ? { urlQuery: disclosedQuery } : {}),
+          ...(queryEntries.length > 0
+            ? {
+                queryMode: strippedCredentials ? "credential_stripped" : hasUnclassifiedQuery ? "unclassified_exact" : "canonical",
+                ...(strippedCredentials || hasUnclassifiedQuery
+                  ? { queryFingerprint: canonicalTargetFingerprint(queryEntries) }
+                  : {})
+              }
+            : {}),
+          reuse: denyReuse ? "deny" : "exact"
+        }
+      : undefined;
+    return { resource, ...(constraints ? { constraints } : {}) };
   } catch {
-    return CREDENTIAL_VALUE_PATTERN.test(normalized) ? undefined : normalized;
+    return containsCredentialLikeData(normalized)
+      ? { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } }
+      : { constraints: { resourceMode: "invalid_url", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
   }
 }
 
@@ -102,13 +158,11 @@ function credentialSafeTarget(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(credentialSafeTarget).filter((child) => child !== undefined);
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => !CREDENTIAL_KEY_PATTERN.test(key))
+      .filter(([key]) => !isCredentialFieldName(key))
       .map(([key, child]) => [key, credentialSafeTarget(child)])
       .filter((entry): entry is [string, unknown] => entry[1] !== undefined));
   }
-  if (typeof value === "string" && CREDENTIAL_VALUE_PATTERN.test(value)) {
-    return safeResource(value);
-  }
+  if (typeof value === "string" && containsCredentialLikeData(value)) return undefined;
   return value;
 }
 
@@ -133,9 +187,13 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
   operation: string;
   resource?: string;
   resourceVersion?: string;
+  targetConstraints?: Record<string, unknown>;
   targetFingerprint?: string;
 } {
-  const safeTarget = credentialSafeTarget(rawInput);
+  const rawRecord = rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)
+    ? rawInput as Record<string, unknown>
+    : {};
+  const safeTarget = credentialSafeTarget(rawRecord);
   const record = safeTarget && typeof safeTarget === "object" && !Array.isArray(safeTarget)
     ? safeTarget as Record<string, unknown>
     : {};
@@ -151,7 +209,11 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
   const operation = safeLabel(record["operation"], 64)?.toLowerCase()
     ?? safeLabel(kind, 64)?.toLowerCase()
     ?? "tool";
-  const resource = safeResource(firstString("resource", "package", "repository", "repo", "path", "url", "id"));
+  const rawResource = ["resource", "package", "repository", "repo", "path", "url", "id"]
+    .map((key) => rawRecord[key])
+    .find((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0);
+  const resourceIdentity = safeResourceIdentity(rawResource);
+  const resource = resourceIdentity.resource;
   const resourceVersion = safeLabel(firstString("resourceVersion", "version", "tag", "ref"), 128);
   const fingerprintTarget: Record<string, unknown> = { ...record };
   for (const key of ["resource", "package", "repository", "repo", "path", "url", "id"]) delete fingerprintTarget[key];
@@ -161,7 +223,8 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
     connectionId,
     operation,
     ...(resource ? { resource } : {}),
-    ...(resourceVersion ? { resourceVersion } : {})
+    ...(resourceVersion ? { resourceVersion } : {}),
+    ...(resourceIdentity.constraints ? { targetConstraints: resourceIdentity.constraints } : {})
   });
   return {
     provider,
@@ -169,6 +232,7 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
     operation,
     ...(resource ? { resource } : {}),
     ...(resourceVersion ? { resourceVersion } : {}),
+    ...(resourceIdentity.constraints ? { targetConstraints: resourceIdentity.constraints } : {}),
     ...(rawInput === undefined ? {} : { targetFingerprint: canonicalTargetFingerprint(fingerprintTarget)! })
   };
 }
@@ -569,6 +633,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   operation: target.operation,
                   ...(target.resource ? { resource: target.resource } : {}),
                   ...(target.resourceVersion ? { resourceVersion: target.resourceVersion } : {}),
+                  ...(target.targetConstraints ? { targetConstraints: target.targetConstraints } : {}),
                   ...(request.toolCall.targetFingerprint ? { targetFingerprint: request.toolCall.targetFingerprint } : {}),
                   permissionScopes: request.permissionScopes
                 });

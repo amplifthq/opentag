@@ -227,6 +227,71 @@ describe("ACP executor", () => {
     expect(JSON.stringify(requests)).not.toContain("secret-two");
   }, 15_000);
 
+  it("separates display URLs from canonical disclosed query constraints", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const resources = [
+      "https://example.test/deploy?environment=staging&force=false",
+      "https://example.test/deploy?force=false&environment=staging",
+      "https://example.test/deploy?environment=production&force=false",
+      "https://example.test/deploy?environment=staging&force=true"
+    ];
+    for (const [index, resource] of resources.entries()) {
+      const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+      await executor.run({
+        ...input({ kind: "scratch", path: tempDir(`query-identity-${index}`) }, `run_query_identity_${index}`),
+        permissionResolver: async (request) => {
+          requests.push(request);
+          return { actionId: `action_query_${index}`, decision: "allow_once", material: true };
+        }
+      }, { emit: async () => undefined });
+    }
+    expect(requests.map((request) => request["resource"])).toEqual(Array(4).fill("https://example.test/deploy"));
+    expect(requests[0]?.["targetFingerprint"]).toBe(requests[1]?.["targetFingerprint"]);
+    expect(requests[2]?.["targetFingerprint"]).not.toBe(requests[0]?.["targetFingerprint"]);
+    expect(requests[3]?.["targetFingerprint"]).not.toBe(requests[0]?.["targetFingerprint"]);
+    expect(requests[0]?.["targetConstraints"]).toEqual({
+      queryMode: "canonical",
+      reuse: "exact",
+      urlQuery: { environment: "staging", force: "false" }
+    });
+  }, 20_000);
+
+  it("strips signed URL credentials and marks credential or unclassified queries non-reusable", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    for (const [index, resource] of [
+      "https://user:password@example.test/deploy?environment=staging&X-Amz-Signature=signed-secret#token",
+      "https://example.test/deploy?custom_target=blue",
+      "https://operator:password@example.test/deploy",
+      "https://example test/deploy"
+    ].entries()) {
+      const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+      await executor.run({
+        ...input({ kind: "scratch", path: tempDir(`query-deny-${index}`) }, `run_query_deny_${index}`),
+        permissionResolver: async (request) => {
+          requests.push(request);
+          return { actionId: `action_query_deny_${index}`, decision: "allow_once", material: true };
+        }
+      }, { emit: async () => undefined });
+    }
+    expect(requests[0]).toMatchObject({
+      resource: "https://example.test/deploy",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny", urlQuery: { environment: "staging" } }
+    });
+    expect(requests[1]).toMatchObject({
+      resource: "https://example.test/deploy",
+      targetConstraints: { queryMode: "unclassified_exact", reuse: "deny", urlQuery: { custom_target: "blue" } }
+    });
+    expect(requests[2]).toMatchObject({
+      resource: "https://example.test/deploy",
+      targetConstraints: { resourceMode: "credential_stripped", reuse: "deny" }
+    });
+    expect(requests[3]).toMatchObject({
+      targetConstraints: { resourceMode: "invalid_url", reuse: "deny" }
+    });
+    expect(requests[3]?.["resource"]).toBeUndefined();
+    expect(JSON.stringify(requests)).not.toMatch(/password|operator|signed-secret|X-Amz-Signature|#token|example test/iu);
+  }, 15_000);
+
   it("fingerprints generic ACP version, environment, force, visibility, and provider constraints exactly", async () => {
     const fingerprints: string[] = [];
     const variants: Array<Record<string, string>> = [

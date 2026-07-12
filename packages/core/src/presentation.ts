@@ -9,6 +9,9 @@ import {
   type ActionReceiptState
 } from "./action.js";
 import { OpenTagRunResultSchema, type OpenTagRunResult } from "./schema.js";
+import { isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
+
+const CredentialSafePresentationTextSchema = z.string().min(1).refine(isCredentialSafeText);
 
 export const OpenTagPresentationActionSchema = z.object({
   index: z.number().int().positive(),
@@ -46,16 +49,16 @@ export const OpenTagApprovalPromptPresentationSchema = z
     intentId: z.string().min(1),
     actionId: z.string().min(1),
     proposalHash: z.string().min(1),
-    title: z.string().min(1),
-    summary: z.string().min(1),
+    title: CredentialSafePresentationTextSchema,
+    summary: CredentialSafePresentationTextSchema,
     target: z.object({
-      provider: z.string().min(1),
-      connectionId: z.string().min(1),
-      operation: z.string().min(1),
-      resource: z.string().min(1),
-      resourceVersion: z.string().min(1).optional()
+      provider: CredentialSafePresentationTextSchema,
+      connectionId: CredentialSafePresentationTextSchema,
+      operation: CredentialSafePresentationTextSchema,
+      resource: CredentialSafePresentationTextSchema,
+      resourceVersion: CredentialSafePresentationTextSchema.optional()
     }).strict(),
-    runScope: z.record(z.unknown()),
+    runScope: z.record(z.unknown()).refine(isCredentialSafeValue),
     decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
   })
   .strict();

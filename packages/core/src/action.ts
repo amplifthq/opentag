@@ -18,6 +18,7 @@ export type MaterialActionRequestInput = {
   resource?: string;
   resourceVersion?: string;
   targetFingerprint?: string;
+  targetConstraints?: Record<string, unknown>;
   grantScope?: Record<string, unknown>;
   target?: Record<string, unknown>;
 };
@@ -46,7 +47,14 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const material = OPAQUE_MATERIAL_ACTION_KINDS.has(kind) || MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
   const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
   const scope = input.grantScope
-    ? normalizedRecord({ permissionScopes, provider, connectionId, operation, grantScope: normalizedRecord(input.grantScope) })
+    ? normalizedRecord({
+        permissionScopes,
+        provider,
+        connectionId,
+        operation,
+        grantScope: normalizedRecord(input.grantScope),
+        ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {})
+      })
     : normalizedRecord({
         permissionScopes,
         provider,
@@ -54,7 +62,8 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
         operation,
         resource,
         ...(resourceVersion ? { resourceVersion } : {}),
-        ...(targetFingerprint ? { targetFingerprint } : {})
+        ...(targetFingerprint ? { targetFingerprint } : {}),
+        ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {})
       });
   return {
     actionFamily: actionFamily || "tool",
@@ -67,6 +76,7 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
       resource,
       ...(resourceVersion ? { resourceVersion } : {}),
       ...(targetFingerprint ? { targetFingerprint } : {}),
+      ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {}),
       ...(input.grantScope ? { grantScope: normalizedRecord(input.grantScope) } : {}),
       ...(input.target ?? {}),
       ...(input.kind ? { kind } : {})
@@ -93,6 +103,7 @@ export function grantMatchesAction(
   grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt" | "constraints">,
   input: { runId: string; attemptId: string; actionId?: string; proposalHash?: string; action: NormalizedMaterialAction; now?: string }
 ): boolean {
+  if (!actionScopeAllowsRunReuse(input.action.scope)) return false;
   if (grant.revokedAt) return false;
   if (grant.expiresAt && grant.expiresAt <= (input.now ?? new Date().toISOString())) return false;
   if (grant.runId !== input.runId || grant.capability !== input.action.actionFamily) return false;
@@ -101,6 +112,12 @@ export function grantMatchesAction(
     if (grant.constraints["actionId"] !== input.actionId || grant.constraints["proposalHash"] !== input.proposalHash) return false;
   }
   return stableJson(grant.resourceScope) === stableJson(input.action.scope);
+}
+
+export function actionScopeAllowsRunReuse(scope: Record<string, unknown>): boolean {
+  const targetConstraints = scope["targetConstraints"];
+  return !(targetConstraints && typeof targetConstraints === "object" && !Array.isArray(targetConstraints) &&
+    (targetConstraints as Record<string, unknown>)["reuse"] === "deny");
 }
 
 export function evaluateActionPermission(input: {
