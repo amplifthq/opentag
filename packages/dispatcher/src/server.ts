@@ -4019,9 +4019,10 @@ export function createDispatcherApp(input: {
     const deleted = await repo.deleteChannelBinding({
       provider,
       accountId,
-      conversationId
+      conversationId,
+      expectedBinding: existing
     });
-    if (!deleted) return c.json({ error: "channel_binding_not_found" }, 404);
+    if (!deleted) return c.json({ error: "channel_binding_changed" }, 409);
     await recordControlPlaneEvent({
       type: "binding.channel.deleted",
       severity: "info",
@@ -4064,7 +4065,39 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/slack-channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateSlackChannelBindingSchema);
-    await repo.createSlackChannelBinding(parsed);
+    const existing = await repo.getChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId
+    });
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing?.ownership && !principalOwnsManagedBinding(principal, existing)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `slack:${parsed.teamId}/${parsed.channelId}`,
+        payload: {
+          provider: "slack",
+          accountId: parsed.teamId,
+          conversationId: parsed.channelId,
+          operation: "compatibility_upsert"
+        }
+      });
+    }
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId,
+      repoProvider: parsed.repoProvider ?? "github",
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(existing?.metadata ? { metadata: existing.metadata } : {}),
+      ...(existing?.ownership ? { ownership: existing.ownership } : {}),
+      ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+    });
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -4799,15 +4832,20 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, MarkRunningSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeRunningFields = sanitizeCredentialLikeValue({
+      executor: body.executor,
+      ...(body.executorCapability !== undefined ? { executorCapability: body.executorCapability } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [body.fencingToken] });
     const runningOutcome = await repo.markRunning({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: body.attemptId,
       fencingToken: body.fencingToken,
-      executor: body.executor,
-      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
+      executor: safeRunningFields.executor,
+      ...(safeRunningFields.executorCapability !== undefined ? { executorCapability: safeRunningFields.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(safeRunningFields.idempotencyKey ? { idempotencyKey: safeRunningFields.idempotencyKey } : {})
     });
     if (runningOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (runningOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
@@ -4832,7 +4870,7 @@ export function createDispatcherApp(input: {
       const runningPresentation = presentation.runStatusPresentation({
         runId,
         state: "running",
-        message: `Running with ${body.executor}.`,
+        message: `Running with ${safeRunningFields.executor}.`,
         nextAction: "Wait for the final reply, send a follow-up to queue more context, or request cancellation with /stop.",
         detailVisibility: "source_thread"
       });
@@ -4881,22 +4919,26 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, ProgressSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
-    const progressVisibility = channelProgressVisibility({
+    const safeProgressFields = sanitizeCredentialLikeValue({
+      message: body.message,
       ...(body.type ? { type: body.type } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [body.fencingToken] });
+    const progressVisibility = channelProgressVisibility({
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
       ...(body.visibility ? { requested: body.visibility } : {})
     });
-    const safeProgressMessage = sanitizeCredentialLikeValue(body.message, { secrets: [body.fencingToken] });
     const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: body.attemptId,
       fencingToken: body.fencingToken,
-      message: safeProgressMessage,
-      ...(body.type ? { type: body.type } : {}),
+      message: safeProgressFields.message,
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
       ...(body.at ? { at: body.at } : {}),
       visibility: progressVisibility,
       ...(body.importance ? { importance: body.importance } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(safeProgressFields.idempotencyKey ? { idempotencyKey: safeProgressFields.idempotencyKey } : {})
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
@@ -4905,7 +4947,7 @@ export function createDispatcherApp(input: {
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const progressPresentation = presentation.progressPresentation({ runId, message: safeProgressMessage });
+      const progressPresentation = presentation.progressPresentation({ runId, message: safeProgressFields.message });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
         ...larkRenderLocaleRenderOption(stored.event),
@@ -4964,16 +5006,18 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CompleteRunSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = parsed.idempotencyKey?.trim() || headerIdempotencyKey;
-    const safeResult = OpenTagRunResultSchema.parse(
-      sanitizeCredentialLikeValue(parsed.result, { secrets: [parsed.fencingToken] })
-    );
+    const safeCompleteFields = sanitizeCredentialLikeValue({
+      result: parsed.result,
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [parsed.fencingToken] });
+    const safeResult = OpenTagRunResultSchema.parse(safeCompleteFields.result);
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: parsed.attemptId,
       fencingToken: parsed.fencingToken,
       result: safeResult,
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(safeCompleteFields.idempotencyKey ? { idempotencyKey: safeCompleteFields.idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);

@@ -149,9 +149,11 @@ A managed binding should include the configured provider application identity:
 ```
 
 `applicationId` and `botId` are opaque, bounded provider IDs. Display names are
-not identity. Native adapters add the verified/configured identity to normalized
-event metadata, and the dispatcher rejects a managed event when the identity is
-missing or does not match the binding.
+not identity. Native adapters authenticate as a channel principal in dispatcher
+request context. The dispatcher compares that authenticated principal with the
+managed binding and rejects a request when it is missing or does not match.
+Provider payloads and normalized event metadata remain useful for routing and
+presentation, but are never trusted to establish application identity.
 
 Channel membership and app scopes remain provider-administrator concerns. Agent
 filesystem and process permissions remain agent-administrator concerns. OpenTag

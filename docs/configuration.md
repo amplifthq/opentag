@@ -130,11 +130,14 @@ so the administrator can pin the immutable provider application identity:
 }
 ```
 
-Application and bot IDs come from verified adapter configuration or provider
-event metadata. Bot display names can be changed freely and are never used as
-binding identity. A managed Run fails closed if the incoming application ID is
-missing or different. Replacing or deleting the binding remains an authenticated
-administrator operation.
+Application and bot IDs name the configured adapter application. The adapter
+authenticates to the dispatcher as a channel principal in request context; that
+principal, not provider payloads or normalized event metadata, is authoritative
+for managed Run admission and binding mutation. Bot display names can be changed
+freely and are never used as binding identity. A managed Run fails closed when
+the authenticated request principal is missing or does not match. Replacing or
+deleting the binding remains an authenticated administrator operation; the
+Slack compatibility binding endpoint follows the same rule.
 
 If Hermes supplies both a channel gateway and ACP execution, configure them as
 separate runtime identities. The gateway owns only Slack/Lark transport

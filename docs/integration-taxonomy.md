@@ -103,10 +103,13 @@ A managed channel binding is exclusive to one configured application identity:
 }
 ```
 
-`applicationId` and optional `botId` come from verified adapter configuration or
-provider event metadata. Display names are presentation metadata and never
-select or authorize an integration. A managed event whose application identity
-is absent or different is rejected before Run admission.
+`applicationId` and optional `botId` identify the configured adapter application.
+For authorization, the dispatcher trusts only the authenticated channel
+principal attached to the request context and compares that principal with the
+binding. Provider payloads, normalized event metadata, actor fields, and display
+names are routing or presentation data; none of them can establish channel
+ownership. A managed request with no matching authenticated principal is
+rejected before Run admission.
 
 Binding creation, replacement, and deletion are administrator operations. An
 ordinary source-thread actor cannot claim ownership by supplying metadata.

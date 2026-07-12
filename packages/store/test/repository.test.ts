@@ -737,8 +737,34 @@ describe("OpenTag repository", () => {
     const providerToken = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
 
     await expect(
-      repo.recordProgress({ ...lease, message: `using ${providerToken} and ${claimed.fencingToken}` })
+      repo.markRunning({
+        ...lease,
+        executor: claimed.fencingToken,
+        executorCapability: { nested: { credential: "opaque-executor-secret", fence: claimed.fencingToken } },
+        idempotencyKey: claimed.fencingToken
+      })
+    ).resolves.toBe("running");
+    await expect(
+      repo.recordProgress({
+        ...lease,
+        message: `using ${providerToken} and ${claimed.fencingToken}`,
+        type: claimed.fencingToken,
+        idempotencyKey: claimed.fencingToken
+      })
     ).resolves.toBe("recorded");
+    const providerFailure = `provider failed ${claimed.fencingToken} Bearer ${providerToken} -----BEGIN PRIVATE KEY----- secret`;
+    await repo.appendRunEvent({
+      runId: "run_safe_output",
+      type: "source_receipt.failed",
+      payload: { provider: "lark", error: providerFailure },
+      message: providerFailure
+    });
+    await repo.appendRunEvent({
+      runId: "run_safe_output",
+      type: "callback.progress.failed",
+      payload: { provider: "lark", reason: "delayed_status_card", error: providerFailure },
+      message: providerFailure
+    });
     await expect(
       repo.completeRun({
         ...lease,
@@ -753,7 +779,8 @@ describe("OpenTag repository", () => {
             }
           ],
           verification: [{ command: "check", outcome: "passed", excerpt: `fence=${claimed.fencingToken}` }]
-        }
+        },
+        idempotencyKey: claimed.fencingToken
       })
     ).resolves.toBe("completed");
     await repo.enqueueCallbackDelivery({
@@ -775,7 +802,9 @@ describe("OpenTag repository", () => {
     expect(serialized).not.toContain(providerToken);
     expect(serialized).not.toContain(claimed.fencingToken);
     expect(serialized).not.toContain("opaque-secret");
+    expect(serialized).not.toContain("opaque-executor-secret");
     expect(serialized).not.toContain("opaque-callback-secret");
+    expect(serialized).not.toContain("-----BEGIN PRIVATE KEY-----");
     expect(serialized).toContain("[redacted]");
   });
 
@@ -962,42 +991,45 @@ describe("OpenTag repository", () => {
     ).resolves.toBe(false);
   });
 
-  it("ignores malformed channel binding metadata instead of throwing", async () => {
+  it.each([
+    ["invalid JSON", "{bad-json"],
+    ["JSON null", "null"],
+    ["an array", "[]"],
+    ["a string primitive", "\"legacy\""],
+    ["a number primitive", "42"]
+  ])("fails closed when channel binding metadata is %s", async (_label, metadataJson) => {
     const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
     migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    sqlite.exec(`
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    sqlite.prepare(`
       INSERT INTO channel_bindings (
-        provider,
-        account_id,
-        conversation_id,
-        repo_provider,
-        owner,
-        repo,
-        metadata_json,
-        created_at
-      ) VALUES (
-        'telegram',
-        'bot_123',
-        'chat_456',
-        'github',
-        'acme',
-        'demo',
-        '{bad-json',
-        '2026-06-25T00:00:00.000Z'
-      );
-    `);
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("telegram", "bot_123", "chat_456", "github", "acme", "demo", metadataJson, "2026-06-25T00:00:00.000Z");
 
-    await expect(repo.getChannelBinding({ provider: "telegram", accountId: "bot_123", conversationId: "chat_456" })).resolves.toEqual({
-      provider: "telegram",
-      accountId: "bot_123",
-      conversationId: "chat_456",
-      repoProvider: "github",
-      owner: "acme",
-      repo: "demo"
-    });
+    await expect(
+      repo.getChannelBinding({ provider: "telegram", accountId: "bot_123", conversationId: "chat_456" })
+    ).rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
+  it.each([
+    ["management", { management: "managed" }],
+    ["ownership", { ownership: { mode: "managed", exclusive: true, applicationId: "A123" } }],
+    ["metadata", { metadata: { title: "reserved envelope" } }],
+    ["a deleted discriminator", { management: "managed", metadata: {}, ownership: { mode: "managed", exclusive: true, applicationId: "A123" } }]
+  ])("rejects a versionless channel binding object containing reserved v2 field %s", async (_label, stored) => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    sqlite.prepare(`
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("slack", "T123", "C456", "github", "acme", "demo", JSON.stringify(stored), "2026-06-25T00:00:00.000Z");
+
+    await expect(
+      repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })
+    ).rejects.toBeInstanceOf(ChannelBindingCorruptionError);
   });
 
   it("stores Slack channel bindings through the generic channel binding table", async () => {
@@ -1214,6 +1246,15 @@ describe("OpenTag repository", () => {
     migrateSchema(sqlite);
     const repo = createOpenTagRepository(db);
 
+    await repo.registerRunner({ runnerId: "runner_callback_guard", name: "Callback Guard" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_callback_guard" });
+    await repo.createRun({
+      id: "run_callback_storm_guard",
+      event: larkEvent({ id: "evt_callback_storm_guard", sourceEventId: "msg_callback_storm_guard" })
+    });
+    const runClaim = await repo.claimNextRun({ runnerId: "runner_callback_guard", leaseSeconds: 60 });
+    if (!runClaim) throw new Error("expected callback guard run claim");
+
     await repo.enqueueCallbackDelivery({
       runId: "run_callback_storm_guard",
       kind: "final",
@@ -1228,19 +1269,30 @@ describe("OpenTag repository", () => {
     expect(claimed).toHaveLength(1);
     await repo.markCallbackFailed({
       deliveryId: claimed[0]!.id,
-      error: "rate_limited",
+      error: `rate_limited ${runClaim.fencingToken} xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz Bearer ghp\x5fabcdefghijklmnopqrstuvwxyz123456 -----BEGIN PRIVATE KEY----- secret`,
       maxAttempts: 1
     });
 
     await expect(repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 })).resolves.toEqual([]);
 
     const events = await repo.listRunEvents({ runId: "run_callback_storm_guard" });
-    expect(events.map((event) => event.type)).toEqual(["callback.final.queued", "callback.final.failed", "callback.final.suppressed"]);
+    expect(events.filter((event) => event.type.startsWith("callback.")).map((event) => event.type)).toEqual([
+      "callback.final.queued",
+      "callback.final.failed",
+      "callback.final.suppressed"
+    ]);
     expect(events.at(-1)).toMatchObject({
       visibility: "audit",
       importance: "high",
       message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms."
     });
+    const failedRow = sqlite.prepare("SELECT last_error FROM callback_deliveries WHERE id = ?").get(claimed[0]!.id);
+    const failurePersistence = JSON.stringify({ failedRow, events });
+    expect(failurePersistence).not.toContain(runClaim.fencingToken);
+    expect(failurePersistence).not.toContain("xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz");
+    expect(failurePersistence).not.toContain("ghp\x5fabcdefghijklmnopqrstuvwxyz123456");
+    expect(failurePersistence).not.toContain("-----BEGIN PRIVATE KEY-----");
+    expect(failurePersistence).toContain("[redacted]");
   });
 
   it("records control-plane events that are not tied to a run", async () => {
@@ -2615,6 +2667,66 @@ describe("repository-optional channel bindings", () => {
     await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toMatchObject({
       ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
     });
+  });
+
+  it("does not let the Slack compatibility store method mutate a managed binding", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "original",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    });
+
+    await expect(repo.createSlackChannelBinding({
+      teamId: "T123",
+      channelId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "replacement"
+    })).rejects.toThrow(/managed channel binding.*compatibility/iu);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .resolves.toMatchObject({ repo: "original" });
+  });
+
+  it("does not delete a managed binding after its authorized snapshot has been rebound", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    const original = {
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "original",
+      ownership: { mode: "managed" as const, exclusive: true as const, applicationId: "A123" }
+    };
+    await repo.upsertChannelBinding(original);
+    const authorizedSnapshot = await repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+    expect(authorizedSnapshot).not.toBeNull();
+
+    await repo.upsertChannelBinding({
+      ...original,
+      repo: "replacement",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999" },
+      allowManagedOwnershipOverride: true
+    });
+
+    await expect(repo.deleteChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      expectedBinding: authorizedSnapshot!
+    })).resolves.toBe(false);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .resolves.toMatchObject({ repo: "replacement", ownership: { applicationId: "A999" } });
   });
 
   it("fails closed when persisted managed ownership is malformed", async () => {

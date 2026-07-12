@@ -293,6 +293,30 @@ describe("@opentag/client", () => {
     expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
   });
 
+  it("sends the authenticated channel principal through the Slack compatibility binding route", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      channelPrincipalCredential: "slack_principal_owner",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true }, 201);
+      }
+    });
+
+    await client.bindSlackChannel({
+      teamId: "T123",
+      channelId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/slack-channel-bindings");
+    expect(new Headers(requests[0]?.init?.headers).get("x-opentag-channel-principal")).toBe("slack_principal_owner");
+  });
+
   it("reads channel runtime status through the dispatcher API", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({

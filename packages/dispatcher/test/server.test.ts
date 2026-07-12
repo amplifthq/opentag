@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { computeLinearSignature } from "@opentag/linear";
 import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
@@ -3334,6 +3338,62 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("sanitizes every runner-controlled sibling field before persistence or presentation", async () => {
+    const delivered: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: {
+        async deliver(message) {
+          delivered.push(message);
+          return { externalMessageId: "safe-status" };
+        }
+      },
+      sourceReceiptSink: { async deliver() { return { delivered: true }; } }
+    });
+    await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_safe_ingress",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }));
+    const event = slackRepoEvent({
+      id: "evt_safe_runner_ingress",
+      sourceEventId: "EvSafeRunnerIngress",
+      threadKey: "T123|C123|1710000000.000100"
+    });
+    expect((await app.request("/v1/runs", jsonRequest({ runId: "run_safe_runner_ingress", event }))).status).toBe(201);
+    const claim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
+    const lease = await claim.json() as { attemptId: string; fencingToken: string };
+
+    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/running", jsonRequest({
+      ...lease,
+      executor: lease.fencingToken,
+      executorCapability: { nested: { fence: lease.fencingToken, accessToken: "opaque-ingress-token" } },
+      idempotencyKey: lease.fencingToken
+    }))).status).toBe(200);
+    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/progress", jsonRequest({
+      ...lease,
+      message: "safe progress",
+      type: lease.fencingToken,
+      visibility: "human",
+      idempotencyKey: lease.fencingToken
+    }))).status).toBe(200);
+    expect((await app.request("/v1/runners/runner_safe_ingress/runs/run_safe_runner_ingress/complete", jsonRequest({
+      ...lease,
+      result: { conclusion: "success", summary: "safe completion" },
+      idempotencyKey: lease.fencingToken
+    }))).status).toBe(200);
+
+    const run = await (await app.request("/v1/runs/run_safe_runner_ingress")).json();
+    const events = await (await app.request("/v1/runs/run_safe_runner_ingress/events")).json();
+    const durableAndPresented = JSON.stringify({ run, events, delivered });
+    expect(durableAndPresented).not.toContain(lease.fencingToken);
+    expect(durableAndPresented).not.toContain("opaque-ingress-token");
+    expect(durableAndPresented).toContain("[redacted]");
+  });
+
   it("delivers Slack source receipts and one running run-card update", async () => {
     const callbacks: { kind: string }[] = [];
     const receipts: Array<{ runId: string; provider: string; state: string; agentId?: string; channelId: unknown; messageTs: unknown }> = [];
@@ -5465,6 +5525,57 @@ describe("dispatcher API", () => {
     expect(accepted.status).toBe(201);
   });
 
+  it("rejects run admission when the matching managed channel binding record is corrupt", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-corrupt-binding-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    try {
+      const app = createDispatcherApp({
+        databasePath,
+        pairingToken: "pair_corrupt",
+        channelPrincipals: [{ provider: "slack", applicationId: "A123", credential: "principal_corrupt" }]
+      });
+      const headers = {
+        "content-type": "application/json",
+        authorization: "Bearer pair_corrupt",
+        "x-opentag-channel-principal": "principal_corrupt"
+      };
+      expect((await app.request("/v1/channel-bindings", {
+        ...jsonRequest({
+          provider: "slack",
+          accountId: "T123",
+          conversationId: "C456",
+          ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+        }),
+        headers
+      })).status).toBe(201);
+
+      const sqlite = new Database(databasePath);
+      sqlite.prepare(
+        "UPDATE channel_bindings SET metadata_json = ? WHERE provider = ? AND account_id = ? AND conversation_id = ?"
+      ).run(JSON.stringify({ management: "managed" }), "slack", "T123", "C456");
+      sqlite.close();
+
+      const response = await app.request("/v1/runs", {
+        ...jsonRequest({
+          runId: "run_corrupt_binding",
+          event: {
+            ...slackRepoEvent({
+              id: "evt_corrupt_binding",
+              sourceEventId: "EvCorruptBinding",
+              threadKey: "T123|C456|1710000000.000100"
+            }),
+            metadata: { teamId: "T123", channelId: "C456" }
+          }
+        }),
+        headers
+      });
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toEqual({ error: "managed_channel_binding_corrupt" });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("requires the owning adapter principal to rebind or delete a managed channel and audits an explicit admin override", async () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -6014,6 +6125,74 @@ describe("dispatcher API", () => {
         repoProvider: "gitlab",
         owner: "acme",
         repo: "demo"
+      }
+    });
+  });
+
+  it("keeps the Slack compatibility binding route inside managed principal authorization", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_compat",
+      channelPrincipals: [
+        { provider: "slack", applicationId: "A123", credential: "slack_principal_owner" }
+      ]
+    });
+    const pairingHeaders = { "content-type": "application/json", authorization: "Bearer pair_compat" };
+    const ownerHeaders = { ...pairingHeaders, "x-opentag-channel-principal": "slack_principal_owner" };
+    const binding = {
+      provider: "slack",
+      accountId: "T_MANAGED",
+      conversationId: "C_MANAGED",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "original",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    };
+    expect((await app.request("/v1/channel-bindings", { ...jsonRequest(binding), headers: ownerHeaders })).status).toBe(201);
+
+    const compatibilityRebind = {
+      teamId: "T_MANAGED",
+      channelId: "C_MANAGED",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "replacement"
+    };
+    const pairingOnly = await app.request("/v1/slack-channel-bindings", {
+      ...jsonRequest(compatibilityRebind),
+      headers: pairingHeaders
+    });
+    expect(pairingOnly.status).toBe(403);
+    await expect(pairingOnly.json()).resolves.toEqual({ error: "managed_channel_principal_required" });
+
+    const ownerRebind = await app.request("/v1/slack-channel-bindings", {
+      ...jsonRequest(compatibilityRebind),
+      headers: ownerHeaders
+    });
+    expect(ownerRebind.status).toBe(201);
+
+    const adminRebind = await app.request("/v1/slack-channel-bindings", {
+      ...jsonRequest({ ...compatibilityRebind, repo: "admin-replacement" }),
+      headers: { ...pairingHeaders, "x-opentag-channel-admin-override": "true" }
+    });
+    expect(adminRebind.status).toBe(201);
+    const audit = await app.request("/v1/control-plane-events?type=binding.channel.admin_override", {
+      headers: { authorization: "Bearer pair_compat" }
+    });
+    await expect(audit.json()).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          subject: "slack:T_MANAGED/C_MANAGED",
+          payload: expect.objectContaining({ operation: "compatibility_upsert" })
+        })
+      ]
+    });
+    const stored = await app.request("/v1/channel-bindings/slack/T_MANAGED/C_MANAGED", {
+      headers: { authorization: "Bearer pair_compat" }
+    });
+    await expect(stored.json()).resolves.toMatchObject({
+      binding: {
+        repo: "admin-replacement",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
       }
     });
   });
