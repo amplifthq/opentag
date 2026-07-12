@@ -227,6 +227,29 @@ describe("ACP executor", () => {
     expect(JSON.stringify(requests)).not.toContain("secret-two");
   }, 15_000);
 
+  it("fingerprints generic ACP version, environment, force, visibility, and provider constraints exactly", async () => {
+    const fingerprints: string[] = [];
+    const variants: Array<Record<string, string>> = [
+      {},
+      { OPENTAG_ACP_TEST_VERSION: "stable" },
+      { OPENTAG_ACP_TEST_ENVIRONMENT: "production" },
+      { OPENTAG_ACP_TEST_FORCE: "true" },
+      { OPENTAG_ACP_TEST_VISIBILITY: "public" },
+      { OPENTAG_ACP_TEST_PROVIDER: "registry" }
+    ];
+    for (const [index, env] of variants.entries()) {
+      const executor = createAcpExecutor({ manifest: permissionManifest(env) });
+      await executor.run({
+        ...input({ kind: "scratch", path: tempDir(`exact-generic-scope-${index}`) }, `run_exact_generic_scope_${index}`),
+        permissionResolver: async (request) => {
+          fingerprints.push(request.targetFingerprint!);
+          return { actionId: `action_exact_${index}`, decision: "allow_once", material: true };
+        }
+      }, { emit: async () => undefined });
+    }
+    expect(new Set(fingerprints)).toHaveLength(variants.length);
+  }, 20_000);
+
   it("normalizes URL resources and bounds structured target labels before policy or presentation", async () => {
     let captured: Record<string, unknown> | undefined;
     const executor = createAcpExecutor({ manifest: permissionManifest({
@@ -250,6 +273,45 @@ describe("ACP executor", () => {
     expect(JSON.stringify(captured)).not.toContain("access_token");
     expect(JSON.stringify(captured)).not.toContain("password");
     expect(JSON.stringify(captured)).not.toContain("credential=");
+  }, 15_000);
+
+  it.each([
+    ["ssh", "ssh://git:password@example.test/acme/report.git?token=secret#credential", "ssh://example.test/acme/report.git"],
+    ["git+https", "git+https://user:password@example.test/acme/report.git?signature=secret#token", "git+https://example.test/acme/report.git"],
+    ["signed https", "https://example.test/acme/report.git?X-Amz-Signature=secret&X-Amz-Credential=private", "https://example.test/acme/report.git"],
+    ["ftp", "ftp://user:password@example.test/acme/report.git?token=secret", undefined],
+    ["token path", "https://example.test/acme/token=secret/report.git", undefined]
+  ])("sanitizes or rejects %s resource URLs before identity and presentation", async (_label, resource, expected) => {
+    let captured: Record<string, unknown> | undefined;
+    const executor = createAcpExecutor({ manifest: permissionManifest({ OPENTAG_ACP_TEST_RESOURCE: resource }) });
+    await executor.run({
+      ...input({ kind: "scratch", path: tempDir(`safe-scheme-${_label}`) }, `run_safe_scheme_${_label}`),
+      permissionResolver: async (request) => {
+        captured = request;
+        return { actionId: `action_${_label}`, decision: "allow_once", material: true };
+      }
+    }, { emit: async () => undefined });
+    expect(captured?.["resource"]).toBe(expected);
+    expect(captured?.["targetFingerprint"]).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(JSON.stringify(captured)).not.toMatch(/password|token=|signature=|credential=|secret/iu);
+  }, 15_000);
+
+  it("redacts credential-like tool titles before progress or durable permission paths", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const progress: string[] = [];
+    const executor = createAcpExecutor({ manifest: permissionManifest({
+      OPENTAG_ACP_TEST_TOOL_TITLE: "Write with password=hunter2",
+      OPENTAG_ACP_TEST_PERMISSION_TITLE: "Publish with token=fixture-secret"
+    }) });
+    await executor.run({
+      ...input({ kind: "scratch", path: tempDir("safe-title") }, "run_safe_title"),
+      permissionResolver: async (request) => {
+        requests.push(request);
+        return { actionId: "action_safe_title", decision: "allow_once", material: true };
+      }
+    }, { emit: async (update) => void progress.push(update.message) });
+    expect(requests[0]?.["title"]).toBe("Sensitive tool action");
+    expect(JSON.stringify({ requests, progress })).not.toMatch(/hunter2|fixture-secret|password=|token=/iu);
   }, 15_000);
 
   it("fails the Attempt after both durable unknown-report attempts fail", async () => {

@@ -2616,6 +2616,8 @@ describe("durable ACP material actions", () => {
     expect(waiting?.action.attemptFenceDigest).not.toBe(claimed.fencingToken);
     await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
     await expect(repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("updated");
+    await expect(repo.recordProgress({ ...lease, message: "Waiting for the governed decision." })).resolves.toBe("recorded");
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
 
     const premature = await repo.recordMaterialActionReceipt({
       ...lease,
@@ -2733,6 +2735,7 @@ describe("durable ACP material actions", () => {
         resource: "@acme/report",
         resourceVersion: "next",
         targetFingerprint: `sha256:${"1".repeat(64)}`,
+        grantScope: { package: "@acme/report", versions: "*" },
         permissionScopes: ["npm:publish"],
         mode: "ask"
       }
@@ -2764,6 +2767,7 @@ describe("durable ACP material actions", () => {
         resource: "@acme/report",
         resourceVersion: "stable",
         targetFingerprint: `sha256:${"2".repeat(64)}`,
+        grantScope: { package: "@acme/report", versions: "*" },
         permissionScopes: ["npm:publish"],
         mode: "auto"
       }
@@ -2783,10 +2787,62 @@ describe("durable ACP material actions", () => {
         resource: "@acme/other",
         resourceVersion: "stable",
         targetFingerprint: `sha256:${"3".repeat(64)}`,
+        grantScope: { package: "@acme/other", versions: "*" },
         permissionScopes: ["npm:publish"],
         mode: "auto"
       }
     })).resolves.toMatchObject({ state: "waiting", action: { status: "waiting_approval" } });
+  });
+
+  it("rolls back grant-based authorization when the grant is revoked or Attempt is reassigned during creation", async () => {
+    for (const interleaving of ["revoke_grant", "reassign_attempt"] as const) {
+      const { sqlite, repo, claimed } = await claimedRepository();
+      const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+      const grantScope = { package: "@acme/report", versions: "*" };
+      const first = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_${interleaving}_first`, title: "Publish report next", kind: "execute", provider: "npm",
+          connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next",
+          targetFingerprint: `sha256:${"4".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "ask"
+        }
+      });
+      await repo.recordApprovalDecision({
+        id: `approval_${interleaving}`,
+        proposalId: first!.action.proposalId!,
+        approvedIntentIds: [`intent_${first!.action.id}`],
+        approvedBy: { provider: "slack", providerUserId: "U123" },
+        approvedAt: "2026-07-12T00:01:00.000Z",
+        scope: "manual",
+        metadata: { permissionDecision: "allow_run", actionId: first!.action.id, proposalHash: first!.action.proposalHash }
+      });
+      await repo.resolveActionPermission({ ...lease, actionId: first!.action.id });
+      sqlite.exec(interleaving === "revoke_grant" ? `
+        CREATE TRIGGER force_grant_revoke
+        AFTER INSERT ON material_actions
+        BEGIN
+          UPDATE grants SET revoked_at = '2026-07-12T00:01:30.000Z' WHERE run_id = NEW.run_id;
+        END
+      ` : `
+        CREATE TRIGGER force_attempt_reassignment_during_creation
+        AFTER INSERT ON material_actions
+        BEGIN
+          UPDATE runs SET current_attempt_id = 'attempt_forced_reassignment' WHERE id = NEW.run_id;
+        END
+      `);
+      const second = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_${interleaving}_second`, title: "Publish report stable", kind: "execute", provider: "npm",
+          connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "stable",
+          targetFingerprint: `sha256:${"5".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "auto"
+        }
+      });
+      expect(second).toBeNull();
+      expect(sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+      expect(sqlite.prepare("SELECT count(*) AS count FROM grants WHERE revoked_at IS NOT NULL").get()).toEqual({ count: 0 });
+      expect(sqlite.prepare("SELECT current_attempt_id AS attemptId FROM runs WHERE id = ?").get("run_action")).toEqual({ attemptId: claimed.attemptId });
+    }
   });
 
   it("keeps repeat non-material Auto permissions usable without releasing a receipt-tracked execution", async () => {
@@ -3067,6 +3123,31 @@ describe("durable ACP material actions", () => {
       actionId: allowed!.action.id,
       receipt: { id: "receipt_generic", actionId: allowed!.action.id, provider: "acp", receiptRef: "acp:self-report", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
     })).resolves.toMatchObject({ state: "unknown", action: { status: "unknown", receipt: { outcome: "unknown" } } });
+  });
+
+  it("downgrades a connector known outcome when either side lacks an exact target fingerprint", async () => {
+    for (const missing of ["approved", "receipt"] as const) {
+      const { repo, claimed } = await claimedRepository();
+      const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+      const fingerprint = `sha256:${"f".repeat(64)}`;
+      const allowed = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_missing_${missing}`, title: "Execute connector action", kind: "execute", provider: "connector",
+          connectionId: "connector:team", operation: "write", resource: "report:123", permissionScopes: [], mode: "autonomous",
+          ...(missing === "approved" ? {} : { targetFingerprint: fingerprint })
+        }
+      });
+      await expect(repo.recordMaterialActionReceipt({
+        ...lease,
+        actionId: allowed!.action.id,
+        receipt: {
+          id: `receipt_missing_${missing}`, actionId: allowed!.action.id, provider: "connector", connectionId: "connector:team",
+          ...(missing === "receipt" ? {} : { targetFingerprint: fingerprint }),
+          receiptRef: `connector:missing:${missing}`, outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z"
+        }
+      })).resolves.toMatchObject({ state: "unknown", action: { status: "unknown", receipt: { outcome: "unknown" } } });
+    }
   });
 
   it("fences every executing material action to unknown when its Attempt terminates", async () => {

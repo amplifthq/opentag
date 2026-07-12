@@ -56,6 +56,7 @@ export type AcpPermissionRequest = {
 const CREDENTIAL_KEY_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[_-]?key|secret|token|api[_-]?key)/iu;
 const CREDENTIAL_VALUE_PATTERN = /(?:auth(?:orization|entication)?|bearer|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key|\b(?:gh[pousr]|github_pat|xox[baprs]|sk_live|sk_test)_[a-z0-9_-]{8,})/iu;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/gu;
+const SAFE_RESOURCE_PROTOCOLS = new Set(["http:", "https:", "ssh:", "git:", "git+http:", "git+https:", "git+ssh:"]);
 
 function safeLabel(value: unknown, maximumLength: number): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -75,15 +76,26 @@ function safeResource(value: unknown): string | undefined {
   if (!normalized) return undefined;
   try {
     const url = new URL(normalized);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return normalized;
+    if (!SAFE_RESOURCE_PROTOCOLS.has(url.protocol)) return undefined;
     url.username = "";
     url.password = "";
     url.search = "";
     url.hash = "";
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(url.pathname);
+    } catch {
+      return undefined;
+    }
+    if (CREDENTIAL_VALUE_PATTERN.test(decodedPath)) return undefined;
     return url.toString().replace(/\/$/u, url.pathname === "/" ? "/" : "");
   } catch {
     return CREDENTIAL_VALUE_PATTERN.test(normalized) ? undefined : normalized;
   }
+}
+
+function safeToolTitle(value: unknown): string {
+  return safeLabel(value, 160) ?? "Sensitive tool action";
 }
 
 function credentialSafeTarget(value: unknown): unknown {
@@ -349,7 +361,7 @@ async function emitSessionUpdate(
     case "tool_call":
       await sink.emit({
         type: "executor.progress",
-        message: `Tool: ${update.title}${update.status ? ` (${update.status})` : ""}`,
+        message: `Tool: ${safeToolTitle(update.title)}${update.status ? ` (${update.status})` : ""}`,
         at
       });
       return;
@@ -539,7 +551,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 runId: input.runId,
                 toolCall: {
                   toolCallId: ctx.params.toolCall.toolCallId,
-                  title: ctx.params.toolCall.title ?? "Untitled tool call",
+                  title: safeToolTitle(ctx.params.toolCall.title ?? "Untitled tool call"),
                   ...(ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
                   ...(ctx.params.toolCall.status ? { status: ctx.params.toolCall.status } : {}),
                   ...(target.targetFingerprint ? { targetFingerprint: target.targetFingerprint } : {})

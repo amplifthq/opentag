@@ -18,6 +18,7 @@ export type MaterialActionRequestInput = {
   resource?: string;
   resourceVersion?: string;
   targetFingerprint?: string;
+  grantScope?: Record<string, unknown>;
   target?: Record<string, unknown>;
 };
 
@@ -44,9 +45,20 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const internallyBlocked = CRITICAL_ACTION_PATTERN.test(probe);
   const material = OPAQUE_MATERIAL_ACTION_KINDS.has(kind) || MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
   const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
+  const scope = input.grantScope
+    ? normalizedRecord({ permissionScopes, provider, connectionId, operation, grantScope: normalizedRecord(input.grantScope) })
+    : normalizedRecord({
+        permissionScopes,
+        provider,
+        connectionId,
+        operation,
+        resource,
+        ...(resourceVersion ? { resourceVersion } : {}),
+        ...(targetFingerprint ? { targetFingerprint } : {})
+      });
   return {
     actionFamily: actionFamily || "tool",
-    scope: normalizedRecord({ permissionScopes, provider, connectionId, operation, resource }),
+    scope,
     target: normalizedRecord({
       title,
       provider,
@@ -55,6 +67,7 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
       resource,
       ...(resourceVersion ? { resourceVersion } : {}),
       ...(targetFingerprint ? { targetFingerprint } : {}),
+      ...(input.grantScope ? { grantScope: normalizedRecord(input.grantScope) } : {}),
       ...(input.target ?? {}),
       ...(input.kind ? { kind } : {})
     }),

@@ -2,6 +2,7 @@ import {
   type ActionReceiptContext,
   type ActionReceiptDecision,
   type OpenTagApprovalPromptPresentation,
+  renderApprovalRunScope,
   type OpenTagActionReceiptPresentation,
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
@@ -123,13 +124,14 @@ export function renderSlackApprovalPrompt(presentation: OpenTagApprovalPromptPre
   const target = [presentation.target.provider, presentation.target.connectionId, presentation.target.operation, presentation.target.resource, presentation.target.resourceVersion]
     .filter((value) => value !== undefined)
     .join(" / ");
-  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nTarget: ${markdownToSlackMrkdwn(target)}\nChoose Allow once, Allow for run, or Deny.`;
+  const runScope = renderApprovalRunScope(presentation.runScope);
+  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nTarget: ${markdownToSlackMrkdwn(target)}\nRun scope: ${markdownToSlackMrkdwn(runScope)}\nAllow for run applies only to the Run scope shown above. Choose Allow once, Allow for run, or Deny.`;
 }
 
 export function createSlackApprovalPromptBlocks(presentation: OpenTagApprovalPromptPresentation): SlackBlock[] {
   const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
   return [
-    slackSection(renderSlackApprovalPrompt(presentation).split("\nChoose Allow once")[0]!),
+    slackSection(renderSlackApprovalPrompt(presentation).split(" Choose Allow once")[0]!),
     {
       type: "actions",
       block_id: `opentag_permission_${presentation.actionId}`,

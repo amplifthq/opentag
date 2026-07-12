@@ -68,7 +68,7 @@ const app = acp
       update: {
         sessionUpdate: "tool_call",
         toolCallId: "tool-1",
-        title: "Write ACP output",
+        title: process.env.OPENTAG_ACP_TEST_TOOL_TITLE ?? "Write ACP output",
         kind: "edit",
         status: "in_progress"
       }
@@ -79,7 +79,7 @@ const app = acp
         sessionId: ctx.params.sessionId,
         toolCall: {
           toolCallId: "material-1",
-          title: "Publish report",
+          title: process.env.OPENTAG_ACP_TEST_PERMISSION_TITLE ?? "Publish report",
           kind: "execute",
           status: "pending",
           rawInput: {
@@ -87,6 +87,9 @@ const app = acp
             connectionId: process.env.OPENTAG_ACP_TEST_CONNECTION ?? "npm:team",
             package: process.env.OPENTAG_ACP_TEST_RESOURCE ?? "@acme/report",
             tag: process.env.OPENTAG_ACP_TEST_VERSION ?? "next",
+            ...(process.env.OPENTAG_ACP_TEST_ENVIRONMENT ? { environment: process.env.OPENTAG_ACP_TEST_ENVIRONMENT } : {}),
+            ...(process.env.OPENTAG_ACP_TEST_FORCE ? { force: process.env.OPENTAG_ACP_TEST_FORCE === "true" } : {}),
+            ...(process.env.OPENTAG_ACP_TEST_VISIBILITY ? { visibility: process.env.OPENTAG_ACP_TEST_VISIBILITY } : {}),
             authorization: `Bearer ${process.env.OPENTAG_ACP_TEST_SECRET ?? "fixture-secret-token"}`
           }
         },

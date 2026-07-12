@@ -55,6 +55,7 @@ export const OpenTagApprovalPromptPresentationSchema = z
       resource: z.string().min(1),
       resourceVersion: z.string().min(1).optional()
     }).strict(),
+    runScope: z.record(z.unknown()),
     decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
   })
   .strict();
@@ -482,6 +483,7 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     return [
       presentation.title,
       presentation.summary,
+      `Run scope: ${renderApprovalRunScope(presentation.runScope)}`,
       `Decisions: ${presentation.decisions.join(", ")}`,
       `Approval: ${presentation.approvalId}`,
       `Run: ${presentation.runId}`
@@ -555,4 +557,22 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
       : []),
     ...(presentation.auditRunId ? [`Audit: opentag status --run ${presentation.auditRunId}`] : [])
   ].join("\n");
+}
+
+function stablePresentationJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stablePresentationJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stablePresentationJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function renderApprovalRunScope(scope: Record<string, unknown>): string {
+  return Object.entries(scope)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${stablePresentationJson(value)}`)
+    .join(", ");
 }

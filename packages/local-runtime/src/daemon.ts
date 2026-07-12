@@ -391,6 +391,7 @@ export async function runOneDaemonIteration(input: {
     throw error;
   }
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
+  let heartbeatInFlight: Promise<void> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let cancellationDetected = false;
   let cancelPromise: Promise<void> | undefined;
@@ -406,9 +407,15 @@ export async function runOneDaemonIteration(input: {
   }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
-      void input.client.heartbeat(runId, lease).catch(requestExecutorCancel);
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = input.client.heartbeat(runId, lease)
+        .catch(requestExecutorCancel)
+        .finally(() => {
+          heartbeatInFlight = undefined;
+        });
     }, heartbeatIntervalMs);
   }
+  const trustedReceiptsByActionId = new Map<string, Promise<MaterialActionReceipt | null>>();
 
   const executorRunPromise: Promise<ExecutorRunOutcome> = activeExecutor
     .run(
@@ -430,6 +437,7 @@ export async function runOneDaemonIteration(input: {
             ...(request.resource ? { resource: request.resource } : {}),
             ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
             ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
+            ...(request.grantScope ? { grantScope: request.grantScope } : {}),
             permissionScopes: request.permissionScopes,
             mode: input.approvalMode ?? "auto",
             provider: request.provider
@@ -461,7 +469,13 @@ export async function runOneDaemonIteration(input: {
           return { actionId: resolution.action.id, decision: "deny" as const };
         },
         materialActionReporter: async (report) => {
-          const trustedReceipt = await input.trustedMaterialActionReceipt?.({ runId, attemptId: lease.attemptId, report });
+          let trustedReceiptPromise = trustedReceiptsByActionId.get(report.actionId);
+          if (!trustedReceiptPromise && input.trustedMaterialActionReceipt) {
+            const createdReceiptPromise = input.trustedMaterialActionReceipt({ runId, attemptId: lease.attemptId, report });
+            trustedReceiptsByActionId.set(report.actionId, createdReceiptPromise);
+            trustedReceiptPromise = createdReceiptPromise;
+          }
+          const trustedReceipt = await trustedReceiptPromise;
           await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, trustedReceipt ?? {
             id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
             actionId: report.actionId,
@@ -519,6 +533,7 @@ export async function runOneDaemonIteration(input: {
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (heartbeatInFlight) await heartbeatInFlight;
   }
 
   if (executorOutcome.kind === "timeout") {

@@ -71,7 +71,7 @@ describe("governed material actions", () => {
       resourceVersion: "stable",
       targetFingerprint: `sha256:${"c".repeat(64)}`
     });
-    expect(first.scope).toEqual(second.scope);
+    expect(first.scope).not.toEqual(second.scope);
     expect(first.target).not.toEqual(second.target);
     expect(first.scope).not.toEqual(outside.scope);
     expect(first.target).toMatchObject({
@@ -81,6 +81,37 @@ describe("governed material actions", () => {
       resource: "@acme/report",
       resourceVersion: "next"
     });
+    const genericRunGrant = {
+      runId: "run_1",
+      capability: first.actionFamily,
+      resourceScope: first.scope,
+      constraints: { permissionDecision: "allow_run" }
+    };
+    expect(grantMatchesAction(genericRunGrant, { runId: "run_1", attemptId: "attempt_1", action: first })).toBe(true);
+    expect(grantMatchesAction(genericRunGrant, { runId: "run_1", attemptId: "attempt_1", action: second })).toBe(false);
+    const trustedFirst = normalizeMaterialActionRequest({
+      title: "Publish package",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      grantScope: { package: "@acme/report", versions: "*" }
+    });
+    const trustedSecond = normalizeMaterialActionRequest({
+      title: "Publish package",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "stable",
+      targetFingerprint: `sha256:${"b".repeat(64)}`,
+      grantScope: { package: "@acme/report", versions: "*" }
+    });
+    expect(trustedFirst.scope).toEqual(trustedSecond.scope);
     expect(JSON.stringify(first)).not.toContain("secret-value");
   });
 
@@ -120,7 +151,8 @@ describe("governed material actions", () => {
       operation: "publish",
       resource: "@acme/report",
       resourceVersion: "next",
-      targetFingerprint: `sha256:${"a".repeat(64)}`
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      grantScope: { package: "@acme/report", versions: "*" }
     });
     const boundedRunGrant = { ...runGrant, capability: scoped.actionFamily, resourceScope: scoped.scope };
     const distinctInsideScope = normalizeMaterialActionRequest({
@@ -131,7 +163,8 @@ describe("governed material actions", () => {
       operation: "publish",
       resource: "@acme/report",
       resourceVersion: "stable",
-      targetFingerprint: `sha256:${"b".repeat(64)}`
+      targetFingerprint: `sha256:${"b".repeat(64)}`,
+      grantScope: { package: "@acme/report", versions: "*" }
     });
     const outsideScope = normalizeMaterialActionRequest({
       title: "Publish other stable",
@@ -141,7 +174,8 @@ describe("governed material actions", () => {
       operation: "publish",
       resource: "@acme/other",
       resourceVersion: "stable",
-      targetFingerprint: `sha256:${"c".repeat(64)}`
+      targetFingerprint: `sha256:${"c".repeat(64)}`,
+      grantScope: { package: "@acme/other", versions: "*" }
     });
     expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: distinctInsideScope })).toBe(true);
     expect(grantMatchesAction(boundedRunGrant, { runId: "run_1", attemptId: "attempt_2", action: outsideScope })).toBe(false);

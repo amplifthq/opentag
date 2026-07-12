@@ -32,10 +32,13 @@ describe("Slack callback rendering", () => {
       title: "Allow publish?",
       summary: "Publish the package.",
       target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },
+      runScope: { provider: "npm", connectionId: "npm:team", operation: "publish", grantScope: { package: "@acme/report", versions: "*" } },
       decisions: ["allow_once", "allow_run", "deny"]
     });
     const blocks = createSlackApprovalPromptBlocks(prompt);
     expect(JSON.stringify(blocks)).toContain("npm / npm:team / publish / @acme/report / next");
+    expect(JSON.stringify(blocks)).toContain('grantScope={\\"package\\":\\"@acme/report\\",\\"versions\\":\\"*\\"}');
+    expect(JSON.stringify(blocks)).toContain("Allow for run applies only to the Run scope shown above");
     const actions = blocks.find((block) => block.type === "actions");
     expect(actions).toMatchObject({
       type: "actions",

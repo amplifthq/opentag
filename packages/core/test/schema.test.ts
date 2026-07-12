@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ActionPermissionRequestSchema,
   ApprovalDecisionSchema,
   ApplyPlanSchema,
   CapabilityContractSchema,
@@ -14,6 +15,22 @@ import {
   SuggestedChangesSnapshotSchema,
   WorkThreadSchema
 } from "../src/schema.js";
+
+describe("ActionPermissionRequestSchema", () => {
+  it("rejects credential-like titles before they enter durable action storage", () => {
+    const base = {
+      toolCallId: "tool_1",
+      title: "Publish package",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    expect(ActionPermissionRequestSchema.parse(base)).toMatchObject({ title: "Publish package" });
+    expect(() => ActionPermissionRequestSchema.parse({ ...base, title: "Publish with token=fixture-secret" })).toThrow(/credential-like/u);
+  });
+});
 
 describe("OpenTagEventSchema", () => {
   it("accepts a valid GitHub event", () => {

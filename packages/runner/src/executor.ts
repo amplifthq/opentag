@@ -35,6 +35,7 @@ export type ExecutorPermissionRequest = {
   resource?: string;
   resourceVersion?: string;
   targetFingerprint?: string;
+  grantScope?: Record<string, unknown>;
   permissionScopes: string[];
 };
 

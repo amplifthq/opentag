@@ -23,11 +23,13 @@ describe("OpenTagPresentation", () => {
       title: "Deploy the verified build?",
       summary: "This will update the production service.",
       target: { provider: "deploy", connectionId: "deploy:prod", operation: "update", resource: "service:web", resourceVersion: "build-42" },
+      runScope: { provider: "deploy", connectionId: "deploy:prod", operation: "update", grantScope: { environment: "production", services: "*" } },
       decisions: ["allow_once", "allow_run", "deny"]
     });
 
     expect(OpenTagPresentationSchema.parse(presentation)).toEqual(presentation);
     expect(renderOpenTagPresentationPlainText(presentation)).toContain("Deploy the verified build?");
+    expect(renderOpenTagPresentationPlainText(presentation)).toContain('grantScope={"environment":"production","services":"*"}');
   });
 
   it("creates a provider-neutral final summary presentation", () => {

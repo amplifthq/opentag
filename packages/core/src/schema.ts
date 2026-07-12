@@ -204,6 +204,11 @@ export const GrantSchema = z
 export const ApprovalModeSchema = z.enum(["ask", "auto", "autonomous"]);
 export const PermissionDecisionKindSchema = z.enum(["allow_once", "allow_run", "deny"]);
 export const ActionRiskTierSchema = z.enum(["low", "medium", "high", "critical"]);
+const CredentialSafeActionTitleSchema = z.string().min(1).max(240)
+  .regex(/^[^\u0000-\u001f\u007f]+$/u)
+  .refine((value) => !/(?:authorization|authentication|bearer|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key)/iu.test(value), {
+    message: "Action title must not contain credential-like data."
+  });
 
 export const NormalizedMaterialActionSchema = z
   .object({
@@ -259,13 +264,14 @@ export const ActionSchema = z
 export const ActionPermissionRequestSchema = z
   .object({
     toolCallId: z.string().min(1),
-    title: z.string().min(1),
+    title: CredentialSafeActionTitleSchema,
     kind: z.string().min(1).nullable().optional(),
     connectionId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).default("acp:agent-managed"),
     operation: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/u).default("tool"),
     resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
     resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).optional(),
     targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    grantScope: z.record(z.unknown()).optional(),
     permissionScopes: z.array(z.string().min(1)).default([]),
     mode: ApprovalModeSchema.default("auto"),
     provider: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/u).default("acp")

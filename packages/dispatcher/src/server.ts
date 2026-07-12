@@ -4562,6 +4562,7 @@ export function createDispatcherApp(input: {
             resource: resolution.action.target["resource"],
             ...(typeof resolution.action.target["resourceVersion"] === "string" ? { resourceVersion: resolution.action.target["resourceVersion"] } : {})
           },
+          runScope: resolution.action.scope,
           decisions: ["allow_once", "allow_run", "deny"]
         });
         const rendered = presentation.render({

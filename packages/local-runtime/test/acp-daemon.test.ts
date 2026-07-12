@@ -134,8 +134,33 @@ describe("ACP daemon workspaces", () => {
     let approvedRequest: Parameters<DaemonClient["requestActionPermission"]>[2] | undefined;
     let approvedAction: Awaited<ReturnType<DaemonClient["requestActionPermission"]>>["action"] | undefined;
     let duplicateResolution: Awaited<ReturnType<DaemonClient["requestActionPermission"]>> | undefined;
+    let heartbeatCalls = 0;
+    const heartbeatErrors: string[] = [];
+    const progressErrors: string[] = [];
+    let completeCalls = 0;
     const client: DaemonClient = {
       ...realClient,
+      heartbeat: async (runId, lease) => {
+        heartbeatCalls += 1;
+        try {
+          return await realClient.heartbeat(runId, lease);
+        } catch (error) {
+          heartbeatErrors.push(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
+      complete: async (runId, lease, result) => {
+        completeCalls += 1;
+        return realClient.complete(runId, lease, result);
+      },
+      progress: async (runId, lease, progress) => {
+        try {
+          return await realClient.progress(runId, lease, progress);
+        } catch (error) {
+          progressErrors.push(error instanceof Error ? error.message : String(error));
+          throw error;
+        }
+      },
       requestActionPermission: async (runId, lease, request) => {
         approvedRequest = request;
         const resolution = await realClient.requestActionPermission(runId, lease, request);
@@ -189,6 +214,10 @@ describe("ACP daemon workspaces", () => {
       heartbeatIntervalMs: 50,
       trustedMaterialActionReceipt: async ({ report }) => {
         providerMutations += 1;
+        await Promise.all([
+          new Promise((resolve) => setTimeout(resolve, 1_100)),
+          ...Array.from({ length: 24 }, () => admin.getRun({ runId: "run_acp" }))
+        ]);
         return {
           id: "receipt_e2e_npm",
           actionId: report.actionId,
@@ -205,6 +234,13 @@ describe("ACP daemon workspaces", () => {
     });
 
     expect(providerMutations).toBe(1);
+    expect(heartbeatCalls).toBeGreaterThan(0);
+    expect(heartbeatErrors).toEqual([]);
+    expect(progressErrors).toEqual([]);
+    expect(completeCalls).toBe(1);
+    const stoppedHeartbeatCount = heartbeatCalls;
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    expect(heartbeatCalls).toBe(stoppedHeartbeatCount);
     expect(duplicateResolution).toMatchObject({ state: "reconciled", decision: "deny", receipt: { id: "receipt_e2e_npm", outcome: "succeeded" } });
     await expect(admin.getRun({ runId: "run_acp" })).resolves.toMatchObject({ run: { status: "succeeded" } });
     const { events } = await admin.listRunEvents({ runId: "run_acp" });
