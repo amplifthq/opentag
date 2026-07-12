@@ -1,5 +1,11 @@
 # OpenTag Integration Taxonomy
 
+> **Direction note:** The role-based taxonomy and `opentag.integration.v1`
+> manifest remain the intended discovery model. The executor examples below
+> describe the current prototype; the accepted target uses standard ACP v1 with
+> a separate `stdio` binding and adds the Channel role defined in
+> [ACP-First Agent Runtime and Channel Integration](./acp-first-agent-runtime-design.md).
+
 OpenTag integrations are role-based, not vendor-based. A vendor integration can
 implement one or more roles and expose one or more resource domains. This keeps
 new platform work bounded: each adapter implements the boundary it owns instead

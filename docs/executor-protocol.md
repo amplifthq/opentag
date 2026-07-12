@@ -1,5 +1,11 @@
 # OpenTag Executor Protocol
 
+> **Status:** Superseded target direction. This document describes the current
+> custom-protocol prototype while it remains in the repository. The accepted
+> replacement is standard ACP v1, defined in
+> [ACP-First Agent Runtime and Channel Integration](./acp-first-agent-runtime-design.md).
+> No long-lived compatibility layer is planned for `opentag.executor.v1`.
+
 `opentag.executor.v1` is the first role protocol for replacing one-off executor
 adapters with one governed run contract. New executors are declared through an
 `opentag.integration.v1` manifest, then the executor role uses this runtime
