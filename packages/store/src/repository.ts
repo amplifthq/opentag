@@ -1057,7 +1057,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     return row?.runnerId ?? null;
   }
 
-  async function appendRunEvent(input: {
+  function runEventValues(input: {
     runId: string;
     type: string;
     payload: unknown;
@@ -1065,8 +1065,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     visibility?: RunEventVisibility;
     importance?: RunEventImportance;
     message?: string;
-  }): Promise<void> {
-    await db.insert(runEvents).values({
+  }): typeof runEvents.$inferInsert {
+    return {
       runId: input.runId,
       type: input.type,
       visibility: input.visibility ?? defaultRunEventMetadata(input.type).visibility,
@@ -1074,7 +1074,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       message: input.message ?? null,
       payloadJson: JSON.stringify(input.payload),
       createdAt: input.createdAt ?? nowIso()
-    });
+    };
+  }
+
+  async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
+    await db.insert(runEvents).values(runEventValues(input));
   }
 
   async function recordCreateRunReplay(input: {
@@ -2089,7 +2093,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
       const now = new Date();
       const runnerHeartbeatAt = nowIso();
-      await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
       const activeRows = await db
         .select()
         .from(runs)
@@ -2126,21 +2129,25 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             })
             .where(eq(runs.id, current.id))
             .run();
+          tx.insert(runEvents)
+            .values(
+              runEventValues({
+                runId: current.id,
+                type: "run.lease_expired",
+                payload: {
+                  previousRunnerId: current.assignedRunnerId,
+                  previousAttemptId: current.currentAttemptId,
+                  previousLeaseExpiresAt: current.leaseExpiresAt
+                },
+                visibility: "audit",
+                importance: "normal",
+                createdAt: updatedAt
+              })
+            )
+            .run();
           return true;
         });
         if (!interrupted) continue;
-        await appendRunEvent({
-          runId: activeRow.id,
-          type: "run.lease_expired",
-          payload: {
-            previousRunnerId: activeRow.assignedRunnerId,
-            previousAttemptId: activeRow.currentAttemptId,
-            previousLeaseExpiresAt: activeRow.leaseExpiresAt
-          },
-          visibility: "audit",
-          importance: "normal",
-          createdAt: updatedAt
-        });
       }
 
       const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
@@ -2163,7 +2170,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           .get();
         return Boolean(binding);
       });
-      if (!row) return null;
+      if (!row) {
+        await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
+        return null;
+      }
 
       const updatedAt = nowIso();
       const leasedAt = updatedAt;
@@ -2208,17 +2218,22 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             updatedAt
           })
           .run();
+        tx.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId)).run();
+        tx.insert(runEvents)
+          .values(
+            runEventValues({
+              runId: row.id,
+              type: "run.claimed",
+              payload: { runnerId: input.runnerId, attemptId, attemptNumber: number, leasedAt, leaseExpiresAt },
+              visibility: "audit",
+              importance: "normal",
+              createdAt: updatedAt
+            })
+          )
+          .run();
         return number;
       });
       if (attemptNumber === null) return null;
-      await appendRunEvent({
-        runId: row.id,
-        type: "run.claimed",
-        payload: { runnerId: input.runnerId, attemptId, attemptNumber, leasedAt, leaseExpiresAt },
-        visibility: "audit",
-        importance: "normal",
-        createdAt: updatedAt
-      });
 
       return {
         run: {
@@ -2534,6 +2549,66 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 : result.conclusion === "needs_human"
                   ? "needs_human"
                   : "failed";
+      const parsedSnapshots = (result.suggestedChanges ?? []).map((snapshot) =>
+        SuggestedChangesSnapshotSchema.parse({
+          ...snapshot,
+          sourceRunId: snapshot.sourceRunId ?? input.runId,
+          ...(snapshot.workThread || !runThread ? {} : { workThread: runThread })
+        })
+      );
+      const completionEvents: Array<typeof runEvents.$inferInsert> = [
+        ...parsedSnapshots.map((snapshot) =>
+          runEventValues({
+            runId: input.runId,
+            type: "proposal.snapshot.created",
+            payload: snapshot,
+            visibility: "audit",
+            importance: "high",
+            message: snapshot.summary,
+            createdAt: updatedAt
+          })
+        ),
+        ...(result.artifacts ?? []).map((artifact) =>
+          runEventValues({
+            runId: input.runId,
+            type: "artifact.created",
+            payload: artifact,
+            visibility: "audit",
+            importance: "normal",
+            message: artifact.summary ?? artifact.title,
+            createdAt: updatedAt
+          })
+        ),
+        runEventValues({
+          runId: input.runId,
+          type: "run.completed",
+          payload: {
+            ...result,
+            ...(attemptId ? { attemptId } : {}),
+            ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+          },
+          visibility: "audit",
+          importance: "high",
+          message: result.summary,
+          createdAt: updatedAt
+        }),
+        ...((result.suggestedChanges?.length ?? 0) > 0 || (result.artifacts?.length ?? 0) > 0
+          ? [
+              runEventValues({
+                runId: input.runId,
+                type: "success_metric.observed",
+                payload: {
+                  metric: "time_to_first_useful_artifact",
+                  artifactCount: result.artifacts?.length ?? 0,
+                  suggestedChangesCount: result.suggestedChanges?.length ?? 0
+                },
+                visibility: "audit",
+                importance: "normal",
+                createdAt: updatedAt
+              })
+            ]
+          : [])
+      ];
       const completionOutcome = db.transaction((tx) => {
         const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         if (!currentRun) return input.runnerId ? ("not_found" as const) : ("not_found" as const);
@@ -2582,79 +2657,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             .where(eq(attempts.id, attemptId))
             .run();
         }
+        for (const snapshot of parsedSnapshots) {
+          tx.insert(suggestedChanges)
+            .values({
+              proposalId: snapshot.proposalId,
+              runId: input.runId,
+              snapshotJson: JSON.stringify(snapshot),
+              createdAt: snapshot.createdAt
+            })
+            .onConflictDoUpdate({
+              target: suggestedChanges.proposalId,
+              set: {
+                runId: input.runId,
+                snapshotJson: JSON.stringify(snapshot),
+                createdAt: snapshot.createdAt
+              }
+            })
+            .run();
+        }
+        for (const event of completionEvents) {
+          tx.insert(runEvents).values(event).run();
+        }
         return "completed" as const;
       });
       if (completionOutcome !== "completed") return completionOutcome;
-      for (const snapshot of result.suggestedChanges ?? []) {
-        const parsedSnapshot = SuggestedChangesSnapshotSchema.parse({
-          ...snapshot,
-          sourceRunId: snapshot.sourceRunId ?? input.runId,
-          ...(snapshot.workThread || !runThread ? {} : { workThread: runThread })
-        });
-        await db
-          .insert(suggestedChanges)
-          .values({
-            proposalId: parsedSnapshot.proposalId,
-            runId: input.runId,
-            snapshotJson: JSON.stringify(parsedSnapshot),
-            createdAt: parsedSnapshot.createdAt
-          })
-          .onConflictDoUpdate({
-            target: suggestedChanges.proposalId,
-            set: {
-              runId: input.runId,
-              snapshotJson: JSON.stringify(parsedSnapshot),
-              createdAt: parsedSnapshot.createdAt
-            }
-          });
-        await appendRunEvent({
-          runId: input.runId,
-          type: "proposal.snapshot.created",
-          payload: parsedSnapshot,
-          visibility: "audit",
-          importance: "high",
-          message: parsedSnapshot.summary,
-          createdAt: updatedAt
-        });
-      }
-      for (const artifact of result.artifacts ?? []) {
-        await appendRunEvent({
-          runId: input.runId,
-          type: "artifact.created",
-          payload: artifact,
-          visibility: "audit",
-          importance: "normal",
-          message: artifact.summary ?? artifact.title,
-          createdAt: updatedAt
-        });
-      }
-      await appendRunEvent({
-        runId: input.runId,
-        type: "run.completed",
-        payload: {
-          ...result,
-          ...(attemptId ? { attemptId } : {}),
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
-        },
-        visibility: "audit",
-        importance: "high",
-        message: result.summary,
-        createdAt: updatedAt
-      });
-      if ((result.suggestedChanges?.length ?? 0) > 0 || (result.artifacts?.length ?? 0) > 0) {
-        await appendRunEvent({
-          runId: input.runId,
-          type: "success_metric.observed",
-          payload: {
-            metric: "time_to_first_useful_artifact",
-            artifactCount: result.artifacts?.length ?? 0,
-            suggestedChangesCount: result.suggestedChanges?.length ?? 0
-          },
-          visibility: "audit",
-          importance: "normal",
-          createdAt: updatedAt
-        });
-      }
       return "completed";
     },
 

@@ -689,6 +689,100 @@ describe("OpenTag repository", () => {
     expect(JSON.stringify(events)).not.toContain(second!.fencingToken);
   });
 
+  it("rolls back run assignment and attempt creation when the claimed event cannot be persisted", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_claim_atomic", event: larkEvent({ id: "evt_claim_atomic", sourceEventId: "message_claim_atomic" }) });
+    sqlite.exec(`
+      CREATE TEMP TRIGGER fail_run_claimed
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.claimed'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected run.claimed failure');
+      END;
+    `);
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).rejects.toThrow("injected run.claimed failure");
+    await expect(repo.getRun({ runId: "run_claim_atomic" })).resolves.toMatchObject({ run: { status: "queued" } });
+    await expect(repo.listAttempts({ runId: "run_claim_atomic" })).resolves.toEqual([]);
+    expect((await repo.listRunEvents({ runId: "run_claim_atomic" })).filter((event) => event.type === "run.claimed")).toHaveLength(0);
+
+    sqlite.exec("DROP TRIGGER fail_run_claimed");
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_claim_atomic", status: "assigned" },
+      attemptNumber: 1
+    });
+  });
+
+  it("rolls back terminal state and completion materialization when an event insert aborts", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_complete_atomic", event: larkEvent({ id: "evt_complete_atomic", sourceEventId: "message_complete_atomic" }) });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const completion = {
+      runId: "run_complete_atomic",
+      runnerId: "runner_1",
+      attemptId: claimed!.attemptId,
+      fencingToken: claimed!.fencingToken,
+      result: {
+        conclusion: "success" as const,
+        summary: "Prepared an atomic proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_complete_atomic",
+            createdAt: "2026-07-12T00:00:00.000Z",
+            summary: "Add the bug label.",
+            intents: [
+              {
+                intentId: "intent_complete_atomic",
+                domain: "labels",
+                action: "add_label",
+                summary: "Add the bug label.",
+                params: { label: "bug" }
+              }
+            ]
+          }
+        ]
+      }
+    };
+    sqlite.exec(`
+      CREATE TEMP TRIGGER fail_completion_materialization
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'proposal.snapshot.created'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected completion materialization failure');
+      END;
+    `);
+
+    await expect(repo.completeRun(completion)).rejects.toThrow("injected completion materialization failure");
+    await expect(repo.getRun({ runId: "run_complete_atomic" })).resolves.toMatchObject({ run: { status: "assigned" } });
+    await expect(repo.listAttempts({ runId: "run_complete_atomic" })).resolves.toMatchObject([
+      { id: claimed!.attemptId, status: "assigned" }
+    ]);
+    await expect(repo.getSuggestedChanges({ proposalId: "proposal_complete_atomic" })).resolves.toBeNull();
+    expect(
+      (await repo.listRunEvents({ runId: "run_complete_atomic" })).filter((event) =>
+        ["proposal.snapshot.created", "artifact.created", "run.completed", "success_metric.observed"].includes(event.type)
+      )
+    ).toHaveLength(0);
+
+    sqlite.exec("DROP TRIGGER fail_completion_materialization");
+    await expect(repo.completeRun(completion)).resolves.toBe("completed");
+    await expect(repo.getSuggestedChanges({ proposalId: "proposal_complete_atomic" })).resolves.toMatchObject({
+      runId: "run_complete_atomic"
+    });
+  });
+
   it("treats duplicate completion from the same active attempt as idempotent", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);

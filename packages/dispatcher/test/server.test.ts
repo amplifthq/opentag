@@ -5232,6 +5232,10 @@ describe("dispatcher API", () => {
     expect(second.attemptNumber).toBe(2);
 
     const stale = { attemptId: first.attemptId, fencingToken: first.fencingToken };
+    const staleRunning = await app.request(
+      "/v1/runners/runner_1/runs/run_http_fenced/running",
+      jsonRequest({ ...stale, executor: "late-executor" })
+    );
     const staleHeartbeat = await app.request(
       "/v1/runners/runner_1/runs/run_http_fenced/heartbeat",
       jsonRequest(stale)
@@ -5244,10 +5248,16 @@ describe("dispatcher API", () => {
       "/v1/runners/runner_1/runs/run_http_fenced/complete",
       jsonRequest({ ...stale, result: { conclusion: "success", summary: "late completion" } })
     );
-    for (const response of [staleHeartbeat, staleProgress, staleComplete]) {
+    for (const response of [staleRunning, staleHeartbeat, staleProgress, staleComplete]) {
       expect(response.status).toBe(409);
       await expect(response.json()).resolves.toEqual({ error: "stale_attempt" });
     }
+
+    const beforeActiveRunning = await app.request("/v1/runs/run_http_fenced");
+    await expect(beforeActiveRunning.json()).resolves.toMatchObject({ run: { status: "assigned" } });
+    const beforeActiveEvents = await app.request("/v1/runs/run_http_fenced/events");
+    const beforeActiveEventBody = (await beforeActiveEvents.json()) as { events: Array<{ type: string }> };
+    expect(beforeActiveEventBody.events.filter((event) => event.type === "run.running")).toHaveLength(0);
 
     const active = { attemptId: second.attemptId, fencingToken: second.fencingToken };
     expect(
