@@ -42,12 +42,11 @@ describe("opentag.channel.v1", () => {
 
   it.each([
     {
-      kind: "run_card",
+      kind: "run_status",
       runId: "run-1",
       state: "running",
-      title: "Investigate incident",
-      summary: "Checking recent deployment changes.",
-      detailLevel: "balanced"
+      message: "Checking recent deployment changes.",
+      detailVisibility: "source_thread"
     },
     {
       kind: "approval_prompt",
@@ -60,25 +59,38 @@ describe("opentag.channel.v1", () => {
     },
     {
       kind: "action_receipt",
-      runId: "run-1",
-      actionId: "action-1",
-      state: "succeeded",
-      summary: "Deployment completed.",
-      receiptRef: "receipt-77"
+      title: "Deployment completed",
+      actions: [
+        {
+          index: 1,
+          title: "Deploy the verified build",
+          state: "ready_to_apply",
+          targetLabel: "production service",
+          visibleDecisions: ["apply", "reject"],
+          primaryDecision: "apply"
+        }
+      ],
+      auditRunId: "run-1"
     },
     {
       kind: "final_summary",
-      runId: "run-1",
-      conclusion: "completed",
+      outcome: "success",
       summary: "Incident mitigated.",
-      artifacts: [{ id: "artifact-1", title: "Incident report", uri: "opentag://artifact-1" }]
+      artifacts: [{ kind: "report", title: "Incident report", uri: "opentag://artifact-1" }],
+      verification: [{ command: "verify-incident", outcome: "passed" }],
+      result: {
+        conclusion: "success",
+        summary: "Incident mitigated.",
+        artifacts: [{ kind: "report", title: "Incident report", uri: "opentag://artifact-1" }],
+        verification: [{ command: "verify-incident", outcome: "passed" }]
+      }
     }
   ] as const)("parses a $kind outbound presentation command", (presentation) => {
     const command = OpenTagChannelPresentationCommandSchema.parse({
       protocol: "opentag.channel.v1",
       commandId: `command-${presentation.kind}`,
       replyTarget,
-      operation: presentation.kind === "run_card" ? "update" : "reply",
+      operation: presentation.kind === "run_status" ? "update" : "reply",
       presentation
     });
 
@@ -86,21 +98,21 @@ describe("opentag.channel.v1", () => {
     expect(command.replyTarget.channel.provider).toBe("chat");
   });
 
-  it("rejects provider-specific payloads from the core presentation contract", () => {
-    expect(() =>
-      OpenTagChannelPresentationCommandSchema.parse({
-        protocol: "opentag.channel.v1",
-        commandId: "command-1",
-        replyTarget,
-        operation: "update",
-        presentation: {
-          kind: "run_card",
-          runId: "run-1",
-          state: "running",
-          title: "Working",
-          slackBlocks: []
-        }
-      })
-    ).toThrow();
+  it("does not carry provider-specific payloads into the normalized command", () => {
+    const command = OpenTagChannelPresentationCommandSchema.parse({
+      protocol: "opentag.channel.v1",
+      commandId: "command-1",
+      replyTarget,
+      operation: "update",
+      presentation: {
+        kind: "run_status",
+        runId: "run-1",
+        state: "running",
+        message: "Working",
+        slackBlocks: []
+      }
+    });
+
+    expect(command.presentation).not.toHaveProperty("slackBlocks");
   });
 });

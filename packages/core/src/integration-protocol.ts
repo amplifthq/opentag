@@ -9,8 +9,11 @@ export const OpenTagChannelProtocolSchema = z.literal("opentag.channel.v1");
 export const OpenTagStdioBindingKindSchema = z.literal("stdio");
 
 function isExecutableNameOrAbsolutePath(command: string): boolean {
-  if (!command.includes("/") && !command.includes("\\")) return true;
-  return command.startsWith("/") || /^[A-Za-z]:[\\/]/u.test(command);
+  const segments = command.split(/[\\/]/u);
+  if (segments.some((segment) => segment === "." || segment === "..")) return false;
+  if (!command.includes("/") && !command.includes("\\")) return !command.includes(":");
+  if (command.startsWith("/")) return command.length > 1;
+  return /^[A-Za-z]:[\\/].+/u.test(command);
 }
 
 export const OpenTagStdioBindingSchema = z

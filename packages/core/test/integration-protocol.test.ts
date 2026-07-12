@@ -99,19 +99,22 @@ describe("OpenTag integration manifest", () => {
     ).toThrow("missing binding");
   });
 
-  it.each(["", "   ", "./hermes", "bin/hermes", "../hermes"])("rejects a blank or relative command: %j", (command) => {
-    const manifest = acpManifest();
+  it.each(["", "   ", ".", "..", "./hermes", "bin/hermes", "../hermes", "C:agent"])(
+    "rejects a blank or relative command: %j",
+    (command) => {
+      const manifest = acpManifest();
 
-    expect(() =>
-      OpenTagIntegrationManifestSchema.parse({
-        ...manifest,
-        bindings: {
-          ...manifest.bindings,
-          hermesAcp: { ...manifest.bindings.hermesAcp, command }
-        }
-      })
-    ).toThrow();
-  });
+      expect(() =>
+        OpenTagIntegrationManifestSchema.parse({
+          ...manifest,
+          bindings: {
+            ...manifest.bindings,
+            hermesAcp: { ...manifest.bindings.hermesAcp, command }
+          }
+        })
+      ).toThrow();
+    }
+  );
 
   it("rejects the unshipped legacy executor role and protocol", () => {
     const manifest = acpManifest();

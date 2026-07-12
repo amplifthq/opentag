@@ -5,11 +5,27 @@ import {
   createFinalSummaryPresentation,
   createRunStatusPresentation,
   createSourceThreadStatusPresentation,
+  OpenTagApprovalPromptPresentationSchema,
   OpenTagPresentationSchema,
   renderOpenTagPresentationPlainText
 } from "../src/presentation.js";
 
 describe("OpenTagPresentation", () => {
+  it("models a provider-neutral approval prompt", () => {
+    const presentation = OpenTagApprovalPromptPresentationSchema.parse({
+      kind: "approval_prompt",
+      runId: "run_approval_1",
+      approvalId: "approval_1",
+      proposalHash: "sha256:abc123",
+      title: "Deploy the verified build?",
+      summary: "This will update the production service.",
+      decisions: ["allow_once", "allow_run", "deny"]
+    });
+
+    expect(OpenTagPresentationSchema.parse(presentation)).toEqual(presentation);
+    expect(renderOpenTagPresentationPlainText(presentation)).toContain("Deploy the verified build?");
+  });
+
   it("creates a provider-neutral final summary presentation", () => {
     const presentation = createFinalSummaryPresentation({
       result: {

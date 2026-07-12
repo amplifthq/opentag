@@ -37,6 +37,18 @@ export const OpenTagRunStatusPresentationSchema = z.object({
   detailVisibility: z.enum(["source_thread", "audit"]).optional()
 });
 
+export const OpenTagApprovalPromptPresentationSchema = z
+  .object({
+    kind: z.literal("approval_prompt"),
+    runId: z.string().min(1),
+    approvalId: z.string().min(1),
+    proposalHash: z.string().min(1),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
+  })
+  .strict();
+
 export const OpenTagDoctorCheckPresentationSchema = z.object({
   status: z.enum(["ok", "warn", "fail", "unknown"]),
   name: z.string().min(1),
@@ -99,6 +111,7 @@ export const OpenTagFinalSummaryPresentationSchema = z.object({
 
 export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
   OpenTagRunStatusPresentationSchema,
+  OpenTagApprovalPromptPresentationSchema,
   OpenTagDoctorSummaryPresentationSchema,
   OpenTagSourceThreadStatusPresentationSchema,
   OpenTagActionReceiptPresentationSchema,
@@ -107,6 +120,7 @@ export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
 
 export type OpenTagPresentationAction = z.infer<typeof OpenTagPresentationActionSchema>;
 export type OpenTagRunStatusPresentation = z.infer<typeof OpenTagRunStatusPresentationSchema>;
+export type OpenTagApprovalPromptPresentation = z.infer<typeof OpenTagApprovalPromptPresentationSchema>;
 export type OpenTagDoctorCheckPresentation = z.infer<typeof OpenTagDoctorCheckPresentationSchema>;
 export type OpenTagDoctorSummaryPresentation = z.infer<typeof OpenTagDoctorSummaryPresentationSchema>;
 export type OpenTagSourceThreadStatusRun = z.infer<typeof OpenTagSourceThreadStatusRunSchema>;
@@ -452,6 +466,15 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
       `Run ${presentation.runId}: ${presentation.state}`,
       ...(presentation.message ? [`Message: ${presentation.message}`] : []),
       ...(presentation.nextAction ? [`Next action: ${presentation.nextAction}`] : [])
+    ].join("\n");
+  }
+  if (presentation.kind === "approval_prompt") {
+    return [
+      presentation.title,
+      presentation.summary,
+      `Decisions: ${presentation.decisions.join(", ")}`,
+      `Approval: ${presentation.approvalId}`,
+      `Run: ${presentation.runId}`
     ].join("\n");
   }
   if (presentation.kind === "doctor_summary") {

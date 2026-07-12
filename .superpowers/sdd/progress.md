@@ -4,7 +4,7 @@ Plan: `docs/superpowers/plans/2026-07-12-acp-first-agent-runtime.md`
 
 | Task | Implementation | Review | Commit |
 | --- | --- | --- | --- |
-| 1. Manifest and channel protocol | complete | pending | included |
+| 1. Manifest and channel protocol | fix applied | pending re-review | separate fix commit |
 | 2. Attempts and fencing | pending | pending | pending |
 | 3. Generic ACP host | pending | pending | pending |
 | 4. Daemon and non-repo runs | pending | pending | pending |
@@ -13,4 +13,4 @@ Plan: `docs/superpowers/plans/2026-07-12-acp-first-agent-runtime.md`
 
 ## Review Notes
 
-- None yet.
+- Task 1 review requested stricter command validation and reuse of the canonical presentation seam; fixes applied, re-review pending.
