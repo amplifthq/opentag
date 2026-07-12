@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { encodeSlackThreadKey, normalizeSlackAppMention, parseSlackThreadKey, stripSlackAppMention } from "../src/normalize.js";
+import { encodeSlackThreadKey, normalizeSlackAppMention, normalizeSlackChannelMessage, parseSlackThreadKey, stripSlackAppMention } from "../src/normalize.js";
 
 describe("Slack normalization", () => {
   it("strips a Slack app mention and preserves the remaining command", () => {
@@ -83,6 +83,7 @@ describe("Slack normalization", () => {
     expect(event?.metadata).toMatchObject({ teamId: "T123", channelId: "C123", owner: "acme", repo: "demo" });
     expect(event?.metadata).toMatchObject({ repoProvider: "gitlab" });
     expect(event?.metadata).toMatchObject({ slackAppId: "A123", slackBotUserId: "U_APP" });
+    expect(event?.metadata).toMatchObject({ channelApplicationId: "A123", channelBotId: "U_APP" });
     expect(event?.metadata).toMatchObject({
       sourceDeliveryId: "Ev123",
       slackEventId: "Ev123",
@@ -92,6 +93,27 @@ describe("Slack normalization", () => {
     expect(event?.permissions.map((permission) => permission.scope)).toContain("chat:postMessage");
     expect(event?.permissions.map((permission) => permission.scope)).toContain("reactions:write");
     expect(event?.callback.uri).toBe("http://127.0.0.1:3102/github-comment");
+  });
+
+  it("normalizes native Slack ingress through opentag.channel.v1", () => {
+    const message = normalizeSlackChannelMessage({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_APP> summarize this thread",
+      ts: "1710000000.000100",
+      eventId: "EvChannel",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: { teamId: "T123", channelId: "C123" }
+    });
+    expect(message).toMatchObject({
+      protocol: "opentag.channel.v1",
+      trigger: "mention",
+      source: { channel: { provider: "slack", workspace: "T123", id: "C123" }, actor: { id: "U456" } },
+      text: "summarize this thread",
+      replyTarget: { purpose: "all" }
+    });
   });
 
   it("encodes and decodes Slack thread keys", () => {

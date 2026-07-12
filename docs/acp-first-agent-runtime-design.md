@@ -7,7 +7,7 @@
 - **Scope:** OpenTag Core, Channel adapters, ACP execution, permissions, approvals, presentation, and Worker boundaries
 - **Replaces:** The target direction of `opentag.executor.v1` and the `stdio-jsonl-basic` executor profile
 
-This document describes the target architecture. At the time of writing, parts of the repository still implement the earlier custom executor protocol. Those implementation details remain current code until the ACP migration lands, but they are no longer the intended protocol boundary.
+The first ACP runtime, governed permission path, native Slack/Lark channel normalization, and Balanced lifecycle presentation now implement this architecture. Remaining sections distinguish durable design invariants from follow-on breadth.
 
 When this document conflicts with older design material about executor runtime, Channel ownership, repository requirements, or Run/session lifecycle, this document controls the target architecture. Existing documents remain useful records of the current implementation and earlier decisions.
 
@@ -139,7 +139,7 @@ The Control Plane and Worker may run on the same machine in a simple deployment.
 
 The integration manifest remains the discovery and configuration layer. It declares which roles an integration can provide and how each role starts. It is not an event-stream protocol.
 
-Conceptual executor declaration:
+Agent declaration:
 
 ```json
 {
@@ -154,7 +154,7 @@ Conceptual executor declaration:
     }
   },
   "roles": {
-    "executor": {
+    "agent": {
       "protocol": "agent-client-protocol",
       "protocolVersion": 1,
       "binding": "hermesAcp"
@@ -183,12 +183,13 @@ interface ChannelInputEvent {
   protocol: "opentag.channel.v1";
   eventId: string;
   occurredAt: string;
-  provider: string;
-  tenantId: string;
-  channelId: string;
-  threadId?: string;
-  actorId: string;
   trigger: "mention" | "command" | "message_action" | "bound_thread_reply" | "automation";
+  source: {
+    kind: "channel_message";
+    channel: ChannelRef;
+    thread?: ThreadRef;
+    actor: ActorRef;
+  };
   text?: string;
   attachments?: ChannelAttachmentRef[];
   replyTarget: ChannelReplyTarget;
@@ -201,7 +202,6 @@ Conceptual output:
 interface ChannelPresentationCommand {
   protocol: "opentag.channel.v1";
   commandId: string;
-  provider: string;
   replyTarget: ChannelReplyTarget;
   operation: "create" | "update" | "reply";
   presentation: RunPresentation;
@@ -469,6 +469,12 @@ OpenTag does not duplicate Slack/Lark membership administration or an agent's in
 
 Exactly one adapter owns a managed Channel scope at a time.
 
+The binding pins a bounded, control-character-free provider `applicationId` and
+an optional `botId`. Native adapters copy these values only from verified event
+metadata or configured runtime identity into normalized event metadata. The
+dispatcher rejects the Run before admission when a managed identity is absent
+or different. A bot display name is never an ownership key.
+
 In managed mode, a Hermes Channel runtime forwards eligible events to OpenTag and does not execute them directly. If OpenTag is unavailable, the adapter fails closed and reports that governed execution is unavailable. It must not silently fall back to direct Hermes execution because that would bypass policy and audit.
 
 This rule applies equally to an OpenTag-native Channel adapter. Hermes-based and native adapters implement the same Channel protocol; they are drivers behind one architecture, not separate control paths.
@@ -636,7 +642,7 @@ Raw ACP session updates never go directly to Slack or Lark. OpenTag owns the Cha
 - **attention-required:** approval, missing input, blocked state, or uncertain action;
 - **terminal:** completed, completed with warnings, failed, cancelled, or unknown.
 
-Each Run has one mutable **Run Card** in its source thread. OpenTag updates that card for status changes and emits a new message only when attention is required or the Run reaches a terminal state.
+Each Run has one mutable **Run Card** in its source thread. OpenTag updates that card for meaningful status and terminal changes. A separate message is reserved for an attention-required decision or receipt that must remain independently actionable.
 
 Notification detail is independent of autonomy:
 
@@ -756,63 +762,61 @@ The managed Channel adapter cannot reach OpenTag. It reports governed execution 
 
 Success criterion: an outage cannot silently bypass policy.
 
-## Migration from the custom executor protocol
+## Removal of the custom executor protocol
 
-The current `opentag.executor.v1` and `stdio-jsonl-basic` implementation has no compatibility requirement. The migration should be a direct replacement, not a dual-protocol compatibility layer.
+The former `opentag.executor.v1` and `stdio-jsonl-basic` implementation was removed by direct replacement. No dual-protocol compatibility layer remains.
 
-The focused migration should:
+The completed replacement:
 
-1. Replace executor manifest declarations with `agent-client-protocol`, `protocolVersion: 1`, and a separate `stdio` binding.
-2. Add a Generic ACP Host based on the official SDK.
-3. Map ACP session updates into internal Attempt events rather than exposing ACP messages as Core domain events.
-4. Move execution request context into the immutable Input Snapshot, prompt, `cwd`, and optional run-scoped MCP.
-5. Remove custom executor request/event types, JSONL parser assumptions, fixtures, examples, and documentation after ACP tests pass.
-6. Preserve existing useful Core semantics such as integration references, artifact verification, append-only Run history, and source-thread callbacks.
-7. Introduce Run→Attempt explicitly so process/session lifecycle is no longer conflated with durable work lifecycle.
+1. uses `agent-client-protocol`, `protocolVersion: 1`, and a separate `stdio` binding in Agent manifests;
+2. hosts ACP through the Generic ACP Host;
+3. maps ACP session updates into internal Attempt events instead of Core domain or channel events;
+4. supplies execution context through the Input Snapshot, prompt, absolute `cwd`, and optional run-scoped MCP;
+5. removes the custom request/event types, parser assumptions, fixtures, and supported-contract documentation;
+6. preserves integration references, artifact verification, append-only Run history, and source-thread callbacks;
+7. models disposable Attempts beneath the durable Run.
 
-No adapter should implement both the custom executor protocol and ACP as a long-lived production path. A short-lived branch-local test bridge is acceptable only if it is deleted before the migration merges.
+Adapters implement ACP only; the removed custom names may appear solely in migration notes.
 
-## Suggested implementation sequence
+## Implementation mapping
 
-### Change 1: Manifest schema
+### Manifest schema
 
-- retain `opentag.integration.v1`;
-- add Channel role vocabulary;
-- replace custom executor protocol/profile declarations with ACP protocol plus stdio binding;
-- keep names, commands, arguments, and capabilities declarative.
+- `opentag.integration.v1` declares Agent and Channel roles;
+- Agent roles select ACP v1 through a named stdio binding;
+- names, commands, arguments, and resource capabilities remain declarative.
 
-### Change 2: Core lifecycle
+### Core lifecycle
 
-- add Attempt beneath Run;
-- add stable Action identity and uncertainty state;
-- add Input Snapshot and Output Contract references;
-- keep the append-only ledger authoritative.
+- Attempt is disposable beneath the durable Run;
+- material Actions have stable identity, fencing, receipts, and uncertainty;
+- the append-only ledger remains authoritative.
 
-### Change 3: Generic ACP Host
+### Generic ACP Host
 
-- implement initialize, session creation, prompt, updates, permission requests, cancellation, and termination;
-- attach absolute `cwd` and run-scoped MCP;
-- normalize ACP output into Attempt events;
-- test Hermes and a second ACP implementation.
+- initializes ACP, creates a session, prompts, handles updates and permissions,
+  cancels, and terminates;
+- attaches an absolute `cwd` and optional run-scoped MCP;
+- normalizes ACP output into Attempt events.
 
-### Change 4: Capability and action path
+### Capability and action path
 
-- define ConnectionRef, Grant, and broker interfaces;
-- implement one observable mutation end to end;
-- add proposal hashing, approval scope, receipt capture, and reconciliation.
+- ConnectionRef, Grant, proposal, and Action boundaries are structured;
+- governed mutations use proposal hashing, scoped approval, receipt capture, and
+  reconciliation.
 
-### Change 5: Channel protocol and Hermes adapter
+### Channel protocol and adapters
 
-- define normalized Input Event and Presentation Command contracts;
-- implement exclusive managed-mode ownership;
-- enforce Channel/executor process and credential isolation;
-- implement the Balanced Run Card.
+- native Slack and Lark normalize `opentag.channel.v1` independently;
+- managed ownership is exclusive to the configured application identity;
+- Channel and Agent processes and credentials remain isolated;
+- Balanced delivery uses one lifecycle Run Card and audit-only routine ACP
+  progress.
 
-### Change 6: Remove the prototype protocol
+### Removed prototype
 
-- delete `opentag.executor.v1`, `stdio-jsonl-basic`, the protocol parser, and obsolete fixtures/docs;
-- update examples and conformance tests;
-- do not preserve a dormant compatibility shim.
+- the former protocol parser, runtime contract, and obsolete fixtures are gone;
+- no dormant compatibility shim remains.
 
 ## Alternatives considered
 
@@ -876,9 +880,9 @@ These costs are intentional: they are concentrated in protocol hosts and adapter
 The implementation conforms to this design only if all of the following remain true:
 
 - OpenTag owns Run state; ACP owns only an Attempt session.
-- The executor role uses standard ACP rather than custom runtime events.
+- The Agent role uses standard ACP rather than custom runtime events.
 - Channel integration is separate from agent execution.
-- Hermes Channel and executor roles are isolated.
+- Hermes Channel and Agent roles are isolated.
 - A managed Channel fails closed.
 - Repository is optional.
 - Raw credentials do not enter Run content or prompts.

@@ -7,8 +7,10 @@ import { createSlackDoctorSummaryBlocks, createSlackPostMessagePayload, createSl
 export type SlackDispatcherEventConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
+  channelPrincipalCredential?: string;
   botToken?: string;
   callbackUri?: string;
+  appId?: string;
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -141,6 +143,7 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {}),
+    ...(config.channelPrincipalCredential ? { channelPrincipalCredential: config.channelPrincipalCredential } : {}),
     fetchImpl
   });
 
@@ -178,7 +181,10 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         conversationId: input.channelId,
         repoProvider: input.repoProvider,
         owner: input.owner,
-        repo: input.repo
+        repo: input.repo,
+        ...(config.appId
+          ? { ownership: { mode: "managed" as const, exclusive: true as const, applicationId: config.appId } }
+          : {})
       });
     },
     async submitThreadAction(action) {

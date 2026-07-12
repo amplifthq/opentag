@@ -56,6 +56,31 @@ describe("parseDaemonConfig ACP agents", () => {
 });
 
 describe("parseDaemonConfig generic channel bindings", () => {
+  it("accepts exclusive managed ownership only with bounded provider application identity", () => {
+    const config = parseDaemonConfig({
+      channelBindings: [{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+      }]
+    });
+    expect(config.channelBindings?.[0]?.ownership).toEqual({
+      mode: "managed",
+      exclusive: true,
+      applicationId: "A123",
+      botId: "U123"
+    });
+    expect(() => parseDaemonConfig({
+      channelBindings: [{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123\nforged" }
+      }]
+    })).toThrow();
+  });
+
   it("accepts a channel binding without repository fields", () => {
     const config = parseDaemonConfig({
       channelBindings: [{ provider: "slack", accountId: "T123", conversationId: "C456" }]

@@ -73,3 +73,33 @@ export function redactCredentialLikeData(value: string): string {
     .replace(/((?:authorization|authentication|cookie|credential|password|passphrase|private[ _-]?key|secret|token|api[ _-]?key|access[ _-]?key|client[ _-]?secret|refresh[ _-]?token|signature)\s*[:=]\s*)\S+/giu, "$1[redacted]")
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/giu, "$1");
 }
+
+export type CredentialSafetyOptions = {
+  /** Runtime-only opaque values, such as the active attempt fencing token. */
+  secrets?: readonly string[];
+};
+
+export function sanitizeCredentialLikeValue<T>(value: T, options: CredentialSafetyOptions = {}): T {
+  const secrets = [...new Set(options.secrets?.filter((secret) => secret.length > 0) ?? [])];
+
+  function sanitize(child: unknown): unknown {
+    if (typeof child === "string") {
+      const withoutRuntimeSecrets = secrets.reduce(
+        (safe, secret) => safe.split(secret).join("[redacted]"),
+        child
+      );
+      return redactCredentialLikeData(withoutRuntimeSecrets);
+    }
+    if (Array.isArray(child)) return child.map((entry) => sanitize(entry));
+    if (child && typeof child === "object") {
+      return Object.fromEntries(
+        Object.entries(child as Record<string, unknown>)
+          .filter(([key]) => !isCredentialFieldName(key))
+          .map(([key, entry]) => [key, sanitize(entry)])
+      );
+    }
+    return child;
+  }
+
+  return sanitize(value) as T;
+}

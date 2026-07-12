@@ -26,6 +26,15 @@ export const OpenTagChannelAttachmentRefSchema = z
   })
   .strict();
 
+export const OpenTagManagedChannelBindingOwnershipSchema = z
+  .object({
+    mode: z.literal("managed"),
+    exclusive: z.literal(true),
+    applicationId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u),
+    botId: z.string().trim().min(1).max(255).regex(/^[^\u0000-\u001f\u007f]+$/u).optional()
+  })
+  .strict();
+
 export const OpenTagChannelInboundSourceSchema = z
   .object({
     kind: z.literal("channel_message"),
@@ -67,7 +76,16 @@ export const OpenTagChannelPresentationCommandSchema = z
   })
   .strict();
 
+/** Routine agent telemetry belongs in the audit stream, not in a source thread. */
+export function channelProgressVisibility(input: {
+  type?: string;
+  requested?: "audit" | "human" | "debug";
+}): "audit" | "human" | "debug" {
+  return input.type?.startsWith("executor.") ? "audit" : (input.requested ?? "audit");
+}
+
 export type OpenTagChannelTrigger = z.infer<typeof OpenTagChannelTriggerSchema>;
+export type OpenTagManagedChannelBindingOwnership = z.infer<typeof OpenTagManagedChannelBindingOwnershipSchema>;
 export type OpenTagChannelAttachmentRef = z.infer<typeof OpenTagChannelAttachmentRefSchema>;
 export type OpenTagChannelInboundSource = z.infer<typeof OpenTagChannelInboundSourceSchema>;
 export type OpenTagChannelInboundMessageInput = z.input<typeof OpenTagChannelInboundMessageSchema>;

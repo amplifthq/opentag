@@ -1,3 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
   createCompositeCallbackSink,
@@ -12,6 +18,7 @@ import {
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
 } from "../src/callbacks.js";
+import { processPendingCallbacks } from "../src/server.js";
 
 describe("createGitHubCallbackSink", () => {
   it("posts GitHub callback messages to the callback URI", async () => {
@@ -729,6 +736,31 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("sanitizes credential-like Slack text and blocks before provider rendering", async () => {
+    const payloads: unknown[] = [];
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-test",
+      fetchImpl: (async (_url, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return Response.json({ ok: true, ts: "1710000000.000200" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_safe_slack",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: `done ${raw}`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Bearer ${raw}` } }]
+    });
+
+    expect(JSON.stringify(payloads)).not.toContain(raw);
+    expect(JSON.stringify(payloads)).toContain("[redacted]");
+  });
+
   it("posts Telegram callback messages to sendMessage without quoting non-ack messages", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createTelegramCallbackSink({
@@ -954,6 +986,121 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("updates a persisted Slack Run Card after the callback sink is recreated", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = (async (url, init) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url: String(url), body });
+      return String(url).endsWith("/chat.postMessage")
+        ? Response.json({ ok: true, ts: "1720000000.000100" })
+        : Response.json({ ok: true, ts: body.ts });
+    }) as typeof fetch;
+
+    const firstSink = createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl });
+    const first = await firstSink.deliver({
+      runId: "run_restart",
+      kind: "progress",
+      provider: "slack",
+      uri: "https://slack-proxy.example.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: "Starting",
+      statusMessageKey: "run_restart:status"
+    });
+
+    const restartedSink = createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl });
+    const final = await restartedSink.deliver({
+      runId: "run_restart",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack-proxy.example.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: "Finished",
+      statusMessageKey: "run_restart:status",
+      externalMessageId: first?.externalMessageId
+    });
+
+    expect(first).toEqual({ externalMessageId: "1720000000.000100" });
+    expect(final).toEqual({ externalMessageId: "1720000000.000100" });
+    expect(requests).toEqual([
+      {
+        url: "https://slack-proxy.example.com/api/chat.postMessage",
+        body: { channel: "C123", text: "Starting", thread_ts: "1710000000.000100" }
+      },
+      {
+        url: "https://slack-proxy.example.com/api/chat.update",
+        body: { channel: "C123", text: "Finished", ts: "1720000000.000100" }
+      }
+    ]);
+  });
+
+  it("updates a persisted Slack Run Card through the delivery repository after process restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-slack-restart-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = (async (url, init) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url: String(url), body });
+      return String(url).endsWith("/chat.postMessage")
+        ? Response.json({ ok: true, ts: "1720000000.000100" })
+        : Response.json({ ok: true, ts: body.ts });
+    }) as typeof fetch;
+
+    try {
+      const firstSqlite = new Database(databasePath);
+      migrateSchema(firstSqlite);
+      const firstRepo = createOpenTagRepository(drizzle(firstSqlite));
+      await firstRepo.enqueueCallbackDelivery({
+        runId: "run_repository_restart",
+        kind: "progress",
+        provider: "slack",
+        uri: "https://slack-proxy.example.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "Starting",
+        statusMessageKey: "run_repository_restart:status"
+      });
+      await expect(
+        processPendingCallbacks({
+          repo: firstRepo,
+          sink: createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl })
+        })
+      ).resolves.toEqual({ processed: 1, delivered: 1, failed: 0 });
+      firstSqlite.close();
+
+      const restartedSqlite = new Database(databasePath);
+      migrateSchema(restartedSqlite);
+      const restartedRepo = createOpenTagRepository(drizzle(restartedSqlite));
+      await restartedRepo.enqueueCallbackDelivery({
+        runId: "run_repository_restart",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack-proxy.example.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "Finished",
+        statusMessageKey: "run_repository_restart:status"
+      });
+      await expect(
+        processPendingCallbacks({
+          repo: restartedRepo,
+          sink: createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl })
+        })
+      ).resolves.toEqual({ processed: 1, delivered: 1, failed: 0 });
+      restartedSqlite.close();
+
+      expect(requests).toEqual([
+        {
+          url: "https://slack-proxy.example.com/api/chat.postMessage",
+          body: { channel: "C123", text: "Starting", thread_ts: "1710000000.000100" }
+        },
+        {
+          url: "https://slack-proxy.example.com/api/chat.update",
+          body: { channel: "C123", text: "Finished", ts: "1720000000.000100" }
+        }
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("cleans up Slack status message keys when a run finishes", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createSlackCallbackSink({
@@ -1125,6 +1272,41 @@ describe("createGitHubCallbackSink", () => {
         }
       }
     ]);
+  });
+
+  it("sanitizes credential-like Lark text and cards before provider rendering", async () => {
+    const replies: unknown[] = [];
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply(payload) {
+              replies.push(payload);
+            }
+          }
+        }
+      }
+    });
+
+    await sink.deliver({
+      runId: "run_safe_lark",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant_1|oc_chat|om_msg",
+      body: `done ${raw}`,
+      rich: {
+        provider: "lark",
+        payload: {
+          header: { title: { tag: "plain_text", content: `done ${raw}` } },
+          elements: [{ tag: "div", text: { tag: "lark_md", content: `Bearer ${raw}` } }]
+        }
+      }
+    });
+
+    expect(JSON.stringify(replies)).not.toContain(raw);
+    expect(JSON.stringify(replies)).toContain("[redacted]");
   });
 
   it("patches an existing Lark status card when an external message id is provided", async () => {

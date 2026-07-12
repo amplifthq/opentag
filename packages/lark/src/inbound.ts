@@ -80,6 +80,7 @@ export type LarkCardActionEvent = {
 
 export type LarkMessageHandlerConfig = {
   agentId: string;
+  applicationId?: string;
   botOpenId?: string;
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
@@ -685,6 +686,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       eventId,
       eventTimeMs,
       agentId: config.agentId,
+      ...(config.applicationId ? { applicationId: config.applicationId } : {}),
       ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
       ...(config.domain ? { domain: config.domain } : {}),
       renderLocale,

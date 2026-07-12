@@ -22,7 +22,9 @@ import {
   grantMatchesAction,
   containsCredentialLikeData,
   isCredentialFieldName,
+  sanitizeCredentialLikeValue,
   normalizeMaterialActionRequest,
+  OpenTagManagedChannelBindingOwnershipSchema,
   formatProjectTargetRef,
   projectTargetRefFromEvent,
   protocolRunFieldsFromEvent,
@@ -42,6 +44,7 @@ import {
   type AdapterMutationMapping,
   type MutationIntentActionability,
   type OpenTagEvent,
+  type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
   type PolicyRule,
@@ -80,6 +83,10 @@ export type OpenTagRunWithEvent = {
   run: OpenTagRun;
   event: OpenTagEvent;
 };
+
+export class ChannelBindingCorruptionError extends Error {
+  override readonly name = "ChannelBindingCorruptionError";
+}
 
 export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
   attemptId: string;
@@ -166,6 +173,7 @@ export type ChannelBinding = {
   accountId: string;
   conversationId: string;
   metadata?: Record<string, unknown>;
+  ownership?: OpenTagManagedChannelBindingOwnership;
 } & (
   | { repoProvider: string; owner: string; repo: string }
   | { repoProvider?: never; owner?: never; repo?: never }
@@ -732,8 +740,48 @@ function runProvenance(input: {
   };
 }
 
+const CHANNEL_BINDING_RECORD_VERSION = 2;
+
+function channelBindingRecordFromJson(value: string | null): {
+  metadata?: Record<string, unknown>;
+  ownership?: OpenTagManagedChannelBindingOwnership;
+} {
+  const stored = recordFromJson(value);
+  if (!stored) return {};
+  const storedVersion = stored["__opentagChannelBindingRecord"];
+  if (storedVersion === undefined) return { metadata: stored };
+  if (storedVersion !== CHANNEL_BINDING_RECORD_VERSION) {
+    throw new ChannelBindingCorruptionError("Stored channel binding record has an unsupported version.");
+  }
+  const metadata = stored["metadata"];
+  const management = stored["management"];
+  if (management !== "managed" && management !== "unmanaged") {
+    throw new ChannelBindingCorruptionError("Stored channel binding record has no valid management state.");
+  }
+  const ownership = OpenTagManagedChannelBindingOwnershipSchema.safeParse(stored["ownership"]);
+  if (management === "managed" && !ownership.success) {
+    throw new ChannelBindingCorruptionError("Stored managed channel binding has invalid ownership.");
+  }
+  if (management === "unmanaged" && stored["ownership"] !== undefined) {
+    throw new ChannelBindingCorruptionError("Stored unmanaged channel binding unexpectedly contains ownership.");
+  }
+  return {
+    ...(metadata && typeof metadata === "object" && !Array.isArray(metadata) ? { metadata: metadata as Record<string, unknown> } : {}),
+    ...(management === "managed" && ownership.success ? { ownership: ownership.data } : {})
+  };
+}
+
+function channelBindingRecordJson(input: ChannelBinding): string | null {
+  return JSON.stringify({
+    __opentagChannelBindingRecord: CHANNEL_BINDING_RECORD_VERSION,
+    management: input.ownership ? "managed" : "unmanaged",
+    ...(input.metadata ? { metadata: input.metadata } : {}),
+    ...(input.ownership ? { ownership: OpenTagManagedChannelBindingOwnershipSchema.parse(input.ownership) } : {})
+  });
+}
+
 function channelBindingFromRow(row: typeof channelBindings.$inferSelect): ChannelBinding {
-  const metadata = recordFromJson(row.metadataJson);
+  const record = channelBindingRecordFromJson(row.metadataJson);
   const repositoryValues = [row.repoProvider, row.owner, row.repo];
   const repositoryFieldCount = repositoryValues.filter((value) => value !== null).length;
   if (repositoryFieldCount !== 0 && repositoryFieldCount !== 3) {
@@ -746,7 +794,8 @@ function channelBindingFromRow(row: typeof channelBindings.$inferSelect): Channe
     ...(row.repoProvider && row.owner && row.repo
       ? { repoProvider: row.repoProvider, owner: row.owner, repo: row.repo }
       : {}),
-    ...(metadata ? { metadata } : {})
+    ...(record.metadata ? { metadata: record.metadata } : {}),
+    ...(record.ownership ? { ownership: record.ownership } : {})
   };
 }
 
@@ -1940,25 +1989,48 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .where(eq(linearOAuthInstallStates.state, input.state));
     },
 
-    async upsertChannelBinding(input: ChannelBinding): Promise<void> {
+    async upsertChannelBinding(input: ChannelBinding & { allowManagedOwnershipOverride?: boolean }): Promise<void> {
       const repositoryFields = channelBindingRepositoryFields(input);
-      await db
-        .insert(channelBindings)
-        .values({
-          provider: input.provider,
-          accountId: input.accountId,
-          conversationId: input.conversationId,
-          ...repositoryFields,
-          metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
-          createdAt: nowIso()
-        })
-        .onConflictDoUpdate({
-          target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
-          set: {
+      const ownership = input.ownership ? OpenTagManagedChannelBindingOwnershipSchema.parse(input.ownership) : undefined;
+      db.transaction((tx) => {
+        const existingRow = tx
+          .select()
+          .from(channelBindings)
+          .where(
+            and(
+              eq(channelBindings.provider, input.provider),
+              eq(channelBindings.accountId, input.accountId),
+              eq(channelBindings.conversationId, input.conversationId)
+            )
+          )
+          .limit(1)
+          .get();
+        const existing = existingRow ? channelBindingFromRow(existingRow) : null;
+        if (!input.allowManagedOwnershipOverride && existing?.ownership && (
+          !ownership ||
+          ownership.applicationId !== existing.ownership.applicationId ||
+          ownership.botId !== existing.ownership.botId
+        )) {
+          throw new Error("Exclusive managed channel binding belongs to a different application identity.");
+        }
+        tx.insert(channelBindings)
+          .values({
+            provider: input.provider,
+            accountId: input.accountId,
+            conversationId: input.conversationId,
             ...repositoryFields,
-            metadataJson: input.metadata ? JSON.stringify(input.metadata) : null
-          }
-        });
+            metadataJson: channelBindingRecordJson({ ...input, ...(ownership ? { ownership } : {}) }),
+            createdAt: nowIso()
+          })
+          .onConflictDoUpdate({
+            target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
+            set: {
+              ...repositoryFields,
+              metadataJson: channelBindingRecordJson({ ...input, ...(ownership ? { ownership } : {}) })
+            }
+          })
+          .run();
+      });
     },
 
     async deleteChannelBinding(input: {
@@ -2602,7 +2674,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<CompleteRunOutcome> {
-      const parsedResult = OpenTagRunResultSchema.parse(input.result);
+      const parsedResult = OpenTagRunResultSchema.parse(
+        sanitizeCredentialLikeValue(input.result, {
+          ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
+        })
+      );
       const updatedAt = nowIso();
       const result = OpenTagRunResultSchema.parse({
         ...parsedResult,
@@ -3562,6 +3638,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<RecordProgressOutcome> {
+      const safeMessage = sanitizeCredentialLikeValue(input.message, {
+        ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
+      });
+      const safeType = input.type ? sanitizeCredentialLikeValue(input.type) : undefined;
+      const safeIdempotencyKey = input.idempotencyKey
+        ? sanitizeCredentialLikeValue(input.idempotencyKey, {
+            ...(input.fencingToken ? { secrets: [input.fencingToken] } : {})
+          })
+        : undefined;
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
         const createdAt = input.at ?? nowIso();
@@ -3581,12 +3666,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ) {
             return "stale_attempt" as const;
           }
-          if (input.idempotencyKey) {
+          if (safeIdempotencyKey) {
             const existing = tx.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250).all();
             for (const event of existing) {
               if (event.type !== "run.progress") continue;
               const payload = recordFromJson(event.payloadJson);
-              if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate" as const;
+              if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate" as const;
             }
           }
           tx.insert(runEvents)
@@ -3596,26 +3681,26 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               payloadJson: JSON.stringify({
                 runnerId: input.runnerId,
                 attemptId: input.attemptId,
-                ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-                type: input.type ?? "progress",
-                message: input.message,
+                ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
+                type: safeType ?? "progress",
+                message: safeMessage,
                 at: createdAt
               }),
               visibility: input.visibility ?? "audit",
               importance: input.importance ?? "normal",
-              message: input.message,
+              message: safeMessage,
               createdAt
             })
             .run();
           return "recorded" as const;
         });
       }
-      if (input.idempotencyKey) {
+      if (safeIdempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
         for (const event of existing) {
           if (event.type !== "run.progress") continue;
           const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+          if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate";
         }
       }
       await appendRunEvent({
@@ -3623,14 +3708,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         type: "run.progress",
         payload: {
           ...(input.runnerId ? { runnerId: input.runnerId } : {}),
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-          type: input.type ?? "progress",
-          message: input.message,
+          ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
+          type: safeType ?? "progress",
+          message: safeMessage,
           at: input.at ?? nowIso()
         },
         visibility: input.visibility ?? "audit",
         importance: input.importance ?? "normal",
-        message: input.message,
+        message: safeMessage,
         createdAt: input.at ?? nowIso()
       });
       return "recorded";
@@ -3827,23 +3912,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       blocks?: unknown[];
       rich?: unknown;
     }): Promise<CallbackDelivery> {
+      const safeDelivery = sanitizeCredentialLikeValue({
+        uri: input.uri,
+        body: input.body,
+        ...(input.threadKey ? { threadKey: input.threadKey } : {}),
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
+        ...(input.blocks ? { blocks: input.blocks } : {}),
+        ...(input.rich !== undefined ? { rich: input.rich } : {})
+      });
       const createdAt = nowIso();
-      const idempotencyKey = callbackIdempotencyKey(input);
+      const idempotencyKey = callbackIdempotencyKey({ ...input, ...safeDelivery });
       const rows = await db
         .insert(callbackDeliveries)
         .values({
           runId: input.runId,
           kind: input.kind,
           provider: input.provider,
-          uri: input.uri,
-          body: input.body,
-          threadKey: input.threadKey ?? null,
+          uri: safeDelivery.uri,
+          body: safeDelivery.body,
+          threadKey: safeDelivery.threadKey ?? null,
           idempotencyKey,
           metadataJson: JSON.stringify({
-            ...(input.agentId ? { agentId: input.agentId } : {}),
-            ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
-            ...(input.blocks ? { blocks: input.blocks } : {}),
-            ...(input.rich !== undefined ? { rich: input.rich } : {})
+            ...(safeDelivery.agentId ? { agentId: safeDelivery.agentId } : {}),
+            ...(safeDelivery.statusMessageKey ? { statusMessageKey: safeDelivery.statusMessageKey } : {}),
+            ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
+            ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
           }),
           status: "pending",
           createdAt,

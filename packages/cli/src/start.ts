@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { createServer } from "node:net";
 import {
   createDispatcherAdminClient,
@@ -324,6 +325,35 @@ export function dispatcherRuntimeInputFromCliConfig(
   const discordPublicKey = discord?.publicKey ?? env.OPENTAG_DISCORD_PUBLIC_KEY;
   const discordBotToken = discord?.botToken ?? env.OPENTAG_DISCORD_BOT_TOKEN;
   const discordWebhookPath = discord?.webhookPath ?? env.OPENTAG_DISCORD_WEBHOOK_PATH;
+  const channelPrincipals = [
+    ...(lark
+      ? [
+          {
+            provider: "lark",
+            applicationId: lark.appId,
+            ...(lark.botOpenId ? { botId: lark.botOpenId } : {}),
+            credential: channelPrincipalCredential({
+              provider: "lark",
+              applicationId: lark.appId,
+              secret: lark.appSecret
+            })
+          }
+        ]
+      : []),
+    ...(slack?.appId
+      ? [
+          {
+            provider: "slack",
+            applicationId: slack.appId,
+            credential: channelPrincipalCredential({
+              provider: "slack",
+              applicationId: slack.appId,
+              secret: slack.botToken
+            })
+          }
+        ]
+      : [])
+  ];
   if (discordMode === "webhook" && !discordPublicKey) {
     throw new Error("Discord webhook mode requires platforms.discord.publicKey or OPENTAG_DISCORD_PUBLIC_KEY.");
   }
@@ -350,6 +380,7 @@ export function dispatcherRuntimeInputFromCliConfig(
     ...(config.daemon.revokedRunnerTokenFingerprints
       ? { revokedRunnerTokenFingerprints: config.daemon.revokedRunnerTokenFingerprints }
       : {}),
+    ...(channelPrincipals.length > 0 ? { channelPrincipals } : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
     ...(config.daemon.githubToken ? { githubCallbackToken: config.daemon.githubToken } : {}),
     ...(config.daemon.githubApplyToken !== undefined
@@ -400,6 +431,16 @@ export function dispatcherRuntimeInputFromCliConfig(
   };
 }
 
+function channelPrincipalCredential(input: {
+  provider: "lark" | "slack";
+  applicationId: string;
+  secret: string;
+}): string {
+  return createHmac("sha256", input.secret)
+    .update(`opentag-channel-principal:v1\0${input.provider}\0${input.applicationId}`)
+    .digest("base64url");
+}
+
 function defaultRepoBindingFromConfig(config: OpenTagCliConfig): LarkIngressConfig["defaultRepoBinding"] {
   if (config.platforms.lark?.defaultProjectBinding === false) return undefined;
   if (config.daemon.repositories.length !== 1) return undefined;
@@ -421,6 +462,11 @@ export function larkIngressConfigFromCliConfig(config: OpenTagCliConfig): LarkIn
     dispatcherUrl: config.daemon.dispatcherUrl,
     domain: lark.domain,
     agentId: DEFAULT_AGENT_ID,
+    channelPrincipalCredential: channelPrincipalCredential({
+      provider: "lark",
+      applicationId: lark.appId,
+      secret: lark.appSecret
+    }),
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(lark.botOpenId ? { botOpenId: lark.botOpenId } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
@@ -447,6 +493,15 @@ export function slackIngressConfigFromCliConfig(
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     botToken: slack.botToken,
+    ...(slack.appId
+      ? {
+          channelPrincipalCredential: channelPrincipalCredential({
+            provider: "slack",
+            applicationId: slack.appId,
+            secret: slack.botToken
+          })
+        }
+      : {}),
     ...(slack.appId ? { appId: slack.appId } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
@@ -464,6 +519,15 @@ export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConf
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     botToken: slack.botToken,
+    ...(slack.appId
+      ? {
+          channelPrincipalCredential: channelPrincipalCredential({
+            provider: "slack",
+            applicationId: slack.appId,
+            secret: slack.botToken
+          })
+        }
+      : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(slack.appId ? { appId: slack.appId } : {})
   };
@@ -727,7 +791,8 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
       ...(binding.repoProvider && binding.owner && binding.repo
         ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
         : {}),
-      ...(binding.metadata ? { metadata: binding.metadata } : {})
+      ...(binding.metadata ? { metadata: binding.metadata } : {}),
+      ...(binding.ownership ? { ownership: binding.ownership } : {})
     });
   }
 }

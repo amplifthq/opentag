@@ -2,7 +2,7 @@ import { projectTargetRefFromLocalPath } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { createOpenTagRepository } from "../src/repository.js";
+import { ChannelBindingCorruptionError, createOpenTagRepository } from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
 function githubIssueContext(issueNumber: number) {
@@ -717,6 +717,66 @@ describe("OpenTag repository", () => {
     expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
     expect(JSON.stringify(events)).not.toContain(first!.fencingToken);
     expect(JSON.stringify(events)).not.toContain(second!.fencingToken);
+  });
+
+  it("sanitizes runner output and callback payloads before any durable write", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_safe", name: "Safe Runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_safe" });
+    await repo.createRun({ id: "run_safe_output", event: larkEvent({ id: "evt_safe_output", sourceEventId: "msg_safe_output" }) });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_safe", leaseSeconds: 60 });
+    if (!claimed) throw new Error("expected claimed run");
+    const lease = {
+      runId: "run_safe_output",
+      runnerId: "runner_safe",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    const providerToken = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+
+    await expect(
+      repo.recordProgress({ ...lease, message: `using ${providerToken} and ${claimed.fencingToken}` })
+    ).resolves.toBe("recorded");
+    await expect(
+      repo.completeRun({
+        ...lease,
+        result: {
+          conclusion: "success",
+          summary: `done with ${providerToken}`,
+          artifacts: [
+            {
+              title: "credential report",
+              uri: "workspace/report.md",
+              metadata: { accessToken: "opaque-secret" }
+            }
+          ],
+          verification: [{ command: "check", outcome: "passed", excerpt: `fence=${claimed.fencingToken}` }]
+        }
+      })
+    ).resolves.toBe("completed");
+    await repo.enqueueCallbackDelivery({
+      runId: "run_safe_output",
+      kind: "final",
+      provider: "slack",
+      uri: "https://example.test/callback",
+      body: `callback ${providerToken}`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Bearer ${providerToken}` } }],
+      rich: { accessToken: "opaque-callback-secret" }
+    });
+
+    const durable = {
+      stored: await repo.getRun({ runId: "run_safe_output" }),
+      events: await repo.listRunEvents({ runId: "run_safe_output" }),
+      callbacks: await repo.claimPendingCallbackDeliveries({ limit: 10 })
+    };
+    const serialized = JSON.stringify(durable);
+    expect(serialized).not.toContain(providerToken);
+    expect(serialized).not.toContain(claimed.fencingToken);
+    expect(serialized).not.toContain("opaque-secret");
+    expect(serialized).not.toContain("opaque-callback-secret");
+    expect(serialized).toContain("[redacted]");
   });
 
   it("rolls back run assignment and attempt creation when the claimed event cannot be persisted", async () => {
@@ -2535,6 +2595,83 @@ describe("non-repository runner eligibility", () => {
 });
 
 describe("repository-optional channel bindings", () => {
+  it("refuses to let a different application take over an exclusive managed channel binding", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+    await expect(repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999", botId: "U999" }
+    })).rejects.toThrow(/managed channel binding.*different application/iu);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toMatchObject({
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+  });
+
+  it("fails closed when persisted managed ownership is malformed", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+    sqlite.prepare("UPDATE channel_bindings SET metadata_json = ? WHERE provider = ? AND account_id = ? AND conversation_id = ?").run(
+      JSON.stringify({
+        __opentagChannelBindingRecord: 2,
+        management: "managed",
+        ownership: { mode: "managed", exclusive: true, applicationId: "bad\u0000application" }
+      }),
+      "slack",
+      "T123",
+      "C456"
+    );
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
+  it.each([
+    {
+      name: "ownership is missing",
+      record: { __opentagChannelBindingRecord: 2, management: "managed" }
+    },
+    {
+      name: "the record version is altered",
+      record: {
+        __opentagChannelBindingRecord: 999,
+        management: "managed",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      }
+    }
+  ])("fails closed when $name", async ({ record }) => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    });
+    sqlite.prepare("UPDATE channel_bindings SET metadata_json = ?").run(JSON.stringify(record));
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
   it("stores a generic channel binding with no repository target", async () => {
     const sqlite = new Database(":memory:");
     const repo = createOpenTagRepository(drizzle(sqlite));

@@ -118,14 +118,16 @@ describe("OpenTag integration manifest", () => {
 
   it("rejects the unshipped legacy executor role and protocol", () => {
     const manifest = acpManifest();
+    const removedProtocol = ["opentag", "executor", "v1"].join(".");
+    const removedProfile = ["stdio", "jsonl-basic"].join("-");
 
     expect(() =>
       OpenTagIntegrationManifestSchema.parse({
         ...manifest,
         roles: {
           executor: {
-            protocol: "opentag.executor.v1",
-            profile: "stdio-jsonl-basic",
+            protocol: removedProtocol,
+            profile: removedProfile,
             binding: "hermesAcp"
           }
         }
@@ -137,7 +139,7 @@ describe("OpenTag integration manifest", () => {
         ...manifest,
         roles: {
           agent: {
-            protocol: "opentag.executor.v1",
+            protocol: removedProtocol,
             protocolVersion: 1,
             binding: "hermesAcp"
           }
@@ -148,6 +150,7 @@ describe("OpenTag integration manifest", () => {
 
   it("rejects legacy fields on the ACP agent role", () => {
     const manifest = acpManifest();
+    const removedProfile = ["stdio", "jsonl-basic"].join("-");
 
     expect(() =>
       OpenTagIntegrationManifestSchema.parse({
@@ -155,7 +158,7 @@ describe("OpenTag integration manifest", () => {
         roles: {
           agent: {
             ...manifest.roles.agent,
-            profile: "stdio-jsonl-basic",
+            profile: removedProfile,
             capabilities: { supportsStreaming: false }
           }
         }

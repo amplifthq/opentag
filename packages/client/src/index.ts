@@ -15,6 +15,7 @@ import {
   type ApplyPlan,
   type MutationIntentActionability,
   type OpenTagEvent,
+  type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
   type PolicyRule,
@@ -75,6 +76,7 @@ export type ChannelBindingInput = {
   accountId: string;
   conversationId: string;
   metadata?: Record<string, unknown>;
+  ownership?: OpenTagManagedChannelBindingOwnership;
 } & ChannelBindingRepositoryTarget;
 
 type Assert<T extends true> = T;
@@ -125,6 +127,7 @@ export type SourceDeliveryPruneResult = {
 export type OpenTagClientOptions = {
   dispatcherUrl: string;
   pairingToken?: string;
+  channelPrincipalCredential?: string;
   fetchImpl?: typeof fetch;
 };
 
@@ -473,7 +476,13 @@ function parseClaimedRun(body: {
 
 export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClient {
   const baseUrl = baseUrlFrom(options.dispatcherUrl);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const baseFetch = options.fetchImpl ?? fetch;
+  const fetchImpl: typeof fetch = (url, init) => {
+    if (!options.channelPrincipalCredential) return baseFetch(url, init);
+    const headers = new Headers(init?.headers);
+    headers.set("x-opentag-channel-principal", options.channelPrincipalCredential);
+    return baseFetch(url, { ...init, headers });
+  };
 
   return {
     async registerRunner(input) {

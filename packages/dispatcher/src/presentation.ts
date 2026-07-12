@@ -43,11 +43,13 @@ import {
   createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks,
   createSlackFinalSummaryBlocks,
+  createSlackRunStatusBlocks,
   createSlackSourceThreadStatusBlocks,
   renderSlackActionReceiptPresentation,
   renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
   renderSlackFinalSummaryPresentation,
+  renderSlackRunStatusPresentation,
   type SlackBlock
 } from "@opentag/slack";
 import {
@@ -107,6 +109,12 @@ export type CallbackPresentation = {
 
 function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunStatusPresentation): PresentedCallbackBody {
   const canRenderRich = supportsRichPresentation(provider);
+  if (canRenderRich && provider === "slack") {
+    return {
+      body: renderSlackRunStatusPresentation(presentation),
+      blocks: createSlackRunStatusBlocks(presentation)
+    };
+  }
   if (canRenderRich && provider === "lark") {
     return {
       body: renderLarkRunStatusPresentation(presentation),
@@ -288,11 +296,11 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     shouldDeliverStatusUpdate(provider) {
+      if (provider === "slack" || provider === "lark") return true;
       return shouldDeliverCallbackRunStatus(provider);
     },
 
     shouldDeliverRunStatusUpdate(input) {
-      if (input.provider === "lark" && input.state === "running") return false;
       return this.shouldDeliverStatusUpdate(input.provider);
     },
 

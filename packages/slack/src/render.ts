@@ -7,6 +7,7 @@ import {
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
   type OpenTagPresentationAction,
+  type OpenTagRunStatusPresentation,
   type OpenTagSourceThreadStatusPresentation,
   createFinalSummaryPresentation,
   type OpenTagRunResult
@@ -179,6 +180,32 @@ function markdownToSlackActionDetail(text: string): string {
 export function renderSlackAcknowledgement(runId: string): string {
   void runId;
   return "Working on it.";
+}
+
+function slackRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): string {
+  if (state === "received") return "Received";
+  if (state === "queued") return "Queued";
+  if (state === "running") return "Running";
+  if (state === "waiting_for_approval") return "Waiting for approval";
+  if (state === "completed") return "Completed";
+  if (state === "failed") return "Failed";
+  if (state === "cancelled") return "Cancelled";
+  if (state === "interrupted") return "Interrupted";
+  return "Timed out";
+}
+
+export function renderSlackRunStatusPresentation(presentation: OpenTagRunStatusPresentation): string {
+  const title = slackRunStatusTitle(presentation.state);
+  return [
+    `*OpenTag: ${title}*`,
+    ...(presentation.message ? [markdownToSlackMrkdwn(presentation.message)] : []),
+    `Run: \`${presentation.runId}\``,
+    ...(presentation.nextAction ? [markdownToSlackMrkdwn(presentation.nextAction)] : [])
+  ].join("\n");
+}
+
+export function createSlackRunStatusBlocks(presentation: OpenTagRunStatusPresentation): SlackBlock[] {
+  return [slackSection(renderSlackRunStatusPresentation(presentation))];
 }
 
 export function slackSourceReceiptReactionName(state: SlackSourceReceiptState): string {

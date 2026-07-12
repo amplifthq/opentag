@@ -6,9 +6,11 @@ import {
   createRunStatusPresentation,
   createSourceThreadStatusPresentation,
   OpenTagApprovalPromptPresentationSchema,
+  OpenTagFinalSummaryPresentationSchema,
   OpenTagPresentationSchema,
   renderOpenTagPresentationPlainText
 } from "../src/presentation.js";
+import { sanitizeCredentialLikeValue } from "../src/credential-safety.js";
 
 describe("OpenTagPresentation", () => {
   it("models a provider-neutral approval prompt", () => {
@@ -95,6 +97,26 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("- Log summary: opentag/run_1-log.md");
     expect(rendered).toContain("- Pull request: https://github.com/acme/demo/pull/1");
     expect(rendered).toContain("Audit: opentag status --run run_1");
+  });
+
+  it("rejects credential-bearing final presentation fields and accepts the centrally sanitized shape", () => {
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const unsafe = {
+      kind: "final_summary" as const,
+      outcome: "success",
+      summary: `finished with ${raw}`,
+      artifacts: [{ title: "Report", uri: "workspace/report.md", metadata: { accessToken: "opaque-secret" } }],
+      verification: [{ command: "check", outcome: "passed" as const, excerpt: `Bearer ${raw}` }],
+      result: {
+        conclusion: "success" as const,
+        summary: `finished with ${raw}`,
+        artifacts: [{ title: "Report", uri: "workspace/report.md", metadata: { accessToken: "opaque-secret" } }],
+        verification: [{ command: "check", outcome: "passed" as const, excerpt: `Bearer ${raw}` }]
+      }
+    };
+
+    expect(() => OpenTagFinalSummaryPresentationSchema.parse(unsafe)).toThrow();
+    expect(() => OpenTagFinalSummaryPresentationSchema.parse(sanitizeCredentialLikeValue(unsafe))).not.toThrow();
   });
 
   it("carries action receipt semantics without provider-native UI fields", () => {

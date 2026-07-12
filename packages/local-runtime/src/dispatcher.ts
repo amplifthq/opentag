@@ -14,6 +14,7 @@ import {
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink,
+  type ChannelPrincipalCredential,
   type LinearTokenProvider
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
@@ -43,6 +44,7 @@ export type LocalDispatcherRuntimeInput = {
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
+  channelPrincipals?: ChannelPrincipalCredential[];
   /**
    * Backward-compatible GitHub token. When specific callback/apply tokens are
    * omitted, this token is used for both callback delivery and direct apply.
@@ -666,6 +668,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
     ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
+    ...(input.channelPrincipals ? { channelPrincipals: input.channelPrincipals } : {}),
     ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
     ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
     relayCapabilities: {

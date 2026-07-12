@@ -1289,7 +1289,7 @@ describe("dispatcher API", () => {
     ]);
   });
 
-  it("does not send queued text callbacks for source-receipt liveness providers", async () => {
+  it("uses the Slack run card for queued follow-ups instead of a text acknowledgement", async () => {
     const delivered: Array<{ kind: string; body: string }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -1343,7 +1343,12 @@ describe("dispatcher API", () => {
         activeRunId: "run_slack_active_1"
       }
     });
-    expect(delivered.filter((message) => message.kind === "progress")).toEqual([]);
+    expect(delivered.filter((message) => message.kind === "progress")).toEqual([
+      {
+        kind: "progress",
+        body: expect.stringContaining("*OpenTag: Queued*")
+      }
+    ]);
   });
 
   it("stores and returns repo policy rules", async () => {
@@ -2828,7 +2833,7 @@ describe("dispatcher API", () => {
     await app.request("/v1/runners/runner_1/runs/run_2/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
+      body: JSON.stringify({ type: "milestone.progress", message: "running tests", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
     });
     const completeResponse = await app.request("/v1/runners/runner_1/runs/run_2/complete", {
       method: "POST",
@@ -3219,12 +3224,18 @@ describe("dispatcher API", () => {
   });
 
   it("renders Slack callbacks with Slack mrkdwn and keeps progress audit-only", async () => {
-    const delivered: { kind: string; body: string; blocks?: unknown[] }[] = [];
+    const delivered: { kind: string; body: string; blocks?: unknown[]; statusMessageKey?: string }[] = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
       callbackSink: {
         async deliver(message) {
-          delivered.push({ kind: message.kind, body: message.body, ...(message.blocks?.length ? { blocks: message.blocks } : {}) });
+          delivered.push({
+            kind: message.kind,
+            body: message.body,
+            ...(message.blocks?.length ? { blocks: message.blocks } : {}),
+            ...(message.statusMessageKey ? { statusMessageKey: message.statusMessageKey } : {})
+          });
+          return { externalMessageId: message.externalMessageId ?? "slack_status_1" };
         }
       },
       sourceReceiptSink: {
@@ -3254,6 +3265,7 @@ describe("dispatcher API", () => {
       sourceEventId: "Ev123",
       actor: { provider: "slack", providerUserId: "U123", handle: "U123", organizationId: "T123" },
       permissions: [{ scope: "chat:postMessage", reason: "reply in thread" }],
+      metadata: { ...validEvent.metadata, teamId: "T123", channelId: "C123", channelApplicationId: "A123", channelBotId: "U_APP" },
       callback: {
         provider: "slack",
         uri: "https://slack.com/api/chat.postMessage",
@@ -3269,10 +3281,21 @@ describe("dispatcher API", () => {
     expect(createResponse.status).toBe(201);
 
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const runningResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/running", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ executor: "hermes" })
+    });
+    expect(runningResponse.status).toBe(200);
     const progressResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "Echo executor started", at: "2026-06-24T00:00:01.000Z" })
+      body: JSON.stringify({
+        type: "executor.progress",
+        message: "Hermes tool call started",
+        at: "2026-06-24T00:00:01.000Z",
+        visibility: "human"
+      })
     });
     expect(progressResponse.status).toBe(200);
     const completeResponse = await app.request("/v1/runners/runner_1/runs/run_slack_1/complete", {
@@ -3288,61 +3311,30 @@ describe("dispatcher API", () => {
     });
     expect(completeResponse.status).toBe(200);
 
-    expect(delivered).toEqual([
-      {
-        kind: "final",
-        body: "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed\n\nAudit: `opentag status --run run_slack_1`",
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "*Finished: success.*\nEchoed OpenTag command: introduce yourself"
-            }
-          },
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: "Verified: `echo` passed"
-            }
-          },
-          {
-            type: "context",
-            elements: [
-              {
-                type: "mrkdwn",
-                text: "Audit: `opentag status --run run_slack_1`"
-              }
-            ]
-          }
-        ]
-      }
+    expect(delivered.map(({ kind, statusMessageKey }) => ({ kind, statusMessageKey }))).toEqual([
+      { kind: "progress", statusMessageKey: "run_slack_1:status" },
+      { kind: "final", statusMessageKey: "run_slack_1:status" }
     ]);
+    expect(delivered[0]?.body).toContain("*OpenTag: Running*");
+    expect(delivered[0]?.body).toContain("Running with hermes.");
+    expect(delivered[1]?.body).toBe(
+      "*Finished: success.*\nEchoed OpenTag command: introduce yourself\nVerified: `echo` passed\n\nAudit: `opentag status --run run_slack_1`"
+    );
+    expect(delivered.some((message) => message.body.includes("Hermes tool call started"))).toBe(false);
     expect(delivered.every((message) => (message as { agentId?: string }).agentId === undefined)).toBe(true);
     expect(delivered.at(-1)?.body).not.toContain("**success**");
 
     const eventsResponse = await app.request("/v1/runs/run_slack_1/events");
     const { events } = await eventsResponse.json();
-    expect(events.map((event: { type: string }) => event.type)).toEqual([
-      "admission.decided",
-      "run.created",
-      "context_packet.generated",
-      "source_receipt.delivered",
-      "run.claimed",
-      "run.progress",
-      "run.completed",
-      "callback.final.queued",
-      "callback.final.delivered"
-    ]);
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("callback.progress.suppressed");
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
       visibility: "audit",
       importance: "normal",
-      message: "Echo executor started"
+      message: "Hermes tool call started"
     });
   });
 
-  it("delivers Slack received and running source receipts without posting text acknowledgements", async () => {
+  it("delivers Slack source receipts and one running run-card update", async () => {
     const callbacks: { kind: string }[] = [];
     const receipts: Array<{ runId: string; provider: string; state: string; agentId?: string; channelId: unknown; messageTs: unknown }> = [];
     const app = createDispatcherApp({
@@ -3388,7 +3380,7 @@ describe("dispatcher API", () => {
     const replayResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_replay", event }));
     expect(replayResponse.status).toBe(200);
 
-    expect(callbacks).toEqual([]);
+    expect(callbacks).toEqual([{ kind: "progress" }]);
     expect(receipts).toEqual([
       {
         runId: "run_slack_receipt",
@@ -3418,6 +3410,8 @@ describe("dispatcher API", () => {
       "run.claimed",
       "run.running",
       "source_receipt.delivered",
+      "callback.progress.queued",
+      "callback.progress.delivered",
       "admission.decided",
       "run.create_idempotent_replay"
     ]);
@@ -3472,7 +3466,12 @@ describe("dispatcher API", () => {
     const event = slackRepoEvent({ id: "evt_slack_receipt_fallback", sourceEventId: "EvSlackReceiptFallback", threadKey: "T123|C123|1710000000.000100" });
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_fallback", event }));
     expect(createResponse.status).toBe(201);
-    expect(callbacks).toEqual([{ kind: "acknowledgement", body: "Working on it." }]);
+    expect(callbacks).toEqual([
+      {
+        kind: "acknowledgement",
+        body: "*OpenTag: Received*\nRun: `run_slack_receipt_fallback`"
+      }
+    ]);
 
     const eventsResponse = await app.request("/v1/runs/run_slack_receipt_fallback/events");
     const { events } = await eventsResponse.json();
@@ -3569,7 +3568,7 @@ describe("dispatcher API", () => {
     expect(callbacks).toEqual([{ kind: "acknowledgement", hasRich: true }]);
   });
 
-  it("does not create a delayed Lark status card when the run finishes before the threshold", async () => {
+  it("updates the native Lark run card even when the run finishes before the legacy delay", async () => {
     const delivered: Array<{ kind: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -3621,8 +3620,14 @@ describe("dispatcher API", () => {
 
     expect(delivered).toEqual([
       {
+        kind: "progress",
+        statusMessageKey: "run_lark_short_status_card:status",
+        hasRich: true
+      },
+      {
         kind: "final",
         statusMessageKey: "run_lark_short_status_card:status",
+        externalMessageId: "om_final",
         hasRich: true
       }
     ]);
@@ -3706,7 +3711,7 @@ describe("dispatcher API", () => {
     ]);
   });
 
-  it("patches delayed Lark progress at phase changes and throttles repeated progress", async () => {
+  it("keeps routine executor progress audit-only after the Lark run card is visible", async () => {
     const delivered: Array<{ kind: string; body: string; statusMessageKey?: string; externalMessageId?: string; hasRich?: boolean }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -3762,13 +3767,6 @@ describe("dispatcher API", () => {
         body: ["Running with codex.", "Run: run_lark_progress_status_card", "Use /status here for details."].join("\n"),
         statusMessageKey: "run_lark_progress_status_card:status",
         hasRich: true
-      },
-      {
-        kind: "progress",
-        body: ["OpenTag is still working.", "Run: run_lark_progress_status_card", "Use /status here for details."].join("\n"),
-        statusMessageKey: "run_lark_progress_status_card:status",
-        externalMessageId: "om_status",
-        hasRich: true
       }
     ]);
     expect(delivered.map((delivery) => delivery.body).join("\n")).not.toContain("Still working with internal details");
@@ -3809,6 +3807,13 @@ describe("dispatcher API", () => {
         provider: "lark",
         uri: "lark://im/v1/messages",
         threadKey: "tk_123|oc_chat|om_msg"
+      },
+      metadata: {
+        ...validEvent.metadata,
+        tenantKey: "tenant_123",
+        chatId: "oc_chat",
+        channelApplicationId: "cli_app_123",
+        channelBotId: "ou_bot"
       }
     };
 
@@ -3859,6 +3864,10 @@ describe("dispatcher API", () => {
         )
       },
       {
+        kind: "progress",
+        body: ["Running with echo.", "Run: run_lark_1", "Use /status here for details."].join("\n")
+      },
+      {
         kind: "final",
         body: "Finished with success.\n\nEchoed OpenTag command: introduce yourself\n\nVerification\n- echo: passed\n\nAudit: opentag status --run run_lark_1"
       }
@@ -3874,28 +3883,19 @@ describe("dispatcher API", () => {
       "callback.acknowledgement.delivered",
       "run.claimed",
       "run.running",
+      "callback.progress.queued",
+      "callback.progress.delivered",
       "run.progress",
-      "callback.progress.suppressed",
       "run.completed",
       "callback.final.queued",
       "callback.final.delivered"
     ]);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
-      visibility: "human",
+      visibility: "audit",
       importance: "normal",
       message: "Echo executor started"
     });
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")).toHaveLength(1);
-    expect(events.filter((event: { type: string }) => event.type === "callback.progress.suppressed")[0]).toMatchObject({
-      visibility: "audit",
-      importance: "low",
-      payload: {
-        provider: "lark",
-        reason: "platform_liveness_strategy",
-        requestedVisibility: "human",
-        livenessStrategy: "source_receipt"
-      }
-    });
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("callback.progress.suppressed");
   });
 
   it("reuses the first Lark status message id when delivering the final card", async () => {
@@ -3944,6 +3944,13 @@ describe("dispatcher API", () => {
         provider: "lark",
         uri: "lark://im/v1/messages",
         threadKey: "tk_123|oc_chat|om_msg"
+      },
+      metadata: {
+        ...validEvent.metadata,
+        tenantKey: "tenant_123",
+        chatId: "oc_chat",
+        channelApplicationId: "cli_app_123",
+        channelBotId: "ou_bot"
       }
     };
 
@@ -4630,6 +4637,13 @@ describe("dispatcher API", () => {
             provider: "slack",
             uri: "https://slack.com/api/chat.postMessage",
             threadKey: "T123|C123|1710000000.000100"
+          },
+          metadata: {
+            ...validEvent.metadata,
+            teamId: "T123",
+            channelId: "C123",
+            channelApplicationId: "A123",
+            channelBotId: "U_APP"
           }
         }
       })
@@ -4640,12 +4654,12 @@ describe("dispatcher API", () => {
     const progressResponse = await app.request("/v1/runners/runner_1/runs/run_status_key/progress", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ type: "executor.progress", message: "working", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
+      body: JSON.stringify({ type: "milestone.progress", message: "working", at: "2026-06-24T00:00:01.000Z", visibility: "human" })
     });
     expect(progressResponse.status).toBe(200);
 
     expect(delivered).toEqual([
-      { kind: "acknowledgement" },
+      { kind: "acknowledgement", statusMessageKey: "run_status_key:status" },
       { kind: "progress", statusMessageKey: "run_status_key:status" }
     ]);
   });
@@ -4977,7 +4991,7 @@ describe("dispatcher API", () => {
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
 
     const body = {
-      type: "executor.progress",
+      type: "milestone.progress",
       message: "working",
       at: "2026-06-24T00:00:01.000Z",
       visibility: "human",
@@ -5369,6 +5383,155 @@ describe("dispatcher API", () => {
         conversationId: "C456",
         metadata: { title: "General" }
       }
+    });
+  });
+
+  it("fails closed when a managed channel run cannot prove the configured application identity", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_shared",
+      channelPrincipals: [
+        { provider: "slack", applicationId: "A123", botId: "U_APP", credential: "slack_principal_123" },
+        { provider: "slack", applicationId: "A999", botId: "U_OTHER", credential: "slack_principal_999" }
+      ]
+    });
+    const sharedHeaders = { "content-type": "application/json", authorization: "Bearer pair_shared" };
+    const nativeHeaders = { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_123" };
+    await app.request("/v1/runners", { ...jsonRequest({ runnerId: "runner_managed", name: "Managed Runner" }), headers: sharedHeaders });
+    const binding = await app.request("/v1/channel-bindings", {
+      ...jsonRequest({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U_APP" }
+      }),
+      headers: nativeHeaders
+    });
+    expect(binding.status).toBe(201);
+
+    const managedEvent = {
+      id: "evt_managed_identity",
+      source: "slack",
+      sourceEventId: "message_managed_identity",
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@any-display-name", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    };
+
+    const missing = await app.request("/v1/runs", {
+      ...jsonRequest({
+        runId: "run_managed_missing",
+        event: {
+          ...managedEvent,
+          metadata: { ...managedEvent.metadata, channelApplicationId: "A123", channelBotId: "U_APP" }
+        }
+      }),
+      headers: sharedHeaders
+    });
+    expect(missing.status).toBe(403);
+    await expect(missing.json()).resolves.toEqual({ error: "managed_channel_ownership_unverified" });
+
+    const mismatch = await app.request("/v1/runs", {
+      ...jsonRequest({
+        runId: "run_managed_mismatch",
+        event: {
+          ...managedEvent,
+          id: "evt_managed_mismatch",
+          sourceEventId: "message_managed_mismatch",
+          metadata: { ...managedEvent.metadata, channelApplicationId: "A123", channelBotId: "U_APP" }
+        }
+      }),
+      headers: { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_999" }
+    });
+    expect(mismatch.status).toBe(403);
+
+    const accepted = await app.request("/v1/runs", {
+      ...jsonRequest({
+        runId: "run_managed_verified",
+        event: {
+          ...managedEvent,
+          id: "evt_managed_verified",
+          sourceEventId: "message_managed_verified",
+          metadata: { ...managedEvent.metadata, channelApplicationId: "A999", channelBotId: "U_OTHER" }
+        }
+      }),
+      headers: nativeHeaders
+    });
+    expect(accepted.status).toBe(201);
+  });
+
+  it("requires the owning adapter principal to rebind or delete a managed channel and audits an explicit admin override", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_admin",
+      channelPrincipals: [
+        { provider: "slack", applicationId: "A123", credential: "slack_principal_123" },
+        { provider: "slack", applicationId: "A999", credential: "slack_principal_999" }
+      ]
+    });
+    const binding = {
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    };
+    const ownerHeaders = {
+      "content-type": "application/json",
+      authorization: "Bearer pair_admin",
+      "x-opentag-channel-principal": "slack_principal_123"
+    };
+    expect((await app.request("/v1/channel-bindings", { ...jsonRequest(binding), headers: ownerHeaders })).status).toBe(201);
+
+    const foreignHeaders = {
+      ...ownerHeaders,
+      "x-opentag-channel-principal": "slack_principal_999"
+    };
+    const foreignRebind = await app.request("/v1/channel-bindings", {
+      ...jsonRequest({
+        ...binding,
+        ownership: { mode: "managed", exclusive: true, applicationId: "A999" }
+      }),
+      headers: foreignHeaders
+    });
+    expect(foreignRebind.status).toBe(403);
+    const foreignDelete = await app.request("/v1/channel-bindings/slack/T123/C456", {
+      method: "DELETE",
+      headers: foreignHeaders
+    });
+    expect(foreignDelete.status).toBe(403);
+
+    const overrideHeaders = {
+      "content-type": "application/json",
+      authorization: "Bearer pair_admin",
+      "x-opentag-channel-admin-override": "true"
+    };
+    const overridden = await app.request("/v1/channel-bindings", {
+      ...jsonRequest({
+        ...binding,
+        ownership: { mode: "managed", exclusive: true, applicationId: "A999" }
+      }),
+      headers: overrideHeaders
+    });
+    expect(overridden.status).toBe(201);
+
+    const audit = await app.request("/v1/control-plane-events?type=binding.channel.admin_override", {
+      headers: { authorization: "Bearer pair_admin" }
+    });
+    expect(audit.status).toBe(200);
+    await expect(audit.json()).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: "binding.channel.admin_override",
+          severity: "warn",
+          subject: "slack:T123/C456",
+          payload: { provider: "slack", accountId: "T123", conversationId: "C456", operation: "upsert" }
+        })
+      ]
     });
   });
 
@@ -5948,6 +6111,13 @@ describe("dispatcher API", () => {
         provider: "slack",
         uri: "https://slack.com/api/chat.postMessage",
         threadKey: "T123|C123|1710000000.000100"
+      },
+      metadata: {
+        ...validEvent.metadata,
+        teamId: "T123",
+        channelId: "C123",
+        channelApplicationId: "A123",
+        channelBotId: "U_APP"
       }
     };
 

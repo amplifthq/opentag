@@ -134,7 +134,10 @@ const app = acp
       sessionId: ctx.params.sessionId,
       update: {
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "ACP fixture completed the requested work." }
+        content: {
+          type: "text",
+          text: process.env.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."
+        }
       }
     });
     return { stopReason: mode === "refusal" ? "refusal" : "end_turn" };

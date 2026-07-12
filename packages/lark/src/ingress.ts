@@ -29,6 +29,7 @@ export type LarkIngressConfig = {
   appSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
+  channelPrincipalCredential?: string;
   domain: "lark" | "feishu";
   agentId: string;
   botOpenId?: string;
@@ -338,7 +339,8 @@ function formatDoctorUnavailable(input: {
 export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIngressDependencies = {}): LarkIngressHandle {
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
-    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
+    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {}),
+    ...(config.channelPrincipalCredential ? { channelPrincipalCredential: config.channelPrincipalCredential } : {})
   });
   let replyClient: ReturnType<typeof createLarkReplyClient> | undefined;
   const reply =
@@ -372,6 +374,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
 
   const handler = createLarkMessageHandler({
     agentId: config.agentId,
+    applicationId: config.appId,
     suppressRunCreatedReply: true,
     domain: config.domain,
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
@@ -384,7 +387,13 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
         conversationId: input.chatId,
         repoProvider: input.repoProvider,
         owner: input.owner,
-        repo: input.repo
+        repo: input.repo,
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: config.appId,
+          ...(config.botOpenId ? { botId: config.botOpenId } : {})
+        }
       });
     },
     async unbindChannel(input) {

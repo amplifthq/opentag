@@ -5,6 +5,7 @@ import {
   formatProjectTargetRef,
   parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
+  sanitizeCredentialLikeValue,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
@@ -499,12 +500,13 @@ export async function runOneDaemonIteration(input: {
       },
       {
         emit: async (event) => {
-          console.log(`[${event.type}] ${event.message}`);
+          const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
+          console.log(`[${safeEvent.type}] ${safeEvent.message}`);
           try {
             await input.client.progress(runId, lease, {
-              type: event.type,
-              message: event.message,
-              at: event.at
+              type: safeEvent.type,
+              message: safeEvent.message,
+              at: safeEvent.at
             });
           } catch (error) {
             if (runNoLongerClaimed(error)) {
@@ -544,11 +546,21 @@ export async function runOneDaemonIteration(input: {
     }
     cancellationDetected = true;
     cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
-      console.warn(`OpenTag executor cancellation failed after timeout for ${runId}:`, cancelError);
+      console.warn(
+        `OpenTag executor cancellation failed after timeout for ${runId}:`,
+        sanitizeCredentialLikeValue(String(cancelError), { secrets: [lease.fencingToken] })
+      );
     });
     await cancelPromise;
     try {
-      await input.client.complete(runId, lease, timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }));
+      await input.client.complete(
+        runId,
+        lease,
+        sanitizeCredentialLikeValue(
+          timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }),
+          { secrets: [lease.fencingToken] }
+        )
+      );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -564,7 +576,13 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     try {
-      await input.client.complete(runId, lease, failedRunResult(activeExecutor.displayName, executorOutcome.error));
+      await input.client.complete(
+        runId,
+        lease,
+        sanitizeCredentialLikeValue(failedRunResult(activeExecutor.displayName, executorOutcome.error), {
+          secrets: [lease.fencingToken]
+        })
+      );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -578,7 +596,9 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
-  const executorResult = executorOutcome.result;
+  const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
+    secrets: [lease.fencingToken]
+  });
   let result: OpenTagRunResult;
   try {
     result = binding
@@ -592,7 +612,9 @@ export async function runOneDaemonIteration(input: {
         })
       : executorResult;
   } catch (error) {
-    result = pullRequestPreparationFailureResult(executorResult, error);
+    result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
+      secrets: [lease.fencingToken]
+    });
   }
   try {
     await input.client.complete(runId, lease, result);
@@ -606,7 +628,10 @@ export async function runOneDaemonIteration(input: {
     try {
       await rm(workspace.path, { recursive: true, force: true });
     } catch (error) {
-      console.warn(`OpenTag could not clean scratch workspace ${workspace.path}:`, error);
+      console.warn(
+        `OpenTag could not clean scratch workspace ${workspace.path}:`,
+        sanitizeCredentialLikeValue(String(error), { secrets: [lease.fencingToken] })
+      );
     }
   }
   return true;

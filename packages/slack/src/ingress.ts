@@ -26,6 +26,7 @@ export type SlackEventsApiIngressConfig = {
   signingSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
+  channelPrincipalCredential?: string;
   botToken?: string;
   port?: number;
   agentId?: string;

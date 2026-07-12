@@ -6,13 +6,16 @@ import {
   actionScopeAllowsRunReuse,
   ActionPermissionRequestSchema,
   OpenTagApprovalPromptPresentationSchema,
+  OpenTagManagedChannelBindingOwnershipSchema,
   MaterialActionReceiptSchema,
   capabilityForMutationIntent,
+  channelProgressVisibility,
   conversationKeysFromEvent,
   parseThreadActionCommand,
   parseThreadControlCommand,
   permissionScopesAllowCapability,
   redactCredentialLikeData,
+  sanitizeCredentialLikeValue,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
@@ -82,7 +85,7 @@ import {
   type LinearMutationOperation
 } from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
-import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import { ChannelBindingCorruptionError, createOpenTagRepository, migrateSchema } from "@opentag/store";
 import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -370,7 +373,9 @@ function shouldDeliverRunStatusUpdate(
 }
 
 function lifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
-  return input.provider === "lark" || input.provider === "linear" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
+  return input.provider === "slack" || input.provider === "lark" || input.provider === "linear" || input.provider === "telegram"
+    ? `${input.runId}:status`
+    : undefined;
 }
 
 const DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS = 10 * 60 * 1000;
@@ -402,8 +407,12 @@ function isTerminalRun(run: OpenTagRun): boolean {
   return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
 }
 
-function shouldUseDelayedLarkStatusCard(provider: string, options: LarkDelayedStatusCardOptions): boolean {
-  return provider === "lark" && options.enabled !== false;
+function shouldUseDelayedLarkStatusCard(
+  provider: string,
+  options: LarkDelayedStatusCardOptions,
+  nativeStatusDelivery: boolean
+): boolean {
+  return provider === "lark" && options.enabled !== false && !nativeStatusDelivery;
 }
 
 function safeExecutorLabel(executor: string | undefined): string {
@@ -442,7 +451,8 @@ const CreateChannelBindingSchema = z
     repoProvider: z.string().min(1).optional(),
     owner: z.string().min(1).optional(),
     repo: z.string().min(1).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional()
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
   })
   .superRefine((binding, ctx) => {
     const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
@@ -454,6 +464,78 @@ const CreateChannelBindingSchema = z
       });
     }
   });
+
+function channelBindingScopeFromEvent(event: OpenTagEvent): { accountId: string; conversationId: string } | null {
+  const metadata = event.metadata ?? {};
+  const accountId = metadataString(metadata, "accountId")
+    ?? metadataString(metadata, "teamId")
+    ?? metadataString(metadata, "tenantKey")
+    ?? metadataString(metadata, "botId");
+  const conversationId = metadataString(metadata, "conversationId")
+    ?? metadataString(metadata, "channelId")
+    ?? metadataString(metadata, "chatId");
+  return accountId && conversationId ? { accountId, conversationId } : null;
+}
+
+async function managedChannelOwnershipVerified(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  event: OpenTagEvent;
+  principal?: ChannelPrincipalIdentity;
+}): Promise<boolean> {
+  const scope = channelBindingScopeFromEvent(input.event);
+  if (!scope) return input.event.source !== "slack" && input.event.source !== "lark";
+  const binding = await input.repo.getChannelBinding({ provider: input.event.source, ...scope });
+  if (!binding?.ownership) return true;
+  return input.principal?.provider === input.event.source
+    && input.principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || input.principal.botId === binding.ownership.botId);
+}
+
+export type ChannelPrincipalCredential = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+  credential: string;
+};
+
+type ChannelPrincipalIdentity = Omit<ChannelPrincipalCredential, "credential">;
+
+function channelPrincipalCredentialDigest(credential: string): string {
+  return createHash("sha256").update(credential).digest("hex");
+}
+
+function configuredChannelPrincipals(principals: ChannelPrincipalCredential[] | undefined): Map<string, ChannelPrincipalIdentity> {
+  const configured = new Map<string, ChannelPrincipalIdentity>();
+  for (const principal of principals ?? []) {
+    const credential = principal.credential.trim();
+    if (!credential || !principal.provider.trim() || !principal.applicationId.trim()) {
+      throw new Error("Channel principals require provider, applicationId, and credential.");
+    }
+    const digest = channelPrincipalCredentialDigest(credential);
+    if (configured.has(digest)) throw new Error("Channel principal credentials must be unique per adapter.");
+    configured.set(digest, {
+      provider: principal.provider,
+      applicationId: principal.applicationId,
+      ...(principal.botId ? { botId: principal.botId } : {})
+    });
+  }
+  return configured;
+}
+
+function channelPrincipalFromRequest(request: Request, principals: Map<string, ChannelPrincipalIdentity>): ChannelPrincipalIdentity | undefined {
+  const credential = request.headers.get("x-opentag-channel-principal")?.trim();
+  return credential ? principals.get(channelPrincipalCredentialDigest(credential)) : undefined;
+}
+
+function principalOwnsManagedBinding(principal: ChannelPrincipalIdentity | undefined, binding: {
+  provider: string;
+  ownership?: { applicationId: string; botId?: string | undefined } | undefined;
+}): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 const UpsertPolicyRuleSchema = z.object({
   rule: PolicyRuleSchema
@@ -2363,18 +2445,19 @@ async function deliverAndAudit(input: {
   message: CallbackMessage;
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
+  const safeMessage = sanitizeCredentialLikeValue(input.message);
   const delivery = await input.repo.enqueueCallbackDelivery({
-    runId: input.message.runId,
-    kind: input.message.kind,
-    provider: input.message.provider,
-    uri: input.message.uri,
-    body: input.message.body,
-    ...(input.message.idempotencyKey ? { idempotencyKey: input.message.idempotencyKey } : {}),
-    ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
-    ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
-    ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
-    ...(input.message.blocks ? { blocks: input.message.blocks } : {}),
-    ...(input.message.rich ? { rich: input.message.rich } : {})
+    runId: safeMessage.runId,
+    kind: safeMessage.kind,
+    provider: safeMessage.provider,
+    uri: safeMessage.uri,
+    body: safeMessage.body,
+    ...(safeMessage.idempotencyKey ? { idempotencyKey: safeMessage.idempotencyKey } : {}),
+    ...(safeMessage.threadKey ? { threadKey: safeMessage.threadKey } : {}),
+    ...(safeMessage.agentId ? { agentId: safeMessage.agentId } : {}),
+    ...(safeMessage.statusMessageKey ? { statusMessageKey: safeMessage.statusMessageKey } : {}),
+    ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
+    ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
   });
   return deliverCallbackDelivery({
     repo: input.repo,
@@ -2537,6 +2620,7 @@ export function createDispatcherApp(input: {
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
+  channelPrincipals?: ChannelPrincipalCredential[];
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
@@ -2556,6 +2640,7 @@ export function createDispatcherApp(input: {
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
+  const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
   const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
@@ -2957,7 +3042,11 @@ export function createDispatcherApp(input: {
     phase: DelayedLarkStatusPhase;
     createIfMissing?: boolean;
   }): Promise<boolean> {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return false;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return false;
     if (!input.event.callback.threadKey) return false;
     if (isTerminalRun(input.run)) return false;
 
@@ -3013,7 +3102,11 @@ export function createDispatcherApp(input: {
   }
 
   function scheduleDelayedLarkStatusCard(input: { run: OpenTagRun; event: OpenTagEvent }): void {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return;
     if (!input.event.callback.threadKey) return;
     if (larkStatusCardDelayMs < 0) return;
     const existing = delayedLarkStatusCards.get(input.run.id);
@@ -3811,15 +3904,47 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateChannelBindingSchema);
-    await repo.upsertChannelBinding({
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    const existing = await repo.getChannelBinding({
       provider: parsed.provider,
       accountId: parsed.accountId,
-      conversationId: parsed.conversationId,
-      ...(parsed.repoProvider && parsed.owner && parsed.repo
-        ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
-        : {}),
-      ...(parsed.metadata ? { metadata: parsed.metadata } : {})
+      conversationId: parsed.conversationId
     });
+    const requestedManagedBinding = parsed.ownership
+      ? { provider: parsed.provider, ownership: parsed.ownership }
+      : undefined;
+    if (
+      (requestedManagedBinding && !principalOwnsManagedBinding(principal, requestedManagedBinding))
+      || (existing?.ownership && !principalOwnsManagedBinding(principal, existing))
+    ) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${parsed.provider}:${parsed.accountId}/${parsed.conversationId}`,
+        payload: { provider: parsed.provider, accountId: parsed.accountId, conversationId: parsed.conversationId, operation: "upsert" }
+      });
+    }
+    try {
+      await repo.upsertChannelBinding({
+        provider: parsed.provider,
+        accountId: parsed.accountId,
+        conversationId: parsed.conversationId,
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
+        ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
+        ...(parsed.ownership ? { ownership: parsed.ownership } : {}),
+        ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+      });
+    } catch (error) {
+      if (error instanceof Error && /Exclusive managed channel binding/u.test(error.message)) {
+        return c.json({ error: "managed_channel_binding_conflict" }, 409);
+      }
+      throw error;
+    }
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -3831,7 +3956,8 @@ export function createDispatcherApp(input: {
         ...(parsed.repoProvider && parsed.owner && parsed.repo
           ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
           : {}),
-        hasMetadata: Boolean(parsed.metadata)
+        hasMetadata: Boolean(parsed.metadata),
+        ...(parsed.ownership ? { managedOwnership: true } : {})
       }
     });
     return c.json({ ok: true }, 201);
@@ -3874,6 +4000,22 @@ export function createDispatcherApp(input: {
     const provider = c.req.param("provider");
     const accountId = c.req.param("accountId");
     const conversationId = c.req.param("conversationId");
+    const existing = await repo.getChannelBinding({ provider, accountId, conversationId });
+    if (!existing) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing.ownership && !principalOwnsManagedBinding(principal, existing) && !adminOverride) {
+      return c.json({ error: "managed_channel_principal_required" }, 403);
+    }
+    if (existing.ownership && adminOverride && !principalOwnsManagedBinding(principal, existing)) {
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "delete" }
+      });
+    }
     const deleted = await repo.deleteChannelBinding({
       provider,
       accountId,
@@ -3952,6 +4094,33 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runs", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRunSchema);
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    let ownershipVerified = false;
+    try {
+      ownershipVerified = await managedChannelOwnershipVerified({
+        repo,
+        event: parsed.event,
+        ...(channelPrincipal ? { principal: channelPrincipal } : {})
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_binding_corrupt",
+        severity: "error",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_binding_corrupt" }, 403);
+    }
+    if (!ownershipVerified) {
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_ownership_unverified",
+        severity: "warn",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_ownership_unverified" }, 403);
+    }
     const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
 
     if (admitted.outcome === "needs_human_decision") {
@@ -4712,15 +4881,20 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, ProgressSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const progressVisibility = channelProgressVisibility({
+      ...(body.type ? { type: body.type } : {}),
+      ...(body.visibility ? { requested: body.visibility } : {})
+    });
+    const safeProgressMessage = sanitizeCredentialLikeValue(body.message, { secrets: [body.fencingToken] });
     const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: body.attemptId,
       fencingToken: body.fencingToken,
-      message: body.message,
+      message: safeProgressMessage,
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {}),
-      ...(body.visibility ? { visibility: body.visibility } : {}),
+      visibility: progressVisibility,
       ...(body.importance ? { importance: body.importance } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
@@ -4729,10 +4903,9 @@ export function createDispatcherApp(input: {
     if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-    const progressVisibility = body.visibility ?? "audit";
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
+      const progressPresentation = presentation.progressPresentation({ runId, message: safeProgressMessage });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
         ...larkRenderLocaleRenderOption(stored.event),
@@ -4791,12 +4964,15 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CompleteRunSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = parsed.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeResult = OpenTagRunResultSchema.parse(
+      sanitizeCredentialLikeValue(parsed.result, { secrets: [parsed.fencingToken] })
+    );
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
       attemptId: parsed.attemptId,
       fencingToken: parsed.fencingToken,
-      result: parsed.result,
+      result: safeResult,
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
@@ -4808,13 +4984,13 @@ export function createDispatcherApp(input: {
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
-      result: parsed.result,
+      result: safeResult,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
       ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
       ...(linearApply ? { linearApply } : {})
     });
     if (
-      parsed.result.conclusion === "needs_human" &&
+      safeResult.conclusion === "needs_human" &&
       shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
     ) {
       const waitingPresentation = presentation.runStatusPresentation({
@@ -4848,7 +5024,7 @@ export function createDispatcherApp(input: {
       });
     }
     const finalPresentation = presentation.finalPresentation({
-      result: parsed.result,
+      result: safeResult,
       runId,
       receiptContext
     });
@@ -4876,7 +5052,7 @@ export function createDispatcherApp(input: {
       }
     });
     clearDelayedLarkStatusCard(runId);
-    const shouldPromoteFollowUp = parsed.result.conclusion !== "needs_human" && parsed.result.conclusion !== "cancelled";
+    const shouldPromoteFollowUp = safeResult.conclusion !== "needs_human" && safeResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,

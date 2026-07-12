@@ -31,6 +31,7 @@ import {
   parseTelegramThreadKey,
   telegramMessageRichPayloadFromUnknown
 } from "@opentag/telegram";
+import { sanitizeCredentialLikeValue } from "@opentag/core";
 import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
@@ -145,7 +146,7 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
   const deliveryByKey = new Map<string, Promise<void>>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "github") return;
       if (!input.token) return;
 
@@ -369,7 +370,8 @@ export function createSlackCallbackSink(input: {
   const statusMessageTsByKey = new Map<string, string>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      message = sanitizeCredentialLikeValue(message);
       if (message.provider !== "slack") return;
       const botToken = slackBotTokenFor({
         botToken: input.botToken,
@@ -379,7 +381,8 @@ export function createSlackCallbackSink(input: {
       if (!botToken) return;
 
       const thread = parseSlackThreadKey(message.threadKey ?? "");
-      const existingStatusTs = message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined;
+      const existingStatusTs = message.externalMessageId
+        ?? (message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined);
       const response = await fetchImpl(existingStatusTs ? slackUpdateUriFrom(message.uri) : message.uri, {
         method: "POST",
         headers: {
@@ -420,6 +423,8 @@ export function createSlackCallbackSink(input: {
           }
         }
       }
+      const externalMessageId = existingStatusTs ?? body.ts;
+      return externalMessageId ? { externalMessageId } : undefined;
     }
   };
 }
@@ -530,6 +535,7 @@ export function createLarkCallbackSink(input: {
 
   return {
     async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      message = sanitizeCredentialLikeValue(message);
       if (message.provider !== "lark") return;
       // A lark run was accepted, so a missing client/threadKey is a real failure, not a silent success.
       if (!client) {

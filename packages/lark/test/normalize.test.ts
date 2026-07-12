@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   encodeLarkThreadKey,
   type LarkMessageInput,
+  normalizeLarkChannelMessage,
   normalizeLarkMessage,
   parseLarkThreadKey,
   stripLarkMention
@@ -16,6 +17,8 @@ const baseInput: LarkMessageInput = {
   messageId: "om_msg",
   eventId: "evt_1",
   eventTimeMs: 1_700_000_000_000,
+  applicationId: "cli_app_123",
+  botOpenId: "ou_bot",
   binding: { tenantKey: "tk_123", chatId: "oc_chat", owner: "acme", repo: "app" }
 };
 
@@ -50,6 +53,16 @@ describe("lark thread key", () => {
 });
 
 describe("normalizeLarkMessage", () => {
+  it("normalizes native Lark ingress through opentag.channel.v1", () => {
+    expect(normalizeLarkChannelMessage(baseInput)).toMatchObject({
+      protocol: "opentag.channel.v1",
+      trigger: "mention",
+      source: { channel: { provider: "lark", workspace: "tk_123", id: "oc_chat" }, actor: { id: "ou_user" } },
+      text: "fix the login bug",
+      replyTarget: { purpose: "all" }
+    });
+  });
+
   it("maps a Lark message into an OpenTagEvent", () => {
     const event = normalizeLarkMessage(baseInput);
     expect(event).not.toBeNull();
@@ -68,6 +81,7 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
+    expect(event?.metadata).toMatchObject({ channelApplicationId: "cli_app_123", channelBotId: "ou_bot" });
   });
 
   it("derives Feishu render locale from the domain", () => {

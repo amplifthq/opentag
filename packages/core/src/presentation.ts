@@ -15,20 +15,20 @@ const CredentialSafePresentationTextSchema = z.string().min(1).refine(isCredenti
 
 export const OpenTagPresentationActionSchema = z.object({
   index: z.number().int().positive(),
-  proposalId: z.string().min(1).optional(),
-  intentId: z.string().min(1).optional(),
-  title: z.string().min(1),
+  proposalId: CredentialSafePresentationTextSchema.optional(),
+  intentId: CredentialSafePresentationTextSchema.optional(),
+  title: CredentialSafePresentationTextSchema,
   state: z.enum(["ready_to_apply", "needs_approval", "needs_setup", "unsupported"]),
-  targetLabel: z.string().min(1),
-  impact: z.string().min(1).optional(),
-  capabilityState: z.string().min(1).optional(),
-  approvalRequirement: z.string().min(1).optional(),
-  safeNextAction: z.string().min(1).optional(),
+  targetLabel: CredentialSafePresentationTextSchema,
+  impact: CredentialSafePresentationTextSchema.optional(),
+  capabilityState: CredentialSafePresentationTextSchema.optional(),
+  approvalRequirement: CredentialSafePresentationTextSchema.optional(),
+  safeNextAction: CredentialSafePresentationTextSchema.optional(),
   visibleDecisions: z.array(z.enum(["apply", "approve", "reject", "continue"])),
   primaryDecision: z.enum(["apply", "continue", "none"]),
-  setupReason: z.string().min(1).optional(),
-  details: z.array(z.string().min(1)).optional(),
-  detailRows: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional()
+  setupReason: CredentialSafePresentationTextSchema.optional(),
+  details: z.array(CredentialSafePresentationTextSchema).optional(),
+  detailRows: z.array(z.object({ label: CredentialSafePresentationTextSchema, value: CredentialSafePresentationTextSchema })).optional()
 });
 
 export const OpenTagRunStatusPresentationSchema = z.object({
@@ -111,16 +111,16 @@ export const OpenTagActionReceiptPresentationSchema = z.object({
 
 export const OpenTagFinalSummaryPresentationSchema = z.object({
   kind: z.literal("final_summary"),
-  outcome: z.string().min(1),
-  summary: z.string().min(1),
-  changedFiles: z.array(z.string().min(1)).optional(),
-  artifacts: OpenTagRunResultSchema.shape.artifacts,
-  verification: OpenTagRunResultSchema.shape.verification,
-  nextActions: z.array(z.string().min(1)).optional(),
-  actionReceiptTitle: z.string().min(1).optional(),
+  outcome: CredentialSafePresentationTextSchema,
+  summary: CredentialSafePresentationTextSchema,
+  changedFiles: z.array(CredentialSafePresentationTextSchema).optional(),
+  artifacts: OpenTagRunResultSchema.shape.artifacts.refine(isCredentialSafeValue),
+  verification: OpenTagRunResultSchema.shape.verification.refine(isCredentialSafeValue),
+  nextActions: z.array(CredentialSafePresentationTextSchema).optional(),
+  actionReceiptTitle: CredentialSafePresentationTextSchema.optional(),
   actions: z.array(OpenTagPresentationActionSchema).optional(),
-  auditRunId: z.string().min(1).optional(),
-  result: OpenTagRunResultSchema
+  auditRunId: CredentialSafePresentationTextSchema.optional(),
+  result: OpenTagRunResultSchema.refine(isCredentialSafeValue)
 });
 
 export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
@@ -143,6 +143,19 @@ export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSource
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
+export type OpenTagPresentationDeliveryTier = "silent" | "status" | "attention_required" | "terminal";
+
+export function presentationDeliveryTier(presentation: OpenTagPresentation): OpenTagPresentationDeliveryTier {
+  if (presentation.kind === "final_summary") return "terminal";
+  if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
+  if (presentation.kind === "run_status") {
+    if (presentation.detailVisibility === "audit") return "silent";
+    if (presentation.state === "waiting_for_approval" || presentation.state === "failed") return "attention_required";
+    if (["completed", "cancelled", "interrupted", "timed_out"].includes(presentation.state)) return "terminal";
+    return "status";
+  }
+  return "status";
+}
 
 export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
   if (!presentation.artifacts?.length) return [];

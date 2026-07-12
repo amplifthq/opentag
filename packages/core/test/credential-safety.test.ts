@@ -4,7 +4,8 @@ import {
   isCredentialSafeDisplayResource,
   isCredentialFieldName,
   isCredentialSafeValue,
-  redactCredentialLikeData
+  redactCredentialLikeData,
+  sanitizeCredentialLikeValue
 } from "../src/credential-safety.js";
 
 describe("credential safety", () => {
@@ -47,5 +48,24 @@ describe("credential safety", () => {
     const redacted = redactCredentialLikeData("request failed for https://operator:password@example.test/deploy");
     expect(redacted).toContain("https://example.test/deploy");
     expect(redacted).not.toMatch(/operator|password/iu);
+  });
+
+  it("recursively sanitizes credential fields, detected tokens, and active runtime secrets without changing shape", () => {
+    const activeFencingToken = "opaque-fence-value-not-detectable-by-pattern";
+    const input = {
+      summary: `completed with ${activeFencingToken}`,
+      metadata: {
+        accessToken: "innocent-looking-secret",
+        nested: ["Bearer abcdefghijklmnopqrstuvwxyz", { note: `again ${activeFencingToken}` }]
+      }
+    };
+
+    expect(sanitizeCredentialLikeValue(input, { secrets: [activeFencingToken] })).toEqual({
+      summary: "completed with [redacted]",
+      metadata: {
+        nested: ["Bearer [redacted]", { note: "again [redacted]" }]
+      }
+    });
+    expect(input.metadata.accessToken).toBe("innocent-looking-secret");
   });
 });

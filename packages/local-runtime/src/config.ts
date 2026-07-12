@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { OpenTagIntegrationManifestSchema } from "@opentag/core";
+import { OpenTagIntegrationManifestSchema, OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
 // Accept any trimmed non-empty executor id. The built-ins are echo, codex,
@@ -148,7 +148,8 @@ export const ChannelBindingConfigSchema = z
     repoProvider: z.string().min(1).optional(),
     owner: z.string().min(1).optional(),
     repo: z.string().min(1).optional(),
-    metadata: z.record(z.string(), z.unknown()).optional()
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
   })
   .superRefine((binding, ctx) => {
     const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
@@ -225,7 +226,10 @@ function formatChannelBindingIdentity(binding: Pick<ChannelBindingConfig, "provi
 }
 
 function sameChannelBindingTarget(left: ChannelBindingConfig, right: ChannelBindingConfig): boolean {
-  return left.repoProvider === right.repoProvider && left.owner === right.owner && left.repo === right.repo;
+  return left.repoProvider === right.repoProvider
+    && left.owner === right.owner
+    && left.repo === right.repo
+    && JSON.stringify(left.ownership) === JSON.stringify(right.ownership);
 }
 
 function formatChannelBindingTarget(binding: ChannelBindingConfig): string {

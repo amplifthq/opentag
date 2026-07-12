@@ -237,14 +237,15 @@ describe("Slack dispatcher-backed self-service", () => {
   });
 
   it("binds a Slack channel through the dispatcher", async () => {
-    const requests: Array<{ url: string; authorization?: string; body?: unknown; method?: string }> = [];
+    const requests: Array<{ url: string; authorization?: string; principal?: string; body?: unknown; method?: string }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
-      const headers = init?.headers as Record<string, string> | undefined;
+      const headers = new Headers(init?.headers);
       requests.push({
         url: href,
         ...(init?.method ? { method: init.method } : {}),
-        ...(headers?.authorization ? { authorization: headers.authorization } : {}),
+        ...(headers.get("authorization") ? { authorization: headers.get("authorization")! } : {}),
+        ...(headers.get("x-opentag-channel-principal") ? { principal: headers.get("x-opentag-channel-principal")! } : {}),
         ...(typeof init?.body === "string" ? { body: JSON.parse(init.body) as unknown } : {})
       });
       if (href === "http://dispatcher.test/v1/channel-bindings" && init?.method === "POST") {
@@ -256,6 +257,8 @@ describe("Slack dispatcher-backed self-service", () => {
     const processorInput = createSlackDispatcherEventProcessorInput({
       dispatcherUrl: "http://dispatcher.test",
       dispatcherToken: "dispatcher_token",
+      channelPrincipalCredential: "slack_principal_123",
+      appId: "A123",
       fetchImpl
     });
 
@@ -274,13 +277,15 @@ describe("Slack dispatcher-backed self-service", () => {
         url: "http://dispatcher.test/v1/channel-bindings",
         method: "POST",
         authorization: "Bearer dispatcher_token",
+        principal: "slack_principal_123",
         body: {
           provider: "slack",
           accountId: "T123",
           conversationId: "C123",
           repoProvider: "github",
           owner: "acme",
-          repo: "demo"
+          repo: "demo",
+          ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
         }
       }
     ]);

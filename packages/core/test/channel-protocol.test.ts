@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  channelProgressVisibility,
   OpenTagChannelInboundMessageSchema,
+  OpenTagManagedChannelBindingOwnershipSchema,
   OpenTagChannelPresentationCommandSchema
 } from "../src/channel-protocol.js";
+import { presentationDeliveryTier } from "../src/presentation.js";
 
 const replyTarget = {
   channel: { provider: "chat", id: "channel-42", workspace: "tenant-7" },
@@ -10,6 +13,33 @@ const replyTarget = {
 } as const;
 
 describe("opentag.channel.v1", () => {
+  it("keeps routine executor progress audit-only even when a caller requests source-thread delivery", () => {
+    expect(channelProgressVisibility({ type: "executor.progress", requested: "human" })).toBe("audit");
+    expect(channelProgressVisibility({ type: "executor.started", requested: "human" })).toBe("audit");
+    expect(channelProgressVisibility({ type: "executor.completed", requested: "human" })).toBe("audit");
+    expect(channelProgressVisibility({ type: "security.blocked", requested: "human" })).toBe("human");
+  });
+
+  it("classifies normalized presentations into Balanced delivery tiers", () => {
+    expect(presentationDeliveryTier({ kind: "run_status", runId: "run-1", state: "running", detailVisibility: "audit" })).toBe("silent");
+    expect(presentationDeliveryTier({ kind: "run_status", runId: "run-1", state: "running", detailVisibility: "source_thread" })).toBe("status");
+    expect(presentationDeliveryTier({ kind: "run_status", runId: "run-1", state: "waiting_for_approval" })).toBe("attention_required");
+  });
+
+  it("keys managed channel ownership to immutable application identity, not display name", () => {
+    expect(OpenTagManagedChannelBindingOwnershipSchema.parse({
+      mode: "managed",
+      exclusive: true,
+      applicationId: "A123",
+      botId: "U456"
+    })).toEqual({ mode: "managed", exclusive: true, applicationId: "A123", botId: "U456" });
+    expect(() => OpenTagManagedChannelBindingOwnershipSchema.parse({
+      mode: "managed",
+      exclusive: true,
+      displayName: "Whatever name the admin chose"
+    })).toThrow();
+  });
+
   it("parses a normalized source-thread inbound message", () => {
     const event = OpenTagChannelInboundMessageSchema.parse({
       protocol: "opentag.channel.v1",

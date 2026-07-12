@@ -1,4 +1,12 @@
-import { commandFromRawText, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
+import {
+  commandFromRawText,
+  OpenTagChannelInboundMessageSchema,
+  type ContextPointer,
+  type OpenTagChannelInboundMessage,
+  type OpenTagCommand,
+  type OpenTagEvent,
+  type PermissionGrant
+} from "@opentag/core";
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -66,6 +74,29 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
     throw new Error(`Invalid Slack thread key: ${threadKey}`);
   }
   return { teamId, channelId, threadTs };
+}
+
+export function normalizeSlackChannelMessage(input: SlackAppMentionInput): OpenTagChannelInboundMessage | null {
+  const text = stripSlackAppMention(input.text, input.botUserId);
+  if (!text) return null;
+  const threadTs = input.threadTs ?? input.ts;
+  const channel = { provider: "slack", workspace: input.teamId, id: input.channelId };
+  const thread = { provider: "slack", id: threadTs, parentMessageId: threadTs };
+  return OpenTagChannelInboundMessageSchema.parse({
+    protocol: "opentag.channel.v1",
+    eventId: input.eventId,
+    occurredAt: new Date(input.eventTime * 1000).toISOString(),
+    trigger: "mention",
+    source: {
+      kind: "channel_message",
+      channel,
+      thread,
+      actor: { provider: "slack", id: input.userId }
+    },
+    text,
+    attachments: [],
+    replyTarget: { channel, thread, purpose: "all" }
+  });
 }
 
 const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i;
@@ -178,8 +209,9 @@ function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
 }
 
 export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEvent | null {
-  const rawText = stripSlackAppMention(input.text, input.botUserId);
-  if (!rawText) return null;
+  const channelMessage = normalizeSlackChannelMessage(input);
+  if (!channelMessage?.text) return null;
+  const rawText = channelMessage.text;
 
   const command = commandFromRawText(rawText);
   const replyThreadTs = input.threadTs ?? input.ts;
@@ -236,6 +268,8 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       slackEventId: input.eventId,
       ...(input.appId ? { slackAppId: input.appId } : {}),
       ...(input.botUserId ? { slackBotUserId: input.botUserId } : {}),
+      ...(input.appId ? { channelApplicationId: input.appId } : {}),
+      ...(input.botUserId ? { channelBotId: input.botUserId } : {}),
       ...(typeof input.signatureVerified === "boolean"
         ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
         : {}),

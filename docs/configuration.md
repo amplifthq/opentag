@@ -84,6 +84,64 @@ ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
 }
 ```
 
+### ACP-first setup choices
+
+The basic setup model has four choices:
+
+1. **Channel** — the Slack, Lark, or other source scope allowed to create Runs.
+2. **Agent** — the named ACP Agent Profile that executes Attempts.
+3. **Connections** — external resource accounts that policy may grant.
+4. **Mode** — `ask`, `auto`, or `autonomous`; `auto` is the default.
+
+No repository is required for a repository-free task. Basic setup also does not
+require a cross-provider principal, policy DSL, Worker ID, ACP transport detail,
+presentation rule, or custom user limit.
+
+For managed Slack and Lark channels, prefer the generic `channelBindings` form
+so the administrator can pin the immutable provider application identity:
+
+```json
+{
+  "channelBindings": [
+    {
+      "provider": "slack",
+      "accountId": "T123",
+      "conversationId": "C123",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "A123",
+        "botId": "U123"
+      }
+    },
+    {
+      "provider": "lark",
+      "accountId": "tenant_1",
+      "conversationId": "oc_chat",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "cli_app_123",
+        "botId": "ou_bot"
+      }
+    }
+  ],
+  "approvalMode": "auto"
+}
+```
+
+Application and bot IDs come from verified adapter configuration or provider
+event metadata. Bot display names can be changed freely and are never used as
+binding identity. A managed Run fails closed if the incoming application ID is
+missing or different. Replacing or deleting the binding remains an authenticated
+administrator operation.
+
+If Hermes supplies both a channel gateway and ACP execution, configure them as
+separate runtime identities. The gateway owns only Slack/Lark transport
+credentials; the `hermes acp` binding owns only its Agent Profile and granted
+Attempt capabilities. Do not share profiles, environment variables, credentials,
+logs, or lifecycle supervision between those roles.
+
 Add Slack channel bindings when a chat surface should route work to a Project Target:
 
 ```json
@@ -195,6 +253,7 @@ use `--permission-mode plan`.
 | `agents` | `{}` | Named `opentag.integration.v1` manifests whose ACP agent role is hosted by the generic ACP executor |
 | `scratchRoot` | local OpenTag state directory | Absolute root for attempt-scoped non-repository workspaces |
 | `keepScratch` | `on_failure` | Scratch retention: `always`, `on_failure`, or `never`; failed attempts retain evidence |
+| `approvalMode` | `auto` | Autonomy mode: `ask`, `auto`, or `autonomous`. Every mode remains inside administrator-defined hard boundaries. |
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |

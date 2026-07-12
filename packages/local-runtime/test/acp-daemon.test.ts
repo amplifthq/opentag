@@ -624,4 +624,59 @@ describe("ACP daemon workspaces", () => {
     expect(cancellations).toEqual([{ runId: "run_acp", attemptId: "attempt_A" }]);
     expect(completed).toEqual([]);
   });
+
+  it("sanitizes ACP-native progress, final output, logs, and the active fencing token at the daemon boundary", async () => {
+    const providerToken = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const activeFence = "fence_1";
+    const completed: OpenTagRunResult[] = [];
+    const progress: Array<{ type: string; message: string; at: string }> = [];
+    const logged: unknown[][] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logged.push(args);
+    });
+    const executor = createAcpExecutor({
+      manifest: {
+        protocol: "opentag.integration.v1",
+        id: "credential-output-fixture",
+        label: "Credential Output Fixture",
+        bindings: {
+          agent: {
+            kind: "stdio",
+            command: process.execPath,
+            args: [acpFixture],
+            env: {
+              OPENTAG_ACP_TEST_TOOL_TITLE: `Inspect with ${providerToken} and ${activeFence}`,
+              OPENTAG_ACP_TEST_OUTPUT: `ACP completed with ${providerToken} and ${activeFence}`
+            }
+          }
+        },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        resources: {}
+      }
+    });
+
+    try {
+      await runOneDaemonIteration({
+        runnerId: "runner_local",
+        repositories: [],
+        executors: { reviewer: executor },
+        scratchRoot: join(mkdtempSync(join(tmpdir(), "opentag-safe-acp-root-")), "scratch"),
+        heartbeatIntervalMs: 0,
+        client: clientFor({
+          claimed: claimed({ event: event({ id: "evt_safe_acp", permissions: [] }) }),
+          completed,
+          progress: async (_runId, _lease, item) => {
+            progress.push(item);
+          }
+        })
+      });
+    } finally {
+      log.mockRestore();
+    }
+
+    const serialized = JSON.stringify({ completed, progress, logged });
+    expect(serialized).not.toContain(providerToken);
+    expect(serialized).not.toContain(activeFence);
+    expect(serialized).toContain("[redacted]");
+  });
 });
