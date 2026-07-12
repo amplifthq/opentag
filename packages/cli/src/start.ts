@@ -724,9 +724,9 @@ export async function bootstrapLocalDispatcher(config: OpenTagCliConfig, client?
       provider: binding.provider,
       accountId: binding.accountId,
       conversationId: binding.conversationId,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       ...(binding.metadata ? { metadata: binding.metadata } : {})
     });
   }

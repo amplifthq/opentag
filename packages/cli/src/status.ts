@@ -719,7 +719,8 @@ export function formatRunStatus(summary: RunStatusSummary): string {
   ].join("\n");
 }
 
-function projectTargetLabel(input: { repoProvider: string; owner: string; repo: string }): string {
+function projectTargetLabel(input: ChannelRuntimeStatus["binding"]): string | undefined {
+  if (!input.repoProvider || !input.owner || !input.repo) return undefined;
   return `${input.repoProvider}:${input.owner}/${input.repo}`;
 }
 
@@ -728,10 +729,11 @@ export function formatChannelStatus(summary: ChannelStatusSummary): string {
   const runTimeoutPolicy = summary.status.runTimeoutPolicy?.hardTimeoutMs
     ? formatRunTimeoutPolicy(summary.status.runTimeoutPolicy.hardTimeoutMs)
     : summary.runTimeoutPolicy;
+  const projectTarget = projectTargetLabel(summary.status.binding);
   const statusPresentation = createSourceThreadStatusPresentation({
     title: "OpenTag status:",
     sourceContainer: `${summary.provider}:${summary.accountId}/${summary.conversationId}`,
-    projectTarget: projectTargetLabel(summary.status.binding),
+    ...(projectTarget ? { projectTarget } : {}),
     bindingState: "bound",
     ...(activeRun
       ? {

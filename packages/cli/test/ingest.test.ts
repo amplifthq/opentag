@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderIngestShellTemplate, renderIngestTemplate, runIngestCommand, runIngestTemplateCommand } from "../src/ingest.js";
 import { createSetupConfig } from "../src/setup.js";
 
@@ -33,6 +33,13 @@ function writeIngestConfig(): string {
 }
 
 describe("OpenTag CLI ingest", () => {
+  const lease = { attemptId: "attempt_1", fencingToken: "fence_1" };
+
+  beforeEach(() => {
+    vi.stubEnv("OPENTAG_ATTEMPT_ID", lease.attemptId);
+    vi.stubEnv("OPENTAG_FENCING_TOKEN", lease.fencingToken);
+  });
+
   it("reports external progress through the runner-scoped client", async () => {
     const client = {
       progress: vi.fn(async () => {}),
@@ -55,7 +62,7 @@ describe("OpenTag CLI ingest", () => {
       }
     );
 
-    expect(client.progress).toHaveBeenCalledWith("run_1", {
+    expect(client.progress).toHaveBeenCalledWith("run_1", lease, {
       type: "ingest.hermes.progress",
       message: "post_llm_call completed",
       at: "2026-06-30T00:00:00.000Z",
@@ -88,6 +95,7 @@ describe("OpenTag CLI ingest", () => {
 
     expect(client.complete).toHaveBeenCalledWith(
       "run_1",
+      lease,
       {
         conclusion: "success",
         summary: "External runtime completed.",
@@ -118,7 +126,7 @@ describe("OpenTag CLI ingest", () => {
       }
     );
 
-    expect(client.progress).toHaveBeenCalledWith("run_1", {
+    expect(client.progress).toHaveBeenCalledWith("run_1", lease, {
       type: "ingest.hermes.post_llm_call",
       message: "LLM call completed.",
       at: "2026-06-30T00:00:00.000Z",
@@ -169,7 +177,7 @@ describe("OpenTag CLI ingest", () => {
       { client, logger: { log: vi.fn() } }
     );
 
-    expect(client.complete).toHaveBeenCalledWith("run_1", {
+    expect(client.complete).toHaveBeenCalledWith("run_1", lease, {
       conclusion: "failure",
       summary: "External runtime failed before finalization."
     });
@@ -191,7 +199,7 @@ describe("OpenTag CLI ingest", () => {
       { client, logger: { log: (message) => output.push(message) } }
     );
 
-    expect(client.complete).toHaveBeenCalledWith("run_1", {
+    expect(client.complete).toHaveBeenCalledWith("run_1", lease, {
       conclusion: "interrupted",
       summary: "External runtime ended before finalization."
     });
@@ -213,7 +221,7 @@ describe("OpenTag CLI ingest", () => {
       { client, logger: { log: vi.fn() } }
     );
 
-    expect(client.complete).toHaveBeenCalledWith("run_1", {
+    expect(client.complete).toHaveBeenCalledWith("run_1", lease, {
       conclusion: "timed_out",
       summary: "External runtime exceeded its timeout policy."
     });
@@ -243,6 +251,8 @@ describe("OpenTag CLI ingest", () => {
     expect(template).toContain("--event agent_failed");
     expect(template).toContain("--event agent_timeout");
     expect(template).toContain("OPENTAG_INGEST_IDEMPOTENCY_PREFIX");
+    expect(template).toContain("OPENTAG_ATTEMPT_ID");
+    expect(template).toContain("OPENTAG_FENCING_TOKEN");
     expect(template).toContain('--idempotency-key "$OPENTAG_INGEST_IDEMPOTENCY_PREFIX:progress:post_llm_call"');
     expect(template).toContain('--idempotency-key "$OPENTAG_INGEST_IDEMPOTENCY_PREFIX:complete:agent_end"');
     expect(template).toContain("Do not paste dispatcher tokens");
@@ -269,6 +279,7 @@ describe("OpenTag CLI ingest", () => {
       kind: string;
       source: string;
       command: string;
+      requiredEnv: string[];
       permissions: {
         conversationAccess: string;
         promptMutation: string;
@@ -293,6 +304,7 @@ describe("OpenTag CLI ingest", () => {
       kind: "opentag_hook_ingest_manifest",
       source: "hermes",
       command: "opentag",
+      requiredEnv: ["OPENTAG_RUN_ID", "OPENTAG_ATTEMPT_ID", "OPENTAG_FENCING_TOKEN"],
       permissions: {
         conversationAccess: "none",
         promptMutation: "none",
@@ -395,6 +407,21 @@ describe("OpenTag CLI ingest", () => {
         }
       )
     ).rejects.toThrow("--source must be a safe label");
+  });
+
+  it("requires the active attempt lease before ingesting runner events", async () => {
+    await expect(
+      runIngestCommand(
+        { run: "run_1", event: "progress", message: "started" },
+        {
+          env: {},
+          client: {
+            progress: vi.fn(async () => {}),
+            complete: vi.fn(async () => {})
+          }
+        }
+      )
+    ).rejects.toThrow("OPENTAG_ATTEMPT_ID is required");
   });
 
   it("requires progress messages", async () => {
