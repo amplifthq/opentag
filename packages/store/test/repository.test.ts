@@ -2056,6 +2056,13 @@ describe("OpenTag repository", () => {
                 action: "add_label",
                 summary: "Add the bug label.",
                 params: { label: "bug" }
+              },
+              {
+                intentId: "intent_status_ready",
+                domain: "status",
+                action: "set_status",
+                summary: "Set status to ready.",
+                params: { status: "ready" }
               }
             ]
           }
@@ -2075,6 +2082,15 @@ describe("OpenTag repository", () => {
       scope: "manual"
     });
     expect(decision?.approvedIntentIds).toEqual(["intent_label_bug"]);
+    const secondDecision = await repo.recordApprovalDecision({
+      id: "approval_protocol_status",
+      proposalId: "proposal_protocol",
+      approvedIntentIds: ["intent_status_ready"],
+      approvedBy: { provider: "github", providerUserId: "43", handle: "reviewer" },
+      approvedAt: "2026-06-24T00:00:02.500Z",
+      scope: "manual"
+    });
+    expect(secondDecision?.approvedIntentIds).toEqual(["intent_status_ready"]);
 
     const planResult = await repo.createApplyPlanOnce({
       id: "apply_protocol",
@@ -2093,6 +2109,7 @@ describe("OpenTag repository", () => {
     expect(plan?.outcomes?.[0]?.message).toContain("adapter execution is not implemented");
 
     await expect(repo.getApprovalDecision({ id: "approval_protocol" })).resolves.toMatchObject({ id: "approval_protocol" });
+    await expect(repo.getApprovalDecision({ id: "approval_protocol_status" })).resolves.toMatchObject({ id: "approval_protocol_status" });
     await expect(repo.getApplyPlan({ id: "apply_protocol" })).resolves.toMatchObject({ id: "apply_protocol" });
     await expect(
       repo.createApplyPlanOnce({
@@ -2122,8 +2139,8 @@ describe("OpenTag repository", () => {
     expect(metrics).toMatchObject({
       runId: "run_protocol",
       humanCallbackCount: 0,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1,
       childRunCount: 0,
       applyOutcomeCounts: {
@@ -2139,8 +2156,8 @@ describe("OpenTag repository", () => {
       scope: "repo",
       scopeId: "github:acme/demo",
       runCount: 1,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1
     });
     const storedRun = await repo.getRun({ runId: "run_protocol" });
@@ -2150,8 +2167,8 @@ describe("OpenTag repository", () => {
       scope: "work_thread",
       scopeId: threadId,
       runCount: 1,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1
     });
   });
@@ -2567,14 +2584,14 @@ describe("durable ACP material actions", () => {
     } as const;
   }
 
-  async function claimedRepository() {
+  async function claimedRepository(leaseSeconds = 60) {
     const sqlite = new Database(":memory:");
     const repo = createOpenTagRepository(drizzle(sqlite));
     migrateSchema(sqlite);
     await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
     await repo.upsertChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
     await repo.createRun({ id: "run_action", event: permissionEvent("action") });
-    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds });
     if (!claimed) throw new Error("expected claimed run");
     return { sqlite, repo, claimed };
   }
@@ -2613,10 +2630,15 @@ describe("durable ACP material actions", () => {
       approvedBy: { provider: "slack", providerUserId: "U123", handle: "alice" },
       approvedAt: "2026-07-12T00:01:00.000Z",
       scope: "manual",
-      metadata: { source: "thread_action", permissionDecision: "allow_once" }
+      metadata: {
+        source: "thread_action",
+        permissionDecision: "allow_once",
+        actionId: waiting!.action.id,
+        proposalHash: waiting!.action.proposalHash
+      }
     });
     const allowed = await repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id });
-    expect(allowed).toMatchObject({ state: "authorized", decision: "allow_once", action: { status: "authorized" } });
+    expect(allowed).toMatchObject({ state: "authorized", decision: "allow_once", action: { status: "executing" } });
     await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "running" } });
 
     const receipt = {
@@ -2646,6 +2668,220 @@ describe("durable ACP material actions", () => {
     ]);
     expect(results[0]?.action.id).toBe(results[1]?.action.id);
     expect(results.every((result) => result?.state === "waiting")).toBe(true);
+  });
+
+  it("keeps provider and credential-safe target fingerprints in action identity and never broadens allow_once", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const firstRequest = {
+      toolCallId: "tool_target_a",
+      title: "Execute deployment",
+      kind: "execute",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      permissionScopes: ["deploy:write"],
+      mode: "auto" as const,
+      provider: "acp"
+    };
+    const first = await repo.requestActionPermission({ ...lease, request: firstRequest });
+    const second = await repo.requestActionPermission({
+      ...lease,
+      request: { ...firstRequest, toolCallId: "tool_target_b", targetFingerprint: `sha256:${"b".repeat(64)}` }
+    });
+    const otherProvider = await repo.requestActionPermission({
+      ...lease,
+      request: { ...firstRequest, toolCallId: "tool_target_c", provider: "connector" }
+    });
+    expect(first).toMatchObject({ state: "waiting", action: { status: "waiting_approval" } });
+    expect(new Set([first?.action.id, second?.action.id, otherProvider?.action.id]).size).toBe(3);
+
+    await repo.recordApprovalDecision({
+      id: "approval_exact_once",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: {
+        source: "thread_action",
+        permissionDecision: "allow_once",
+        proposalHash: first!.action.proposalHash,
+        actionId: first!.action.id
+      }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: second!.action.id })).resolves.toMatchObject({ state: "waiting" });
+  });
+
+  it("keeps the first proposal terminal decision immutable and validates governed proposal identity", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_terminal",
+        title: "Publish package",
+        kind: "publish",
+        targetFingerprint: `sha256:${"c".repeat(64)}`,
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    });
+    const identity = {
+      actionId: waiting!.action.id,
+      proposalHash: waiting!.action.proposalHash,
+      permissionDecision: "allow_once"
+    };
+    const invalid = await repo.recordApprovalDecision({
+      id: "approval_invalid_hash",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:00:30.000Z",
+      scope: "manual",
+      metadata: { ...identity, proposalHash: "tampered" }
+    });
+    expect(invalid).toBeNull();
+
+    const first = await repo.recordApprovalDecision({
+      id: "approval_first_terminal",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: identity
+    });
+    const conflicting = await repo.recordApprovalDecision({
+      id: "approval_conflicting_terminal",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [],
+      rejectedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U999" },
+      approvedAt: "2026-07-12T00:02:00.000Z",
+      scope: "manual",
+      metadata: { ...identity, permissionDecision: "deny" }
+    });
+    expect(conflicting).toEqual(first);
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+  });
+
+  it("rebinds an immutable waiting proposal after reassignment but turns released execution into unknown", async () => {
+    const waitingFixture = await claimedRepository(0);
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: waitingFixture.claimed.attemptId, fencingToken: waitingFixture.claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_rebind",
+      title: "Publish package",
+      kind: "publish",
+      targetFingerprint: `sha256:${"d".repeat(64)}`,
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const waiting = await waitingFixture.repo.requestActionPermission({ ...firstLease, request });
+    const secondClaim = await waitingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: secondClaim!.attemptId, fencingToken: secondClaim!.fencingToken };
+    const rebound = await waitingFixture.repo.requestActionPermission({ ...secondLease, request: { ...request, toolCallId: "tool_rebound" } });
+    expect(rebound).toMatchObject({
+      state: "waiting",
+      action: { id: waiting!.action.id, proposalId: waiting!.action.proposalId, proposalHash: waiting!.action.proposalHash, attemptId: secondClaim!.attemptId }
+    });
+    const stale = await waitingFixture.repo.resolveActionPermission({ ...firstLease, actionId: waiting!.action.id });
+    expect(stale).toMatchObject({ state: "stale" });
+    expect(stale).not.toHaveProperty("decision");
+
+    const executingFixture = await claimedRepository(0);
+    const executingFirstLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingFixture.claimed.attemptId, fencingToken: executingFixture.claimed.fencingToken };
+    const executingRequest = {
+      toolCallId: "tool_execute",
+      title: "Read metadata",
+      kind: "read",
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      permissionScopes: [],
+      mode: "auto" as const,
+      provider: "acp"
+    };
+    const executing = await executingFixture.repo.requestActionPermission({ ...executingFirstLease, request: executingRequest });
+    expect(executing).toMatchObject({ state: "authorized", action: { status: "executing" } });
+    const executingSecondClaim = await executingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const executingSecondLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingSecondClaim!.attemptId, fencingToken: executingSecondClaim!.fencingToken };
+    const staleReceipt = await executingFixture.repo.recordMaterialActionReceipt({
+      ...executingFirstLease,
+      actionId: executing!.action.id,
+      receipt: {
+        id: "receipt_from_stale_attempt",
+        actionId: executing!.action.id,
+        provider: "acp",
+        receiptRef: "acp:stale-attempt",
+        outcome: "succeeded",
+        observedAt: "2026-07-12T00:02:00.000Z"
+      }
+    });
+    expect(staleReceipt).toMatchObject({ state: "stale", action: { id: executing!.action.id, status: "executing" } });
+    expect(staleReceipt).not.toHaveProperty("decision");
+    expect(staleReceipt?.action.receipt).toBeUndefined();
+    expect(JSON.stringify(await executingFixture.repo.listRunEvents({ runId: "run_action" }))).not.toContain("receipt_from_stale_attempt");
+    await expect(executingFixture.repo.requestActionPermission({ ...executingSecondLease, request: { ...executingRequest, toolCallId: "tool_execute_retry" } })).resolves.toMatchObject({
+      state: "unknown",
+      action: { id: executing!.action.id, status: "unknown" }
+    });
+  });
+
+  it("accepts only the first fenced terminal receipt and strips credential-bearing receipt fields", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const allowed = await repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_receipt", title: "Read metadata", kind: "read", permissionScopes: [], mode: "auto", provider: "connector" }
+    });
+    const success = {
+      id: "receipt_success",
+      actionId: allowed!.action.id,
+      provider: "connector",
+      receiptRef: "connector:operation:123",
+      outcome: "succeeded" as const,
+      externalId: "operation_123",
+      externalUri: "https://connector.example/operations/123?access_token=secret#authorization",
+      observedAt: "2026-07-12T00:02:00.000Z",
+      metadata: {
+        assurance: "trusted_provider",
+        toolCallId: "tool_receipt",
+        authorization: "Bearer secret",
+        cookie: "session=secret",
+        password: "hunter2",
+        credential: "private",
+        private_key: "pem-data",
+        statusCode: 200
+      }
+    };
+    const [winner, loser] = await Promise.all([
+      repo.recordMaterialActionReceipt({ ...lease, actionId: allowed!.action.id, receipt: success }),
+      repo.recordMaterialActionReceipt({ ...lease, actionId: allowed!.action.id, receipt: { ...success, id: "receipt_failed", outcome: "failed" } })
+    ]);
+    expect(winner).toMatchObject({ state: "reconciled", action: { status: "succeeded", receipt: { id: "receipt_success", externalUri: "https://connector.example/operations/123" } } });
+    expect(loser).toMatchObject({ state: "reconciled", action: { receipt: { id: "receipt_success" } } });
+    const events = await repo.listRunEvents({ runId: "run_action" });
+    const durable = JSON.stringify(events);
+    expect(durable).not.toContain("access_token");
+    expect(durable).not.toContain("Bearer secret");
+    expect(durable).not.toContain("session=secret");
+    expect(durable).not.toContain("hunter2");
+    expect(durable).not.toContain("pem-data");
+
+    const second = await claimedRepository();
+    const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: second.claimed.attemptId, fencingToken: second.claimed.fencingToken };
+    const secondAllowed = await second.repo.requestActionPermission({ ...secondLease, request: { toolCallId: "tool_secret_ref", title: "Read metadata", kind: "read", permissionScopes: [], mode: "auto", provider: "connector" } });
+    await expect(second.repo.recordMaterialActionReceipt({
+      ...secondLease,
+      actionId: secondAllowed!.action.id,
+      receipt: { id: "receipt_secret_id", actionId: secondAllowed!.action.id, provider: "connector", receiptRef: "connector:operation:456", externalId: "password=hunter2", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
+    })).rejects.toThrow(/externalId.*credential-like/u);
+    await expect(second.repo.recordMaterialActionReceipt({
+      ...secondLease,
+      actionId: secondAllowed!.action.id,
+      receipt: { id: "receipt_secret", actionId: secondAllowed!.action.id, provider: "connector", receiptRef: "authorization=Bearer secret", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
+    })).rejects.toThrow(/credential-like/u);
+    expect(JSON.stringify(await second.repo.listRunEvents({ runId: "run_action" }))).not.toContain("Bearer secret");
   });
 
   it("stops automatic retry when the provider outcome is unknown", async () => {

@@ -164,7 +164,13 @@ describe("ACP executor", () => {
     await executor.run({
       ...input({ kind: "scratch", path: scratch }, "run_governed"),
       permissionResolver: async (request) => {
-        expect(request).toMatchObject({ toolCallId: "material-1", title: "Publish report" });
+        expect(request).toMatchObject({
+          toolCallId: "material-1",
+          title: "Publish report",
+          provider: "acp",
+          targetFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u)
+        });
+        expect(JSON.stringify(request)).not.toContain("fixture-secret-token");
         return { actionId: "action_publish", decision: "allow_once", material: true };
       },
       materialActionReporter: async (report) => void reports.push(report)

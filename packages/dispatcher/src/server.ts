@@ -4,6 +4,7 @@ import {
   ActorIdentitySchema,
   ActionHintSchema,
   ActionPermissionRequestSchema,
+  OpenTagApprovalPromptPresentationSchema,
   MaterialActionReceiptSchema,
   capabilityForMutationIntent,
   conversationKeysFromEvent,
@@ -4119,6 +4120,26 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "unauthorized", reason: authorization.reason, message: authorization.message }, 403);
     }
 
+    const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
+    const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
+    const requestedPermissionDecision = parsed.metadata?.["permissionDecision"];
+    if (governedPermission) {
+      const expectedActionId = proposalMetadata?.["actionId"];
+      const expectedProposalHash = proposalMetadata?.["proposalHash"];
+      const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
+      const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
+      if (
+        (requestedPermissionDecision !== "allow_once" && requestedPermissionDecision !== "allow_run" && requestedPermissionDecision !== "deny") ||
+        parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
+        parsed.metadata?.["governedActionId"] !== expectedActionId ||
+        parsed.metadata?.["proposalId"] !== resolved.resolved.proposal.snapshot.proposalId ||
+        parsed.metadata?.["intentId"] !== expectedIntentId ||
+        !compatibleVerb
+      ) {
+        return c.json({ outcome: "approval_identity_mismatch", message: "The governed approval payload does not match the immutable proposal." }, 409);
+      }
+    }
+
     const selectionText = selectedActionSummary(resolved.resolved.selectedCandidates);
     const selectedIntents = resolved.resolved.proposal.snapshot.intents.filter((intent) =>
       resolved.resolved.selectedIntentIds.includes(intent.intentId)
@@ -4209,9 +4230,15 @@ export function createDispatcherApp(input: {
         verb: command.verb,
         selection: command.selection,
         callback: parsed.callback,
-        ...(parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
-          ? { permissionDecision: "allow_run" }
-          : { permissionDecision: command.verb === "reject" ? "deny" : "allow_once" }),
+        ...(governedPermission
+          ? {
+              permissionDecision: requestedPermissionDecision,
+              actionId: proposalMetadata?.["actionId"],
+              proposalHash: proposalMetadata?.["proposalHash"]
+            }
+          : parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
+            ? { permissionDecision: "allow_run" }
+            : { permissionDecision: command.verb === "reject" ? "deny" : "allow_once" }),
         ...(parsed.metadata ? { ingressMetadata: parsed.metadata } : {})
       }
     });
@@ -4517,20 +4544,23 @@ export function createDispatcherApp(input: {
     if (resolution.state === "waiting" && resolution.action.proposalId) {
       const stored = await repo.getRun({ runId });
       const proposal = await repo.getSuggestedChanges({ proposalId: resolution.action.proposalId });
-      if (stored && proposal) {
-        const final = presentation.finalPresentation({
+      if (stored && proposal && resolution.action.proposalHash) {
+        const approvalPrompt = OpenTagApprovalPromptPresentationSchema.parse({
+          kind: "approval_prompt",
           runId,
-          result: {
-            conclusion: "needs_human",
-            summary: `Approval required for ${resolution.action.actionFamily}.`,
-            suggestedChanges: [proposal.snapshot],
-            nextAction: "Choose Allow once, Allow for this run, or Deny in this source thread."
-          }
+          approvalId: `approval_${resolution.action.id}`,
+          proposalId: proposal.snapshot.proposalId,
+          intentId: `intent_${resolution.action.id}`,
+          actionId: resolution.action.id,
+          proposalHash: resolution.action.proposalHash,
+          title: `Allow ${resolution.action.actionFamily}?`,
+          summary: proposal.snapshot.summary,
+          decisions: ["allow_once", "allow_run", "deny"]
         });
         const rendered = presentation.render({
           provider: stored.event.callback.provider,
           ...larkRenderLocaleRenderOption(stored.event),
-          presentation: final
+          presentation: approvalPrompt
         });
         await deliverAndAudit({
           repo,

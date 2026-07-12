@@ -31,6 +31,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
   const linearAuth = input.linear?.auth ?? { method: "api_key" as const };
   const stateDirectory = input.stateDirectory ?? defaultStateDirectory(env);
   const worktreeRoot = join(stateDirectory, "worktrees");
+  const scratchRoot = join(stateDirectory, "scratch");
   const databasePath = join(stateDirectory, "opentag.db");
   const repositoryBindings = [
     {
@@ -168,6 +169,10 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       dispatcherUrl: "http://localhost:3030",
       pairingToken: pairingToken(),
       repositories: repositoryBindings,
+      agents: {},
+      scratchRoot,
+      keepScratch: "on_failure",
+      approvalMode: "auto",
       ...(input.hermes
         ? {
             hermes: {

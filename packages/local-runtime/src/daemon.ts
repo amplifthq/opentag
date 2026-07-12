@@ -11,6 +11,7 @@ import {
   type ActionPermissionRequest,
   type ActionPermissionResolution,
   type ApprovalMode,
+  type MaterialActionReceipt,
   type ProjectTargetRef
 } from "@opentag/core";
 import {
@@ -20,6 +21,7 @@ import {
   createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
   type ExecutorAdapter,
+  type ExecutorMaterialActionReport,
   type ExecutorWorkspace,
   type RunnerSecurityPolicy,
   worktreePathForRun
@@ -52,6 +54,12 @@ export type DaemonClient = {
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
 };
+
+export type TrustedMaterialActionReceiptProvider = (input: {
+  runId: string;
+  attemptId: string;
+  report: ExecutorMaterialActionReport;
+}) => Promise<MaterialActionReceipt | null>;
 
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
   const projectTargetRef = projectTargetRefFromEvent(event);
@@ -198,6 +206,7 @@ export async function runOneDaemonIteration(input: {
   scratchRoot?: string;
   keepScratch?: "always" | "on_failure" | "never";
   approvalMode?: ApprovalMode;
+  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -416,9 +425,10 @@ export async function runOneDaemonIteration(input: {
             toolCallId: request.toolCallId,
             title: request.title,
             ...(request.kind ? { kind: request.kind } : {}),
+            ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
             permissionScopes: request.permissionScopes,
             mode: input.approvalMode ?? "auto",
-            provider: "acp"
+            provider: request.provider
           });
           while (resolution.state === "waiting") {
             await new Promise((resolveWait) => setTimeout(resolveWait, 250));
@@ -447,7 +457,8 @@ export async function runOneDaemonIteration(input: {
           return { actionId: resolution.action.id, decision: "deny" as const };
         },
         materialActionReporter: async (report) => {
-          await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, {
+          const trustedReceipt = await input.trustedMaterialActionReceipt?.({ runId, attemptId: lease.attemptId, report });
+          await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, trustedReceipt ?? {
             id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
             actionId: report.actionId,
             provider: report.provider,
@@ -606,6 +617,7 @@ export async function serveDaemon(input: {
   scratchRoot?: string;
   keepScratch?: "always" | "on_failure" | "never";
   approvalMode?: ApprovalMode;
+  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -625,6 +637,7 @@ export async function serveDaemon(input: {
         ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
         ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
         ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+        ...(input.trustedMaterialActionReceipt ? { trustedMaterialActionReceipt: input.trustedMaterialActionReceipt } : {}),
         ...(input.security ? { security: input.security } : {}),
         ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
         ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),

@@ -77,7 +77,13 @@ const app = acp
     if (mode === "permission") {
       const permission = await ctx.client.request(acp.methods.client.session.requestPermission, {
         sessionId: ctx.params.sessionId,
-        toolCall: { toolCallId: "material-1", title: "Publish report", kind: "execute", status: "pending" },
+        toolCall: {
+          toolCallId: "material-1",
+          title: "Publish report",
+          kind: "execute",
+          status: "pending",
+          rawInput: { package: "@acme/report", tag: "next", authorization: "Bearer fixture-secret-token" }
+        },
         options: [
           { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
           { optionId: "allow-run", name: "Allow for session", kind: "allow_always" },

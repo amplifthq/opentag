@@ -7,6 +7,7 @@ import {
   shouldDeliverCallbackRunStatus,
   type ActionReceiptContext,
   type OpenTagActionReceiptPresentation,
+  type OpenTagApprovalPromptPresentation,
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
   type OpenTagPresentation,
@@ -22,11 +23,13 @@ import {
 } from "@opentag/gitlab";
 import {
   createLarkActionReceiptCard,
+  createLarkApprovalPromptCard,
   createLarkDoctorSummaryCard,
   createLarkFinalSummaryCard,
   createLarkRunStatusCard,
   createLarkSourceThreadStatusCard,
   renderLarkActionReceiptPresentation,
+  renderLarkApprovalPrompt,
   renderLarkFinalSummaryPresentation,
   renderLarkRunStatusPresentation
 } from "@opentag/lark";
@@ -37,10 +40,12 @@ import {
 } from "@opentag/linear";
 import {
   createSlackActionReceiptBlocks,
+  createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks,
   createSlackFinalSummaryBlocks,
   createSlackSourceThreadStatusBlocks,
   renderSlackActionReceiptPresentation,
+  renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
   renderSlackFinalSummaryPresentation,
   type SlackBlock
@@ -263,6 +268,19 @@ function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagAc
   return { body };
 }
 
+function renderApprovalPrompt(provider: CallbackProvider, presentation: OpenTagApprovalPromptPresentation): PresentedCallbackBody {
+  if (supportsRichPresentation(provider) && provider === "slack") {
+    return { body: renderSlackApprovalPrompt(presentation), blocks: createSlackApprovalPromptBlocks(presentation) };
+  }
+  if (supportsRichPresentation(provider) && provider === "lark") {
+    return {
+      body: renderLarkApprovalPrompt(presentation),
+      rich: { provider: "lark", payload: createLarkApprovalPromptCard(presentation) }
+    };
+  }
+  return { body: renderOpenTagPresentationPlainText(presentation) };
+}
+
 export function createDefaultCallbackPresentation(): CallbackPresentation {
   return {
     shouldDeliverAcknowledgement(provider) {
@@ -318,6 +336,9 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     render(input) {
+      if (input.presentation.kind === "approval_prompt") {
+        return renderApprovalPrompt(input.provider, input.presentation);
+      }
       if (input.presentation.kind === "run_status") {
         return renderRunStatus(input.provider, input.presentation);
       }

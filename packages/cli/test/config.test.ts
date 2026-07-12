@@ -503,6 +503,12 @@ describe("OpenTag CLI config", () => {
       worktreeRoot: join(stateDirectory, "worktrees")
     });
     expect(built.state.databasePath).toBe(join(stateDirectory, "opentag.db"));
+    expect(built.daemon).toMatchObject({
+      agents: {},
+      scratchRoot: join(stateDirectory, "scratch"),
+      keepScratch: "on_failure",
+      approvalMode: "auto"
+    });
     expect(built.platforms.lark?.domain).toBe("feishu");
     expect(built.platforms.lark?.defaultProjectBinding).toBe(false);
     expect(built.preferences?.language).toBe("zh-CN");

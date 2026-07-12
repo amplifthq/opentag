@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { computeLinearSignature } from "@opentag/linear";
+import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
 import { z } from "zod";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { createDispatcherApp as createRawDispatcherApp } from "../src/server.js";
@@ -7444,10 +7445,10 @@ describe("dispatcher API", () => {
   });
 
   it("resumes a repo-less ACP permission through the managed source-thread approval path", async () => {
-    const delivered: Array<{ kind: string; body: string }> = [];
+    const delivered: Array<{ kind: string; body: string; blocks?: SlackBlock[] }> = [];
     const app = createDispatcherApp({
       databasePath: ":memory:",
-      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); } }
+      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body, ...(message.blocks ? { blocks: message.blocks } : {}) }); } }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request("/v1/channel-bindings", jsonRequest({
@@ -7473,27 +7474,41 @@ describe("dispatcher API", () => {
     const lease = { attemptId: claim.attemptId, fencingToken: claim.fencingToken };
     await app.request("/v1/runners/runner_1/runs/run_acp_permission/running", jsonRequest({ ...lease, executor: "fixture-agent" }));
 
+    const permissionRequest = { toolCallId: "tool_publish", title: "Publish report", kind: "publish", targetFingerprint: `sha256:${"a".repeat(64)}`, permissionScopes: ["report:publish"], mode: "ask", provider: "acp" };
     const requested = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
       ...lease,
-      request: { toolCallId: "tool_publish", title: "Publish report", kind: "publish", permissionScopes: ["report:publish"], mode: "ask", provider: "acp" }
+      request: permissionRequest
     }));
     expect(requested.status).toBe(202);
-    const requestedBody = await requested.json() as { resolution: { action: { id: string; proposalId: string } } };
+    const requestedBody = await requested.json() as { resolution: { action: { id: string; proposalId: string; proposalHash: string } } };
     const actionId = requestedBody.resolution.action.id;
     const proposalId = requestedBody.resolution.action.proposalId;
     await expect((await app.request("/v1/runs/run_acp_permission")).json()).resolves.toMatchObject({ run: { status: "needs_approval" } });
     expect(delivered.some((message) => message.body.includes("Publish report"))).toBe(true);
+    const approvalActions = delivered.at(-1)?.blocks?.find((block) => block.type === "actions");
+    if (!approvalActions || approvalActions.type !== "actions") throw new Error("expected native Slack approval actions");
+    const allowRunPayload = parseSlackSuggestedActionButtonValue(approvalActions.elements[1]!.value);
+    expect(allowRunPayload).toMatchObject({
+      command: "approve 1",
+      permissionDecision: "allow_run",
+      proposalId,
+      intentId: `intent_${actionId}`,
+      actionId,
+      proposalHash: requestedBody.resolution.action.proposalHash
+    });
 
     const actionRequest = {
-      rawText: "approve 1",
+      rawText: allowRunPayload!.command,
       actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
       callback: { provider: "slack", uri: "https://example.com/slack/callback", threadKey: "T123|C456|171.1" },
       metadata: {
         teamId: "T123",
         channelId: "C456",
-        proposalId,
-        intentId: `intent_${actionId}`,
-        permissionDecision: "allow_run"
+        proposalId: allowRunPayload!.proposalId,
+        intentId: allowRunPayload!.intentId,
+        permissionDecision: allowRunPayload!.permissionDecision,
+        proposalHash: allowRunPayload!.proposalHash,
+        governedActionId: allowRunPayload!.actionId
       }
     };
     const unauthorized = await app.request("/v1/thread-actions", jsonRequest({
@@ -7506,8 +7521,30 @@ describe("dispatcher API", () => {
 
     const resolved = await app.request(`/v1/runners/runner_1/runs/run_acp_permission/action-permissions/${actionId}/resolve`, jsonRequest(lease));
     expect(resolved.status).toBe(200);
-    await expect(resolved.json()).resolves.toMatchObject({ resolution: { state: "authorized", decision: "allow_run" } });
+    await expect(resolved.json()).resolves.toMatchObject({ resolution: { state: "authorized", decision: "allow_run", action: { status: "executing" } } });
     await expect((await app.request("/v1/runs/run_acp_permission")).json()).resolves.toMatchObject({ run: { status: "running" } });
+
+    const trustedReceipt = await app.request(`/v1/runners/runner_1/runs/run_acp_permission/material-actions/${actionId}/receipt`, jsonRequest({
+      ...lease,
+      receipt: {
+        id: "receipt_connector_publish",
+        actionId,
+        provider: "connector",
+        receiptRef: "connector:publish:report-123",
+        outcome: "succeeded",
+        observedAt: "2026-07-12T00:02:00.000Z",
+        metadata: { assurance: "trusted_provider", providerOperationId: "report-123" }
+      }
+    }));
+    expect(trustedReceipt.status).toBe(200);
+    await expect(trustedReceipt.json()).resolves.toMatchObject({ resolution: { state: "reconciled", action: { status: "succeeded" }, receipt: { id: "receipt_connector_publish" } } });
+
+    const duplicate = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
+      ...lease,
+      request: { ...permissionRequest, toolCallId: "tool_publish_retry" }
+    }));
+    expect(duplicate.status).toBe(200);
+    await expect(duplicate.json()).resolves.toMatchObject({ resolution: { state: "reconciled", decision: "deny", receipt: { id: "receipt_connector_publish" } } });
   });
 
   it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {

@@ -259,6 +259,7 @@ export const ActionPermissionRequestSchema = z
     toolCallId: z.string().min(1),
     title: z.string().min(1),
     kind: z.string().min(1).nullable().optional(),
+    targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
     permissionScopes: z.array(z.string().min(1)).default([]),
     mode: ApprovalModeSchema.default("auto"),
     provider: z.string().min(1).default("acp")

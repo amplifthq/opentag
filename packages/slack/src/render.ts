@@ -1,6 +1,7 @@
 import {
   type ActionReceiptContext,
   type ActionReceiptDecision,
+  type OpenTagApprovalPromptPresentation,
   type OpenTagActionReceiptPresentation,
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
@@ -55,6 +56,9 @@ export type SlackSuggestedActionButtonValue = {
   command: string;
   proposalId: string;
   intentId: string;
+  permissionDecision?: "allow_once" | "allow_run" | "deny";
+  proposalHash?: string;
+  actionId?: string;
 };
 
 export type SlackMessagePayload = {
@@ -103,11 +107,47 @@ export function parseSlackSuggestedActionButtonValue(value: string): SlackSugges
       version: 1,
       command: parsed.command.trim(),
       proposalId: parsed.proposalId,
-      intentId: parsed.intentId
+      intentId: parsed.intentId,
+      ...(parsed.permissionDecision === "allow_once" || parsed.permissionDecision === "allow_run" || parsed.permissionDecision === "deny"
+        ? { permissionDecision: parsed.permissionDecision }
+        : {}),
+      ...(typeof parsed.proposalHash === "string" && parsed.proposalHash.length > 0 ? { proposalHash: parsed.proposalHash } : {}),
+      ...(typeof parsed.actionId === "string" && parsed.actionId.length > 0 ? { actionId: parsed.actionId } : {})
     };
   } catch {
     return null;
   }
+}
+
+export function renderSlackApprovalPrompt(presentation: OpenTagApprovalPromptPresentation): string {
+  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nChoose Allow once, Allow for run, or Deny.`;
+}
+
+export function createSlackApprovalPromptBlocks(presentation: OpenTagApprovalPromptPresentation): SlackBlock[] {
+  const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
+  return [
+    slackSection(`*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}`),
+    {
+      type: "actions",
+      block_id: `opentag_permission_${presentation.actionId}`,
+      elements: presentation.decisions.map((permissionDecision) => ({
+        type: "button",
+        text: { type: "plain_text", text: labels[permissionDecision], emoji: true },
+        action_id: `opentag:permission:${permissionDecision}`,
+        value: buildSlackSuggestedActionButtonValue({
+          version: 1,
+          command: permissionDecision === "deny" ? "reject 1" : "approve 1",
+          proposalId: presentation.proposalId,
+          intentId: presentation.intentId,
+          permissionDecision,
+          proposalHash: presentation.proposalHash,
+          actionId: presentation.actionId
+        }),
+        ...(permissionDecision === "allow_once" ? { style: "primary" as const } : {}),
+        ...(permissionDecision === "deny" ? { style: "danger" as const } : {})
+      }))
+    }
+  ];
 }
 
 function escapeSlackText(text: string): string {

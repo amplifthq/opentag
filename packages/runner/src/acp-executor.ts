@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -46,10 +47,26 @@ export type AcpPermissionRequest = {
     title: string;
     kind?: string | null;
     status?: string | null;
+    targetFingerprint?: string;
   };
   options: AcpPermissionOption[];
   permissionScopes: string[];
 };
+
+function canonicalCredentialSafeFingerprint(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const canonical = (child: unknown): string => {
+    if (Array.isArray(child)) return `[${child.map(canonical).join(",")}]`;
+    if (child && typeof child === "object") {
+      return `{${Object.entries(child as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, nested]) => `${JSON.stringify(key)}:${canonical(nested)}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(child) ?? "null";
+  };
+  return `sha256:${createHash("sha256").update(canonical(value)).digest("hex")}`;
+}
 
 export type AcpPermissionDecision =
   | { decision: "allow_once" }
@@ -430,7 +447,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   toolCallId: ctx.params.toolCall.toolCallId,
                   title: ctx.params.toolCall.title ?? "Untitled tool call",
                   ...(ctx.params.toolCall.kind ? { kind: ctx.params.toolCall.kind } : {}),
-                  ...(ctx.params.toolCall.status ? { status: ctx.params.toolCall.status } : {})
+                  ...(ctx.params.toolCall.status ? { status: ctx.params.toolCall.status } : {}),
+                  ...(ctx.params.toolCall.rawInput === undefined ? {} : { targetFingerprint: canonicalCredentialSafeFingerprint(ctx.params.toolCall.rawInput)! })
                 },
                 options: requestOptions,
                 permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
@@ -440,6 +458,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
                   ...(request.toolCall.kind ? { kind: request.toolCall.kind } : {}),
+                  provider: "acp",
+                  ...(request.toolCall.targetFingerprint ? { targetFingerprint: request.toolCall.targetFingerprint } : {}),
                   permissionScopes: request.permissionScopes
                 });
                 if (resolution.decision !== "deny" && !resolution.reconciled && resolution.material) {

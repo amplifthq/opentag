@@ -1,5 +1,6 @@
 import {
   createFinalSummaryPresentation,
+  type OpenTagApprovalPromptPresentation,
   type OpenTagActionReceiptPresentation,
   type OpenTagDoctorCheckPresentation,
   type OpenTagDoctorSummaryPresentation,
@@ -80,6 +81,9 @@ export type LarkThreadActionButtonValue = {
   index: number;
   proposalId?: string;
   intentId?: string;
+  permissionDecision?: "allow_once" | "allow_run" | "deny";
+  proposalHash?: string;
+  actionId?: string;
 };
 
 export function parseLarkThreadActionButtonValue(value: unknown): LarkThreadActionButtonValue | null {
@@ -117,7 +121,48 @@ export function parseLarkThreadActionButtonValue(value: unknown): LarkThreadActi
     decision,
     index,
     ...(typeof record["proposalId"] === "string" && record["proposalId"].length > 0 ? { proposalId: record["proposalId"] } : {}),
-    ...(typeof record["intentId"] === "string" && record["intentId"].length > 0 ? { intentId: record["intentId"] } : {})
+    ...(typeof record["intentId"] === "string" && record["intentId"].length > 0 ? { intentId: record["intentId"] } : {}),
+    ...(record["permissionDecision"] === "allow_once" || record["permissionDecision"] === "allow_run" || record["permissionDecision"] === "deny"
+      ? { permissionDecision: record["permissionDecision"] }
+      : {}),
+    ...(typeof record["proposalHash"] === "string" && record["proposalHash"].length > 0 ? { proposalHash: record["proposalHash"] } : {}),
+    ...(typeof record["actionId"] === "string" && record["actionId"].length > 0 ? { actionId: record["actionId"] } : {})
+  };
+}
+
+export function renderLarkApprovalPrompt(presentation: OpenTagApprovalPromptPresentation): string {
+  return [presentation.title, presentation.summary, "Choose Allow once, Allow for run, or Deny."].join("\n");
+}
+
+export function createLarkApprovalPromptCard(presentation: OpenTagApprovalPromptPresentation): LarkCard {
+  const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
+  return {
+    config: { wide_screen_mode: true },
+    header: { template: "yellow", title: { tag: "plain_text", content: presentation.title } },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: presentation.summary } },
+      {
+        tag: "action",
+        layout: "trisection",
+        actions: presentation.decisions.map((permissionDecision) => ({
+          tag: "button",
+          text: { tag: "plain_text", content: labels[permissionDecision] },
+          type: permissionDecision === "allow_once" ? "primary" : permissionDecision === "deny" ? "danger" : "default",
+          value: {
+            opentag: "thread_action",
+            version: 1,
+            command: permissionDecision === "deny" ? "reject 1" : "approve 1",
+            decision: permissionDecision === "deny" ? "reject" : "approve",
+            index: 1,
+            proposalId: presentation.proposalId,
+            intentId: presentation.intentId,
+            permissionDecision,
+            proposalHash: presentation.proposalHash,
+            actionId: presentation.actionId
+          }
+        }))
+      }
+    ]
   };
 }
 

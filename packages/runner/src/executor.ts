@@ -29,6 +29,8 @@ export type ExecutorPermissionRequest = {
   toolCallId: string;
   title: string;
   kind?: string | null;
+  provider: string;
+  targetFingerprint?: string;
   permissionScopes: string[];
 };
 

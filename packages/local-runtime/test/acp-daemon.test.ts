@@ -368,7 +368,7 @@ describe("ACP daemon workspaces", () => {
       displayName: "Review Agent",
       async canRun() { return { ready: true }; },
       async run(run) {
-        const decision = await run.permissionResolver?.({ toolCallId: "tool_publish", title: "Publish report", kind: "publish", permissionScopes: ["report:publish"] });
+        const decision = await run.permissionResolver?.({ toolCallId: "tool_publish", title: "Publish report", kind: "publish", provider: "acp", permissionScopes: ["report:publish"] });
         expect(decision).toMatchObject({ actionId: "action_publish", decision: "allow_run", material: true });
         await run.materialActionReporter?.({ actionId: "action_publish", toolCallId: "tool_publish", provider: "acp", receiptRef: "acp:session:tool_publish", outcome: "unknown", reportedOutcome: "completed" });
         return { conclusion: "success", summary: "done" };
@@ -398,6 +398,67 @@ describe("ACP daemon workspaces", () => {
     expect(permissionRequests).toEqual([expect.objectContaining({ mode: "auto", provider: "acp" })]);
     expect(receipts).toEqual([expect.objectContaining({ outcome: "unknown", metadata: expect.objectContaining({ assurance: "reported", agentReportedOutcome: "completed" }) })]);
     expect(completed).toEqual([{ conclusion: "success", summary: "done" }]);
+  });
+
+  it("persists a trusted provider receipt instead of promoting an ACP self-report", async () => {
+    const root = join(mkdtempSync(join(tmpdir(), "opentag-trusted-receipt-root-")), "scratch");
+    const completed: OpenTagRunResult[] = [];
+    const receipts: unknown[] = [];
+    const action = {
+      id: "action_publish",
+      runId: "run_acp",
+      attemptId: "attempt_01J_TEST",
+      actionFamily: "publish",
+      capability: "publish",
+      scope: { permissionScopes: ["report:publish"], provider: "acp" },
+      target: { title: "Publish report", kind: "publish", provider: "acp" },
+      riskTier: "high" as const,
+      status: "executing" as const,
+      idempotencyKey: "action:key",
+      proposalId: "proposal_action_publish",
+      proposalHash: "hash_action_publish",
+      attemptFenceDigest: "digest",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z"
+    };
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        await run.permissionResolver?.({ toolCallId: "tool_publish", title: "Publish report", kind: "publish", provider: "acp", permissionScopes: ["report:publish"] });
+        await run.materialActionReporter?.({ actionId: action.id, toolCallId: "tool_publish", provider: "acp", receiptRef: "acp:session:tool_publish", outcome: "unknown", reportedOutcome: "completed" });
+        return { conclusion: "success", summary: "done" };
+      },
+      async cancel() {}
+    };
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot: root,
+      heartbeatIntervalMs: 0,
+      trustedMaterialActionReceipt: async ({ report }) => ({
+        id: "receipt_npm_publish",
+        actionId: report.actionId,
+        provider: "npm",
+        receiptRef: "npm:publish:@acme/report@1.0.0",
+        outcome: "succeeded",
+        observedAt: "2026-07-12T00:02:00.000Z",
+        metadata: { assurance: "trusted_provider", providerOperationId: "npm-op-123" }
+      }),
+      client: clientFor({
+        claimed: claimed({ event: event({ id: "evt_trusted_permission", permissions: [] }) }),
+        completed,
+        requestActionPermission: async () => ({ state: "authorized", action, decision: "allow_once" }),
+        recordMaterialActionReceipt: async (_runId, _lease, _actionId, receipt) => {
+          receipts.push(receipt);
+          return { state: "reconciled", action: { ...action, status: "succeeded", receipt }, decision: "deny", receipt };
+        }
+      })
+    });
+    expect(receipts).toEqual([expect.objectContaining({ provider: "npm", outcome: "succeeded", metadata: { assurance: "trusted_provider", providerOperationId: "npm-op-123" } })]);
+    expect(JSON.stringify(receipts)).not.toContain("acp:session");
   });
 
   it("cancels only the stale ACP attempt and never completes it", async () => {

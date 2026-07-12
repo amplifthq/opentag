@@ -797,6 +797,9 @@ export function createLarkCardActionHandler(config: LarkCardActionHandlerConfig)
         ...(data.action?.name ? { actionName: data.action.name } : {}),
         ...(parsedValue.proposalId ? { proposalId: parsedValue.proposalId } : {}),
         ...(parsedValue.intentId ? { intentId: parsedValue.intentId } : {}),
+        ...(parsedValue.permissionDecision ? { permissionDecision: parsedValue.permissionDecision } : {}),
+        ...(parsedValue.proposalHash ? { proposalHash: parsedValue.proposalHash } : {}),
+        ...(parsedValue.actionId ? { governedActionId: parsedValue.actionId } : {}),
         repoProvider: binding.repoProvider ?? "github",
         owner: binding.owner,
         repo: binding.repo

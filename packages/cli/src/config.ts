@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { AdapterMutationMappingSchema } from "@opentag/core";
+import { AdapterMutationMappingSchema, OpenTagIntegrationManifestSchema } from "@opentag/core";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
 import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
@@ -180,6 +180,10 @@ const DaemonConfigSchema = z
     runnerId: z.string().min(1),
     dispatcherUrl: z.string().url(),
     repositories: z.array(RepositoryBindingSchema).min(1),
+    agents: z.record(OpenTagIntegrationManifestSchema).optional(),
+    scratchRoot: z.string().min(1).optional(),
+    keepScratch: KeepWorktreeSchema.optional(),
+    approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
     channelBindings: z.array(ChannelBindingSchema).optional(),
     claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),

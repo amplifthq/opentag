@@ -12,11 +12,14 @@ export type MaterialActionRequestInput = {
   title: string;
   kind?: string | null;
   permissionScopes?: string[];
+  provider?: string;
+  targetFingerprint?: string;
   target?: Record<string, unknown>;
 };
 
 const MATERIAL_ACTION_PATTERN = /(?:push|deploy|publish|release|create|update|delete|write|mutat|send|post|merge|issue|connector)/iu;
 const CRITICAL_ACTION_PATTERN = /(?:credential|secret|token|security[_ -]?override|disable[_ -]?(?:guard|safety))/iu;
+const OPAQUE_MATERIAL_ACTION_KINDS = new Set(["execute", "tool", "fetch", "edit", "delete", "move", "other"]);
 
 function normalizedRecord(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
@@ -27,14 +30,16 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
   const kind = input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
   const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
   const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
+  const provider = input.provider?.trim().toLowerCase() || "acp";
+  const targetFingerprint = input.targetFingerprint?.trim().toLowerCase();
   const probe = `${actionFamily} ${title} ${permissionScopes.join(" ")}`;
   const internallyBlocked = CRITICAL_ACTION_PATTERN.test(probe);
-  const material = MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
+  const material = OPAQUE_MATERIAL_ACTION_KINDS.has(kind) || MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
   const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
   return {
     actionFamily: actionFamily || "tool",
-    scope: { permissionScopes },
-    target: normalizedRecord({ title, ...(input.target ?? {}), ...(input.kind ? { kind } : {}) }),
+    scope: normalizedRecord({ permissionScopes, provider, ...(targetFingerprint ? { targetFingerprint } : {}) }),
+    target: normalizedRecord({ title, provider, ...(targetFingerprint ? { targetFingerprint } : {}), ...(input.target ?? {}), ...(input.kind ? { kind } : {}) }),
     riskTier,
     material,
     internallyBlocked,
@@ -54,13 +59,16 @@ function stableJson(value: unknown): string {
 }
 
 export function grantMatchesAction(
-  grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt">,
-  input: { runId: string; attemptId: string; action: NormalizedMaterialAction; now?: string }
+  grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt" | "constraints">,
+  input: { runId: string; attemptId: string; actionId?: string; proposalHash?: string; action: NormalizedMaterialAction; now?: string }
 ): boolean {
   if (grant.revokedAt) return false;
   if (grant.expiresAt && grant.expiresAt <= (input.now ?? new Date().toISOString())) return false;
   if (grant.runId !== input.runId || grant.capability !== input.action.actionFamily) return false;
   if (grant.attemptId && grant.attemptId !== input.attemptId) return false;
+  if (grant.constraints?.["permissionDecision"] === "allow_once") {
+    if (grant.constraints["actionId"] !== input.actionId || grant.constraints["proposalHash"] !== input.proposalHash) return false;
+  }
   return stableJson(grant.resourceScope) === stableJson(input.action.scope);
 }
 

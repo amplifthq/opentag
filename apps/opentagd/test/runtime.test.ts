@@ -73,7 +73,10 @@ describe("opentagd runtime helpers", () => {
       markRunning: expect.any(Function),
       heartbeat: expect.any(Function),
       progress: expect.any(Function),
-      complete: expect.any(Function)
+      complete: expect.any(Function),
+      requestActionPermission: expect.any(Function),
+      resolveActionPermission: expect.any(Function),
+      recordMaterialActionReceipt: expect.any(Function)
     });
   });
 });

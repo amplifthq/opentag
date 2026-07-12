@@ -27,6 +27,34 @@ describe("governed material actions", () => {
     expect(evaluateActionPermission({ mode: "auto", action: read }).outcome).toBe("authorized");
   });
 
+  it("treats opaque ACP operations as material in auto mode and keys authority to provider and target fingerprint", () => {
+    for (const kind of ["execute", "tool", "fetch", "edit", "delete", "move", "other"]) {
+      const opaque = normalizeMaterialActionRequest({
+        title: "Do work",
+        kind,
+        provider: "acp",
+        targetFingerprint: `sha256:${kind.padEnd(64, "0").slice(0, 64)}`
+      });
+      expect(evaluateActionPermission({ mode: "auto", action: opaque }).outcome).toBe("needs_approval");
+    }
+
+    const first = normalizeMaterialActionRequest({
+      title: "Publish package",
+      kind: "execute",
+      provider: "npm",
+      targetFingerprint: `sha256:${"a".repeat(64)}`
+    });
+    const second = normalizeMaterialActionRequest({
+      title: "Publish package",
+      kind: "execute",
+      provider: "npm",
+      targetFingerprint: `sha256:${"b".repeat(64)}`
+    });
+    expect(first.scope).not.toEqual(second.scope);
+    expect(first.target).not.toEqual(second.target);
+    expect(JSON.stringify(first)).not.toContain("secret-value");
+  });
+
   it("matches allow_once only to an attempt and allow_run only to the exact normalized family and scope", () => {
     const once = {
       id: "grant_once",
@@ -34,12 +62,18 @@ describe("governed material actions", () => {
       capability: request.actionFamily,
       resourceScope: request.scope,
       runId: "run_1",
-      attemptId: "attempt_1"
+      attemptId: "attempt_1",
+      constraints: {
+        permissionDecision: "allow_once",
+        actionId: "action_1",
+        proposalHash: "proposal_hash_1"
+      }
     };
-    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_1", action: request })).toBe(true);
-    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_2", action: request })).toBe(false);
+    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_1", actionId: "action_1", proposalHash: "proposal_hash_1", action: request })).toBe(true);
+    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_1", actionId: "action_2", proposalHash: "proposal_hash_1", action: request })).toBe(false);
+    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_2", actionId: "action_1", proposalHash: "proposal_hash_1", action: request })).toBe(false);
 
-    const runGrant = { ...once, id: "grant_run", attemptId: undefined };
+    const runGrant = { ...once, id: "grant_run", attemptId: undefined, constraints: { permissionDecision: "allow_run" } };
     expect(grantMatchesAction(runGrant, { runId: "run_1", attemptId: "attempt_2", action: request })).toBe(true);
     expect(
       grantMatchesAction(runGrant, {
