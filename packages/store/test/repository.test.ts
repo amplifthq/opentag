@@ -3303,6 +3303,58 @@ describe("durable ACP material actions", () => {
     });
   });
 
+  it("selects the replacement action epoch by Attempt number when timestamps tie", async () => {
+    const fixture = await claimedRepository(0);
+    const firstLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    const request = {
+      toolCallId: "tool_same_timestamp_first",
+      title: "Publish package",
+      kind: "publish",
+      targetFingerprint: `sha256:${"f".repeat(64)}`,
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const first = await fixture.repo.requestActionPermission({ ...firstLease, request });
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    if (!first || !secondClaim) throw new Error("expected replacement Attempt and approval epoch");
+    const secondLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim.attemptId,
+      fencingToken: secondClaim.fencingToken
+    };
+    const replacement = await fixture.repo.requestActionPermission({
+      ...secondLease,
+      request: { ...request, toolCallId: "tool_same_timestamp_replacement" }
+    });
+    if (!replacement) throw new Error("expected replacement action epoch");
+
+    fixture.sqlite.prepare("UPDATE material_actions SET created_at = ? WHERE id IN (?, ?)")
+      .run("2026-07-12T00:00:00.000Z", first.action.id, replacement.action.id);
+    fixture.sqlite.exec(`
+      CREATE TRIGGER reject_duplicate_current_epoch_insert
+      BEFORE INSERT ON material_actions
+      WHEN NEW.id = '${replacement.action.id}'
+      BEGIN
+        SELECT RAISE(FAIL, 'current action epoch must be read, not inserted again');
+      END;
+    `);
+
+    await expect(fixture.repo.requestActionPermission({
+      ...secondLease,
+      request: { ...request, toolCallId: "tool_same_timestamp_retry" }
+    })).resolves.toMatchObject({
+      state: "waiting",
+      action: { id: replacement.action.id, attemptId: secondClaim.attemptId, status: "waiting_approval" }
+    });
+  });
+
   it("rejects a decision submitted after its approval Attempt lease expired", async () => {
     const fixture = await claimedRepository(60);
     const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };

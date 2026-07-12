@@ -57,7 +57,7 @@ import {
   type RunEventVisibility,
   type SuggestedChangesSnapshot
 } from "@opentag/core";
-import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
@@ -1353,6 +1353,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     return sanitizeCredentialLikeValue(input, {
       secrets: await attemptFencingTokensForRun(runId)
     });
+  }
+
+  async function latestMaterialActionForSemanticKey(input: {
+    runId: string;
+    idempotencyKey: string;
+  }): Promise<typeof materialActions.$inferSelect | undefined> {
+    const row = await db
+      .select({ action: materialActions })
+      .from(materialActions)
+      .leftJoin(
+        attempts,
+        and(eq(materialActions.attemptId, attempts.id), eq(materialActions.runId, attempts.runId))
+      )
+      .where(and(eq(materialActions.runId, input.runId), eq(materialActions.idempotencyKey, input.idempotencyKey)))
+      .orderBy(
+        desc(attempts.number),
+        desc(materialActions.createdAt),
+        desc(sql<number>`"material_actions"._rowid_`)
+      )
+      .limit(1)
+      .get();
+    return row?.action;
   }
 
   async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
@@ -3083,13 +3105,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const idempotencyKey = `action:${sha256(semanticKey)}`;
       const actionId = `action_${sha256(stableActionJson({ semanticKey, attemptId: input.attemptId })).slice(0, 24)}`;
       const candidateProposalHash = sha256(stableActionJson({ actionId, normalized }));
-      const existing = await db
-        .select()
-        .from(materialActions)
-        .where(eq(materialActions.idempotencyKey, idempotencyKey))
-        .orderBy(desc(materialActions.createdAt))
-        .limit(1)
-        .get();
+      const existing = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
       if (existing) {
         const action = actionFromRow(existing);
         if (action.status === "succeeded" && action.receipt) {
@@ -3275,7 +3291,46 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         throw error;
       }
       if (inserted.kind === "stale") return null;
-      if (inserted.kind === "conflict") return this.requestActionPermission(input);
+      if (inserted.kind === "conflict") {
+        const winnerRow = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
+        if (!winnerRow || winnerRow.id !== actionId) return null;
+        const winner = actionFromRow(winnerRow);
+        if (winner.status === "succeeded" && winner.receipt) {
+          return { state: "reconciled", action: winner, decision: "deny", receipt: winner.receipt, reason: "Known success reused; the ACP tool must not execute again." };
+        }
+        if (winner.status === "unknown") {
+          return { state: "unknown", action: winner, reason: "The provider outcome is unknown and requires human reconciliation." };
+        }
+        if (winner.status === "authorized" && !normalized.material) {
+          return { state: "authorized", action: winner, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." };
+        }
+        if (winner.status === "executing") {
+          const unknown = db.transaction((tx) => {
+            const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+            const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+            if (
+              !currentAttempt || !currentRun || currentAttempt.runnerId !== input.runnerId ||
+              currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+              currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+            ) return undefined;
+            tx.update(materialActions)
+              .set({ status: "unknown", updatedAt: nowIso() })
+              .where(and(eq(materialActions.id, winner.id), eq(materialActions.status, "executing")))
+              .run();
+            return tx.select().from(materialActions).where(eq(materialActions.id, winner.id)).limit(1).get();
+          });
+          return unknown
+            ? { state: "unknown", action: actionFromRow(unknown), reason: "Execution ownership changed or a duplicate arrived before a trusted receipt; reconciliation is required." }
+            : null;
+        }
+        return this.resolveActionPermission({
+          runnerId: input.runnerId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
+          actionId: winner.id
+        });
+      }
       return inserted.resolution;
     },
 
@@ -3492,7 +3547,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       action?: ReturnType<typeof actionFromRow>;
     }> {
       const updatedAt = nowIso();
-      const safeInput = sanitizeCredentialLikeValue(input) as typeof input;
+      const actionRun = await db
+        .select({ runId: materialActions.runId })
+        .from(materialActions)
+        .where(eq(materialActions.id, input.actionId))
+        .limit(1)
+        .get();
+      if (!actionRun) return { outcome: "not_found" };
+      const safeInput = await sanitizeRunnerControlledInputForRun(actionRun.runId, input);
       return db.transaction((tx) => {
         const row = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
         if (!row) return { outcome: "not_found" as const };
@@ -3511,8 +3573,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         const connectionId = current.target["connectionId"];
         const targetFingerprint = current.target["targetFingerprint"];
         const receipt = sanitizeMaterialActionReceipt(MaterialActionReceiptSchema.parse({
-          id: `reconciliation_${sha256(stableActionJson({ actionId: input.actionId, idempotencyKey: safeInput.idempotencyKey })).slice(0, 24)}`,
-          actionId: input.actionId,
+          id: `reconciliation_${sha256(stableActionJson({ actionId: safeInput.actionId, idempotencyKey: safeInput.idempotencyKey })).slice(0, 24)}`,
+          actionId: safeInput.actionId,
           provider,
           ...(typeof connectionId === "string" ? { connectionId } : {}),
           ...(typeof targetFingerprint === "string" ? { targetFingerprint } : {}),
@@ -3535,7 +3597,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           return winner ? { outcome: "conflict" as const, action: actionFromRow(winner) } : { outcome: "not_found" as const };
         }
         const auditPayload = sanitizeCredentialLikeValue({
-          actionId: input.actionId,
+          actionId: safeInput.actionId,
           runId: row.runId,
           outcome: safeInput.outcome,
           idempotencyKey: safeInput.idempotencyKey,

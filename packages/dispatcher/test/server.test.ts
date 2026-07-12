@@ -3,12 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { computeLinearSignature } from "@opentag/linear";
 import { parseSlackSuggestedActionButtonValue, type SlackBlock } from "@opentag/slack";
 import { z } from "zod";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
-import { createDispatcherApp as createRawDispatcherApp } from "../src/server.js";
+import { createDispatcherApp as createRawDispatcherApp, type CallbackMessage } from "../src/server.js";
 
 function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
   const app = createRawDispatcherApp(input);
@@ -7821,10 +7821,13 @@ describe("dispatcher API", () => {
   });
 
   it("resumes a repo-less ACP permission through the managed source-thread approval path", async () => {
-    const delivered: Array<{ kind: string; body: string; blocks?: SlackBlock[] }> = [];
+    const directory = mkdtempSync(join(tmpdir(), "opentag-reconciliation-fences-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const delivered: CallbackMessage[] = [];
     const app = createDispatcherApp({
-      databasePath: ":memory:",
-      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body, ...(message.blocks ? { blocks: message.blocks } : {}) }); } }
+      databasePath,
+      callbackSink: { async deliver(message) { delivered.push(message); } }
     });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request("/v1/channel-bindings", jsonRequest({
@@ -7937,15 +7940,16 @@ describe("dispatcher API", () => {
     expect(duplicate.status).toBe(200);
     await expect(duplicate.json()).resolves.toMatchObject({ resolution: { state: "reconciled", decision: "deny", receipt: { id: "receipt_connector_publish" } } });
 
+    const unknownPermissionRequest = {
+      ...permissionRequest,
+      toolCallId: "tool_publish_unknown",
+      resource: "report:unknown",
+      targetFingerprint: `sha256:${"b".repeat(64)}`,
+      mode: "autonomous" as const
+    };
     const unknownRequest = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
       ...lease,
-      request: {
-        ...permissionRequest,
-        toolCallId: "tool_publish_unknown",
-        resource: "report:unknown",
-        targetFingerprint: `sha256:${"b".repeat(64)}`,
-        mode: "autonomous"
-      }
+      request: unknownPermissionRequest
     }));
     const unknownBody = await unknownRequest.json() as { resolution: { action: { id: string } } };
     expect(unknownRequest.status).toBe(200);
@@ -7961,7 +7965,17 @@ describe("dispatcher API", () => {
       }
     }));
     expect(unknownReceipt.status).toBe(200);
+    const expiryDb = new Database(databasePath);
+    expiryDb.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", "run_acp_permission");
+    expiryDb.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?").run("2000-01-01T00:00:00.000Z", lease.attemptId);
+    expiryDb.close();
+    const secondClaimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    expect(secondClaimResponse.status).toBe(200);
+    const secondClaim = await secondClaimResponse.json() as { attemptId: string; fencingToken: string };
+    expect(secondClaim.attemptId).not.toBe(lease.attemptId);
+    expect(secondClaim.fencingToken).not.toBe(lease.fencingToken);
     const deliveriesBeforeReconciliation = delivered.length;
+    const privateKeyBody = "private-key-body-that-must-not-persist";
     const reconciliationBody = {
       outcome: "succeeded",
       idempotencyKey: "provider-check-report-unknown",
@@ -7971,7 +7985,10 @@ describe("dispatcher API", () => {
         kind: "provider_lookup",
         assurance: "verified",
         subjectRef: "report:unknown",
-        summary: `Provider confirms success; stale fence ${lease.fencingToken}; authorization=Bearer callback-secret`,
+        summary: [
+          `Provider confirms success; first fence ${lease.fencingToken}; second fence ${secondClaim.fencingToken}; authorization=Bearer callback-secret`,
+          `-----BEGIN PRIVATE KEY-----\n${privateKeyBody}\n-----END PRIVATE KEY-----`
+        ].join("\n"),
         createdAt: new Date().toISOString()
       }]
     };
@@ -7980,12 +7997,40 @@ describe("dispatcher API", () => {
       app.request(`/v1/material-actions/${unknownBody.resolution.action.id}/reconcile`, jsonRequest(reconciliationBody))
     ]);
     expect([reconciled.status, replayed.status]).toEqual([200, 200]);
+    const reconciledPayload = await reconciled.json();
+    const replayedPayload = await replayed.json();
     expect(delivered).toHaveLength(deliveriesBeforeReconciliation + 1);
-    const reconciliationCallback = delivered.at(-1)?.body ?? "";
-    expect(reconciliationCallback).toContain("reconciled as succeeded");
-    expect(reconciliationCallback).not.toContain(lease.fencingToken);
-    expect(reconciliationCallback).not.toContain("callback-secret");
-    expect(reconciliationCallback).not.toContain("provider-check-1");
+    const publicActionResponse = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
+      ...secondClaim,
+      request: { ...unknownPermissionRequest, toolCallId: "tool_publish_unknown_after_reconciliation" }
+    }));
+    expect(publicActionResponse.status).toBe(200);
+    const publicActionPayload = await publicActionResponse.json();
+    const runEventsPayload = await (await app.request("/v1/runs/run_acp_permission/events")).json();
+    const controlPlanePayload = await (await app.request("/v1/control-plane-events?type=material_action.reconciled")).json();
+    const inspectionDb = new Database(databasePath, { readonly: true });
+    const receiptRow = inspectionDb.prepare("SELECT receipt_json FROM material_actions WHERE id = ?").get(unknownBody.resolution.action.id) as { receipt_json: string };
+    inspectionDb.close();
+    const exposedSurfaces = {
+      reconciledPayload,
+      replayedPayload,
+      receiptRow,
+      publicActionPayload,
+      runEventsPayload,
+      controlPlanePayload,
+      callbackDeliveryAndProviderPayload: delivered.at(-1)
+    };
+    const exposedJson = JSON.stringify(exposedSurfaces);
+    for (const secret of [lease.fencingToken, secondClaim.fencingToken, "callback-secret", privateKeyBody]) {
+      expect(exposedJson).not.toContain(secret);
+    }
+    expect(exposedSurfaces.callbackDeliveryAndProviderPayload).toMatchObject({
+      kind: "progress",
+      provider: "slack",
+      uri: "https://example.com/slack/callback",
+      body: expect.stringContaining("reconciled as succeeded")
+    });
+    expect(exposedSurfaces.reconciledPayload).toMatchObject({ result: { action: { receipt: { evidence: [{ summary: expect.stringContaining("[redacted]") }] } } } });
     const conflictingReconciliation = await app.request(`/v1/material-actions/${unknownBody.resolution.action.id}/reconcile`, jsonRequest({
       ...reconciliationBody,
       outcome: "failed",
