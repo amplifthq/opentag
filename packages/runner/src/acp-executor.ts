@@ -328,6 +328,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       rawContextAccess: false,
       writeActionAccess: "propose",
       workspaceIsolation: "worktree",
+      sourceControl: "self_committing",
       requiredSecrets: [],
       completionSignals: [{ type: "stream_event", required: true, description: "ACP session/prompt stop response." }]
     },

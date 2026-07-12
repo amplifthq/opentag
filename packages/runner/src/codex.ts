@@ -73,6 +73,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       rawContextAccess: false,
       writeActionAccess: "none",
       workspaceIsolation: "worktree",
+      sourceControl: "self_committing",
       requiredSecrets: [
         {
           id: "openai_api_key",

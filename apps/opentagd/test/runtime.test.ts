@@ -5,6 +5,9 @@ import { createDaemonRuntimeInput, pullRequestOptionsFromConfig, securityFromCon
 const config: OpenTagDaemonConfig = {
   runnerId: "runner_local",
   dispatcherUrl: "http://localhost:3030",
+  agents: {},
+  scratchRoot: "/tmp/opentag-scratch",
+  keepScratch: "on_failure",
   repositories: [
     {
       provider: "github",

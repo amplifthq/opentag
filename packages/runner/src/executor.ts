@@ -136,6 +136,7 @@ export type ExecutorCapabilityContract = {
   rawContextAccess: boolean;
   writeActionAccess: ExecutorWriteActionAccess;
   workspaceIsolation: "none" | "branch" | "worktree" | "external";
+  sourceControl?: "none" | "daemon_managed" | "self_committing";
   requiredSecrets: ExecutorSecretRequirement[];
   completionSignals: ExecutorCompletionSignal[];
 };

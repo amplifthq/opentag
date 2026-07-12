@@ -62,15 +62,21 @@ export type SlackChannelBindingInput = {
   repo: string;
 };
 
+type ChannelBindingRepositoryTarget =
+  | { repoProvider: string; owner: string; repo: string }
+  | { repoProvider?: never; owner?: never; repo?: never };
+
 export type ChannelBindingInput = {
   provider: string;
   accountId: string;
   conversationId: string;
-  repoProvider: string;
-  owner: string;
-  repo: string;
   metadata?: Record<string, unknown>;
-};
+} & ChannelBindingRepositoryTarget;
+
+type Assert<T extends true> = T;
+type ChannelBindingRejectsPartialRepositoryTarget = Assert<
+  { provider: string; accountId: string; conversationId: string; repoProvider: string } extends ChannelBindingInput ? false : true
+>;
 
 export type RunnerRegistration = {
   runnerId: string;

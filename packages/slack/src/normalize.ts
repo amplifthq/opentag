@@ -3,10 +3,7 @@ import { commandFromRawText, type ContextPointer, type OpenTagCommand, type Open
 export type SlackChannelBinding = {
   teamId: string;
   channelId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type SlackAppMentionInput = {
   teamId: string;
@@ -243,9 +240,9 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
         ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
         : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...(input.binding.owner && input.binding.repo
+        ? { repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo }
+        : {})
     }
   };
 }

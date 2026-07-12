@@ -88,6 +88,7 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
       rawContextAccess: false,
       writeActionAccess: "none",
       workspaceIsolation: "worktree",
+      sourceControl: "self_committing",
       requiredSecrets: [
         {
           id: "anthropic_api_key",

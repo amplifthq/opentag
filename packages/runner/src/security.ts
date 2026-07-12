@@ -117,7 +117,8 @@ function hasPermission(permissions: PermissionGrant[] | undefined, scope: string
   return permissions?.some((permission) => permission.scope === scope) ?? false;
 }
 
-function needsWritePermission(command: OpenTagCommand, executorId: string): boolean {
+function needsWritePermission(command: OpenTagCommand, executorId: string, workspaceKind: "repository" | "scratch"): boolean {
+  if (workspaceKind === "scratch") return false;
   if (executorId === "echo") return false;
   return command.intent === "fix" || command.intent === "run";
 }
@@ -147,6 +148,7 @@ function scanTextForHighRiskPatterns(input: { command: OpenTagCommand; context: 
 
 export function assessRunnerSecurity(input: {
   executorId: string;
+  workspaceKind?: "repository" | "scratch";
   workspacePath: string;
   executionPath?: string;
   command: OpenTagCommand;
@@ -196,7 +198,7 @@ export function assessRunnerSecurity(input: {
     }
   }
 
-  if (needsWritePermission(input.command, input.executorId) && !hasPermission(input.permissions, "repo:write")) {
+  if (needsWritePermission(input.command, input.executorId, input.workspaceKind ?? "repository") && !hasPermission(input.permissions, "repo:write")) {
     findings.push({
       code: "permission.repo_write_required",
       severity: "block",

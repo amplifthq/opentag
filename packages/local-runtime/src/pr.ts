@@ -1,6 +1,13 @@
 import type { OpenTagEvent, OpenTagRun, OpenTagRunResult } from "@opentag/core";
 import { buildPullRequestBody, createPullRequestViaFetch, type FetchLike } from "@opentag/github";
-import { branchNameForRun, commitChangedFiles, nodeCommandRunner, pushBranch, type CommandRunner } from "@opentag/runner";
+import {
+  branchNameForRun,
+  commitChangedFiles,
+  nodeCommandRunner,
+  pushBranch,
+  type CommandRunner,
+  type ExecutorCapabilityContract
+} from "@opentag/runner";
 import type { RepositoryBindingConfig } from "./config.js";
 
 export type PullRequestOptions = {
@@ -27,9 +34,36 @@ function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: R
   return owner === input.binding.owner && repo === input.binding.repo;
 }
 
+type CreatePullRequestIntent = {
+  head: string;
+  base?: string;
+  title?: string;
+  body?: string;
+};
+
+function createPullRequestIntent(result: OpenTagRunResult): CreatePullRequestIntent | null {
+  for (const snapshot of result.suggestedChanges ?? []) {
+    for (const intent of snapshot.intents) {
+      if (intent.domain !== "pull_request" || intent.action !== "create_pull_request") continue;
+      const head = intent.params?.["head"];
+      if (typeof head !== "string" || head.length === 0) continue;
+      const base = intent.params?.["base"];
+      const title = intent.params?.["title"];
+      const body = intent.params?.["body"];
+      return {
+        head,
+        ...(typeof base === "string" && base.length > 0 ? { base } : {}),
+        ...(typeof title === "string" && title.length > 0 ? { title } : {}),
+        ...(typeof body === "string" && body.length > 0 ? { body } : {})
+      };
+    }
+  }
+  return null;
+}
+
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
-  executor?: string;
+  executorCapability?: Pick<ExecutorCapabilityContract, "sourceControl">;
   event: OpenTagEvent;
   binding: RepositoryBindingConfig;
   result: OpenTagRunResult;
@@ -44,15 +78,10 @@ export async function maybeCreatePullRequest(input: {
   const owner = input.binding.owner;
   const repo = input.binding.repo;
 
-  const branchName = branchNameForRun(input.run.id);
+  const intent = createPullRequestIntent(input.result);
+  const branchName = intent?.head ?? branchNameForRun(input.run.id);
   const runner = input.options.commandRunner ?? nodeCommandRunner;
-  // Worktree-isolated executors (Codex, Claude Code) commit inside their own
-  // worktree, so the daemon must not re-add/commit their files. Prefer the
-  // explicitly-resolved executor; fall back to the run row for backward
-  // compatibility when an external caller omits it.
-  const resolvedExecutor = input.executor ?? input.run.executor;
-  const selfCommittingExecutors = new Set(["codex", "claude-code"]);
-  if (!selfCommittingExecutors.has(resolvedExecutor ?? "")) {
+  if (input.executorCapability?.sourceControl !== "self_committing") {
     await commitChangedFiles({
       runner,
       workspacePath: input.binding.checkoutPath,
@@ -77,10 +106,10 @@ export async function maybeCreatePullRequest(input: {
       token: input.options.githubToken,
       owner,
       repo,
-      title: `OpenTag run ${input.run.id}`,
-      body: buildPullRequestBody(input.result),
+      title: intent?.title ?? `OpenTag run ${input.run.id}`,
+      body: intent?.body ?? buildPullRequestBody(input.result),
       head: branchName,
-      base: input.binding.baseBranch ?? "main"
+      base: intent?.base ?? input.binding.baseBranch ?? "main"
     },
     input.options.fetchImpl
   );

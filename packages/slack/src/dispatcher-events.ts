@@ -14,7 +14,8 @@ export type SlackDispatcherEventConfig = {
   fetchImpl?: typeof fetch;
 };
 
-function formatProjectTarget(input: { repoProvider?: string; owner: string; repo: string }): string {
+function formatProjectTarget(input: { repoProvider?: string; owner?: string; repo?: string }): string {
+  if (!input.owner || !input.repo) return "not bound";
   return `${input.repoProvider ?? "github"}:${input.owner}/${input.repo}`;
 }
 
@@ -100,7 +101,7 @@ function slackRuntimeDoctorReply(input: { teamId: string; channelId: string; sta
   };
 }
 
-function statusUnavailable(input: { binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function statusUnavailable(input: { binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag status:",
@@ -111,7 +112,7 @@ function statusUnavailable(input: { binding?: { repoProvider?: string; owner: st
   ].join("\n");
 }
 
-function doctorUnavailable(input: { teamId: string; channelId: string; binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function doctorUnavailable(input: { teamId: string; channelId: string; binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag doctor (redacted):",
@@ -154,9 +155,9 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         return {
           teamId: binding.accountId,
           channelId: binding.conversationId,
-          repoProvider: binding.repoProvider,
-          owner: binding.owner,
-          repo: binding.repo
+          ...(binding.repoProvider
+            ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+            : {})
         };
       } catch (error) {
         if (error instanceof Error && error.message.includes("channel_binding_not_found")) {

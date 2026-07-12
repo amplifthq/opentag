@@ -231,15 +231,13 @@ export async function runOneDaemonIteration(input: {
     });
     return true;
   }
+  const scratchRoot = resolve(input.scratchRoot ?? join(process.cwd(), ".opentag", "scratch"));
   const workspace: ExecutorWorkspace = binding
     ? { kind: "repository", path: binding.checkoutPath }
     : {
         kind: "scratch",
-        path: scratchPathForAttempt(input.scratchRoot ?? join(process.cwd(), ".opentag", "scratch"), claimed.attemptId)
+        path: scratchPathForAttempt(scratchRoot, claimed.attemptId)
       };
-  if (workspace.kind === "scratch") {
-    await mkdir(workspace.path, { recursive: true, mode: 0o700 });
-  }
   const executorId = claimed.event.target.executorHint ?? binding?.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
@@ -280,12 +278,17 @@ export async function runOneDaemonIteration(input: {
 
   const securityAssessment = assessRunnerSecurity({
     executorId,
+    workspaceKind: workspace.kind,
     workspacePath: workspace.path,
     executionPath,
     command: claimed.event.command,
     context: claimed.event.context,
     permissions: claimed.event.permissions,
-    ...(input.security ? { policy: input.security } : {})
+    ...(workspace.kind === "scratch"
+      ? { policy: { ...(input.security ?? {}), allowedWorkspaceRoot: scratchRoot } }
+      : input.security
+        ? { policy: input.security }
+        : {})
   });
   if (securityAssessment.findings.length > 0) {
     await input.client.progress(claimed.run.id, lease, {
@@ -301,6 +304,22 @@ export async function runOneDaemonIteration(input: {
       nextAction: "Review the request and rerun with a narrower prompt or an explicit local policy override if appropriate."
     });
     return true;
+  }
+
+  let scratchAttemptCreated = false;
+  if (workspace.kind === "scratch") {
+    await mkdir(scratchRoot, { recursive: true, mode: 0o700 });
+    try {
+      await mkdir(workspace.path, { mode: 0o700 });
+      scratchAttemptCreated = true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+    }
+  }
+  async function cleanupUnexecutedScratch(): Promise<void> {
+    if (!scratchAttemptCreated || workspace.kind !== "scratch") return;
+    await rm(workspace.path, { recursive: true, force: true });
+    scratchAttemptCreated = false;
   }
 
   let readiness: Awaited<ReturnType<ExecutorAdapter["canRun"]>>;
@@ -320,11 +339,13 @@ export async function runOneDaemonIteration(input: {
       ...(binding?.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
     });
   } catch (error) {
+    await cleanupUnexecutedScratch();
     await input.client.complete(claimed.run.id, lease, failedRunResult(`${executor.displayName} readiness check`, error));
     return true;
   }
 
   if (!readiness.ready) {
+    await cleanupUnexecutedScratch();
     await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: readiness.reason ?? `${executor.displayName} is not ready`
@@ -337,11 +358,16 @@ export async function runOneDaemonIteration(input: {
   const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
   const runTimeoutMs = input.runTimeoutMs;
-  await input.client.markRunning(runId, activeExecutor.id, lease, {
-    ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
-    idempotencyKey: `${input.runnerId}:${runId}:running`,
-    ...(runTimeoutMs ? { runTimeoutMs } : {})
-  });
+  try {
+    await input.client.markRunning(runId, activeExecutor.id, lease, {
+      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
+      idempotencyKey: `${input.runnerId}:${runId}:running`,
+      ...(runTimeoutMs ? { runTimeoutMs } : {})
+    });
+  } catch (error) {
+    await cleanupUnexecutedScratch();
+    throw error;
+  }
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let cancellationDetected = false;
@@ -464,7 +490,7 @@ export async function runOneDaemonIteration(input: {
     result = binding
       ? await maybeCreatePullRequest({
           run: claimed.run,
-          executor: executorId,
+          ...(executor.capability ? { executorCapability: executor.capability } : {}),
           event: claimed.event,
           binding,
           result: executorResult,

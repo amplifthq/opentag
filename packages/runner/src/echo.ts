@@ -25,6 +25,7 @@ export function createEchoExecutor(): ExecutorAdapter {
       rawContextAccess: false,
       writeActionAccess: "none",
       workspaceIsolation: "none",
+      sourceControl: "none",
       requiredSecrets: [],
       completionSignals: [
         {

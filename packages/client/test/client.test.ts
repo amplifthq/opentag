@@ -1,6 +1,6 @@
 import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it } from "vitest";
-import { createOpenTagClient } from "../src/index.js";
+import { createOpenTagClient, type ChannelBindingInput } from "../src/index.js";
 
 const event: OpenTagEvent = {
   id: "evt_1",
@@ -24,6 +24,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("@opentag/client", () => {
+  it("sends and reads repo-less channel bindings", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const binding: ChannelBindingInput = {
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "oc_chat",
+      metadata: { displayName: "General" }
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === "POST") return jsonResponse({ ok: true });
+        return jsonResponse({ binding });
+      }
+    });
+
+    await client.bindChannel(binding);
+    await expect(client.getChannelBinding({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" })).resolves.toEqual({
+      binding
+    });
+
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(binding);
+    expect(requests[1]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat");
+  });
+
   it("creates dispatcher runs with validated event payloads and auth headers", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
@@ -249,10 +276,7 @@ describe("@opentag/client", () => {
           binding: {
             provider: "lark",
             accountId: "tenant_1",
-            conversationId: "oc_chat",
-            repoProvider: "github",
-            owner: "acme",
-            repo: "demo"
+            conversationId: "oc_chat"
           },
           activeRun: {
             id: "run_active",
@@ -288,6 +312,8 @@ describe("@opentag/client", () => {
     });
 
     const status = await client.getChannelRuntimeStatus({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
+
+    expect(status.binding).toEqual({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
 
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat/status");
     expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });

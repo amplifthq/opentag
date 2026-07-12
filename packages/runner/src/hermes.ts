@@ -65,6 +65,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       rawContextAccess: false,
       writeActionAccess: "none",
       workspaceIsolation: "branch",
+      sourceControl: "daemon_managed",
       requiredSecrets: [],
       completionSignals: [
         {

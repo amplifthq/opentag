@@ -203,8 +203,9 @@ function logIgnored(outcome: LarkMessageHandlerOutcome): void {
   console.log(`[lark] ignored event: ${outcome.status}${outcome.chatId ? ` chat_id=${outcome.chatId}` : ""}`);
 }
 
-function formatProjectTarget(input: { repoProvider: string; owner: string; repo: string }): string {
-  return `${input.repoProvider}:${input.owner}/${input.repo}`;
+function formatProjectTarget(input: { repoProvider?: string; owner?: string; repo?: string }): string {
+  if (!input.owner || !input.repo) return "not bound";
+  return `${input.repoProvider ?? "github"}:${input.owner}/${input.repo}`;
 }
 
 function queuedFollowUpsSummary(status: ChannelRuntimeStatus): string {
@@ -303,11 +304,11 @@ function larkRuntimeDoctorReply(input: { tenantKey: string; chatId: string; stat
   };
 }
 
-function formatStatusUnavailable(input: { binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function formatStatusUnavailable(input: { binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag status:",
-    input.binding ? `- Project Target: ${formatProjectTarget({ repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo })}` : "- Project Target: not bound.",
+    input.binding ? `- Project Target: ${formatProjectTarget(input.binding)}` : "- Project Target: not bound.",
     "- Runtime status: unavailable from dispatcher.",
     `- Reason: ${message}`,
     "- Next action: check `opentag service status` and `opentag status` locally."
@@ -317,7 +318,7 @@ function formatStatusUnavailable(input: { binding?: { repoProvider?: string; own
 function formatDoctorUnavailable(input: {
   tenantKey: string;
   chatId: string;
-  binding?: { repoProvider?: string; owner: string; repo: string };
+  binding?: { repoProvider?: string; owner?: string; repo?: string };
   error: unknown;
 }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
@@ -325,7 +326,7 @@ function formatDoctorUnavailable(input: {
     "OpenTag doctor (redacted):",
     `- Source container: lark:${input.tenantKey}/${input.chatId}`,
     input.binding
-      ? `- Project Target: ${formatProjectTarget({ repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo })}`
+      ? `- Project Target: ${formatProjectTarget(input.binding)}`
       : "- Project Target: not bound.",
     "- Dispatcher: source-container status unavailable.",
     `- Reason: ${message}`,
@@ -357,9 +358,9 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
       return {
         tenantKey: binding.accountId,
         chatId: binding.conversationId,
-        repoProvider: binding.repoProvider,
-        owner: binding.owner,
-        repo: binding.repo
+        ...(binding.repoProvider
+          ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+          : {})
       };
     } catch (error) {
       if (error instanceof Error && error.message.includes("channel_binding_not_found")) {

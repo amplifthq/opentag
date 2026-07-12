@@ -40,6 +40,12 @@ const slackEvent: OpenTagEvent = {
   metadata: { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
+const attemptLease = {
+  attemptId: "attempt_1",
+  attemptNumber: 1,
+  fencingToken: "fence_1"
+};
+
 describe("opentagd", () => {
   it("claims a run and completes it with echo executor", async () => {
     const calls: string[] = [];
@@ -51,7 +57,7 @@ describe("opentagd", () => {
       client: {
         async claim() {
           calls.push("claim");
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
         async markRunning(runId, executor) {
           calls.push(`running:${runId}:${executor}`);
@@ -59,10 +65,10 @@ describe("opentagd", () => {
         async heartbeat(runId) {
           calls.push(`heartbeat:${runId}`);
         },
-        async progress(runId, input) {
+        async progress(runId, _lease, input) {
           calls.push(`progress:${runId}:${input.type}:${input.message}`);
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
@@ -147,7 +153,7 @@ describe("opentagd", () => {
       executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
         async markRunning() {
           throw new Error("should not run");
@@ -158,7 +164,7 @@ describe("opentagd", () => {
         async progress() {
           throw new Error("should not run");
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
@@ -178,7 +184,7 @@ describe("opentagd", () => {
       executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
         async markRunning() {
           throw new Error("should not run");
@@ -189,7 +195,7 @@ describe("opentagd", () => {
         async progress() {
           throw new Error("should not run");
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
@@ -207,7 +213,7 @@ describe("opentagd", () => {
       executors: { echo: createEchoExecutor() },
       client: {
         async claim() {
-          return { run, event: slackEvent };
+          return { run, event: slackEvent, ...attemptLease };
         },
         async markRunning(runId, executor) {
           calls.push(`running:${runId}:${executor}`);
@@ -218,7 +224,7 @@ describe("opentagd", () => {
         async progress() {
           return;
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}`);
         }
       }
@@ -256,18 +262,18 @@ describe("opentagd", () => {
       heartbeatIntervalMs: 5,
       client: {
         async claim() {
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
-        async markRunning(runId, executor, options) {
+        async markRunning(runId, executor, _lease, options) {
           calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
         },
         async heartbeat(runId) {
           calls.push(`heartbeat:${runId}`);
         },
-        async progress(runId, input) {
+        async progress(runId, _lease, input) {
           calls.push(`progress:${runId}:${input.type}:${input.message}`);
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
@@ -303,9 +309,9 @@ describe("opentagd", () => {
       heartbeatIntervalMs: 5,
       client: {
         async claim() {
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
-        async markRunning(runId, executor, options) {
+        async markRunning(runId, executor, _lease, options) {
           calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
         },
         async heartbeat() {
@@ -322,7 +328,7 @@ describe("opentagd", () => {
       }
     });
 
-    expect(cancel).toHaveBeenCalledWith("run_1");
+    expect(cancel).toHaveBeenCalledWith("run_1", "attempt_1");
     expect(calls).toContain("heartbeat.cancelled");
     expect(calls).not.toContain("complete");
   });
@@ -356,9 +362,9 @@ describe("opentagd", () => {
       runTimeoutMs: 5,
       client: {
         async claim() {
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
-        async markRunning(runId, executor, options) {
+        async markRunning(runId, executor, _lease, options) {
           calls.push(`running:${runId}:${executor}:${options?.runTimeoutMs ?? "none"}`);
         },
         async heartbeat() {
@@ -367,13 +373,13 @@ describe("opentagd", () => {
         async progress() {
           calls.push("progress");
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
     });
 
-    expect(cancel).toHaveBeenCalledWith("run_1");
+    expect(cancel).toHaveBeenCalledWith("run_1", "attempt_1");
     expect(calls).toEqual([
       "running:run_1:echo:5",
       "executor.cancel",
@@ -406,7 +412,7 @@ describe("opentagd", () => {
       client: {
         async claim() {
           calls.push("claim");
-          return { run, event };
+          return { run, event, ...attemptLease };
         },
         async markRunning(runId, executor) {
           calls.push(`running:${runId}:${executor}`);
@@ -417,7 +423,7 @@ describe("opentagd", () => {
         async progress() {
           return;
         },
-        async complete(runId, result) {
+        async complete(runId, _lease, result) {
           calls.push(`complete:${runId}:${result.conclusion}:${result.summary}`);
         }
       }
@@ -440,6 +446,11 @@ describe("opentagd", () => {
           ...createEchoExecutor(),
           id: "codex",
           displayName: "Codex",
+          capability: {
+            ...createEchoExecutor().capability!,
+            id: "codex",
+            sourceControl: "self_committing"
+          },
           async run() {
             return { conclusion: "success", summary: "Changed README.md.", changedFiles: ["README.md"] };
           }
@@ -461,6 +472,7 @@ describe("opentagd", () => {
         async claim() {
           return {
             run,
+            ...attemptLease,
             event: {
               ...event,
               permissions: [
@@ -480,7 +492,7 @@ describe("opentagd", () => {
         async progress() {
           return;
         },
-        async complete(_runId, result) {
+        async complete(_runId, _lease, result) {
           completed = result;
         }
       }
@@ -551,6 +563,7 @@ describe("opentagd", () => {
         async claim() {
           return {
             run,
+            ...attemptLease,
             event: {
               ...event,
               permissions: [
@@ -570,7 +583,7 @@ describe("opentagd", () => {
         async progress() {
           return;
         },
-        async complete(_runId, result) {
+        async complete(_runId, _lease, result) {
           completed = result;
         }
       }
@@ -664,6 +677,7 @@ describe("opentagd", () => {
         async claim() {
           return {
             run: localRun,
+            ...attemptLease,
             event: {
               ...event,
               permissions: [

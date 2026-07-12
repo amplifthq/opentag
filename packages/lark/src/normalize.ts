@@ -4,10 +4,7 @@ import { larkRenderLocaleFromDomain, type LarkRenderLocale } from "./render.js";
 export type LarkChannelBinding = {
   tenantKey: string;
   chatId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type LarkMessageInput = {
   tenantKey: string;
@@ -186,9 +183,9 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...(input.binding.owner && input.binding.repo
+        ? { repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo }
+        : {})
     }
   };
 }

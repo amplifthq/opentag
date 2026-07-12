@@ -824,9 +824,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             return {
               botId: binding.accountId,
               chatId: binding.conversationId,
-              owner: binding.owner,
-              repo: binding.repo,
-              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+              ...(binding.repoProvider
+                ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+                : {})
             };
           } catch (error) {
             if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
@@ -988,9 +988,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             return {
               applicationId,
               channelId,
-              owner: binding.owner,
-              repo: binding.repo,
-              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+              ...(binding.repoProvider
+                ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+                : {})
             };
           } catch (error) {
             // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
@@ -1033,9 +1033,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           return {
             applicationId,
             channelId,
-            owner: binding.owner,
-            repo: binding.repo,
-            ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+            ...(binding.repoProvider
+              ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+              : {})
           };
         } catch (error) {
           console.error("discord.resolveChannelBinding failed", error);
