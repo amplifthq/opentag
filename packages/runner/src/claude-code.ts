@@ -1,7 +1,7 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
 import { executorPolicyPromptLines } from "./executor-report.js";
-import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
+import { executorWorkspacePath, renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import {
   branchNameForRun,
   changedFiles,
@@ -107,21 +107,22 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
       ]
     },
     async canRun(input) {
+      const workspacePath = executorWorkspacePath(input);
       try {
-        const claudeVersion = await runner.run(claudeCommand, ["--version"], { cwd: input.workspacePath });
+        const claudeVersion = await runner.run(claudeCommand, ["--version"], { cwd: workspacePath });
         if (claudeVersion.exitCode !== 0) {
           return { ready: false, reason: `Claude Code CLI is not available: ${claudeVersion.stderr || claudeVersion.stdout}` };
         }
       } catch (error) {
         return { ready: false, reason: `Claude Code CLI is not available: ${error instanceof Error ? error.message : String(error)}` };
       }
-      const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: input.workspacePath });
+      const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: workspacePath });
       if (gitRepo.exitCode !== 0) {
         return { ready: false, reason: `Workspace is not a git checkout: ${gitRepo.stderr || gitRepo.stdout}` };
       }
       const baseBranch = input.baseBranch ?? "main";
       const baseRef = await runner.run("git", ["rev-parse", "--verify", `${baseBranch}^{commit}`], {
-        cwd: input.workspacePath
+        cwd: workspacePath
       });
       if (baseRef.exitCode !== 0) {
         return { ready: false, reason: `Base branch '${baseBranch}' is not available: ${baseRef.stderr || baseRef.stdout}` };
@@ -129,15 +130,16 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
       return { ready: true };
     },
     async run(input, sink) {
+      const workspacePath = executorWorkspacePath(input);
       const security = options.security;
       const worktreePath = worktreePathForRun({
-        workspacePath: input.workspacePath,
+        workspacePath,
         runId: input.runId,
         ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
       });
       const assessment = assessRunnerSecurity({
         executorId: "claude-code",
-        workspacePath: input.workspacePath,
+        workspacePath,
         executionPath: worktreePath,
         command: input.command,
         context: input.context,
@@ -197,7 +199,7 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
       try {
         await createRunWorktree({
           runner,
-          workspacePath: input.workspacePath,
+          workspacePath,
           worktreePath,
           branchName,
           baseBranch
@@ -278,9 +280,9 @@ export function createClaudeCodeExecutor(options: ClaudeCodeExecutorOptions = {}
         const shouldRemove = keepWorktree === "never" || (keepWorktree === "on_failure" && completed);
         if (shouldRemove) {
           try {
-            await removeRunWorktree({ runner, workspacePath: input.workspacePath, worktreePath });
+            await removeRunWorktree({ runner, workspacePath, worktreePath });
             if (completed && changedFileCount === 0) {
-              await deleteRunBranch({ runner, workspacePath: input.workspacePath, branchName });
+              await deleteRunBranch({ runner, workspacePath, branchName });
             }
           } catch (error) {
             await sink.emit({

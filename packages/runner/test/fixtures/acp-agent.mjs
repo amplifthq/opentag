@@ -1,0 +1,112 @@
+#!/usr/bin/env node
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { Readable, Writable } from "node:stream";
+import * as acp from "@agentclientprotocol/sdk";
+
+const mode = process.env.OPENTAG_ACP_TEST_MODE ?? "success";
+
+if (mode === "malformed") {
+  process.stdout.write("this is not an ACP frame\n");
+  process.exit(2);
+}
+
+const sessions = new Map();
+
+async function record(cwd, name, value) {
+  await mkdir(cwd, { recursive: true });
+  await writeFile(join(cwd, name), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+const app = acp
+  .agent({ name: "opentag-test-agent" })
+  .onRequest(acp.methods.agent.initialize, (ctx) => ({
+    protocolVersion: acp.PROTOCOL_VERSION,
+    agentCapabilities: { loadSession: false },
+    agentInfo: { name: "opentag-test-agent", version: "1.0.0" }
+  }))
+  .onRequest(acp.methods.agent.session.new, async (ctx) => {
+    const sessionId = crypto.randomUUID();
+    sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false });
+    await record(ctx.params.cwd, "acp-session.json", {
+      cwd: ctx.params.cwd,
+      mcpServers: ctx.params.mcpServers,
+      inheritedSecret: process.env.OPENTAG_ACP_HOST_SECRET ?? null,
+      explicitValue: process.env.OPENTAG_ACP_EXPLICIT ?? null
+    });
+    return { sessionId };
+  })
+  .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
+    const session = sessions.get(ctx.params.sessionId);
+    if (!session) throw new Error("unknown test session");
+    const text = ctx.params.prompt
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+    await record(session.cwd, "acp-prompt.json", { text });
+
+    await ctx.client.notify(acp.methods.client.session.update, {
+      sessionId: ctx.params.sessionId,
+      update: {
+        sessionUpdate: "plan",
+        entries: [{ content: "Complete the OpenTag run", priority: "high", status: "in_progress" }]
+      }
+    });
+    await ctx.client.notify(acp.methods.client.session.update, {
+      sessionId: ctx.params.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        title: "Write ACP output",
+        kind: "edit",
+        status: "in_progress"
+      }
+    });
+
+    if (mode === "permission") {
+      const permission = await ctx.client.request(acp.methods.client.session.requestPermission, {
+        sessionId: ctx.params.sessionId,
+        toolCall: { toolCallId: "material-1", title: "Publish report", kind: "execute", status: "pending" },
+        options: [
+          { optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+          { optionId: "allow-run", name: "Allow for session", kind: "allow_always" },
+          { optionId: "reject-once", name: "Reject", kind: "reject_once" }
+        ]
+      });
+      await record(session.cwd, "acp-permission.json", permission);
+    }
+
+    if (mode === "cancel") {
+      await record(session.cwd, "acp-waiting.json", { waiting: true });
+      while (!session.cancelled) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await record(session.cwd, "acp-cancelled.json", { cancelled: true });
+      return { stopReason: "cancelled" };
+    }
+
+    await writeFile(join(session.cwd, "acp-output.txt"), "created by the ACP fixture\n");
+    await ctx.client.notify(acp.methods.client.session.update, {
+      sessionId: ctx.params.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-1",
+        status: "completed"
+      }
+    });
+    await ctx.client.notify(acp.methods.client.session.update, {
+      sessionId: ctx.params.sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "ACP fixture completed the requested work." }
+      }
+    });
+    return { stopReason: mode === "refusal" ? "refusal" : "end_turn" };
+  })
+  .onNotification(acp.methods.agent.session.cancel, async (ctx) => {
+    const session = sessions.get(ctx.params.sessionId);
+    if (session) session.cancelled = true;
+  });
+
+const stream = acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin));
+await app.connect(stream);

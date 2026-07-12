@@ -1,7 +1,7 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandResult, type CommandRunner } from "./command.js";
 import { executorPolicyPromptLines } from "./executor-report.js";
-import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
+import { executorWorkspacePath, renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
 import { resolveAgentSessionProfile } from "./session-profile.js";
@@ -75,8 +75,9 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       ]
     },
     async canRun(input) {
+      const workspacePath = executorWorkspacePath(input);
       try {
-        const hermesVersion = await runner.run(hermesCommand, ["--version"], { cwd: input.workspacePath });
+        const hermesVersion = await runner.run(hermesCommand, ["--version"], { cwd: workspacePath });
         if (hermesVersion.exitCode !== 0) {
           return { ready: false, reason: `Hermes CLI is not available: ${hermesVersion.stderr || hermesVersion.stdout}` };
         }
@@ -86,7 +87,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       let gitStatus: CommandResult;
       try {
-        gitStatus = await runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
+        gitStatus = await runner.run("git", ["status", "--porcelain"], { cwd: workspacePath });
       } catch (error) {
         return { ready: false, reason: `Workspace is not a git checkout: ${error instanceof Error ? error.message : String(error)}` };
       }
@@ -100,6 +101,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       return { ready: true };
     },
     async run(input, sink) {
+      const workspacePath = executorWorkspacePath(input);
       const branchName = branchNameForRun(input.runId);
       await sink.emit({
         type: "executor.started",
@@ -109,7 +111,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       await createRunBranch({
         runner,
-        workspacePath: input.workspacePath,
+        workspacePath,
         branchName,
         ...(input.baseBranch ? { startPoint: input.baseBranch } : {})
       });
@@ -141,10 +143,10 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       let hermesResult: CommandResult | undefined;
       try {
-        hermesResult = await runner.run(hermesCommand, args, { cwd: input.workspacePath });
+        hermesResult = await runner.run(hermesCommand, args, { cwd: workspacePath });
         await assertCommandSucceeded(hermesResult, "hermes -z");
       } finally {
-        const cleanedArtifacts = await cleanupInternalArtifacts({ runner, workspacePath: input.workspacePath });
+        const cleanedArtifacts = await cleanupInternalArtifacts({ runner, workspacePath });
         if (cleanedArtifacts.length > 0) {
           await sink.emit({
             type: "executor.progress",
@@ -156,7 +158,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       if (!hermesResult) throw new Error("Hermes did not return a result.");
 
-      const files = await changedFiles({ runner, workspacePath: input.workspacePath });
+      const files = await changedFiles({ runner, workspacePath });
       await sink.emit({
         type: "executor.completed",
         message: `Hermes executor completed with ${files.length} changed file(s)`,

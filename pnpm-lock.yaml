@@ -511,6 +511,9 @@ importers:
 
   packages/runner:
     dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: ^1.2.1
+        version: 1.2.1(zod@3.25.76)
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
@@ -589,6 +592,11 @@ importers:
         version: 5.9.3
 
 packages:
+
+  '@agentclientprotocol/sdk@1.2.1':
+    resolution: {integrity: sha512-jwYUdOQR7tc+Zfch53VL4JJyUNK/46q03uUTYb+PjECsmnNl94XFXOfYLJ8RBpMNidXd1rpOAVgb0vqD98xImA==}
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
 
   '@clack/core@0.5.0':
     resolution: {integrity: sha512-p3y0FIOwaYRUPRcMO7+dlmLh8PSRcrjuTndsiA0WAFbWES0mLZlrjVoBRZ9DzkPFJZG6KGkJmoEAY0ZcVWTkow==}
@@ -1985,6 +1993,10 @@ packages:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
+
+  '@agentclientprotocol/sdk@1.2.1(zod@3.25.76)':
+    dependencies:
+      zod: 3.25.76
 
   '@clack/core@0.5.0':
     dependencies:

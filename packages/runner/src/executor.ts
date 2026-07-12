@@ -21,9 +21,12 @@ export type ExecutorEventSink = {
   emit(event: ExecutorEvent): Promise<void>;
 };
 
-export type ExecutorRunInput = {
+export type ExecutorWorkspace =
+  | { kind: "repository"; path: string }
+  | { kind: "scratch"; path: string };
+
+type ExecutorRunInputBase = {
   runId: string;
-  workspacePath: string;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;
   targets?: OpenTagRunTargets;
@@ -37,6 +40,20 @@ export type ExecutorRunInput = {
   metadata?: Record<string, unknown>;
   sessionProfile?: AgentSessionProfile;
 };
+
+export type ExecutorRunInput = ExecutorRunInputBase &
+  (
+    | { workspace: ExecutorWorkspace; workspacePath?: never }
+    | { workspace?: never; workspacePath: string }
+  );
+
+export function executorWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
+  return input.workspace ?? { kind: "repository", path: input.workspacePath };
+}
+
+export function executorWorkspacePath(input: ExecutorRunInput): string {
+  return executorWorkspace(input).path;
+}
 
 export function renderContextPacketForPrompt(packet?: ContextPacket): string[] {
   if (!packet) return [];

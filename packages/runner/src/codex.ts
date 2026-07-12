@@ -1,7 +1,7 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandRunner } from "./command.js";
 import { executorPolicyPromptLines } from "./executor-report.js";
-import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
+import { executorWorkspacePath, renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import {
   branchNameForRun,
   changedFiles,
@@ -91,17 +91,18 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       ]
     },
     async canRun(input) {
-      const codexVersion = await runner.run(codexCommand, ["--version"], { cwd: input.workspacePath });
+      const workspacePath = executorWorkspacePath(input);
+      const codexVersion = await runner.run(codexCommand, ["--version"], { cwd: workspacePath });
       if (codexVersion.exitCode !== 0) {
         return { ready: false, reason: `Codex CLI is not available: ${codexVersion.stderr || codexVersion.stdout}` };
       }
-      const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: input.workspacePath });
+      const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: workspacePath });
       if (gitRepo.exitCode !== 0) {
         return { ready: false, reason: `Workspace is not a git checkout: ${gitRepo.stderr || gitRepo.stdout}` };
       }
       const baseBranch = input.baseBranch ?? "main";
       const baseRef = await runner.run("git", ["rev-parse", "--verify", `${baseBranch}^{commit}`], {
-        cwd: input.workspacePath
+        cwd: workspacePath
       });
       if (baseRef.exitCode !== 0) {
         return { ready: false, reason: `Base branch '${baseBranch}' is not available: ${baseRef.stderr || baseRef.stdout}` };
@@ -109,15 +110,16 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       return { ready: true };
     },
     async run(input, sink) {
+      const workspacePath = executorWorkspacePath(input);
       const security = options.security;
       const worktreePath = worktreePathForRun({
-        workspacePath: input.workspacePath,
+        workspacePath,
         runId: input.runId,
         ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
       });
       const assessment = assessRunnerSecurity({
         executorId: "codex",
-        workspacePath: input.workspacePath,
+        workspacePath,
         executionPath: worktreePath,
         command: input.command,
         context: input.context,
@@ -153,7 +155,7 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
       try {
         await createRunWorktree({
           runner,
-          workspacePath: input.workspacePath,
+          workspacePath,
           worktreePath,
           branchName,
           baseBranch
@@ -238,9 +240,9 @@ export function createCodexExecutor(options: CodexExecutorOptions = {}): Executo
         const shouldRemove = keepWorktree === "never" || (keepWorktree === "on_failure" && completed);
         if (shouldRemove) {
           try {
-            await removeRunWorktree({ runner, workspacePath: input.workspacePath, worktreePath });
+            await removeRunWorktree({ runner, workspacePath, worktreePath });
             if (completed && changedFileCount === 0) {
-              await deleteRunBranch({ runner, workspacePath: input.workspacePath, branchName });
+              await deleteRunBranch({ runner, workspacePath, branchName });
             }
           } catch (error) {
             await sink.emit({
