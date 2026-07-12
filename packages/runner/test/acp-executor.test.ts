@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,7 @@ function tempDir(name: string): string {
 }
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, { cwd, encoding: "utf8" });
+  return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
 function initRepo(): string {
@@ -55,6 +55,19 @@ function manifest(mode = "success") {
       }
     },
     resources: {}
+  };
+}
+
+function manifestWithCwd(cwd: string, mode = "success") {
+  const configured = manifest(mode);
+  return {
+    ...configured,
+    bindings: {
+      agent: {
+        ...configured.bindings.agent,
+        cwd
+      }
+    }
   };
 }
 
@@ -156,13 +169,79 @@ describe("ACP executor", () => {
     expect(existsSync(join(scratch, "acp-cancelled.json"))).toBe(true);
   }, 15_000);
 
-  it("reports a deterministic protocol error and cleans up a malformed child", async () => {
+  it("returns cancelled without spawning when cancellation wins the startup race", async () => {
+    const scratch = tempDir("immediate-cancel");
+    const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_immediate_cancel"), {
+      emit: async () => undefined
+    });
+
+    await executor.cancel("run_immediate_cancel");
+    const result = await running;
+
+    expect(result.conclusion).toBe("cancelled");
+    expect(existsSync(join(scratch, "acp-session.json"))).toBe(false);
+    expect(existsSync(join(scratch, "acp-prompt.json"))).toBe(false);
+  }, 15_000);
+
+  it("cancels a delayed session/new without ever submitting a prompt", async () => {
+    const scratch = tempDir("delayed-session");
+    const executor = createAcpExecutor({ manifest: manifest("delay-session"), cancelGraceMs: 100 });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_delayed_session"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(scratch, "acp-session-new-started.json"));
+
+    await executor.cancel("run_delayed_session");
+    const result = await running;
+
+    expect(result.conclusion).toBe("cancelled");
+    expect(existsSync(join(scratch, "acp-prompt.json"))).toBe(false);
+  }, 15_000);
+
+  it("kills the child even when the ACP cancellation notification is rejected", async () => {
+    const scratch = tempDir("cancel-notify-failure");
+    const executor = createAcpExecutor({ manifest: manifest("cancel-notify-failure"), cancelGraceMs: 100 });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_cancel_notify_failure"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(scratch, "acp-waiting.json"));
+    const { pid } = JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"));
+
+    await executor.cancel("run_cancel_notify_failure");
+    const result = await running;
+
+    expect(result.conclusion).toBe("cancelled");
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it("strictly rejects malformed NDJSON and kills a child that stays alive", async () => {
     const scratch = tempDir("malformed");
-    const executor = createAcpExecutor({ manifest: manifest("malformed") });
+    const executor = createAcpExecutor({ manifest: manifest("malformed-live"), cancelGraceMs: 100 });
 
     await expect(
       executor.run(input({ kind: "scratch", path: scratch }, "run_malformed"), { emit: async () => undefined })
     ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
+    const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it("does not leak child stderr through errors or normalized events", async () => {
+    const scratch = tempDir("child-exit");
+    const executor = createAcpExecutor({ manifest: manifest("child-exit"), cancelGraceMs: 100 });
+    const events: string[] = [];
+    let thrown = "";
+    try {
+      await executor.run(input({ kind: "scratch", path: scratch }, "run_child_exit"), {
+        emit: async (event) => void events.push(event.message)
+      });
+    } catch (error) {
+      thrown = String(error);
+    }
+
+    expect(thrown).toMatch(/ACP agent fixture-agent.*(?:protocol|exit)/i);
+    expect(thrown).not.toContain("SENTINEL_CHILD_STDERR_SECRET");
+    expect(events.join("\n")).not.toContain("SENTINEL_CHILD_STDERR_SECRET");
   }, 15_000);
 
   it("uses an absolute scratch cwd without invoking repository isolation", async () => {
@@ -172,7 +251,7 @@ describe("ACP executor", () => {
     const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_scratch"), { emit: async () => undefined });
 
     const session = JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"));
-    expect(session).toEqual({ cwd: scratch, mcpServers: [], inheritedSecret: null, explicitValue: null });
+    expect(session).toMatchObject({ cwd: realpathSync(scratch), mcpServers: [], inheritedSecret: null, explicitValue: null });
     expect(result.conclusion).toBe("success");
     expect(result.changedFiles).toEqual([]);
     expect(existsSync(join(scratch, ".git"))).toBe(false);
@@ -187,6 +266,43 @@ describe("ACP executor", () => {
     const session = JSON.parse(git(repo, ["show", "opentag/run_repo_cwd:acp-session.json"]));
     expect(session.cwd).toContain("/.worktrees/opentag/run_repo_cwd");
     expect(session.cwd.startsWith("/")).toBe(true);
+  }, 15_000);
+
+  it("uses a real contained binding cwd for both the child and ACP session", async () => {
+    const scratch = tempDir("contained-cwd");
+    const nested = join(scratch, "nested");
+    mkdirSync(nested);
+    const executor = createAcpExecutor({ manifest: manifestWithCwd("nested") });
+
+    await executor.run(input({ kind: "scratch", path: scratch }, "run_contained_cwd"), { emit: async () => undefined });
+
+    const session = JSON.parse(readFileSync(join(nested, "acp-session.json"), "utf8"));
+    expect(session.cwd).toBe(realpathSync(nested));
+    expect(existsSync(join(nested, "acp-output.txt"))).toBe(true);
+  }, 15_000);
+
+  it.each([
+    ["scratch traversal", "scratch" as const, ".."],
+    ["scratch absolute", "scratch" as const, "/tmp"],
+    ["repository traversal", "repository" as const, ".."]
+  ])("rejects an escaping binding cwd: %s", async (_label, kind, cwd) => {
+    const workspace = kind === "repository" ? initRepo() : tempDir("unsafe-cwd");
+    const executor = createAcpExecutor({ manifest: manifestWithCwd(cwd) });
+
+    await expect(
+      executor.run(input({ kind, path: workspace }, `run_${kind}_unsafe_cwd`), { emit: async () => undefined })
+    ).rejects.toThrow(/binding cwd/i);
+  }, 15_000);
+
+  it("rejects a binding cwd symlink that escapes the attempt workspace", async () => {
+    const scratch = tempDir("symlink-cwd");
+    const outside = tempDir("symlink-outside");
+    symlinkSync(outside, join(scratch, "escape"));
+    const executor = createAcpExecutor({ manifest: manifestWithCwd("escape") });
+
+    await expect(
+      executor.run(input({ kind: "scratch", path: scratch }, "run_symlink_cwd"), { emit: async () => undefined })
+    ).rejects.toThrow(/binding cwd/i);
   }, 15_000);
 
   it("scrubs inherited secrets while preserving explicitly configured binding environment", async () => {
@@ -213,12 +329,28 @@ describe("ACP executor", () => {
   it("does not commit or discard repository changes when an ACP attempt refuses", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest("refusal") });
-    const { keepWorktree: _keepWorktree, ...run } = input({ kind: "repository", path: repo }, "run_refusal");
 
-    const result = await executor.run(run, { emit: async () => undefined });
+    const result = await executor.run(input({ kind: "repository", path: repo }, "run_refusal"), { emit: async () => undefined });
 
     expect(result.conclusion).toBe("needs_human");
     expect(() => git(repo, ["show", "opentag/run_refusal:acp-output.txt"])).toThrow();
     expect(existsSync(join(repo, ".worktrees", "opentag", "run_refusal", "acp-output.txt"))).toBe(true);
+  }, 15_000);
+
+  it("retains a cancelled repository delta even when keepWorktree is never", async () => {
+    const repo = initRepo();
+    const worktree = join(repo, ".worktrees", "opentag", "run_cancel_recovery");
+    const executor = createAcpExecutor({ manifest: manifest("cancel"), cancelGraceMs: 100 });
+    const running = executor.run(input({ kind: "repository", path: repo }, "run_cancel_recovery"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(worktree, "acp-waiting.json"));
+
+    await executor.cancel("run_cancel_recovery");
+    const result = await running;
+
+    expect(result.conclusion).toBe("cancelled");
+    expect(readFileSync(join(worktree, "acp-output.txt"), "utf8")).toContain("recoverable cancellation delta");
+    expect(() => git(repo, ["show", "opentag/run_cancel_recovery:acp-output.txt"])).toThrow();
   }, 15_000);
 });

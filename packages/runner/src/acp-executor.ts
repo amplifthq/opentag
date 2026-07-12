@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { isAbsolute, resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
@@ -10,7 +11,6 @@ import {
 } from "@opentag/core";
 import { nodeCommandRunner, type CommandRunner } from "./command.js";
 import {
-  executorWorkspace,
   type ExecutorAdapter,
   type ExecutorEventSink,
   type ExecutorRunInput,
@@ -31,7 +31,6 @@ import { scrubEnvironment } from "./security.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
 const CHILD_EXIT_GRACE_MS = 500;
-const MAX_STDERR_LENGTH = 8_192;
 
 export type AcpPermissionOption = {
   optionId: string;
@@ -72,7 +71,7 @@ type NormalizedAcpManifest = {
 };
 
 type ActiveRun = {
-  child: ChildProcessWithoutNullStreams;
+  child?: ChildProcessWithoutNullStreams;
   client?: acp.ClientContext;
   sessionId?: string;
   cancelRequested: boolean;
@@ -144,9 +143,52 @@ function permissionResponseForDecision(
     : { outcome: { outcome: "cancelled" } };
 }
 
-function boundedAppend(current: string, chunk: string): string {
-  const combined = `${current}${chunk}`;
-  return combined.length <= MAX_STDERR_LENGTH ? combined : combined.slice(combined.length - MAX_STDERR_LENGTH);
+function strictAcpOutput(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  let pending = "";
+
+  function validate(line: string): void {
+    if (!line.trim()) return;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+    } catch {
+      throw new Error("ACP agent emitted an invalid NDJSON frame.");
+    }
+  }
+
+  return source.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        pending += decoder.decode(chunk, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop() ?? "";
+        for (const line of lines) validate(line.replace(/\r$/u, ""));
+        controller.enqueue(chunk);
+      },
+      flush() {
+        pending += decoder.decode();
+        validate(pending.replace(/\r$/u, ""));
+      }
+    })
+  );
+}
+
+async function safeAcpCwd(workspacePath: string, configuredCwd?: string): Promise<string> {
+  const workspaceRealPath = await realpath(workspacePath);
+  if (!configuredCwd) return workspaceRealPath;
+  if (isAbsolute(configuredCwd)) {
+    throw new Error("ACP binding cwd must be relative to the attempt workspace.");
+  }
+  const candidate = await realpath(resolve(workspaceRealPath, configuredCwd));
+  const relation = relative(workspaceRealPath, candidate);
+  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) {
+    throw new Error("ACP binding cwd must stay inside the attempt workspace.");
+  }
+  if (!(await stat(candidate)).isDirectory()) {
+    throw new Error("ACP binding cwd must resolve to a directory.");
+  }
+  return candidate;
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
@@ -301,52 +343,64 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
     },
     async run(input, sink) {
       const workspace = assertExplicitWorkspace(input);
+      if (activeRuns.has(input.runId)) throw new Error(`ACP run ${input.runId} is already active.`);
+      const active: ActiveRun = { cancelRequested: false };
+      activeRuns.set(input.runId, active);
       const baseBranch = input.baseBranch ?? "main";
       const branchName = branchNameForRun(input.runId);
       let executionPath = workspace.path;
       let repositoryCompleted = false;
+      let worktreeCreated = false;
       let changedFileCount: number | undefined;
-
-      if (workspace.kind === "repository") {
-        executionPath = worktreePathForRun({
-          workspacePath: workspace.path,
-          runId: input.runId,
-          ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
-        });
-        await sink.emit({
-          type: "executor.started",
-          message: `Creating isolated ACP worktree ${executionPath} on ${branchName}`,
-          at: new Date().toISOString()
-        });
-        await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
-      } else {
-        await sink.emit({
-          type: "executor.started",
-          message: `Starting ACP agent ${manifest.id} in scratch workspace`,
-          at: new Date().toISOString()
-        });
-      }
-
-      let stderr = "";
-      let active: ActiveRun | undefined;
       try {
-        const childCwd = manifest.binding.cwd ? resolve(executionPath, manifest.binding.cwd) : executionPath;
+        if (workspace.kind === "repository") {
+          executionPath = worktreePathForRun({
+            workspacePath: workspace.path,
+            runId: input.runId,
+            ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
+          });
+          await sink.emit({
+            type: "executor.started",
+            message: `Creating isolated ACP worktree ${executionPath} on ${branchName}`,
+            at: new Date().toISOString()
+          });
+          if (active.cancelRequested) {
+            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          }
+          await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
+          worktreeCreated = true;
+        } else {
+          await sink.emit({
+            type: "executor.started",
+            message: `Starting ACP agent ${manifest.id} in scratch workspace`,
+            at: new Date().toISOString()
+          });
+        }
+
+        if (active.cancelRequested) {
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+        }
+        const childCwd = await safeAcpCwd(executionPath, manifest.binding.cwd);
+        if (active.cancelRequested) {
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+        }
         const child = spawn(manifest.binding.command, manifest.binding.args, {
           cwd: childCwd,
           env: { ...scrubEnvironment(), ...manifest.binding.env },
           stdio: ["pipe", "pipe", "pipe"]
         });
-        active = { child, cancelRequested: false };
-        activeRuns.set(input.runId, active);
-        child.stderr.setEncoding("utf8");
-        child.stderr.on("data", (chunk: string) => {
-          stderr = boundedAppend(stderr, chunk);
-        });
+        active.child = child;
+        child.stderr.resume();
+        if (active.cancelRequested) {
+          await terminateChild(child, cancelGraceMs);
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+        }
 
         const output: string[] = [];
+        const childOutput = strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
         const stream = acp.ndJsonStream(
           Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-          Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
+          childOutput
         );
         let stopReason: acp.StopReason;
         try {
@@ -373,7 +427,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               return permissionResponseForDecision(decision, requestOptions);
             })
             .connectWith(stream, async (client) => {
-              active!.client = client;
+              active.client = client;
               const initialized = await client.request(acp.methods.agent.initialize, {
                 protocolVersion: acp.PROTOCOL_VERSION,
                 clientCapabilities: {}
@@ -381,10 +435,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               if (initialized.protocolVersion !== 1) {
                 throw new Error(`Agent negotiated unsupported ACP protocol version ${initialized.protocolVersion}.`);
               }
-              return client.buildSession({ cwd: resolve(executionPath), mcpServers: [] }).withSession(async (session) => {
-                active!.sessionId = session.sessionId;
-                if (active!.cancelRequested) {
-                  await client.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+              return client.buildSession({ cwd: childCwd, mcpServers: [] }).withSession(async (session) => {
+                active.sessionId = session.sessionId;
+                if (active.cancelRequested) {
+                  try {
+                    await client.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
+                  } catch {
+                    // The cancellation path below still terminates the child.
+                  }
+                  return "cancelled";
                 }
                 void session.prompt(promptForRun(input));
                 for (;;) {
@@ -394,15 +453,14 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 }
               });
             });
-        } catch (error) {
-          const diagnostics = stderr.trim() ? ` Diagnostics: ${stderr.trim()}` : "";
-          throw new Error(
-            `ACP agent ${manifest.id} protocol or exit failure: ${error instanceof Error ? error.message : String(error)}.${diagnostics}`,
-            { cause: error }
-          );
+        } catch {
+          if (active.cancelRequested) stopReason = "cancelled";
+          else throw new Error(`ACP agent ${manifest.id} protocol or exit failure.`);
         }
 
-        if (workspace.kind === "repository") {
+        await terminateChild(child);
+
+        if (workspace.kind === "repository" && stopReason === "end_turn") {
           const cleaned = await cleanupInternalArtifacts({ runner, workspacePath: executionPath });
           if (cleaned.length) {
             await sink.emit({
@@ -443,10 +501,10 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         throw error;
       } finally {
         activeRuns.delete(input.runId);
-        if (active) await terminateChild(active.child);
-        if (workspace.kind === "repository") {
+        if (active.child) await terminateChild(active.child);
+        if (workspace.kind === "repository" && worktreeCreated) {
           const keepWorktree = input.keepWorktree ?? "on_failure";
-          const shouldRemove = keepWorktree === "never" || (keepWorktree === "on_failure" && repositoryCompleted);
+          const shouldRemove = repositoryCompleted && keepWorktree !== "always";
           if (shouldRemove) {
             try {
               await removeRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath });
@@ -468,11 +526,18 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       const active = activeRuns.get(runId);
       if (!active) return;
       active.cancelRequested = true;
-      if (active.client && active.sessionId) {
-        await active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId });
-      }
-      if (!(await waitForExit(active.child, cancelGraceMs))) {
-        await terminateChild(active.child, cancelGraceMs);
+      const child = active.child;
+      if (!child) return;
+      try {
+        if (active.client && active.sessionId) {
+          await active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId });
+        }
+      } catch {
+        // A broken ACP connection must not prevent forced child termination.
+      } finally {
+        if (!(await waitForExit(child, cancelGraceMs))) {
+          await terminateChild(child, cancelGraceMs);
+        }
       }
     }
   };

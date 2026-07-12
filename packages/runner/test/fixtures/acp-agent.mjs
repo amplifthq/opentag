@@ -6,9 +6,15 @@ import * as acp from "@agentclientprotocol/sdk";
 
 const mode = process.env.OPENTAG_ACP_TEST_MODE ?? "success";
 
-if (mode === "malformed") {
+if (mode === "malformed-live") {
+  await writeFile(join(process.cwd(), "acp-child-pid.txt"), `${process.pid}\n`);
   process.stdout.write("this is not an ACP frame\n");
-  process.exit(2);
+  await new Promise(() => undefined);
+}
+
+if (mode === "child-exit") {
+  process.stderr.write("SENTINEL_CHILD_STDERR_SECRET\n");
+  process.exit(7);
 }
 
 const sessions = new Map();
@@ -26,11 +32,16 @@ const app = acp
     agentInfo: { name: "opentag-test-agent", version: "1.0.0" }
   }))
   .onRequest(acp.methods.agent.session.new, async (ctx) => {
+    if (mode === "delay-session") {
+      await record(ctx.params.cwd, "acp-session-new-started.json", { started: true });
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
     const sessionId = crypto.randomUUID();
     sessions.set(sessionId, { cwd: ctx.params.cwd, cancelled: false });
     await record(ctx.params.cwd, "acp-session.json", {
       cwd: ctx.params.cwd,
       mcpServers: ctx.params.mcpServers,
+      pid: process.pid,
       inheritedSecret: process.env.OPENTAG_ACP_HOST_SECRET ?? null,
       explicitValue: process.env.OPENTAG_ACP_EXPLICIT ?? null
     });
@@ -76,8 +87,10 @@ const app = acp
       await record(session.cwd, "acp-permission.json", permission);
     }
 
-    if (mode === "cancel") {
+    if (mode === "cancel" || mode === "cancel-notify-failure") {
+      await writeFile(join(session.cwd, "acp-output.txt"), "recoverable cancellation delta\n");
       await record(session.cwd, "acp-waiting.json", { waiting: true });
+      if (mode === "cancel-notify-failure") process.stdin.destroy();
       while (!session.cancelled) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
