@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   ApprovalDecisionSchema,
   ApplyIntentOutcomeSchema,
@@ -21,6 +21,7 @@ import {
   RunEventVisibilitySchema,
   SuggestedChangesSnapshotSchema,
   type ApprovalDecision,
+  type Attempt,
   type ApplyIntentOutcome,
   type ApplyPlan,
   type ActionHint,
@@ -41,6 +42,7 @@ import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
+  attempts,
   approvalDecisions,
   channelBindings,
   controlPlaneEvents,
@@ -58,9 +60,15 @@ import {
   suggestedChanges
 } from "./schema.js";
 
-export type ClaimedOpenTagRun = {
+export type OpenTagRunWithEvent = {
   run: OpenTagRun;
   event: OpenTagEvent;
+};
+
+export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
 };
 
 export type OpenTagAuditEvent = {
@@ -311,9 +319,11 @@ export type OpenTagAggregateMetrics = {
   staleIntentCount: number;
 };
 
-export type RecordProgressOutcome = "recorded" | "duplicate" | "not_found";
-export type MarkRunningOutcome = "running" | "duplicate" | "not_found";
-export type CompleteRunOutcome = "completed" | "duplicate" | "not_found";
+export type AttemptMutationConflict = "stale_attempt";
+export type HeartbeatOutcome = "updated" | AttemptMutationConflict | "not_found";
+export type RecordProgressOutcome = "recorded" | "duplicate" | AttemptMutationConflict | "not_found";
+export type MarkRunningOutcome = "running" | "duplicate" | AttemptMutationConflict | "not_found";
+export type CompleteRunOutcome = "completed" | "duplicate" | AttemptMutationConflict | "not_found";
 
 export type ControlPlaneEventSeverity = "info" | "warn" | "error";
 
@@ -355,6 +365,38 @@ function isIsoExpired(iso: string | null, now: Date): boolean {
   if (!iso) return false;
   return new Date(iso).getTime() <= now.getTime();
 }
+
+function newAttemptId(): string {
+  return `attempt_${randomUUID()}`;
+}
+
+function newFencingToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
+  return {
+    id: row.id,
+    runId: row.runId,
+    number: row.number,
+    runnerId: row.runnerId,
+    status: row.status as Attempt["status"],
+    startedAt: row.startedAt,
+    heartbeatAt: row.heartbeatAt,
+    leaseExpiresAt: row.leaseExpiresAt,
+    ...(row.finishedAt ? { finishedAt: row.finishedAt } : {}),
+    ...(row.resultJson ? { result: OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+type AttemptLease = {
+  runId: string;
+  runnerId: string;
+  attemptId: string;
+  fencingToken: string;
+};
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
@@ -977,6 +1019,27 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  function activeAttemptLease(input: AttemptLease):
+    | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
+    | { outcome: "stale_attempt" | "not_found" } {
+    const run = db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+    if (!run) return { outcome: "not_found" };
+    if (run.currentAttemptId !== input.attemptId || run.assignedRunnerId !== input.runnerId) {
+      return { outcome: "stale_attempt" };
+    }
+    const attempt = db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+    if (
+      !attempt ||
+      attempt.runId !== input.runId ||
+      attempt.runnerId !== input.runnerId ||
+      attempt.fencingToken !== input.fencingToken ||
+      (attempt.status !== "assigned" && attempt.status !== "running")
+    ) {
+      return { outcome: "stale_attempt" };
+    }
+    return { outcome: "active", run, attempt };
+  }
+
   async function repoBindingRunnerId(projectTarget: ProjectTargetRef | null): Promise<string | null> {
     if (!projectTarget) return null;
     const row = await db
@@ -1300,18 +1363,29 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         summary: input.reason ?? "Cancellation was requested by a human.",
         nextAction: "OpenTag will not treat this stop request as a successful completion."
       };
-      await db
-        .update(runs)
-        .set({
-          status: "cancelled",
-          resultJson: JSON.stringify(result),
-          assignedRunnerId: null,
-          leasedAt: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
-          updatedAt
-        })
-        .where(eq(runs.id, input.runId));
+      db.transaction((tx) => {
+        const current = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!current || terminalRunStatus(current.status)) return;
+        if (current.currentAttemptId) {
+          tx.update(attempts)
+            .set({ status: "cancelled", finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .where(eq(attempts.id, current.currentAttemptId))
+            .run();
+        }
+        tx.update(runs)
+          .set({
+            status: "cancelled",
+            resultJson: JSON.stringify(result),
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            currentAttemptId: null,
+            updatedAt
+          })
+          .where(eq(runs.id, input.runId))
+          .run();
+      });
       await appendRunEvent({
         runId: input.runId,
         type: "run.cancel_requested",
@@ -2024,21 +2098,45 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       for (const activeRow of activeRows) {
         if (!isIsoExpired(activeRow.leaseExpiresAt, now)) continue;
         const updatedAt = nowIso();
-        await db
-          .update(runs)
-          .set({
-            status: "queued",
-            assignedRunnerId: null,
-            leasedAt: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-            updatedAt
-          })
-          .where(eq(runs.id, activeRow.id));
+        const interrupted = db.transaction((tx) => {
+          const current = tx.select().from(runs).where(eq(runs.id, activeRow.id)).limit(1).get();
+          if (!current || !isIsoExpired(current.leaseExpiresAt, now) || (current.status !== "assigned" && current.status !== "running")) {
+            return false;
+          }
+          if (current.currentAttemptId) {
+            tx.update(attempts)
+              .set({
+                status: "interrupted",
+                finishedAt: updatedAt,
+                resultJson: JSON.stringify({ conclusion: "interrupted", summary: "Attempt lease expired." }),
+                updatedAt
+              })
+              .where(and(eq(attempts.id, current.currentAttemptId), inArray(attempts.status, ["assigned", "running"])))
+              .run();
+          }
+          tx.update(runs)
+            .set({
+              status: "queued",
+              assignedRunnerId: null,
+              leasedAt: null,
+              leaseExpiresAt: null,
+              heartbeatAt: null,
+              currentAttemptId: null,
+              updatedAt
+            })
+            .where(eq(runs.id, current.id))
+            .run();
+          return true;
+        });
+        if (!interrupted) continue;
         await appendRunEvent({
           runId: activeRow.id,
           type: "run.lease_expired",
-          payload: { previousRunnerId: activeRow.assignedRunnerId, previousLeaseExpiresAt: activeRow.leaseExpiresAt },
+          payload: {
+            previousRunnerId: activeRow.assignedRunnerId,
+            previousAttemptId: activeRow.currentAttemptId,
+            previousLeaseExpiresAt: activeRow.leaseExpiresAt
+          },
           visibility: "audit",
           importance: "normal",
           createdAt: updatedAt
@@ -2070,24 +2168,53 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const updatedAt = nowIso();
       const leasedAt = updatedAt;
       const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
-      const updateResult = await db
-        .update(runs)
-        .set({
-          status: "assigned",
-          assignedRunnerId: input.runnerId,
-          leasedAt,
-          leaseExpiresAt,
-          heartbeatAt: leasedAt,
-          updatedAt
-        })
-        .where(and(eq(runs.id, row.id), eq(runs.status, "queued")));
-      if (updateResult.changes === 0) {
-        return null;
-      }
+      const attemptId = newAttemptId();
+      const fencingToken = newFencingToken();
+      const attemptNumber = db.transaction((tx) => {
+        const previous = tx
+          .select({ number: attempts.number })
+          .from(attempts)
+          .where(eq(attempts.runId, row.id))
+          .orderBy(desc(attempts.number))
+          .limit(1)
+          .get();
+        const number = (previous?.number ?? 0) + 1;
+        const updateResult = tx
+          .update(runs)
+          .set({
+            status: "assigned",
+            assignedRunnerId: input.runnerId,
+            leasedAt,
+            leaseExpiresAt,
+            heartbeatAt: leasedAt,
+            currentAttemptId: attemptId,
+            updatedAt
+          })
+          .where(and(eq(runs.id, row.id), eq(runs.status, "queued")))
+          .run();
+        if (updateResult.changes === 0) return null;
+        tx.insert(attempts)
+          .values({
+            id: attemptId,
+            runId: row.id,
+            number,
+            runnerId: input.runnerId,
+            fencingToken,
+            status: "assigned",
+            startedAt: leasedAt,
+            heartbeatAt: leasedAt,
+            leaseExpiresAt,
+            createdAt: leasedAt,
+            updatedAt
+          })
+          .run();
+        return number;
+      });
+      if (attemptNumber === null) return null;
       await appendRunEvent({
         runId: row.id,
         type: "run.claimed",
-        payload: { runnerId: input.runnerId, leasedAt, leaseExpiresAt },
+        payload: { runnerId: input.runnerId, attemptId, attemptNumber, leasedAt, leaseExpiresAt },
         visibility: "audit",
         importance: "normal",
         createdAt: updatedAt
@@ -2105,7 +2232,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           assignedRunnerId: input.runnerId,
           updatedAt
         },
-        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
+        attemptId,
+        attemptNumber,
+        fencingToken
       };
     },
 
@@ -2174,37 +2304,57 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
-    async heartbeat(input: { runId: string; runnerId: string; leaseSeconds?: number }): Promise<boolean> {
+    async heartbeat(input: AttemptLease & { leaseSeconds?: number }): Promise<HeartbeatOutcome> {
       const updatedAt = nowIso();
-      const row = await db
-        .select()
-        .from(runs)
-        .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
-        .limit(1)
-        .get();
-      if (!row) return false;
+      const lease = activeAttemptLease(input);
+      if (lease.outcome !== "active") return lease.outcome;
       const leaseSeconds = input.leaseSeconds ?? 60;
       const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-      await db.update(runners).set({ heartbeatAt: updatedAt }).where(eq(runners.runnerId, input.runnerId));
-      await db
-        .update(runs)
-        .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
-        .where(eq(runs.id, input.runId));
+      const updated = db.transaction((tx) => {
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        if (
+          !currentRun ||
+          !currentAttempt ||
+          currentRun.assignedRunnerId !== input.runnerId ||
+          currentRun.currentAttemptId !== input.attemptId ||
+          (currentRun.status !== "assigned" && currentRun.status !== "running") ||
+          currentAttempt.runId !== input.runId ||
+          currentAttempt.runnerId !== input.runnerId ||
+          currentAttempt.fencingToken !== input.fencingToken ||
+          (currentAttempt.status !== "assigned" && currentAttempt.status !== "running")
+        ) {
+          return false;
+        }
+        tx.update(attempts)
+          .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
+          .where(eq(attempts.id, input.attemptId))
+          .run();
+        tx.update(runs)
+          .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
+          .where(eq(runs.id, input.runId))
+          .run();
+        tx.update(runners).set({ heartbeatAt: updatedAt }).where(eq(runners.runnerId, input.runnerId)).run();
+        return true;
+      });
+      if (!updated) return "stale_attempt";
       await appendRunEvent({
         runId: input.runId,
         type: "run.heartbeat",
-        payload: { runnerId: input.runnerId, heartbeatAt: updatedAt, leaseExpiresAt },
+        payload: { runnerId: input.runnerId, attemptId: input.attemptId, heartbeatAt: updatedAt, leaseExpiresAt },
         visibility: "debug",
         importance: "low",
         createdAt: updatedAt
       });
-      return true;
+      return "updated";
     },
 
     async markRunning(input: {
       runId: string;
       executor: string;
       runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
       executorCapability?: unknown;
       runTimeoutMs?: number;
       idempotencyKey?: string;
@@ -2212,7 +2362,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const updatedAt = nowIso();
       const conditions = [eq(runs.id, input.runId)];
       if (input.runnerId) {
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") return lease.outcome;
         conditions.push(eq(runs.assignedRunnerId, input.runnerId));
+        conditions.push(eq(runs.currentAttemptId, input.attemptId));
       }
       if (input.idempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
@@ -2222,18 +2381,47 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
         }
       }
-      const updateResult = await db
-        .update(runs)
-        .set({ status: "running", executor: input.executor, updatedAt })
-        .where(and(...conditions));
-      if (updateResult.changes === 0) {
-        return "not_found";
-      }
+      const mutationOutcome =
+        input.runnerId && input.attemptId && input.fencingToken
+          ? db.transaction((tx) => {
+              const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+              const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get();
+              if (
+                !currentRun ||
+                !currentAttempt ||
+                currentRun.assignedRunnerId !== input.runnerId ||
+                currentRun.currentAttemptId !== input.attemptId ||
+                (currentRun.status !== "assigned" && currentRun.status !== "running") ||
+                currentAttempt.runId !== input.runId ||
+                currentAttempt.runnerId !== input.runnerId ||
+                currentAttempt.fencingToken !== input.fencingToken ||
+                (currentAttempt.status !== "assigned" && currentAttempt.status !== "running")
+              ) {
+                return "stale_attempt" as const;
+              }
+              tx.update(runs)
+                .set({ status: "running", executor: input.executor, updatedAt })
+                .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId!)))
+                .run();
+              tx.update(attempts)
+                .set({ status: "running", heartbeatAt: updatedAt, updatedAt })
+                .where(eq(attempts.id, input.attemptId!))
+                .run();
+              return "running" as const;
+            })
+          : (await db
+              .update(runs)
+              .set({ status: "running", executor: input.executor, updatedAt })
+              .where(and(...conditions))).changes > 0
+            ? ("running" as const)
+            : ("not_found" as const);
+      if (mutationOutcome !== "running") return mutationOutcome;
       await appendRunEvent({
         runId: input.runId,
         type: "run.running",
         payload: {
           ...(input.runnerId ? { runnerId: input.runnerId } : {}),
+          ...(input.attemptId ? { attemptId: input.attemptId } : {}),
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
           executor: input.executor,
           ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {})
@@ -2259,7 +2447,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return "running";
     },
 
-    async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string; idempotencyKey?: string }): Promise<CompleteRunOutcome> {
+    async completeRun(input: {
+      runId: string;
+      result: OpenTagRunResult;
+      runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
+      idempotencyKey?: string;
+    }): Promise<CompleteRunOutcome> {
       const parsedResult = OpenTagRunResultSchema.parse(input.result);
       const updatedAt = nowIso();
       const result = OpenTagRunResultSchema.parse({
@@ -2292,6 +2487,28 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
       }
+      if (input.runnerId) {
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const attempt = await db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        if (
+          !attempt ||
+          attempt.runId !== input.runId ||
+          attempt.runnerId !== input.runnerId ||
+          attempt.fencingToken !== input.fencingToken
+        ) {
+          return "stale_attempt";
+        }
+        if (attempt.status !== "assigned" && attempt.status !== "running") {
+          return attempt.status === "succeeded" ||
+            attempt.status === "failed" ||
+            attempt.status === "timed_out" ||
+            attempt.status === "needs_human"
+            ? "duplicate"
+            : "stale_attempt";
+        }
+        if (runRow.currentAttemptId !== input.attemptId) return "stale_attempt";
+        if (runRow.assignedRunnerId !== input.runnerId) return "stale_attempt";
+      }
       if (input.idempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
         for (const event of existing) {
@@ -2301,24 +2518,73 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
       }
       if (terminalRunStatus(runRow.status)) {
-        return "not_found";
-      }
-      if (input.runnerId && runRow.assignedRunnerId !== input.runnerId) {
-        return "not_found";
+        return input.runnerId ? "duplicate" : "not_found";
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
-      await db
-        .update(runs)
-        .set({
-          status,
-          resultJson: JSON.stringify(result),
-          assignedRunnerId: null,
-          leasedAt: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
-          updatedAt
-        })
-        .where(input.runnerId ? and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)) : eq(runs.id, input.runId));
+      const attemptId = input.attemptId ?? runRow.currentAttemptId ?? undefined;
+      const attemptStatus =
+        result.conclusion === "success"
+          ? "succeeded"
+          : result.conclusion === "cancelled"
+            ? "cancelled"
+            : result.conclusion === "interrupted"
+              ? "interrupted"
+              : result.conclusion === "timed_out"
+                ? "timed_out"
+                : result.conclusion === "needs_human"
+                  ? "needs_human"
+                  : "failed";
+      const completionOutcome = db.transaction((tx) => {
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!currentRun) return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        let currentAttempt: typeof attempts.$inferSelect | undefined;
+        if (input.runnerId && input.attemptId && input.fencingToken) {
+          currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          if (
+            !currentAttempt ||
+            currentAttempt.runId !== input.runId ||
+            currentAttempt.runnerId !== input.runnerId ||
+            currentAttempt.fencingToken !== input.fencingToken
+          ) {
+            return "stale_attempt" as const;
+          }
+          if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
+            return currentAttempt.status === "succeeded" ||
+              currentAttempt.status === "failed" ||
+              currentAttempt.status === "timed_out" ||
+              currentAttempt.status === "needs_human"
+              ? ("duplicate" as const)
+              : ("stale_attempt" as const);
+          }
+          if (currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId) {
+            return "stale_attempt" as const;
+          }
+          if (currentRun.status !== "assigned" && currentRun.status !== "running") return "stale_attempt" as const;
+        } else if (terminalRunStatus(currentRun.status)) {
+          return "not_found" as const;
+        }
+        tx.update(runs)
+          .set({
+            status,
+            resultJson: JSON.stringify(result),
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            currentAttemptId: null,
+            updatedAt
+          })
+          .where(eq(runs.id, input.runId))
+          .run();
+        if (attemptId) {
+          tx.update(attempts)
+            .set({ status: attemptStatus, finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .where(eq(attempts.id, attemptId))
+            .run();
+        }
+        return "completed" as const;
+      });
+      if (completionOutcome !== "completed") return completionOutcome;
       for (const snapshot of result.suggestedChanges ?? []) {
         const parsedSnapshot = SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
@@ -2367,6 +2633,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         type: "run.completed",
         payload: {
           ...result,
+          ...(attemptId ? { attemptId } : {}),
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
         },
         visibility: "audit",
@@ -2643,16 +2910,57 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       visibility?: RunEventVisibility;
       importance?: RunEventImportance;
       runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<RecordProgressOutcome> {
       if (input.runnerId) {
-        const row = await db
-          .select()
-          .from(runs)
-          .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
-          .limit(1)
-          .get();
-        if (!row) return "not_found";
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const createdAt = input.at ?? nowIso();
+        return db.transaction((tx) => {
+          const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get();
+          if (!run) return "not_found" as const;
+          if (
+            !attempt ||
+            run.assignedRunnerId !== input.runnerId ||
+            run.currentAttemptId !== input.attemptId ||
+            (run.status !== "assigned" && run.status !== "running") ||
+            attempt.runId !== input.runId ||
+            attempt.runnerId !== input.runnerId ||
+            attempt.fencingToken !== input.fencingToken ||
+            (attempt.status !== "assigned" && attempt.status !== "running")
+          ) {
+            return "stale_attempt" as const;
+          }
+          if (input.idempotencyKey) {
+            const existing = tx.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250).all();
+            for (const event of existing) {
+              if (event.type !== "run.progress") continue;
+              const payload = recordFromJson(event.payloadJson);
+              if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate" as const;
+            }
+          }
+          tx.insert(runEvents)
+            .values({
+              runId: input.runId,
+              type: "run.progress",
+              payloadJson: JSON.stringify({
+                runnerId: input.runnerId,
+                attemptId: input.attemptId,
+                ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+                type: input.type ?? "progress",
+                message: input.message,
+                at: createdAt
+              }),
+              visibility: input.visibility ?? "audit",
+              importance: input.importance ?? "normal",
+              message: input.message,
+              createdAt
+            })
+            .run();
+          return "recorded" as const;
+        });
       }
       if (input.idempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
@@ -2680,7 +2988,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return "recorded";
     },
 
-    async getRun(input: { runId: string }): Promise<ClaimedOpenTagRun | null> {
+    async listAttempts(input: { runId: string }): Promise<Attempt[]> {
+      const rows = await db.select().from(attempts).where(eq(attempts.runId, input.runId)).orderBy(asc(attempts.number));
+      return rows.map(attemptFromRow);
+    },
+
+    async getRun(input: { runId: string }): Promise<OpenTagRunWithEvent | null> {
       const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!row) return null;
       return {

@@ -87,7 +87,10 @@ describe("@opentag/client", () => {
             createdAt: "2026-06-24T00:00:00.000Z",
             updatedAt: "2026-06-24T00:00:00.000Z"
           },
-          event
+          event,
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          fencingToken: "fence_1"
         })
     });
 
@@ -95,6 +98,7 @@ describe("@opentag/client", () => {
 
     expect(claimed?.run.status).toBe("assigned");
     expect(claimed?.event.id).toBe("evt_1");
+    expect(claimed).toMatchObject({ attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" });
   });
 
   it("includes dispatcher error bodies in thrown errors", async () => {
@@ -123,6 +127,8 @@ describe("@opentag/client", () => {
       runnerId: "runner_1",
       runId: "run_1",
       executor: "echo",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       runTimeoutMs: 30_000,
       idempotencyKey: "runner_1:run_1:running"
     });
@@ -134,6 +140,8 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       executor: "echo",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       runTimeoutMs: 30_000,
       idempotencyKey: "runner_1:run_1:running"
     });
@@ -153,6 +161,8 @@ describe("@opentag/client", () => {
     await client.progress({
       runnerId: "runner_1",
       runId: "run_1",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       type: "ingest.hermes.post_llm_call",
       message: "LLM call completed.",
       at: "2026-06-24T00:00:01.000Z",
@@ -167,6 +177,8 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       type: "ingest.hermes.post_llm_call",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       message: "LLM call completed.",
       at: "2026-06-24T00:00:01.000Z",
       visibility: "audit",
@@ -188,6 +200,8 @@ describe("@opentag/client", () => {
     await client.complete({
       runnerId: "runner_1",
       runId: "run_1",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       result: { conclusion: "success", summary: "done" },
       idempotencyKey: "hermes:run_1:complete:agent_end"
     });
@@ -199,6 +213,8 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       result: { conclusion: "success", summary: "done" },
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       idempotencyKey: "hermes:run_1:complete:agent_end"
     });
   });

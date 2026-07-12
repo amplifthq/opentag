@@ -536,12 +536,17 @@ const PromoteFollowUpRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
-const CompleteRunSchema = z.object({
+const AttemptLeaseSchema = z.object({
+  attemptId: z.string().min(1),
+  fencingToken: z.string().min(1)
+});
+
+const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
   idempotencyKey: z.string().min(1).max(256).optional()
 });
 
-const MarkRunningSchema = z.object({
+const MarkRunningSchema = AttemptLeaseSchema.extend({
   executor: z.string().min(1),
   executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
@@ -612,7 +617,7 @@ const CHILD_EVENT_METADATA_REPLAY_KEYS = [
   "githubSignatureVerified"
 ] as const;
 
-const ProgressSchema = z.object({
+const ProgressSchema = AttemptLeaseSchema.extend({
   type: z.string().min(1).optional(),
   message: z.string().min(1),
   at: z.string().datetime().optional(),
@@ -2505,6 +2510,7 @@ export function createDispatcherApp(input: {
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
+  runnerLeaseSeconds?: number;
   relayCapabilities?: {
     platforms?: RelayPlatformCapability[];
   };
@@ -2525,6 +2531,7 @@ export function createDispatcherApp(input: {
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
   const runnerTokens = configuredRunnerTokens(input);
   const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
   const requestEndpoint = (c: Context) => normalizeRateLimitedEndpoint(c.req.method, new URL(c.req.url).pathname);
@@ -4436,14 +4443,21 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners/:runnerId/claim", async (c) => {
-    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: runnerLeaseSeconds });
     if (!claimed) return c.body(null, 204);
     return c.json(claimed, 200);
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/heartbeat", async (c) => {
-    const ok = await repo.heartbeat({ runnerId: c.req.param("runnerId"), runId: c.req.param("runId") });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    const body = await parseDispatcherBody(c, AttemptLeaseSchema);
+    const outcome = await repo.heartbeat({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     return c.json({ ok: true });
   });
 
@@ -4462,12 +4476,15 @@ export function createDispatcherApp(input: {
     const runningOutcome = await repo.markRunning({
       runId,
       runnerId: c.req.param("runnerId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
       executor: body.executor,
       ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (runningOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (runningOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (runningOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
@@ -4541,6 +4558,8 @@ export function createDispatcherApp(input: {
     const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
       message: body.message,
       ...(body.type ? { type: body.type } : {}),
       ...(body.at ? { at: body.at } : {}),
@@ -4549,6 +4568,7 @@ export function createDispatcherApp(input: {
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
@@ -4617,10 +4637,13 @@ export function createDispatcherApp(input: {
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
+      attemptId: parsed.attemptId,
+      fencingToken: parsed.fencingToken,
       result: parsed.result,
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);

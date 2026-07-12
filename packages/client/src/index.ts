@@ -23,7 +23,12 @@ import {
 export type ClaimedOpenTagRun = {
   run: OpenTagRun;
   event: OpenTagEvent;
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
 };
+
+export type AttemptLease = Pick<ClaimedOpenTagRun, "attemptId" | "fencingToken">;
 
 export type RepoBindingInput = {
   provider: string;
@@ -153,6 +158,8 @@ export type CreateRunResult =
 export type CompleteRunInput = {
   runnerId: string;
   runId: string;
+  attemptId: string;
+  fencingToken: string;
   result: OpenTagRunResult;
   idempotencyKey?: string;
 };
@@ -330,16 +337,18 @@ export type OpenTagClient = {
   getFollowUpRequest(input: { id: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest }>;
   createRunFromFollowUpRequest(input: { id: string; runId: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
-  heartbeat(input: { runnerId: string; runId: string }): Promise<void>;
+  heartbeat(input: { runnerId: string; runId: string } & AttemptLease): Promise<void>;
   markRunning(input: {
     runnerId: string;
     runId: string;
+    attemptId: string;
+    fencingToken: string;
     executor: string;
     executorCapability?: Record<string, unknown>;
     runTimeoutMs?: number;
     idempotencyKey?: string;
   }): Promise<void>;
-  progress(input: { runnerId: string; runId: string } & RunProgressInput): Promise<void>;
+  progress(input: { runnerId: string; runId: string } & AttemptLease & RunProgressInput): Promise<void>;
   complete(input: CompleteRunInput): Promise<void>;
   cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunResult>;
   cancelActiveChannelRun(input: {
@@ -371,11 +380,12 @@ export type DispatcherRunnerClient = {
   markRunning(
     runId: string,
     executor: string,
+    lease: AttemptLease,
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
-  heartbeat(runId: string): Promise<void>;
-  progress(runId: string, input: RunProgressInput & { type: string; at: string }): Promise<void>;
-  complete(runId: string, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
+  heartbeat(runId: string, lease: AttemptLease): Promise<void>;
+  progress(runId: string, lease: AttemptLease, input: RunProgressInput & { type: string; at: string }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
 };
 
 function baseUrlFrom(dispatcherUrl: string): string {
@@ -421,10 +431,25 @@ function parseSourceDeliveryPruneResult(value: unknown): SourceDeliveryPruneResu
   };
 }
 
-function parseClaimedRun(body: { run: unknown; event: unknown }): ClaimedOpenTagRun {
+function parseClaimedRun(body: {
+  run: unknown;
+  event: unknown;
+  attemptId?: unknown;
+  attemptNumber?: unknown;
+  fencingToken?: unknown;
+}): ClaimedOpenTagRun {
+  if (typeof body.attemptId !== "string" || !body.attemptId || typeof body.fencingToken !== "string" || !body.fencingToken) {
+    throw new Error("claim returned an invalid attempt lease.");
+  }
+  if (typeof body.attemptNumber !== "number" || !Number.isInteger(body.attemptNumber) || body.attemptNumber < 1) {
+    throw new Error("claim returned an invalid attempt number.");
+  }
   return {
     run: OpenTagRunSchema.parse(body.run),
-    event: OpenTagEventSchema.parse(body.event)
+    event: OpenTagEventSchema.parse(body.event),
+    attemptId: body.attemptId,
+    attemptNumber: body.attemptNumber,
+    fencingToken: body.fencingToken
   };
 }
 
@@ -693,13 +718,20 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       });
       if (response.status === 204) return null;
       await assertOk(response, "claim");
-      return parseClaimedRun((await response.json()) as { run: unknown; event: unknown });
+      return parseClaimedRun((await response.json()) as {
+        run: unknown;
+        event: unknown;
+        attemptId?: unknown;
+        attemptNumber?: unknown;
+        fencingToken?: unknown;
+      });
     },
 
     async heartbeat(input) {
       const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/heartbeat`, {
         method: "POST",
-        headers: authHeaders(options.pairingToken)
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({ attemptId: input.attemptId, fencingToken: input.fencingToken })
       });
       await assertOk(response, "heartbeat");
     },
@@ -710,6 +742,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
           executor: input.executor,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
           ...(input.executorCapability ? { executorCapability: input.executorCapability } : {}),
           ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {}),
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
@@ -724,6 +758,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
           ...(input.type ? { type: input.type } : {}),
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
           message: input.message,
           ...(input.at ? { at: input.at } : {}),
           ...(input.visibility ? { visibility: input.visibility } : {}),
@@ -741,6 +777,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         headers: jsonHeaders(options.pairingToken),
         body: JSON.stringify({
           result,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
           ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
         })
       });
@@ -944,21 +982,23 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
   const client = createOpenTagClient(options);
   return {
     claim: () => client.claim({ runnerId: options.runnerId }),
-    markRunning: (runId, executor, markRunningOptions) =>
+    markRunning: (runId, executor, lease, markRunningOptions) =>
       client.markRunning({
         runnerId: options.runnerId,
         runId,
         executor,
+        ...lease,
         ...(markRunningOptions?.executorCapability ? { executorCapability: markRunningOptions.executorCapability } : {}),
         ...(markRunningOptions?.runTimeoutMs ? { runTimeoutMs: markRunningOptions.runTimeoutMs } : {}),
         ...(markRunningOptions?.idempotencyKey ? { idempotencyKey: markRunningOptions.idempotencyKey } : {})
       }),
-    heartbeat: (runId) => client.heartbeat({ runnerId: options.runnerId, runId }),
-    progress: (runId, input) => client.progress({ runnerId: options.runnerId, runId, ...input }),
-    complete: (runId, result, completeOptions) =>
+    heartbeat: (runId, lease) => client.heartbeat({ runnerId: options.runnerId, runId, ...lease }),
+    progress: (runId, lease, input) => client.progress({ runnerId: options.runnerId, runId, ...lease, ...input }),
+    complete: (runId, lease, result, completeOptions) =>
       client.complete({
         runnerId: options.runnerId,
         runId,
+        ...lease,
         result,
         ...(completeOptions?.idempotencyKey ? { idempotencyKey: completeOptions.idempotencyKey } : {})
       })

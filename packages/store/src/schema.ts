@@ -24,6 +24,7 @@ export const runs = sqliteTable(
     leasedAt: text("leased_at"),
     leaseExpiresAt: text("lease_expires_at"),
     heartbeatAt: text("heartbeat_at"),
+    currentAttemptId: text("current_attempt_id"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
@@ -33,6 +34,30 @@ export const runs = sqliteTable(
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
     conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
+  })
+);
+
+export const attempts = sqliteTable(
+  "attempts",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull(),
+    number: integer("number").notNull(),
+    runnerId: text("runner_id").notNull(),
+    fencingToken: text("fencing_token").notNull(),
+    status: text("status").notNull(),
+    startedAt: text("started_at").notNull(),
+    heartbeatAt: text("heartbeat_at").notNull(),
+    leaseExpiresAt: text("lease_expires_at").notNull(),
+    finishedAt: text("finished_at"),
+    resultJson: text("result_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    runNumberIdx: uniqueIndex("attempts_run_number_idx").on(table.runId, table.number),
+    runIdx: index("attempts_run_idx").on(table.runId),
+    runnerIdx: index("attempts_runner_idx").on(table.runnerId)
   })
 );
 
@@ -294,12 +319,31 @@ export function migrateSchema(sqlite: Database.Database): void {
       leased_at TEXT,
       lease_expires_at TEXT,
       heartbeat_at TEXT,
+      current_attempt_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
     CREATE INDEX IF NOT EXISTS runs_runner_idx ON runs(assigned_runner_id);
     CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key);
+    CREATE TABLE IF NOT EXISTS attempts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      runner_id TEXT NOT NULL,
+      fencing_token TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      finished_at TEXT,
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS attempts_run_number_idx ON attempts(run_id, number);
+    CREATE INDEX IF NOT EXISTS attempts_run_idx ON attempts(run_id);
+    CREATE INDEX IF NOT EXISTS attempts_runner_idx ON attempts(runner_id);
     CREATE TABLE IF NOT EXISTS run_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -537,9 +581,32 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runColumnNames.has("conversation_key")) {
     sqlite.exec("ALTER TABLE runs ADD COLUMN conversation_key TEXT");
   }
+  if (!runColumnNames.has("current_attempt_id")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN current_attempt_id TEXT");
+  }
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_repo_idx ON runs(repo_provider, repo_owner, repo_name)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_idx ON runs(work_thread_id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS attempts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      runner_id TEXT NOT NULL,
+      fencing_token TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      finished_at TEXT,
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS attempts_run_number_idx ON attempts(run_id, number)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_run_idx ON attempts(run_id)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_runner_idx ON attempts(runner_id)");
   sqlite.exec(`
     UPDATE runs
     SET event_id = event_id || '#duplicate:' || id

@@ -135,6 +135,118 @@ export const PermissionGrantSchema = z.object({
   expiresAt: z.string().datetime().optional()
 });
 
+/** An opaque reference to connector credentials held outside the durable run model. */
+export const ConnectionRefSchema = z
+  .object({
+    id: z.string().min(1),
+    provider: ProviderSchema,
+    custody: z.enum(["agent", "opentag", "operator"]),
+    brokerRef: z.string().min(1),
+    declaredCapabilities: z.array(z.string().min(1))
+  })
+  .strict();
+
+export const VerificationEvidenceSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.string().min(1),
+    assurance: z.enum(["verified", "reported", "unverifiable"]),
+    subjectRef: z.string().min(1),
+    summary: z.string().min(1),
+    sourceRef: z.string().min(1).optional(),
+    createdAt: z.string().datetime(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
+
+export const AttemptStatusSchema = z.enum([
+  "assigned",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "timed_out",
+  "needs_human"
+]);
+
+export const AttemptSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    number: z.number().int().positive(),
+    runnerId: z.string().min(1),
+    status: AttemptStatusSchema,
+    startedAt: z.string().datetime(),
+    heartbeatAt: z.string().datetime(),
+    leaseExpiresAt: z.string().datetime(),
+    finishedAt: z.string().datetime().optional(),
+    result: z.lazy(() => OpenTagRunResultSchema).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const GrantSchema = z
+  .object({
+    id: z.string().min(1),
+    connectionId: z.string().min(1),
+    capability: z.string().min(1),
+    resourceScope: z.record(z.unknown()),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1).optional(),
+    expiresAt: z.string().datetime().optional(),
+    constraints: z.record(z.unknown()).optional(),
+    revokedAt: z.string().datetime().optional()
+  })
+  .strict();
+
+export const MaterialActionReceiptSchema = z
+  .object({
+    id: z.string().min(1),
+    actionId: z.string().min(1),
+    provider: ProviderSchema,
+    receiptRef: z.string().min(1),
+    outcome: z.enum(["succeeded", "failed", "unknown"]),
+    externalId: z.string().min(1).optional(),
+    externalUri: z.string().url().optional(),
+    observedAt: z.string().datetime(),
+    evidence: z.array(VerificationEvidenceSchema).optional(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
+
+export const ActionSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1),
+    capability: z.string().min(1),
+    target: z.record(z.unknown()),
+    status: z.enum(["proposed", "waiting_approval", "authorized", "executing", "succeeded", "failed", "unknown", "cancelled"]),
+    idempotencyKey: z.string().min(1),
+    proposalHash: z.string().min(1).optional(),
+    receipt: MaterialActionReceiptSchema.optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const ArtifactSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1).optional(),
+    kind: z.string().min(1),
+    title: z.string().min(1),
+    uri: z.string().min(1).optional(),
+    summary: z.string().min(1).optional(),
+    evidence: z.array(VerificationEvidenceSchema).optional(),
+    createdAt: z.string().datetime(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
+
 export const CapabilityClassSchema = z.enum(["read_only", "callback", "external_write"]);
 
 export const CapabilityContractSchema = z.object({
@@ -509,6 +621,14 @@ export type ContextPacketSource = z.infer<typeof ContextPacketSourceSchema>;
 export type ContextPacketFactConfidence = z.infer<typeof ContextPacketFactConfidenceSchema>;
 export type ContextPacket = z.infer<typeof ContextPacketSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
+export type ConnectionRef = z.infer<typeof ConnectionRefSchema>;
+export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
+export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
+export type Attempt = z.infer<typeof AttemptSchema>;
+export type Grant = z.infer<typeof GrantSchema>;
+export type MaterialActionReceipt = z.infer<typeof MaterialActionReceiptSchema>;
+export type Action = z.infer<typeof ActionSchema>;
+export type Artifact = z.infer<typeof ArtifactSchema>;
 export type CapabilityClass = z.infer<typeof CapabilityClassSchema>;
 export type CapabilityContract = z.infer<typeof CapabilityContractSchema>;
 export type PolicyScope = z.infer<typeof PolicyScopeSchema>;

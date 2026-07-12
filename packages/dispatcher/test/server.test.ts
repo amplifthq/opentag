@@ -3,7 +3,49 @@ import { describe, expect, it } from "vitest";
 import { computeLinearSignature } from "@opentag/linear";
 import { z } from "zod";
 import { createDefaultCallbackPresentation } from "../src/presentation.js";
-import { createDispatcherApp } from "../src/server.js";
+import { createDispatcherApp as createRawDispatcherApp } from "../src/server.js";
+
+function createDispatcherApp(input: Parameters<typeof createRawDispatcherApp>[0]): ReturnType<typeof createRawDispatcherApp> {
+  const app = createRawDispatcherApp(input);
+  const leases = new Map<string, { attemptId: string; fencingToken: string }>();
+  const request = app.request.bind(app);
+  app.request = (async (requestInput: Request | string, requestInit?: RequestInit) => {
+    const path = typeof requestInput === "string" ? requestInput : new URL(requestInput.url).pathname;
+    const mutation = path.match(/^\/v1\/runners\/([^/]+)\/runs\/([^/]+)\/(?:running|heartbeat|progress|complete)$/);
+    let nextInit = requestInit;
+    if (mutation) {
+      const lease = leases.get(`${mutation[1]}:${mutation[2]}`);
+      if (lease) {
+        let body: Record<string, unknown> = {};
+        if (typeof requestInit?.body === "string" && requestInit.body.length > 0) {
+          body = JSON.parse(requestInit.body) as Record<string, unknown>;
+        }
+        if (body["attemptId"] === undefined && body["fencingToken"] === undefined) {
+          nextInit = {
+            ...requestInit,
+            method: requestInit?.method ?? "POST",
+            headers: { "content-type": "application/json", ...(requestInit?.headers as Record<string, string> | undefined) },
+            body: JSON.stringify({ ...body, ...lease })
+          };
+        }
+      }
+    }
+    const response = await request(requestInput as string, nextInit);
+    const claim = path.match(/^\/v1\/runners\/([^/]+)\/claim$/);
+    if (claim && response.ok && response.status !== 204) {
+      const body = (await response.clone().json()) as {
+        run?: { id?: string };
+        attemptId?: string;
+        fencingToken?: string;
+      };
+      if (body.run?.id && body.attemptId && body.fencingToken) {
+        leases.set(`${claim[1]}:${body.run.id}`, { attemptId: body.attemptId, fencingToken: body.fencingToken });
+      }
+    }
+    return response;
+  }) as typeof app.request;
+  return app;
+}
 
 const validEvent = {
   id: "evt_1",
@@ -5151,9 +5193,13 @@ describe("dispatcher API", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ runId: "run_heartbeat", event: validEvent })
     });
-    await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const claim = (await claimResponse.json()) as { attemptId: string; fencingToken: string };
 
-    const response = await app.request("/v1/runners/runner_1/runs/run_heartbeat/heartbeat", { method: "POST" });
+    const response = await app.request(
+      "/v1/runners/runner_1/runs/run_heartbeat/heartbeat",
+      jsonRequest({ attemptId: claim.attemptId, fencingToken: claim.fencingToken })
+    );
     expect(response.status).toBe(200);
 
     const runnerResponse = await app.request("/v1/runners/runner_1");
@@ -5167,6 +5213,62 @@ describe("dispatcher API", () => {
     const eventsResponse = await app.request("/v1/runs/run_heartbeat/events");
     const { events } = await eventsResponse.json();
     expect(events.map((event: { type: string }) => event.type)).toContain("run.heartbeat");
+  });
+
+  it("rejects every stale runner mutation after a lease is reclaimed", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:", runnerLeaseSeconds: 0 });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
+    await app.request(
+      "/v1/repo-bindings",
+      jsonRequest({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" })
+    );
+    await app.request("/v1/runs", jsonRequest({ runId: "run_http_fenced", event: validEvent }));
+
+    const firstResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const first = (await firstResponse.json()) as { attemptId: string; attemptNumber: number; fencingToken: string };
+    const secondResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const second = (await secondResponse.json()) as { attemptId: string; attemptNumber: number; fencingToken: string };
+    expect(first.attemptNumber).toBe(1);
+    expect(second.attemptNumber).toBe(2);
+
+    const stale = { attemptId: first.attemptId, fencingToken: first.fencingToken };
+    const staleHeartbeat = await app.request(
+      "/v1/runners/runner_1/runs/run_http_fenced/heartbeat",
+      jsonRequest(stale)
+    );
+    const staleProgress = await app.request(
+      "/v1/runners/runner_1/runs/run_http_fenced/progress",
+      jsonRequest({ ...stale, message: "late progress" })
+    );
+    const staleComplete = await app.request(
+      "/v1/runners/runner_1/runs/run_http_fenced/complete",
+      jsonRequest({ ...stale, result: { conclusion: "success", summary: "late completion" } })
+    );
+    for (const response of [staleHeartbeat, staleProgress, staleComplete]) {
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({ error: "stale_attempt" });
+    }
+
+    const active = { attemptId: second.attemptId, fencingToken: second.fencingToken };
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_http_fenced/running", jsonRequest({ ...active, executor: "echo" }))).status
+    ).toBe(200);
+    expect(
+      (await app.request("/v1/runners/runner_1/runs/run_http_fenced/progress", jsonRequest({ ...active, message: "current progress" }))).status
+    ).toBe(200);
+    expect(
+      (
+        await app.request(
+          "/v1/runners/runner_1/runs/run_http_fenced/complete",
+          jsonRequest({ ...active, result: { conclusion: "success", summary: "done" } })
+        )
+      ).status
+    ).toBe(200);
+
+    const eventsResponse = await app.request("/v1/runs/run_http_fenced/events");
+    const { events } = (await eventsResponse.json()) as { events: unknown[] };
+    expect(JSON.stringify(events)).not.toContain(first.fencingToken);
+    expect(JSON.stringify(events)).not.toContain(second.fencingToken);
   });
 
   it("returns needs_human_decision when the agent access profile hook denies the run", async () => {
@@ -5312,7 +5414,8 @@ describe("dispatcher API", () => {
     const lateComplete = await app.request("/v1/runners/runner_1/runs/run_lark_cancel/complete", jsonRequest({
       result: { conclusion: "success", summary: "late success" }
     }));
-    expect(lateComplete.status).toBe(404);
+    expect(lateComplete.status).toBe(409);
+    await expect(lateComplete.json()).resolves.toEqual({ error: "stale_attempt" });
 
     const stored = await app.request("/v1/runs/run_lark_cancel");
     await expect(stored.json()).resolves.toMatchObject({
@@ -5588,7 +5691,8 @@ describe("dispatcher API", () => {
     const lateComplete = await app.request("/v1/runners/runner_1/runs/run_gitlab_thread_stop/complete", jsonRequest({
       result: { conclusion: "success", summary: "late success" }
     }));
-    expect(lateComplete.status).toBe(404);
+    expect(lateComplete.status).toBe(409);
+    await expect(lateComplete.json()).resolves.toEqual({ error: "stale_attempt" });
     const queuedFollowUp = await app.request("/v1/follow-up-requests/follow_up_gitlab_thread_stop");
     await expect(queuedFollowUp.json()).resolves.toMatchObject({
       followUpRequest: {

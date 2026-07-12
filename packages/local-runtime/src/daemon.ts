@@ -23,18 +23,24 @@ import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 export type ClaimedRun = {
   run: OpenTagRun;
   event: OpenTagEvent;
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
 };
+
+export type AttemptLease = Pick<ClaimedRun, "attemptId" | "fencingToken">;
 
 export type DaemonClient = {
   claim(): Promise<ClaimedRun | null>;
   markRunning(
     runId: string,
     executor: string,
+    lease: AttemptLease,
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
-  heartbeat(runId: string): Promise<void>;
-  progress(runId: string, input: { type: string; message: string; at: string }): Promise<void>;
-  complete(runId: string, result: OpenTagRunResult): Promise<void>;
+  heartbeat(runId: string, lease: AttemptLease): Promise<void>;
+  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
 };
 
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
@@ -120,7 +126,7 @@ function timedOutRunResult(input: { executorName: string; timeoutMs: number }): 
 
 function runNoLongerClaimed(error: unknown): boolean {
   const message = errorMessage(error);
-  return message.includes("run_not_claimed_by_runner") || message.includes("run_not_found");
+  return message.includes("stale_attempt") || message.includes("run_not_claimed_by_runner") || message.includes("run_not_found");
 }
 
 type ExecutorRunOutcome =
@@ -179,6 +185,7 @@ export async function runOneDaemonIteration(input: {
 }): Promise<boolean> {
   const claimed = await input.client.claim();
   if (!claimed) return false;
+  const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
 
   const projectTargetRef = projectTargetRefFromEvent(claimed.event);
   const claimedTargetFailure = claimedProjectTargetFailure({
@@ -187,12 +194,12 @@ export async function runOneDaemonIteration(input: {
     repositories: input.repositories
   });
   if (claimedTargetFailure) {
-    await input.client.complete(claimed.run.id, claimedTargetFailure);
+    await input.client.complete(claimed.run.id, lease, claimedTargetFailure);
     return true;
   }
   const binding = resolveRepositoryBinding(claimed.event, input.repositories);
   if (!binding) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: "No local workspace mapping is configured for this run's repository."
     });
@@ -205,6 +212,7 @@ export async function runOneDaemonIteration(input: {
   if (mutationRequests) {
     await input.client.complete(
       claimed.run.id,
+      lease,
       createWorkContextMutationRunResult({ runId: claimed.run.id, requests: mutationRequests })
     );
     return true;
@@ -212,7 +220,7 @@ export async function runOneDaemonIteration(input: {
   const executorId = claimed.event.target.executorHint ?? binding.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: `No local executor is configured for '${executorId}'.`
     });
@@ -257,14 +265,14 @@ export async function runOneDaemonIteration(input: {
     ...(input.security ? { policy: input.security } : {})
   });
   if (securityAssessment.findings.length > 0) {
-    await input.client.progress(claimed.run.id, {
+    await input.client.progress(claimed.run.id, lease, {
       type: securityAssessment.allowed ? "security.audit" : "security.blocked",
       message: formatSecurityAssessment(securityAssessment),
       at: new Date().toISOString()
     });
   }
   if (!securityAssessment.allowed) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: formatSecurityAssessment(securityAssessment),
       nextAction: "Review the request and rerun with a narrower prompt or an explicit local policy override if appropriate."
@@ -288,12 +296,12 @@ export async function runOneDaemonIteration(input: {
       ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
     });
   } catch (error) {
-    await input.client.complete(claimed.run.id, failedRunResult(`${executor.displayName} readiness check`, error));
+    await input.client.complete(claimed.run.id, lease, failedRunResult(`${executor.displayName} readiness check`, error));
     return true;
   }
 
   if (!readiness.ready) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: readiness.reason ?? `${executor.displayName} is not ready`
     });
@@ -304,7 +312,7 @@ export async function runOneDaemonIteration(input: {
   const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
   const runTimeoutMs = input.runTimeoutMs;
-  await input.client.markRunning(runId, activeExecutor.id, {
+  await input.client.markRunning(runId, activeExecutor.id, lease, {
     ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
     idempotencyKey: `${input.runnerId}:${runId}:running`,
     ...(runTimeoutMs ? { runTimeoutMs } : {})
@@ -325,7 +333,7 @@ export async function runOneDaemonIteration(input: {
   }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
-      void input.client.heartbeat(runId).catch(requestExecutorCancel);
+      void input.client.heartbeat(runId, lease).catch(requestExecutorCancel);
     }, heartbeatIntervalMs);
   }
 
@@ -348,7 +356,7 @@ export async function runOneDaemonIteration(input: {
         emit: async (event) => {
           console.log(`[${event.type}] ${event.message}`);
           try {
-            await input.client.progress(runId, {
+            await input.client.progress(runId, lease, {
               type: event.type,
               message: event.message,
               at: event.at
@@ -394,7 +402,7 @@ export async function runOneDaemonIteration(input: {
     });
     await cancelPromise;
     try {
-      await input.client.complete(runId, timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }));
+      await input.client.complete(runId, lease, timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }));
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -410,7 +418,7 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     try {
-      await input.client.complete(runId, failedRunResult(activeExecutor.displayName, executorOutcome.error));
+      await input.client.complete(runId, lease, failedRunResult(activeExecutor.displayName, executorOutcome.error));
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -439,7 +447,7 @@ export async function runOneDaemonIteration(input: {
     result = pullRequestPreparationFailureResult(executorResult, error);
   }
   try {
-    await input.client.complete(runId, result);
+    await input.client.complete(runId, lease, result);
   } catch (error) {
     if (runNoLongerClaimed(error)) {
       return true;

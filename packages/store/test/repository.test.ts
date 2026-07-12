@@ -579,13 +579,20 @@ describe("OpenTag repository", () => {
         metadata: { owner: "acme", repo: "demo" }
       }
     });
-    await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
       runnerId: "runner_1",
       heartbeatAt: expect.any(String)
     });
 
-    await expect(repo.heartbeat({ runId: "run_heartbeat", runnerId: "runner_1" })).resolves.toBe(true);
+    await expect(
+      repo.heartbeat({
+        runId: "run_heartbeat",
+        runnerId: "runner_1",
+        attemptId: claimed!.attemptId,
+        fencingToken: claimed!.fencingToken
+      })
+    ).resolves.toBe("updated");
     await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
       runnerId: "runner_1",
       heartbeatAt: expect.any(String)
@@ -627,6 +634,86 @@ describe("OpenTag repository", () => {
 
     const events = await repo.listRunEvents({ runId: "run_expire" });
     expect(events.map((event) => event.type)).toContain("run.lease_expired");
+  });
+
+  it("fences stale attempts after lease recovery", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_fenced", event: larkEvent({ id: "evt_fenced", sourceEventId: "message_fenced" }) });
+
+    const first = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 0 });
+    expect(first).toMatchObject({ attemptId: expect.any(String), fencingToken: expect.any(String), attemptNumber: 1 });
+
+    const second = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    expect(second).toMatchObject({ attemptId: expect.any(String), fencingToken: expect.any(String), attemptNumber: 2 });
+    expect(second?.attemptId).not.toBe(first?.attemptId);
+    expect(second?.fencingToken).not.toBe(first?.fencingToken);
+
+    const staleLease = {
+      runId: "run_fenced",
+      runnerId: "runner_1",
+      attemptId: first!.attemptId,
+      fencingToken: first!.fencingToken
+    };
+    await expect(repo.heartbeat(staleLease)).resolves.toBe("stale_attempt");
+    await expect(repo.recordProgress({ ...staleLease, message: "late progress" })).resolves.toBe("stale_attempt");
+    await expect(
+      repo.completeRun({ ...staleLease, result: { conclusion: "success", summary: "late completion" } })
+    ).resolves.toBe("stale_attempt");
+
+    const activeLease = {
+      runId: "run_fenced",
+      runnerId: "runner_1",
+      attemptId: second!.attemptId,
+      fencingToken: second!.fencingToken
+    };
+    await expect(repo.heartbeat(activeLease)).resolves.toBe("updated");
+    await expect(repo.recordProgress({ ...activeLease, message: "current progress" })).resolves.toBe("recorded");
+    await expect(
+      repo.completeRun({ ...activeLease, result: { conclusion: "success", summary: "current completion" } })
+    ).resolves.toBe("completed");
+
+    await expect(repo.listAttempts({ runId: "run_fenced" })).resolves.toMatchObject([
+      { id: first!.attemptId, number: 1, status: "interrupted" },
+      { id: second!.attemptId, number: 2, status: "succeeded" }
+    ]);
+    const events = await repo.listRunEvents({ runId: "run_fenced" });
+    expect(events.filter((event) => event.type === "run.progress")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+    expect(JSON.stringify(events)).not.toContain(first!.fencingToken);
+    expect(JSON.stringify(events)).not.toContain(second!.fencingToken);
+  });
+
+  it("treats duplicate completion from the same active attempt as idempotent", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_attempt_replay", event: larkEvent({ id: "evt_attempt_replay", sourceEventId: "message_attempt_replay" }) });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const lease = {
+      runId: "run_attempt_replay",
+      runnerId: "runner_1",
+      attemptId: claimed!.attemptId,
+      fencingToken: claimed!.fencingToken,
+      result: { conclusion: "success" as const, summary: "done once" }
+    };
+
+    await expect(repo.completeRun(lease)).resolves.toBe("completed");
+    await expect(repo.completeRun(lease)).resolves.toBe("duplicate");
+    await expect(repo.listRunEvents({ runId: "run_attempt_replay" })).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "run.completed", message: "done once" })])
+    );
+    const events = await repo.listRunEvents({ runId: "run_attempt_replay" });
+    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
   });
 
   it("stores generic channel to repo bindings", async () => {

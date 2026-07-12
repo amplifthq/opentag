@@ -54,11 +54,11 @@ async function iterate(input: { event: OpenTagEvent; defaultExecutor: string }) 
   };
   let completed: OpenTagRunResult | undefined;
   const client: DaemonClient = {
-    claim: async () => ({ run, event: input.event }),
+    claim: async () => ({ run, event: input.event, attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" }),
     markRunning: async () => {},
     heartbeat: async () => {},
     progress: async () => {},
-    complete: async (_runId, result) => {
+    complete: async (_runId, _lease, result) => {
       completed = result;
     }
   };
@@ -117,5 +117,58 @@ describe("daemon executor selection", () => {
     expect(ran).toEqual([]);
     expect(completed?.conclusion).toBe("needs_human");
     expect(completed?.summary).toContain("hermes");
+  });
+
+  it("cancels the executor when progress is rejected as a stale attempt", async () => {
+    const event = eventWithExecutorHint("openclaw");
+    const run: OpenTagRun = {
+      id: "run_stale_attempt",
+      eventId: event.id,
+      status: "assigned",
+      assignedRunnerId: "runner_local",
+      createdAt: "2026-06-29T00:00:00.000Z",
+      updatedAt: "2026-06-29T00:00:00.000Z"
+    };
+    let cancelled = 0;
+    let completed = 0;
+    const executor: ExecutorAdapter = {
+      id: "openclaw",
+      displayName: "OpenClaw",
+      async canRun() {
+        return { ready: true };
+      },
+      async run(_input, sink) {
+        await sink.emit({ type: "executor.progress", message: "late update", at: "2026-06-29T00:00:01.000Z" });
+        return { conclusion: "success", summary: "late completion" };
+      },
+      async cancel() {
+        cancelled += 1;
+      }
+    };
+    const client: DaemonClient = {
+      claim: async () => ({ run, event, attemptId: "attempt_stale", attemptNumber: 1, fencingToken: "fence_stale" }),
+      markRunning: async () => {},
+      heartbeat: async () => {},
+      progress: async () => {
+        throw new Error('progress failed: 409 {"error":"stale_attempt"}');
+      },
+      complete: async () => {
+        completed += 1;
+      }
+    };
+
+    await expect(
+      runOneDaemonIteration({
+        runnerId: "runner_local",
+        repositories: [
+          { provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo", defaultExecutor: "openclaw" }
+        ],
+        executors: { openclaw: executor },
+        heartbeatIntervalMs: 0,
+        client
+      })
+    ).resolves.toBe(true);
+    expect(cancelled).toBe(1);
+    expect(completed).toBe(0);
   });
 });
