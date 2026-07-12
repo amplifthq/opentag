@@ -61,6 +61,9 @@ function scratchAttemptPath(root: string, attemptId: string): string {
 function clientFor(input: {
   claimed: ReturnType<typeof claimed>;
   progress?: DaemonClient["progress"];
+  requestActionPermission?: DaemonClient["requestActionPermission"];
+  resolveActionPermission?: DaemonClient["resolveActionPermission"];
+  recordMaterialActionReceipt?: DaemonClient["recordMaterialActionReceipt"];
   completed: OpenTagRunResult[];
 }): DaemonClient {
   return {
@@ -68,6 +71,9 @@ function clientFor(input: {
     markRunning: async () => {},
     heartbeat: async () => {},
     progress: input.progress ?? (async () => {}),
+    requestActionPermission: input.requestActionPermission ?? (async () => { throw new Error("unexpected permission request"); }),
+    resolveActionPermission: input.resolveActionPermission ?? (async () => { throw new Error("unexpected permission resolution"); }),
+    recordMaterialActionReceipt: input.recordMaterialActionReceipt ?? (async () => { throw new Error("unexpected material action receipt"); }),
     complete: async (_runId, _lease, result) => {
       input.completed.push(result);
     }
@@ -334,6 +340,64 @@ describe("ACP daemon workspaces", () => {
     expect(runs).toEqual([]);
     expect(completed[0]).toMatchObject({ conclusion: "needs_human" });
     expect(completed[0]?.summary).toContain("allowlist");
+  });
+
+  it("holds an ACP permission on the durable dispatcher decision and reports only an unknown ACP correlation", async () => {
+    const root = join(mkdtempSync(join(tmpdir(), "opentag-permission-root-")), "scratch");
+    const completed: OpenTagRunResult[] = [];
+    const permissionRequests: unknown[] = [];
+    const receipts: unknown[] = [];
+    const action = {
+      id: "action_publish",
+      runId: "run_acp",
+      attemptId: "attempt_01J_TEST",
+      actionFamily: "publish",
+      capability: "publish",
+      scope: { permissionScopes: ["report:publish"] },
+      target: { title: "Publish report", kind: "publish" },
+      riskTier: "high" as const,
+      status: "waiting_approval" as const,
+      idempotencyKey: "action:key",
+      proposalId: "proposal_action_publish",
+      attemptFenceDigest: "digest",
+      createdAt: "2026-07-12T00:00:00.000Z",
+      updatedAt: "2026-07-12T00:00:00.000Z"
+    };
+    const executor: ExecutorAdapter = {
+      id: "reviewer",
+      displayName: "Review Agent",
+      async canRun() { return { ready: true }; },
+      async run(run) {
+        const decision = await run.permissionResolver?.({ toolCallId: "tool_publish", title: "Publish report", kind: "publish", permissionScopes: ["report:publish"] });
+        expect(decision).toMatchObject({ actionId: "action_publish", decision: "allow_run", material: true });
+        await run.materialActionReporter?.({ actionId: "action_publish", toolCallId: "tool_publish", provider: "acp", receiptRef: "acp:session:tool_publish", outcome: "unknown", reportedOutcome: "completed" });
+        return { conclusion: "success", summary: "done" };
+      },
+      async cancel() {}
+    };
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot: root,
+      heartbeatIntervalMs: 0,
+      client: clientFor({
+        claimed: claimed({ event: event({ id: "evt_permission", permissions: [] }) }),
+        completed,
+        requestActionPermission: async (_runId, _lease, request) => {
+          permissionRequests.push(request);
+          return { state: "waiting", action };
+        },
+        resolveActionPermission: async () => ({ state: "authorized", action: { ...action, status: "authorized" }, decision: "allow_run" }),
+        recordMaterialActionReceipt: async (_runId, _lease, _actionId, receipt) => {
+          receipts.push(receipt);
+          return { state: "unknown", action: { ...action, status: "unknown", receipt }, receipt };
+        }
+      })
+    });
+    expect(permissionRequests).toEqual([expect.objectContaining({ mode: "auto", provider: "acp" })]);
+    expect(receipts).toEqual([expect.objectContaining({ outcome: "unknown", metadata: expect.objectContaining({ assurance: "reported", agentReportedOutcome: "completed" }) })]);
+    expect(completed).toEqual([{ conclusion: "success", summary: "done" }]);
   });
 
   it("cancels only the stale ACP attempt and never completes it", async () => {

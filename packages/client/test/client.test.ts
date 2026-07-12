@@ -213,6 +213,34 @@ describe("@opentag/client", () => {
     });
   });
 
+  it("forwards fenced governed action requests and parses durable resolutions", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const action = {
+      id: "action_1", runId: "run_1", attemptId: "attempt_1", actionFamily: "publish", capability: "publish",
+      scope: { permissionScopes: ["npm:publish"] }, target: { title: "Publish package" }, riskTier: "high",
+      status: "waiting_approval", idempotencyKey: "action:key", proposalId: "proposal_action_1",
+      attemptFenceDigest: "digest", createdAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+        return jsonResponse({ resolution: { state: "waiting", action } }, 202);
+      }
+    });
+    await expect(client.requestActionPermission({
+      runnerId: "runner_1", runId: "run_1", attemptId: "attempt_1", fencingToken: "fence_1",
+      request: { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+    })).resolves.toMatchObject({ state: "waiting", action: { id: "action_1", attemptFenceDigest: "digest" } });
+    expect(requests).toEqual([{
+      url: "http://dispatcher.test/v1/runners/runner_1/runs/run_1/action-permissions",
+      body: {
+        attemptId: "attempt_1", fencingToken: "fence_1",
+        request: { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+      }
+    }]);
+  });
+
   it("sends runner completion idempotency keys to the dispatcher", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({

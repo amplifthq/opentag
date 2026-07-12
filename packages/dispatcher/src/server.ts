@@ -3,6 +3,8 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  ActionPermissionRequestSchema,
+  MaterialActionReceiptSchema,
   capabilityForMutationIntent,
   conversationKeysFromEvent,
   parseThreadActionCommand,
@@ -551,6 +553,10 @@ const AttemptLeaseSchema = z.object({
   attemptId: z.string().min(1),
   fencingToken: z.string().min(1)
 });
+
+const ActionPermissionInputSchema = AttemptLeaseSchema.extend({ request: ActionPermissionRequestSchema });
+const ActionPermissionResolutionInputSchema = AttemptLeaseSchema;
+const MaterialActionReceiptInputSchema = AttemptLeaseSchema.extend({ receipt: MaterialActionReceiptSchema });
 
 const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
@@ -1506,7 +1512,24 @@ async function authorizeThreadAction(input: {
 }): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
   const repoKey = projectTargetRefFromEvent(input.resolved.proposal.event);
   if (!repoKey) {
-    return { ok: false, reason: "repo_context_missing", message: "The proposal does not resolve to a repository binding." };
+    const event = input.resolved.proposal.event;
+    const metadata = event.metadata ?? {};
+    const accountId = metadataString(metadata, "accountId") ?? metadataString(metadata, "teamId") ?? metadataString(metadata, "tenantKey") ?? metadataString(metadata, "botId");
+    const conversationId = metadataString(metadata, "conversationId") ?? metadataString(metadata, "channelId") ?? metadataString(metadata, "chatId");
+    if (!accountId || !conversationId || input.actor.provider !== event.source) {
+      return { ok: false, reason: "channel_identity_missing", message: "The non-repository proposal does not resolve to a managed source-channel identity." };
+    }
+    const channelBinding = await input.repo.getChannelBinding({ provider: event.source, accountId, conversationId });
+    if (!channelBinding || channelBinding.repoProvider || channelBinding.owner || channelBinding.repo) {
+      return { ok: false, reason: "channel_binding_mismatch", message: "The non-repository proposal is not owned by the expected managed channel binding." };
+    }
+    const allowedActors = Array.isArray(channelBinding.metadata?.["allowedActors"])
+      ? channelBinding.metadata["allowedActors"].filter((value): value is string => typeof value === "string")
+      : undefined;
+    if (!actorAllowedByList(input.actor, allowedActors)) {
+      return { ok: false, reason: "actor_not_allowed", message: "This actor is not allowed to approve actions for the managed channel." };
+    }
+    return { ok: true };
   }
 
   const binding = await input.repo.getRepoBinding(repoKey);
@@ -1996,6 +2019,7 @@ export type CallbackMessage = {
   provider: string;
   uri: string;
   body: string;
+  idempotencyKey?: string;
   agentId?: string;
   threadKey?: string;
   statusMessageKey?: string;
@@ -2346,6 +2370,7 @@ async function deliverAndAudit(input: {
     provider: input.message.provider,
     uri: input.message.uri,
     body: input.message.body,
+    ...(input.message.idempotencyKey ? { idempotencyKey: input.message.idempotencyKey } : {}),
     ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
     ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
     ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
@@ -2409,7 +2434,9 @@ type DispatcherAuthResult =
 function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (/^\/v1\/runners\/[^/]+\/claim$/.test(path)) return true;
-  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete|action-permissions)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/action-permissions\/[^/]+\/resolve$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/material-actions\/[^/]+\/receipt$/.test(path)) return true;
   return /^\/v1\/runs\/[^/]+\/(running|progress|complete)$/.test(path);
 }
 
@@ -4182,6 +4209,9 @@ export function createDispatcherApp(input: {
         verb: command.verb,
         selection: command.selection,
         callback: parsed.callback,
+        ...(parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
+          ? { permissionDecision: "allow_run" }
+          : { permissionDecision: command.verb === "reject" ? "deny" : "allow_once" }),
         ...(parsed.metadata ? { ingressMetadata: parsed.metadata } : {})
       }
     });
@@ -4470,6 +4500,86 @@ export function createDispatcherApp(input: {
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     return c.json({ ok: true });
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions", async (c) => {
+    const runnerId = c.req.param("runnerId");
+    const runId = c.req.param("runId");
+    const body = await parseDispatcherBody(c, ActionPermissionInputSchema);
+    const resolution = await repo.requestActionPermission({
+      runnerId,
+      runId,
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      request: body.request
+    });
+    if (!resolution) return c.json({ error: "stale_attempt" }, 409);
+    if (resolution.state === "waiting" && resolution.action.proposalId) {
+      const stored = await repo.getRun({ runId });
+      const proposal = await repo.getSuggestedChanges({ proposalId: resolution.action.proposalId });
+      if (stored && proposal) {
+        const final = presentation.finalPresentation({
+          runId,
+          result: {
+            conclusion: "needs_human",
+            summary: `Approval required for ${resolution.action.actionFamily}.`,
+            suggestedChanges: [proposal.snapshot],
+            nextAction: "Choose Allow once, Allow for this run, or Deny in this source thread."
+          }
+        });
+        const rendered = presentation.render({
+          provider: stored.event.callback.provider,
+          ...larkRenderLocaleRenderOption(stored.event),
+          presentation: final
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: rendered.body,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+            ...(rendered.rich ? { rich: rendered.rich } : {}),
+            idempotencyKey: `action-permission:${resolution.action.id}`,
+            statusMessageKey: `${runId}:status`
+          }
+        });
+      }
+    }
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions/:actionId/resolve", async (c) => {
+    const body = await parseDispatcherBody(c, ActionPermissionResolutionInputSchema);
+    const resolution = await repo.resolveActionPermission({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : resolution.state === "stale" ? 409 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/material-actions/:actionId/receipt", async (c) => {
+    const body = await parseDispatcherBody(c, MaterialActionReceiptInputSchema);
+    const resolution = await repo.recordMaterialActionReceipt({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      receipt: body.receipt
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
+    return c.json({ resolution }, 200);
   });
 
   app.post("/v1/runs/:runId/running", async (c) => {

@@ -7443,6 +7443,73 @@ describe("dispatcher API", () => {
     expect(finalMessage).not.toContain("authorization");
   });
 
+  it("resumes a repo-less ACP permission through the managed source-thread approval path", async () => {
+    const delivered: Array<{ kind: string; body: string }> = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      callbackSink: { async deliver(message) { delivered.push({ kind: message.kind, body: message.body }); } }
+    });
+    await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "slack", accountId: "T123", conversationId: "C456", metadata: { allowedActors: ["slack:U123"] }
+    }));
+    const event = {
+      id: "evt_acp_permission",
+      source: "slack",
+      sourceEventId: "msg_acp_permission",
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "publish the report", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/slack/callback", threadKey: "T123|C456|171.1" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    };
+    const createRunResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_acp_permission", event }));
+    expect(createRunResponse.status, await createRunResponse.clone().text()).toBe(201);
+    const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
+    const claim = await claimResponse.json() as { attemptId: string; fencingToken: string };
+    const lease = { attemptId: claim.attemptId, fencingToken: claim.fencingToken };
+    await app.request("/v1/runners/runner_1/runs/run_acp_permission/running", jsonRequest({ ...lease, executor: "fixture-agent" }));
+
+    const requested = await app.request("/v1/runners/runner_1/runs/run_acp_permission/action-permissions", jsonRequest({
+      ...lease,
+      request: { toolCallId: "tool_publish", title: "Publish report", kind: "publish", permissionScopes: ["report:publish"], mode: "ask", provider: "acp" }
+    }));
+    expect(requested.status).toBe(202);
+    const requestedBody = await requested.json() as { resolution: { action: { id: string; proposalId: string } } };
+    const actionId = requestedBody.resolution.action.id;
+    const proposalId = requestedBody.resolution.action.proposalId;
+    await expect((await app.request("/v1/runs/run_acp_permission")).json()).resolves.toMatchObject({ run: { status: "needs_approval" } });
+    expect(delivered.some((message) => message.body.includes("Publish report"))).toBe(true);
+
+    const actionRequest = {
+      rawText: "approve 1",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      callback: { provider: "slack", uri: "https://example.com/slack/callback", threadKey: "T123|C456|171.1" },
+      metadata: {
+        teamId: "T123",
+        channelId: "C456",
+        proposalId,
+        intentId: `intent_${actionId}`,
+        permissionDecision: "allow_run"
+      }
+    };
+    const unauthorized = await app.request("/v1/thread-actions", jsonRequest({
+      ...actionRequest,
+      actor: { provider: "slack", providerUserId: "U999", handle: "mallory" }
+    }));
+    expect(unauthorized.status).toBe(403);
+    const approval = await app.request("/v1/thread-actions", jsonRequest(actionRequest));
+    expect(approval.status).toBe(201);
+
+    const resolved = await app.request(`/v1/runners/runner_1/runs/run_acp_permission/action-permissions/${actionId}/resolve`, jsonRequest(lease));
+    expect(resolved.status).toBe(200);
+    await expect(resolved.json()).resolves.toMatchObject({ resolution: { state: "authorized", decision: "allow_run" } });
+    await expect((await app.request("/v1/runs/run_acp_permission")).json()).resolves.toMatchObject({ run: { status: "running" } });
+  });
+
   it("applies a model-suggested create PR action from a GitLab source-thread reply as an MR", async () => {
     const gitlabRequests: Array<{ url: string; method?: string; body?: unknown; token?: string | null }> = [];
     const delivered: Array<{ kind: string; body: string }> = [];

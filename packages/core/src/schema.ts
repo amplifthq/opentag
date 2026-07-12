@@ -201,6 +201,22 @@ export const GrantSchema = z
   })
   .strict();
 
+export const ApprovalModeSchema = z.enum(["ask", "auto", "autonomous"]);
+export const PermissionDecisionKindSchema = z.enum(["allow_once", "allow_run", "deny"]);
+export const ActionRiskTierSchema = z.enum(["low", "medium", "high", "critical"]);
+
+export const NormalizedMaterialActionSchema = z
+  .object({
+    actionFamily: z.string().min(1),
+    scope: z.record(z.unknown()),
+    target: z.record(z.unknown()),
+    riskTier: ActionRiskTierSchema,
+    material: z.boolean(),
+    internallyBlocked: z.boolean(),
+    blockReason: z.string().min(1).optional()
+  })
+  .strict();
+
 export const MaterialActionReceiptSchema = z
   .object({
     id: z.string().min(1),
@@ -221,14 +237,41 @@ export const ActionSchema = z
     id: z.string().min(1),
     runId: z.string().min(1),
     attemptId: z.string().min(1),
+    actionFamily: z.string().min(1),
     capability: z.string().min(1),
+    scope: z.record(z.unknown()),
     target: z.record(z.unknown()),
+    riskTier: ActionRiskTierSchema,
     status: z.enum(["proposed", "waiting_approval", "authorized", "executing", "succeeded", "failed", "unknown", "cancelled"]),
     idempotencyKey: z.string().min(1),
+    proposalId: z.string().min(1).optional(),
     proposalHash: z.string().min(1).optional(),
+    decisionSnapshotHash: z.string().min(1).optional(),
+    attemptFenceDigest: z.string().min(1),
     receipt: MaterialActionReceiptSchema.optional(),
     createdAt: z.string().datetime(),
     updatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const ActionPermissionRequestSchema = z
+  .object({
+    toolCallId: z.string().min(1),
+    title: z.string().min(1),
+    kind: z.string().min(1).nullable().optional(),
+    permissionScopes: z.array(z.string().min(1)).default([]),
+    mode: ApprovalModeSchema.default("auto"),
+    provider: z.string().min(1).default("acp")
+  })
+  .strict();
+
+export const ActionPermissionResolutionSchema = z
+  .object({
+    state: z.enum(["authorized", "waiting", "denied", "reconciled", "unknown", "stale"]),
+    action: ActionSchema,
+    decision: PermissionDecisionKindSchema.optional(),
+    receipt: MaterialActionReceiptSchema.optional(),
+    reason: z.string().min(1).optional()
   })
   .strict();
 
@@ -626,8 +669,14 @@ export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
 export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
 export type Attempt = z.infer<typeof AttemptSchema>;
 export type Grant = z.infer<typeof GrantSchema>;
+export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
+export type PermissionDecisionKind = z.infer<typeof PermissionDecisionKindSchema>;
+export type ActionRiskTier = z.infer<typeof ActionRiskTierSchema>;
+export type NormalizedMaterialAction = z.infer<typeof NormalizedMaterialActionSchema>;
 export type MaterialActionReceipt = z.infer<typeof MaterialActionReceiptSchema>;
 export type Action = z.infer<typeof ActionSchema>;
+export type ActionPermissionRequest = z.infer<typeof ActionPermissionRequestSchema>;
+export type ActionPermissionResolution = z.infer<typeof ActionPermissionResolutionSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
 export type CapabilityClass = z.infer<typeof CapabilityClassSchema>;
 export type CapabilityContract = z.infer<typeof CapabilityContractSchema>;

@@ -2549,3 +2549,116 @@ describe("repository-optional channel bindings", () => {
     ).rejects.toThrow(/repository|repoProvider|owner|repo/u);
   });
 });
+
+describe("durable ACP material actions", () => {
+  function permissionEvent(id: string) {
+    return {
+      id: `evt_${id}`,
+      source: "slack",
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "publish the package", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback", threadKey: "T123|C456|ts1" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    } as const;
+  }
+
+  async function claimedRepository() {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.upsertChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+    await repo.createRun({ id: "run_action", event: permissionEvent("action") });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    if (!claimed) throw new Error("expected claimed run");
+    return { sqlite, repo, claimed };
+  }
+
+  it("waits on the existing proposal approval path, creates an attempt grant, and reuses a known-success receipt", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_1",
+      title: "Publish package",
+      kind: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const waiting = await repo.requestActionPermission({ ...lease, request });
+    expect(waiting).toMatchObject({ state: "waiting", action: { status: "waiting_approval", riskTier: "high" } });
+    expect(waiting?.action.attemptFenceDigest).not.toBe(claimed.fencingToken);
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
+    await expect(repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("updated");
+
+    const premature = await repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: waiting!.action.id,
+      receipt: { id: "receipt_too_early", actionId: waiting!.action.id, provider: "npm", receiptRef: "npm:early", outcome: "succeeded", observedAt: "2026-07-12T00:00:30.000Z" }
+    });
+    expect(premature?.state).toBe("waiting");
+    expect(premature?.action.receipt).toBeUndefined();
+
+    const proposalId = waiting?.action.proposalId;
+    expect(proposalId).toBeTruthy();
+    await repo.recordApprovalDecision({
+      id: "approval_once",
+      proposalId: proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { source: "thread_action", permissionDecision: "allow_once" }
+    });
+    const allowed = await repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id });
+    expect(allowed).toMatchObject({ state: "authorized", decision: "allow_once", action: { status: "authorized" } });
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "running" } });
+
+    const receipt = {
+      id: "receipt_1",
+      actionId: waiting!.action.id,
+      provider: "npm",
+      receiptRef: "npm:publish:acme-pkg@1.0.0",
+      outcome: "succeeded" as const,
+      observedAt: "2026-07-12T00:02:00.000Z"
+    };
+    await expect(repo.recordMaterialActionReceipt({ ...lease, actionId: waiting!.action.id, receipt: { ...receipt, actionId: "action_other" } })).rejects.toThrow(/actionId/u);
+    await repo.recordMaterialActionReceipt({ ...lease, actionId: waiting!.action.id, receipt });
+    await expect(repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })).resolves.toMatchObject({
+      state: "reconciled",
+      decision: "deny",
+      receipt: { receiptRef: "npm:publish:acme-pkg@1.0.0" }
+    });
+  });
+
+  it("converges concurrent semantic request replays on one durable action", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask" as const, provider: "npm" };
+    const results = await Promise.all([
+      repo.requestActionPermission({ ...lease, request }),
+      repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })
+    ]);
+    expect(results[0]?.action.id).toBe(results[1]?.action.id);
+    expect(results.every((result) => result?.state === "waiting")).toBe(true);
+  });
+
+  it("stops automatic retry when the provider outcome is unknown", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = { toolCallId: "tool_1", title: "Read metadata", kind: "read", permissionScopes: [], mode: "auto" as const, provider: "acp" };
+    const allowed = await repo.requestActionPermission({ ...lease, request });
+    expect(allowed?.state).toBe("authorized");
+    await repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { id: "receipt_unknown", actionId: allowed!.action.id, provider: "acp", receiptRef: "acp:tool_1", outcome: "unknown", observedAt: "2026-07-12T00:02:00.000Z" }
+    });
+    await expect(repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })).resolves.toMatchObject({ state: "unknown" });
+  });
+});

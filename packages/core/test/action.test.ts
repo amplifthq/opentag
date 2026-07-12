@@ -2,11 +2,63 @@ import { describe, expect, it } from "vitest";
 import {
   actionReceiptHeading,
   buildActionReceipt,
+  evaluateActionPermission,
+  grantMatchesAction,
+  normalizeMaterialActionRequest,
   parseThreadActionCommand,
   parseThreadControlCommand,
   parseWorkContextMutationCommand,
   suggestedActionCandidatesFromResult
 } from "../src/action.js";
+
+describe("governed material actions", () => {
+  const request = normalizeMaterialActionRequest({
+    title: "Publish package",
+    kind: "publish",
+    permissionScopes: ["npm:publish", "package:write"]
+  });
+
+  it("keeps ask, auto, and autonomous modes distinct", () => {
+    expect(evaluateActionPermission({ mode: "ask", action: request }).outcome).toBe("needs_approval");
+    expect(evaluateActionPermission({ mode: "auto", action: request }).outcome).toBe("needs_approval");
+    expect(evaluateActionPermission({ mode: "autonomous", action: request }).outcome).toBe("authorized");
+
+    const read = normalizeMaterialActionRequest({ title: "Read package metadata", kind: "read", permissionScopes: [] });
+    expect(evaluateActionPermission({ mode: "auto", action: read }).outcome).toBe("authorized");
+  });
+
+  it("matches allow_once only to an attempt and allow_run only to the exact normalized family and scope", () => {
+    const once = {
+      id: "grant_once",
+      connectionId: "acp",
+      capability: request.actionFamily,
+      resourceScope: request.scope,
+      runId: "run_1",
+      attemptId: "attempt_1"
+    };
+    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_1", action: request })).toBe(true);
+    expect(grantMatchesAction(once, { runId: "run_1", attemptId: "attempt_2", action: request })).toBe(false);
+
+    const runGrant = { ...once, id: "grant_run", attemptId: undefined };
+    expect(grantMatchesAction(runGrant, { runId: "run_1", attemptId: "attempt_2", action: request })).toBe(true);
+    expect(
+      grantMatchesAction(runGrant, {
+        runId: "run_1",
+        attemptId: "attempt_2",
+        action: normalizeMaterialActionRequest({ title: "Deploy app", kind: "deploy", permissionScopes: ["deploy:write"] })
+      })
+    ).toBe(false);
+  });
+
+  it("keeps internal guardrails active in autonomous mode", () => {
+    const guarded = normalizeMaterialActionRequest({
+      title: "Export access token",
+      kind: "credential_export",
+      permissionScopes: ["secrets:read"]
+    });
+    expect(evaluateActionPermission({ mode: "autonomous", action: guarded })).toMatchObject({ outcome: "blocked" });
+  });
+});
 
 describe("thread action commands", () => {
   it("parses explicit English action replies", () => {

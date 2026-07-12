@@ -8,6 +8,9 @@ import {
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
+  type ActionPermissionRequest,
+  type ActionPermissionResolution,
+  type ApprovalMode,
   type ProjectTargetRef
 } from "@opentag/core";
 import {
@@ -45,6 +48,9 @@ export type DaemonClient = {
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
   progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
   complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
+  requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
+  resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
+  recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
 };
 
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
@@ -191,6 +197,7 @@ export async function runOneDaemonIteration(input: {
   executors: Record<string, ExecutorAdapter>;
   scratchRoot?: string;
   keepScratch?: "always" | "on_failure" | "never";
+  approvalMode?: ApprovalMode;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -404,6 +411,56 @@ export async function runOneDaemonIteration(input: {
         context: claimed.event.context,
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
+        permissionResolver: async (request) => {
+          let resolution = await input.client.requestActionPermission(runId, lease, {
+            toolCallId: request.toolCallId,
+            title: request.title,
+            ...(request.kind ? { kind: request.kind } : {}),
+            permissionScopes: request.permissionScopes,
+            mode: input.approvalMode ?? "auto",
+            provider: "acp"
+          });
+          while (resolution.state === "waiting") {
+            await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+            try {
+              resolution = await input.client.resolveActionPermission(runId, lease, resolution.action.id);
+            } catch (error) {
+              if (runNoLongerClaimed(error)) return { actionId: resolution.action.id, decision: "deny" as const };
+              throw error;
+            }
+          }
+          if (resolution.state === "authorized") {
+            return {
+              actionId: resolution.action.id,
+              decision: resolution.decision === "allow_run" ? "allow_run" as const : "allow_once" as const,
+              material: resolution.action.riskTier !== "low"
+            };
+          }
+          if (resolution.state === "reconciled") {
+            return {
+              actionId: resolution.action.id,
+              decision: "deny" as const,
+              reconciled: true,
+              ...(resolution.receipt ? { receipt: { receiptRef: resolution.receipt.receiptRef, outcome: resolution.receipt.outcome } } : {})
+            };
+          }
+          return { actionId: resolution.action.id, decision: "deny" as const };
+        },
+        materialActionReporter: async (report) => {
+          await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, {
+            id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
+            actionId: report.actionId,
+            provider: report.provider,
+            receiptRef: report.receiptRef,
+            outcome: report.outcome,
+            observedAt: new Date().toISOString(),
+            metadata: {
+              toolCallId: report.toolCallId,
+              assurance: "reported",
+              ...(report.reportedOutcome ? { agentReportedOutcome: report.reportedOutcome } : {})
+            }
+          });
+        },
         metadata,
         ...(sessionProfile ? { sessionProfile } : {}),
         ...(binding?.baseBranch ? { baseBranch: binding.baseBranch } : {}),
@@ -548,6 +605,7 @@ export async function serveDaemon(input: {
   executors: Record<string, ExecutorAdapter>;
   scratchRoot?: string;
   keepScratch?: "always" | "on_failure" | "never";
+  approvalMode?: ApprovalMode;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -566,6 +624,7 @@ export async function serveDaemon(input: {
         executors: input.executors,
         ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
         ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
+        ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
         ...(input.security ? { security: input.security } : {}),
         ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
         ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),

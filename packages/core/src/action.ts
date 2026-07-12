@@ -1,5 +1,82 @@
 import { parseOpenTagMention } from "./mention.js";
-import type { MutationIntent, OpenTagRunResult, SuggestedChangesSnapshot } from "./schema.js";
+import type {
+  ApprovalMode,
+  Grant,
+  MutationIntent,
+  NormalizedMaterialAction,
+  OpenTagRunResult,
+  SuggestedChangesSnapshot
+} from "./schema.js";
+
+export type MaterialActionRequestInput = {
+  title: string;
+  kind?: string | null;
+  permissionScopes?: string[];
+  target?: Record<string, unknown>;
+};
+
+const MATERIAL_ACTION_PATTERN = /(?:push|deploy|publish|release|create|update|delete|write|mutat|send|post|merge|issue|connector)/iu;
+const CRITICAL_ACTION_PATTERN = /(?:credential|secret|token|security[_ -]?override|disable[_ -]?(?:guard|safety))/iu;
+
+function normalizedRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+export function normalizeMaterialActionRequest(input: MaterialActionRequestInput): NormalizedMaterialAction {
+  const title = input.title.trim().replace(/\s+/gu, " ").slice(0, 240) || "untitled action";
+  const kind = input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
+  const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
+  const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
+  const probe = `${actionFamily} ${title} ${permissionScopes.join(" ")}`;
+  const internallyBlocked = CRITICAL_ACTION_PATTERN.test(probe);
+  const material = MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
+  const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
+  return {
+    actionFamily: actionFamily || "tool",
+    scope: { permissionScopes },
+    target: normalizedRecord({ title, ...(input.target ?? {}), ...(input.kind ? { kind } : {}) }),
+    riskTier,
+    material,
+    internallyBlocked,
+    ...(internallyBlocked ? { blockReason: "OpenTag internal guardrails prohibit credential export or safety bypass actions." } : {})
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function grantMatchesAction(
+  grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt">,
+  input: { runId: string; attemptId: string; action: NormalizedMaterialAction; now?: string }
+): boolean {
+  if (grant.revokedAt) return false;
+  if (grant.expiresAt && grant.expiresAt <= (input.now ?? new Date().toISOString())) return false;
+  if (grant.runId !== input.runId || grant.capability !== input.action.actionFamily) return false;
+  if (grant.attemptId && grant.attemptId !== input.attemptId) return false;
+  return stableJson(grant.resourceScope) === stableJson(input.action.scope);
+}
+
+export function evaluateActionPermission(input: {
+  mode: ApprovalMode;
+  action: NormalizedMaterialAction;
+  matchingGrant?: boolean;
+}): { outcome: "authorized" | "needs_approval" | "blocked"; reason: string } {
+  if (input.action.internallyBlocked) {
+    return { outcome: "blocked", reason: input.action.blockReason ?? "Blocked by OpenTag internal guardrails." };
+  }
+  if (input.matchingGrant) return { outcome: "authorized", reason: "A matching durable grant covers this action family and scope." };
+  if (input.mode === "autonomous") return { outcome: "authorized", reason: "Autonomous mode authorizes this action within internal guardrails." };
+  if (input.mode === "auto" && !input.action.material) return { outcome: "authorized", reason: "Auto mode authorizes low-risk non-material actions." };
+  return { outcome: "needs_approval", reason: `${input.mode} mode requires a durable approval for this action.` };
+}
 
 export type ThreadActionVerb = "approve" | "apply" | "continue" | "reject";
 export type ThreadControlVerb = "status" | "doctor" | "stop";

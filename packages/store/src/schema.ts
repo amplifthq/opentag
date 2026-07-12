@@ -143,6 +143,51 @@ export const approvalDecisions = sqliteTable("approval_decisions", {
   createdAt: text("created_at").notNull()
 });
 
+export const grants = sqliteTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    connectionId: text("connection_id").notNull(),
+    capability: text("capability").notNull(),
+    resourceScopeJson: text("resource_scope_json").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id"),
+    expiresAt: text("expires_at"),
+    constraintsJson: text("constraints_json"),
+    revokedAt: text("revoked_at"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({ runIdx: index("grants_run_idx").on(table.runId), attemptIdx: index("grants_attempt_idx").on(table.attemptId) })
+);
+
+export const materialActions = sqliteTable(
+  "material_actions",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    actionFamily: text("action_family").notNull(),
+    capability: text("capability").notNull(),
+    scopeJson: text("scope_json").notNull(),
+    targetJson: text("target_json").notNull(),
+    riskTier: text("risk_tier").notNull(),
+    status: text("status").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    proposalId: text("proposal_id"),
+    proposalHash: text("proposal_hash"),
+    decisionSnapshotHash: text("decision_snapshot_hash"),
+    attemptFenceDigest: text("attempt_fence_digest").notNull(),
+    receiptJson: text("receipt_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    idempotencyIdx: uniqueIndex("material_actions_idempotency_idx").on(table.idempotencyKey),
+    runIdx: index("material_actions_run_idx").on(table.runId),
+    proposalIdx: index("material_actions_proposal_idx").on(table.proposalId)
+  })
+);
+
 export const applyPlans = sqliteTable("apply_plans", {
   id: text("id").primaryKey(),
   proposalId: text("proposal_id").notNull(),
@@ -389,6 +434,24 @@ export function migrateSchema(sqlite: Database.Database): void {
       decision_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS grants (
+      id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, capability TEXT NOT NULL,
+      resource_scope_json TEXT NOT NULL, run_id TEXT NOT NULL, attempt_id TEXT,
+      expires_at TEXT, constraints_json TEXT, revoked_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS grants_run_idx ON grants(run_id);
+    CREATE INDEX IF NOT EXISTS grants_attempt_idx ON grants(attempt_id);
+    CREATE TABLE IF NOT EXISTS material_actions (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+      action_family TEXT NOT NULL, capability TEXT NOT NULL, scope_json TEXT NOT NULL,
+      target_json TEXT NOT NULL, risk_tier TEXT NOT NULL, status TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL, proposal_id TEXT, proposal_hash TEXT,
+      decision_snapshot_hash TEXT, attempt_fence_digest TEXT NOT NULL, receipt_json TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS material_actions_idempotency_idx ON material_actions(idempotency_key);
+    CREATE INDEX IF NOT EXISTS material_actions_run_idx ON material_actions(run_id);
+    CREATE INDEX IF NOT EXISTS material_actions_proposal_idx ON material_actions(proposal_id);
     CREATE TABLE IF NOT EXISTS apply_plans (
       id TEXT PRIMARY KEY,
       proposal_id TEXT NOT NULL,

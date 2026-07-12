@@ -1,10 +1,14 @@
 import {
   FollowUpRequestSchema,
+  ActionPermissionResolutionSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
   RunAdmissionDecisionSchema,
   type ActorIdentity,
+  type ActionPermissionRequest,
+  type ActionPermissionResolution,
+  type MaterialActionReceipt,
   type ActionHint,
   type AdapterMutationMapping,
   type ApprovalDecision,
@@ -346,6 +350,9 @@ export type OpenTagClient = {
   createRunFromFollowUpRequest(input: { id: string; runId: string }): Promise<{ followUpRequest: import("@opentag/core").FollowUpRequest; run: OpenTagRun }>;
   claim(input: { runnerId: string }): Promise<ClaimedOpenTagRun | null>;
   heartbeat(input: { runnerId: string; runId: string } & AttemptLease): Promise<void>;
+  requestActionPermission(input: { runnerId: string; runId: string } & AttemptLease & { request: ActionPermissionRequest }): Promise<ActionPermissionResolution>;
+  resolveActionPermission(input: { runnerId: string; runId: string; actionId: string } & AttemptLease): Promise<ActionPermissionResolution>;
+  recordMaterialActionReceipt(input: { runnerId: string; runId: string; actionId: string; receipt: MaterialActionReceipt } & AttemptLease): Promise<ActionPermissionResolution>;
   markRunning(input: {
     runnerId: string;
     runId: string;
@@ -392,6 +399,9 @@ export type DispatcherRunnerClient = {
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
+  requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
+  resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
+  recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: MaterialActionReceipt): Promise<ActionPermissionResolution>;
   progress(runId: string, lease: AttemptLease, input: RunProgressInput & { type: string; at: string }): Promise<void>;
   complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
 };
@@ -744,6 +754,39 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       await assertOk(response, "heartbeat");
     },
 
+    async requestActionPermission(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/action-permissions`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({ attemptId: input.attemptId, fencingToken: input.fencingToken, request: input.request })
+      });
+      await assertOk(response, "requestActionPermission");
+      const body = (await response.json()) as { resolution: unknown };
+      return ActionPermissionResolutionSchema.parse(body.resolution);
+    },
+
+    async resolveActionPermission(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/action-permissions/${input.actionId}/resolve`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({ attemptId: input.attemptId, fencingToken: input.fencingToken })
+      });
+      await assertOk(response, "resolveActionPermission");
+      const body = (await response.json()) as { resolution: unknown };
+      return ActionPermissionResolutionSchema.parse(body.resolution);
+    },
+
+    async recordMaterialActionReceipt(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/material-actions/${input.actionId}/receipt`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify({ attemptId: input.attemptId, fencingToken: input.fencingToken, receipt: input.receipt })
+      });
+      await assertOk(response, "recordMaterialActionReceipt");
+      const body = (await response.json()) as { resolution: unknown };
+      return ActionPermissionResolutionSchema.parse(body.resolution);
+    },
+
     async markRunning(input) {
       const response = await fetchImpl(`${baseUrl}/v1/runners/${input.runnerId}/runs/${input.runId}/running`, {
         method: "POST",
@@ -1005,6 +1048,9 @@ export function createDispatcherClient(options: RunnerClientOptions): Dispatcher
         ...(markRunningOptions?.idempotencyKey ? { idempotencyKey: markRunningOptions.idempotencyKey } : {})
       }),
     heartbeat: (runId, lease) => client.heartbeat({ runnerId: options.runnerId, runId, ...lease }),
+    requestActionPermission: (runId, lease, request) => client.requestActionPermission({ runnerId: options.runnerId, runId, ...lease, request }),
+    resolveActionPermission: (runId, lease, actionId) => client.resolveActionPermission({ runnerId: options.runnerId, runId, actionId, ...lease }),
+    recordMaterialActionReceipt: (runId, lease, actionId, receipt) => client.recordMaterialActionReceipt({ runnerId: options.runnerId, runId, actionId, receipt, ...lease }),
     progress: (runId, lease, input) => client.progress({ runnerId: options.runnerId, runId, ...lease, ...input }),
     complete: (runId, lease, result, completeOptions) =>
       client.complete({

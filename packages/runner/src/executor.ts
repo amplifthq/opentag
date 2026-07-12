@@ -25,6 +25,30 @@ export type ExecutorWorkspace =
   | { kind: "repository"; path: string }
   | { kind: "scratch"; path: string };
 
+export type ExecutorPermissionRequest = {
+  toolCallId: string;
+  title: string;
+  kind?: string | null;
+  permissionScopes: string[];
+};
+
+export type ExecutorPermissionResolution = {
+  actionId: string;
+  decision: "allow_once" | "allow_run" | "deny";
+  reconciled?: boolean;
+  receipt?: { receiptRef: string; outcome: "succeeded" | "failed" | "unknown" };
+  material?: boolean;
+};
+
+export type ExecutorMaterialActionReport = {
+  actionId: string;
+  toolCallId: string;
+  provider: string;
+  receiptRef: string;
+  outcome: "succeeded" | "failed" | "unknown";
+  reportedOutcome?: "completed" | "failed";
+};
+
 type ExecutorRunInputBase = {
   runId: string;
   attemptId?: string;
@@ -40,6 +64,8 @@ type ExecutorRunInputBase = {
   keepWorktree?: "always" | "on_failure" | "never";
   metadata?: Record<string, unknown>;
   sessionProfile?: AgentSessionProfile;
+  permissionResolver?: (request: ExecutorPermissionRequest) => Promise<ExecutorPermissionResolution>;
+  materialActionReporter?: (report: ExecutorMaterialActionReport) => Promise<void>;
 };
 
 export type ExecutorRunInput = ExecutorRunInputBase &

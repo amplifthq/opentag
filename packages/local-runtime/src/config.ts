@@ -177,6 +177,7 @@ export const OpenTagDaemonConfigSchema = z
     agents: z.record(OpenTagIntegrationManifestSchema).default({}),
     scratchRoot: AbsolutePathSchema.default(join(defaultLocalStateDirectory(), "scratch")),
     keepScratch: KeepWorktreeSchema.default("on_failure"),
+    approvalMode: z.enum(["ask", "auto", "autonomous"]).default("auto"),
     channelBindings: z.array(ChannelBindingConfigSchema).optional(),
     slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
     larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),

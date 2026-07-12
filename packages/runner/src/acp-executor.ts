@@ -13,6 +13,7 @@ import { nodeCommandRunner, type CommandRunner } from "./command.js";
 import {
   type ExecutorAdapter,
   type ExecutorEventSink,
+  type ExecutorPermissionResolution,
   type ExecutorRunInput,
   type ExecutorWorkspace
 } from "./executor.js";
@@ -406,6 +407,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         const output: string[] = [];
+        const governedActions = new Map<string, { resolution: ExecutorPermissionResolution; reported: boolean }>();
         const childOutput = strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>);
         const stream = acp.ndJsonStream(
           Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -421,8 +423,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 name: option.name,
                 kind: option.kind
               }));
-              if (!options.permissionResolver) return { outcome: { outcome: "cancelled" as const } };
-              const decision = await options.permissionResolver({
+              const governedResolver = input.permissionResolver;
+              const request = {
                 runId: input.runId,
                 toolCall: {
                   toolCallId: ctx.params.toolCall.toolCallId,
@@ -432,7 +434,28 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 },
                 options: requestOptions,
                 permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
-              });
+              };
+              if (governedResolver) {
+                const resolution = await governedResolver({
+                  toolCallId: request.toolCall.toolCallId,
+                  title: request.toolCall.title,
+                  ...(request.toolCall.kind ? { kind: request.toolCall.kind } : {}),
+                  permissionScopes: request.permissionScopes
+                });
+                if (resolution.decision !== "deny" && !resolution.reconciled && resolution.material) {
+                  governedActions.set(request.toolCall.toolCallId, { resolution, reported: false });
+                }
+                if (resolution.reconciled) {
+                  await sink.emit({
+                    type: "executor.progress",
+                    message: `Material action ${resolution.actionId} already has a durable receipt; skipping duplicate execution.`,
+                    at: new Date().toISOString()
+                  });
+                }
+                return permissionResponseForDecision({ decision: resolution.decision }, requestOptions);
+              }
+              if (!options.permissionResolver) return { outcome: { outcome: "cancelled" as const } };
+              const decision = await options.permissionResolver(request);
               return permissionResponseForDecision(decision, requestOptions);
             })
             .connectWith(stream, async (client) => {
@@ -459,6 +482,28 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   const message = await session.nextUpdate();
                   if (message.kind === "stop") return message.stopReason;
                   await emitSessionUpdate(sink, message.update, output);
+                  if (message.update.sessionUpdate === "tool_call_update") {
+                    const governed = governedActions.get(message.update.toolCallId);
+                    if (governed && !governed.reported && (message.update.status === "completed" || message.update.status === "failed")) {
+                      try {
+                        await input.materialActionReporter?.({
+                          actionId: governed.resolution.actionId,
+                          toolCallId: message.update.toolCallId,
+                          provider: "acp",
+                          receiptRef: `acp:${session.sessionId}:${message.update.toolCallId}`,
+                          outcome: "unknown",
+                          reportedOutcome: message.update.status
+                        });
+                        governed.reported = true;
+                      } catch {
+                        await sink.emit({
+                          type: "executor.progress",
+                          message: `Could not durably correlate material action ${governed.resolution.actionId}; retrying as unknown before session cleanup.`,
+                          at: new Date().toISOString()
+                        });
+                      }
+                    }
+                  }
                 }
               });
             });
@@ -468,6 +513,17 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         await terminateChild(child);
+        for (const [toolCallId, governed] of governedActions) {
+          if (governed.reported) continue;
+          governed.reported = true;
+          await input.materialActionReporter?.({
+            actionId: governed.resolution.actionId,
+            toolCallId,
+            provider: "acp",
+            receiptRef: `acp:${active.sessionId ?? "unknown"}:${toolCallId}`,
+            outcome: "unknown"
+          });
+        }
 
         if (workspace.kind === "repository" && stopReason === "end_turn") {
           const cleaned = await cleanupInternalArtifacts({ runner, workspacePath: executionPath });

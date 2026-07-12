@@ -77,6 +77,7 @@ export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
     executors: executorsFromConfig(config),
     scratchRoot: config.scratchRoot,
     keepScratch: config.keepScratch,
+    approvalMode: config.approvalMode,
     ...(security ? { security } : {}),
     ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),
