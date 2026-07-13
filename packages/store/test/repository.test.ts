@@ -126,6 +126,7 @@ describe("OpenTag repository", () => {
     `);
 
     migrateSchema(sqlite);
+    expect(() => migrateSchema(sqlite)).not.toThrow();
     const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
     expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name)).every((column) => column.notnull === 0)).toBe(true);
     const repo = createOpenTagRepository(drizzle(sqlite));
@@ -134,6 +135,76 @@ describe("OpenTag repository", () => {
       owner: "acme",
       repo: "demo"
     });
+  });
+
+  it("rolls back the legacy channel binding rebuild when destructive DDL fails mid-migration", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE channel_bindings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        repo_provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX channel_bindings_provider_account_conversation_idx
+        ON channel_bindings(provider, account_id, conversation_id);
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (
+        'slack', 'T123', 'C456', 'github', 'acme', 'demo', '{"legacy":true}', '2026-07-12T00:00:00.000Z'
+      );
+    `);
+    const originalExecMethod = sqlite.exec;
+    const originalExec = sqlite.exec.bind(sqlite);
+    let destructiveMidpointObserved = false;
+    sqlite.exec = ((source: string) => {
+      if (source.includes("ALTER TABLE channel_bindings_nullable_repo RENAME TO channel_bindings")) {
+        const tables = sqlite.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name IN ('channel_bindings', 'channel_bindings_nullable_repo')
+        `).all() as Array<{ name: string }>;
+        const tableNames = new Set(tables.map((table) => table.name));
+        destructiveMidpointObserved = !tableNames.has("channel_bindings") && tableNames.has("channel_bindings_nullable_repo");
+        throw new Error("injected channel binding rebuild failure");
+      }
+      return originalExec(source);
+    }) as typeof sqlite.exec;
+
+    try {
+      expect(() => migrateSchema(sqlite)).toThrow("injected channel binding rebuild failure");
+    } finally {
+      sqlite.exec = originalExecMethod;
+    }
+
+    expect(destructiveMidpointObserved).toBe(true);
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings'").get()).toBeTruthy();
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings_nullable_repo'").get()).toBeUndefined();
+    expect(sqlite.prepare("SELECT * FROM channel_bindings").all()).toEqual([
+      expect.objectContaining({
+        provider: "slack",
+        account_id: "T123",
+        conversation_id: "C456",
+        repo_provider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata_json: '{"legacy":true}'
+      })
+    ]);
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name))).toEqual([
+      expect.objectContaining({ name: "repo_provider", notnull: 1 }),
+      expect.objectContaining({ name: "owner", notnull: 1 }),
+      expect.objectContaining({ name: "repo", notnull: 1 })
+    ]);
+    const indexes = sqlite.prepare("PRAGMA index_list(channel_bindings)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toContainEqual(
+      expect.objectContaining({ name: "channel_bindings_provider_account_conversation_idx", unique: 1 })
+    );
   });
 
   it("migrates legacy Linear relay installations before OAuth auth metadata", () => {
