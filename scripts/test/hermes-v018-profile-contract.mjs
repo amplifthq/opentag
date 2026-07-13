@@ -10,10 +10,18 @@ if (!profile) {
   process.exit(2);
 }
 
+// These probes only print a version string, so anything slower than this means Hermes is stuck.
+const TIMEOUT_MS = 15_000;
+
 function run(args) {
-  const result = spawnSync(command, args, { encoding: "utf8" });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: TIMEOUT_MS });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   if (result.error) {
+    if (result.error.code === "ETIMEDOUT") {
+      throw new Error(
+        `${command} ${args.join(" ")} did not exit within ${TIMEOUT_MS}ms and was killed:\n${output}`
+      );
+    }
     throw result.error;
   }
   if (result.status !== 0) {
