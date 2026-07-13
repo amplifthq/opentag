@@ -871,6 +871,10 @@ describe("OpenTag CLI start wiring", () => {
       relayProvider: "custom"
     };
     built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.hermes = {
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{conversationId}"
+    };
     const calls: string[] = [];
     const logs: string[] = [];
     const dispatcherHandle = {
@@ -921,6 +925,8 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("Security: only pair with a relay you operate or trust");
     expect(logs.join("\n")).toContain("GitHub webhook URL: https://relay.example/github/webhooks");
     expect(logs.join("\n")).toContain("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
+    expect(logs.join("\n")).toContain("daemon.hermes.profileTemplate is not used");
+    expect(logs.join("\n")).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
   it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {

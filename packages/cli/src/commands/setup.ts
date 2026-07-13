@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { probeHermesProfile as probeHermesProfileReadiness } from "@opentag/local-runtime";
 import {
   defaultConfigPath,
   ensurePrivateDirectory,
@@ -25,6 +26,7 @@ export type SetupCommandDependencies = Partial<Omit<SetupFlowDependencies, "prom
   bootstrapClient?: BootstrapClient;
   fetchImpl?: typeof fetch;
   healthTimeoutMs?: number;
+  probeHermesProfile?: typeof probeHermesProfileReadiness;
   startOpenTag?(options: StartCommandOptions): Promise<void>;
   startOpenTagService?(options: ServiceCommandOptions): Promise<void>;
 };
@@ -110,6 +112,16 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
     ...(dependencies.env ? { env: dependencies.env } : {}),
     ...(dependencies.defaults ? { defaults: dependencies.defaults } : {})
   });
+  if (setupInput.hermes) {
+    const readiness = await (dependencies.probeHermesProfile ?? probeHermesProfileReadiness)({
+      ...(setupInput.hermes.command ? { hermesCommand: setupInput.hermes.command } : {}),
+      profile: setupInput.hermes.profile,
+      cwd: setupInput.projectPath
+    });
+    if (!readiness.ready) {
+      throw new Error(readiness.reason ?? `Hermes profile '${setupInput.hermes.profile}' is not ready.`);
+    }
+  }
   let config = createSetupConfig(setupInput, env);
   let relayUrl: string | undefined;
   let relayRegistered = false;

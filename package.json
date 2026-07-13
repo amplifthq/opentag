@@ -13,6 +13,7 @@
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",
     "smoke:governance": "node scripts/test/governance-matrix.mjs",
+    "smoke:hermes-profile-contract": "node scripts/test/hermes-v018-profile-contract.mjs",
     "smoke:live": "node scripts/test/live-e2e-smoke.mjs",
     "smoke:privacy": "node scripts/test/privacy-redaction-scan.mjs",
     "smoke:protocol": "NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../scripts/test/protocol-runtime-smoke.ts",

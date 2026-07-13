@@ -4,7 +4,7 @@ import type { CommandRunner } from "../src/command.js";
 import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-report.js";
 
 describe("Hermes executor", () => {
-  it("creates an isolated branch, runs Hermes with an isolated profile and context, and reports changed files", async () => {
+  it("creates an isolated branch, runs Hermes with a fixed profile and context, and reports changed files", async () => {
     const calls: { command: string; args: string[] }[] = [];
     const runner: CommandRunner = {
       async run(command, args) {
@@ -39,7 +39,7 @@ describe("Hermes executor", () => {
 
     const executor = createHermesExecutor({
       runner,
-      profileTemplate: "opentag-{provider}-{accountId}-{conversationId}"
+      profile: "opentag-fixed"
     });
 
     await expect(
@@ -86,8 +86,8 @@ describe("Hermes executor", () => {
     const prompt = hermesCall?.args[hermesCall.args.indexOf("-z") + 1];
 
     expect(calls.some((call) => call.command === "git" && call.args.join(" ") === "checkout -B opentag/run_1 main")).toBe(true);
-    expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain("opentag-slack-T123-456");
+    expect(calls).toContainEqual({ command: "hermes", args: ["-p", "opentag-fixed", "--version"] });
+    expect(hermesCall?.args.slice(0, 3)).toEqual(["-p", "opentag-fixed", "-z"]);
     expect(hermesCall?.args).not.toContain("--provider");
     expect(hermesCall?.args).not.toContain("--model");
     expect(hermesCall?.args).not.toContain("-s");
@@ -131,7 +131,32 @@ describe("Hermes executor", () => {
     ).resolves.toEqual({ ready: false, reason: "Workspace is not a git checkout: bad cwd" });
   });
 
-  it("inherits a generic agent session profile when no Hermes-specific profile is configured", async () => {
+  it("fails readiness with actionable guidance when the fixed profile is unavailable", async () => {
+    const calls: { command: string; args: string[]; cwd: string }[] = [];
+    const runner: CommandRunner = {
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options.cwd });
+        return { exitCode: 1, stdout: "", stderr: "Profile 'opentag' does not exist" };
+      }
+    };
+
+    await expect(
+      createHermesExecutor({ runner }).canRun({
+        runId: "run_1",
+        workspace: { kind: "scratch", path: "/tmp/demo" },
+        command: { rawText: "fix this", intent: "fix", args: {} },
+        context: []
+      })
+    ).resolves.toEqual({
+      ready: false,
+      reason:
+        "Hermes profile 'opentag' is not ready: Profile 'opentag' does not exist " +
+        "Create it with `hermes profile create opentag` or configure daemon.hermes.profile to an existing dedicated profile."
+    });
+    expect(calls).toEqual([{ command: "hermes", args: ["-p", "opentag", "--version"], cwd: "/tmp/demo" }]);
+  });
+
+  it("uses the fixed default profile instead of a derived agent session profile", async () => {
     const calls: { command: string; args: string[] }[] = [];
     const runner: CommandRunner = {
       async run(command, args) {
@@ -168,8 +193,8 @@ describe("Hermes executor", () => {
     });
 
     const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
-    expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain("opentag-slack-T123-C456-acme-demo-U123");
+    expect(hermesCall?.args.slice(0, 3)).toEqual(["-p", "opentag", "-z"]);
+    expect(hermesCall?.args).not.toContain("opentag-slack-T123-C456-acme-demo-U123");
   });
 
   it("cleans internal artifacts when Hermes exits unsuccessfully", async () => {

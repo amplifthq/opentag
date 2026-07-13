@@ -35,6 +35,7 @@ function testPrompts(overrides: Partial<PromptAdapter> = {}): PromptAdapter {
 function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
   return runSetupCommandRaw(options, {
     validateLarkCredentials: vi.fn(async () => ({ botOpenId: "ou_verified_bot", botName: "OpenTag" })),
+    probeHermesProfile: vi.fn(async () => ({ ready: true })),
     ...dependencies
   });
 }
@@ -1281,30 +1282,35 @@ describe("OpenTag CLI setup", () => {
 
   it("writes Hermes setup options into daemon config", async () => {
     const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+    const probeHermesProfile = vi.fn(async () => ({ ready: true }));
 
     await runSetupCommand(
       {
         config: configPath,
-        project: tempDir(),
+        project: projectPath,
         platform: "github",
         executor: "hermes",
         githubRepository: "acme/demo",
         githubToken: "ghp_test",
         hermesCommand: "custom-hermes",
         hermesProfile: "opentag-fixed",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
         force: true,
         yes: true
       },
-      { prompts: testPrompts() }
+      { prompts: testPrompts(), probeHermesProfile }
     );
 
     const config = readCliConfig(configPath);
     expect(config.daemon.repositories[0]?.defaultExecutor).toBe("hermes");
     expect(config.daemon.hermes).toEqual({
       command: "custom-hermes",
+      profile: "opentag-fixed"
+    });
+    expect(probeHermesProfile).toHaveBeenCalledWith({
+      hermesCommand: "custom-hermes",
       profile: "opentag-fixed",
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
+      cwd: projectPath
     });
   });
 
@@ -1371,7 +1377,7 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
-  it("defaults Hermes profileTemplate when no fixed profile is provided", async () => {
+  it("defaults Hermes to the fixed opentag profile", async () => {
     const configPath = join(tempDir(), "config.json");
 
     await runSetupCommand(
@@ -1389,47 +1395,37 @@ describe("OpenTag CLI setup", () => {
     );
 
     expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate:
-        "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}"
+      profile: "opentag"
     });
   });
 
-  it("does not keep an inherited Hermes fixed profile when a profileTemplate is explicitly provided", async () => {
+  it("does not write config when the Hermes profile probe fails", async () => {
     const configPath = join(tempDir(), "config.json");
     const projectPath = tempDir();
 
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfile: "opentag-fixed",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
-    });
+    await expect(
+      runSetupCommand(
+        {
+          config: configPath,
+          project: projectPath,
+          platform: "github",
+          executor: "hermes",
+          githubRepository: "acme/demo",
+          githubToken: "ghp_test",
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          probeHermesProfile: vi.fn(async () => ({
+            ready: false,
+            reason:
+              "Hermes profile 'opentag' is not ready. Create it with `hermes profile create opentag` or configure daemon.hermes.profile."
+          }))
+        }
+      )
+    ).rejects.toThrow("Hermes profile 'opentag' is not ready");
+    expect(existsSync(configPath)).toBe(false);
   });
 
   it("rejects Slack setup without an initial channel binding", async () => {

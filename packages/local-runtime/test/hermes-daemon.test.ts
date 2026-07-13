@@ -19,7 +19,7 @@ function eventWithMetadata(source: string, metadata: Record<string, unknown>): O
   };
 }
 
-function runForEvent(input: { event: OpenTagEvent; profileTemplate: string }) {
+function runForEvent(input: { event: OpenTagEvent; profile: string; profileReady?: boolean }) {
   const calls: { command: string; args: string[] }[] = [];
   const runner: CommandRunner = {
     async run(command, args) {
@@ -27,7 +27,9 @@ function runForEvent(input: { event: OpenTagEvent; profileTemplate: string }) {
       const joinedArgs = args.join(" ");
 
       if (command === "hermes" && args.includes("--version")) {
-        return { exitCode: 0, stdout: "1.0.0", stderr: "" };
+        return input.profileReady === false
+          ? { exitCode: 1, stdout: "", stderr: `Profile '${input.profile}' does not exist` }
+          : { exitCode: 0, stdout: "Hermes Agent v0.18.2 (2026.7.7.2)", stderr: "" };
       }
       if (command === "git" && joinedArgs === "status --porcelain") {
         return { exitCode: 0, stdout: "", stderr: "" };
@@ -81,7 +83,7 @@ function runForEvent(input: { event: OpenTagEvent; profileTemplate: string }) {
       }
     ],
     executors: {
-      hermes: createHermesExecutor({ runner, profileTemplate: input.profileTemplate })
+      hermes: createHermesExecutor({ runner, profile: input.profile })
     },
     client
   }).then(() => ({ calls, completed }));
@@ -92,31 +94,52 @@ describe("Hermes daemon integration", () => {
     {
       source: "slack",
       metadata: { teamId: "T123", channelId: "C456", repoProvider: "github", owner: "acme", repo: "demo" },
-      profileTemplate: "opentag-{provider}-{accountId}-{conversationId}",
-      expectedProfile: "opentag-slack-T123-C456"
+      derivedProfile: "opentag-slack-T123-C456"
     },
     {
       source: "github",
       metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 },
-      profileTemplate: "opentag-{provider}-{repoProvider}-{owner}-{repo}-{issueNumber}",
-      expectedProfile: "opentag-github-github-acme-demo-1"
+      derivedProfile: "opentag-github-github-acme-demo-1"
     },
     {
       source: "telegram",
       metadata: { botId: "bot_123", chatId: "456", repoProvider: "github", owner: "acme", repo: "demo" },
-      profileTemplate: "opentag-{provider}-{accountId}-{conversationId}",
-      expectedProfile: "opentag-telegram-bot_123-456"
+      derivedProfile: "opentag-telegram-bot_123-456"
     }
-  ])("selects an isolated Hermes profile for $source events", async ({ source, metadata, profileTemplate, expectedProfile }) => {
+  ])("uses the same fixed Hermes profile for $source events", async ({ source, metadata, derivedProfile }) => {
     const { calls, completed } = await runForEvent({
       event: eventWithMetadata(source, metadata),
-      profileTemplate
+      profile: "opentag"
     });
 
     const hermesCall = calls.find((call) => call.command === "hermes" && call.args.includes("-z"));
     expect(hermesCall, JSON.stringify({ calls, completed })).toBeDefined();
-    expect(hermesCall?.args).toContain("-p");
-    expect(hermesCall?.args).toContain(expectedProfile);
+    expect(hermesCall?.args.slice(0, 3)).toEqual(["-p", "opentag", "-z"]);
+    expect(hermesCall?.args).not.toContain(derivedProfile);
     expect(completed?.conclusion).toBe("success");
   });
+
+  it("fails closed before invocation when the fixed Hermes profile does not exist", async () => {
+    const { calls, completed } = await runForEvent({
+      event: eventWithMetadata("slack", {
+        teamId: "T123",
+        channelId: "C456",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }),
+      profile: "opentag-missing",
+      profileReady: false
+    });
+
+    expect(calls).toContainEqual({ command: "hermes", args: ["-p", "opentag-missing", "--version"] });
+    expect(calls.some((call) => call.command === "hermes" && call.args.includes("-z"))).toBe(false);
+    expect(completed).toEqual({
+      conclusion: "needs_human",
+      summary:
+        "Hermes profile 'opentag-missing' is not ready: Profile 'opentag-missing' does not exist " +
+        "Create it with `hermes profile create opentag-missing` or configure daemon.hermes.profile to an existing dedicated profile."
+    });
+  });
+
 });

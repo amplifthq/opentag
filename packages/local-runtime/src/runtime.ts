@@ -1,5 +1,14 @@
 import { createDispatcherClient } from "@opentag/client";
-import { createAcpExecutor, createClaudeCodeExecutor, createCodexExecutor, createEchoExecutor, createHermesExecutor, type ExecutorAdapter, type RunnerSecurityPolicy } from "@opentag/runner";
+import {
+  createAcpExecutor,
+  createClaudeCodeExecutor,
+  createCodexExecutor,
+  createEchoExecutor,
+  createHermesExecutor,
+  DEFAULT_HERMES_PROFILE,
+  type ExecutorAdapter,
+  type RunnerSecurityPolicy
+} from "@opentag/runner";
 import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
 import type { DaemonClient } from "./daemon.js";
 import type { PullRequestOptions } from "./pr.js";
@@ -15,6 +24,15 @@ export function securityFromConfig(config: OpenTagDaemonConfig): RunnerSecurityP
   if (security.extraSafeEnv !== undefined) normalized.extraSafeEnv = security.extraSafeEnv;
 
   return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): string | undefined {
+  if (!config.hermes?.profileTemplate) return undefined;
+  const profile = config.hermes.profile ?? DEFAULT_HERMES_PROFILE;
+  return (
+    "Hermes configuration warning: daemon.hermes.profileTemplate is not used because OpenTag does not yet provision per-run " +
+    `Hermes profiles. OpenTag will use the fixed profile '${profile}'; set daemon.hermes.profile explicitly and remove profileTemplate.`
+  );
 }
 
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
@@ -36,8 +54,7 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     }),
     hermes: createHermesExecutor({
       ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
-      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {}),
-      ...(config.hermes?.profileTemplate ? { profileTemplate: config.hermes.profileTemplate } : {})
+      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
     })
   };
   for (const manifest of Object.values(config.agents)) {
