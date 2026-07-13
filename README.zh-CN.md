@@ -294,4 +294,4 @@ OpenTag 基于 MIT License 开源。详见 [LICENSE](LICENSE)。
 
 我们会在群里同步项目进展和版本更新。欢迎大家一起玩、一起提 issue、一起把 OpenTag 做得更好！👏
 
-<img width="939" height="1455" alt="img_v3_02134_6a2eaf32-fa30-481c-8a74-a1827bf1a6hu" src="https://github.com/user-attachments/assets/43604f5e-4f1d-4ad4-9a7d-a79832c54a28" />
+<img width="939" height="1455" alt="OpenTag 交流微信群二维码" src="./assets/wechat-group-qr.jpg" />
