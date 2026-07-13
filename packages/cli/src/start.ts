@@ -50,6 +50,7 @@ import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhook
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
 import { linearLocalWebhookUrl, linearPublicWebhookUrlPlaceholder, linearWebhookSettingsUrl } from "./platforms/linear/display.js";
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEAR_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "./platforms/ports.js";
+import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "./platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
 
@@ -173,7 +174,8 @@ function hasStartablePlatform(config: OpenTagCliConfig): boolean {
       config.platforms.gitlab ||
       config.platforms.linear ||
       config.platforms.telegram ||
-      config.platforms.discord
+      config.platforms.discord ||
+      config.platforms.teams
   );
 }
 
@@ -316,6 +318,7 @@ export function dispatcherRuntimeInputFromCliConfig(
   const linear = config.platforms.linear;
   const telegram = config.platforms.telegram;
   const discord = config.platforms.discord;
+  const teams = config.platforms.teams;
   const env = input.env ?? process.env;
   const discordMode =
     discord?.mode ??
@@ -331,6 +334,17 @@ export function dispatcherRuntimeInputFromCliConfig(
     // Without the bot token the interactions app still mounts and ACKs slash commands,
     // but every progress/final callback would silently fail — fail fast instead.
     throw new Error("Discord platform requires platforms.discord.botToken or OPENTAG_DISCORD_BOT_TOKEN.");
+  }
+  const teamsAppId = teams?.appId ?? env.OPENTAG_TEAMS_APP_ID;
+  const teamsAppPassword = teams?.appPassword ?? env.OPENTAG_TEAMS_APP_PASSWORD;
+  const teamsTenantId = teams?.tenantId ?? env.OPENTAG_TEAMS_TENANT_ID;
+  const teamsWebhookPath = teams?.webhookPath ?? env.OPENTAG_TEAMS_WEBHOOK_PATH;
+  if (Boolean(teamsAppId) !== Boolean(teamsAppPassword)) {
+    // Bot Framework token exchange needs both halves of the credential; a lone
+    // app id or password would silently fail authentication on every message.
+    throw new Error(
+      "Microsoft Teams platform requires both platforms.teams.appId/appPassword or OPENTAG_TEAMS_APP_ID/OPENTAG_TEAMS_APP_PASSWORD together."
+    );
   }
   if (github && !config.daemon.githubToken) {
     throw new Error("GitHub platform requires daemon.githubToken for callbacks.");
@@ -396,7 +410,11 @@ export function dispatcherRuntimeInputFromCliConfig(
     ...(discordMode ? { discordMode } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(discordBotToken ? { discordBotToken } : {}),
-    ...(discordWebhookPath ? { discordWebhookPath } : {})
+    ...(discordWebhookPath ? { discordWebhookPath } : {}),
+    ...(teamsAppId ? { teamsAppId } : {}),
+    ...(teamsAppPassword ? { teamsAppPassword } : {}),
+    ...(teamsTenantId ? { teamsTenantId } : {}),
+    ...(teamsWebhookPath ? { teamsWebhookPath } : {})
   };
 }
 
@@ -842,7 +860,8 @@ function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
     ...(config.platforms.lark ? ["Lark / Feishu"] : []),
     ...(config.platforms.slack ? ["Slack"] : []),
     ...(config.platforms.telegram ? ["Telegram"] : []),
-    ...(config.platforms.discord ? ["Discord"] : [])
+    ...(config.platforms.discord ? ["Discord"] : []),
+    ...(config.platforms.teams ? ["Microsoft Teams"] : [])
   ];
   if (unsupported.length > 0) {
     throw new Error(
@@ -998,6 +1017,18 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
         logger.log("Discord tunnel: not required in Gateway mode");
         logger.log("Discord slash command: register /opentag and install the app into the target server.");
       }
+    }
+    if (config.platforms.teams) {
+      const teams = config.platforms.teams;
+      logger.log(
+        `Microsoft Teams local messaging endpoint: ${teamsLocalWebhookUrl({
+          webhookPath: teams.webhookPath,
+          dispatcherPort: dispatcherPortFromUrl(config.daemon.dispatcherUrl)
+        })}`
+      );
+      logger.log(`Microsoft Teams Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(teams.webhookPath ?? "/teams/messages")}`);
+      logger.log("Microsoft Teams: install the app into the target Teams tenant.");
+      logger.log(`Tunnel example: ngrok http ${dispatcherPortFromUrl(config.daemon.dispatcherUrl)}`);
     }
     logger.log("Press Ctrl-C to stop.");
 

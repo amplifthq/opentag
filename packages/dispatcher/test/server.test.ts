@@ -212,6 +212,53 @@ function slackRepoEvent(input: { id: string; sourceEventId: string; threadKey: s
   };
 }
 
+function teamsRepoEvent(input: {
+  id: string;
+  sourceEventId: string;
+  conversationId?: string;
+  threadKey?: string;
+  omitTenantId?: boolean;
+  omitConversationId?: boolean;
+}) {
+  const conversationId = input.conversationId ?? "19:channel@thread.tacv2";
+  return {
+    ...validEvent,
+    id: input.id,
+    source: "teams",
+    sourceEventId: input.sourceEventId,
+    actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada", organizationId: "team-1" },
+    context: [
+      {
+        provider: "teams",
+        kind: "url",
+        uri: "teams://team/team-1/channel/channel-1/message/root-activity",
+        visibility: "organization"
+      }
+    ],
+    permissions: [
+      { scope: "chat:postMessage", reason: "reply in the originating Teams channel thread" },
+      { scope: "runner:local", reason: "execute on local daemon" },
+      { scope: "repo:write", reason: "modify the mapped repository" }
+    ],
+    callback: {
+      provider: "teams",
+      uri: "https://smba.trafficmanager.net/amer/",
+      threadKey: input.threadKey ?? `https://smba.trafficmanager.net/amer/|${conversationId}|root-activity`
+    },
+    metadata: {
+      ...(!input.omitTenantId ? { tenantId: "tenant-1" } : {}),
+      ...(!input.omitConversationId ? { conversationId } : {}),
+      teamId: "team-1",
+      channelId: "channel-1",
+      serviceUrl: "https://smba.trafficmanager.net/amer/",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo",
+      issueNumber: 1
+    }
+  };
+}
+
 function larkRepoEvent(input: { id: string; sourceEventId: string; chatId?: string; messageId?: string }) {
   const chatId = input.chatId ?? "oc_chat";
   const messageId = input.messageId ?? "om_msg";
@@ -6647,6 +6694,446 @@ describe("dispatcher API", () => {
       outcome: "unauthorized",
       reason: "channel_binding_mismatch"
     });
+  });
+
+  it("rejects Teams apply actions when the source channel binding was removed before mutation", async () => {
+    const githubRequests: unknown[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(url);
+          return Response.json({});
+        }
+      }
+    });
+    const conversationId = "19:removed@thread.tacv2";
+    const threadKey = `https://smba.trafficmanager.net/amer/|${conversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_removed_binding",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_removed_binding",
+        sourceEventId: "teams_thread_removed_binding",
+        conversationId,
+        threadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_removed_binding",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_removed_binding",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const deleteResponse = await app.request(
+      `/v1/channel-bindings/teams/tenant-1/${encodeURIComponent(conversationId)}`,
+      { method: "DELETE" }
+    );
+    expect(deleteResponse.status).toBe(204);
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "channel_binding_mismatch"
+    });
+    expect(githubRequests).toHaveLength(0);
+
+    const eventsResponse = await app.request("/v1/runs/run_thread_teams_removed_binding/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+  });
+
+  it("rejects Teams reject actions when the source channel was rebound to another repository", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const conversationId = "19:rebound@thread.tacv2";
+    const threadKey = `https://smba.trafficmanager.net/amer/|${conversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_rebound_binding",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_rebound_binding",
+        sourceEventId: "teams_thread_rebound_binding",
+        conversationId,
+        threadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_rebound_binding",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_rebound_binding",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+
+    const rebindResponse = await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "other-repo"
+    }));
+    expect(rebindResponse.status).toBe(201);
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "reject 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "channel_binding_mismatch"
+    });
+
+    const eventsResponse = await app.request("/v1/runs/run_thread_teams_rebound_binding/events");
+    const { events } = await eventsResponse.json();
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+    expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+  });
+
+  it("matches a full Teams reply conversation id to a proposal stored with the base conversation id", async () => {
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return Response.json({});
+        }
+      }
+    });
+    const serviceUrl = "https://smba.trafficmanager.net/amer/";
+    const baseConversationId = "19:canonical-loop@thread.tacv2";
+    const fullConversationId = `${baseConversationId};messageid=root-activity`;
+    const baseThreadKey = `${serviceUrl}|${baseConversationId}|root-activity`;
+    const fullThreadKey = `${serviceUrl}|${fullConversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: baseConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_canonical_loop",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_canonical_loop",
+        sourceEventId: "teams_thread_canonical_loop",
+        conversationId: baseConversationId,
+        threadKey: baseThreadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_canonical_loop",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_canonical_loop",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: serviceUrl,
+        threadKey: fullThreadKey
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({ outcome: "applied" });
+    expect(githubRequests.length).toBeGreaterThan(0);
+  });
+
+  it.each([
+    { name: "authorizes Teams actions through a base conversation binding", includeExactBinding: false },
+    { name: "authorizes Teams actions when exact and base bindings point to the same repository", includeExactBinding: true }
+  ])("$name", async ({ includeExactBinding }) => {
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return Response.json({});
+        }
+      }
+    });
+    const baseConversationId = "19:base-fallback@thread.tacv2";
+    const fullConversationId = `${baseConversationId};messageid=root-activity`;
+    const threadKey = `https://smba.trafficmanager.net/amer/|${fullConversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: baseConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_base_binding",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_base_binding",
+        sourceEventId: "teams_thread_base_binding",
+        conversationId: fullConversationId,
+        threadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_base_binding",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_base_binding",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    if (includeExactBinding) {
+      await app.request("/v1/channel-bindings", jsonRequest({
+        provider: "teams",
+        accountId: "tenant-1",
+        conversationId: fullConversationId,
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      }));
+    }
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey
+      }
+    }));
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "applied",
+      decision: { proposalId: "proposal_thread_teams_base_binding" },
+      plan: { proposalId: "proposal_thread_teams_base_binding" }
+    });
+    expect(githubRequests).toEqual(["https://api.github.com/repos/acme/demo/issues/1/labels"]);
+  });
+
+  it("rejects Teams actions when exact and base conversation bindings point to different repositories", async () => {
+    const githubRequests: string[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      githubApply: {
+        token: "gh_test",
+        fetchImpl: async (url) => {
+          githubRequests.push(String(url));
+          return Response.json({});
+        }
+      }
+    });
+    const baseConversationId = "19:conflicting-bindings@thread.tacv2";
+    const fullConversationId = `${baseConversationId};messageid=root-activity`;
+    const threadKey = `https://smba.trafficmanager.net/amer/|${fullConversationId}|root-activity`;
+
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: fullConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    }));
+    await app.request("/v1/channel-bindings", jsonRequest({
+      provider: "teams",
+      accountId: "tenant-1",
+      conversationId: baseConversationId,
+      repoProvider: "github",
+      owner: "acme",
+      repo: "other-repo"
+    }));
+    await seedCompletedProposal({
+      app,
+      runId: "run_thread_teams_conflicting_bindings",
+      event: teamsRepoEvent({
+        id: "evt_thread_teams_conflicting_bindings",
+        sourceEventId: "teams_thread_conflicting_bindings",
+        conversationId: fullConversationId,
+        threadKey
+      }),
+      suggestedChanges: [
+        {
+          proposalId: "proposal_thread_teams_conflicting_bindings",
+          createdAt: "2026-06-24T00:00:00.000Z",
+          summary: "Label the bug.",
+          intents: [
+            {
+              intentId: "intent_teams_conflicting_bindings",
+              domain: "labels",
+              action: "add_label",
+              summary: "Add the bug label.",
+              params: { label: "bug" }
+            }
+          ]
+        }
+      ]
+    });
+    githubRequests.length = 0;
+
+    const response = await app.request("/v1/thread-actions", jsonRequest({
+      rawText: "apply 1",
+      actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      outcome: "unauthorized",
+      reason: "channel_binding_mismatch"
+    });
+    expect(githubRequests).toHaveLength(0);
+  });
+
+  it("fails closed for Teams proposals missing stored channel identity metadata", async () => {
+    for (const missing of ["tenantId", "conversationId"] as const) {
+      const app = createDispatcherApp({ databasePath: ":memory:" });
+      const suffix = missing === "tenantId" ? "tenant" : "conversation";
+      const conversationId = `19:missing-${suffix}@thread.tacv2`;
+      const threadKey = `https://smba.trafficmanager.net/amer/|${conversationId}|root-activity`;
+
+      await seedCompletedProposal({
+        app,
+        runId: `run_thread_teams_missing_${suffix}`,
+        event: teamsRepoEvent({
+          id: `evt_thread_teams_missing_${suffix}`,
+          sourceEventId: `teams_thread_missing_${suffix}`,
+          conversationId,
+          threadKey,
+          ...(missing === "tenantId" ? { omitTenantId: true } : { omitConversationId: true })
+        }),
+        suggestedChanges: [
+          {
+            proposalId: `proposal_thread_teams_missing_${suffix}`,
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Label the bug.",
+            intents: [
+              {
+                intentId: `intent_teams_missing_${suffix}`,
+                domain: "labels",
+                action: "add_label",
+                summary: "Add the bug label.",
+                params: { label: "bug" }
+              }
+            ]
+          }
+        ]
+      });
+
+      const response = await app.request("/v1/thread-actions", jsonRequest({
+        rawText: "apply 1",
+        actor: { provider: "teams", providerUserId: "aad-user-1", handle: "Ada" },
+        callback: {
+          provider: "teams",
+          uri: "https://smba.trafficmanager.net/amer/",
+          threadKey
+        }
+      }));
+
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        outcome: "unauthorized",
+        reason: "channel_binding_mismatch"
+      });
+      const eventsResponse = await app.request(`/v1/runs/run_thread_teams_missing_${suffix}/events`);
+      const { events } = await eventsResponse.json();
+      expect(events.map((event: { type: string }) => event.type)).not.toContain("approval.decision.recorded");
+      expect(events.map((event: { type: string }) => event.type)).not.toContain("apply_plan.created");
+    }
   });
 
   it("does not replay Slack source delivery ids when creating action fallback child runs", async () => {

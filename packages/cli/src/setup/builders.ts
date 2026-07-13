@@ -152,6 +152,12 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               discordMode: input.discord.mode,
               ...(input.discord.webhookPath ? { discordWebhookPath: input.discord.webhookPath } : {})
             }
+          : {}),
+        ...(input.teams
+          ? {
+              ...(input.teams.tenantId ? { teamsTenantId: input.teams.tenantId } : {}),
+              ...(input.teams.webhookPath ? { teamsWebhookPath: input.teams.webhookPath } : {})
+            }
           : {})
       }
     },
@@ -283,6 +289,16 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               ...(input.discord.publicKey ? { publicKey: input.discord.publicKey } : {}),
               botToken: input.discord.botToken,
               ...(input.discord.webhookPath ? { webhookPath: input.discord.webhookPath } : {})
+            }
+          }
+        : {}),
+      ...(input.teams
+        ? {
+            teams: {
+              appId: input.teams.appId,
+              appPassword: input.teams.appPassword,
+              ...(input.teams.tenantId ? { tenantId: input.teams.tenantId } : {}),
+              webhookPath: input.teams.webhookPath ?? "/teams/messages"
             }
           }
         : {})

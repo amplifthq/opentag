@@ -17,7 +17,7 @@ const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
 const CliLanguageSchema = z.enum(["en", "zh-CN"]);
-const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "linear", "telegram", "discord"]);
+const PlatformSchema = z.enum(["lark", "slack", "github", "gitlab", "linear", "telegram", "discord", "teams"]);
 const LarkSetupMethodSchema = z.enum(["saved", "scan", "manual"]);
 const SlackModeSchema = z.enum(["socket_mode", "events_api"]);
 const TelegramModeSchema = z.enum(["polling", "webhook"]);
@@ -362,6 +362,15 @@ const DiscordPlatformSchema = z
     }
   });
 
+const TeamsPlatformSchema = z
+  .object({
+    appId: z.string().min(1),
+    appPassword: SecretStringSchema,
+    tenantId: z.string().min(1).optional(),
+    webhookPath: z.string().min(1).optional()
+  })
+  .strict();
+
 const PreferencesSchema = z
   .object({
     language: CliLanguageSchema.optional(),
@@ -392,7 +401,9 @@ const PreferencesSchema = z
         telegramBotId: z.string().min(1).optional(),
         telegramBotUsername: z.string().min(1).optional(),
         discordMode: DiscordModeSchema.optional(),
-        discordWebhookPath: z.string().min(1).optional()
+        discordWebhookPath: z.string().min(1).optional(),
+        teamsTenantId: z.string().min(1).optional(),
+        teamsWebhookPath: z.string().min(1).optional()
       })
       .strict()
       .optional()
@@ -420,7 +431,8 @@ export const OpenTagCliConfigSchema = z
         gitlab: GitLabPlatformSchema.optional(),
         linear: LinearPlatformSchema.optional(),
         telegram: TelegramPlatformSchema.optional(),
-        discord: DiscordPlatformSchema.optional()
+        discord: DiscordPlatformSchema.optional(),
+        teams: TeamsPlatformSchema.optional()
       })
       .strict()
   })
@@ -546,6 +558,7 @@ function redactValue(key: string, value: unknown): unknown {
   }
   if (
     [
+      "appPassword",
       "appSecret",
       "appToken",
       "botToken",

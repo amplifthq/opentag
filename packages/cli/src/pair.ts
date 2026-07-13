@@ -183,11 +183,16 @@ function discordRelayInteractionsUrl(relayUrl: string, webhookPath = "/discord/i
   return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
 }
 
+function teamsRelayWebhookUrl(relayUrl: string, webhookPath = "/teams/messages"): string {
+  return `${stripTrailingSlash(relayUrl)}${webhookPath}`;
+}
+
 export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
   const projectTargets = input.config.daemon.repositories.map((repository) => {
     return `  ${formatConfiguredProjectTargetSummary(repository)}`;
   });
   const discord = input.config.platforms.discord;
+  const teams = input.config.platforms.teams;
   return [
     "OpenTag relay pairing updated.",
     `Config: ${input.configPath}`,
@@ -208,6 +213,7 @@ export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
       ? [`Linear OAuth install URL: ${input.config.platforms.linear.auth.authorizationUrl}`]
       : []),
     ...(discord?.mode === "webhook" ? [`Discord Interactions Endpoint URL: ${discordRelayInteractionsUrl(input.relayUrl, discord.webhookPath)}`] : []),
+    ...(teams ? [`Microsoft Teams Messaging Endpoint URL: ${teamsRelayWebhookUrl(input.relayUrl, teams.webhookPath)}`] : []),
     "Next steps:",
     `  opentag start --config ${input.configPath}`,
     "  opentag service start"

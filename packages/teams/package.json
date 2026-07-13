@@ -1,0 +1,34 @@
+{
+  "name": "@opentag/teams",
+  "version": "0.4.0",
+  "description": "Microsoft Teams activity normalization and callback rendering for OpenTag.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "publishConfig": { "access": "public" },
+  "keywords": ["opentag", "teams", "microsoft-teams", "agents", "webhooks"],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentag/core": "workspace:*",
+    "botframework-connector": "^4.23.3",
+    "hono": "^4.12.27"
+  },
+  "devDependencies": {
+    "jose": "^5.9.6",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}

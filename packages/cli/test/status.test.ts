@@ -302,6 +302,24 @@ describe("OpenTag CLI status", () => {
     expect(formatted).not.toContain("GitLab relay mode is not supported");
   });
 
+  it("reports Microsoft Teams relay ingress as unsupported", async () => {
+    const relayConfig = githubRelayConfig();
+    relayConfig.platforms.teams = {
+      appId: "teams_app_id",
+      appPassword: "teams_app_password",
+      webhookPath: "/teams/messages"
+    };
+    const summary = await statusFromConfig({
+      config: relayConfig,
+      configPath: "/tmp/opentag/config.json",
+      fetchImpl: vi.fn(async () => Response.json({ ok: true }))
+    });
+
+    const formatted = formatStatus(summary);
+    expect(formatted).toContain("FAIL relay platform support: Microsoft Teams relay mode is not supported in this MVP; use local mode for those ingress paths.");
+    expect(formatted).not.toContain("OK Microsoft Teams Bot Framework JWT");
+  });
+
   it("formats Linear relay security as supported when a Linear webhook secret is configured", async () => {
     const summary = await statusFromConfig({
       config: linearRelayConfig(),

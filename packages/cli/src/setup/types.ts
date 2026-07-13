@@ -101,6 +101,13 @@ export type DiscordSetupInput = {
   webhookPath?: string;
 };
 
+export type TeamsSetupInput = {
+  appId: string;
+  appPassword: string;
+  tenantId?: string;
+  webhookPath?: string;
+};
+
 export type HermesSetupInput = {
   command?: string;
   profile?: string;
@@ -125,6 +132,7 @@ export type OpenTagSetupInput = {
   linear?: LinearSetupInput;
   telegram?: TelegramSetupInput;
   discord?: DiscordSetupInput;
+  teams?: TeamsSetupInput;
   hermes?: HermesSetupInput;
   agentSessionProfile?: AgentSessionProfileSetupInput;
 };
@@ -167,6 +175,8 @@ export type SetupDefaults = Partial<{
   telegramCallbackUri: string;
   discordMode: DiscordSetupMode;
   discordWebhookPath: string;
+  teamsTenantId: string;
+  teamsWebhookPath: string;
   hermesCommand: string;
   hermesProfile: string;
   hermesProfileTemplate: string;

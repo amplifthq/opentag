@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   OPEN_TAG_PLATFORM_CAPABILITIES,
+  isOpenTagPlatformId,
   platformCapabilityForProvider,
   shouldDeliverCallbackProgress,
   shouldDeliverCallbackRunStatus,
@@ -53,5 +54,18 @@ describe("platform capability catalog", () => {
 
   it("returns undefined for providers outside the shared catalog", () => {
     expect(platformCapabilityForProvider("custom")).toBeUndefined();
+  });
+});
+
+describe("teams platform capability", () => {
+  it("registers teams as a known platform", () => {
+    expect(isOpenTagPlatformId("teams")).toBe(true);
+  });
+  it("uses the status_update liveness strategy so progress edits are delivered", () => {
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.teams.livenessStrategy).toBe("status_update");
+    expect(shouldDeliverCallbackProgress("teams")).toBe(true);
+  });
+  it("requires explicit addressing (the bot must be @mentioned)", () => {
+    expect(OPEN_TAG_PLATFORM_CAPABILITIES.teams.requiresExplicitAddressing).toBe(true);
   });
 });

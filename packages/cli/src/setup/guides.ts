@@ -31,7 +31,11 @@ export const OFFICIAL_SETUP_LINKS = {
   discordApplications: "https://discord.com/developers/applications",
   discordInteractionsOverview: "https://docs.discord.com/developers/interactions/overview",
   discordGatewayEventsDocs: "https://docs.discord.com/developers/events/gateway-events#interaction-create",
-  discordApplicationCommands: "https://docs.discord.com/developers/interactions/application-commands"
+  discordApplicationCommands: "https://docs.discord.com/developers/interactions/application-commands",
+  teamsAzureBotPortal: "https://portal.azure.com",
+  teamsBotFrameworkRegistrationDocs: "https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration",
+  teamsBotForTeamsDocs: "https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/create-a-bot-for-teams",
+  teamsSendActivityDocs: "https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/rest-api/send-proactive-messages"
 } as const;
 
 function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
@@ -51,6 +55,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
         return ["Telegram bot token（从 BotFather 获取）", "OpenTag 会从 bot token 推导 bot id", "默认使用 getUpdates polling，不需要公网 tunnel", "可选 bot username（群聊里用于 @botname 或 /opentag@botname）", "高级 webhook 模式才需要公网 HTTPS tunnel 和 secret token"];
       case "discord":
         return ["Discord Bot Token（Bot 页面，用于 Gateway 连接和回写频道消息）", "默认使用 Gateway 接收 INTERACTION_CREATE，不需要公网 tunnel", "注册 /opentag slash command", "高级 webhook 模式才需要 Application Public Key 和 Interactions Endpoint URL"];
+      case "teams":
+        return ["Microsoft Teams App ID 和 App Password（在 Azure Bot 资源里创建）", "可选 Tenant ID，用于限定单租户应用", "Teams 只支持 webhook 接收消息，需要公网 HTTPS Messaging endpoint", "默认 webhook 路径为 /teams/messages"];
     }
   }
 
@@ -69,6 +75,8 @@ function setupNeeds(platform: PlatformId, language: CliLanguage): string[] {
       return ["Telegram bot token from BotFather", "OpenTag derives the bot id from the bot token", "Default getUpdates polling does not need a public tunnel", "Optional bot username for @botname or /opentag@botname in group chats", "Advanced webhook mode needs a public HTTPS tunnel and secret token"];
     case "discord":
       return ["Discord Bot Token from the Bot page for Gateway connection and channel replies", "Default Gateway delivery does not need a public tunnel", "A registered /opentag slash command", "Advanced webhook mode needs an Application Public Key and Interactions Endpoint URL"];
+    case "teams":
+      return ["Microsoft Teams App ID and App Password from an Azure Bot resource", "Optional Tenant ID to restrict the app to a single tenant", "Teams only delivers messages over webhook; a public HTTPS Messaging endpoint is required", "Default webhook path is /teams/messages"];
   }
 }
 
@@ -118,6 +126,13 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
           `Discord Interactions Endpoint 文档（高级 webhook 模式）: ${OFFICIAL_SETUP_LINKS.discordInteractionsOverview}`,
           `Discord slash command 文档: ${OFFICIAL_SETUP_LINKS.discordApplicationCommands}`
         ];
+      case "teams":
+        return [
+          `Azure Portal（创建 Bot 资源）: ${OFFICIAL_SETUP_LINKS.teamsAzureBotPortal}`,
+          `Bot Framework 注册文档: ${OFFICIAL_SETUP_LINKS.teamsBotFrameworkRegistrationDocs}`,
+          `Teams Bot 配置文档: ${OFFICIAL_SETUP_LINKS.teamsBotForTeamsDocs}`,
+          `Teams 消息发送文档: ${OFFICIAL_SETUP_LINKS.teamsSendActivityDocs}`
+        ];
     }
   }
 
@@ -164,6 +179,13 @@ function officialSetupLinks(platform: PlatformId, language: CliLanguage): string
         `Discord Gateway docs: ${OFFICIAL_SETUP_LINKS.discordGatewayEventsDocs}`,
         `Discord Interactions Endpoint docs (advanced webhook mode): ${OFFICIAL_SETUP_LINKS.discordInteractionsOverview}`,
         `Discord slash command docs: ${OFFICIAL_SETUP_LINKS.discordApplicationCommands}`
+      ];
+    case "teams":
+      return [
+        `Azure Portal (create a Bot resource): ${OFFICIAL_SETUP_LINKS.teamsAzureBotPortal}`,
+        `Bot Framework registration docs: ${OFFICIAL_SETUP_LINKS.teamsBotFrameworkRegistrationDocs}`,
+        `Teams bot setup docs: ${OFFICIAL_SETUP_LINKS.teamsBotForTeamsDocs}`,
+        `Teams send-message docs: ${OFFICIAL_SETUP_LINKS.teamsSendActivityDocs}`
       ];
   }
 }
@@ -437,5 +459,29 @@ export function formatDiscordCredentialHelp(language: CliLanguage): string {
     `- Gateway docs: ${OFFICIAL_SETUP_LINKS.discordGatewayEventsDocs}`,
     `- Interactions docs: ${OFFICIAL_SETUP_LINKS.discordInteractionsOverview}`,
     `- Slash command docs: ${OFFICIAL_SETUP_LINKS.discordApplicationCommands}`
+  ].join("\n");
+}
+
+export function formatTeamsCredentialHelp(language: CliLanguage): string {
+  if (language === "zh-CN") {
+    return [
+      "Microsoft Teams 凭据在哪里拿:",
+      `- Azure Portal（创建 Bot 资源）: ${OFFICIAL_SETUP_LINKS.teamsAzureBotPortal}`,
+      "- App ID / App Password: 在 Azure Bot 资源的 Configuration 页面创建客户端密码。",
+      "- Tenant ID: 只有单租户应用才需要，位于 Azure AD 应用注册页面。",
+      "- Messaging endpoint: Teams 只支持 webhook 接收消息，需要公网 HTTPS URL，默认路径 /teams/messages。",
+      `- Bot Framework 注册文档: ${OFFICIAL_SETUP_LINKS.teamsBotFrameworkRegistrationDocs}`,
+      `- Teams Bot 配置文档: ${OFFICIAL_SETUP_LINKS.teamsBotForTeamsDocs}`
+    ].join("\n");
+  }
+
+  return [
+    "Where to find Microsoft Teams credentials:",
+    `- Azure Portal (create a Bot resource): ${OFFICIAL_SETUP_LINKS.teamsAzureBotPortal}`,
+    "- App ID / App Password: create a client secret on the Azure Bot resource's Configuration page.",
+    "- Tenant ID: only needed for single-tenant apps; found on the Azure AD app registration page.",
+    "- Messaging endpoint: Teams only delivers messages over webhook; a public HTTPS URL is required, default path /teams/messages.",
+    `- Bot Framework registration docs: ${OFFICIAL_SETUP_LINKS.teamsBotFrameworkRegistrationDocs}`,
+    `- Teams bot setup docs: ${OFFICIAL_SETUP_LINKS.teamsBotForTeamsDocs}`
   ].join("\n");
 }
