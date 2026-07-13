@@ -226,7 +226,7 @@ export function createSlackReactionPayload(input: { channelId: string; messageTs
 }
 
 function truncateSlackText(text: string, maxLength: number): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
+  const normalized = text.replace(/\r\n/g, "\n").trim();
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
@@ -239,12 +239,8 @@ function firstMarkdownSection(text: string, heading: string): string | undefined
 
 function compactSlackSummary(summary: string): string {
   const whatChanged = firstMarkdownSection(summary, "What changed");
-  const firstParagraph = summary
-    .split(/\n\s*\n/)
-    .map((part) => part.trim())
-    .find(Boolean);
-  const selected = whatChanged ?? firstParagraph ?? summary;
-  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), 360);
+  const selected = whatChanged ?? summary;
+  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), 2800);
 }
 
 function compactNextAction(nextAction: string): string {
