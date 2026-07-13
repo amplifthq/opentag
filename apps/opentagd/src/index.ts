@@ -170,7 +170,8 @@ program
         ...(binding.repoProvider && binding.owner && binding.repo
           ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
           : {}),
-        ...(binding.metadata ? { metadata: binding.metadata } : {})
+        ...(binding.metadata ? { metadata: binding.metadata } : {}),
+        ...(binding.ownership ? { ownership: binding.ownership } : {})
       });
       const target = binding.repoProvider && binding.owner && binding.repo
         ? `${binding.repoProvider}:${binding.owner}/${binding.repo}`

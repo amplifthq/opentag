@@ -85,6 +85,30 @@ function jsonRequest(body: unknown) {
   };
 }
 
+async function bindSourceChannel(
+  app: ReturnType<typeof createDispatcherApp>,
+  event: { source: string; metadata?: Record<string, unknown> }
+): Promise<void> {
+  if (event.source !== "slack" && event.source !== "lark") return;
+  const metadata = event.metadata ?? {};
+  const accountId = event.source === "slack" ? metadata["teamId"] : metadata["tenantKey"];
+  const conversationId = event.source === "slack" ? metadata["channelId"] : metadata["chatId"];
+  if (typeof accountId !== "string" || typeof conversationId !== "string") {
+    throw new Error(`Cannot bind incomplete ${event.source} source channel fixture.`);
+  }
+  const hasRepository = [metadata["repoProvider"], metadata["owner"], metadata["repo"]]
+    .every((value) => typeof value === "string" && value.length > 0);
+  const response = await app.request("/v1/channel-bindings", jsonRequest({
+    provider: event.source,
+    accountId,
+    conversationId,
+    ...(hasRepository
+      ? { repoProvider: metadata["repoProvider"], owner: metadata["owner"], repo: metadata["repo"] }
+      : {})
+  }));
+  expect(response.status).toBe(201);
+}
+
 function authorizedJsonRequest(body: unknown, token = "pairing_token") {
   return {
     method: "POST",
@@ -355,6 +379,7 @@ async function seedCompletedProposal(input: {
     defaultExecutor: "echo",
     ...(input.allowedActors ? { allowedActors: input.allowedActors } : {})
   }));
+  await bindSourceChannel(input.app, input.event);
   const createResponse = await input.app.request("/v1/runs", jsonRequest({ runId: input.runId, event: input.event }));
   expect(createResponse.status).toBe(201);
   await input.app.request("/v1/runners/runner_1/claim", { method: "POST" });
@@ -1371,6 +1396,11 @@ describe("dispatcher API", () => {
         defaultExecutor: "echo"
       })
     );
+    await bindSourceChannel(app, slackRepoEvent({
+      id: "evt_slack_active_binding",
+      sourceEventId: "slack_active_binding",
+      threadKey: "T123|C123|1710000000.000100"
+    }));
 
     const first = await app.request(
       "/v1/runs",
@@ -3021,6 +3051,7 @@ describe("dispatcher API", () => {
       defaultExecutor: "echo",
       allowedActors: ["ou_sender"]
     }));
+    await bindSourceChannel(app, larkRepoEvent({ id: "evt_hook_binding", sourceEventId: "msg_hook_binding" }));
     const createResponse = await app.request("/v1/runs", jsonRequest({
       runId: "run_hook_ingest_progress",
       event: larkRepoEvent({ id: "evt_hook_ingest_progress", sourceEventId: "msg_hook_ingest_progress" })
@@ -3327,6 +3358,7 @@ describe("dispatcher API", () => {
         threadKey: "T123|C123|1710000000.000100"
       }
     };
+    await bindSourceChannel(app, slackEvent);
 
     const createResponse = await app.request("/v1/runs", {
       method: "POST",
@@ -3415,6 +3447,7 @@ describe("dispatcher API", () => {
       sourceEventId: "EvSafeRunnerIngress",
       threadKey: "T123|C123|1710000000.000100"
     });
+    await bindSourceChannel(app, event);
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_safe_runner_ingress", event }))).status).toBe(201);
     const firstClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
     const firstLease = await firstClaim.json() as { attemptId: string; fencingToken: string };
@@ -3489,6 +3522,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = slackRepoEvent({ id: "evt_slack_receipt", sourceEventId: "EvSlackReceipt", threadKey: "T123|C123|1710000000.000100" });
+    await bindSourceChannel(app, event);
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt", event }));
     expect(createResponse.status).toBe(201);
 
@@ -3584,6 +3618,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = slackRepoEvent({ id: "evt_slack_receipt_fallback", sourceEventId: "EvSlackReceiptFallback", threadKey: "T123|C123|1710000000.000100" });
+    await bindSourceChannel(app, event);
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_slack_receipt_fallback", event }));
     expect(createResponse.status).toBe(201);
     expect(callbacks).toEqual([
@@ -3638,6 +3673,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = larkRepoEvent({ id: "evt_lark_receipt", sourceEventId: "EvLarkReceipt" });
+    await bindSourceChannel(app, event);
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt", event }));
     expect(createResponse.status).toBe(201);
 
@@ -3683,6 +3719,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = larkRepoEvent({ id: "evt_lark_receipt_fallback", sourceEventId: "EvLarkReceiptFallback" });
+    await bindSourceChannel(app, event);
     const createResponse = await app.request("/v1/runs", jsonRequest({ runId: "run_lark_receipt_fallback", event }));
     expect(createResponse.status).toBe(201);
     expect(callbacks).toEqual([{ kind: "acknowledgement", hasRich: true }]);
@@ -3721,6 +3758,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = larkRepoEvent({ id: "evt_lark_short_status_card", sourceEventId: "EvLarkShortStatusCard" });
+    await bindSourceChannel(app, event);
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_short_status_card", event }))).status).toBe(201);
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
     expect(
@@ -3787,6 +3825,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = larkRepoEvent({ id: "evt_lark_delayed_status_card", sourceEventId: "EvLarkDelayedStatusCard" });
+    await bindSourceChannel(app, event);
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_delayed_status_card", event }))).status).toBe(201);
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
     expect(
@@ -3865,6 +3904,7 @@ describe("dispatcher API", () => {
     }));
 
     const event = larkRepoEvent({ id: "evt_lark_progress_status_card", sourceEventId: "EvLarkProgressStatusCard" });
+    await bindSourceChannel(app, event);
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_lark_progress_status_card", event }))).status).toBe(201);
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
     await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/running", jsonRequest({ executor: "codex" }));
@@ -3936,6 +3976,7 @@ describe("dispatcher API", () => {
         channelBotId: "ou_bot"
       }
     };
+    await bindSourceChannel(app, larkEvent);
 
     const createResponse = await app.request("/v1/runs", {
       method: "POST",
@@ -4073,6 +4114,7 @@ describe("dispatcher API", () => {
         channelBotId: "ou_bot"
       }
     };
+    await bindSourceChannel(app, larkEvent);
 
     const createResponse = await app.request("/v1/runs", {
       method: "POST",
@@ -4740,6 +4782,11 @@ describe("dispatcher API", () => {
         defaultExecutor: "echo"
       })
     });
+    await bindSourceChannel(app, slackRepoEvent({
+      id: "evt_status_key_binding",
+      sourceEventId: "EvStatusBinding",
+      threadKey: "T123|C123|1710000000.000100"
+    }));
 
     const response = await app.request("/v1/runs", {
       method: "POST",
@@ -5520,6 +5567,58 @@ describe("dispatcher API", () => {
     });
   });
 
+  it.each([
+    {
+      source: "slack",
+      metadata: { teamId: "T123", channelId: "C456" },
+      callback: { provider: "slack", uri: "https://slack.com/api/chat.postMessage" }
+    },
+    {
+      source: "lark",
+      metadata: { tenantKey: "tenant_1", chatId: "oc_chat" },
+      callback: { provider: "lark", uri: "lark://im/v1/messages" }
+    }
+  ])("rejects $source run admission when its resolved channel has no binding", async ({ source, metadata, callback }) => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const response = await app.request("/v1/runs", jsonRequest({
+      runId: `run_${source}_unbound`,
+      event: {
+        ...validEvent,
+        id: `evt_${source}_unbound`,
+        source,
+        sourceEventId: `message_${source}_unbound`,
+        actor: { provider: source, providerUserId: "user_1" },
+        context: [],
+        permissions: [],
+        callback,
+        metadata
+      }
+    }));
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "managed_channel_ownership_unverified" });
+  });
+
+  it("preserves unbound run admission for non-Slack/Lark channel providers", async () => {
+    const app = createDispatcherApp({ databasePath: ":memory:" });
+    const response = await app.request("/v1/runs", jsonRequest({
+      runId: "run_teams_unbound",
+      event: {
+        ...validEvent,
+        id: "evt_teams_unbound",
+        source: "teams",
+        sourceEventId: "message_teams_unbound",
+        actor: { provider: "teams", providerUserId: "user_1" },
+        context: [],
+        permissions: [],
+        callback: { provider: "teams", uri: "https://smba.trafficmanager.net/amer/" },
+        metadata: { accountId: "tenant_1", conversationId: "conversation_1" }
+      }
+    }));
+
+    expect(response.status).toBe(201);
+  });
+
   it("fails closed when a managed channel run cannot prove the configured application identity", async () => {
     const app = createDispatcherApp({
       databasePath: ":memory:",
@@ -5749,6 +5848,7 @@ describe("dispatcher API", () => {
       callback: { provider: "slack", uri: "https://example.com/callback" },
       metadata: { teamId: "T123", channelId: "C456" }
     };
+    await bindSourceChannel(app, ordinaryEvent);
     const created = await app.request("/v1/runs", jsonRequest({ runId: "run_scratch_dispatcher", event: ordinaryEvent }));
     expect([201, 202]).toContain(created.status);
 
@@ -6284,6 +6384,11 @@ describe("dispatcher API", () => {
         runnerId: "runner_1"
       })
     });
+    await bindSourceChannel(app, slackRepoEvent({
+      id: "evt_slack_bound_binding",
+      sourceEventId: "EvBoundBinding",
+      threadKey: "T123|C123|1710000000.000100"
+    }));
 
     const response = await app.request("/v1/runs", {
       method: "POST",
@@ -6373,6 +6478,7 @@ describe("dispatcher API", () => {
         channelBotId: "U_APP"
       }
     };
+    await bindSourceChannel(app, slackEvent);
 
     const createResponse = await app.request("/v1/runs", {
       method: "POST",
@@ -7228,6 +7334,8 @@ describe("dispatcher API", () => {
         }
       ]
     });
+    const removedBinding = await app.request("/v1/channel-bindings/slack/T123/C123", { method: "DELETE" });
+    expect(removedBinding.status).toBe(204);
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
       rawText: "continue 1",

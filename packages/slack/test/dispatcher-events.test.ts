@@ -1,7 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSlackDispatcherEventProcessorInput } from "../src/dispatcher-events.js";
+import { createSlackDispatcherEventProcessorInput, type SlackDispatcherEventConfig } from "../src/dispatcher-events.js";
 
 describe("Slack dispatcher-backed self-service", () => {
+  it.each([
+    ["appId", { dispatcherUrl: "http://dispatcher.test", appId: "A123" }],
+    ["channelPrincipalCredential", { dispatcherUrl: "http://dispatcher.test", channelPrincipalCredential: "slack_principal_123" }]
+  ])("rejects Slack dispatcher config with only %s", (_field, config) => {
+    expect(() => createSlackDispatcherEventProcessorInput(config as unknown as SlackDispatcherEventConfig)).toThrow(
+      "Slack appId and channelPrincipalCredential must be configured together."
+    );
+  });
+
   it("renders dispatcher channel status and posts it back to the Slack thread", async () => {
     const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

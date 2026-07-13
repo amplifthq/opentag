@@ -487,7 +487,8 @@ async function managedChannelOwnershipVerified(input: {
   const scope = channelBindingScopeFromEvent(input.event);
   if (!scope) return input.event.source !== "slack" && input.event.source !== "lark";
   const binding = await input.repo.getChannelBinding({ provider: input.event.source, ...scope });
-  if (!binding?.ownership) return true;
+  if (!binding) return input.event.source !== "slack" && input.event.source !== "lark";
+  if (!binding.ownership) return true;
   return input.principal?.provider === input.event.source
     && input.principal.applicationId === binding.ownership.applicationId
     && (!binding.ownership.botId || input.principal.botId === binding.ownership.botId);

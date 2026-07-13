@@ -4,17 +4,28 @@ import { createDoctorSummaryPresentation, createSourceThreadStatusPresentation, 
 import type { SlackEventProcessorInput, SlackSelfServiceReply, SlackStopRunResult } from "./events.js";
 import { createSlackDoctorSummaryBlocks, createSlackPostMessagePayload, createSlackSourceThreadStatusBlocks } from "./render.js";
 
+export type SlackChannelPrincipalConfig =
+  | { appId: string; channelPrincipalCredential: string }
+  | { appId?: never; channelPrincipalCredential?: never };
+
 export type SlackDispatcherEventConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
-  channelPrincipalCredential?: string;
   botToken?: string;
   callbackUri?: string;
-  appId?: string;
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   fetchImpl?: typeof fetch;
-};
+} & SlackChannelPrincipalConfig;
+
+function assertSlackChannelPrincipalConfig(config: {
+  appId?: string;
+  channelPrincipalCredential?: string;
+}): void {
+  if (Boolean(config.appId) !== Boolean(config.channelPrincipalCredential)) {
+    throw new Error("Slack appId and channelPrincipalCredential must be configured together.");
+  }
+}
 
 function formatProjectTarget(input: { repoProvider?: string; owner?: string; repo?: string }): string {
   if (!input.owner || !input.repo) return "not bound";
@@ -139,6 +150,7 @@ function mapStopError(input: { error: unknown; runId?: string }): SlackStopRunRe
 }
 
 export function createSlackDispatcherEventProcessorInput(config: SlackDispatcherEventConfig): SlackEventProcessorInput {
+  assertSlackChannelPrincipalConfig(config);
   const fetchImpl = config.fetchImpl ?? fetch;
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,

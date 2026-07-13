@@ -1,9 +1,21 @@
 import {
   startSlackIngress,
   startSlackSocketModeIngress,
+  type SlackChannelPrincipalConfig,
   type SlackEventsApiIngressConfig,
   type SlackSocketModeIngressConfig
 } from "@opentag/slack";
+
+type SharedSlackIngressConfig = {
+  dispatcherUrl: string;
+  agentId: string;
+  dispatcherToken?: string;
+  botToken?: string;
+  bindingAdminUserIds?: string[];
+  runTimeoutMs?: number;
+  maxRequestBodyBytes?: number;
+  callbackUri?: string;
+} & SlackChannelPrincipalConfig;
 
 function positivePort(value: string | undefined, fallback: number): number {
   const port = Number(value ?? String(fallback));
@@ -30,26 +42,31 @@ function csvList(value: string | undefined): string[] | undefined {
   return items?.length ? items : undefined;
 }
 
-function sharedConfigFromEnv(env: NodeJS.ProcessEnv) {
+function sharedConfigFromEnv(env: NodeJS.ProcessEnv): SharedSlackIngressConfig {
   const dispatcherUrl = env.OPENTAG_DISPATCHER_URL;
   if (!dispatcherUrl) {
     throw new Error("OPENTAG_DISPATCHER_URL is required");
+  }
+  const appId = env.OPENTAG_SLACK_APP_ID;
+  const channelPrincipalCredential = env.OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL;
+  if (Boolean(appId) !== Boolean(channelPrincipalCredential)) {
+    throw new Error("OPENTAG_SLACK_APP_ID and OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
   }
   const botToken = env.OPENTAG_SLACK_BOT_TOKEN ?? env.SLACK_BOT_TOKEN;
   const runTimeoutMs = positiveIntegerFromEnv("OPENTAG_RUN_TIMEOUT_MS", env.OPENTAG_RUN_TIMEOUT_MS);
   const maxRequestBodyBytes = positiveIntegerFromEnv("OPENTAG_MAX_REQUEST_BODY_BYTES", env.OPENTAG_MAX_REQUEST_BODY_BYTES);
   const bindingAdminUserIds = csvList(env.OPENTAG_SLACK_BINDING_ADMIN_USER_IDS);
-  return {
+  const shared = {
     dispatcherUrl,
     agentId: env.OPENTAG_SLACK_AGENT_ID ?? "opentag",
     ...(env.OPENTAG_DISPATCHER_TOKEN ? { dispatcherToken: env.OPENTAG_DISPATCHER_TOKEN } : {}),
-    ...(env.OPENTAG_SLACK_APP_ID ? { appId: env.OPENTAG_SLACK_APP_ID } : {}),
     ...(botToken ? { botToken } : {}),
     ...(bindingAdminUserIds ? { bindingAdminUserIds } : {}),
     ...(runTimeoutMs ? { runTimeoutMs } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     ...(env.OPENTAG_SLACK_POST_MESSAGE_URL ? { callbackUri: env.OPENTAG_SLACK_POST_MESSAGE_URL } : {})
   };
+  return appId && channelPrincipalCredential ? { ...shared, appId, channelPrincipalCredential } : shared;
 }
 
 function eventsApiConfigFromEnv(env: NodeJS.ProcessEnv): SlackEventsApiIngressConfig {
