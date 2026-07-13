@@ -167,7 +167,7 @@ export function createAdmissionRuntime(input: {
       if (!repoKey) {
         const metadata = request.event.metadata ?? {};
         const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
-        if (request.event.source === "github" || hasRepositoryMetadata) {
+        if (request.event.source === "github" || request.event.source === "gitlab" || hasRepositoryMetadata) {
           return {
             outcome: "needs_human_decision",
             decision: admissionDecision({

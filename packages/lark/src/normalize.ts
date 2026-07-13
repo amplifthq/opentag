@@ -76,7 +76,18 @@ export function normalizeLarkChannelMessage(input: LarkMessageInput): OpenTagCha
   });
 }
 
-function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+function repositoryMetadataFromBinding(
+  binding: LarkChannelBinding
+): { repoProvider: string; owner: string; repo: string } | undefined {
+  if (!binding.owner?.trim() || !binding.repo?.trim()) return undefined;
+  return {
+    repoProvider: binding.repoProvider?.trim() || "github",
+    owner: binding.owner,
+    repo: binding.repo
+  };
+}
+
+function permissionsForIntent(intent: OpenTagCommand["intent"], hasRepositoryTarget: boolean): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     {
       scope: "chat:postMessage",
@@ -88,7 +99,7 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
     }
   ];
 
-  if (intent === "fix" || intent === "run") {
+  if (hasRepositoryTarget && (intent === "fix" || intent === "run")) {
     permissions.push(
       {
         scope: "repo:read",
@@ -160,6 +171,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
   const command = commandFromRawText(rawText);
   const agentId = input.agentId ?? "opentag";
   const renderLocale = input.renderLocale ?? larkRenderLocaleFromDomain(input.domain);
+  const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
 
   return {
     id: `evt_lark_message_${input.eventId}`,
@@ -194,7 +206,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       },
       ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForIntent(command.intent),
+    permissions: permissionsForIntent(command.intent, repositoryMetadata !== undefined),
     callback: {
       provider: "lark",
       uri: input.callbackUri ?? "lark://im/v1/messages",
@@ -218,9 +230,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       ...(input.applicationId ? { channelApplicationId: input.applicationId } : {}),
       ...(input.botOpenId ? { channelBotId: input.botOpenId } : {}),
       ...commandMetadata(command),
-      ...(input.binding.owner && input.binding.repo
-        ? { repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo }
-        : {})
+      ...repositoryMetadata
     }
   };
 }

@@ -82,6 +82,9 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
     expect(event?.metadata).toMatchObject({ channelApplicationId: "cli_app_123", channelBotId: "ou_bot" });
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(
+      expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
+    );
   });
 
   it("derives Feishu render locale from the domain", () => {
@@ -100,5 +103,37 @@ describe("normalizeLarkMessage", () => {
       binding: { ...baseInput.binding, repoProvider: "gitlab" }
     });
     expect(event?.metadata.repoProvider).toBe("gitlab");
+  });
+
+  it.each(["fix", "run"] as const)(
+    "keeps repository-free %s commands at channel-and-runner least privilege",
+    (intent) => {
+      const event = normalizeLarkMessage({
+        ...baseInput,
+        text: `@_user_1 ${intent} the login bug`,
+        binding: { tenantKey: "tk_123", chatId: "oc_chat" }
+      });
+
+      expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "runner:local"]);
+      expect(event?.metadata).not.toHaveProperty("repoProvider");
+      expect(event?.metadata).not.toHaveProperty("owner");
+      expect(event?.metadata).not.toHaveProperty("repo");
+    }
+  );
+
+  it("treats a partial runtime repository binding as repository-free", () => {
+    const event = normalizeLarkMessage({
+      ...baseInput,
+      binding: {
+        tenantKey: "tk_123",
+        chatId: "oc_chat",
+        owner: "acme"
+      } as LarkMessageInput["binding"]
+    });
+
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "runner:local"]);
+    expect(event?.metadata).not.toHaveProperty("repoProvider");
+    expect(event?.metadata).not.toHaveProperty("owner");
+    expect(event?.metadata).not.toHaveProperty("repo");
   });
 });

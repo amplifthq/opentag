@@ -322,4 +322,83 @@ describe("Admission Runtime", () => {
     expect(result).toMatchObject({ outcome: "start", binding: { runnerId: "runner_1" } });
     expect(getRepoBinding).toHaveBeenCalledWith(localProject);
   });
+
+  it.each([
+    ["missing", {}],
+    ["partial", { repoProvider: "gitlab", owner: "acme" }]
+  ])("fails closed when a GitLab event has %s repository context", async (_label, metadata) => {
+    const getRepoBinding = vi.fn(async () => {
+      throw new Error("should not resolve a binding without complete repository context");
+    });
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding,
+        findActiveRunForConversation: async () => null,
+        createFollowUpRequest: async () => {
+          throw new Error("should not queue follow-up");
+        },
+        appendRunEvent: async () => undefined
+      } as never
+    });
+
+    const result = await admission.admitRun({
+      requestId: `req_gitlab_${_label}`,
+      event: {
+        ...event,
+        id: `evt_gitlab_${_label}`,
+        source: "gitlab",
+        sourceEventId: `note_${_label}`,
+        actor: { provider: "gitlab", providerUserId: "42", handle: "octocat" },
+        callback: { provider: "gitlab", uri: "https://gitlab.example/api/v4/projects/1/notes" },
+        metadata
+      }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: { reasonCode: "repo_context_missing" }
+    });
+    expect(getRepoBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(["slack", "lark"] as const)("admits repository-free %s channel events", async (source) => {
+    const getRepoBinding = vi.fn(async () => {
+      throw new Error("should not resolve a repository binding for channel-native work");
+    });
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding,
+        findActiveRunForConversation: async () => null,
+        createFollowUpRequest: async () => {
+          throw new Error("should not queue follow-up");
+        },
+        appendRunEvent: async () => undefined
+      } as never
+    });
+    const isSlack = source === "slack";
+
+    const result = await admission.admitRun({
+      requestId: `req_${source}_repo_free`,
+      event: {
+        ...event,
+        id: `evt_${source}_repo_free`,
+        source,
+        sourceEventId: `message_${source}`,
+        actor: { provider: source, providerUserId: "channel_user" },
+        permissions: [
+          { scope: "chat:postMessage", reason: "reply in the source thread" },
+          { scope: "runner:local", reason: "execute on a paired local daemon" }
+        ],
+        callback: isSlack
+          ? { provider: "slack", uri: "https://slack.com/api/chat.postMessage", threadKey: "T|C|1.0" }
+          : { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tk|oc|om" },
+        metadata: isSlack ? { teamId: "T", channelId: "C" } : { tenantKey: "tk", chatId: "oc" }
+      }
+    });
+
+    expect(result).toMatchObject({ outcome: "start" });
+    expect(getRepoBinding).not.toHaveBeenCalled();
+  });
 });

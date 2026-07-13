@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { encodeSlackThreadKey, normalizeSlackAppMention, normalizeSlackChannelMessage, parseSlackThreadKey, stripSlackAppMention } from "../src/normalize.js";
+import {
+  encodeSlackThreadKey,
+  type SlackAppMentionInput,
+  normalizeSlackAppMention,
+  normalizeSlackChannelMessage,
+  parseSlackThreadKey,
+  stripSlackAppMention
+} from "../src/normalize.js";
 
 describe("Slack normalization", () => {
   it("strips a Slack app mention and preserves the remaining command", () => {
@@ -247,5 +254,88 @@ describe("Slack normalization", () => {
 
     expect(event?.command.intent).toBe("unknown");
     expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "reactions:write", "runner:local"]);
+  });
+
+  it.each([
+    ["fix", "<@U_APP> fix the login bug"],
+    ["run", "<@U_APP> run the test suite"],
+    ["write-like", "<@U_APP> Add one short sentence to README.md"]
+  ])("keeps repository-free %s commands at channel-and-runner least privilege", (_label, text) => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text,
+      ts: "1710000000.000100",
+      eventId: "EvRepoFree",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: { teamId: "T123", channelId: "C123" }
+    });
+
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual([
+      "chat:postMessage",
+      "reactions:write",
+      "runner:local"
+    ]);
+    expect(event?.metadata).not.toHaveProperty("repoProvider");
+    expect(event?.metadata).not.toHaveProperty("owner");
+    expect(event?.metadata).not.toHaveProperty("repo");
+  });
+
+  it("filters explicitly requested repository scopes without a complete repository target", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text:
+        "<@U_APP> fix auth --scope repo:read --scope repo:write --scope pr:create --scope pr:update --scope issue:create",
+      ts: "1710000000.000100",
+      eventId: "EvExplicitRepoFree",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: { teamId: "T123", channelId: "C123" }
+    });
+
+    expect(event?.command.parsed?.requestedScopes).toEqual([
+      "repo:read",
+      "repo:write",
+      "pr:create",
+      "pr:update",
+      "issue:create"
+    ]);
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual([
+      "chat:postMessage",
+      "reactions:write",
+      "runner:local",
+      "issue:create"
+    ]);
+  });
+
+  it("treats a partial runtime repository binding as repository-free", () => {
+    const event = normalizeSlackAppMention({
+      teamId: "T123",
+      channelId: "C123",
+      userId: "U456",
+      text: "<@U_APP> fix the login bug",
+      ts: "1710000000.000100",
+      eventId: "EvPartialRepo",
+      eventTime: 1710000000,
+      botUserId: "U_APP",
+      binding: {
+        teamId: "T123",
+        channelId: "C123",
+        repo: "demo"
+      } as SlackAppMentionInput["binding"]
+    });
+
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual([
+      "chat:postMessage",
+      "reactions:write",
+      "runner:local"
+    ]);
+    expect(event?.metadata).not.toHaveProperty("repoProvider");
+    expect(event?.metadata).not.toHaveProperty("owner");
+    expect(event?.metadata).not.toHaveProperty("repo");
   });
 });
