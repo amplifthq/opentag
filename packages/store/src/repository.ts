@@ -1747,7 +1747,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             .where(and(
               eq(attempts.id, current.currentAttemptId),
               eq(attempts.runId, input.runId),
-              inArray(attempts.status, ["assigned", "running", "needs_human"])
+              inArray(attempts.status, ["assigned", "running"])
             ))
             .run();
           if (attemptCancellation.changes !== 1) {
@@ -3079,7 +3079,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ) {
             return "stale_attempt" as const;
           }
-          if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) return "duplicate" as const;
+          if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
+            return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
+          }
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
             return "stale_attempt" as const;
           }
