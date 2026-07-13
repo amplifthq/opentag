@@ -32,7 +32,7 @@ const event: OpenTagEvent = {
   },
   permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
   callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-  metadata: { owner: "acme", repo: "demo" }
+  metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
 function fetchForApp(app: ReturnType<typeof createDispatcherApp>): typeof fetch {
