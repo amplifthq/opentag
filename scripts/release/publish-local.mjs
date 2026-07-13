@@ -1,32 +1,18 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { buildPublicPackagePlan } from "./package-plan.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const packageDirs = [
-  "core",
-  "client",
-  "telegram",
-  "discord",
-  "runner",
-  "store",
-  "github",
-  "gitlab",
-  "lark",
-  "slack",
-  "dispatcher",
-  "local-runtime",
-  "cli"
-];
+const packagePlan = buildPublicPackagePlan(path.join(repoRoot, "packages"));
 
 function parseArgs(argv) {
   const options = {
     dryRun: false,
     skipCheck: false,
     otp: undefined,
-    tag: "latest"
+    tag: "next"
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -87,7 +73,7 @@ Options:
   --dry-run       Run pnpm publish without publishing to npm.
   --skip-check    Skip corepack pnpm release:check.
   --otp <code>    Pass an npm two-factor one-time password.
-  --tag <tag>     Publish dist-tag. Defaults to latest.
+  --tag <tag>     Publish dist-tag. Defaults to next.
   -h, --help      Show this help.
 `);
 }
@@ -125,21 +111,37 @@ function runOutput(command, args, options = {}) {
   };
 }
 
-function readPackage(packageDir) {
-  const packagePath = path.join(repoRoot, "packages", packageDir, "package.json");
-  return JSON.parse(readFileSync(packagePath, "utf8"));
+function registryVersion(packageSpec) {
+  const result = runOutput("npm", ["view", packageSpec, "version"]);
+  if (result.ok) {
+    return result.stdout || undefined;
+  }
+  if (/\bE404\b/.test(result.stderr)) {
+    return undefined;
+  }
+
+  throw new Error(
+    `npm registry lookup failed for ${packageSpec}:\n${result.stderr || `npm exited with status ${result.status ?? "unknown"}`}`
+  );
 }
 
 function publishedVersionExists(packageName, version) {
-  const result = runOutput("npm", ["view", `${packageName}@${version}`, "version"]);
-  return result.ok && result.stdout === version;
+  return registryVersion(`${packageName}@${version}`) === version;
 }
 
-function printGitContext() {
+function publishedVersionForTag(packageName, tag) {
+  return registryVersion(`${packageName}@${tag}`);
+}
+
+function printGitContext({ dryRun }) {
   const branch = runOutput("git", ["branch", "--show-current"]);
   const status = runOutput("git", ["status", "--short"]);
   if (branch.ok && branch.stdout) {
     console.log(`Git branch: ${branch.stdout}`);
+  }
+  if (!dryRun && branch.stdout !== "main") {
+    console.error(`Release refused: npm publication must run from main, not ${branch.stdout || "a detached or unknown ref"}.`);
+    process.exit(1);
   }
   if (status.ok && status.stdout) {
     console.error("Release refused: the git working tree has local changes.");
@@ -162,7 +164,7 @@ function checkNpmAccess() {
 const options = parseArgs(process.argv.slice(2));
 
 console.log("OpenTag local npm publish");
-printGitContext();
+printGitContext(options);
 checkNpmAccess();
 
 if (!options.skipCheck) {
@@ -174,20 +176,27 @@ if (!options.skipCheck) {
 console.log("");
 console.log(options.dryRun ? "Dry-run publishing packages..." : "Publishing packages...");
 
-for (const packageDir of packageDirs) {
-  const packageJson = readPackage(packageDir);
+for (const { directory: packageDir, packageJson } of packagePlan) {
   const packageName = packageJson.name;
   const version = packageJson.version;
 
   if (publishedVersionExists(packageName, version)) {
-    console.log(`Skipping ${packageName}@${version}; it is already published.`);
+    const taggedVersion = publishedVersionForTag(packageName, options.tag);
+    if (taggedVersion !== version) {
+      console.error(
+        `Release refused: ${packageName}@${version} already exists, but dist-tag ${options.tag} points to ${taggedVersion ?? "nothing"}.`
+      );
+      console.error(`Repair it explicitly with: npm dist-tag add ${packageName}@${version} ${options.tag}`);
+      process.exit(1);
+    }
+    console.log(`Skipping ${packageName}@${version}; it is already published with dist-tag ${options.tag}.`);
     continue;
   }
 
   console.log(`${options.dryRun ? "Dry-run publishing" : "Publishing"} ${packageName}@${version}...`);
   const args = ["pnpm", "publish", "--access", "public", "--tag", options.tag];
   if (options.dryRun) {
-    args.push("--dry-run");
+    args.push("--dry-run", "--no-git-checks");
   }
   if (options.otp) {
     args.push("--otp", options.otp);

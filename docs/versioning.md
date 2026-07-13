@@ -4,20 +4,23 @@ OpenTag packages are versioned and published as a coordinated package family.
 
 ## Package Family
 
-Public packages:
+Public packages, shown in one valid dependency order:
 
-- `@opentag/cli`
-- `@opentag/local-runtime`
 - `@opentag/core`
 - `@opentag/client`
-- `@opentag/dispatcher`
+- `@opentag/discord`
 - `@opentag/github`
 - `@opentag/gitlab`
 - `@opentag/lark`
-- `@opentag/slack`
-- `@opentag/telegram`
+- `@opentag/linear`
 - `@opentag/runner`
+- `@opentag/slack`
 - `@opentag/store`
+- `@opentag/teams`
+- `@opentag/telegram`
+- `@opentag/dispatcher`
+- `@opentag/local-runtime`
+- `@opentag/cli`
 
 Private runnable apps are not published:
 
@@ -28,7 +31,7 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The current public release is `0.4.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The current public release is `0.5.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
 The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
@@ -36,13 +39,29 @@ The `0.3.0` release improved CLI setup flexibility, source-thread approval rende
 The `0.3.4` release improves service startup reliability, Lark status updates, final-card readability, and read-only executor result summaries.
 The `0.3.5` release adds Linux user-service support and keeps unsupported platforms on terminal startup by default.
 The `0.4.0` release adds GitLab source-thread ingestion, note callbacks, and merge request action application.
+The `0.5.0` release adds Discord, Linear, and Microsoft Teams adapters, ACP-first agent execution, durable Attempt leases and fencing, governed material-action receipts and reconciliation, and the corresponding Client/Runner migration.
 
 For each npm release:
 
 - Set every public package to the same version.
 - Keep `private: true` only on runnable apps and the root workspace.
+- Discover the public package family from `packages/*/package.json` entries with
+  `publishConfig.access=public`; do not maintain separate package arrays in
+  release scripts.
+- Validate that every public package's `@opentag/*` runtime dependency is in
+  the discovered publication set, reject dependency cycles, and build and
+  publish packages in topological order.
 - Verify `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build`.
-- Run `npm pack --dry-run --json` in every public package directory and inspect included files.
+- Run the governance and privacy smoke suites.
+- Pack every discovered public package, install the tarballs into a clean npm
+  project, and run the installed CLI help and doctor checks.
+- Publish the coordinated version to the npm `next` dist-tag first.
+- Install the exact CLI version from the public registry and complete setup,
+  doctor, start, and one credentialed real-platform smoke before promotion.
+- Promote the same immutable package versions to `latest`; never rebuild or
+  republish between canary and promotion.
+- Create a matching annotated git tag and GitHub Release from the exact commit
+  used for npm publication.
 
 For `0.x` releases:
 
@@ -69,12 +88,30 @@ After `1.0.0`, follow SemVer:
 ## Release Checklist
 
 1. Update package versions consistently across public packages.
-2. Update changelog or release notes with package-specific changes.
-3. Run `pnpm install` to refresh `pnpm-lock.yaml`.
-4. Run `pnpm lint`.
-5. Run `pnpm typecheck`.
-6. Run `pnpm test`.
-7. Run `pnpm build`.
-8. Run `npm pack --dry-run --json` in each public package directory.
-9. Publish public packages with `publishConfig.access=public`.
-10. Create a matching GitHub Release, for example `v0.3.0`, pointing at the commit that produced the npm packages.
+2. Run `pnpm release:publication-set` and verify that automatic discovery
+   returns all expected public packages, their versions match, and every
+   internal runtime dependency belongs to the publication set.
+3. Update changelog and migration notes with package-specific changes and every
+   breaking public contract.
+4. Run `pnpm install` to refresh `pnpm-lock.yaml`.
+5. Run build, lint, typecheck, and tests sequentially.
+6. Run governance and privacy smoke validation.
+7. Run `release:check` to pack the complete publication set, install it in a
+   clean npm project, and verify the installed CLI.
+8. Publish all public packages to `next` in the computed topological order.
+9. Confirm the exact version and `next` dist-tag for every package from the npm
+   registry.
+10. Install `@opentag/cli@<version>` from the registry in a clean directory.
+11. Run CLI version/help, setup, doctor, start, and at least one real-platform
+    ingest-to-receipt smoke from that registry installation.
+12. Promote the same package versions to `latest` by changing dist-tags only.
+13. Confirm `latest` and `next` for the complete package family.
+14. Create and push the matching annotated git tag, for example `v0.5.0`, from
+    the exact publication commit.
+15. Create the matching GitHub Release with the changelog notes and verify its
+    tag target.
+
+If canary validation fails, leave `latest` unchanged and remove or move the
+`next` tags after preserving diagnostics. If a promoted release must be rolled
+back, move `latest` for every package back to the previous coordinated version;
+do not unpublish or overwrite an immutable npm version.
