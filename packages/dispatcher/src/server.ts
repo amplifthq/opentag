@@ -2039,6 +2039,28 @@ function renderThreadActionRecordedBody(input: {
   return [`Rejected: ${sentenceWithTerminalPunctuation(title)}`, "No external write will be performed for this action."].join("\n");
 }
 
+type GovernedPermissionDecision = "allow_once" | "allow_run" | "deny";
+
+function governedPermissionDecision(value: unknown): GovernedPermissionDecision | undefined {
+  return value === "allow_once" || value === "allow_run" || value === "deny" ? value : undefined;
+}
+
+function renderGovernedPermissionDecisionBody(input: {
+  decision: GovernedPermissionDecision;
+  selectionText: string;
+}): string {
+  const title = sentenceWithTerminalPunctuation(
+    selectedActionReceiptTitle(input.selectionText).replace(/^Allow\s+/iu, "")
+  );
+  if (input.decision === "allow_once") {
+    return [`Allowed once: ${title}`, "Permission recorded for this attempt. The agent may now perform this governed action."].join("\n");
+  }
+  if (input.decision === "allow_run") {
+    return [`Allowed for this run: ${title}`, "Permission recorded for this run. The agent may now perform this governed action."].join("\n");
+  }
+  return [`Denied: ${title}`, "The agent was not allowed to perform this governed action."].join("\n");
+}
+
 async function selectedDirectApplyStatus(input: {
   event: OpenTagEvent;
   callbackProvider: string;
@@ -4392,7 +4414,7 @@ export function createDispatcherApp(input: {
 
     const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
     const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
-    const requestedPermissionDecision = parsed.metadata?.["permissionDecision"];
+    const requestedPermissionDecision = governedPermissionDecision(parsed.metadata?.["permissionDecision"]);
     if (governedPermission) {
       const expectedActionId = proposalMetadata?.["actionId"];
       const expectedProposalHash = proposalMetadata?.["proposalHash"];
@@ -4400,7 +4422,7 @@ export function createDispatcherApp(input: {
       const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
       const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
       if (
-        (requestedPermissionDecision !== "allow_once" && requestedPermissionDecision !== "allow_run" && requestedPermissionDecision !== "deny") ||
+        !requestedPermissionDecision ||
         parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
         parsed.metadata?.["approvalEpoch"] !== expectedApprovalEpoch ||
         parsed.metadata?.["governedActionId"] !== expectedActionId ||
@@ -4523,10 +4545,9 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
-      const body = renderThreadActionRecordedBody({
-        verb: "reject",
-        selectionText
-      });
+      const body = governedPermission && requestedPermissionDecision
+        ? renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText })
+        : renderThreadActionRecordedBody({ verb: "reject", selectionText });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -4547,21 +4568,26 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
-      const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
-      const directApply = await selectedDirectApplyStatus({
-        event: resolved.resolved.proposal.event,
-        callbackProvider: parsed.callback.provider,
-        candidates: resolved.resolved.selectedCandidates,
-        ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
-        ...(linearApply ? { linearApply } : {})
-      });
-      const body = renderThreadActionRecordedBody({
-        verb: "approve",
-        selectionText,
-        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
-        directApply
-      });
+      let body: string;
+      if (governedPermission && requestedPermissionDecision) {
+        body = renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText });
+      } else {
+        const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
+        const directApply = await selectedDirectApplyStatus({
+          event: resolved.resolved.proposal.event,
+          callbackProvider: parsed.callback.provider,
+          candidates: resolved.resolved.selectedCandidates,
+          ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+          ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          ...(linearApply ? { linearApply } : {})
+        });
+        body = renderThreadActionRecordedBody({
+          verb: "approve",
+          selectionText,
+          applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
+          directApply
+        });
+      }
       await deliverAndAudit({
         repo,
         sink: callbackSink,

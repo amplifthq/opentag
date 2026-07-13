@@ -353,7 +353,7 @@ export type OpenTagClient = {
   listRepoMutationMappings(input: { provider: string; owner: string; repo: string }): Promise<{ mappings: AdapterMutationMapping[] }>;
   createLinearOAuthInstallation(input: CreateLinearOAuthInstallationInput): Promise<LinearOAuthInstallationStart>;
   upsertLinearRelayInstallation(input: LinearRelayInstallationInput): Promise<{ installation: LinearRelayInstallationSummary }>;
-  bindChannel(input: ChannelBindingInput): Promise<void>;
+  bindChannel(input: ChannelBindingInput, options?: { adminOverride?: boolean }): Promise<void>;
   getChannelBinding(input: { provider: string; accountId: string; conversationId: string }): Promise<{ binding: ChannelBindingInput }>;
   getChannelRuntimeStatus(input: { provider: string; accountId: string; conversationId: string }): Promise<ChannelRuntimeStatus>;
   unbindChannel(input: { provider: string; accountId: string; conversationId: string }): Promise<void>;
@@ -619,10 +619,13 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return (await response.json()) as { installation: LinearRelayInstallationSummary };
     },
 
-    async bindChannel(input) {
+    async bindChannel(input, bindOptions) {
       const response = await fetchImpl(`${baseUrl}/v1/channel-bindings`, {
         method: "POST",
-        headers: jsonHeaders(options.pairingToken),
+        headers: {
+          ...jsonHeaders(options.pairingToken),
+          ...(bindOptions?.adminOverride ? { "x-opentag-channel-admin-override": "true" } : {})
+        },
         body: JSON.stringify(input)
       });
       await assertOk(response, "bindChannel");
@@ -1123,7 +1126,7 @@ export function createDispatcherAdminClient(options: RunnerClientOptions) {
     },
 
     bindChannel(binding: ChannelBindingInput): Promise<void> {
-      return client.bindChannel(binding);
+      return client.bindChannel(binding, { adminOverride: true });
     },
 
     upsertRepoMutationMapping(input: {

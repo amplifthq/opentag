@@ -8397,6 +8397,11 @@ describe("dispatcher API", () => {
     expect(unauthorized.status).toBe(403);
     const approval = await app.request("/v1/thread-actions", jsonRequest(actionRequest));
     expect(approval.status).toBe(201);
+    expect(delivered.at(-1)?.body).toContain("Allowed for this run: Publish report.");
+    expect(delivered.at(-1)?.body).toContain("The agent may now perform this governed action.");
+    expect(delivered.at(-1)?.body).not.toContain("Approved only");
+    expect(delivered.at(-1)?.body).not.toContain("Direct apply");
+    expect(delivered.at(-1)?.body).not.toContain("continue 1");
 
     const resolved = await app.request(`/v1/runners/runner_1/runs/run_acp_permission/action-permissions/${actionId}/resolve`, jsonRequest(lease));
     expect(resolved.status).toBe(200);

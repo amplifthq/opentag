@@ -710,6 +710,41 @@ describe("OpenTag CLI start wiring", () => {
     ]);
   });
 
+  it("bootstraps a repository-free managed channel without creating a repository binding", async () => {
+    const built = slackSocketModeConfig();
+    built.daemon.repositories = [];
+    built.daemon.channelBindings = [
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: "A123",
+          botId: "U123"
+        }
+      }
+    ];
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async bindChannel(binding) {
+        calls.push(
+          `channel:${binding.provider}:${binding.accountId}/${binding.conversationId}:${binding.ownership?.applicationId ?? "unmanaged"}`
+        );
+      }
+    });
+
+    expect(calls).toEqual(["runner:runner_local", "channel:slack:T123/C123:A123"]);
+  });
+
   it("uploads discovered Linear mutation mappings during dispatcher bootstrap", async () => {
     const built = linearConfig();
     const calls: string[] = [];

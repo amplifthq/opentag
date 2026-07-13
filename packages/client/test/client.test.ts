@@ -51,6 +51,33 @@ describe("@opentag/client", () => {
     expect(requests[1]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat");
   });
 
+  it("marks explicit local-admin channel binding mutations for dispatcher audit", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true }, 201);
+      }
+    });
+
+    await client.bindChannel(
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      },
+      { adminOverride: true }
+    );
+
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer pair_1");
+    expect(headers.get("x-opentag-channel-admin-override")).toBe("true");
+    expect(JSON.parse(String(requests[0]?.init?.body))).not.toHaveProperty("adminOverride");
+  });
+
   it("creates dispatcher runs with validated event payloads and auth headers", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
