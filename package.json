@@ -9,6 +9,7 @@
     "test": "vitest run",
     "typecheck": "tsc -b",
     "lint": "corepack pnpm -r lint",
+    "release:publication-set": "node scripts/release/check-publication-set.mjs",
     "release:check": "node scripts/release/check-cli-package.mjs",
     "release:publish": "node scripts/release/publish-local.mjs",
     "opentag-dev": "node scripts/dev/install-opentag-dev.mjs",

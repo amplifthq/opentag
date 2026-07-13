@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check:
-    name: Build, lint, typecheck, and test
+    name: Build, lint, typecheck, test, and release checks
     runs-on: ubuntu-latest
 
     steps:
@@ -46,3 +46,9 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Check publication set consistency
+        run: pnpm release:publication-set
+
+      - name: Check release packages
+        run: pnpm release:check

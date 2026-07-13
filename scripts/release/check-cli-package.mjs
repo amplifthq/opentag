@@ -4,23 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { buildPublicPackagePlan } from "./package-plan.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const packageDirs = [
-  "core",
-  "client",
-  "telegram",
-  "discord",
-  "runner",
-  "store",
-  "github",
-  "gitlab",
-  "lark",
-  "slack",
-  "dispatcher",
-  "local-runtime",
-  "cli"
-];
+const packagePlan = buildPublicPackagePlan(path.join(repoRoot, "packages"));
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -31,14 +18,15 @@ function run(command, args, options = {}) {
       ...process.env,
       npm_config_audit: "false",
       npm_config_fund: "false"
-    }
+    },
+    encoding: options.stdio === "pipe" ? "utf8" : undefined
   });
 
   if (result.error) {
     throw result.error;
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+  if (result.status !== 0 && !options.allowFailure) {
+    throw new Error(`${command} failed with exit code ${result.status ?? 1}.`);
   }
   return result;
 }
@@ -57,6 +45,56 @@ function commandPath(cwd, command) {
   return path.join(cwd, "node_modules", ".bin", process.platform === "win32" ? `${command}.cmd` : command);
 }
 
+function checkInstalledDoctorCommand(installDir) {
+  const opentagCommand = commandPath(installDir, "opentag");
+  run(opentagCommand, ["doctor", "--help"], { cwd: installDir });
+
+  const stateDirectory = path.join(installDir, "doctor-state");
+  const configPath = path.join(installDir, "doctor-config.json");
+  mkdirSync(stateDirectory, { recursive: true });
+  writeFileSync(
+    configPath,
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        state: {
+          directory: stateDirectory,
+          databasePath: path.join(stateDirectory, "opentag.db"),
+          worktreeRoot: path.join(stateDirectory, "worktrees")
+        },
+        runtime: { mode: "local" },
+        daemon: {
+          runnerId: "runner_release_check",
+          dispatcherUrl: "http://127.0.0.1:9",
+          repositories: [],
+          pairingToken: "release_check_pairing_token",
+          pollIntervalMs: 5_000,
+          heartbeatIntervalMs: 15_000
+        },
+        platforms: {}
+      },
+      null,
+      2
+    )}\n`,
+    { mode: 0o600 }
+  );
+
+  const doctor = run(opentagCommand, ["doctor", "--config", configPath], {
+    cwd: installDir,
+    stdio: "pipe",
+    allowFailure: true
+  });
+  const doctorOutput = `${doctor.stdout ?? ""}\n${doctor.stderr ?? ""}`;
+  if (doctor.status !== 1) {
+    throw new Error(`Expected the intentionally incomplete doctor config to exit 1, received ${doctor.status ?? "no status"}.`);
+  }
+  for (const expected of ["OpenTag doctor", "FAIL repository config: No repositories are configured."]) {
+    if (!doctorOutput.includes(expected)) {
+      throw new Error(`Installed opentag doctor output did not contain ${JSON.stringify(expected)}.`);
+    }
+  }
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -67,7 +105,7 @@ try {
 
   console.log("Packing publishable packages...");
   mkdirSync(packDir, { recursive: true });
-  const tarballs = packageDirs.map((packageDir) => packPackage(packageDir, packDir));
+  const tarballs = packagePlan.map((entry) => packPackage(entry.directory, packDir));
 
   console.log("Installing packed packages into a clean npm project...");
   mkdirSync(installDir, { recursive: true });
@@ -77,6 +115,7 @@ try {
   console.log("Checking the installed opentag command...");
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });
   run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
+  checkInstalledDoctorCommand(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

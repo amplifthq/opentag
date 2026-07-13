@@ -266,7 +266,7 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.4.0`. The npm package family is published under the `@opentag` scope.
+Current public release: `v0.5.0`. The npm package family is published under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |

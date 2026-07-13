@@ -261,7 +261,7 @@ opentag-dev setup
 
 ## 软件包
 
-当前公开发布版本：`v0.4.0`。OpenTag 的 npm 包发布在 `@opentag` scope 下。
+当前公开发布版本：`v0.5.0`。OpenTag 的 npm 包发布在 `@opentag` scope 下。
 
 | 包 | 用途 |
 | --- | --- |
