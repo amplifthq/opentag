@@ -109,6 +109,8 @@ try {
   await client.complete({
     runnerId: "runner_smoke",
     runId: "run_smoke_1",
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     result: {
       conclusion: "needs_human",
       summary: "Prepared issue metadata proposal.",

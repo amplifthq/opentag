@@ -1,10 +1,13 @@
 import {
   type ActionReceiptContext,
   type ActionReceiptDecision,
+  type OpenTagApprovalPromptPresentation,
+  renderApprovalRunScope,
   type OpenTagActionReceiptPresentation,
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
   type OpenTagPresentationAction,
+  type OpenTagRunStatusPresentation,
   type OpenTagSourceThreadStatusPresentation,
   createFinalSummaryPresentation,
   type OpenTagRunResult
@@ -55,6 +58,10 @@ export type SlackSuggestedActionButtonValue = {
   command: string;
   proposalId: string;
   intentId: string;
+  permissionDecision?: "allow_once" | "allow_run" | "deny";
+  proposalHash?: string;
+  approvalEpoch?: string;
+  actionId?: string;
 };
 
 export type SlackMessagePayload = {
@@ -103,11 +110,53 @@ export function parseSlackSuggestedActionButtonValue(value: string): SlackSugges
       version: 1,
       command: parsed.command.trim(),
       proposalId: parsed.proposalId,
-      intentId: parsed.intentId
+      intentId: parsed.intentId,
+      ...(parsed.permissionDecision === "allow_once" || parsed.permissionDecision === "allow_run" || parsed.permissionDecision === "deny"
+        ? { permissionDecision: parsed.permissionDecision }
+        : {}),
+      ...(typeof parsed.proposalHash === "string" && parsed.proposalHash.length > 0 ? { proposalHash: parsed.proposalHash } : {}),
+      ...(typeof parsed.approvalEpoch === "string" && parsed.approvalEpoch.length > 0 ? { approvalEpoch: parsed.approvalEpoch } : {}),
+      ...(typeof parsed.actionId === "string" && parsed.actionId.length > 0 ? { actionId: parsed.actionId } : {})
     };
   } catch {
     return null;
   }
+}
+
+export function renderSlackApprovalPrompt(presentation: OpenTagApprovalPromptPresentation): string {
+  const target = [presentation.target.provider, presentation.target.connectionId, presentation.target.operation, presentation.target.resource, presentation.target.resourceVersion]
+    .filter((value) => value !== undefined)
+    .join(" / ");
+  const runScope = renderApprovalRunScope(presentation.runScope);
+  return `*${markdownToSlackMrkdwn(presentation.title)}*\n${markdownToSlackMrkdwn(presentation.summary)}\nTarget: ${markdownToSlackMrkdwn(target)}\nRun scope: ${markdownToSlackMrkdwn(runScope)}\nAllow for run applies only to the Run scope shown above. Choose Allow once, Allow for run, or Deny.`;
+}
+
+export function createSlackApprovalPromptBlocks(presentation: OpenTagApprovalPromptPresentation): SlackBlock[] {
+  const labels = { allow_once: "Allow once", allow_run: "Allow for run", deny: "Deny" } as const;
+  return [
+    slackSection(renderSlackApprovalPrompt(presentation).split(" Choose Allow once")[0]!),
+    {
+      type: "actions",
+      block_id: `opentag_permission_${presentation.actionId}`,
+      elements: presentation.decisions.map((permissionDecision) => ({
+        type: "button",
+        text: { type: "plain_text", text: labels[permissionDecision], emoji: true },
+        action_id: `opentag:permission:${permissionDecision}`,
+        value: buildSlackSuggestedActionButtonValue({
+          version: 1,
+          command: permissionDecision === "deny" ? "reject 1" : "approve 1",
+          proposalId: presentation.proposalId,
+          intentId: presentation.intentId,
+          permissionDecision,
+          proposalHash: presentation.proposalHash,
+          approvalEpoch: presentation.approvalEpoch,
+          actionId: presentation.actionId
+        }),
+        ...(permissionDecision === "allow_once" ? { style: "primary" as const } : {}),
+        ...(permissionDecision === "deny" ? { style: "danger" as const } : {})
+      }))
+    }
+  ];
 }
 
 function escapeSlackText(text: string): string {
@@ -134,6 +183,32 @@ function markdownToSlackActionDetail(text: string): string {
 export function renderSlackAcknowledgement(runId: string): string {
   void runId;
   return "Working on it.";
+}
+
+function slackRunStatusTitle(state: OpenTagRunStatusPresentation["state"]): string {
+  if (state === "received") return "Received";
+  if (state === "queued") return "Queued";
+  if (state === "running") return "Running";
+  if (state === "waiting_for_approval") return "Waiting for approval";
+  if (state === "completed") return "Completed";
+  if (state === "failed") return "Failed";
+  if (state === "cancelled") return "Cancelled";
+  if (state === "interrupted") return "Interrupted";
+  return "Timed out";
+}
+
+export function renderSlackRunStatusPresentation(presentation: OpenTagRunStatusPresentation): string {
+  const title = slackRunStatusTitle(presentation.state);
+  return [
+    `*OpenTag: ${title}*`,
+    ...(presentation.message ? [markdownToSlackMrkdwn(presentation.message)] : []),
+    `Run: \`${presentation.runId}\``,
+    ...(presentation.nextAction ? [markdownToSlackMrkdwn(presentation.nextAction)] : [])
+  ].join("\n");
+}
+
+export function createSlackRunStatusBlocks(presentation: OpenTagRunStatusPresentation): SlackBlock[] {
+  return [slackSection(renderSlackRunStatusPresentation(presentation))];
 }
 
 export function slackSourceReceiptReactionName(state: SlackSourceReceiptState): string {

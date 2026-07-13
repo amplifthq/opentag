@@ -250,6 +250,10 @@ These commands do not accept absolute local checkout paths. Local paths belong i
 When OpenTag posts suggested actions, follow the receipt state. If it says **Ready to apply**, click **Apply 1** in Slack or type `apply 1` in the thread. Both paths apply the same source-thread action.
 If the receipt says **Needs setup**, OpenTag will show **Continue** or a setup hint instead of presenting **Apply 1** as the primary path. Configure GitHub as a repository target before expecting Slack receipts to create PRs directly.
 
+Slack can also be the source thread for creating Linear issues. For example, ask OpenTag to "create a Linear issue"; the run's final result can show an `issue/create_issue` action receipt. OpenTag does not create the issue silently by default: click **Apply 1** or reply with `apply 1`, then the Slack thread receives the created Linear issue URL. This requires Linear OAuth App / actor=app credentials in OpenTag and a resolvable Linear team: provide `teamId` in the action, or use Linear metadata discovery to map `team/teamKey -> teamId`. Multi-team workspaces without an explicit team show setup/continue guidance instead of creating an issue.
+
+Slack -> Linear issue creation does not require an extra public URL for the Linear create action; issue creation is an outbound GraphQL request from OpenTag to Linear. Public URL needs only depend on the Slack ingress mode: Socket Mode needs no public URL, while Events API still needs a Slack-reachable HTTPS endpoint. Discord, Lark, and GitHub can reuse the same `issue/create_issue` action design later, but this Slack guide only documents the Slack path.
+
 If suggested action buttons are visible but clicking them shows an error in Slack, re-check **Interactivity & Shortcuts**:
 
 - Socket Mode: Interactivity is on, and no Request URL is required.

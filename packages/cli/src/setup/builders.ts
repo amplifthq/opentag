@@ -28,8 +28,10 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
   const checkoutPath = realpathSync.native(input.projectPath);
   const target = projectTargetRefFromLocalPath(checkoutPath);
   const gitlabTarget = input.gitlab ? ownerRepoFromGitLabProjectPath(input.gitlab.projectPathWithNamespace) : undefined;
+  const linearAuth = input.linear?.auth ?? { method: "api_key" as const };
   const stateDirectory = input.stateDirectory ?? defaultStateDirectory(env);
   const worktreeRoot = join(stateDirectory, "worktrees");
+  const scratchRoot = join(stateDirectory, "scratch");
   const databasePath = join(stateDirectory, "opentag.db");
   const repositoryBindings = [
     {
@@ -131,6 +133,14 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               gitlabPort: input.gitlab.port
             }
           : {}),
+        ...(input.linear
+          ? {
+              ...(input.linear.teamId ? { linearTeamId: input.linear.teamId } : {}),
+              ...(input.linear.teamKey ? { linearTeamKey: input.linear.teamKey } : {}),
+              linearAuth: linearAuth.method === "hosted_oauth_app" ? "oauth_app" : linearAuth.method,
+              linearPort: input.linear.port
+            }
+          : {}),
         ...(input.telegram
           ? {
               telegramMode: input.telegram.mode,
@@ -142,6 +152,12 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
           ? {
               discordMode: input.discord.mode,
               ...(input.discord.webhookPath ? { discordWebhookPath: input.discord.webhookPath } : {})
+            }
+          : {}),
+        ...(input.teams
+          ? {
+              ...(input.teams.tenantId ? { teamsTenantId: input.teams.tenantId } : {}),
+              ...(input.teams.webhookPath ? { teamsWebhookPath: input.teams.webhookPath } : {})
             }
           : {})
       }
@@ -159,12 +175,15 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       dispatcherUrl: "http://localhost:3030",
       pairingToken: pairingToken(),
       repositories: repositoryBindings,
+      agents: {},
+      scratchRoot,
+      keepScratch: "on_failure",
+      approvalMode: "auto",
       ...(input.hermes
         ? {
             hermes: {
               ...(input.hermes.command ? { command: input.hermes.command } : {}),
-              ...(input.hermes.profile ? { profile: input.hermes.profile } : {}),
-              ...(input.hermes.profileTemplate ? { profileTemplate: input.hermes.profileTemplate } : {})
+              profile: input.hermes.profile
             }
           }
         : {}),
@@ -233,6 +252,26 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
             }
           }
         : {}),
+      ...(input.linear
+        ? {
+            linear: {
+              ...(input.linear.token ? { token: input.linear.token } : {}),
+              auth: linearAuth,
+              ...(input.linear.webhookSecret ? { webhookSecret: input.linear.webhookSecret } : {}),
+              ...(input.linear.teamId ? { teamId: input.linear.teamId } : {}),
+              ...(input.linear.teamKey ? { teamKey: input.linear.teamKey } : {}),
+              ...(input.linear.graphqlUrl ? { graphqlUrl: input.linear.graphqlUrl } : {}),
+              webhookPath: input.linear.webhookPath,
+              port: input.linear.port,
+              ...(input.linear.mappings ? { mappings: input.linear.mappings } : {}),
+              projectTarget: {
+                repoProvider: target.provider,
+                owner: target.owner,
+                repo: target.repo
+              }
+            }
+          }
+        : {}),
       ...(input.telegram
         ? {
             telegram: {
@@ -254,6 +293,16 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
               ...(input.discord.publicKey ? { publicKey: input.discord.publicKey } : {}),
               botToken: input.discord.botToken,
               ...(input.discord.webhookPath ? { webhookPath: input.discord.webhookPath } : {})
+            }
+          }
+        : {}),
+      ...(input.teams
+        ? {
+            teams: {
+              appId: input.teams.appId,
+              appPassword: input.teams.appPassword,
+              ...(input.teams.tenantId ? { tenantId: input.teams.tenantId } : {}),
+              webhookPath: input.teams.webhookPath ?? "/teams/messages"
             }
           }
         : {})

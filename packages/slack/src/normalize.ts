@@ -1,12 +1,18 @@
-import { commandFromRawText, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
+import {
+  commandFromRawText,
+  isRepositoryFreePermissionScope,
+  OpenTagChannelInboundMessageSchema,
+  type ContextPointer,
+  type OpenTagChannelInboundMessage,
+  type OpenTagCommand,
+  type OpenTagEvent,
+  type PermissionGrant
+} from "@opentag/core";
 
 export type SlackChannelBinding = {
   teamId: string;
   channelId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type SlackAppMentionInput = {
   teamId: string;
@@ -71,15 +77,57 @@ export function parseSlackThreadKey(threadKey: string): { teamId: string; channe
   return { teamId, channelId, threadTs };
 }
 
+export function normalizeSlackChannelMessage(input: SlackAppMentionInput): OpenTagChannelInboundMessage | null {
+  const text = stripSlackAppMention(input.text, input.botUserId);
+  if (!text) return null;
+  const threadTs = input.threadTs ?? input.ts;
+  const channel = { provider: "slack", workspace: input.teamId, id: input.channelId };
+  const thread = { provider: "slack", id: threadTs, parentMessageId: threadTs };
+  return OpenTagChannelInboundMessageSchema.parse({
+    protocol: "opentag.channel.v1",
+    eventId: input.eventId,
+    occurredAt: new Date(input.eventTime * 1000).toISOString(),
+    trigger: "mention",
+    source: {
+      kind: "channel_message",
+      channel,
+      thread,
+      actor: { provider: "slack", id: input.userId }
+    },
+    text,
+    attachments: [],
+    replyTarget: { channel, thread, purpose: "all" }
+  });
+}
+
 const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|delete|edit|fix|modify|open\s+a?\s*pr|pull\s+request|remove|update|write)\b/i;
 const REPO_WRITE_TARGET_PATTERN =
   /\b(repo|repository|code|file|files|branch|commit|diff|patch|readme|pr|pull\s+request|package\.json|pnpm|npm|test|build)\b|(?:^|\s)[./\w-]+\.(?:cjs|css|gitignore|go|html|js|json|jsx|lock|md|mjs|py|rb|rs|sh|toml|ts|tsx|txt|yaml|yml)\b|(?:^|[\s`'"(])(?:[./\w-]+\/)?(?:Dockerfile|Makefile|Procfile|Rakefile|Gemfile|Brewfile|Justfile|Taskfile|\.dockerignore|\.env(?:\.[\w-]+)?|\.gitignore|\.npmrc)(?=$|[\s`'",.):])/i;
+const LINEAR_ISSUE_CREATE_PATTERN = /(?=.*\blinear\b)(?=.*\b(?:issue|task|ticket)\b)(?=.*\b(?:add|create|file|open)\b)/i;
+function repositoryMetadataFromBinding(
+  binding: SlackChannelBinding
+): { repoProvider: string; owner: string; repo: string } | undefined {
+  if (!binding.owner?.trim() || !binding.repo?.trim()) return undefined;
+  return {
+    repoProvider: binding.repoProvider?.trim() || "github",
+    owner: binding.owner,
+    repo: binding.repo
+  };
+}
 
 function commandLooksRepoWriteCapable(command: OpenTagCommand): boolean {
   return UNKNOWN_WRITE_VERB_PATTERN.test(command.rawText) && REPO_WRITE_TARGET_PATTERN.test(command.rawText);
 }
 
-function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
+function commandLooksLinearIssueCreateCapable(command: OpenTagCommand): boolean {
+  return LINEAR_ISSUE_CREATE_PATTERN.test(command.rawText);
+}
+
+function addPermissionGrant(permissions: PermissionGrant[], grant: PermissionGrant): void {
+  if (!permissions.some((permission) => permission.scope === grant.scope)) permissions.push(grant);
+}
+
+function permissionsForCommand(command: OpenTagCommand, hasRepositoryTarget: boolean): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     {
       scope: "chat:postMessage",
@@ -95,21 +143,37 @@ function permissionsForCommand(command: OpenTagCommand): PermissionGrant[] {
     }
   ];
 
-  if (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksRepoWriteCapable(command))) {
-    permissions.push(
-      {
-        scope: "repo:read",
-        reason: "inspect the repository in the paired local checkout"
-      },
-      {
-        scope: "repo:write",
-        reason: "commit code changes on an isolated run branch"
-      },
-      {
-        scope: "pr:create",
-        reason: "open a pull request for completed code changes"
-      }
-    );
+  if (
+    hasRepositoryTarget &&
+    (command.intent === "fix" || command.intent === "run" || (command.intent === "unknown" && commandLooksRepoWriteCapable(command)))
+  ) {
+    addPermissionGrant(permissions, {
+      scope: "repo:read",
+      reason: "inspect the repository in the paired local checkout"
+    });
+    addPermissionGrant(permissions, {
+      scope: "repo:write",
+      reason: "commit code changes on an isolated run branch"
+    });
+    addPermissionGrant(permissions, {
+      scope: "pr:create",
+      reason: "open a pull request for completed code changes"
+    });
+  }
+
+  if (commandLooksLinearIssueCreateCapable(command)) {
+    addPermissionGrant(permissions, {
+      scope: "issue:create",
+      reason: "create a Linear issue after explicit source-thread approval"
+    });
+  }
+
+  for (const scope of command.parsed?.requestedScopes ?? []) {
+    if (!hasRepositoryTarget && !isRepositoryFreePermissionScope(scope)) continue;
+    addPermissionGrant(permissions, {
+      scope,
+      reason: "requested explicitly in the source-thread command"
+    });
   }
 
   return permissions;
@@ -160,12 +224,14 @@ function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
 }
 
 export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEvent | null {
-  const rawText = stripSlackAppMention(input.text, input.botUserId);
-  if (!rawText) return null;
+  const channelMessage = normalizeSlackChannelMessage(input);
+  if (!channelMessage?.text) return null;
+  const rawText = channelMessage.text;
 
   const command = commandFromRawText(rawText);
   const replyThreadTs = input.threadTs ?? input.ts;
   const agentId = input.agentId ?? "opentag";
+  const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
 
   return {
     id: `evt_slack_app_mention_${input.eventId}`,
@@ -200,7 +266,7 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       },
       ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForCommand(command),
+    permissions: permissionsForCommand(command, repositoryMetadata !== undefined),
     callback: {
       provider: "slack",
       uri: input.callbackUri ?? "https://slack.com/api/chat.postMessage",
@@ -218,13 +284,13 @@ export function normalizeSlackAppMention(input: SlackAppMentionInput): OpenTagEv
       slackEventId: input.eventId,
       ...(input.appId ? { slackAppId: input.appId } : {}),
       ...(input.botUserId ? { slackBotUserId: input.botUserId } : {}),
+      ...(input.appId ? { channelApplicationId: input.appId } : {}),
+      ...(input.botUserId ? { channelBotId: input.botUserId } : {}),
       ...(typeof input.signatureVerified === "boolean"
         ? { webhookSignatureVerified: input.signatureVerified, signatureState: input.signatureVerified ? "verified" : "unverified" }
         : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...repositoryMetadata
     }
   };
 }

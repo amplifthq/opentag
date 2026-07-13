@@ -9,7 +9,12 @@
     { "path": "../client" },
     { "path": "../core" },
     { "path": "../dispatcher" },
+    { "path": "../discord" },
+    { "path": "../gitlab" },
     { "path": "../github" },
+    { "path": "../linear" },
+    { "path": "../teams" },
+    { "path": "../telegram" },
     { "path": "../runner" }
   ]
 }

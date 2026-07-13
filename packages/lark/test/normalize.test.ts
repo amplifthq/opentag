@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   encodeLarkThreadKey,
   type LarkMessageInput,
+  normalizeLarkChannelMessage,
   normalizeLarkMessage,
   parseLarkThreadKey,
   stripLarkMention
@@ -16,6 +17,8 @@ const baseInput: LarkMessageInput = {
   messageId: "om_msg",
   eventId: "evt_1",
   eventTimeMs: 1_700_000_000_000,
+  applicationId: "cli_app_123",
+  botOpenId: "ou_bot",
   binding: { tenantKey: "tk_123", chatId: "oc_chat", owner: "acme", repo: "app" }
 };
 
@@ -50,6 +53,16 @@ describe("lark thread key", () => {
 });
 
 describe("normalizeLarkMessage", () => {
+  it("normalizes native Lark ingress through opentag.channel.v1", () => {
+    expect(normalizeLarkChannelMessage(baseInput)).toMatchObject({
+      protocol: "opentag.channel.v1",
+      trigger: "mention",
+      source: { channel: { provider: "lark", workspace: "tk_123", id: "oc_chat" }, actor: { id: "ou_user" } },
+      text: "fix the login bug",
+      replyTarget: { purpose: "all" }
+    });
+  });
+
   it("maps a Lark message into an OpenTagEvent", () => {
     const event = normalizeLarkMessage(baseInput);
     expect(event).not.toBeNull();
@@ -68,6 +81,10 @@ describe("normalizeLarkMessage", () => {
     expect(event?.metadata.sourceDeliveryId).toBe("evt_1");
     expect(event?.metadata.larkEventId).toBe("evt_1");
     expect(event?.metadata.larkRenderLocale).toBe("en-US");
+    expect(event?.metadata).toMatchObject({ channelApplicationId: "cli_app_123", channelBotId: "ou_bot" });
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(
+      expect.arrayContaining(["chat:postMessage", "runner:local", "repo:read", "repo:write", "pr:create"])
+    );
   });
 
   it("derives Feishu render locale from the domain", () => {
@@ -86,5 +103,37 @@ describe("normalizeLarkMessage", () => {
       binding: { ...baseInput.binding, repoProvider: "gitlab" }
     });
     expect(event?.metadata.repoProvider).toBe("gitlab");
+  });
+
+  it.each(["fix", "run"] as const)(
+    "keeps repository-free %s commands at channel-and-runner least privilege",
+    (intent) => {
+      const event = normalizeLarkMessage({
+        ...baseInput,
+        text: `@_user_1 ${intent} the login bug`,
+        binding: { tenantKey: "tk_123", chatId: "oc_chat" }
+      });
+
+      expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "runner:local"]);
+      expect(event?.metadata).not.toHaveProperty("repoProvider");
+      expect(event?.metadata).not.toHaveProperty("owner");
+      expect(event?.metadata).not.toHaveProperty("repo");
+    }
+  );
+
+  it("treats a partial runtime repository binding as repository-free", () => {
+    const event = normalizeLarkMessage({
+      ...baseInput,
+      binding: {
+        tenantKey: "tk_123",
+        chatId: "oc_chat",
+        owner: "acme"
+      } as LarkMessageInput["binding"]
+    });
+
+    expect(event?.permissions.map((permission) => permission.scope)).toEqual(["chat:postMessage", "runner:local"]);
+    expect(event?.metadata).not.toHaveProperty("repoProvider");
+    expect(event?.metadata).not.toHaveProperty("owner");
+    expect(event?.metadata).not.toHaveProperty("repo");
   });
 });

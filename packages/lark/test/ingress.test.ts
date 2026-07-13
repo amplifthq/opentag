@@ -57,7 +57,7 @@ describe("startLarkIngress", () => {
   });
 
   it("delivers Lark action replies through the dispatcher thread-actions endpoint", async () => {
-    const requests: Array<{ url: string; body?: unknown }> = [];
+    const requests: Array<{ url: string; body?: unknown; principal?: string }> = [];
     let inboundHandler: ((data: LarkInboundMessageEvent) => Promise<void>) | undefined;
 
     vi.stubGlobal(
@@ -65,7 +65,8 @@ describe("startLarkIngress", () => {
       vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
         const href = String(url);
         const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-        requests.push({ url: href, ...(body ? { body } : {}) });
+        const principal = new Headers(init?.headers).get("x-opentag-channel-principal");
+        requests.push({ url: href, ...(body ? { body } : {}), ...(principal ? { principal } : {}) });
         if (href === "http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat") {
           return Response.json({
             binding: {
@@ -94,6 +95,7 @@ describe("startLarkIngress", () => {
         appSecret: "secret",
         dispatcherUrl: "http://dispatcher.test",
         dispatcherToken: "pair_1",
+        channelPrincipalCredential: "lark_principal_456",
         domain: "lark",
         agentId: "opentag",
         botOpenId: "ou_bot"
@@ -128,6 +130,7 @@ describe("startLarkIngress", () => {
       "http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat",
       "http://dispatcher.test/v1/thread-actions"
     ]);
+    expect(requests.every((request) => request.principal === "lark_principal_456")).toBe(true);
     expect(requests[1]?.body).toMatchObject({
       id: "approval_lark_evt_lark_ingress_action",
       rawText: "apply 1",

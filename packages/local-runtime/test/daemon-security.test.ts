@@ -30,11 +30,11 @@ function runForEvent(input: { event: OpenTagEvent; executor?: ExecutorAdapter })
   };
   let completed: OpenTagRunResult | undefined;
   const client: DaemonClient = {
-    claim: async () => ({ run, event: input.event }),
+    claim: async () => ({ run, event: input.event, attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" }),
     markRunning: async () => {},
     heartbeat: async () => {},
     progress: async () => {},
-    complete: async (_runId, result) => {
+    complete: async (_runId, _lease, result) => {
       completed = result;
     }
   };
@@ -99,7 +99,7 @@ describe("daemon Project Target allowlist", () => {
 
     expect(completed).toMatchObject({
       conclusion: "needs_human",
-      summary: "No Project Target metadata is configured for this run."
+      summary: "Repository-bearing events require complete Project Target metadata."
     });
   });
 });

@@ -1,6 +1,6 @@
 import type { OpenTagEvent } from "@opentag/core";
 import { describe, expect, it } from "vitest";
-import { createOpenTagClient } from "../src/index.js";
+import { createOpenTagClient, type ChannelBindingInput } from "../src/index.js";
 
 const event: OpenTagEvent = {
   id: "evt_1",
@@ -24,6 +24,60 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("@opentag/client", () => {
+  it("sends and reads repo-less channel bindings", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const binding: ChannelBindingInput = {
+      provider: "lark",
+      accountId: "tenant_1",
+      conversationId: "oc_chat",
+      metadata: { displayName: "General" }
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (init?.method === "POST") return jsonResponse({ ok: true });
+        return jsonResponse({ binding });
+      }
+    });
+
+    await client.bindChannel(binding);
+    await expect(client.getChannelBinding({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" })).resolves.toEqual({
+      binding
+    });
+
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(binding);
+    expect(requests[1]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat");
+  });
+
+  it("marks explicit local-admin channel binding mutations for dispatcher audit", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true }, 201);
+      }
+    });
+
+    await client.bindChannel(
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      },
+      { adminOverride: true }
+    );
+
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer pair_1");
+    expect(headers.get("x-opentag-channel-admin-override")).toBe("true");
+    expect(JSON.parse(String(requests[0]?.init?.body))).not.toHaveProperty("adminOverride");
+  });
+
   it("creates dispatcher runs with validated event payloads and auth headers", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
@@ -87,7 +141,10 @@ describe("@opentag/client", () => {
             createdAt: "2026-06-24T00:00:00.000Z",
             updatedAt: "2026-06-24T00:00:00.000Z"
           },
-          event
+          event,
+          attemptId: "attempt_1",
+          attemptNumber: 1,
+          fencingToken: "fence_1"
         })
     });
 
@@ -95,6 +152,7 @@ describe("@opentag/client", () => {
 
     expect(claimed?.run.status).toBe("assigned");
     expect(claimed?.event.id).toBe("evt_1");
+    expect(claimed).toMatchObject({ attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" });
   });
 
   it("includes dispatcher error bodies in thrown errors", async () => {
@@ -123,6 +181,8 @@ describe("@opentag/client", () => {
       runnerId: "runner_1",
       runId: "run_1",
       executor: "echo",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       runTimeoutMs: 30_000,
       idempotencyKey: "runner_1:run_1:running"
     });
@@ -134,6 +194,8 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       executor: "echo",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       runTimeoutMs: 30_000,
       idempotencyKey: "runner_1:run_1:running"
     });
@@ -153,6 +215,8 @@ describe("@opentag/client", () => {
     await client.progress({
       runnerId: "runner_1",
       runId: "run_1",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       type: "ingest.hermes.post_llm_call",
       message: "LLM call completed.",
       at: "2026-06-24T00:00:01.000Z",
@@ -167,11 +231,41 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       type: "ingest.hermes.post_llm_call",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       message: "LLM call completed.",
       at: "2026-06-24T00:00:01.000Z",
       visibility: "audit",
       idempotencyKey: "hermes:run_1:post_llm_call:1"
     });
+  });
+
+  it("forwards fenced governed action requests and parses durable resolutions", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const action = {
+      id: "action_1", runId: "run_1", attemptId: "attempt_1", actionFamily: "publish", capability: "publish",
+      scope: { permissionScopes: ["npm:publish"] }, target: { title: "Publish package" }, riskTier: "high",
+      status: "waiting_approval", idempotencyKey: "action:key", proposalId: "proposal_action_1",
+      attemptFenceDigest: "digest", createdAt: "2026-07-12T00:00:00.000Z", updatedAt: "2026-07-12T00:00:00.000Z"
+    };
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+        return jsonResponse({ resolution: { state: "waiting", action } }, 202);
+      }
+    });
+    await expect(client.requestActionPermission({
+      runnerId: "runner_1", runId: "run_1", attemptId: "attempt_1", fencingToken: "fence_1",
+      request: { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+    })).resolves.toMatchObject({ state: "waiting", action: { id: "action_1", attemptFenceDigest: "digest" } });
+    expect(requests).toEqual([{
+      url: "http://dispatcher.test/v1/runners/runner_1/runs/run_1/action-permissions",
+      body: {
+        attemptId: "attempt_1", fencingToken: "fence_1",
+        request: { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+      }
+    }]);
   });
 
   it("sends runner completion idempotency keys to the dispatcher", async () => {
@@ -188,6 +282,8 @@ describe("@opentag/client", () => {
     await client.complete({
       runnerId: "runner_1",
       runId: "run_1",
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       result: { conclusion: "success", summary: "done" },
       idempotencyKey: "hermes:run_1:complete:agent_end"
     });
@@ -199,6 +295,8 @@ describe("@opentag/client", () => {
     });
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({
       result: { conclusion: "success", summary: "done" },
+      attemptId: "attempt_1",
+      fencingToken: "fence_1",
       idempotencyKey: "hermes:run_1:complete:agent_end"
     });
   });
@@ -222,21 +320,43 @@ describe("@opentag/client", () => {
     expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
   });
 
+  it("sends the authenticated channel principal through the Slack compatibility binding route", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      channelPrincipalCredential: "slack_principal_owner",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ ok: true }, 201);
+      }
+    });
+
+    await client.bindSlackChannel({
+      teamId: "T123",
+      channelId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/slack-channel-bindings");
+    expect(new Headers(requests[0]?.init?.headers).get("x-opentag-channel-principal")).toBe("slack_principal_owner");
+  });
+
   it("reads channel runtime status through the dispatcher API", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
       pairingToken: "pair_1",
+      channelPrincipalCredential: "lark_principal_owner",
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse({
           binding: {
             provider: "lark",
             accountId: "tenant_1",
-            conversationId: "oc_chat",
-            repoProvider: "github",
-            owner: "acme",
-            repo: "demo"
+            conversationId: "oc_chat"
           },
           activeRun: {
             id: "run_active",
@@ -273,8 +393,12 @@ describe("@opentag/client", () => {
 
     const status = await client.getChannelRuntimeStatus({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
 
+    expect(status.binding).toEqual({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
+
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat/status");
-    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer pair_1");
+    expect(headers.get("x-opentag-channel-principal")).toBe("lark_principal_owner");
     expect(status.activeRun?.id).toBe("run_active");
     expect(status.runTimeoutPolicy).toEqual({ hardTimeoutMs: 30_000 });
     expect(status.queuedFollowUps.map((followUp) => followUp.id)).toEqual(["follow_up_1"]);
@@ -431,6 +555,7 @@ describe("@opentag/client", () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      channelPrincipalCredential: "lark_principal_owner",
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse({
@@ -456,6 +581,7 @@ describe("@opentag/client", () => {
 
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant%201/oc%2Fchat/cancel-active-run");
     expect(requests[0]?.init?.method).toBe("POST");
+    expect(new Headers(requests[0]?.init?.headers).get("x-opentag-channel-principal")).toBe("lark_principal_owner");
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({ reason: "Stop requested." });
   });
 
@@ -847,6 +973,138 @@ describe("@opentag/client", () => {
       {
         url: "http://dispatcher.test/v1/repo-bindings/github/acme/demo/mutation-mappings",
         method: "GET"
+      }
+    ]);
+  });
+
+  it("calls Linear relay installation endpoint without reading secrets back", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_token",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return jsonResponse(
+          {
+            installation: {
+              id: "install_123",
+              webhookPath: "/linear/webhooks/install_123",
+              projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+            }
+          },
+          201
+        );
+      }
+    });
+
+    await expect(
+      client.upsertLinearRelayInstallation({
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        webhookSecret: "linear_webhook_secret",
+        token: "linear_oauth_token",
+        auth: {
+          method: "oauth_app",
+          actor: "app",
+          clientId: "linear_client",
+          refreshToken: "linear_refresh_token",
+          accessTokenExpiresAt: "2026-07-07T00:10:00.000Z",
+          scopes: ["read", "comments:create"]
+        },
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo"
+      })
+    ).resolves.toEqual({
+      installation: {
+        id: "install_123",
+        webhookPath: "/linear/webhooks/install_123",
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+      }
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "http://dispatcher.test/v1/linear-relay-installations",
+        method: "POST",
+        body: {
+          id: "install_123",
+          webhookPath: "/linear/webhooks/install_123",
+          webhookSecret: "linear_webhook_secret",
+          token: "linear_oauth_token",
+          auth: {
+            method: "oauth_app",
+            actor: "app",
+            clientId: "linear_client",
+            refreshToken: "linear_refresh_token",
+            accessTokenExpiresAt: "2026-07-07T00:10:00.000Z",
+            scopes: ["read", "comments:create"]
+          },
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo"
+        }
+      }
+    ]);
+  });
+
+  it("calls Linear OAuth installation start endpoint", async () => {
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_token",
+      fetchImpl: async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {})
+        });
+        return jsonResponse(
+          {
+            authorizationUrl: "https://linear.app/oauth/authorize?state=linear_state",
+            stateExpiresAt: "2026-07-07T00:10:00.000Z",
+            oauthWebhookPath: "/linear/oauth/webhooks",
+            installation: {
+              id: "install_123",
+              webhookPath: "/linear/webhooks/install_123",
+              projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+            }
+          },
+          201
+        );
+      }
+    });
+
+    await expect(
+      client.createLinearOAuthInstallation({
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        teamKey: "ENG"
+      })
+    ).resolves.toMatchObject({
+      authorizationUrl: expect.stringContaining("linear.app/oauth/authorize"),
+      oauthWebhookPath: "/linear/oauth/webhooks",
+      installation: {
+        webhookPath: "/linear/webhooks/install_123",
+        projectTarget: { repoProvider: "github", owner: "acme", repo: "demo" }
+      }
+    });
+
+    expect(requests).toEqual([
+      {
+        url: "http://dispatcher.test/v1/linear-oauth-installations",
+        method: "POST",
+        body: {
+          repoProvider: "github",
+          owner: "acme",
+          repo: "demo",
+          teamKey: "ENG"
+        }
       }
     ]);
   });

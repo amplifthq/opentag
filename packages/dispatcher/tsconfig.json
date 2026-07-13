@@ -8,8 +8,11 @@
   "references": [
     { "path": "../core" },
     { "path": "../github" },
+    { "path": "../gitlab" },
     { "path": "../lark" },
+    { "path": "../linear" },
     { "path": "../slack" },
+    { "path": "../teams" },
     { "path": "../telegram" },
     { "path": "../store" }
   ]

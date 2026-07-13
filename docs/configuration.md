@@ -56,6 +56,95 @@ Minimal local config:
 }
 ```
 
+Named ACP agents use the same manifest-backed runtime path. Hermes is an
+ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
+
+```json
+{
+  "agents": {
+    "hermes-acp": {
+      "protocol": "opentag.integration.v1",
+      "id": "hermes-acp",
+      "label": "Hermes ACP",
+      "bindings": {
+        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"] }
+      },
+      "roles": {
+        "agent": {
+          "protocol": "agent-client-protocol",
+          "protocolVersion": 1,
+          "binding": "agent"
+        }
+      },
+      "resources": {}
+    }
+  },
+  "scratchRoot": "/absolute/path/to/opentag-state/scratch",
+  "keepScratch": "on_failure"
+}
+```
+
+### ACP-first setup choices
+
+The basic setup model has four choices:
+
+1. **Channel** — the Slack, Lark, or other source scope allowed to create Runs.
+2. **Agent** — the named ACP Agent Profile that executes Attempts.
+3. **Connections** — external resource accounts that policy may grant.
+4. **Mode** — `ask`, `auto`, or `autonomous`; `auto` is the default.
+
+No repository is required for a repository-free task. Basic setup also does not
+require a cross-provider principal, policy DSL, Worker ID, ACP transport detail,
+presentation rule, or custom user limit.
+
+For managed Slack and Lark channels, prefer the generic `channelBindings` form
+so the administrator can pin the immutable provider application identity:
+
+```json
+{
+  "channelBindings": [
+    {
+      "provider": "slack",
+      "accountId": "T123",
+      "conversationId": "C123",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "A123",
+        "botId": "U123"
+      }
+    },
+    {
+      "provider": "lark",
+      "accountId": "tenant_1",
+      "conversationId": "oc_chat",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "cli_app_123",
+        "botId": "ou_bot"
+      }
+    }
+  ],
+  "approvalMode": "auto"
+}
+```
+
+Application and bot IDs name the configured adapter application. The adapter
+authenticates to the dispatcher as a channel principal in request context; that
+principal, not provider payloads or normalized event metadata, is authoritative
+for managed Run admission and binding mutation. Bot display names can be changed
+freely and are never used as binding identity. A managed Run fails closed when
+the authenticated request principal is missing or does not match. Replacing or
+deleting the binding remains an authenticated administrator operation; the
+Slack compatibility binding endpoint follows the same rule.
+
+If Hermes supplies both a channel gateway and ACP execution, configure them as
+separate runtime identities. The gateway owns only Slack/Lark transport
+credentials; the `hermes acp` binding owns only its Agent Profile and granted
+Attempt capabilities. Do not share profiles, environment variables, credentials,
+logs, or lifecycle supervision between those roles.
+
 Add Slack channel bindings when a chat surface should route work to a Project Target:
 
 ```json
@@ -164,11 +253,15 @@ use `--permission-mode plan`.
 | `runnerTokens` | none | Additional runner-scoped tokens accepted by the local dispatcher during a rotation window |
 | `revokedRunnerTokenFingerprints` | none | SHA-256 fingerprints of revoked runner tokens that must fail closed |
 | `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
+| `agents` | `{}` | Named `opentag.integration.v1` manifests whose ACP agent role is hosted by the generic ACP executor |
+| `scratchRoot` | local OpenTag state directory | Absolute root for attempt-scoped non-repository workspaces |
+| `keepScratch` | `on_failure` | Scratch retention: `always`, `on_failure`, or `never`; failed attempts retain evidence |
+| `approvalMode` | `auto` | Autonomy mode: `ask`, `auto`, or `autonomous`. Every mode remains inside administrator-defined hard boundaries. |
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
-| `hermes` | none | Hermes executor command/profile settings; `profile` and `profileTemplate` still override the Hermes CLI `-p` argument |
+| `hermes` | fixed profile `opentag` when Hermes is selected during setup | Hermes command and one dedicated, pre-existing profile. Every readiness probe and invocation passes `hermes -p <profile>`; legacy `profileTemplate` values are parsed but ignored. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
@@ -178,6 +271,42 @@ use `--permission-mode plan`.
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 | `runTimeoutMs` | none | Optional hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
+
+### Hermes execution profile
+
+OpenTag uses one fixed Hermes profile as the executor identity boundary. Setup
+defaults this value to `opentag`, writes it to `daemon.hermes.profile`, and
+validates the profile before saving the configuration with a non-mutating probe:
+
+```bash
+hermes -p opentag --version
+```
+
+Create the dedicated profile first if necessary:
+
+```bash
+hermes profile create opentag
+```
+
+You may instead configure another dedicated, pre-existing profile with
+`opentag setup --executor hermes --hermes-profile <profile>`. OpenTag passes the
+selected profile on every execution as `hermes -p <profile> -z <prompt>`. If the
+profile probe fails, setup, doctor, and runtime readiness fail closed rather than
+falling back to Hermes' mutable sticky/global profile.
+
+Older configs may still contain `daemon.hermes.profileTemplate` or
+`OPENTAG_HERMES_PROFILE_TEMPLATE`. These values remain parse-compatible for
+upgrades, but OpenTag does not use them to derive per-source or per-thread
+profiles. Startup and doctor warn when a legacy template is present. Automatic
+profile creation, cloning, locking, retention, and cleanup require a separate
+lifecycle design and are intentionally deferred.
+
+To run the opt-in Hermes v0.18.2 CLI contract smoke test against an existing
+profile without creating or changing it:
+
+```bash
+OPENTAG_HERMES_SMOKE_PROFILE=<profile> pnpm smoke:hermes-profile-contract
+```
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the
 runner has marked the run as running, the command prefers the run-specific
@@ -353,7 +482,7 @@ manifest instead of a shell script:
 opentag ingest-template --source hermes --format manifest
 ```
 
-The manifest declares required environment variables, event aliases,
+The ingest manifest declares required runtime references, event aliases,
 idempotency suffixes, terminal-event semantics, and the hook ingest permission
 boundary. Hook ingest itself does not request source-thread transcript access,
 does not mutate prompts, does not read raw provider context, and does not
@@ -402,6 +531,7 @@ for repeatable setups.
 | `OPENTAG_CONFIG_PATH` | none | Path to daemon JSON config. Takes precedence over Project Target env fallback |
 | `OPENTAG_RUNNER_ID` | `runner_local` | Runner identity |
 | `OPENTAG_DISPATCHER_URL` | `http://localhost:3030` | Dispatcher URL |
+| `OPENTAG_REPO_PROVIDER` | `OPENTAG_SLACK_REPO_PROVIDER`, then `github` | Project Target provider for env-derived repository binding |
 | `OPENTAG_REPO_OWNER` | none | Required for env-derived Project Target binding |
 | `OPENTAG_REPO_NAME` | none | Required for env-derived Project Target binding |
 | `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived Project Target binding |
@@ -412,7 +542,7 @@ for repeatable setups.
 | `OPENTAG_KEEP_WORKTREE` | `on_failure` | `always`, `on_failure`, or `never` |
 | `OPENTAG_SLACK_TEAM_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
 | `OPENTAG_SLACK_CHANNEL_ID` | none | Creates one env-derived Slack channel binding when paired with Project Target env |
-| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Project Target provider used for the env-derived Slack channel binding |
+| `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Legacy Project Target provider fallback used by the env-derived Slack channel binding |
 | `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_CLAUDE_COMMAND` | `claude` in executor default | Claude Code CLI command |
@@ -435,6 +565,91 @@ for repeatable setups.
 | `OPENTAG_POLL_INTERVAL_MS` | `5000` | Poll interval |
 | `OPENTAG_HEARTBEAT_INTERVAL_MS` | `15000` | Heartbeat interval |
 | `OPENTAG_RUN_TIMEOUT_MS` | none | Optional hard timeout for one executor run |
+
+## Linear Dispatcher / Relay Environment
+
+`apps/dispatcher` and `opentag start` can mount Linear webhook ingress in the
+dispatcher process when `OPENTAG_LINEAR_WEBHOOK_SECRET` is set. That enables the
+static global `/linear/webhooks` path. In relay mode, the local runner polls the
+dispatcher without opening an inbound local port, and Linear calls either the
+static global path or a dynamic `/linear/webhooks/<install-id>` path depending
+on how the relay was provisioned.
+
+Static-token relays can also accept per-install Linear configuration through
+`POST /v1/linear-relay-installations`. In that path, `opentag setup --relay`
+generates a unique `/linear/webhooks/<install-id>` path for new Linear configs
+and uploads the Linear token, signing secret, Project Target, and optional
+GraphQL URL during relay bootstrap. When the local config uses
+`auth.method: "oauth_app"`, the upload also carries OAuth refresh metadata
+without the OAuth client secret, allowing the relay to refresh the Linear access
+token before callbacks and direct apply. Responses intentionally omit the token,
+refresh token, and signing secret. Webhooks delivered to the unique path are
+verified with the stored secret, and later Linear callbacks / Agent Activities /
+direct apply use the non-secret `linearRelayInstallationId` stored on the run to
+resolve the stored token.
+
+When `OPENTAG_LINEAR_OAUTH_CLIENT_ID` and `OPENTAG_LINEAR_OAUTH_REDIRECT_URI`
+are configured, the dispatcher also exposes a hosted-install backend:
+authenticated callers can start an install with
+`POST /v1/linear-oauth-installations`, and Linear returns to the public
+`/linear/oauth/callback` endpoint. The callback exchanges the code, stores the
+per-install token and installation record, keeps a generated per-install
+webhook secret for dynamic relay compatibility, runs best-effort Linear metadata
+discovery for team/state/user/label mappings, and only returns the non-secret
+installation summary. When `OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` is also
+configured, the same relay exposes a fixed OAuth App webhook ingress at
+`OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH` (default `/linear/oauth/webhooks`). Linear
+OAuth App webhook settings should point to that fixed path; the relay verifies
+the app-level `Linear-Signature`, then routes the payload to the completed
+install by the webhook payload's `organizationId`. If Linear sends an
+`OAuthApp` `revoked` webhook, the relay deletes the matching hosted OAuth
+installation record and records a `linear.oauth_install.revoked` control-plane
+event so later callbacks fail closed.
+
+When a trusted relay advertises this capability, `opentag setup --relay
+<url> --platform linear` defaults Linear auth to hosted OAuth App install. The
+CLI does not ask for a Linear API key, webhook signing secret, or local
+authorization code in that path; instead it asks the relay to create a pending
+install, stores the returned installation id and Linear authorization URL in the
+local config, and prints the install URL as the next step. The user-facing
+webhook path remains the fixed OAuth App webhook path, not the internal dynamic
+install path. The relay stores the token and generated signing secret only after
+Linear returns to `/linear/oauth/callback`.
+
+Dispatcher relays expose `/v1/relay/capabilities` so `opentag setup --relay`
+and `opentag pair --relay` can confirm Linear ingress, callback delivery, and
+direct apply readiness when the relay supports capability discovery. With
+`OPENTAG_LINEAR_WEBHOOK_SECRET` configured, the capability response advertises
+`provider: "linear"` with ingress enabled at `OPENTAG_LINEAR_WEBHOOK_PATH`.
+With `OPENTAG_LINEAR_API_KEY` or `OPENTAG_LINEAR_TOKEN` configured, the same
+response advertises Linear callback and apply readiness. With
+`OPENTAG_LINEAR_OAUTH_CLIENT_ID`, `OPENTAG_LINEAR_OAUTH_REDIRECT_URI`, and
+`OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` configured, the capability response
+advertises `oauthInstall.enabled=true` and Linear ingress at the fixed OAuth App
+webhook path for hosted Linear OAuth App installs.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `OPENTAG_LINEAR_API_KEY` / `OPENTAG_LINEAR_TOKEN` | none | Linear OAuth access token or raw `lin_api_...` API key used for callbacks and direct issue apply; OAuth tokens may include or omit the `Bearer ` prefix |
+| `OPENTAG_LINEAR_GRAPHQL_URL` | `https://api.linear.app/graphql` | Optional Linear GraphQL endpoint override |
+| `OPENTAG_LINEAR_WEBHOOK_SECRET` | none | Enables dispatcher-mounted Linear webhook ingress and verifies `Linear-Signature` |
+| `OPENTAG_LINEAR_WEBHOOK_PATH` | `/linear/webhooks` | Public Linear webhook path |
+| `OPENTAG_LINEAR_OAUTH_CLIENT_ID` | none | Linear OAuth App client id; enables hosted install start/callback endpoints when paired with `OPENTAG_LINEAR_OAUTH_REDIRECT_URI` |
+| `OPENTAG_LINEAR_OAUTH_CLIENT_SECRET` | none | Optional Linear OAuth App client secret used for authorization-code and refresh-token exchanges |
+| `OPENTAG_LINEAR_OAUTH_REDIRECT_URI` | none | Public redirect URI registered on the Linear OAuth App, usually `https://<relay-host>/linear/oauth/callback` |
+| `OPENTAG_LINEAR_OAUTH_WEBHOOK_SECRET` | none | Linear OAuth App webhook signing secret; enables fixed hosted OAuth webhook ingress |
+| `OPENTAG_LINEAR_OAUTH_WEBHOOK_PATH` | `/linear/oauth/webhooks` | Public webhook URL path configured on the Linear OAuth App for hosted installs |
+| `OPENTAG_LINEAR_OAUTH_SCOPES` | `read,write,comments:create,app:assignable,app:mentionable` | Optional comma- or space-separated scope override for hosted OAuth install starts |
+| `OPENTAG_LINEAR_REPO_PROVIDER` | `OPENTAG_REPO_PROVIDER`, then `OPENTAG_SLACK_REPO_PROVIDER`, then `github` | Project Target provider embedded into Linear-created runs |
+| `OPENTAG_LINEAR_REPO_OWNER` | `OPENTAG_REPO_OWNER` | Project Target owner embedded into Linear-created runs |
+| `OPENTAG_LINEAR_REPO_NAME` | `OPENTAG_REPO_NAME` | Project Target repo embedded into Linear-created runs |
+
+`OPENTAG_LINEAR_REPO_OWNER` and `OPENTAG_LINEAR_REPO_NAME` must be configured
+together, either directly or through the generic `OPENTAG_REPO_OWNER` /
+`OPENTAG_REPO_NAME` fallback. The resulting Project Target must match a
+repository binding registered on the dispatcher by `opentag setup --relay` or
+`opentag pair --relay`; otherwise the local runner rejects the run before
+executor startup.
 
 ## Dispatcher Environment
 

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
+import { executorsFromConfig } from "../src/runtime.js";
 
 const baseRepository = {
   owner: "acme",
@@ -10,9 +11,161 @@ const baseRepository = {
   checkoutPath: "/tmp/acme-widgets"
 };
 
+function acpManifest(input: { id: string; label: string; command: string; args?: string[] }) {
+  return {
+    protocol: "opentag.integration.v1" as const,
+    id: input.id,
+    label: input.label,
+    bindings: {
+      agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [] }
+    },
+    roles: {
+      agent: { protocol: "agent-client-protocol" as const, protocolVersion: 1 as const, binding: "agent" }
+    },
+    resources: {}
+  };
+}
+
+describe("parseDaemonConfig ACP agents", () => {
+  it("creates differently named agents through the generic ACP executor path", () => {
+    const config = parseDaemonConfig({
+      agents: {
+        "hermes-acp": acpManifest({ id: "hermes-acp", label: "Hermes ACP", command: "hermes", args: ["acp"] }),
+        reviewer: acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" })
+      }
+    });
+
+    expect(config.agents?.["hermes-acp"]?.bindings.agent).toMatchObject({ command: "hermes", args: ["acp"] });
+    const executors = executorsFromConfig(config);
+    expect(executors["hermes-acp"]).toMatchObject({ id: "hermes-acp", displayName: "Hermes ACP" });
+    expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
+    expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(
+      executors.reviewer?.capability?.completionSignals
+    );
+  });
+
+  it("requires the configured name to match the manifest id", () => {
+    expect(() =>
+      parseDaemonConfig({
+        agents: {
+          reviewer: acpManifest({ id: "different-id", label: "Review Agent", command: "review-agent" })
+        }
+      })
+    ).toThrow(/reviewer|different-id/u);
+  });
+
+  it.each(["echo", "codex", "claude-code", "hermes"])(
+    "rejects a configured ACP agent that collides with built-in executor %s",
+    (executorId) => {
+      expect(() =>
+        parseDaemonConfig({
+          agents: {
+            [executorId]: acpManifest({ id: executorId, label: "Collision", command: "custom-agent" })
+          }
+        })
+      ).toThrow(/built-in executor/iu);
+    }
+  );
+
+  it("defensively rejects a built-in executor collision when parsed config is bypassed", () => {
+    const config = parseDaemonConfig({});
+    const bypassed = {
+      ...config,
+      agents: {
+        echo: acpManifest({ id: "echo", label: "Replacement Echo", command: "custom-echo" })
+      }
+    } as unknown as Parameters<typeof executorsFromConfig>[0];
+
+    expect(() => executorsFromConfig(bypassed)).toThrow(/built-in executor 'echo'/iu);
+  });
+
+  it("rejects literal environment values in ACP bindings", () => {
+    const configured = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
+    expect(() => parseDaemonConfig({
+      agents: {
+        reviewer: {
+          ...configured,
+          bindings: { agent: { ...configured.bindings.agent, env: { TOKEN: "literal" } } }
+        }
+      }
+    })).toThrow(/env|unrecognized/iu);
+  });
+});
+
+describe("parseDaemonConfig generic channel bindings", () => {
+  it("accepts exclusive managed ownership only with bounded provider application identity", () => {
+    const config = parseDaemonConfig({
+      channelBindings: [{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+      }]
+    });
+    expect(config.channelBindings?.[0]?.ownership).toEqual({
+      mode: "managed",
+      exclusive: true,
+      applicationId: "A123",
+      botId: "U123"
+    });
+    expect(() => parseDaemonConfig({
+      channelBindings: [{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123\nforged" }
+      }]
+    })).toThrow();
+  });
+
+  it("accepts a channel binding without repository fields", () => {
+    const config = parseDaemonConfig({
+      channelBindings: [{ provider: "slack", accountId: "T123", conversationId: "C456" }]
+    });
+
+    expect(config.channelBindings).toEqual([{ provider: "slack", accountId: "T123", conversationId: "C456" }]);
+  });
+
+  it.each([
+    { repoProvider: "github" },
+    { owner: "acme" },
+    { repo: "demo" },
+    { repoProvider: "github", owner: "acme" },
+    { owner: "acme", repo: "demo" }
+  ])("rejects a partial repository target: $repoProvider $owner $repo", (partial) => {
+    expect(() =>
+      parseDaemonConfig({
+        channelBindings: [{ provider: "slack", accountId: "T123", conversationId: "C456", ...partial }]
+      })
+    ).toThrow();
+  });
+});
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "opentag-local-runtime-test-"));
 }
+
+describe("parseDaemonConfig scratchRoot", () => {
+  it("evaluates the default state directory for each parse", () => {
+    const previousStateDirectory = process.env.OPENTAG_STATE_DIR;
+    const firstStateDirectory = join(tempDir(), "first-state");
+    const secondStateDirectory = join(tempDir(), "second-state");
+
+    try {
+      process.env.OPENTAG_STATE_DIR = firstStateDirectory;
+      expect(parseDaemonConfig({}).scratchRoot).toBe(join(firstStateDirectory, "scratch"));
+
+      process.env.OPENTAG_STATE_DIR = secondStateDirectory;
+      expect(parseDaemonConfig({}).scratchRoot).toBe(join(secondStateDirectory, "scratch"));
+    } finally {
+      if (previousStateDirectory === undefined) {
+        delete process.env.OPENTAG_STATE_DIR;
+      } else {
+        process.env.OPENTAG_STATE_DIR = previousStateDirectory;
+      }
+    }
+  });
+});
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
@@ -236,6 +389,39 @@ describe("parseDaemonConfig secret refs", () => {
 
       expect(config.runnerTokens).toEqual(["runner_old"]);
       expect(config.revokedRunnerTokenFingerprints).toEqual(["abc123"]);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
+  it("uses OPENTAG_REPO_PROVIDER for env-derived Project Target bindings", () => {
+    const previous = {
+      OPENTAG_CONFIG_PATH: process.env.OPENTAG_CONFIG_PATH,
+      OPENTAG_REPO_PROVIDER: process.env.OPENTAG_REPO_PROVIDER,
+      OPENTAG_REPO_OWNER: process.env.OPENTAG_REPO_OWNER,
+      OPENTAG_REPO_NAME: process.env.OPENTAG_REPO_NAME,
+      OPENTAG_WORKSPACE_PATH: process.env.OPENTAG_WORKSPACE_PATH
+    };
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_PROVIDER = "gitlab";
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/acme-demo";
+    try {
+      const config = loadConfigFromEnv();
+
+      expect(config.repositories[0]).toMatchObject({
+        provider: "gitlab",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/acme-demo"
+      });
     } finally {
       for (const [key, value] of Object.entries(previous)) {
         if (value === undefined) {

@@ -9,23 +9,26 @@ import {
   type ActionReceiptState
 } from "./action.js";
 import { OpenTagRunResultSchema, type OpenTagRunResult } from "./schema.js";
+import { isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
+
+const CredentialSafePresentationTextSchema = z.string().min(1).refine(isCredentialSafeText);
 
 export const OpenTagPresentationActionSchema = z.object({
   index: z.number().int().positive(),
-  proposalId: z.string().min(1).optional(),
-  intentId: z.string().min(1).optional(),
-  title: z.string().min(1),
+  proposalId: CredentialSafePresentationTextSchema.optional(),
+  intentId: CredentialSafePresentationTextSchema.optional(),
+  title: CredentialSafePresentationTextSchema,
   state: z.enum(["ready_to_apply", "needs_approval", "needs_setup", "unsupported"]),
-  targetLabel: z.string().min(1),
-  impact: z.string().min(1).optional(),
-  capabilityState: z.string().min(1).optional(),
-  approvalRequirement: z.string().min(1).optional(),
-  safeNextAction: z.string().min(1).optional(),
+  targetLabel: CredentialSafePresentationTextSchema,
+  impact: CredentialSafePresentationTextSchema.optional(),
+  capabilityState: CredentialSafePresentationTextSchema.optional(),
+  approvalRequirement: CredentialSafePresentationTextSchema.optional(),
+  safeNextAction: CredentialSafePresentationTextSchema.optional(),
   visibleDecisions: z.array(z.enum(["apply", "approve", "reject", "continue"])),
   primaryDecision: z.enum(["apply", "continue", "none"]),
-  setupReason: z.string().min(1).optional(),
-  details: z.array(z.string().min(1)).optional(),
-  detailRows: z.array(z.object({ label: z.string().min(1), value: z.string().min(1) })).optional()
+  setupReason: CredentialSafePresentationTextSchema.optional(),
+  details: z.array(CredentialSafePresentationTextSchema).optional(),
+  detailRows: z.array(z.object({ label: CredentialSafePresentationTextSchema, value: CredentialSafePresentationTextSchema })).optional()
 });
 
 export const OpenTagRunStatusPresentationSchema = z.object({
@@ -36,6 +39,30 @@ export const OpenTagRunStatusPresentationSchema = z.object({
   nextAction: z.string().min(1).optional(),
   detailVisibility: z.enum(["source_thread", "audit"]).optional()
 });
+
+export const OpenTagApprovalPromptPresentationSchema = z
+  .object({
+    kind: z.literal("approval_prompt"),
+    runId: z.string().min(1),
+    approvalId: z.string().min(1),
+    proposalId: z.string().min(1),
+    intentId: z.string().min(1),
+    actionId: z.string().min(1),
+    proposalHash: z.string().min(1),
+    approvalEpoch: z.string().min(1),
+    title: CredentialSafePresentationTextSchema,
+    summary: CredentialSafePresentationTextSchema,
+    target: z.object({
+      provider: CredentialSafePresentationTextSchema,
+      connectionId: CredentialSafePresentationTextSchema,
+      operation: CredentialSafePresentationTextSchema,
+      resource: CredentialSafePresentationTextSchema,
+      resourceVersion: CredentialSafePresentationTextSchema.optional()
+    }).strict(),
+    runScope: z.record(z.unknown()).refine(isCredentialSafeValue),
+    decisions: z.array(z.enum(["allow_once", "allow_run", "deny"])).min(1)
+  })
+  .strict();
 
 export const OpenTagDoctorCheckPresentationSchema = z.object({
   status: z.enum(["ok", "warn", "fail", "unknown"]),
@@ -85,20 +112,21 @@ export const OpenTagActionReceiptPresentationSchema = z.object({
 
 export const OpenTagFinalSummaryPresentationSchema = z.object({
   kind: z.literal("final_summary"),
-  outcome: z.string().min(1),
-  summary: z.string().min(1),
-  changedFiles: z.array(z.string().min(1)).optional(),
-  artifacts: OpenTagRunResultSchema.shape.artifacts,
-  verification: OpenTagRunResultSchema.shape.verification,
-  nextActions: z.array(z.string().min(1)).optional(),
-  actionReceiptTitle: z.string().min(1).optional(),
+  outcome: CredentialSafePresentationTextSchema,
+  summary: CredentialSafePresentationTextSchema,
+  changedFiles: z.array(CredentialSafePresentationTextSchema).optional(),
+  artifacts: OpenTagRunResultSchema.shape.artifacts.refine(isCredentialSafeValue),
+  verification: OpenTagRunResultSchema.shape.verification.refine(isCredentialSafeValue),
+  nextActions: z.array(CredentialSafePresentationTextSchema).optional(),
+  actionReceiptTitle: CredentialSafePresentationTextSchema.optional(),
   actions: z.array(OpenTagPresentationActionSchema).optional(),
-  auditRunId: z.string().min(1).optional(),
-  result: OpenTagRunResultSchema
+  auditRunId: CredentialSafePresentationTextSchema.optional(),
+  result: OpenTagRunResultSchema.refine(isCredentialSafeValue)
 });
 
 export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
   OpenTagRunStatusPresentationSchema,
+  OpenTagApprovalPromptPresentationSchema,
   OpenTagDoctorSummaryPresentationSchema,
   OpenTagSourceThreadStatusPresentationSchema,
   OpenTagActionReceiptPresentationSchema,
@@ -107,6 +135,7 @@ export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
 
 export type OpenTagPresentationAction = z.infer<typeof OpenTagPresentationActionSchema>;
 export type OpenTagRunStatusPresentation = z.infer<typeof OpenTagRunStatusPresentationSchema>;
+export type OpenTagApprovalPromptPresentation = z.infer<typeof OpenTagApprovalPromptPresentationSchema>;
 export type OpenTagDoctorCheckPresentation = z.infer<typeof OpenTagDoctorCheckPresentationSchema>;
 export type OpenTagDoctorSummaryPresentation = z.infer<typeof OpenTagDoctorSummaryPresentationSchema>;
 export type OpenTagSourceThreadStatusRun = z.infer<typeof OpenTagSourceThreadStatusRunSchema>;
@@ -115,6 +144,19 @@ export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSource
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
+export type OpenTagPresentationDeliveryTier = "silent" | "status" | "attention_required" | "terminal";
+
+export function presentationDeliveryTier(presentation: OpenTagPresentation): OpenTagPresentationDeliveryTier {
+  if (presentation.kind === "final_summary") return "terminal";
+  if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
+  if (presentation.kind === "run_status") {
+    if (presentation.detailVisibility === "audit") return "silent";
+    if (presentation.state === "waiting_for_approval" || presentation.state === "failed") return "attention_required";
+    if (["completed", "cancelled", "interrupted", "timed_out"].includes(presentation.state)) return "terminal";
+    return "status";
+  }
+  return "status";
+}
 
 export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
   if (!presentation.artifacts?.length) return [];
@@ -192,6 +234,13 @@ function actionImpactFromReceipt(receipt: ActionReceipt): string {
     const changedFiles = stringArrayParam(params, "changedFiles");
     const fileText = changedFiles.length === 1 ? "1 changed file" : `${changedFiles.length} changed files`;
     return `Creates a pull request from ${inlineCode(head)} into ${inlineCode(base)} with ${fileText}.`;
+  }
+  if (intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")) {
+    const title = stringParam(params, "title") ?? "untitled issue";
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    return team
+      ? `Creates a new Linear issue titled ${inlineCode(title)} for team ${inlineCode(team)}.`
+      : `Creates a new Linear issue titled ${inlineCode(title)}.`;
   }
   if (intent.domain === "labels") return "Writes label metadata on the source work item.";
   if (intent.domain === "assignee" || intent.domain === "assignees") return "Writes assignee metadata on the source work item.";
@@ -284,6 +333,14 @@ function presentationActionDetailsFromReceipt(receipt: ActionReceipt): string[] 
     if (head || base) details.push(`Branch: \`${head ?? "unknown"}\` -> \`${base ?? "main"}\``);
     if (changedFiles.length > 0) details.push(`Changed files: ${changedFiles.map((file) => `\`${file}\``).join(", ")}`);
   }
+  if (receipt.candidate.intent.action === "create_issue" || (receipt.candidate.intent.domain === "issue" && receipt.candidate.intent.action === "create")) {
+    const title = stringParam(params, "title");
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    const labels = stringArrayParam(params, "labels").concat(stringArrayParam(params, "labelIds"));
+    if (title) details.push(`Title: ${inlineCode(title)}`);
+    if (team) details.push(`Team: ${inlineCode(team)}`);
+    if (labels.length > 0) details.push(`Labels: ${labels.map(inlineCode).join(", ")}`);
+  }
   if (receipt.candidate.proposalPreconditions?.length) {
     details.push(`Preconditions: ${receipt.candidate.proposalPreconditions.length} check(s) in the audit log.`);
   }
@@ -315,6 +372,18 @@ function presentationActionDetailRowsFromReceipt(receipt: ActionReceipt): Array<
     if (changedFiles.length > 0) rows.push({ label: "Changed files", value: changedFiles.map(inlineCode).join(", ") });
     if (verification.length > 0) rows.push({ label: "Verification", value: listValue(verification) });
     if (risks.length > 0) rows.push({ label: "Risks", value: listValue(risks) });
+  }
+  if (candidate.intent.action === "create_issue" || (candidate.intent.domain === "issue" && candidate.intent.action === "create")) {
+    const title = stringParam(params, "title");
+    const description = stringParam(params, "description") ?? stringParam(params, "body");
+    const team = stringParam(params, "team") ?? stringParam(params, "teamKey") ?? stringParam(params, "teamId");
+    const priority = stringParam(params, "priority");
+    const labels = stringArrayParam(params, "labels").concat(stringArrayParam(params, "labelIds"));
+    if (title) rows.push({ label: "Title", value: title });
+    if (team) rows.push({ label: "Team", value: inlineCode(team) });
+    if (priority) rows.push({ label: "Priority", value: inlineCode(priority) });
+    if (labels.length > 0) rows.push({ label: "Labels", value: labels.map(inlineCode).join(", ") });
+    if (description) rows.push({ label: "Description", value: description });
   }
   if (candidate.proposalPreconditions?.length) {
     rows.push({ label: "Preconditions", value: listValue(candidate.proposalPreconditions) });
@@ -427,6 +496,16 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
       ...(presentation.nextAction ? [`Next action: ${presentation.nextAction}`] : [])
     ].join("\n");
   }
+  if (presentation.kind === "approval_prompt") {
+    return [
+      presentation.title,
+      presentation.summary,
+      `Run scope: ${renderApprovalRunScope(presentation.runScope)}`,
+      `Decisions: ${presentation.decisions.join(", ")}`,
+      `Approval: ${presentation.approvalId}`,
+      `Run: ${presentation.runId}`
+    ].join("\n");
+  }
   if (presentation.kind === "doctor_summary") {
     return [
       presentation.title,
@@ -495,4 +574,22 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
       : []),
     ...(presentation.auditRunId ? [`Audit: opentag status --run ${presentation.auditRunId}`] : [])
   ].join("\n");
+}
+
+function stablePresentationJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stablePresentationJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stablePresentationJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function renderApprovalRunScope(scope: Record<string, unknown>): string {
+  return Object.entries(scope)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${stablePresentationJson(value)}`)
+    .join(", ");
 }

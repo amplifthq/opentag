@@ -74,6 +74,27 @@ describe("protocol helpers", () => {
     expect(conversationKeysFromEvent(githubEvent)).toEqual(["github:acme/demo"]);
   });
 
+  it("keeps a canonical Teams thread alias when the reply conversation id includes messageid", () => {
+    const teamsEvent: OpenTagEvent = {
+      ...githubEvent,
+      id: "evt_teams_1",
+      source: "teams",
+      sourceEventId: "activity_1",
+      actor: { provider: "teams", providerUserId: "aad-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey: "https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2;messageid=root-1|root-1"
+      },
+      metadata: { tenantId: "tenant-1", conversationId: "19:abc@thread.tacv2;messageid=root-1" }
+    };
+
+    expect(conversationKeysFromEvent(teamsEvent)).toEqual([
+      "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2;messageid=root-1|root-1",
+      "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2|root-1"
+    ]);
+  });
+
   it("does not invent a canonical work item when only a Slack thread is known", () => {
     const { workItem: _githubWorkItem, ...githubEventWithoutWorkItem } = githubEvent;
     const slackEvent: OpenTagEvent = {
@@ -134,6 +155,44 @@ describe("protocol helpers", () => {
     expect(packet.intent).toBeDefined();
     expect(packet.intent?.rawText).toBe(packet.summary);
     expect(() => ContextPacketSchema.parse(packet)).not.toThrow();
+  });
+
+  it("preflights provider-neutral issue creation as a Linear external write", () => {
+    const denied = preflightMutationIntent({
+      intent: {
+        intentId: "intent_create_issue",
+        domain: "issue",
+        action: "create_issue",
+        summary: "Create a Linear issue.",
+        params: { title: "Fix OAuth callback error", teamKey: "ENG" }
+      },
+      permissions: githubEvent.permissions,
+      policyRules: [],
+      adapter: "linear"
+    });
+    expect(denied.outcome).toMatchObject({
+      intentId: "intent_create_issue",
+      outcome: "unsupported",
+      message: "Missing platform permission for capability create_issue."
+    });
+
+    const allowed = preflightMutationIntent({
+      intent: {
+        intentId: "intent_create_issue",
+        domain: "issue",
+        action: "create_issue",
+        summary: "Create a Linear issue.",
+        params: { title: "Fix OAuth callback error", teamKey: "ENG" }
+      },
+      permissions: [...githubEvent.permissions, { scope: "issue:create", reason: "create Linear issues after approval" }],
+      policyRules: [{ id: "manual", scope: "primary_anchor_override", effect: "allow", capabilityId: "create_issue", reason: "Approved." }],
+      adapter: "linear"
+    });
+    expect(allowed.outcome).toMatchObject({
+      intentId: "intent_create_issue",
+      outcome: "skipped",
+      message: "Preflight passed for create_issue; adapter execution is not implemented in this protocol slice."
+    });
   });
 
   it("falls back to summary when the command rawText is whitespace-only", () => {

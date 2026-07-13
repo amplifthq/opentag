@@ -7,6 +7,7 @@ import {
   shouldDeliverCallbackRunStatus,
   type ActionReceiptContext,
   type OpenTagActionReceiptPresentation,
+  type OpenTagApprovalPromptPresentation,
   type OpenTagDoctorSummaryPresentation,
   type OpenTagFinalSummaryPresentation,
   type OpenTagPresentation,
@@ -22,22 +23,33 @@ import {
 } from "@opentag/gitlab";
 import {
   createLarkActionReceiptCard,
+  createLarkApprovalPromptCard,
   createLarkDoctorSummaryCard,
   createLarkFinalSummaryCard,
   createLarkRunStatusCard,
   createLarkSourceThreadStatusCard,
   renderLarkActionReceiptPresentation,
+  renderLarkApprovalPrompt,
   renderLarkFinalSummaryPresentation,
   renderLarkRunStatusPresentation
 } from "@opentag/lark";
 import {
+  renderAcknowledgement as renderLinearAcknowledgement,
+  renderFinalSummaryPresentation as renderLinearFinalSummaryPresentation,
+  renderProgress as renderLinearProgress
+} from "@opentag/linear";
+import {
   createSlackActionReceiptBlocks,
+  createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks,
   createSlackFinalSummaryBlocks,
+  createSlackRunStatusBlocks,
   createSlackSourceThreadStatusBlocks,
   renderSlackActionReceiptPresentation,
+  renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
   renderSlackFinalSummaryPresentation,
+  renderSlackRunStatusPresentation,
   type SlackBlock
 } from "@opentag/slack";
 import {
@@ -97,6 +109,12 @@ export type CallbackPresentation = {
 
 function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunStatusPresentation): PresentedCallbackBody {
   const canRenderRich = supportsRichPresentation(provider);
+  if (canRenderRich && provider === "slack") {
+    return {
+      body: renderSlackRunStatusPresentation(presentation),
+      blocks: createSlackRunStatusBlocks(presentation)
+    };
+  }
   if (canRenderRich && provider === "lark") {
     return {
       body: renderLarkRunStatusPresentation(presentation),
@@ -120,6 +138,9 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
     if (provider === "gitlab") {
       return { body: renderGitLabAcknowledgement(presentation.runId) };
     }
+    if (provider === "linear") {
+      return { body: renderLinearAcknowledgement(presentation.runId) };
+    }
     return { body: renderAcknowledgement(presentation.runId) };
   }
 
@@ -132,6 +153,9 @@ function renderRunStatus(provider: CallbackProvider, presentation: OpenTagRunSta
   }
   if (provider === "gitlab") {
     return { body: renderGitLabProgress({ runId: presentation.runId, message }) };
+  }
+  if (provider === "linear") {
+    return { body: renderLinearProgress({ runId: presentation.runId, message }) };
   }
   return { body: renderProgress({ runId: presentation.runId, message }) };
 }
@@ -177,6 +201,9 @@ function renderFinalSummary(provider: CallbackProvider, presentation: OpenTagFin
   }
   if (provider === "gitlab") {
     return { body: renderGitLabFinalSummaryPresentation(presentation) };
+  }
+  if (provider === "linear") {
+    return { body: renderLinearFinalSummaryPresentation(presentation) };
   }
   return { body: renderFinalSummaryPresentation(presentation) };
 }
@@ -249,6 +276,19 @@ function renderActionReceipt(provider: CallbackProvider, presentation: OpenTagAc
   return { body };
 }
 
+function renderApprovalPrompt(provider: CallbackProvider, presentation: OpenTagApprovalPromptPresentation): PresentedCallbackBody {
+  if (supportsRichPresentation(provider) && provider === "slack") {
+    return { body: renderSlackApprovalPrompt(presentation), blocks: createSlackApprovalPromptBlocks(presentation) };
+  }
+  if (supportsRichPresentation(provider) && provider === "lark") {
+    return {
+      body: renderLarkApprovalPrompt(presentation),
+      rich: { provider: "lark", payload: createLarkApprovalPromptCard(presentation) }
+    };
+  }
+  return { body: renderOpenTagPresentationPlainText(presentation) };
+}
+
 export function createDefaultCallbackPresentation(): CallbackPresentation {
   return {
     shouldDeliverAcknowledgement(provider) {
@@ -256,11 +296,11 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     shouldDeliverStatusUpdate(provider) {
+      if (provider === "slack" || provider === "lark") return true;
       return shouldDeliverCallbackRunStatus(provider);
     },
 
     shouldDeliverRunStatusUpdate(input) {
-      if (input.provider === "lark" && input.state === "running") return false;
       return this.shouldDeliverStatusUpdate(input.provider);
     },
 
@@ -304,6 +344,9 @@ export function createDefaultCallbackPresentation(): CallbackPresentation {
     },
 
     render(input) {
+      if (input.presentation.kind === "approval_prompt") {
+        return renderApprovalPrompt(input.provider, input.presentation);
+      }
       if (input.presentation.kind === "run_status") {
         return renderRunStatus(input.provider, input.presentation);
       }

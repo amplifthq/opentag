@@ -3,13 +3,16 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { readCliConfig, writeCliConfigAtomic } from "../src/config.js";
 import { createSetupConfig } from "../src/setup.js";
 import {
   assertStartPortsAvailable,
   bootstrapLocalDispatcher,
+  createLinearOAuthTokenProvider,
   dispatcherRuntimeInputFromCliConfig,
   githubIngressConfigFromCliConfig,
   gitlabIngressConfigFromCliConfig,
+  linearIngressConfigFromCliConfig,
   larkIngressConfigFromCliConfig,
   shouldRethrowAbortReason,
   slackIngressConfigFromCliConfig,
@@ -116,6 +119,50 @@ function gitlabConfig(port?: number) {
   });
 }
 
+function linearConfig(port?: number) {
+  return createSetupConfig({
+    language: "en",
+    platform: "linear",
+    projectPath: tempDir(),
+    executor: "echo",
+    stateDirectory: join(tempDir(), "state"),
+    linear: {
+      token: "lin_api_token",
+      webhookSecret: "linear_webhook_secret",
+      teamId: "team_eng",
+      teamKey: "ENG",
+      graphqlUrl: "https://linear.example/graphql",
+      webhookPath: "/linear/webhooks",
+      port: port ?? 3070,
+      mappings: [
+        {
+          id: "linear_priority_priority",
+          adapter: "linear",
+          domain: "priority",
+          strategy: "priority",
+          values: { high: "2" }
+        }
+      ]
+    }
+  });
+}
+
+function linearOAuthConfig() {
+  const built = linearConfig();
+  built.platforms.linear!.token = "access_old";
+  built.platforms.linear!.auth = {
+    method: "oauth_app",
+    actor: "app",
+    clientId: "linear_client_id",
+    clientSecret: "linear_client_secret",
+    redirectUri: "https://opentag.example/oauth/linear/callback",
+    refreshToken: "refresh_old",
+    accessTokenExpiresAt: "2026-07-07T00:04:00.000Z",
+    scopes: ["read"]
+  };
+  return built;
+}
+
 function telegramConfig() {
   return createSetupConfig({
     language: "en",
@@ -197,8 +244,19 @@ describe("OpenTag CLI start wiring", () => {
         appId: "cli_test",
         appSecret: "secret_test",
         domain: "lark"
-      }
+      },
+      channelPrincipals: [
+        {
+          provider: "lark",
+          applicationId: "cli_test",
+          botId: "ou_bot",
+          credential: expect.any(String)
+        }
+      ]
     });
+    expect(dispatcher.channelPrincipals?.[0]?.credential).toBe(
+      larkIngressConfigFromCliConfig(built).channelPrincipalCredential
+    );
   });
 
   it("adds dispatcher hardening env to the local dispatcher without overriding config authority", () => {
@@ -229,20 +287,31 @@ describe("OpenTag CLI start wiring", () => {
     const built = slackConfig();
     built.daemon.runTimeoutMs = 30_000;
 
-    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+    const dispatcher = dispatcherRuntimeInputFromCliConfig(built);
+    expect(dispatcher).toMatchObject({
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
-      slackBotToken: "xoxb-token"
+      slackBotToken: "xoxb-token",
+      channelPrincipals: [
+        {
+          provider: "slack",
+          applicationId: "A123",
+          credential: expect.any(String)
+        }
+      ]
     });
-    expect(slackIngressConfigFromCliConfig(built)).toMatchObject({
+    const ingress = slackIngressConfigFromCliConfig(built);
+    expect(ingress).toMatchObject({
       signingSecret: "slack_signing_secret",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       botToken: "xoxb-token",
       appId: "A123",
+      channelPrincipalCredential: expect.any(String),
       runTimeoutMs: 30_000
     });
+    expect(dispatcher.channelPrincipals?.[0]?.credential).toBe(ingress.channelPrincipalCredential);
   });
 
   it("passes the service request body limit to Slack Events API ingress", () => {
@@ -270,6 +339,7 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherToken: built.daemon.pairingToken,
       botToken: "xoxb-token",
       appId: "A123",
+      channelPrincipalCredential: expect.any(String),
       runTimeoutMs: 30_000
     });
   });
@@ -311,6 +381,118 @@ describe("OpenTag CLI start wiring", () => {
       webhookPath: "/gitlab/webhooks",
       port: 3060
     });
+  });
+
+  it("derives dispatcher and ingress input for Linear without Lark", () => {
+    const built = linearConfig();
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+      port: 3030,
+      databasePath: built.state.databasePath,
+      pairingToken: built.daemon.pairingToken,
+      linearToken: "lin_api_token",
+      linearGraphqlUrl: "https://linear.example/graphql",
+      linearMappings: built.platforms.linear!.mappings,
+      linearProjectTarget: built.platforms.linear!.projectTarget
+    });
+    expect(linearIngressConfigFromCliConfig(built)).toMatchObject({
+      webhookSecret: "linear_webhook_secret",
+      linearToken: "lin_api_token",
+      graphqlUrl: "https://linear.example/graphql",
+      projectTarget: built.platforms.linear!.projectTarget,
+      dispatcherUrl: "http://localhost:3030",
+      dispatcherToken: built.daemon.pairingToken,
+      webhookPath: "/linear/webhooks",
+      port: 3070
+    });
+  });
+
+  it("refreshes and persists Linear OAuth app tokens before they expire", async () => {
+    const built = linearOAuthConfig();
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, built);
+
+    const provider = createLinearOAuthTokenProvider({
+      config: built,
+      configPath,
+      now: () => new Date("2026-07-07T00:00:00.000Z"),
+      async refreshLinearOAuthToken(input) {
+        expect(input).toEqual({
+          clientId: "linear_client_id",
+          clientSecret: "linear_client_secret",
+          refreshToken: "refresh_old"
+        });
+        return {
+          accessToken: "access_new",
+          refreshToken: "refresh_new",
+          expiresIn: 86_400,
+          scope: ["read", "write", "comments:create"]
+        };
+      }
+    });
+
+    await expect(provider?.()).resolves.toBe("access_new");
+
+    const saved = readCliConfig(configPath);
+    expect(saved.platforms.linear).toMatchObject({
+      token: "access_new",
+      auth: {
+        method: "oauth_app",
+        refreshToken: "refresh_new",
+        accessTokenExpiresAt: "2026-07-08T00:00:00.000Z",
+        scopes: ["read", "write", "comments:create"]
+      }
+    });
+    expect(built.platforms.linear).toMatchObject({
+      token: "access_new",
+      auth: {
+        refreshToken: "refresh_new"
+      }
+    });
+  });
+
+  it("passes a Linear OAuth token provider into the local dispatcher", async () => {
+    const built = linearOAuthConfig();
+    let capturedTokenProvider: unknown;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher(input) {
+          capturedTokenProvider = input.linearTokenProvider;
+          return {
+            url: "http://localhost:3030",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        startLinearIngress() {
+          return {
+            url: "http://127.0.0.1:3070",
+            webhookPath: "/linear/webhooks",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        async serveDaemon() {},
+        logger: { log() {} },
+        readConfig() {
+          return built;
+        },
+        writeConfig() {},
+        async refreshLinearOAuthToken() {
+          throw new Error("provider should not refresh until callback or apply needs a token");
+        }
+      }
+    });
+
+    expect(capturedTokenProvider).toEqual(expect.any(Function));
   });
 
   it("derives dispatcher input for Telegram from saved setup config", () => {
@@ -412,6 +594,21 @@ describe("OpenTag CLI start wiring", () => {
     }
   });
 
+  it("fails before start when the Linear webhook port is already in use", async () => {
+    const { server, port } = await listenOnRandomPort();
+    try {
+      const built = linearConfig(port);
+
+      await expect(assertStartPortsAvailable(built)).rejects.toThrow(
+        `OpenTag cannot start Linear local webhook because port ${port} is already in use.`
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
   it("fails fast for GitHub when run branches are not prepared for apply actions", () => {
     const built = githubConfig();
     built.daemon.preparePullRequestBranch = false;
@@ -462,6 +659,7 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       agentId: "opentag",
+      channelPrincipalCredential: expect.any(String),
       botOpenId: "ou_bot",
       runTimeoutMs: 30_000,
       defaultRepoBinding: {
@@ -512,6 +710,194 @@ describe("OpenTag CLI start wiring", () => {
     ]);
   });
 
+  it("bootstraps a repository-free managed channel without creating a repository binding", async () => {
+    const built = slackSocketModeConfig();
+    built.daemon.repositories = [];
+    built.daemon.channelBindings = [
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: "A123",
+          botId: "U123"
+        }
+      }
+    ];
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async bindChannel(binding) {
+        calls.push(
+          `channel:${binding.provider}:${binding.accountId}/${binding.conversationId}:${binding.ownership?.applicationId ?? "unmanaged"}`
+        );
+      }
+    });
+
+    expect(calls).toEqual(["runner:runner_local", "channel:slack:T123/C123:A123"]);
+  });
+
+  it("uploads discovered Linear mutation mappings during dispatcher bootstrap", async () => {
+    const built = linearConfig();
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async upsertRepoMutationMapping(input) {
+        calls.push(`mapping:${input.provider}:${input.owner}/${input.repo}:${input.mapping.id}`);
+      },
+      async bindChannel(binding) {
+        calls.push(`channel:${binding.provider}:${binding.accountId}/${binding.conversationId}`);
+      }
+    });
+
+    const linear = built.platforms.linear!;
+    expect(calls).toEqual([
+      "runner:runner_local",
+      `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
+      `mapping:${linear.projectTarget.repoProvider}:${linear.projectTarget.owner}/${linear.projectTarget.repo}:linear_priority_priority`
+    ]);
+  });
+
+  it("uploads dynamic Linear relay installation config during dispatcher bootstrap", async () => {
+    const built = linearConfig();
+    built.platforms.linear!.webhookPath = "/linear/webhooks/install_123";
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async upsertLinearRelayInstallation(input) {
+        calls.push(`linear:${input.id}:${input.webhookPath}:${input.repoProvider}:${input.owner}/${input.repo}`);
+      },
+      async bindChannel(binding) {
+        calls.push(`channel:${binding.provider}:${binding.accountId}/${binding.conversationId}`);
+      }
+    });
+
+    const linear = built.platforms.linear!;
+    expect(calls).toEqual([
+      "runner:runner_local",
+      `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
+      `linear:install_123:/linear/webhooks/install_123:${linear.projectTarget.repoProvider}:${linear.projectTarget.owner}/${linear.projectTarget.repo}`
+    ]);
+  });
+
+  it("uploads Linear OAuth relay auth metadata without leaking the client secret", async () => {
+    const built = linearOAuthConfig();
+    built.platforms.linear!.webhookPath = "/linear/webhooks/install_oauth";
+    let uploaded: unknown;
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner() {},
+      async bindRepository() {},
+      async upsertLinearRelayInstallation(input) {
+        uploaded = input;
+      },
+      async bindChannel() {}
+    });
+
+    expect(uploaded).toMatchObject({
+      id: "install_oauth",
+      webhookPath: "/linear/webhooks/install_oauth",
+      token: "access_old",
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: "linear_client_id",
+        refreshToken: "refresh_old",
+        accessTokenExpiresAt: "2026-07-07T00:04:00.000Z",
+        scopes: ["read"]
+      }
+    });
+    expect(JSON.stringify(uploaded)).not.toContain("linear_client_secret");
+  });
+
+  it("persists the fixed OAuth webhook path returned by hosted Linear installs", async () => {
+    const built = linearConfig();
+    built.platforms.linear = {
+      ...built.platforms.linear!,
+      webhookPath: "/linear/oauth/webhooks",
+      auth: {
+        method: "hosted_oauth_app",
+        actor: "app",
+        scopes: ["read", "comments:create", "app:assignable"]
+      }
+    };
+    delete built.platforms.linear.token;
+    delete built.platforms.linear.webhookSecret;
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async upsertRepoMutationMapping(input) {
+        calls.push(`mapping:${input.provider}:${input.owner}/${input.repo}:${input.mapping.id}`);
+      },
+      async createLinearOAuthInstallation(input) {
+        calls.push(`oauth:${input.repoProvider}:${input.owner}/${input.repo}:${input.teamKey}:${input.scopes?.join(",")}`);
+        return {
+          authorizationUrl: "https://linear.example/oauth/authorize?state=linear_state",
+          stateExpiresAt: "2026-07-07T01:00:00.000Z",
+          oauthWebhookPath: "/linear/custom/oauth/webhooks",
+          installation: {
+            id: "install_hosted",
+            webhookPath: "/linear/webhooks/install_hosted",
+            graphqlUrl: "https://linear.example/custom/graphql",
+            teamKey: "OPS",
+            projectTarget: {
+              repoProvider: input.repoProvider ?? "github",
+              owner: input.owner,
+              repo: input.repo
+            }
+          }
+        };
+      },
+      async bindChannel(binding) {
+        calls.push(`channel:${binding.provider}:${binding.accountId}/${binding.conversationId}`);
+      }
+    });
+
+    expect(calls).toEqual([
+      "runner:runner_local",
+      `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
+      `mapping:${built.platforms.linear!.projectTarget.repoProvider}:${built.platforms.linear!.projectTarget.owner}/${built.platforms.linear!.projectTarget.repo}:linear_priority_priority`,
+      `oauth:${built.platforms.linear!.projectTarget.repoProvider}:${built.platforms.linear!.projectTarget.owner}/${built.platforms.linear!.projectTarget.repo}:ENG:read,comments:create,app:assignable`
+    ]);
+    expect(built.platforms.linear).toMatchObject({
+      webhookPath: "/linear/custom/oauth/webhooks",
+      graphqlUrl: "https://linear.example/custom/graphql",
+      teamKey: "OPS",
+      auth: {
+        method: "hosted_oauth_app",
+        installationId: "install_hosted",
+        authorizationUrl: "https://linear.example/oauth/authorize?state=linear_state",
+        stateExpiresAt: "2026-07-07T01:00:00.000Z"
+      }
+    });
+  });
+
   it("starts relay mode without local dispatcher, local port checks, or GitHub ingress", async () => {
     const built = githubConfig();
     built.runtime = {
@@ -520,6 +906,10 @@ describe("OpenTag CLI start wiring", () => {
       relayProvider: "custom"
     };
     built.daemon.dispatcherUrl = "https://relay.example";
+    built.daemon.hermes = {
+      profile: "opentag-fixed",
+      profileTemplate: "opentag-{provider}-{conversationId}"
+    };
     const calls: string[] = [];
     const logs: string[] = [];
     const dispatcherHandle = {
@@ -570,6 +960,8 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("Security: only pair with a relay you operate or trust");
     expect(logs.join("\n")).toContain("GitHub webhook URL: https://relay.example/github/webhooks");
     expect(logs.join("\n")).toContain("GitHub webhook secret: the relay must verify the configured secret before creating runs.");
+    expect(logs.join("\n")).toContain("daemon.hermes.profileTemplate is not used");
+    expect(logs.join("\n")).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
   it("starts relay mode for GitLab without local dispatcher, local port checks, or local GitLab ingress", async () => {
@@ -621,6 +1013,59 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
     expect(logs.join("\n")).toContain("GitLab webhook URL: https://relay.example/gitlab/webhooks");
     expect(logs.join("\n")).toContain("GitLab webhook secret: the relay must verify X-Gitlab-Token before creating runs.");
+  });
+
+  it("starts relay mode for Linear without local dispatcher, local port checks, or local Linear ingress", async () => {
+    const built = linearConfig();
+    built.runtime = {
+      mode: "relay",
+      relayUrl: "https://relay.example",
+      relayProvider: "custom"
+    };
+    built.daemon.dispatcherUrl = "https://relay.example";
+    const calls: string[] = [];
+    const logs: string[] = [];
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {
+          calls.push("ports");
+        },
+        startDispatcher() {
+          calls.push("dispatcher");
+          throw new Error("local dispatcher should not start in relay mode");
+        },
+        startLinearIngress() {
+          calls.push("linear-ingress");
+          throw new Error("Linear ingress should not start in relay mode");
+        },
+        async waitForDispatcher() {
+          calls.push("wait");
+        },
+        async bootstrapDispatcher() {
+          calls.push("bootstrap");
+        },
+        async serveDaemon() {
+          calls.push("daemon");
+        },
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(calls).toEqual(["wait", "bootstrap", "daemon"]);
+    expect(logs.join("\n")).toContain("OpenTag is running in relay mode.");
+    expect(logs.join("\n")).toContain("Linear webhook URL: https://relay.example/linear/webhooks");
+    expect(logs.join("\n")).toContain(
+      "Linear webhook secret: the relay must verify Linear-Signature and webhook timestamp before creating runs."
+    );
   });
 
   it("refuses public HTTP relay configs before connecting", async () => {
@@ -756,6 +1201,47 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("Discord tunnel: not required in Gateway mode");
   });
 
+  it("logs the Teams endpoint with the configured dispatcher port", async () => {
+    const built = config();
+    delete built.platforms.lark;
+    built.platforms.teams = {
+      appId: "teams_app_id",
+      appPassword: "teams_app_password",
+      webhookPath: "/teams/messages"
+    };
+    built.daemon.dispatcherUrl = "http://localhost:4040";
+    const logs: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:4040",
+      server: {},
+      async close() {}
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher() {
+          return dispatcherHandle;
+        },
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        async serveDaemon() {},
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(logs).toContain("Microsoft Teams local messaging endpoint: http://127.0.0.1:4040/teams/messages");
+    expect(logs).toContain("Tunnel example: ngrok http 4040");
+  });
+
   it("fails clearly for relay mode platform ingress that is not supported in the MVP", async () => {
     const built = config();
     built.runtime = {
@@ -780,7 +1266,7 @@ describe("OpenTag CLI start wiring", () => {
           }
         }
       })
-    ).rejects.toThrow("Relay mode currently supports GitHub/GitLab-backed ingress only.");
+    ).rejects.toThrow("Relay mode currently supports GitHub/GitLab/Linear-backed ingress only.");
   });
 
   it("waits for dispatcher health instead of assuming the port is ready", async () => {

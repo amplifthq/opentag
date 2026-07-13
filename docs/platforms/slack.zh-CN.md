@@ -249,6 +249,10 @@ Slack 自服务命令仍然围绕 Project Target：
 当 OpenTag 发出 suggested actions 时，先看 receipt state。如果显示 **Ready to apply**，可以在 Slack 里点击 **Apply 1**，也可以在线程里手动回复 `apply 1`。两种方式都会应用同一个 source-thread action。
 如果 receipt 显示 **Needs setup**，OpenTag 会显示 **Continue** 或 setup hint，而不是把 **Apply 1** 当成主路径。想让 Slack receipt 直接创建 PR，需要先配置 GitHub repository target。
 
+Slack 也可以作为创建 Linear issue 的 source thread：例如让 OpenTag “create a Linear issue”，run 的 final result 可以给出 `issue/create_issue` action receipt。默认不会静默创建，仍需要点击 **Apply 1** 或回复 `apply 1`；成功后 Slack thread 会收到 Linear issue URL。这个动作需要 OpenTag 同时配置 Linear OAuth App / actor=app token，并且能确定 Linear team：action 里提供 `teamId`，或使用 Linear metadata discovery 生成的 `team/teamKey -> teamId` mapping。多 team workspace 如果没有明确 team，会显示 setup/continue hint。
+
+Slack -> Linear issue create 不需要额外给 Linear 创建动作准备公网地址；创建 issue 是 OpenTag 到 Linear GraphQL 的 outbound 请求。是否需要公网 URL 只取决于你选择的 Slack ingress：Socket Mode 不需要公网 URL，Events API 仍需要 Slack 可访问的 HTTPS endpoint。Discord、Lark、GitHub 后续可以复用同一个 `issue/create_issue` action 设计，但本 Slack 文档只说明 Slack 路径。
+
 如果 suggested action 按钮能看到，但点击后 Slack 提示失败，优先检查 **Interactivity & Shortcuts**：
 
 - Socket Mode：Interactivity 已开启，不需要 Request URL。

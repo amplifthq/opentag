@@ -173,7 +173,10 @@ describe("Slack Socket Mode", () => {
                   version: 1,
                   command: "apply 1",
                   proposalId: "proposal_1",
-                  intentId: "intent_label_1"
+                  intentId: "intent_label_1",
+                  permissionDecision: "allow_run",
+                  proposalHash: "proposal_hash_1",
+                  actionId: "action_governed_1"
                 }),
                 action_ts: "1719187200.000600"
               }
@@ -211,6 +214,9 @@ describe("Slack Socket Mode", () => {
         actionTs: "1719187200.000600",
         proposalId: "proposal_1",
         intentId: "intent_label_1",
+        permissionDecision: "allow_run",
+        proposalHash: "proposal_hash_1",
+        governedActionId: "action_governed_1",
         repoProvider: "github",
         owner: "acme",
         repo: "demo"

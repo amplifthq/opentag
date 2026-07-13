@@ -76,8 +76,22 @@ export function formatSecretReadiness(redactedConfig: unknown): string[] {
     add("platforms.gitlab.webhookSecret", ["platforms", "gitlab", "webhookSecret"]);
   }
 
+  if (hasPath(redactedConfig, ["platforms", "linear"])) {
+    const hostedOAuth = getPath(redactedConfig, ["platforms", "linear", "auth", "method"]) === "hosted_oauth_app";
+    if (hostedOAuth) {
+      rows.push("  platforms.linear.auth: hosted OAuth install (relay stores token and webhook secret)");
+    } else {
+      add("platforms.linear.token", ["platforms", "linear", "token"]);
+      add("platforms.linear.webhookSecret", ["platforms", "linear", "webhookSecret"]);
+    }
+  }
+
   if (hasPath(redactedConfig, ["platforms", "discord"])) {
     add("platforms.discord.botToken", ["platforms", "discord", "botToken"]);
+  }
+
+  if (hasPath(redactedConfig, ["platforms", "teams"])) {
+    add("platforms.teams.appPassword", ["platforms", "teams", "appPassword"]);
   }
 
   return rows;

@@ -1,4 +1,14 @@
-import { contextPointerLabel, type ContextPacket, type ContextPointer, type OpenTagCommand, type OpenTagRunResult, type PermissionGrant } from "@opentag/core";
+import {
+  contextPointerLabel,
+  type ContextPacket,
+  type ContextPointer,
+  type OpenTagCommand,
+  type OpenTagReplyTargetRef,
+  type OpenTagRunResult,
+  type OpenTagRunSourceRef,
+  type OpenTagRunTargets,
+  type PermissionGrant
+} from "@opentag/core";
 import type { AgentSessionProfile } from "./session-profile.js";
 
 export type ExecutorEvent = {
@@ -11,10 +21,50 @@ export type ExecutorEventSink = {
   emit(event: ExecutorEvent): Promise<void>;
 };
 
+export type ExecutorWorkspace =
+  | { kind: "repository"; path: string }
+  | { kind: "scratch"; path: string };
+
+export type ExecutorPermissionRequest = {
+  toolCallId: string;
+  title: string;
+  kind?: string | null;
+  provider: string;
+  connectionId: string;
+  operation: string;
+  resource?: string;
+  resourceVersion?: string;
+  targetFingerprint?: string;
+  targetConstraints?: Record<string, unknown>;
+  grantScope?: Record<string, unknown>;
+  permissionScopes: string[];
+};
+
+export type ExecutorPermissionResolution = {
+  actionId: string;
+  decision: "allow_once" | "allow_run" | "deny";
+  reconciled?: boolean;
+  receipt?: { receiptRef: string; outcome: "succeeded" | "failed" | "unknown" };
+  material?: boolean;
+};
+
+export type ExecutorMaterialActionReport = {
+  actionId: string;
+  toolCallId: string;
+  provider: string;
+  receiptRef: string;
+  outcome: "succeeded" | "failed" | "unknown";
+  reportedOutcome?: "completed" | "failed";
+};
+
 export type ExecutorRunInput = {
   runId: string;
-  workspacePath: string;
+  attemptId?: string;
+  workspace: ExecutorWorkspace;
   command: OpenTagCommand;
+  source?: OpenTagRunSourceRef;
+  targets?: OpenTagRunTargets;
+  replyTo?: OpenTagReplyTargetRef[];
   context: ContextPointer[];
   contextPacket?: ContextPacket;
   permissions?: PermissionGrant[];
@@ -23,7 +73,13 @@ export type ExecutorRunInput = {
   keepWorktree?: "always" | "on_failure" | "never";
   metadata?: Record<string, unknown>;
   sessionProfile?: AgentSessionProfile;
+  permissionResolver?: (request: ExecutorPermissionRequest) => Promise<ExecutorPermissionResolution>;
+  materialActionReporter?: (report: ExecutorMaterialActionReport) => Promise<void>;
 };
+
+export function executorWorkspacePath(input: ExecutorRunInput): string {
+  return input.workspace.path;
+}
 
 export function renderContextPacketForPrompt(packet?: ContextPacket): string[] {
   if (!packet) return [];
@@ -105,6 +161,7 @@ export type ExecutorCapabilityContract = {
   rawContextAccess: boolean;
   writeActionAccess: ExecutorWriteActionAccess;
   workspaceIsolation: "none" | "branch" | "worktree" | "external";
+  sourceControl?: "none" | "daemon_managed" | "self_committing";
   requiredSecrets: ExecutorSecretRequirement[];
   completionSignals: ExecutorCompletionSignal[];
 };
@@ -115,5 +172,5 @@ export type ExecutorAdapter = {
   capability?: ExecutorCapabilityContract;
   canRun(input: ExecutorRunInput): Promise<ExecutorReadiness>;
   run(input: ExecutorRunInput, sink: ExecutorEventSink): Promise<OpenTagRunResult>;
-  cancel(runId: string): Promise<void>;
+  cancel(runId: string, attemptId?: string): Promise<void>;
 };

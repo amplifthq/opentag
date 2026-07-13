@@ -1,9 +1,9 @@
 # Live E2E Smoke Harness
 
 The replay harness proves protocol behavior without live provider APIs. The live
-E2E smoke harness is the next layer: it collects the existing GitHub, Slack, and
-Lark dogfood scripts behind one safe entry point so a release or PR reviewer can
-run the live cases intentionally and keep a JSON evidence report.
+E2E smoke harness is the next layer: it collects the existing GitHub, Slack,
+Lark, and Linear dogfood scripts behind one safe entry point so a release or PR
+reviewer can run the live cases intentionally and keep a JSON evidence report.
 
 The harness does not run live provider calls by default. You must select cases
 with `--case` or `--all`.
@@ -25,6 +25,7 @@ Current cases:
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
 | `slack-ui-live` | Yes | Real Slack source-thread mention or button flow through Socket Mode or Events API |
 | `lark-patch-live` | Yes | Real Lark reply plus final card patch through `lark-cli` |
+| `linear-workspace-live` | Yes | Real Linear GraphQL `commentCreate` and `issueUpdate` through a signed local Linear webhook payload |
 
 ## Dry Run
 
@@ -113,6 +114,77 @@ It requires `lark-cli` or `OPENTAG_LARK_CLI`, with a ready bot identity and a
 ready user identity or cached user `openId`. It can create a private seed
 message or reuse an existing message when `OPENTAG_LARK_LIVE_CHAT_ID` and
 `OPENTAG_LARK_LIVE_SOURCE_MESSAGE_ID` are set together.
+
+### Linear Workspace
+
+`linear-workspace-live` wraps
+`scripts/dev/run-linear-workspace-live-test.ts`. It requires:
+
+- `OPENTAG_LINEAR_SMOKE_TOKEN`: Linear OAuth app actor access token header
+  value. Include the `Bearer ` prefix for OAuth access tokens. API-key
+  compatibility smoke runs must also set
+  `OPENTAG_LINEAR_SMOKE_ALLOW_NON_APP_TOKEN=true`.
+- `OPENTAG_LINEAR_SMOKE_ISSUE`: Linear issue key, model UUID, or issue URL to
+  use as the smoke source issue. `OPENTAG_LINEAR_SMOKE_ISSUE_ID` remains
+  supported for compatibility.
+
+Optional inputs:
+
+- `OPENTAG_LINEAR_SMOKE_WEBHOOK_SECRET`: override the temporary signing secret
+  stored on the generated relay installation. When omitted, the script
+  generates one for the local signed webhook payloads.
+- `OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_SECRET`: override the temporary
+  OAuth App webhook signing secret used for the fixed
+  `/linear/oauth/webhooks` hosted relay path. When omitted, the script
+  generates one.
+- `OPENTAG_LINEAR_SMOKE_OAUTH_WEBHOOK_PATH`: fixed hosted OAuth webhook path to
+  exercise. Defaults to `/linear/oauth/webhooks`.
+- `OPENTAG_LINEAR_SMOKE_ORGANIZATION_ID`: override the Linear organization id
+  used to route the fixed OAuth App webhook to the temporary installation. When
+  omitted, the script tries to query the workspace organization id and falls
+  back to a local smoke id.
+- `OPENTAG_LINEAR_SMOKE_GRAPHQL_URL`: Linear GraphQL endpoint override.
+- `OPENTAG_LINEAR_SMOKE_ALLOW_NON_APP_TOKEN`: allow API-key compatibility smoke
+  runs where `viewer.app` is not `true`. Defaults to `false`.
+- `OPENTAG_LINEAR_SMOKE_DISCOVERY_LIMIT`: page size for Linear metadata
+  discovery. Defaults to `100`.
+- `OPENTAG_LINEAR_SMOKE_AGENT_SESSION_ID`: existing Linear Agent Session id to
+  additionally validate the native agent path. When set, the smoke submits both
+  `created` and `prompted` `AgentSessionEvent` payloads, verifies the prompted
+  activity queues behind the active session run before promotion, and expects
+  `agentSessionUpdate` plus `agentActivityCreate` delivery.
+- `OPENTAG_LINEAR_SMOKE_REPO_PROVIDER`, `OPENTAG_LINEAR_SMOKE_REPO_OWNER`, and
+  `OPENTAG_LINEAR_SMOKE_REPO_NAME`: local Project Target metadata to embed in
+  the normalized Linear event.
+
+The script registers a temporary Linear relay installation for token/project
+target storage, then submits signed Linear Comment webhook payloads through the
+fixed hosted OAuth App webhook path (`/linear/oauth/webhooks` by default). The
+dispatcher verifies the app-level signature, verifies the token is a Linear
+OAuth app actor by default, routes by `organizationId`, creates a run, completes
+it with a safe priority update proposal, submits a second signed Linear
+`apply 1` payload, posts a real Linear `commentCreate` callback, executes a real
+Linear `issueUpdate`, and runs metadata discovery for teams, users, workflow
+states, and labels. By default the issue update re-applies the issue's current
+priority value, so it proves the mutation path without intentionally changing
+the issue. The metadata step verifies the smoke issue's team appears in
+discovery and that status/priority/user/label mapping drafts are generated.
+When `OPENTAG_LINEAR_SMOKE_AGENT_SESSION_ID` is set, the same script also
+submits signed `created` and `prompted`
+`AgentSessionEvent` webhooks and verifies native Linear Agent Session / Agent
+Activity GraphQL calls. The prompted payload is sent while the created session
+run is still active; the script checks that it first appears as a queued
+follow-up, then proves the same follow-up request is promoted into the claimed
+follow-up run after the active run completes. Successful runs include
+`linearGraphqlEvidence.operationCounts` and
+`linearGraphqlEvidence.requiredOperations` so the exact Linear GraphQL paths are
+auditable from the JSON output. The output also includes `metadataDiscovery`
+counts and mapping value counts, `oauthActor.appActorVerified` for the default
+app-token path, and `singleStatusComment.graphql.statusCommentUpdateVerified`
+proving `commentUpdate` calls target the reused status comment id.
+When Agent Session smoke is enabled, the output also includes
+`agentSessionSmoke.prompted` with the queued follow-up id,
+`followUpStatus: "promoted"`, and the promoted follow-up run id.
 
 ## Boundary
 

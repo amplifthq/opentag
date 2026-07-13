@@ -7,6 +7,7 @@ import { nodeCommandRunner, type CommandRunner, type ExecutorAdapter, type Execu
 import { createOpenTagClient } from "@opentag/client";
 import { normalizeChannelBindings, runnerDispatcherToken } from "./config.js";
 import type { OpenTagDaemonConfig, RepositoryBindingConfig } from "./config.js";
+import { hermesProfileConfigurationWarning } from "./runtime.js";
 
 export type DoctorCheckStatus = "ok" | "warn" | "fail";
 
@@ -317,7 +318,7 @@ async function checkGitCheckout(input: {
   try {
     const readiness = await executor.canRun({
       runId: "doctor",
-      workspacePath: input.repository.checkoutPath,
+      workspace: { kind: "repository", path: input.repository.checkoutPath },
       ...(input.repository.baseBranch ? { baseBranch: input.repository.baseBranch } : {}),
       ...(input.repository.worktreeRoot ? { worktreeRoot: input.repository.worktreeRoot } : {}),
       ...(input.repository.keepWorktree ? { keepWorktree: input.repository.keepWorktree } : {}),
@@ -353,6 +354,10 @@ export async function runDoctor(input: {
   const checks: DoctorCheck[] = [];
   const commandRunner = input.commandRunner ?? nodeCommandRunner;
   const env = input.env ?? process.env;
+  const hermesProfileWarning = hermesProfileConfigurationWarning(input.config);
+  if (hermesProfileWarning) {
+    checks.push(check("warn", "Hermes profile configuration", hermesProfileWarning));
+  }
   const token = runnerDispatcherToken(input.config);
   const client = createOpenTagClient({
     dispatcherUrl: input.config.dispatcherUrl,

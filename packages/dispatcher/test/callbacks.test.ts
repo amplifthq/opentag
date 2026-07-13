@@ -1,3 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import Database from "better-sqlite3";
+import { drizzle } from "drizzle-orm/better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
   createCompositeCallbackSink,
@@ -5,12 +11,14 @@ import {
   createDiscordCallbackSink,
   createGitHubCallbackSink,
   createGitLabCallbackSink,
+  createLinearCallbackSink,
   createLarkCallbackSink,
   createLarkSourceReceiptSink,
   createSlackCallbackSink,
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
 } from "../src/callbacks.js";
+import { processPendingCallbacks } from "../src/server.js";
 
 describe("createGitHubCallbackSink", () => {
   it("posts GitHub callback messages to the callback URI", async () => {
@@ -77,6 +85,338 @@ describe("createGitHubCallbackSink", () => {
         body: { body: "done" }
       }
     ]);
+  });
+
+  it("posts Linear callback messages as new issue comments", async () => {
+    const requests: { url: string; method: string; body: unknown; authorization: string | null }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (url, init) => {
+        requests.push({
+          url: String(url),
+          method: init?.method ?? "GET",
+          body: JSON.parse(String(init?.body)),
+          authorization: new Headers(init?.headers).get("authorization")
+        });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "done"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: "https://linear.example/graphql",
+      method: "POST",
+      authorization: "lin_api_test",
+      body: {
+        variables: {
+          input: {
+            issueId: "issue_123",
+            body: "done"
+          }
+        }
+      }
+    });
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("commentCreate");
+  });
+
+  it("threads Linear callback comments under the mention's thread-root comment", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_2", url: "https://linear.app/acme/issue/ENG-1#comment_2" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments?parent=comment_root",
+      body: "done"
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            issueId: "issue_123",
+            body: "done",
+            parentId: "comment_root"
+          }
+        }
+      }
+    });
+  });
+
+  it("uses the Linear token provider for callback delivery", async () => {
+    const requests: { authorization: string | null }[] = [];
+    const sink = createLinearCallbackSink({
+      async getToken() {
+        return "Bearer refreshed_app_token";
+      },
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ authorization: new Headers(init?.headers).get("authorization") });
+        return Response.json({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_1",
+      kind: "final",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "done"
+    });
+
+    expect(requests).toEqual([{ authorization: "Bearer refreshed_app_token" }]);
+  });
+
+  it("updates an existing Linear status comment when the status key repeats", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        requests.push({ body: JSON.parse(String(init?.body)) });
+        return Response.json({
+          data: {
+            commentUpdate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "progress",
+        provider: "linear",
+        uri: "linear://issue/issue_123/comments",
+        body: "still working",
+        statusMessageKey: "run_1:status",
+        externalMessageId: "comment_1"
+      })
+    ).resolves.toEqual({ externalMessageId: "comment_1" });
+
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("commentUpdate");
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          id: "comment_1",
+          input: { body: "still working" }
+        }
+      }
+    });
+  });
+
+  it("creates then reuses one Linear status comment for repeated status updates", async () => {
+    const requests: Array<{ query: string; variables: unknown }> = [];
+    const sink = createLinearCallbackSink({
+      token: "lin_api_test",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string; variables: unknown };
+        requests.push(body);
+        if (body.query.includes("commentCreate")) {
+          return Response.json({
+            data: {
+              commentCreate: {
+                success: true,
+                comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+              }
+            }
+          });
+        }
+        return Response.json({
+          data: {
+            commentUpdate: {
+              success: true,
+              comment: { id: "comment_1", url: "https://linear.app/acme/issue/ENG-1#comment_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    const first = await sink.deliver({
+      runId: "run_1",
+      kind: "acknowledgement",
+      provider: "linear",
+      uri: "linear://issue/issue_123/comments",
+      body: "OpenTag picked this up.",
+      statusMessageKey: "run_1:status"
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "progress",
+        provider: "linear",
+        uri: "linear://issue/issue_123/comments",
+        body: "OpenTag is still working.",
+        statusMessageKey: "run_1:status",
+        externalMessageId: first?.externalMessageId
+      })
+    ).resolves.toEqual({ externalMessageId: "comment_1" });
+
+    expect(first).toEqual({ externalMessageId: "comment_1" });
+    expect(requests.map((request) => request.query)).toEqual([expect.stringContaining("commentCreate"), expect.stringContaining("commentUpdate")]);
+    expect(requests[0]?.variables).toMatchObject({
+      input: {
+        issueId: "issue_123",
+        body: "OpenTag picked this up."
+      }
+    });
+    expect(requests[1]?.variables).toMatchObject({
+      id: "comment_1",
+      input: {
+        body: "OpenTag is still working."
+      }
+    });
+  });
+
+  it("updates Linear agent-session plans and posts callbacks as agent activities", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "Bearer app_access",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        requests.push({ body });
+        if (body.query.includes("agentSessionUpdate")) {
+          return Response.json({
+            data: {
+              agentSessionUpdate: {
+                success: true
+              }
+            }
+          });
+        }
+        return Response.json({
+          data: {
+            agentActivityCreate: {
+              success: true,
+              agentActivity: { id: "activity_1" }
+            }
+          }
+        });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "final",
+        provider: "linear",
+        uri: "linear://agent-session/agent_session_1/activities",
+        body: "done"
+      })
+    ).resolves.toEqual({ externalMessageId: "activity_1" });
+
+    expect(String((requests[0]!.body as { query: string }).query)).toContain("agentSessionUpdate");
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          agentSessionId: "agent_session_1",
+          input: {
+            plan: [
+              { content: "Accept the Linear agent session", status: "completed" },
+              { content: "Run OpenTag on the paired local checkout", status: "completed" },
+              { content: "Report the result back to Linear", status: "completed" }
+            ]
+          }
+        }
+      }
+    });
+    expect(String((requests[1]!.body as { query: string }).query)).toContain("agentActivityCreate");
+    expect(requests[1]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            agentSessionId: "agent_session_1",
+            content: { type: "response", body: "done" }
+          }
+        }
+      }
+    });
+  });
+
+  it("marks Linear agent-session plans in progress before final completion", async () => {
+    const requests: { body: unknown }[] = [];
+    const sink = createLinearCallbackSink({
+      token: "Bearer app_access",
+      graphqlUrl: "https://linear.example/graphql",
+      fetchImpl: (async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as { query: string };
+        requests.push({ body });
+        if (body.query.includes("agentSessionUpdate")) {
+          return Response.json({ data: { agentSessionUpdate: { success: true } } });
+        }
+        return Response.json({ data: { agentActivityCreate: { success: true, agentActivity: { id: "activity_ack" } } } });
+      }) as typeof fetch
+    });
+
+    await expect(
+      sink.deliver({
+        runId: "run_1",
+        kind: "acknowledgement",
+        provider: "linear",
+        uri: "linear://agent-session/agent_session_1/activities",
+        body: "OpenTag picked this up."
+      })
+    ).resolves.toEqual({ externalMessageId: "activity_ack" });
+
+    expect(requests[0]).toMatchObject({
+      body: {
+        variables: {
+          input: {
+            plan: [
+              { content: "Accept the Linear agent session", status: "completed" },
+              { content: "Run OpenTag on the paired local checkout", status: "inProgress" },
+              { content: "Report the result back to Linear", status: "pending" }
+            ]
+          }
+        }
+      }
+    });
   });
 
   it("ignores non-GitLab callback messages in the GitLab sink", async () => {
@@ -396,6 +736,31 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("sanitizes credential-like Slack text and blocks before provider rendering", async () => {
+    const payloads: unknown[] = [];
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-test",
+      fetchImpl: (async (_url, init) => {
+        payloads.push(JSON.parse(String(init?.body)));
+        return Response.json({ ok: true, ts: "1710000000.000200" });
+      }) as typeof fetch
+    });
+
+    await sink.deliver({
+      runId: "run_safe_slack",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: `done ${raw}`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Bearer ${raw}` } }]
+    });
+
+    expect(JSON.stringify(payloads)).not.toContain(raw);
+    expect(JSON.stringify(payloads)).toContain("[redacted]");
+  });
+
   it("posts Telegram callback messages to sendMessage without quoting non-ack messages", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createTelegramCallbackSink({
@@ -621,6 +986,121 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("updates a persisted Slack Run Card after the callback sink is recreated", async () => {
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = (async (url, init) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url: String(url), body });
+      return String(url).endsWith("/chat.postMessage")
+        ? Response.json({ ok: true, ts: "1720000000.000100" })
+        : Response.json({ ok: true, ts: body.ts });
+    }) as typeof fetch;
+
+    const firstSink = createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl });
+    const first = await firstSink.deliver({
+      runId: "run_restart",
+      kind: "progress",
+      provider: "slack",
+      uri: "https://slack-proxy.example.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: "Starting",
+      statusMessageKey: "run_restart:status"
+    });
+
+    const restartedSink = createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl });
+    const final = await restartedSink.deliver({
+      runId: "run_restart",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack-proxy.example.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: "Finished",
+      statusMessageKey: "run_restart:status",
+      externalMessageId: first?.externalMessageId
+    });
+
+    expect(first).toEqual({ externalMessageId: "1720000000.000100" });
+    expect(final).toEqual({ externalMessageId: "1720000000.000100" });
+    expect(requests).toEqual([
+      {
+        url: "https://slack-proxy.example.com/api/chat.postMessage",
+        body: { channel: "C123", text: "Starting", thread_ts: "1710000000.000100" }
+      },
+      {
+        url: "https://slack-proxy.example.com/api/chat.update",
+        body: { channel: "C123", text: "Finished", ts: "1720000000.000100" }
+      }
+    ]);
+  });
+
+  it("updates a persisted Slack Run Card through the delivery repository after process restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-slack-restart-"));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const requests: Array<{ url: string; body: unknown }> = [];
+    const fetchImpl = (async (url, init) => {
+      const body = JSON.parse(String(init?.body));
+      requests.push({ url: String(url), body });
+      return String(url).endsWith("/chat.postMessage")
+        ? Response.json({ ok: true, ts: "1720000000.000100" })
+        : Response.json({ ok: true, ts: body.ts });
+    }) as typeof fetch;
+
+    try {
+      const firstSqlite = new Database(databasePath);
+      migrateSchema(firstSqlite);
+      const firstRepo = createOpenTagRepository(drizzle(firstSqlite));
+      await firstRepo.enqueueCallbackDelivery({
+        runId: "run_repository_restart",
+        kind: "progress",
+        provider: "slack",
+        uri: "https://slack-proxy.example.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "Starting",
+        statusMessageKey: "run_repository_restart:status"
+      });
+      await expect(
+        processPendingCallbacks({
+          repo: firstRepo,
+          sink: createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl })
+        })
+      ).resolves.toEqual({ processed: 1, delivered: 1, failed: 0 });
+      firstSqlite.close();
+
+      const restartedSqlite = new Database(databasePath);
+      migrateSchema(restartedSqlite);
+      const restartedRepo = createOpenTagRepository(drizzle(restartedSqlite));
+      await restartedRepo.enqueueCallbackDelivery({
+        runId: "run_repository_restart",
+        kind: "final",
+        provider: "slack",
+        uri: "https://slack-proxy.example.com/api/chat.postMessage",
+        threadKey: "T123|C123|1710000000.000100",
+        body: "Finished",
+        statusMessageKey: "run_repository_restart:status"
+      });
+      await expect(
+        processPendingCallbacks({
+          repo: restartedRepo,
+          sink: createSlackCallbackSink({ botToken: "xoxb-test", fetchImpl })
+        })
+      ).resolves.toEqual({ processed: 1, delivered: 1, failed: 0 });
+      restartedSqlite.close();
+
+      expect(requests).toEqual([
+        {
+          url: "https://slack-proxy.example.com/api/chat.postMessage",
+          body: { channel: "C123", text: "Starting", thread_ts: "1710000000.000100" }
+        },
+        {
+          url: "https://slack-proxy.example.com/api/chat.update",
+          body: { channel: "C123", text: "Finished", ts: "1720000000.000100" }
+        }
+      ]);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("cleans up Slack status message keys when a run finishes", async () => {
     const requests: { url: string; body: unknown }[] = [];
     const sink = createSlackCallbackSink({
@@ -792,6 +1272,41 @@ describe("createGitHubCallbackSink", () => {
         }
       }
     ]);
+  });
+
+  it("sanitizes credential-like Lark text and cards before provider rendering", async () => {
+    const replies: unknown[] = [];
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const sink = createLarkCallbackSink({
+      client: {
+        im: {
+          message: {
+            async reply(payload) {
+              replies.push(payload);
+            }
+          }
+        }
+      }
+    });
+
+    await sink.deliver({
+      runId: "run_safe_lark",
+      kind: "final",
+      provider: "lark",
+      uri: "lark://im/v1/messages",
+      threadKey: "tenant_1|oc_chat|om_msg",
+      body: `done ${raw}`,
+      rich: {
+        provider: "lark",
+        payload: {
+          header: { title: { tag: "plain_text", content: `done ${raw}` } },
+          elements: [{ tag: "div", text: { tag: "lark_md", content: `Bearer ${raw}` } }]
+        }
+      }
+    });
+
+    expect(JSON.stringify(replies)).not.toContain(raw);
+    expect(JSON.stringify(replies)).toContain("[redacted]");
   });
 
   it("patches an existing Lark status card when an external message id is provided", async () => {

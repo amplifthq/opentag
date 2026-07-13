@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation } from "@opentag/core";
+import { createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation, OpenTagApprovalPromptPresentationSchema } from "@opentag/core";
 import {
   createSlackActionReceiptBlocks,
+  createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks,
   createSlackFinalSummaryBlocks,
   parseSlackSuggestedActionButtonValue,
@@ -19,6 +20,49 @@ import {
 } from "../src/render.js";
 
 describe("Slack callback rendering", () => {
+  it("renders immutable governed permission choices as native buttons", () => {
+    const prompt = OpenTagApprovalPromptPresentationSchema.parse({
+      kind: "approval_prompt",
+      runId: "run_1",
+      approvalId: "approval_action_1",
+      proposalId: "proposal_action_1",
+      intentId: "intent_action_1",
+      actionId: "action_1",
+      proposalHash: "hash_1",
+      approvalEpoch: "epoch_1",
+      title: "Allow publish?",
+      summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },
+      runScope: {
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        grantScope: { package: "@acme/report", versions: "*" },
+        targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } }
+      },
+      decisions: ["allow_once", "allow_run", "deny"]
+    });
+    const blocks = createSlackApprovalPromptBlocks(prompt);
+    expect(JSON.stringify(blocks)).toContain("npm / npm:team / publish / @acme/report / next");
+    expect(JSON.stringify(blocks)).toContain('grantScope={\\"package\\":\\"@acme/report\\",\\"versions\\":\\"*\\"}');
+    expect(JSON.stringify(blocks)).toContain("Allow for run applies only to the Run scope shown above");
+    expect(JSON.stringify(blocks)).toContain('\\"urlQuery\\":{\\"environment\\":\\"staging\\",\\"force\\":\\"false\\"}');
+    const actions = blocks.find((block) => block.type === "actions");
+    expect(actions).toMatchObject({
+      type: "actions",
+      elements: [
+        { text: { text: "Allow once" }, style: "primary" },
+        { text: { text: "Allow for run" } },
+        { text: { text: "Deny" }, style: "danger" }
+      ]
+    });
+    if (!actions || actions.type !== "actions") throw new Error("expected actions");
+    expect(actions.elements.map((button) => parseSlackSuggestedActionButtonValue(button.value))).toEqual([
+      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_once", proposalHash: "hash_1", actionId: "action_1" }),
+      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_run", proposalHash: "hash_1", actionId: "action_1" }),
+      expect.objectContaining({ command: "reject 1", permissionDecision: "deny", proposalHash: "hash_1", actionId: "action_1" })
+    ]);
+  });
   it("renders Slack-friendly acknowledgement messages", () => {
     expect(renderSlackAcknowledgement("run_1")).toBe("Working on it.");
   });
@@ -444,6 +488,66 @@ describe("Slack callback rendering", () => {
         command: "reject 1",
         proposalId: "proposal_pr",
         intentId: "intent_create_pr"
+      }
+    ]);
+  });
+
+  it("renders interactive Slack actions for Linear issue creation", () => {
+    const presentation = createFinalSummaryPresentation({
+      auditRunId: "run_linear_issue_1",
+      result: {
+        conclusion: "needs_human",
+        summary: "Prepared a Linear issue proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_linear_issue",
+            createdAt: "2026-06-24T00:00:00.000Z",
+            summary: "Create a Linear issue.",
+            intents: [
+              {
+                intentId: "intent_create_linear_issue",
+                domain: "issue",
+                action: "create_issue",
+                summary: "Create a Linear issue for the OAuth callback error.",
+                params: {
+                  title: "Fix OAuth callback error",
+                  body: "Created from a Slack thread.",
+                  teamKey: "ENG"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      receiptContext: {
+        capabilityByIntentId: {
+          intent_create_linear_issue: { state: "ready_to_apply" }
+        }
+      }
+    });
+
+    const text = renderSlackFinalSummaryPresentation(presentation);
+    const blocks = createSlackFinalSummaryBlocks(presentation);
+
+    expect(text).toContain("Ready to apply");
+    expect(text).toContain("1. *Create a Linear issue for the OAuth callback error.*");
+    expect(text).toContain("Reply: `apply 1` / `reject 1`");
+    expect(text).not.toContain("Description: Created from a Slack thread.");
+    expect(JSON.stringify(blocks)).toContain("Create a Linear issue");
+    const actionsBlock = blocks.find((block) => block.type === "actions");
+    if (actionsBlock?.type !== "actions") throw new Error("expected actions block");
+    expect(actionsBlock.elements.map((element) => parseSlackSuggestedActionButtonValue(element.value))).toEqual([
+      {
+        version: 1,
+        command: "apply 1",
+        proposalId: "proposal_linear_issue",
+        intentId: "intent_create_linear_issue"
+      },
+      {
+        version: 1,
+        command: "reject 1",
+        proposalId: "proposal_linear_issue",
+        intentId: "intent_create_linear_issue"
       }
     ]);
   });

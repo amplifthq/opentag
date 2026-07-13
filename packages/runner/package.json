@@ -35,6 +35,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^1.2.1",
     "@opentag/core": "workspace:*"
   },
   "devDependencies": {

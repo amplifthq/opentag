@@ -68,7 +68,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
-      executor: "echo",
+      executorCapability: { sourceControl: "daemon_managed" },
       event,
       binding: {
         provider: "github",
@@ -112,7 +112,7 @@ describe("maybeCreatePullRequest", () => {
     await expect(
       maybeCreatePullRequest({
         run,
-        executor: "echo",
+        executorCapability: { sourceControl: "daemon_managed" },
         event,
         binding: { provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" },
         result,
@@ -126,7 +126,7 @@ describe("maybeCreatePullRequest", () => {
     await expect(
       maybeCreatePullRequest({
         run,
-        executor: "echo",
+        executorCapability: { sourceControl: "daemon_managed" },
         event,
         binding: { provider: "github", owner: "acme", repo: "demo", checkoutPath: "/tmp/demo" },
         result,
@@ -149,7 +149,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
-      executor: "echo",
+      executorCapability: { sourceControl: "daemon_managed" },
       event,
       binding: {
         provider: "github",
@@ -185,7 +185,7 @@ describe("maybeCreatePullRequest", () => {
     const commands: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
-      executor: "echo",
+      executorCapability: { sourceControl: "daemon_managed" },
       event,
       binding: {
         provider: "github",
@@ -216,7 +216,7 @@ describe("maybeCreatePullRequest", () => {
     const requests: string[] = [];
     const updated = await maybeCreatePullRequest({
       run,
-      executor: "echo",
+      executorCapability: { sourceControl: "daemon_managed" },
       event: slackEvent,
       binding: {
         provider: "github",
@@ -253,7 +253,7 @@ describe("maybeCreatePullRequest", () => {
     const commands: string[] = [];
     await maybeCreatePullRequest({
       run,
-      executor: "codex",
+      executorCapability: { sourceControl: "self_committing" },
       event,
       binding: {
         provider: "github",
@@ -280,6 +280,57 @@ describe("maybeCreatePullRequest", () => {
     expect(commands).toEqual(["git push -u origin opentag/run_1"]);
   });
 
+  it("pushes the canonical attempt branch for a self-committing ACP result without touching the base checkout", async () => {
+    const commands: string[] = [];
+    const attemptBranch = "opentag/run_1-attempt_01J_TEST";
+    const acpResult: OpenTagRunResult = {
+      ...result,
+      suggestedChanges: [
+        {
+          proposalId: "proposal_run_1",
+          createdAt: "2026-07-12T00:00:00.000Z",
+          sourceRunId: "run_1",
+          summary: "ACP prepared a repository change.",
+          intents: [
+            {
+              intentId: "proposal_run_1_create_pr",
+              domain: "pull_request",
+              action: "create_pull_request",
+              summary: `Create a pull request for branch ${attemptBranch}.`,
+              params: { head: attemptBranch, base: "main", changedFiles: ["src/demo.ts"] }
+            }
+          ]
+        }
+      ]
+    };
+
+    await maybeCreatePullRequest({
+      run,
+      executorCapability: { sourceControl: "self_committing" },
+      event,
+      binding: {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        checkoutPath: "/tmp/demo",
+        baseBranch: "main",
+        pushRemote: "origin"
+      },
+      result: acpResult,
+      options: {
+        preparePullRequestBranch: true,
+        commandRunner: {
+          async run(command, args) {
+            commands.push(`${command} ${args.join(" ")}`);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+        }
+      }
+    });
+
+    expect(commands).toEqual([`git push -u origin ${attemptBranch}`]);
+  });
+
   it("skips push and PR creation when event metadata owner/repo does not match binding", async () => {
     const commands: string[] = [];
     const mismatchEvent: OpenTagEvent = {
@@ -288,7 +339,7 @@ describe("maybeCreatePullRequest", () => {
     };
     const updated = await maybeCreatePullRequest({
       run,
-      executor: "echo",
+      executorCapability: { sourceControl: "daemon_managed" },
       event: mismatchEvent,
       binding: {
         provider: "github",

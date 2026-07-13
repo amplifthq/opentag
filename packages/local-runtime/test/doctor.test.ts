@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { CommandRunner, ExecutorAdapter } from "@opentag/runner";
+import { createHermesExecutor, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
 import type { OpenTagDaemonConfig } from "../src/config.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "../src/doctor.js";
 
@@ -140,6 +140,94 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain("conversation=request, prompt_mutation=none, raw_context=no, write_actions=none");
     expect(formatDoctorChecks(checks)).toContain("OK   github:acme/demo checkout: Workspace path configured (hasWorkspacePath=yes).");
     expect(formatDoctorChecks(checks)).not.toContain("opentag-local-runtime-doctor-");
+  });
+
+  it("fails Hermes readiness when the configured fixed profile is unavailable", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opentag-hermes-doctor-"));
+    const checkoutPath = join(root, "demo");
+    mkdirSync(checkoutPath, { recursive: true });
+    writeFileSync(join(checkoutPath, ".git"), "gitdir: /tmp/fake-git\n");
+    const calls: { command: string; args: string[] }[] = [];
+    const hermesRunner: CommandRunner = {
+      async run(command, args) {
+        calls.push({ command, args });
+        if (command === "hermes") {
+          return { exitCode: 1, stdout: "", stderr: "Profile 'opentag-fixed' does not exist" };
+        }
+        if (command === "git" && args.join(" ") === "status --porcelain") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+      }
+    };
+
+    try {
+      const checks = await runDoctor({
+        config: {
+          runnerId: "runner_local",
+          dispatcherUrl: "http://dispatcher.test",
+          repositories: [
+            {
+              provider: "github",
+              owner: "acme",
+              repo: "demo",
+              checkoutPath,
+              defaultExecutor: "hermes",
+              baseBranch: "main",
+              pushRemote: "origin",
+              keepWorktree: "on_failure"
+            }
+          ],
+          hermes: { profile: "opentag-fixed" },
+          pollIntervalMs: 5000,
+          heartbeatIntervalMs: 15000
+        },
+        executors: { hermes: createHermesExecutor({ runner: hermesRunner, profile: "opentag-fixed" }) },
+        commandRunner,
+        fetchImpl: async (url) => {
+          const stringUrl = String(url);
+          if (stringUrl.endsWith("/healthz")) return Response.json({ ok: true });
+          if (stringUrl.endsWith("/v1/runners/runner_local")) {
+            return Response.json({ runner: { runnerId: "runner_local", name: "Local Runner", createdAt: "2026-06-24T00:00:00.000Z" } });
+          }
+          if (stringUrl.endsWith("/v1/repo-bindings/github/acme/demo")) {
+            return Response.json({
+              binding: {
+                provider: "github",
+                owner: "acme",
+                repo: "demo",
+                runnerId: "runner_local",
+                workspacePath: checkoutPath,
+                defaultExecutor: "hermes"
+              }
+            });
+          }
+          return new Response("not found", { status: 404 });
+        }
+      });
+
+      expect(doctorHasFailures(checks)).toBe(true);
+      expect(formatDoctorChecks(checks)).toContain(
+        "FAIL hermes executor: Hermes profile 'opentag-fixed' is not ready: Profile 'opentag-fixed' does not exist"
+      );
+      expect(calls).toEqual([{ command: "hermes", args: ["-p", "opentag-fixed", "--version"] }]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("warns that legacy Hermes profile templates are ignored in favor of the fixed profile", async () => {
+    const checks = await runCodexDoctor('service_tier = "fast"\n', {
+      hermes: {
+        profile: "opentag-fixed",
+        profileTemplate: "opentag-{provider}-{conversationId}"
+      }
+    });
+
+    expect(formatDoctorChecks(checks)).toContain(
+      "WARN Hermes profile configuration: Hermes configuration warning: daemon.hermes.profileTemplate is not used"
+    );
+    expect(formatDoctorChecks(checks)).toContain("OpenTag will use the fixed profile 'opentag-fixed'");
   });
 
   it("checks executor required env secrets without printing secret values", async () => {

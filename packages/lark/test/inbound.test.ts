@@ -632,7 +632,10 @@ describe("createLarkCardActionHandler", () => {
           decision: "apply",
           index: 1,
           proposalId: "proposal_pr",
-          intentId: "intent_create_pr"
+          intentId: "intent_create_pr",
+          permissionDecision: "allow_once",
+          proposalHash: "proposal_hash_pr",
+          actionId: "action_create_pr"
         }
       }
     });
@@ -672,6 +675,9 @@ describe("createLarkCardActionHandler", () => {
         actionName: "opentag_apply_1",
         proposalId: "proposal_pr",
         intentId: "intent_create_pr",
+        permissionDecision: "allow_once",
+        proposalHash: "proposal_hash_pr",
+        governedActionId: "action_create_pr",
         repoProvider: "github",
         owner: "acme",
         repo: "demo"

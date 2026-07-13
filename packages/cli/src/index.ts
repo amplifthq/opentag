@@ -27,8 +27,11 @@ import {
 import { runSetupCommand } from "./commands/setup.js";
 import { runStartCommand } from "./start.js";
 import { runStatusCommand } from "./status.js";
+import { CLI_VERSION } from "./version.js";
 
 const program = new Command();
+
+program.version(CLI_VERSION);
 
 function handleError(error: unknown): never {
   console.error(formatCliConfigError(error));
@@ -56,8 +59,7 @@ program
   .option("--language <language>", "Setup language: en or zh-CN")
   .option("--executor <executor>", "Default executor: echo, codex, claude-code, or hermes")
   .option("--hermes-command <command>", "Hermes CLI command")
-  .option("--hermes-profile <profile>", "Hermes profile")
-  .option("--hermes-profile-template <template>", "Hermes profile template")
+  .option("--hermes-profile <profile>", "Fixed, pre-existing Hermes profile (default: opentag)")
   .option("--agent-profile <profile>", "Executor-neutral agent session profile")
   .option("--agent-profile-template <template>", "Executor-neutral agent session profile template")
   .option("--lark-setup <method>", "Lark setup method: saved, scan, or manual")
@@ -86,6 +88,26 @@ program
   .option("--gitlab-webhook-secret <secret>", "GitLab webhook secret token; generated when omitted")
   .option("--gitlab-webhook-path <path>", "GitLab webhook path")
   .option("--gitlab-port <port>", "Local GitLab webhook port")
+  .option("--linear-auth <method>", "Linear auth method: oauth_app or api_key")
+  .option("--linear-token <token>", "Linear API key for source-thread replies")
+  .option("--linear-oauth-client-id <id>", "Linear OAuth app client id")
+  .option("--linear-oauth-client-secret <secret>", "Linear OAuth app client secret")
+  .option("--linear-oauth-redirect-uri <uri>", "Linear OAuth app redirect URI")
+  .option("--linear-oauth-code <code>", "Linear OAuth authorization code")
+  .option("--linear-oauth-access-token <token>", "Linear OAuth access token, when exchanged outside setup")
+  .option("--linear-oauth-refresh-token <token>", "Linear OAuth refresh token, when exchanged outside setup")
+  .option("--linear-oauth-expires-at <iso>", "Linear OAuth access-token expiry timestamp")
+  .option("--linear-oauth-scopes <scopes>", "Linear OAuth scopes, comma- or space-separated")
+  .option("--linear-oauth-state <state>", "Linear OAuth state value")
+  .option("--linear-discover-metadata", "Discover Linear teams, states, users, and labels during setup")
+  .option("--no-linear-discover-metadata", "Skip Linear metadata discovery during setup")
+  .option("--linear-discovery-limit <n>", "Linear metadata discovery page size")
+  .option("--linear-team-id <id>", "Linear team id")
+  .option("--linear-team-key <key>", "Linear team key")
+  .option("--linear-webhook-secret <secret>", "Linear webhook signing secret; generated when omitted")
+  .option("--linear-webhook-path <path>", "Linear webhook path")
+  .option("--linear-port <port>", "Local Linear webhook port")
+  .option("--linear-graphql-url <url>", "Linear GraphQL endpoint override")
   .option("--telegram-mode <mode>", "Telegram delivery mode: polling or webhook")
   .option("--telegram-bot-token <token>", "Telegram bot token from BotFather")
   .option("--telegram-bot-id <id>", "Telegram bot id; derived from the bot token when omitted")
@@ -97,8 +119,13 @@ program
   .option("--discord-public-key <key>", "Discord application public key for webhook mode")
   .option("--discord-bot-token <token>", "Discord bot token for channel replies")
   .option("--discord-webhook-path <path>", "Discord interactions webhook path")
+  .option("--teams-app-id <id>", "Microsoft Teams app id")
+  .option("--teams-app-password <password>", "Microsoft Teams app password")
+  .option("--teams-tenant-id <id>", "Microsoft Teams tenant id (optional; single-tenant apps)")
+  .option("--teams-webhook-path <path>", "Microsoft Teams messaging webhook path")
   .option("--binding <method>", "Binding method: default_project or bind_later")
   .option("--force", "Overwrite an existing config")
+  .option("--relay <url>", "Configure this setup to use a trusted remote relay instead of local public tunnels")
   .option("--start", "Start OpenTag immediately after setup")
   .option("--no-start", "Do not ask to start OpenTag after setup")
   .option("--service", "Install and start OpenTag as a background service after setup")
@@ -145,7 +172,7 @@ program
 
 program
   .command("ingest")
-  .description("Ingest a local external agent progress or completion event")
+  .description("Ingest a fenced local external agent progress or completion event")
   .option("--config <path>", "Config file path")
   .requiredOption("--run <runId>", "OpenTag run id")
   .requiredOption("--event <event>", "Event: progress, post_llm_call, before_agent_finalize, agent_end, failed, cancelled, timed_out, or interrupted")

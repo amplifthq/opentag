@@ -9,6 +9,16 @@ import {
   updateLarkTextMessage
 } from "@opentag/lark";
 import {
+  createLinearAgentActivity,
+  createLinearIssueCommentRecord,
+  linearAgentSessionIdFromCallbackUri,
+  linearIssueIdFromCallbackUri,
+  linearParentCommentIdFromCallbackUri,
+  updateLinearAgentSession,
+  updateLinearComment,
+  type FetchLike as LinearFetchLike
+} from "@opentag/linear";
+import {
   createSlackPostMessagePayload,
   createSlackReactionPayload,
   createSlackUpdateMessagePayload,
@@ -21,9 +31,12 @@ import {
   parseTelegramThreadKey,
   telegramMessageRichPayloadFromUnknown
 } from "@opentag/telegram";
+import { sanitizeCredentialLikeValue } from "@opentag/core";
+import { createTeamsConnector, createTeamsTokenProvider, parseTeamsThreadKey } from "@opentag/teams";
 import type { CallbackDeliveryResult, CallbackMessage, CallbackSink, SourceReceipt, SourceReceiptSink } from "./server.js";
 
 export type FetchLike = typeof fetch;
+export type LinearTokenProvider = () => Promise<string | undefined> | string | undefined;
 
 const DEFAULT_SLACK_SOURCE_RECEIPT_TIMEOUT_MS = 5_000;
 const DEFAULT_LARK_RECEIVED_REACTION = "Typing";
@@ -86,6 +99,30 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+async function resolveLinearToken(input: { token?: string; getToken?: LinearTokenProvider }): Promise<string | undefined> {
+  const token = input.getToken ? await input.getToken() : input.token;
+  const trimmed = token?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function linearAgentSessionPlanFor(message: CallbackMessage) {
+  const completed = message.kind === "final";
+  return [
+    {
+      content: "Accept the Linear agent session",
+      status: "completed" as const
+    },
+    {
+      content: "Run OpenTag on the paired local checkout",
+      status: completed ? ("completed" as const) : ("inProgress" as const)
+    },
+    {
+      content: "Report the result back to Linear",
+      status: completed ? ("completed" as const) : ("pending" as const)
+    }
+  ];
+}
+
 async function fetchWithTimeout(input: {
   fetchImpl: FetchLike;
   uri: string;
@@ -110,7 +147,7 @@ export function createGitHubCallbackSink(input: { token?: string; fetchImpl?: Fe
   const deliveryByKey = new Map<string, Promise<void>>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
       if (message.provider !== "github") return;
       if (!input.token) return;
 
@@ -201,6 +238,66 @@ export function createGitLabCallbackSink(input: { token?: string; fetchImpl?: Fe
   };
 }
 
+export function createLinearCallbackSink(input: {
+  token?: string;
+  getToken?: LinearTokenProvider;
+  graphqlUrl?: string;
+  fetchImpl?: LinearFetchLike;
+}): CallbackSink {
+  return {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      if (message.provider !== "linear") return;
+      const token = await resolveLinearToken(input);
+      if (!token) return;
+      const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
+      if (agentSessionId) {
+        await updateLinearAgentSession({
+          token,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          agentSessionId,
+          plan: linearAgentSessionPlanFor(message),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        const activityId = await createLinearAgentActivity({
+          token,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          activity: {
+            agentSessionId,
+            type: message.kind === "final" ? "response" : "thought",
+            body: message.body,
+            ephemeral: message.kind === "progress"
+          },
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        return activityId ? { externalMessageId: activityId } : undefined;
+      }
+      const issueId = linearIssueIdFromCallbackUri(message.uri);
+      if (!issueId) {
+        throw new Error(`deliver Linear callback failed: invalid callback URI ${message.uri}`);
+      }
+      if (message.statusMessageKey && message.externalMessageId) {
+        await updateLinearComment({
+          token,
+          commentId: message.externalMessageId,
+          body: message.body,
+          ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+          ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+        });
+        return { externalMessageId: message.externalMessageId };
+      }
+      const comment = await createLinearIssueCommentRecord({
+        token,
+        issueId,
+        body: message.body,
+        ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
+        ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+      });
+      return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
+    }
+  };
+}
+
 // Discord rejects message content longer than 2000 characters with a 400 (code 50035),
 // which would fail the whole delivery. Truncate so long summaries/diffs still post.
 const DISCORD_MAX_CONTENT = 2000;
@@ -265,6 +362,70 @@ export function createDiscordCallbackSink(input: { token?: string; fetchImpl?: F
   };
 }
 
+export function createTeamsCallbackSink(input: {
+  appId?: string;
+  appPassword?: string;
+  tenantId?: string;
+  fetchImpl?: FetchLike;
+}): CallbackSink {
+  // Reject partial credentials so a misconfigured sink fails at startup, not silently.
+  if (Boolean(input.appId) !== Boolean(input.appPassword)) {
+    throw new Error("Teams callback sink requires both appId and appPassword (or neither).");
+  }
+
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const tokenProvider =
+    input.appId && input.appPassword
+      ? createTeamsTokenProvider({
+          appId: input.appId,
+          appPassword: input.appPassword,
+          ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+          fetchImpl
+        })
+      : undefined;
+  const connector = tokenProvider ? createTeamsConnector({ getToken: () => tokenProvider.getToken(), fetchImpl }) : undefined;
+  const activityIdByKey = new Map<string, string>();
+  const deliveryByKey = new Map<string, Promise<void>>();
+
+  return {
+    async deliver(message: CallbackMessage): Promise<void> {
+      if (message.provider !== "teams") return;
+      if (!connector) return;
+      if (!message.threadKey) {
+        throw new Error("Teams callback message is missing threadKey.");
+      }
+
+      const { serviceUrl, conversationId } = parseTeamsThreadKey(message.threadKey);
+      const statusKey = message.statusMessageKey ?? `${message.runId}:status`;
+      const previous = deliveryByKey.get(statusKey) ?? Promise.resolve();
+      // Swallow a prior failure so a transient error on one update does not permanently
+      // break the edit chain for the subsequent progress/final messages of the same run.
+      const current = previous.catch(() => {}).then(async () => {
+        try {
+          const existingActivityId = activityIdByKey.get(statusKey);
+          // status_update edit chain: POST the first message, PUT (edit) the same one after.
+          if (existingActivityId) {
+            await connector.updateMessage({ serviceUrl, conversationId, activityId: existingActivityId, text: message.body });
+          } else {
+            const { activityId } = await connector.postMessage({ serviceUrl, conversationId, text: message.body });
+            activityIdByKey.set(statusKey, activityId);
+          }
+        } finally {
+          if (message.kind === "final") {
+            activityIdByKey.delete(statusKey);
+          }
+        }
+      });
+      deliveryByKey.set(statusKey, current);
+      await current.finally(() => {
+        if (deliveryByKey.get(statusKey) === current) {
+          deliveryByKey.delete(statusKey);
+        }
+      });
+    }
+  };
+}
+
 export function createSlackCallbackSink(input: {
   botToken?: string;
   botTokensByAgentId?: Record<string, string>;
@@ -274,7 +435,8 @@ export function createSlackCallbackSink(input: {
   const statusMessageTsByKey = new Map<string, string>();
 
   return {
-    async deliver(message: CallbackMessage): Promise<void> {
+    async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      message = sanitizeCredentialLikeValue(message);
       if (message.provider !== "slack") return;
       const botToken = slackBotTokenFor({
         botToken: input.botToken,
@@ -284,7 +446,8 @@ export function createSlackCallbackSink(input: {
       if (!botToken) return;
 
       const thread = parseSlackThreadKey(message.threadKey ?? "");
-      const existingStatusTs = message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined;
+      const existingStatusTs = message.externalMessageId
+        ?? (message.statusMessageKey ? statusMessageTsByKey.get(message.statusMessageKey) : undefined);
       const response = await fetchImpl(existingStatusTs ? slackUpdateUriFrom(message.uri) : message.uri, {
         method: "POST",
         headers: {
@@ -325,6 +488,8 @@ export function createSlackCallbackSink(input: {
           }
         }
       }
+      const externalMessageId = existingStatusTs ?? body.ts;
+      return externalMessageId ? { externalMessageId } : undefined;
     }
   };
 }
@@ -435,6 +600,7 @@ export function createLarkCallbackSink(input: {
 
   return {
     async deliver(message: CallbackMessage): Promise<CallbackDeliveryResult | void> {
+      message = sanitizeCredentialLikeValue(message);
       if (message.provider !== "lark") return;
       // A lark run was accepted, so a missing client/threadKey is a real failure, not a silent success.
       if (!client) {

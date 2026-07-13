@@ -36,8 +36,11 @@ The CLI maps hook events onto the runner API:
 | Progress | `POST /v1/runners/:runnerId/runs/:runId/progress` |
 | Completion, failure, cancellation, interruption, timeout | `POST /v1/runners/:runnerId/runs/:runId/complete` |
 
-The hook wrapper should set `OPENTAG_RUN_ID` and call the local CLI rather than
-embedding raw HTTP tokens in a third-party runtime config.
+The hook wrapper should set `OPENTAG_RUN_ID`, `OPENTAG_ATTEMPT_ID`, and
+`OPENTAG_FENCING_TOKEN`, then call the local CLI rather than embedding raw HTTP
+tokens in a third-party runtime config. The attempt ID and fencing token must
+come from the active OpenTag lease; a replacement attempt must receive a new
+pair and stale hooks are rejected.
 
 ## Manifest
 
@@ -53,7 +56,8 @@ It declares:
 - `source`: a lowercase safe runtime label such as `hermes`, `openclaw`, or
   `custom-agent`.
 - `command`: the local OpenTag command to invoke.
-- `requiredEnv`: currently `OPENTAG_RUN_ID`.
+- `requiredEnv`: `OPENTAG_RUN_ID`, `OPENTAG_ATTEMPT_ID`, and
+  `OPENTAG_FENCING_TOKEN`.
 - `optionalEnv`: source, command, and idempotency prefix overrides.
 - `permissions`: explicit denial of conversation access, prompt mutation, raw
   context access, and source-thread write actions.

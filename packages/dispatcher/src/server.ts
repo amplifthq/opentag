@@ -1,18 +1,29 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  actionScopeAllowsRunReuse,
+  ActionPermissionRequestSchema,
+  OpenTagApprovalPromptPresentationSchema,
+  OpenTagManagedChannelBindingOwnershipSchema,
+  MaterialActionReceiptSchema,
+  VerificationEvidenceSchema,
   capabilityForMutationIntent,
+  channelProgressVisibility,
+  conversationKeysFromCallback,
   conversationKeysFromEvent,
   parseThreadActionCommand,
   parseThreadControlCommand,
   permissionScopesAllowCapability,
+  redactCredentialLikeData,
+  sanitizeCredentialLikeValue,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
   type ActionReceiptCapability,
   type ActionReceiptContext,
+  type AdapterMutationMapping,
   type ApplyIntentOutcome,
   type ApplyPlan,
   type MutationIntent,
@@ -48,8 +59,36 @@ import {
   type FetchLike as GitLabFetchLike
 } from "@opentag/gitlab";
 import type { GitLabMutationOperation } from "@opentag/gitlab";
+import {
+  acknowledgeLinearAgentSession,
+  applyLinearMutationOperation,
+  buildLinearOAuthAuthorizationUrl,
+  createLinearAgentActivity,
+  createLinearAdapterMappingDrafts,
+  createLinearIssueCommentRecord,
+  createLinearMutationCompiler,
+  createLinearWebhookApp,
+  DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS,
+  DEFAULT_LINEAR_AGENT_OAUTH_SCOPES,
+  discoverLinearMetadata,
+  exchangeLinearOAuthCode,
+  fetchLinearWorkspaceIdentity,
+  linearAgentSessionIdFromCallbackUri,
+  linearIssueIdFromCallbackUri,
+  linearParentCommentIdFromCallbackUri,
+  refreshLinearOAuthToken,
+  updateLinearAgentSession,
+  updateLinearComment,
+  verifyLinearSignature,
+  verifyLinearWebhookTimestamp,
+  type FetchLike as LinearFetchLike,
+  type LinearWebhookPayload,
+  type LinearOAuthTokenResponse,
+  type LinearMutationOperation
+} from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
-import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import { ChannelBindingCorruptionError, createOpenTagRepository, migrateSchema } from "@opentag/store";
+import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
@@ -69,6 +108,35 @@ export type DispatcherRateLimitOptions = {
   windowMs: number;
   maxRequests: number;
   now?(): number;
+};
+
+export type RelayPlatformCapability = {
+  provider: string;
+  ingress?: {
+    enabled: boolean;
+    path?: string;
+    signatureVerification?: "configured" | "not_configured" | "not_required";
+    reason?: string;
+  };
+  callback?: {
+    enabled: boolean;
+    reason?: string;
+  };
+  apply?: {
+    enabled: boolean;
+    reason?: string;
+  };
+  oauthInstall?: {
+    enabled: boolean;
+    path?: string;
+    reason?: string;
+  };
+};
+
+export type RelayCapabilities = {
+  schemaVersion: 1;
+  relay: true;
+  platforms: RelayPlatformCapability[];
 };
 
 type DispatcherRateLimitBucket = {
@@ -262,6 +330,22 @@ export type LarkDelayedStatusCardOptions = {
   clearTimeout?(handle: DelayedLarkStatusTimer): void;
 };
 
+export type LinearOAuthInstallOptions = {
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  scopes?: readonly string[];
+  webhookSecret?: string;
+  webhookPath?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  installStateTtlMs?: number;
+  refreshSkewMs?: number;
+  commentRunDeferMs?: number;
+  fetchImpl?: LinearFetchLike;
+  now?(): Date;
+};
+
 type DelayedLarkStatusState = {
   timer?: DelayedLarkStatusTimer;
   cardCreated: boolean;
@@ -291,15 +375,46 @@ function shouldDeliverRunStatusUpdate(
 }
 
 function lifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
-  return input.provider === "lark" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
+  return input.provider === "slack" || input.provider === "lark" || input.provider === "linear" || input.provider === "telegram"
+    ? `${input.runId}:status`
+    : undefined;
+}
+
+const DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))];
+}
+
+function generateLinearRelayInstallationId(): string {
+  return `install_${randomBytes(12).toString("hex")}`;
+}
+
+function generateLinearRelayWebhookSecret(): string {
+  return `linear_whsec_${randomBytes(24).toString("hex")}`;
+}
+
+function generateLinearOAuthState(): string {
+  return `linear_${randomBytes(24).toString("hex")}`;
+}
+
+function linearAccessTokenExpiresAt(input: { token: LinearOAuthTokenResponse; now: Date }): string | undefined {
+  return typeof input.token.expiresIn === "number" && Number.isFinite(input.token.expiresIn)
+    ? new Date(input.now.getTime() + input.token.expiresIn * 1000).toISOString()
+    : undefined;
 }
 
 function isTerminalRun(run: OpenTagRun): boolean {
   return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
 }
 
-function shouldUseDelayedLarkStatusCard(provider: string, options: LarkDelayedStatusCardOptions): boolean {
-  return provider === "lark" && options.enabled !== false;
+function shouldUseDelayedLarkStatusCard(
+  provider: string,
+  options: LarkDelayedStatusCardOptions,
+  nativeStatusDelivery: boolean
+): boolean {
+  return provider === "lark" && options.enabled !== false && !nativeStatusDelivery;
 }
 
 function safeExecutorLabel(executor: string | undefined): string {
@@ -330,15 +445,100 @@ const CreateSlackChannelBindingSchema = z.object({
   repo: z.string().min(1)
 });
 
-const CreateChannelBindingSchema = z.object({
-  provider: z.string().min(1),
-  accountId: z.string().min(1),
-  conversationId: z.string().min(1),
-  repoProvider: z.string().min(1),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
+const CreateChannelBindingSchema = z
+  .object({
+    provider: z.string().min(1),
+    accountId: z.string().min(1),
+    conversationId: z.string().min(1),
+    repoProvider: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    repo: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
+  })
+  .superRefine((binding, ctx) => {
+    const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
+    if (present !== 0 && present !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repoProvider"],
+        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
+      });
+    }
+  });
+
+function channelBindingScopeFromEvent(event: OpenTagEvent): { accountId: string; conversationId: string } | null {
+  const metadata = event.metadata ?? {};
+  const accountId = metadataString(metadata, "accountId")
+    ?? metadataString(metadata, "teamId")
+    ?? metadataString(metadata, "tenantKey")
+    ?? metadataString(metadata, "botId");
+  const conversationId = metadataString(metadata, "conversationId")
+    ?? metadataString(metadata, "channelId")
+    ?? metadataString(metadata, "chatId");
+  return accountId && conversationId ? { accountId, conversationId } : null;
+}
+
+async function managedChannelOwnershipVerified(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  event: OpenTagEvent;
+  principal?: ChannelPrincipalIdentity;
+}): Promise<boolean> {
+  const scope = channelBindingScopeFromEvent(input.event);
+  if (!scope) return input.event.source !== "slack" && input.event.source !== "lark";
+  const binding = await input.repo.getChannelBinding({ provider: input.event.source, ...scope });
+  if (!binding) return input.event.source !== "slack" && input.event.source !== "lark";
+  if (!binding.ownership) return true;
+  return input.principal?.provider === input.event.source
+    && input.principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || input.principal.botId === binding.ownership.botId);
+}
+
+export type ChannelPrincipalCredential = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+  credential: string;
+};
+
+type ChannelPrincipalIdentity = Omit<ChannelPrincipalCredential, "credential">;
+
+function channelPrincipalCredentialDigest(credential: string): string {
+  return createHash("sha256").update(credential).digest("hex");
+}
+
+function configuredChannelPrincipals(principals: ChannelPrincipalCredential[] | undefined): Map<string, ChannelPrincipalIdentity> {
+  const configured = new Map<string, ChannelPrincipalIdentity>();
+  for (const principal of principals ?? []) {
+    const credential = principal.credential.trim();
+    if (!credential || !principal.provider.trim() || !principal.applicationId.trim()) {
+      throw new Error("Channel principals require provider, applicationId, and credential.");
+    }
+    const digest = channelPrincipalCredentialDigest(credential);
+    if (configured.has(digest)) throw new Error("Channel principal credentials must be unique per adapter.");
+    configured.set(digest, {
+      provider: principal.provider,
+      applicationId: principal.applicationId,
+      ...(principal.botId ? { botId: principal.botId } : {})
+    });
+  }
+  return configured;
+}
+
+function channelPrincipalFromRequest(request: Request, principals: Map<string, ChannelPrincipalIdentity>): ChannelPrincipalIdentity | undefined {
+  const credential = request.headers.get("x-opentag-channel-principal")?.trim();
+  return credential ? principals.get(channelPrincipalCredentialDigest(credential)) : undefined;
+}
+
+function principalOwnsManagedBinding(principal: ChannelPrincipalIdentity | undefined, binding: {
+  provider: string;
+  ownership?: { applicationId: string; botId?: string | undefined } | undefined;
+}): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 const UpsertPolicyRuleSchema = z.object({
   rule: PolicyRuleSchema
@@ -347,6 +547,73 @@ const UpsertPolicyRuleSchema = z.object({
 const UpsertMutationMappingSchema = z.object({
   mapping: AdapterMutationMappingSchema
 });
+
+const LinearRelayInstallationAuthSchema = z.union([
+  z
+    .object({
+      method: z.literal("api_key")
+    })
+    .strict(),
+  z
+    .object({
+      method: z.literal("oauth_app"),
+      actor: z.literal("app"),
+      clientId: z.string().min(1).optional(),
+      refreshToken: z.string().min(1).optional(),
+      accessTokenExpiresAt: z.string().min(1).optional(),
+      scopes: z.array(z.string().min(1)).optional()
+    })
+    .strict()
+]);
+
+const LinearRelayInstallationSchema = z
+  .object({
+    id: z.string().min(1).max(128).regex(/^[a-zA-Z0-9._-]+$/),
+    webhookPath: z
+      .string()
+      .min(1)
+      .refine((value) => value.startsWith("/linear/webhooks/"), {
+        message: "Linear relay webhook path must start with /linear/webhooks/."
+      }),
+    webhookSecret: z.string().min(1),
+    token: z.string().min(1),
+    auth: LinearRelayInstallationAuthSchema.optional(),
+    graphqlUrl: z.string().url().optional(),
+    repoProvider: z.string().min(1),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    organizationId: z.string().min(1).optional(),
+    teamId: z.string().min(1).optional(),
+    teamKey: z.string().min(1).optional()
+  })
+  .strict();
+
+type ParsedLinearRelayInstallationAuth = z.infer<typeof LinearRelayInstallationAuthSchema>;
+
+function linearRelayInstallationAuthFromParsed(auth: ParsedLinearRelayInstallationAuth | undefined): LinearRelayInstallationAuth {
+  if (!auth || auth.method === "api_key") return { method: "api_key" };
+  return {
+    method: "oauth_app",
+    actor: "app",
+    ...(auth.clientId ? { clientId: auth.clientId } : {}),
+    ...(auth.refreshToken ? { refreshToken: auth.refreshToken } : {}),
+    ...(auth.accessTokenExpiresAt ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}),
+    ...(auth.scopes?.length ? { scopes: auth.scopes } : {})
+  };
+}
+
+const CreateLinearOAuthInstallationSchema = z
+  .object({
+    repoProvider: z.string().min(1).default("github"),
+    owner: z.string().min(1),
+    repo: z.string().min(1),
+    teamId: z.string().min(1).optional(),
+    teamKey: z.string().min(1).optional(),
+    graphqlUrl: z.string().url().optional(),
+    redirectUri: z.string().url().optional(),
+    scopes: z.array(z.string().min(1)).optional()
+  })
+  .strict();
 
 const CreateRunSchema = z.object({
   runId: z.string().min(1),
@@ -370,12 +637,27 @@ const PromoteFollowUpRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
-const CompleteRunSchema = z.object({
+const AttemptLeaseSchema = z.object({
+  attemptId: z.string().min(1),
+  fencingToken: z.string().min(1)
+});
+
+const ActionPermissionInputSchema = AttemptLeaseSchema.extend({ request: ActionPermissionRequestSchema });
+const ActionPermissionResolutionInputSchema = AttemptLeaseSchema;
+const MaterialActionReceiptInputSchema = AttemptLeaseSchema.extend({ receipt: MaterialActionReceiptSchema });
+const ReconcileUnknownMaterialActionSchema = z.object({
+  outcome: z.enum(["succeeded", "failed"]),
+  idempotencyKey: z.string().min(1).max(256),
+  receiptRef: z.string().min(1).max(512),
+  evidence: z.array(VerificationEvidenceSchema).max(20).optional()
+}).strict();
+
+const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
   idempotencyKey: z.string().min(1).max(256).optional()
 });
 
-const MarkRunningSchema = z.object({
+const MarkRunningSchema = AttemptLeaseSchema.extend({
   executor: z.string().min(1),
   executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
@@ -446,7 +728,7 @@ const CHILD_EVENT_METADATA_REPLAY_KEYS = [
   "githubSignatureVerified"
 ] as const;
 
-const ProgressSchema = z.object({
+const ProgressSchema = AttemptLeaseSchema.extend({
   type: z.string().min(1).optional(),
   message: z.string().min(1),
   at: z.string().datetime().optional(),
@@ -502,6 +784,13 @@ function mappingsFromAdapterPlan(adapterPlan: unknown) {
   return mappings.map((mapping) => AdapterMutationMappingSchema.parse(mapping));
 }
 
+function mappingsForAdapterPlan(adapterPlan: unknown, defaults: AdapterMutationMapping[] = []): AdapterMutationMapping[] {
+  const planMappings = mappingsFromAdapterPlan(adapterPlan);
+  if (planMappings.length === 0) return defaults;
+  const planMappingIds = new Set(planMappings.map((mapping) => mapping.id));
+  return [...planMappings, ...defaults.filter((mapping) => !planMappingIds.has(mapping.id))];
+}
+
 function conversationKeyFromCallback(input: { provider: string; uri: string; threadKey?: string | undefined }): string {
   return `${input.provider}:${input.threadKey ?? input.uri}`;
 }
@@ -554,8 +843,7 @@ function conversationKeysFromThreadAction(input: {
   callback: { provider: string; uri: string; threadKey?: string | undefined };
   metadata?: Record<string, unknown> | undefined;
 }): string[] {
-  const primary = conversationKeyFromCallback(input.callback);
-  const keys = [primary];
+  const keys = conversationKeysFromCallback(input.callback);
   const issueNumber = metadataIssueNumber(input.metadata);
   if (input.callback.provider === "github" && input.callback.threadKey && issueNumber) {
     const suffix = `#${issueNumber}`;
@@ -794,12 +1082,46 @@ function hasGitLabRepoTarget(event: OpenTagEvent): boolean {
   return gitlabProjectPathFromEvent(event) !== null;
 }
 
+function isLinearIssueEvent(event: OpenTagEvent): boolean {
+  return event.source === "linear" || event.callback.provider === "linear";
+}
+
+function hasLinearIssueTarget(event: OpenTagEvent): boolean {
+  return isLinearIssueEvent(event) && typeof event.metadata["issueId"] === "string" && event.metadata["issueId"].length > 0;
+}
+
 function hasGitHubIssueOrPullTarget(event: OpenTagEvent): boolean {
   return typeof event.metadata["issueNumber"] === "number" || typeof event.metadata["pullRequestNumber"] === "number";
 }
 
 function isRepoLevelGitHubIntent(intent: MutationIntent): boolean {
   return intent.action === "create_pull_request";
+}
+
+function stringIntentParam(intent: MutationIntent, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = intent.params?.[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function targetAdapterForIntent(intent: MutationIntent): string | undefined {
+  return stringIntentParam(intent, "targetAdapter", "target_adapter", "adapter", "provider")?.toLowerCase();
+}
+
+function isCreateIssueIntent(intent: MutationIntent): boolean {
+  return intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create");
+}
+
+function isLinearIssueCreateIntent(intent: MutationIntent): boolean {
+  if (!isCreateIssueIntent(intent)) return false;
+  const targetAdapter = targetAdapterForIntent(intent);
+  return !targetAdapter || targetAdapter === "linear";
+}
+
+function isLinearIssueIntent(intent: MutationIntent): boolean {
+  return isLinearIssueCreateIntent(intent) || intent.action !== "create_pull_request";
 }
 
 function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string; selectedIntents: MutationIntent[] }): string {
@@ -809,8 +1131,14 @@ function adapterForAction(input: { event: OpenTagEvent; callbackProvider: string
   ) {
     return "github";
   }
+  if (input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isLinearIssueCreateIntent(intent))) {
+    return "linear";
+  }
   if (hasGitLabRepoTarget(input.event)) {
     return "gitlab";
+  }
+  if (hasLinearIssueTarget(input.event) && input.selectedIntents.length > 0 && input.selectedIntents.every((intent) => isLinearIssueIntent(intent))) {
+    return "linear";
   }
   return input.callbackProvider;
 }
@@ -1092,6 +1420,7 @@ async function directApplyReceiptCapability(input: {
   intent: MutationIntent;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
   preflightCache?: GitHubPreflightCache;
   gitlabPreflightCache?: GitLabPreflightCache;
 }): Promise<ActionReceiptCapability> {
@@ -1114,7 +1443,7 @@ async function directApplyReceiptCapability(input: {
     callbackProvider: input.callbackProvider,
     selectedIntents: [input.intent]
   });
-  if (adapter !== "github" && adapter !== "gitlab") {
+  if (adapter !== "github" && adapter !== "gitlab" && adapter !== "linear") {
     return {
       state: "needs_setup",
       setupReason: `Direct apply for ${adapter} actions is not configured on this dispatcher.`
@@ -1183,6 +1512,32 @@ async function directApplyReceiptCapability(input: {
     return { state: "ready_to_apply" };
   }
 
+  if (adapter === "linear") {
+    if (!input.linearApply) {
+      return {
+        state: "needs_setup",
+        setupReason: "Linear apply is not configured on this dispatcher."
+      };
+    }
+    const compilation = createLinearMutationCompiler({
+      ...(input.linearApply.mappings ? { mappings: input.linearApply.mappings } : {})
+    }).compile(input.intent);
+    if (!compilation.ok) {
+      return {
+        state: compilation.outcome.outcome === "unsupported" ? "unsupported" : "needs_setup",
+        setupReason: compilation.outcome.message ?? "Linear cannot apply this action from the current source thread."
+      };
+    }
+    const operation = compilation.operation as LinearMutationOperation;
+    if (operation.kind !== "create_issue" && !linearTargetFromEvent(input.event)) {
+      return {
+        state: "needs_setup",
+        setupReason: "The source thread does not include a Linear issue target."
+      };
+    }
+    return { state: "ready_to_apply", targetLabel: "Linear issue" };
+  }
+
   if (!input.gitlabApply) {
     return {
       state: "needs_setup",
@@ -1219,6 +1574,7 @@ async function actionReceiptContextForFinal(input: {
   result: OpenTagRunResult;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<ActionReceiptContext> {
   const preflightCache: GitHubPreflightCache = new Map();
   const gitlabPreflightCache: GitLabPreflightCache = new Map();
@@ -1231,6 +1587,7 @@ async function actionReceiptContextForFinal(input: {
           intent,
           ...(input.githubApply ? { githubApply: input.githubApply } : {}),
           ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          ...(input.linearApply ? { linearApply: input.linearApply } : {}),
           preflightCache,
           gitlabPreflightCache
         });
@@ -1241,6 +1598,50 @@ async function actionReceiptContextForFinal(input: {
   return { capabilityByIntentId: Object.fromEntries(capabilityEntries) };
 }
 
+function threadActionChannelBindingMismatch(): { ok: false; reason: string; message: string } {
+  return {
+    ok: false,
+    reason: "channel_binding_mismatch",
+    message: "The source channel binding is missing or no longer points at the proposal repository."
+  };
+}
+
+function baseTeamsConversationId(conversationId: string): string {
+  return conversationId.replace(/;messageid=[^;]+$/i, "");
+}
+
+async function getTeamsThreadActionChannelBinding(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  tenantId: string;
+  conversationId: string;
+}) {
+  const exactBinding = await input.repo.getChannelBinding({
+    provider: "teams",
+    accountId: input.tenantId,
+    conversationId: input.conversationId
+  });
+
+  const baseConversationId = baseTeamsConversationId(input.conversationId);
+  if (baseConversationId === input.conversationId) return exactBinding;
+
+  const baseBinding = await input.repo.getChannelBinding({
+    provider: "teams",
+    accountId: input.tenantId,
+    conversationId: baseConversationId
+  });
+  if (
+    exactBinding &&
+    baseBinding &&
+    (exactBinding.repoProvider !== baseBinding.repoProvider ||
+      exactBinding.owner !== baseBinding.owner ||
+      exactBinding.repo !== baseBinding.repo)
+  ) {
+    return null;
+  }
+
+  return exactBinding ?? baseBinding;
+}
+
 async function authorizeThreadAction(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   resolved: ResolvedThreadAction;
@@ -1248,7 +1649,24 @@ async function authorizeThreadAction(input: {
 }): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
   const repoKey = projectTargetRefFromEvent(input.resolved.proposal.event);
   if (!repoKey) {
-    return { ok: false, reason: "repo_context_missing", message: "The proposal does not resolve to a repository binding." };
+    const event = input.resolved.proposal.event;
+    const metadata = event.metadata ?? {};
+    const accountId = metadataString(metadata, "accountId") ?? metadataString(metadata, "teamId") ?? metadataString(metadata, "tenantKey") ?? metadataString(metadata, "botId");
+    const conversationId = metadataString(metadata, "conversationId") ?? metadataString(metadata, "channelId") ?? metadataString(metadata, "chatId");
+    if (!accountId || !conversationId || input.actor.provider !== event.source) {
+      return { ok: false, reason: "channel_identity_missing", message: "The non-repository proposal does not resolve to a managed source-channel identity." };
+    }
+    const channelBinding = await input.repo.getChannelBinding({ provider: event.source, accountId, conversationId });
+    if (!channelBinding || channelBinding.repoProvider || channelBinding.owner || channelBinding.repo) {
+      return { ok: false, reason: "channel_binding_mismatch", message: "The non-repository proposal is not owned by the expected managed channel binding." };
+    }
+    const allowedActors = Array.isArray(channelBinding.metadata?.["allowedActors"])
+      ? channelBinding.metadata["allowedActors"].filter((value): value is string => typeof value === "string")
+      : undefined;
+    if (!actorAllowedByList(input.actor, allowedActors)) {
+      return { ok: false, reason: "actor_not_allowed", message: "This actor is not allowed to approve actions for the managed channel." };
+    }
+    return { ok: true };
   }
 
   const binding = await input.repo.getRepoBinding(repoKey);
@@ -1294,12 +1712,31 @@ async function authorizeThreadAction(input: {
         channelBinding.owner !== repoKey.owner ||
         channelBinding.repo !== repoKey.repo
       ) {
-        return {
-          ok: false,
-          reason: "channel_binding_mismatch",
-          message: "The source channel binding is missing or no longer points at the proposal repository."
-        };
+        return threadActionChannelBindingMismatch();
       }
+    }
+  }
+
+  if (input.resolved.proposal.event.source === "teams") {
+    const tenantId = input.resolved.proposal.event.metadata["tenantId"];
+    const conversationId = input.resolved.proposal.event.metadata["conversationId"];
+    if (typeof tenantId !== "string" || !tenantId.trim() || typeof conversationId !== "string" || !conversationId.trim()) {
+      return threadActionChannelBindingMismatch();
+    }
+
+    const channelBinding = await getTeamsThreadActionChannelBinding({
+      repo: input.repo,
+      tenantId,
+      conversationId
+    });
+
+    if (
+      !channelBinding ||
+      channelBinding.repoProvider !== repoKey.provider ||
+      channelBinding.owner !== repoKey.owner ||
+      channelBinding.repo !== repoKey.repo
+    ) {
+      return threadActionChannelBindingMismatch();
     }
   }
 
@@ -1420,6 +1857,16 @@ function gitlabTargetFromEvent(event: OpenTagEvent): { projectPathWithNamespace:
   return projectPathWithNamespace ? { projectPathWithNamespace } : null;
 }
 
+function linearTargetFromEvent(event: OpenTagEvent): { issueId: string; graphqlUrl?: string } | null {
+  const issueId = event.metadata["issueId"];
+  if (typeof issueId !== "string" || issueId.length === 0) return null;
+  const graphqlUrl = event.metadata["graphqlUrl"];
+  return {
+    issueId,
+    ...(typeof graphqlUrl === "string" && graphqlUrl.length > 0 ? { graphqlUrl } : {})
+  };
+}
+
 function selectedActionSummary(candidates: ResolvedThreadAction["selectedCandidates"]): string {
   return candidates.map((candidate) => `${candidate.index}. ${candidate.intent.summary}`).join("; ");
 }
@@ -1510,11 +1957,7 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
 }
 
 function sanitizeApplyFailureDetail(detail: unknown): string {
-  return String(detail ?? "")
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
-    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+  return redactCredentialLikeData(String(detail ?? ""))
     .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
@@ -1597,12 +2040,35 @@ function renderThreadActionRecordedBody(input: {
   return [`Rejected: ${sentenceWithTerminalPunctuation(title)}`, "No external write will be performed for this action."].join("\n");
 }
 
+type GovernedPermissionDecision = "allow_once" | "allow_run" | "deny";
+
+function governedPermissionDecision(value: unknown): GovernedPermissionDecision | undefined {
+  return value === "allow_once" || value === "allow_run" || value === "deny" ? value : undefined;
+}
+
+function renderGovernedPermissionDecisionBody(input: {
+  decision: GovernedPermissionDecision;
+  selectionText: string;
+}): string {
+  const title = sentenceWithTerminalPunctuation(
+    selectedActionReceiptTitle(input.selectionText).replace(/^Allow\s+/iu, "")
+  );
+  if (input.decision === "allow_once") {
+    return [`Allowed once: ${title}`, "Permission recorded for this attempt. The agent may now perform this governed action."].join("\n");
+  }
+  if (input.decision === "allow_run") {
+    return [`Allowed for this run: ${title}`, "Permission recorded for this run. The agent may now perform this governed action."].join("\n");
+  }
+  return [`Denied: ${title}`, "The agent was not allowed to perform this governed action."].join("\n");
+}
+
 async function selectedDirectApplyStatus(input: {
   event: OpenTagEvent;
   callbackProvider: string;
   candidates: ResolvedThreadAction["selectedCandidates"];
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<{ ready: boolean; reason?: string }> {
   if (input.candidates.length === 0) return { ready: false, reason: "No selected action was found." };
   const preflightCache: GitHubPreflightCache = new Map();
@@ -1614,6 +2080,7 @@ async function selectedDirectApplyStatus(input: {
       intent: candidate.intent,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
       ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(input.linearApply ? { linearApply: input.linearApply } : {}),
       preflightCache,
       gitlabPreflightCache
     });
@@ -1726,6 +2193,7 @@ export type CallbackMessage = {
   provider: string;
   uri: string;
   body: string;
+  idempotencyKey?: string;
   agentId?: string;
   threadKey?: string;
   statusMessageKey?: string;
@@ -1781,6 +2249,19 @@ export type GitLabApplyOptions = {
   fetchImpl?: GitLabFetchLike;
 };
 
+export type LinearApplyOptions = {
+  token?: string;
+  getToken?: () => Promise<string | undefined> | string | undefined;
+  graphqlUrl?: string;
+  mappings?: AdapterMutationMapping[];
+  fetchImpl?: LinearFetchLike;
+};
+
+async function resolveLinearApplyToken(input: LinearApplyOptions): Promise<string | undefined> {
+  const token = input.getToken ? await input.getToken() : input.token;
+  return token?.trim() ? token : undefined;
+}
+
 function executableIntentsForPlan(input: { plan: ApplyPlan; resolved: ResolvedThreadAction }): MutationIntent[] {
   const preflightOutcomeByIntentId = new Map((input.plan.outcomes ?? []).map((outcome) => [outcome.intentId, outcome]));
   return input.resolved.proposal.snapshot.intents.filter((intent) => {
@@ -1823,8 +2304,9 @@ async function executeDirectApplyPlan(input: {
   resolved: ResolvedThreadAction;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
 }): Promise<{ plan: ApplyPlan; executed: boolean; fallbackReason?: string }> {
-  if (input.plan.adapter !== "github" && input.plan.adapter !== "gitlab") {
+  if (input.plan.adapter !== "github" && input.plan.adapter !== "gitlab" && input.plan.adapter !== "linear") {
     return { plan: input.plan, executed: false, fallbackReason: `Adapter ${input.plan.adapter ?? "unknown"} is not directly executable yet.` };
   }
 
@@ -1858,6 +2340,52 @@ async function executeDirectApplyPlan(input: {
           },
           operation: compilation.operation as GitLabMutationOperation,
           ...(input.gitlabApply.fetchImpl ? { fetchImpl: input.gitlabApply.fetchImpl } : {})
+        })
+      );
+    }
+    return await updateExecutedApplyPlan({ repo: input.repo, plan: input.plan, resolved: input.resolved, executedOutcomes });
+  }
+
+  if (input.plan.adapter === "linear") {
+    if (!input.linearApply) {
+      return { plan: input.plan, executed: false, fallbackReason: "Linear apply is not configured on this dispatcher." };
+    }
+    const linearToken = await resolveLinearApplyToken(input.linearApply);
+    if (!linearToken) {
+      return { plan: input.plan, executed: false, fallbackReason: "Linear apply token is not available on this dispatcher." };
+    }
+    const target = linearTargetFromEvent(input.resolved.proposal.event);
+
+    const executedOutcomes: ApplyIntentOutcome[] = [];
+    const compilerRegistry = createAdapterMutationCompilerRegistry([
+      createLinearMutationCompiler({
+        mappings: mappingsForAdapterPlan(input.plan.adapterPlan, input.linearApply.mappings)
+      })
+    ]);
+    for (const compilation of compilerRegistry.compile("linear", executableIntents)) {
+      if (!compilation.ok) {
+        executedOutcomes.push(compilation.outcome);
+        continue;
+      }
+      const operation = compilation.operation as LinearMutationOperation;
+      if (operation.kind !== "create_issue" && !target) {
+        executedOutcomes.push({
+          intentId: compilation.intentId,
+          outcome: "failed",
+          message: "The source run does not include a Linear issue target."
+        });
+        continue;
+      }
+      const linearGraphqlUrl = input.linearApply.graphqlUrl ?? target?.graphqlUrl;
+      executedOutcomes.push(
+        await applyLinearMutationOperation({
+          target: {
+            token: linearToken,
+            ...(target?.issueId ? { issueId: target.issueId } : {}),
+            ...(linearGraphqlUrl ? { graphqlUrl: linearGraphqlUrl } : {})
+          },
+          operation,
+          ...(input.linearApply.fetchImpl ? { fetchImpl: input.linearApply.fetchImpl } : {})
         })
       );
     }
@@ -2010,17 +2538,19 @@ async function deliverAndAudit(input: {
   message: CallbackMessage;
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
+  const safeMessage = sanitizeCredentialLikeValue(input.message);
   const delivery = await input.repo.enqueueCallbackDelivery({
-    runId: input.message.runId,
-    kind: input.message.kind,
-    provider: input.message.provider,
-    uri: input.message.uri,
-    body: input.message.body,
-    ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
-    ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
-    ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
-    ...(input.message.blocks ? { blocks: input.message.blocks } : {}),
-    ...(input.message.rich ? { rich: input.message.rich } : {})
+    runId: safeMessage.runId,
+    kind: safeMessage.kind,
+    provider: safeMessage.provider,
+    uri: safeMessage.uri,
+    body: safeMessage.body,
+    ...(safeMessage.idempotencyKey ? { idempotencyKey: safeMessage.idempotencyKey } : {}),
+    ...(safeMessage.threadKey ? { threadKey: safeMessage.threadKey } : {}),
+    ...(safeMessage.agentId ? { agentId: safeMessage.agentId } : {}),
+    ...(safeMessage.statusMessageKey ? { statusMessageKey: safeMessage.statusMessageKey } : {}),
+    ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
+    ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
   });
   return deliverCallbackDelivery({
     repo: input.repo,
@@ -2079,7 +2609,9 @@ type DispatcherAuthResult =
 function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (/^\/v1\/runners\/[^/]+\/claim$/.test(path)) return true;
-  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete|action-permissions)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/action-permissions\/[^/]+\/resolve$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/material-actions\/[^/]+\/receipt$/.test(path)) return true;
   return /^\/v1\/runs\/[^/]+\/(running|progress|complete)$/.test(path);
 }
 
@@ -2181,20 +2713,28 @@ export function createDispatcherApp(input: {
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
+  channelPrincipals?: ChannelPrincipalCredential[];
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
+  linearApply?: LinearApplyOptions;
+  linearOAuthInstall?: LinearOAuthInstallOptions;
   callbackRetry?: CallbackRetryOptions;
   larkStatusCards?: LarkDelayedStatusCardOptions;
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
+  runnerLeaseSeconds?: number;
+  relayCapabilities?: {
+    platforms?: RelayPlatformCapability[];
+  };
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
-  const callbackSink = input.callbackSink ?? noopCallbackSink;
+  const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
+  const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
   const callbackRetry = input.callbackRetry ?? {};
@@ -2206,9 +2746,280 @@ export function createDispatcherApp(input: {
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
   const runnerTokens = configuredRunnerTokens(input);
   const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
   const requestEndpoint = (c: Context) => normalizeRateLimitedEndpoint(c.req.method, new URL(c.req.url).pathname);
+  const linearOAuthInstall = input.linearOAuthInstall;
+  async function linearRelayInstallationFromEvent(event: OpenTagEvent) {
+    const installationId = event.metadata["linearRelayInstallationId"];
+    return typeof installationId === "string" && installationId.length > 0 ? await repo.getLinearRelayInstallation({ id: installationId }) : null;
+  }
+  function linearInstallationTokenIsFresh(input: { accessTokenExpiresAt?: string; now: Date; refreshSkewMs: number }): boolean {
+    const expiresAtMs = input.accessTokenExpiresAt ? Date.parse(input.accessTokenExpiresAt) : Number.NaN;
+    return Number.isFinite(expiresAtMs) && expiresAtMs - input.now.getTime() > input.refreshSkewMs;
+  }
+  const inFlightLinearInstallationTokenRefreshes = new Map<string, Promise<string>>();
+  async function resolveLinearRelayInstallationToken(
+    installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationFromEvent>>>
+  ): Promise<string> {
+    const auth = installation.auth;
+    if (!linearOAuthInstall || auth?.method !== "oauth_app" || !auth.refreshToken) return installation.token;
+
+    const oauthInstall = linearOAuthInstall;
+    const now = oauthInstall.now?.() ?? new Date();
+    const refreshSkewMs = oauthInstall.refreshSkewMs ?? DEFAULT_LINEAR_OAUTH_REFRESH_SKEW_MS;
+    if (linearInstallationTokenIsFresh({ ...(auth.accessTokenExpiresAt ? { accessTokenExpiresAt: auth.accessTokenExpiresAt } : {}), now, refreshSkewMs })) {
+      return installation.token;
+    }
+
+    const inFlight = inFlightLinearInstallationTokenRefreshes.get(installation.id);
+    if (inFlight) return inFlight;
+
+    const refresh = (async () => {
+      const latest = (await repo.getLinearRelayInstallation({ id: installation.id })) ?? installation;
+      const latestAuth = latest.auth;
+      if (latestAuth?.method !== "oauth_app" || !latestAuth.refreshToken) return latest.token;
+      if (
+        linearInstallationTokenIsFresh({
+          ...(latestAuth.accessTokenExpiresAt ? { accessTokenExpiresAt: latestAuth.accessTokenExpiresAt } : {}),
+          now,
+          refreshSkewMs
+        })
+      ) {
+        return latest.token;
+      }
+
+      const refreshed = await refreshLinearOAuthToken({
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        ...(oauthInstall.clientSecret ? { clientSecret: oauthInstall.clientSecret } : {}),
+        refreshToken: latestAuth.refreshToken,
+        ...(oauthInstall.tokenUrl ? { tokenUrl: oauthInstall.tokenUrl } : {}),
+        ...(oauthInstall.fetchImpl ? { fetchImpl: oauthInstall.fetchImpl } : {})
+      });
+      const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token: refreshed, now });
+      const refreshedAuth = {
+        method: "oauth_app" as const,
+        actor: "app" as const,
+        clientId: latestAuth.clientId ?? oauthInstall.clientId,
+        refreshToken: refreshed.refreshToken ?? latestAuth.refreshToken,
+        ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(refreshed.scope?.length ? { scopes: refreshed.scope } : latestAuth.scopes?.length ? { scopes: latestAuth.scopes } : {})
+      };
+      const updated = await repo.upsertLinearRelayInstallation({
+        id: latest.id,
+        webhookPath: latest.webhookPath,
+        webhookSecret: latest.webhookSecret,
+        token: refreshed.accessToken,
+        auth: refreshedAuth,
+        ...(latest.graphqlUrl ? { graphqlUrl: latest.graphqlUrl } : {}),
+        repoProvider: latest.repoProvider,
+        owner: latest.owner,
+        repo: latest.repo,
+        ...(latest.organizationId ? { organizationId: latest.organizationId } : {}),
+        ...(latest.teamId ? { teamId: latest.teamId } : {}),
+        ...(latest.teamKey ? { teamKey: latest.teamKey } : {})
+      });
+      return updated.token;
+    })();
+    inFlightLinearInstallationTokenRefreshes.set(installation.id, refresh);
+    try {
+      return await refresh;
+    } finally {
+      inFlightLinearInstallationTokenRefreshes.delete(installation.id);
+    }
+  }
+  async function linearRelayInstallationForCallback(message: CallbackMessage) {
+    if (message.provider !== "linear") return null;
+    const stored = await repo.getRun({ runId: message.runId });
+    return stored ? linearRelayInstallationFromEvent(stored.event) : null;
+  }
+  async function linearApplyOptionsForEvent(event: OpenTagEvent): Promise<LinearApplyOptions | undefined> {
+    if (input.linearApply) return input.linearApply;
+    const installation = await linearRelayInstallationFromEvent(event);
+    if (!installation) return undefined;
+    const mappings = await repo.listRepoMutationMappings({
+      provider: installation.repoProvider,
+      owner: installation.owner,
+      repo: installation.repo
+    });
+    const token = await resolveLinearRelayInstallationToken(installation);
+    return {
+      token,
+      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+      ...(mappings.length ? { mappings } : {})
+    };
+  }
+  async function postInternalDispatcher(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (input.pairingToken) headers.authorization = `Bearer ${input.pairingToken}`;
+    const response = await app.request(path, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+    const responseBody = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!response.ok) {
+      throw new Error(`internal dispatcher request ${path} failed: ${response.status}`);
+    }
+    return { status: response.status, body: responseBody };
+  }
+  // The webhook app owns the comment-vs-agent-session claim state, so it must live
+  // across deliveries: recreating it per request would let one mention double-trigger.
+  // Cached per installation and rebuilt when the installation row changes.
+  const linearRelayWebhookApps = new Map<string, { fingerprint: string; app: Hono }>();
+  function linearRelayWebhookAppForInstallation(input: {
+    installation: LinearRelayInstallation;
+    webhookSecret: string;
+    webhookPath: string;
+  }): Hono {
+    const fingerprint = JSON.stringify([input.installation.updatedAt, input.webhookSecret, input.webhookPath]);
+    const cached = linearRelayWebhookApps.get(input.installation.id);
+    if (cached && cached.fingerprint === fingerprint) return cached.app;
+    const app = createLinearRelayWebhookAppForInstallation(input);
+    linearRelayWebhookApps.set(input.installation.id, { fingerprint, app });
+    return app;
+  }
+  function createLinearRelayWebhookAppForInstallation(input: {
+    installation: LinearRelayInstallation;
+    webhookSecret: string;
+    webhookPath: string;
+  }) {
+    return createLinearWebhookApp({
+      webhookSecret: input.webhookSecret,
+      ...(input.installation.graphqlUrl ? { graphqlUrl: input.installation.graphqlUrl } : {}),
+      projectTarget: {
+        repoProvider: input.installation.repoProvider,
+        owner: input.installation.owner,
+        repo: input.installation.repo
+      },
+      webhookPath: input.webhookPath,
+      // OAuth-app installs receive both Comment and AgentSessionEvent webhooks for one
+      // mention; defer comment runs so the session channel can claim them.
+      ...(input.installation.auth?.method === "oauth_app"
+        ? { commentRunDeferMs: linearOAuthInstall?.commentRunDeferMs ?? DEFAULT_LINEAR_COMMENT_RUN_DEFER_MS }
+        : {}),
+      ...(input.installation.auth?.method === "oauth_app" && input.installation.auth.appUserId
+        ? { appUserId: input.installation.auth.appUserId }
+        : {}),
+      onAgentSessionAccepted: async ({ agentSessionId, runId }) => {
+        const token = await resolveLinearRelayInstallationToken(input.installation);
+        await acknowledgeLinearAgentSession({
+          token,
+          agentSessionId,
+          ...(runId ? { runId } : {}),
+          ...(input.installation.graphqlUrl ? { graphqlUrl: input.installation.graphqlUrl } : {})
+        });
+      },
+      async createRun(event) {
+        const runId = `run_${randomUUID()}`;
+        const eventWithInstallation: OpenTagEvent = {
+          ...event,
+          metadata: {
+            ...event.metadata,
+            linearRelayInstallationId: input.installation.id
+          }
+        };
+        const created = await postInternalDispatcher("/v1/runs", { runId, event: eventWithInstallation });
+        const run = created.body["run"];
+        if (run && typeof run === "object" && "id" in run && typeof (run as { id?: unknown }).id === "string") {
+          return { runId: (run as { id: string }).id };
+        }
+        return {};
+      },
+      async submitThreadAction(action) {
+        await postInternalDispatcher("/v1/thread-actions", action);
+      },
+      now: () => new Date().toISOString()
+    });
+  }
+  function parseLinearWebhookPayload(rawBody: string): LinearWebhookPayload | null {
+    try {
+      const parsed: unknown = JSON.parse(rawBody);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as LinearWebhookPayload) : null;
+    } catch {
+      return null;
+    }
+  }
+  function stringPayloadValue(value: unknown): string | undefined {
+    return typeof value === "string" && value.length > 0 ? value : undefined;
+  }
+  function numberPayloadValue(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) return Number(value);
+    return null;
+  }
+  function isLinearOAuthAppRevokedPayload(payload: LinearWebhookPayload): boolean {
+    return payload.type === "OAuthApp" && payload.action === "revoked";
+  }
+  function linearAgentSessionPlanFor(message: CallbackMessage) {
+    const finished = message.kind === "final";
+    return [
+      { content: "Accept the Linear agent session", status: "completed" as const },
+      { content: "Run OpenTag on the paired local checkout", status: finished ? ("completed" as const) : ("inProgress" as const) },
+      { content: "Report the result back to Linear", status: finished ? ("completed" as const) : ("pending" as const) }
+    ];
+  }
+  async function deliverLinearRelayCallback(
+    message: CallbackMessage,
+    installation: NonNullable<Awaited<ReturnType<typeof linearRelayInstallationForCallback>>>
+  ): Promise<CallbackDeliveryResult | void> {
+    const token = await resolveLinearRelayInstallationToken(installation);
+    const agentSessionId = linearAgentSessionIdFromCallbackUri(message.uri);
+    if (agentSessionId) {
+      await updateLinearAgentSession({
+        token,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+        agentSessionId,
+        plan: linearAgentSessionPlanFor(message)
+      });
+      const activityId = await createLinearAgentActivity({
+        token,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {}),
+        activity: {
+          agentSessionId,
+          type: message.kind === "final" ? "response" : "thought",
+          body: message.body,
+          ephemeral: message.kind === "progress"
+        }
+      });
+      return activityId ? { externalMessageId: activityId } : undefined;
+    }
+
+    const issueId = linearIssueIdFromCallbackUri(message.uri);
+    if (!issueId) {
+      throw new Error(`deliver Linear relay callback failed: invalid callback URI ${message.uri}`);
+    }
+    if (message.statusMessageKey && message.externalMessageId) {
+      await updateLinearComment({
+        token,
+        commentId: message.externalMessageId,
+        body: message.body,
+        ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
+      });
+      return { externalMessageId: message.externalMessageId };
+    }
+    const comment = await createLinearIssueCommentRecord({
+      token,
+      issueId,
+      body: message.body,
+      ...(linearParentCommentIdFromCallbackUri(message.uri) ? { parentId: linearParentCommentIdFromCallbackUri(message.uri)! } : {}),
+      ...(installation.graphqlUrl ? { graphqlUrl: installation.graphqlUrl } : {})
+    });
+    return message.statusMessageKey && comment.id ? { externalMessageId: comment.id } : undefined;
+  }
+  const callbackSink: CallbackSink = {
+    async deliver(message) {
+      const installation = await linearRelayInstallationForCallback(message);
+      if (installation) return deliverLinearRelayCallback(message, installation);
+      return configuredCallbackSink.deliver(message);
+    }
+  };
+  const relayCapabilities: RelayCapabilities = {
+    schemaVersion: 1,
+    relay: true,
+    platforms: [...(input.relayCapabilities?.platforms ?? [])].sort((left, right) => left.provider.localeCompare(right.provider))
+  };
   const recordControlPlaneEvent = async (input: {
     type: string;
     severity?: "info" | "warn" | "error" | undefined;
@@ -2324,7 +3135,11 @@ export function createDispatcherApp(input: {
     phase: DelayedLarkStatusPhase;
     createIfMissing?: boolean;
   }): Promise<boolean> {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return false;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return false;
     if (!input.event.callback.threadKey) return false;
     if (isTerminalRun(input.run)) return false;
 
@@ -2380,7 +3195,11 @@ export function createDispatcherApp(input: {
   }
 
   function scheduleDelayedLarkStatusCard(input: { run: OpenTagRun; event: OpenTagEvent }): void {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return;
     if (!input.event.callback.threadKey) return;
     if (larkStatusCardDelayMs < 0) return;
     const existing = delayedLarkStatusCards.get(input.run.id);
@@ -2546,7 +3365,289 @@ export function createDispatcherApp(input: {
     ...(input.agentAccessProfileCheck ? { agentAccessProfileCheck: input.agentAccessProfileCheck } : {})
   });
 
+  function linearInstallationSummary(input: {
+    id: string;
+    webhookPath: string;
+    repoProvider: string;
+    owner: string;
+    repo: string;
+    graphqlUrl?: string;
+    organizationId?: string;
+    teamId?: string;
+    teamKey?: string;
+  }) {
+    return {
+      id: input.id,
+      webhookPath: input.webhookPath,
+      projectTarget: {
+        repoProvider: input.repoProvider,
+        owner: input.owner,
+        repo: input.repo
+      },
+      ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
+      ...(input.organizationId ? { organizationId: input.organizationId } : {}),
+      ...(input.teamId ? { teamId: input.teamId } : {}),
+      ...(input.teamKey ? { teamKey: input.teamKey } : {})
+    };
+  }
+
+  function linearMappingsFromMetadata(snapshot: Awaited<ReturnType<typeof discoverLinearMetadata>>): AdapterMutationMapping[] {
+    return createLinearAdapterMappingDrafts(snapshot).map((draft) => ({
+      id: `linear_${draft.domain}_${draft.strategy}`,
+      ...draft,
+      description: `Discovered from Linear ${draft.domain} metadata during hosted OAuth install.`
+    }));
+  }
+
+  function singleDiscoveredLinearTeam(input: { snapshot: Awaited<ReturnType<typeof discoverLinearMetadata>>; teamId?: string; teamKey?: string }) {
+    const team =
+      (input.teamId ? input.snapshot.teams.find((candidate) => candidate.id === input.teamId) : undefined) ??
+      (input.teamKey ? input.snapshot.teams.find((candidate) => candidate.key === input.teamKey) : undefined) ??
+      (input.snapshot.teams.length === 1 ? input.snapshot.teams[0] : undefined);
+    return {
+      ...(!input.teamId && team?.id ? { teamId: team.id } : {}),
+      ...(!input.teamKey && team?.key ? { teamKey: team.key } : {})
+    };
+  }
+
   app.get("/healthz", (c) => c.json({ ok: true }));
+  app.get("/v1/relay/capabilities", (c) => c.json(relayCapabilities));
+
+  app.get("/linear/oauth/callback", async (c) => {
+    if (!linearOAuthInstall) return c.json({ error: "linear_oauth_install_not_configured" }, 404);
+
+    const error = c.req.query("error");
+    if (error) {
+      return c.json(
+        {
+          error: "linear_oauth_error",
+          linearError: error,
+          ...(c.req.query("error_description") ? { description: c.req.query("error_description") } : {})
+        },
+        400
+      );
+    }
+
+    const state = c.req.query("state");
+    const code = c.req.query("code");
+    if (!state || !code) return c.json({ error: "missing_linear_oauth_code_or_state" }, 400);
+
+    const pending = await repo.getLinearOAuthInstallState({ state });
+    if (!pending) return c.json({ error: "linear_oauth_state_not_found" }, 400);
+    if (pending.completedAt) return c.json({ error: "linear_oauth_state_already_completed" }, 409);
+
+    const now = linearOAuthInstall.now?.() ?? new Date();
+    const expiresAtMs = Date.parse(pending.expiresAt);
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now.getTime()) {
+      return c.json({ error: "linear_oauth_state_expired" }, 410);
+    }
+
+    const token = await exchangeLinearOAuthCode({
+      clientId: linearOAuthInstall.clientId,
+      ...(linearOAuthInstall.clientSecret ? { clientSecret: linearOAuthInstall.clientSecret } : {}),
+      code,
+      redirectUri: pending.redirectUri,
+      ...(linearOAuthInstall.tokenUrl ? { tokenUrl: linearOAuthInstall.tokenUrl } : {}),
+      ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+    });
+    const accessTokenExpiresAt = linearAccessTokenExpiresAt({ token, now });
+    let organizationId: string | undefined;
+    let appUserId: string | undefined;
+    try {
+      const identity = await fetchLinearWorkspaceIdentity({
+        token: token.accessToken,
+        ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+        ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+      });
+      organizationId = identity.organization?.id;
+      appUserId = identity.viewer.id;
+    } catch (error) {
+      await recordControlPlaneEvent({
+        type: "linear.oauth_install.identity_failed",
+        severity: "warn",
+        subject: pending.installationId,
+        payload: {
+          installationId: pending.installationId,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+    let discoveredTeam: { teamId?: string; teamKey?: string } = {};
+    let discoverySummary: Record<string, unknown> | undefined;
+    try {
+      const snapshot = await discoverLinearMetadata({
+        token: token.accessToken,
+        ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+        ...(linearOAuthInstall.fetchImpl ? { fetchImpl: linearOAuthInstall.fetchImpl } : {})
+      });
+      discoveredTeam = singleDiscoveredLinearTeam({
+        snapshot,
+        ...(pending.teamId ? { teamId: pending.teamId } : {}),
+        ...(pending.teamKey ? { teamKey: pending.teamKey } : {})
+      });
+      const mappings = linearMappingsFromMetadata(snapshot);
+      for (const mapping of mappings) {
+        await repo.upsertRepoMutationMapping({
+          provider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          mapping
+        });
+      }
+      discoverySummary = {
+        teamCount: snapshot.teams.length,
+        stateCount: snapshot.workflowStates.length,
+        userCount: snapshot.users.length,
+        labelCount: snapshot.issueLabels.length,
+        mappingCount: mappings.length
+      };
+    } catch (error) {
+      await recordControlPlaneEvent({
+        type: "linear.oauth_install.discovery_failed",
+        severity: "warn",
+        subject: pending.installationId,
+        payload: {
+          installationId: pending.installationId,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          error: error instanceof Error ? error.message : String(error)
+        }
+      });
+    }
+    const installation = await repo.upsertLinearRelayInstallation({
+      id: pending.installationId,
+      webhookPath: pending.webhookPath,
+      webhookSecret: pending.webhookSecret,
+      token: token.accessToken,
+      auth: {
+        method: "oauth_app",
+        actor: "app",
+        clientId: linearOAuthInstall.clientId,
+        ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
+        ...(accessTokenExpiresAt ? { accessTokenExpiresAt } : {}),
+        ...(appUserId ? { appUserId } : {}),
+        ...((token.scope ?? pending.scopes).length ? { scopes: token.scope ?? pending.scopes } : {})
+      },
+      ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+      repoProvider: pending.repoProvider,
+      owner: pending.owner,
+      repo: pending.repo,
+      ...(organizationId ? { organizationId } : {}),
+      ...(pending.teamId ?? discoveredTeam.teamId ? { teamId: pending.teamId ?? discoveredTeam.teamId } : {}),
+      ...(pending.teamKey ?? discoveredTeam.teamKey ? { teamKey: pending.teamKey ?? discoveredTeam.teamKey } : {})
+    });
+    await repo.completeLinearOAuthInstallState({ state, completedAt: now.toISOString() });
+    await recordControlPlaneEvent({
+      type: "linear.oauth_install.completed",
+      severity: "info",
+      subject: installation.id,
+      payload: {
+        installationId: installation.id,
+        webhookPath: installation.webhookPath,
+        repoProvider: installation.repoProvider,
+        owner: installation.owner,
+        repo: installation.repo,
+        ...(organizationId ? { organizationId } : {}),
+        ...(appUserId ? { appUserId } : {}),
+        hasRefreshToken: Boolean(token.refreshToken),
+        hasAccessTokenExpiresAt: Boolean(accessTokenExpiresAt),
+        ...(discoverySummary ? { discovery: discoverySummary } : {})
+      }
+    });
+    return c.json({ ok: true, installation: linearInstallationSummary(installation) });
+  });
+
+  if (linearOAuthInstall?.webhookSecret) {
+    const oauthWebhookPath = linearOAuthInstall.webhookPath ?? "/linear/oauth/webhooks";
+    const oauthWebhookSecret = linearOAuthInstall.webhookSecret;
+    app.post(oauthWebhookPath, async (c) => {
+      let rawBody: string;
+      try {
+        rawBody = await readRequestTextWithLimit(c.req.raw, { maxBytes: maxRequestBodyBytes });
+      } catch (error) {
+        if (error instanceof RequestBodyTooLargeError) {
+          return c.json({ error: "request_body_too_large", maxBytes: error.maxBytes }, 413);
+        }
+        throw error;
+      }
+
+      const signature = c.req.header("linear-signature") ?? c.req.header("Linear-Signature");
+      if (!signature || !verifyLinearSignature({ webhookSecret: oauthWebhookSecret, rawBody, signature })) {
+        return c.json({ error: "invalid_signature" }, 401);
+      }
+
+      const payload = parseLinearWebhookPayload(rawBody);
+      if (!payload) return c.json({ error: "invalid_json_body" }, 400);
+      if (
+        !verifyLinearWebhookTimestamp({
+          timestampMs: numberPayloadValue(payload.webhookTimestamp),
+          nowMs: Date.now()
+        })
+      ) {
+        return c.json({ error: "invalid_timestamp" }, 400);
+      }
+
+      const organizationId = stringPayloadValue(payload.organizationId);
+      if (!organizationId) return c.json({ error: "missing_linear_organization_id" }, 400);
+
+      const installation = await repo.getLinearRelayInstallationByOrganizationId({ organizationId });
+      if (!installation) {
+        if (isLinearOAuthAppRevokedPayload(payload)) {
+          return c.json({ ok: true, revoked: true, installationFound: false });
+        }
+        return c.json({ error: "linear_relay_installation_not_found", organizationId }, 404);
+      }
+
+      if (isLinearOAuthAppRevokedPayload(payload)) {
+        if (installation.auth?.method === "oauth_app") {
+          await repo.deleteLinearRelayInstallation({ id: installation.id });
+          linearRelayWebhookApps.delete(installation.id);
+          await recordControlPlaneEvent({
+            type: "linear.oauth_install.revoked",
+            severity: "warn",
+            subject: installation.id,
+            payload: {
+              installationId: installation.id,
+              organizationId,
+              ...(stringPayloadValue(payload.oauthClientId) ? { oauthClientId: stringPayloadValue(payload.oauthClientId) } : {})
+            }
+          });
+          return c.json({ ok: true, revoked: true, installationId: installation.id });
+        }
+        return c.json({ ok: true, ignored: true, reason: "linear_installation_not_oauth_app" });
+      }
+
+      const linearApp = linearRelayWebhookAppForInstallation({
+        installation,
+        webhookSecret: oauthWebhookSecret,
+        webhookPath: oauthWebhookPath
+      });
+      return linearApp.request(oauthWebhookPath, {
+        method: "POST",
+        headers: c.req.raw.headers,
+        body: rawBody
+      });
+    });
+  }
+
+  app.post("/linear/webhooks/:installationId", async (c) => {
+    const webhookPath = new URL(c.req.url).pathname;
+    const installation = await repo.getLinearRelayInstallationByWebhookPath({ webhookPath });
+    if (!installation) {
+      return c.json({ error: "linear_relay_installation_not_found" }, 404);
+    }
+
+    const linearApp = linearRelayWebhookAppForInstallation({
+      installation,
+      webhookSecret: installation.webhookSecret,
+      webhookPath
+    });
+    return linearApp.fetch(c.req.raw);
+  });
 
   if (input.rateLimit) {
     app.use("/v1/*", createDispatcherRateLimitMiddleware(input.rateLimit));
@@ -2771,6 +3872,113 @@ export function createDispatcherApp(input: {
     return c.json({ mappings });
   });
 
+  app.post("/v1/linear-oauth-installations", async (c) => {
+    if (!linearOAuthInstall) return c.json({ error: "linear_oauth_install_not_configured" }, 422);
+    const parsed = await parseDispatcherBody(c, CreateLinearOAuthInstallationSchema);
+    const now = linearOAuthInstall.now?.() ?? new Date();
+    const installationId = generateLinearRelayInstallationId();
+    const webhookPath = `/linear/webhooks/${installationId}`;
+    const scopes = uniqueStrings(parsed.scopes ?? linearOAuthInstall.scopes ?? DEFAULT_LINEAR_AGENT_OAUTH_SCOPES);
+    const redirectUri = parsed.redirectUri ?? linearOAuthInstall.redirectUri;
+    const state = generateLinearOAuthState();
+    const expiresAt = new Date(now.getTime() + (linearOAuthInstall.installStateTtlMs ?? DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS)).toISOString();
+    const pending = await repo.createLinearOAuthInstallState({
+      state,
+      installationId,
+      webhookPath,
+      webhookSecret: generateLinearRelayWebhookSecret(),
+      redirectUri,
+      ...(parsed.graphqlUrl ? { graphqlUrl: parsed.graphqlUrl } : {}),
+      repoProvider: parsed.repoProvider,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(parsed.teamId ? { teamId: parsed.teamId } : {}),
+      ...(parsed.teamKey ? { teamKey: parsed.teamKey } : {}),
+      scopes,
+      expiresAt
+    });
+    const authorizationUrl = buildLinearOAuthAuthorizationUrl({
+      clientId: linearOAuthInstall.clientId,
+      redirectUri,
+      state,
+      scopes,
+      actor: "app",
+      prompt: "consent",
+      ...(linearOAuthInstall.authorizationUrl ? { authorizationUrl: linearOAuthInstall.authorizationUrl } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "linear.oauth_install.started",
+      severity: "info",
+      subject: pending.installationId,
+      payload: {
+        installationId: pending.installationId,
+        webhookPath: pending.webhookPath,
+        repoProvider: pending.repoProvider,
+        owner: pending.owner,
+        repo: pending.repo,
+        scopeCount: scopes.length,
+        expiresAt
+      }
+    });
+    return c.json(
+      {
+        authorizationUrl,
+        stateExpiresAt: expiresAt,
+        oauthWebhookPath: linearOAuthInstall.webhookPath ?? "/linear/oauth/webhooks",
+        installation: linearInstallationSummary({
+          id: pending.installationId,
+          webhookPath: pending.webhookPath,
+          repoProvider: pending.repoProvider,
+          owner: pending.owner,
+          repo: pending.repo,
+          ...(pending.graphqlUrl ? { graphqlUrl: pending.graphqlUrl } : {}),
+          ...(pending.teamId ? { teamId: pending.teamId } : {}),
+          ...(pending.teamKey ? { teamKey: pending.teamKey } : {})
+        })
+      },
+      201
+    );
+  });
+
+  app.post("/v1/linear-relay-installations", async (c) => {
+    const parsed = await parseDispatcherBody(c, LinearRelayInstallationSchema);
+    const installation = await repo.upsertLinearRelayInstallation({
+      id: parsed.id,
+      webhookPath: parsed.webhookPath,
+      webhookSecret: parsed.webhookSecret,
+      token: parsed.token,
+      auth: linearRelayInstallationAuthFromParsed(parsed.auth),
+      ...(parsed.graphqlUrl ? { graphqlUrl: parsed.graphqlUrl } : {}),
+      repoProvider: parsed.repoProvider,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(parsed.organizationId ? { organizationId: parsed.organizationId } : {}),
+      ...(parsed.teamId ? { teamId: parsed.teamId } : {}),
+      ...(parsed.teamKey ? { teamKey: parsed.teamKey } : {})
+    });
+    await recordControlPlaneEvent({
+      type: "linear.relay_installation.upserted",
+      severity: "info",
+      subject: installation.id,
+      payload: {
+        installationId: installation.id,
+        webhookPath: installation.webhookPath,
+        repoProvider: installation.repoProvider,
+        owner: installation.owner,
+        repo: installation.repo,
+        hasGraphqlUrl: Boolean(installation.graphqlUrl),
+        hasTeamId: Boolean(installation.teamId),
+        hasTeamKey: Boolean(installation.teamKey)
+      }
+    });
+    return c.json(
+      {
+        installation: linearInstallationSummary(installation)
+      },
+      201
+    );
+  });
+
   app.get("/v1/repo-bindings/:provider/:owner/:repo/metrics", async (c) => {
     const metrics = await repo.getRepoMetrics({
       provider: c.req.param("provider"),
@@ -2789,15 +3997,47 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateChannelBindingSchema);
-    await repo.upsertChannelBinding({
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    const existing = await repo.getChannelBinding({
       provider: parsed.provider,
       accountId: parsed.accountId,
-      conversationId: parsed.conversationId,
-      repoProvider: parsed.repoProvider,
-      owner: parsed.owner,
-      repo: parsed.repo,
-      ...(parsed.metadata ? { metadata: parsed.metadata } : {})
+      conversationId: parsed.conversationId
     });
+    const requestedManagedBinding = parsed.ownership
+      ? { provider: parsed.provider, ownership: parsed.ownership }
+      : undefined;
+    if (
+      (requestedManagedBinding && !principalOwnsManagedBinding(principal, requestedManagedBinding))
+      || (existing?.ownership && !principalOwnsManagedBinding(principal, existing))
+    ) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${parsed.provider}:${parsed.accountId}/${parsed.conversationId}`,
+        payload: { provider: parsed.provider, accountId: parsed.accountId, conversationId: parsed.conversationId, operation: "upsert" }
+      });
+    }
+    try {
+      await repo.upsertChannelBinding({
+        provider: parsed.provider,
+        accountId: parsed.accountId,
+        conversationId: parsed.conversationId,
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
+        ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
+        ...(parsed.ownership ? { ownership: parsed.ownership } : {}),
+        ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+      });
+    } catch (error) {
+      if (error instanceof Error && /Exclusive managed channel binding/u.test(error.message)) {
+        return c.json({ error: "managed_channel_binding_conflict" }, 409);
+      }
+      throw error;
+    }
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -2806,10 +4046,11 @@ export function createDispatcherApp(input: {
         provider: parsed.provider,
         accountId: parsed.accountId,
         conversationId: parsed.conversationId,
-        repoProvider: parsed.repoProvider,
-        owner: parsed.owner,
-        repo: parsed.repo,
-        hasMetadata: Boolean(parsed.metadata)
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
+        hasMetadata: Boolean(parsed.metadata),
+        ...(parsed.ownership ? { managedOwnership: true } : {})
       }
     });
     return c.json({ ok: true }, 201);
@@ -2831,11 +4072,23 @@ export function createDispatcherApp(input: {
     const conversationId = c.req.param("conversationId");
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "status" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     const queuedFollowUps = active ? await repo.listQueuedFollowUpsForActiveRun({ activeRunId: active.run.id }) : [];
@@ -2852,12 +4105,29 @@ export function createDispatcherApp(input: {
     const provider = c.req.param("provider");
     const accountId = c.req.param("accountId");
     const conversationId = c.req.param("conversationId");
+    const existing = await repo.getChannelBinding({ provider, accountId, conversationId });
+    if (!existing) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing.ownership && !principalOwnsManagedBinding(principal, existing) && !adminOverride) {
+      return c.json({ error: "managed_channel_principal_required" }, 403);
+    }
+    if (existing.ownership && adminOverride && !principalOwnsManagedBinding(principal, existing)) {
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "delete" }
+      });
+    }
     const deleted = await repo.deleteChannelBinding({
       provider,
       accountId,
-      conversationId
+      conversationId,
+      expectedBinding: existing
     });
-    if (!deleted) return c.json({ error: "channel_binding_not_found" }, 404);
+    if (!deleted) return c.json({ error: "channel_binding_changed" }, 409);
     await recordControlPlaneEvent({
       type: "binding.channel.deleted",
       severity: "info",
@@ -2878,11 +4148,23 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CancelRunSchema);
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "cancel" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     if (!active) return c.json({ error: "active_run_not_found" }, 404);
@@ -2900,7 +4182,39 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/slack-channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateSlackChannelBindingSchema);
-    await repo.createSlackChannelBinding(parsed);
+    const existing = await repo.getChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId
+    });
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing?.ownership && !principalOwnsManagedBinding(principal, existing)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `slack:${parsed.teamId}/${parsed.channelId}`,
+        payload: {
+          provider: "slack",
+          accountId: parsed.teamId,
+          conversationId: parsed.channelId,
+          operation: "compatibility_upsert"
+        }
+      });
+    }
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId,
+      repoProvider: parsed.repoProvider ?? "github",
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(existing?.metadata ? { metadata: existing.metadata } : {}),
+      ...(existing?.ownership ? { ownership: existing.ownership } : {}),
+      ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+    });
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -2930,6 +4244,33 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runs", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRunSchema);
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    let ownershipVerified = false;
+    try {
+      ownershipVerified = await managedChannelOwnershipVerified({
+        repo,
+        event: parsed.event,
+        ...(channelPrincipal ? { principal: channelPrincipal } : {})
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_binding_corrupt",
+        severity: "error",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_binding_corrupt" }, 403);
+    }
+    if (!ownershipVerified) {
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_ownership_unverified",
+        severity: "warn",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_ownership_unverified" }, 403);
+    }
     const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
 
     if (admitted.outcome === "needs_human_decision") {
@@ -3096,6 +4437,28 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "unauthorized", reason: authorization.reason, message: authorization.message }, 403);
     }
 
+    const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
+    const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
+    const requestedPermissionDecision = governedPermissionDecision(parsed.metadata?.["permissionDecision"]);
+    if (governedPermission) {
+      const expectedActionId = proposalMetadata?.["actionId"];
+      const expectedProposalHash = proposalMetadata?.["proposalHash"];
+      const expectedApprovalEpoch = proposalMetadata?.["approvalEpoch"];
+      const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
+      const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
+      if (
+        !requestedPermissionDecision ||
+        parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
+        parsed.metadata?.["approvalEpoch"] !== expectedApprovalEpoch ||
+        parsed.metadata?.["governedActionId"] !== expectedActionId ||
+        parsed.metadata?.["proposalId"] !== resolved.resolved.proposal.snapshot.proposalId ||
+        parsed.metadata?.["intentId"] !== expectedIntentId ||
+        !compatibleVerb
+      ) {
+        return c.json({ outcome: "approval_identity_mismatch", message: "The governed approval payload does not match the immutable proposal." }, 409);
+      }
+    }
+
     const selectionText = selectedActionSummary(resolved.resolved.selectedCandidates);
     const selectedIntents = resolved.resolved.proposal.snapshot.intents.filter((intent) =>
       resolved.resolved.selectedIntentIds.includes(intent.intentId)
@@ -3186,6 +4549,16 @@ export function createDispatcherApp(input: {
         verb: command.verb,
         selection: command.selection,
         callback: parsed.callback,
+        ...(governedPermission
+          ? {
+              permissionDecision: requestedPermissionDecision,
+              actionId: proposalMetadata?.["actionId"],
+              proposalHash: proposalMetadata?.["proposalHash"],
+              approvalEpoch: proposalMetadata?.["approvalEpoch"]
+            }
+          : parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
+            ? { permissionDecision: "allow_run" }
+            : { permissionDecision: command.verb === "reject" ? "deny" : "allow_once" }),
         ...(parsed.metadata ? { ingressMetadata: parsed.metadata } : {})
       }
     });
@@ -3197,10 +4570,9 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
-      const body = renderThreadActionRecordedBody({
-        verb: "reject",
-        selectionText
-      });
+      const body = governedPermission && requestedPermissionDecision
+        ? renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText })
+        : renderThreadActionRecordedBody({ verb: "reject", selectionText });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -3221,19 +4593,26 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
-      const directApply = await selectedDirectApplyStatus({
-        event: resolved.resolved.proposal.event,
-        callbackProvider: parsed.callback.provider,
-        candidates: resolved.resolved.selectedCandidates,
-        ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
-      });
-      const body = renderThreadActionRecordedBody({
-        verb: "approve",
-        selectionText,
-        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
-        directApply
-      });
+      let body: string;
+      if (governedPermission && requestedPermissionDecision) {
+        body = renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText });
+      } else {
+        const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
+        const directApply = await selectedDirectApplyStatus({
+          event: resolved.resolved.proposal.event,
+          callbackProvider: parsed.callback.provider,
+          candidates: resolved.resolved.selectedCandidates,
+          ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+          ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          ...(linearApply ? { linearApply } : {})
+        });
+        body = renderThreadActionRecordedBody({
+          verb: "approve",
+          selectionText,
+          applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
+          directApply
+        });
+      }
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -3334,13 +4713,15 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: isStale ? "stale" : "already_planned", decision, plan: planResult.plan }, 200);
     }
     const plan = planResult.plan;
+    const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
 
     const execution = await executeDirectApplyPlan({
       repo,
       plan,
       resolved: resolved.resolved,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(linearApply ? { linearApply } : {})
     });
     if (execution.executed) {
       const outcomes = execution.plan.outcomes ?? [];
@@ -3454,15 +4835,151 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners/:runnerId/claim", async (c) => {
-    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: runnerLeaseSeconds });
     if (!claimed) return c.body(null, 204);
     return c.json(claimed, 200);
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/heartbeat", async (c) => {
-    const ok = await repo.heartbeat({ runnerId: c.req.param("runnerId"), runId: c.req.param("runId") });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    const body = await parseDispatcherBody(c, AttemptLeaseSchema);
+    const outcome = await repo.heartbeat({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     return c.json({ ok: true });
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions", async (c) => {
+    const runnerId = c.req.param("runnerId");
+    const runId = c.req.param("runId");
+    const body = await parseDispatcherBody(c, ActionPermissionInputSchema);
+    const resolution = await repo.requestActionPermission({
+      runnerId,
+      runId,
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      request: body.request
+    });
+    if (!resolution) return c.json({ error: "stale_attempt" }, 409);
+    if (resolution.state === "waiting" && resolution.action.proposalId) {
+      const stored = await repo.getRun({ runId });
+      const proposal = await repo.getSuggestedChanges({ proposalId: resolution.action.proposalId });
+      const approvalEpoch = proposal?.snapshot.metadata?.["approvalEpoch"];
+      if (stored && proposal && resolution.action.proposalHash && typeof approvalEpoch === "string") {
+        const approvalPrompt = OpenTagApprovalPromptPresentationSchema.parse({
+          kind: "approval_prompt",
+          runId,
+          approvalId: `approval_${resolution.action.id}`,
+          proposalId: proposal.snapshot.proposalId,
+          intentId: `intent_${resolution.action.id}`,
+          actionId: resolution.action.id,
+          proposalHash: resolution.action.proposalHash,
+          approvalEpoch,
+          title: `Allow ${resolution.action.actionFamily}?`,
+          summary: proposal.snapshot.summary,
+          target: {
+            provider: resolution.action.target["provider"],
+            connectionId: resolution.action.target["connectionId"],
+            operation: resolution.action.target["operation"],
+            resource: resolution.action.target["resource"],
+            ...(typeof resolution.action.target["resourceVersion"] === "string" ? { resourceVersion: resolution.action.target["resourceVersion"] } : {})
+          },
+          runScope: resolution.action.scope,
+          decisions: actionScopeAllowsRunReuse(resolution.action.scope) ? ["allow_once", "allow_run", "deny"] : ["allow_once", "deny"]
+        });
+        const rendered = presentation.render({
+          provider: stored.event.callback.provider,
+          ...larkRenderLocaleRenderOption(stored.event),
+          presentation: approvalPrompt
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: rendered.body,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+            ...(rendered.rich ? { rich: rendered.rich } : {}),
+            idempotencyKey: `action-permission:${resolution.action.id}`,
+            statusMessageKey: `${runId}:status`
+          }
+        });
+      }
+    }
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions/:actionId/resolve", async (c) => {
+    const body = await parseDispatcherBody(c, ActionPermissionResolutionInputSchema);
+    const resolution = await repo.resolveActionPermission({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : resolution.state === "stale" ? 409 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/material-actions/:actionId/receipt", async (c) => {
+    const body = await parseDispatcherBody(c, MaterialActionReceiptInputSchema);
+    const resolution = await repo.recordMaterialActionReceipt({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      receipt: body.receipt
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
+    return c.json({ resolution }, 200);
+  });
+
+  app.post("/v1/material-actions/:actionId/reconcile", async (c) => {
+    const body = await parseDispatcherBody(c, ReconcileUnknownMaterialActionSchema);
+    const result = await repo.reconcileUnknownMaterialAction({
+      actionId: c.req.param("actionId"),
+      outcome: body.outcome,
+      idempotencyKey: body.idempotencyKey,
+      receiptRef: body.receiptRef,
+      source: "control_plane_admin",
+      actorId: "pairing-authenticated-admin",
+      ...(body.evidence ? { evidence: body.evidence } : {})
+    });
+    if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
+    if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
+    if (result.outcome === "reconciled" && result.action) {
+      const stored = await repo.getRun({ runId: result.action.runId });
+      if (stored) {
+        const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: result.action.runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: bodyText,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            idempotencyKey: `material-action-reconciliation:${body.idempotencyKey}`
+          }
+        });
+      }
+    }
+    return c.json({ result, replayed: result.outcome === "replayed" }, 200);
   });
 
   app.post("/v1/runs/:runId/running", async (c) => {
@@ -3477,15 +4994,23 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, MarkRunningSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeRunningFields = sanitizeCredentialLikeValue({
+      executor: body.executor,
+      ...(body.executorCapability !== undefined ? { executorCapability: body.executorCapability } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [body.fencingToken] });
     const runningOutcome = await repo.markRunning({
       runId,
       runnerId: c.req.param("runnerId"),
-      executor: body.executor,
-      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      executor: safeRunningFields.executor,
+      ...(safeRunningFields.executorCapability !== undefined ? { executorCapability: safeRunningFields.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(safeRunningFields.idempotencyKey ? { idempotencyKey: safeRunningFields.idempotencyKey } : {})
     });
     if (runningOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (runningOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (runningOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
@@ -3507,7 +5032,7 @@ export function createDispatcherApp(input: {
       const runningPresentation = presentation.runStatusPresentation({
         runId,
         state: "running",
-        message: `Running with ${body.executor}.`,
+        message: `Running with ${safeExecutorLabel(stored.run.executor)}.`,
         nextAction: "Wait for the final reply, send a follow-up to queue more context, or request cancellation with /stop.",
         detailVisibility: "source_thread"
       });
@@ -3556,24 +5081,37 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, ProgressSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeProgressFields = sanitizeCredentialLikeValue({
+      message: body.message,
+      ...(body.type ? { type: body.type } : {})
+    }, { secrets: [body.fencingToken] });
+    const progressVisibility = channelProgressVisibility({
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
+      ...(body.visibility ? { requested: body.visibility } : {})
+    });
     const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
-      message: body.message,
-      ...(body.type ? { type: body.type } : {}),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      message: safeProgressFields.message,
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
       ...(body.at ? { at: body.at } : {}),
-      ...(body.visibility ? { visibility: body.visibility } : {}),
+      visibility: progressVisibility,
       ...(body.importance ? { importance: body.importance } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
-    if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
+    if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
+    if (typeof progressOutcome === "object" && progressOutcome.outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-    const progressVisibility = body.visibility ?? "audit";
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
+      const progressPresentation = presentation.progressPresentation({
+        runId,
+        message: typeof progressOutcome === "object" ? progressOutcome.event.message ?? "Progress update recorded." : "Progress update recorded."
+      });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
         ...larkRenderLocaleRenderOption(stored.event),
@@ -3593,6 +5131,7 @@ export function createDispatcherApp(input: {
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
           ...(progress.blocks?.length ? { blocks: progress.blocks } : {}),
           ...(progress.rich ? { rich: progress.rich } : {}),
+          ...(typeof progressOutcome === "object" ? { idempotencyKey: `run-progress:${progressOutcome.event.id}` } : {}),
           statusMessageKey: `${runId}:status`
         }
       });
@@ -3632,25 +5171,36 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CompleteRunSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = parsed.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeCompleteFields = sanitizeCredentialLikeValue({
+      result: parsed.result,
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [parsed.fencingToken] });
+    const safeResult = OpenTagRunResultSchema.parse(safeCompleteFields.result);
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
-      result: parsed.result,
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      attemptId: parsed.attemptId,
+      fencingToken: parsed.fencingToken,
+      result: safeResult,
+      ...(safeCompleteFields.idempotencyKey ? { idempotencyKey: safeCompleteFields.idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     cancelPendingDelayedLarkStatusCard(runId);
+    const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
-      result: parsed.result,
+      result: completedResult,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {})
+      ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+      ...(linearApply ? { linearApply } : {})
     });
     if (
-      parsed.result.conclusion === "needs_human" &&
+      completedResult.conclusion === "needs_human" &&
       shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
     ) {
       const waitingPresentation = presentation.runStatusPresentation({
@@ -3684,7 +5234,7 @@ export function createDispatcherApp(input: {
       });
     }
     const finalPresentation = presentation.finalPresentation({
-      result: parsed.result,
+      result: completedResult,
       runId,
       receiptContext
     });
@@ -3712,7 +5262,7 @@ export function createDispatcherApp(input: {
       }
     });
     clearDelayedLarkStatusCard(runId);
-    const shouldPromoteFollowUp = parsed.result.conclusion !== "needs_human" && parsed.result.conclusion !== "cancelled";
+    const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,
@@ -3778,15 +5328,20 @@ export function createDispatcherApp(input: {
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
           target: NonNullable<ReturnType<typeof githubTargetFromEvent>>;
         }
-      | {
+        | {
           adapter: "gitlab";
           proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
           target: NonNullable<ReturnType<typeof gitlabTargetFromEvent>>;
         }
+        | {
+          adapter: "linear";
+          proposal: NonNullable<Awaited<ReturnType<typeof repo.getSuggestedChanges>>>;
+          target?: NonNullable<ReturnType<typeof linearTargetFromEvent>>;
+        }
       | undefined;
 
     if (body.execute) {
-      if (body.adapter !== "github" && body.adapter !== "gitlab") {
+      if (body.adapter !== "github" && body.adapter !== "gitlab" && body.adapter !== "linear") {
         return c.json({ error: "apply_execution_adapter_not_supported" }, 422);
       }
       if (body.adapter === "github" && !input.githubApply) {
@@ -3805,12 +5360,21 @@ export function createDispatcherApp(input: {
           return c.json({ error: "github_target_missing" }, 422);
         }
         executableTarget = { adapter: "github", proposal, target };
-      } else {
+      } else if (body.adapter === "gitlab") {
         const target = gitlabTargetFromEvent(stored.event);
         if (!target) {
           return c.json({ error: "gitlab_target_missing" }, 422);
         }
         executableTarget = { adapter: "gitlab", proposal, target };
+      } else {
+        const target = linearTargetFromEvent(stored.event);
+        const selectedIntentIds = body.selectedIntentIds ?? proposal.snapshot.intents.map((intent) => intent.intentId);
+        const selectedIntents = proposal.snapshot.intents.filter((intent) => selectedIntentIds.includes(intent.intentId));
+        const needsExistingLinearIssue = selectedIntents.some((intent) => !isLinearIssueCreateIntent(intent));
+        if (needsExistingLinearIssue && !target) {
+          return c.json({ error: "linear_target_missing" }, 422);
+        }
+        executableTarget = { adapter: "linear", proposal, ...(target ? { target } : {}) };
       }
     }
 
@@ -3872,7 +5436,7 @@ export function createDispatcherApp(input: {
             })
           );
         }
-      } else {
+      } else if (executableTarget.adapter === "gitlab") {
         const gitlabApply = input.gitlabApply;
         if (!gitlabApply) {
           return c.json({ error: "gitlab_apply_not_configured" }, 422);
@@ -3892,6 +5456,48 @@ export function createDispatcherApp(input: {
               },
               operation: compilation.operation as GitLabMutationOperation,
               ...(gitlabApply.fetchImpl ? { fetchImpl: gitlabApply.fetchImpl } : {})
+            })
+          );
+        }
+      } else {
+        const sourceRun = await repo.getRun({ runId: executableTarget.proposal.runId });
+        const linearApply = sourceRun ? await linearApplyOptionsForEvent(sourceRun.event) : input.linearApply;
+        if (!linearApply) {
+          return c.json({ error: "linear_apply_not_configured" }, 422);
+        }
+        const linearToken = await resolveLinearApplyToken(linearApply);
+        if (!linearToken) {
+          return c.json({ error: "linear_apply_token_unavailable" }, 422);
+        }
+        const compilerRegistry = createAdapterMutationCompilerRegistry([
+          createLinearMutationCompiler({
+            mappings: mappingsForAdapterPlan(plan.adapterPlan, linearApply.mappings)
+          })
+        ]);
+        for (const compilation of compilerRegistry.compile("linear", executableIntents)) {
+          if (!compilation.ok) {
+            executedOutcomes.push(compilation.outcome);
+            continue;
+          }
+          const operation = compilation.operation as LinearMutationOperation;
+          if (operation.kind !== "create_issue" && !executableTarget.target) {
+            executedOutcomes.push({
+              intentId: compilation.intentId,
+              outcome: "failed",
+              message: "The source run does not include a Linear issue target."
+            });
+            continue;
+          }
+          const linearGraphqlUrl = linearApply.graphqlUrl ?? executableTarget.target?.graphqlUrl;
+          executedOutcomes.push(
+            await applyLinearMutationOperation({
+              target: {
+                token: linearToken,
+                ...(executableTarget.target?.issueId ? { issueId: executableTarget.target.issueId } : {}),
+                ...(linearGraphqlUrl ? { graphqlUrl: linearGraphqlUrl } : {})
+              },
+              operation,
+              ...(linearApply.fetchImpl ? { fetchImpl: linearApply.fetchImpl } : {})
             })
           );
         }

@@ -1,4 +1,4 @@
-import type { OpenTagRunResult } from "@opentag/core";
+import type { OpenTagRunResult, WorkContextMutationRequest } from "@opentag/core";
 import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
@@ -250,5 +250,68 @@ export function createExecutorRunResult(input: {
             }
           }
         : "No file changes were detected."
+  };
+}
+
+export function createWorkContextMutationRunResult(input: {
+  runId: string;
+  requests: WorkContextMutationRequest[];
+}): OpenTagRunResult {
+  const proposalId = `proposal_${input.runId}`;
+  const intents = input.requests.map((request, index) => {
+    const intentId = `${proposalId}_${request.domain}_${index + 1}`;
+    switch (request.domain) {
+      case "priority": {
+        const numeric = /^[0-4]$/.test(request.value) ? Number(request.value) : undefined;
+        return {
+          intentId,
+          domain: "priority" as const,
+          action: "set_priority",
+          summary: `Set the issue priority to ${request.value}.`,
+          params: { priority: numeric ?? request.value }
+        };
+      }
+      case "status":
+        return {
+          intentId,
+          domain: "status" as const,
+          action: "set_status",
+          summary: `Move the issue status to ${request.value}.`,
+          params: { status: request.value }
+        };
+      case "assignee":
+        return {
+          intentId,
+          domain: "assignee" as const,
+          action: "set_assignee",
+          summary: `Assign the issue to ${request.value}.`,
+          params: { assignee: request.value }
+        };
+      case "label":
+        return {
+          intentId,
+          domain: "label" as const,
+          action: "set_labels",
+          summary: `Add the label ${request.value}.`,
+          params: { label: request.value }
+        };
+    }
+  });
+  const actionSummaries = intents.map((intent) => intent.summary).join(" ");
+
+  return {
+    conclusion: "needs_human",
+    summary: `Prepared ${intents.length} issue update action(s) from the request without starting an executor. ${actionSummaries}`,
+    suggestedChanges: [
+      {
+        proposalId,
+        createdAt: new Date().toISOString(),
+        sourceRunId: input.runId,
+        summary: `Apply the requested issue update(s): ${actionSummaries}`,
+        intents,
+        preconditions: ["The work-item adapter resolves names through the discovered mutation mappings at apply time."]
+      }
+    ],
+    nextAction: "Reply `apply 1` to apply the first action (`apply all` for every action), or `reject 1` to dismiss it."
   };
 }

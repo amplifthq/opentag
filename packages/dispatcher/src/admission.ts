@@ -1,5 +1,6 @@
 import {
   conversationKeysFromEvent,
+  isRepositoryFreePermissionScope,
   projectTargetRefFromEvent,
   RunAdmissionDecisionSchema,
   type OpenTagEvent,
@@ -35,7 +36,7 @@ export type AdmitRunResult =
   | {
       outcome: "start";
       decision: RunAdmissionDecision;
-      binding: RepoBinding;
+      binding?: RepoBinding;
     }
   | {
       outcome: "drop_duplicate";
@@ -55,6 +56,24 @@ export type AdmitRunResult =
 
 function isWriteCapable(event: OpenTagEvent): boolean {
   return event.permissions.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope));
+}
+
+function sourceRequiresRepositoryContext(source: OpenTagEvent["source"]): source is "github" | "gitlab" {
+  return source === "github" || source === "gitlab";
+}
+
+function nativeRepositoryContextMatchesSource(event: OpenTagEvent): boolean {
+  if (!sourceRequiresRepositoryContext(event.source)) return true;
+  const metadata = event.metadata ?? {};
+  return (
+    typeof metadata["repoProvider"] === "string" &&
+    metadata["repoProvider"].trim().length > 0 &&
+    metadata["repoProvider"] === event.source &&
+    typeof metadata["owner"] === "string" &&
+    metadata["owner"].trim().length > 0 &&
+    typeof metadata["repo"] === "string" &&
+    metadata["repo"].trim().length > 0
+  );
 }
 
 function actorInAllowedList(event: OpenTagEvent, allowedActors: string[]): boolean {
@@ -163,55 +182,69 @@ export function createAdmissionRuntime(input: {
       }
 
       const repoKey = projectTargetRefFromEvent(request.event);
-      if (!repoKey) {
+      let binding: RepoBinding | undefined;
+      const metadata = request.event.metadata ?? {};
+      const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
+      const hasUnsafeRepositoryFreePermission = request.event.permissions.some(
+        (permission) => !isRepositoryFreePermissionScope(permission.scope)
+      );
+      const nativeRepositoryContextInvalid =
+        sourceRequiresRepositoryContext(request.event.source) && !nativeRepositoryContextMatchesSource(request.event);
+
+      if (
+        nativeRepositoryContextInvalid ||
+        (!repoKey && (hasRepositoryMetadata || hasUnsafeRepositoryFreePermission))
+      ) {
         return {
           outcome: "needs_human_decision",
           decision: admissionDecision({
             action: "needs_human_decision",
-            reason: "The event did not resolve to a repository context.",
+            reason: "The repository-bearing event did not resolve to a complete repository context.",
             reasonCode: "repo_context_missing",
             event: request.event
           })
         };
       }
 
-      const binding = await input.repo.getRepoBinding(repoKey);
-      if (!binding) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: "No repository binding is configured for this work context.",
-            reasonCode: "repo_not_bound",
-            event: request.event
-          })
-        };
-      }
+      if (repoKey) {
+        binding = (await input.repo.getRepoBinding(repoKey)) ?? undefined;
+        if (!binding) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: "No repository binding is configured for this work context.",
+              reasonCode: "repo_not_bound",
+              event: request.event
+            })
+          };
+        }
 
-      const actorGate = evaluateActorGate(request.event, binding.allowedActors);
-      if (!actorGate.allowed) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: actorGate.reason,
-            reasonCode: actorGate.reasonCode,
-            event: request.event
-          })
-        };
-      }
+        const actorGate = evaluateActorGate(request.event, binding.allowedActors);
+        if (!actorGate.allowed) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: actorGate.reason,
+              reasonCode: actorGate.reasonCode,
+              event: request.event
+            })
+          };
+        }
 
-      const accessDecision = await agentAccessProfileCheck({ event: request.event, binding });
-      if (!accessDecision.allowed) {
-        return {
-          outcome: "needs_human_decision",
-          decision: admissionDecision({
-            action: "needs_human_decision",
-            reason: accessDecision.reason,
-            reasonCode: accessDecision.reasonCode ?? "agent_access_profile_denied",
-            event: request.event
-          })
-        };
+        const accessDecision = await agentAccessProfileCheck({ event: request.event, binding });
+        if (!accessDecision.allowed) {
+          return {
+            outcome: "needs_human_decision",
+            decision: admissionDecision({
+              action: "needs_human_decision",
+              reason: accessDecision.reason,
+              reasonCode: accessDecision.reasonCode ?? "agent_access_profile_denied",
+              event: request.event
+            })
+          };
+        }
       }
 
       let activeRun: { run: OpenTagRun; event: OpenTagEvent } | null = null;
@@ -258,7 +291,7 @@ export function createAdmissionRuntime(input: {
           reasonCode: "new_event",
           event: request.event
         }),
-        binding
+        ...(binding ? { binding } : {})
       };
     }
   };

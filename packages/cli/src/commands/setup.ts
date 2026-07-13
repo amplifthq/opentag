@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { probeHermesProfile as probeHermesProfileReadiness } from "@opentag/local-runtime";
 import {
   defaultConfigPath,
   ensurePrivateDirectory,
@@ -9,7 +10,10 @@ import { collectSetupInput, type SetupCommandOptions, type SetupFlowDependencies
 import { formatSetupComplete } from "../setup/summary.js";
 import { createClackPromptAdapter } from "../ui/clack.js";
 import { scanLarkPersonalAgent } from "../platforms/lark/registration-ui.js";
-import { runStartCommand, type StartCommandOptions } from "../start.js";
+import { probeDispatcherHealth } from "../health.js";
+import { formatPairRelaySummary, normalizeRelayUrl, relayConfigFrom, validateRelayPlatformCapabilities } from "../pair.js";
+import { assertRelayTransportAllowed } from "../relay-security.js";
+import { bootstrapLocalDispatcher, runStartCommand, type BootstrapClient, type StartCommandOptions } from "../start.js";
 import { installAndStartService, serviceControllerForPlatform, type ServiceCommandOptions } from "../service.js";
 
 export type { SetupCommandOptions };
@@ -19,6 +23,10 @@ export type SetupCommandDependencies = Partial<Omit<SetupFlowDependencies, "prom
   prompts?: SetupFlowDependencies["prompts"];
   scanLarkPersonalAgent?: SetupFlowDependencies["scanLarkPersonalAgent"];
   validateLarkCredentials?: SetupFlowDependencies["validateLarkCredentials"];
+  bootstrapClient?: BootstrapClient;
+  fetchImpl?: typeof fetch;
+  healthTimeoutMs?: number;
+  probeHermesProfile?: typeof probeHermesProfileReadiness;
   startOpenTag?(options: StartCommandOptions): Promise<void>;
   startOpenTagService?(options: ServiceCommandOptions): Promise<void>;
 };
@@ -97,16 +105,62 @@ export async function runSetupCommand(options: SetupCommandOptions, dependencies
     prompts,
     scanLarkPersonalAgent: dependencies.scanLarkPersonalAgent ?? scanLarkPersonalAgent,
     ...(dependencies.validateLarkCredentials ? { validateLarkCredentials: dependencies.validateLarkCredentials } : {}),
+    ...(dependencies.exchangeLinearOAuthCode ? { exchangeLinearOAuthCode: dependencies.exchangeLinearOAuthCode } : {}),
+    ...(dependencies.discoverLinearMetadata ? { discoverLinearMetadata: dependencies.discoverLinearMetadata } : {}),
+    ...(dependencies.now ? { now: dependencies.now } : {}),
     ...(dependencies.cwd ? { cwd: dependencies.cwd } : {}),
     ...(dependencies.env ? { env: dependencies.env } : {}),
     ...(dependencies.defaults ? { defaults: dependencies.defaults } : {})
   });
-  const config = createSetupConfig(setupInput, env);
+  if (setupInput.hermes) {
+    const readiness = await (dependencies.probeHermesProfile ?? probeHermesProfileReadiness)({
+      ...(setupInput.hermes.command ? { hermesCommand: setupInput.hermes.command } : {}),
+      profile: setupInput.hermes.profile,
+      cwd: setupInput.projectPath
+    });
+    if (!readiness.ready) {
+      throw new Error(readiness.reason ?? `Hermes profile '${setupInput.hermes.profile}' is not ready.`);
+    }
+  }
+  let config = createSetupConfig(setupInput, env);
+  let relayUrl: string | undefined;
+  let relayRegistered = false;
+  if (options.relay) {
+    relayUrl = normalizeRelayUrl(options.relay);
+    assertRelayTransportAllowed(relayUrl);
+    const healthy = await probeDispatcherHealth({
+      dispatcherUrl: relayUrl,
+      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+      timeoutMs: dependencies.healthTimeoutMs ?? 5_000
+    });
+    if (!healthy) {
+      throw new Error(`Relay health check failed at ${relayUrl}/healthz.`);
+    }
+    config = relayConfigFrom({ config, relayUrl });
+    await validateRelayPlatformCapabilities({
+      config,
+      relayUrl,
+      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+      timeoutMs: dependencies.healthTimeoutMs ?? 5_000
+    });
+    await bootstrapLocalDispatcher(config, dependencies.bootstrapClient);
+    relayRegistered = true;
+  }
   ensurePrivateDirectory(config.state.directory);
   ensurePrivateDirectory(config.state.worktreeRoot);
   writeCliConfigAtomic(configPath, config);
 
   prompts.note(formatSetupComplete(config, configPath));
+  if (relayUrl) {
+    prompts.note(
+      formatPairRelaySummary({
+        configPath,
+        config,
+        relayUrl,
+        registered: relayRegistered
+      })
+    );
+  }
 
   const runMode = await collectRunMode(options, prompts, config.preferences?.language, platform);
 

@@ -27,7 +27,7 @@ const executor: ExecutorAdapter = {
 
     return {
       conclusion: "success",
-      summary: `Custom runner handled '${input.command.rawText}' in ${input.workspacePath}`,
+      summary: `Custom runner handled '${input.command.rawText}' in ${input.workspace.path}`,
       verification: [
         {
           command: "custom-runner",
@@ -53,9 +53,11 @@ if (!claimed) {
   process.exit(0);
 }
 
+const lease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+
 const readiness = await executor.canRun({
   runId: claimed.run.id,
-  workspacePath,
+  workspace: { kind: "repository", path: workspacePath },
   command: claimed.event.command,
   context: claimed.event.context
 });
@@ -64,6 +66,7 @@ if (!readiness.ready) {
   await client.complete({
     runnerId,
     runId: claimed.run.id,
+    ...lease,
     result: {
       conclusion: "needs_human",
       summary: readiness.reason ?? `${executor.displayName} is not ready`
@@ -72,12 +75,12 @@ if (!readiness.ready) {
   process.exit(0);
 }
 
-await client.markRunning({ runnerId, runId: claimed.run.id, executor: executor.id });
+await client.markRunning({ runnerId, runId: claimed.run.id, ...lease, executor: executor.id });
 
 const result = await executor.run(
   {
     runId: claimed.run.id,
-    workspacePath,
+    workspace: { kind: "repository", path: workspacePath },
     command: claimed.event.command,
     context: claimed.event.context
   },
@@ -86,6 +89,7 @@ const result = await executor.run(
       client.progress({
         runnerId,
         runId: claimed.run.id,
+        ...lease,
         type: event.type,
         message: event.message,
         at: event.at
@@ -93,6 +97,6 @@ const result = await executor.run(
   }
 );
 
-await client.complete({ runnerId, runId: claimed.run.id, result });
+await client.complete({ runnerId, runId: claimed.run.id, ...lease, result });
 
 console.log(`Completed OpenTag run ${claimed.run.id} with ${executor.id}.`);

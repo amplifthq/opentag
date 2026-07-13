@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CommandRunner } from "./command.js";
 import { assertCommandSucceeded } from "./command.js";
+import type { ExecutorWorkspace } from "./executor.js";
 
 export type GitStatusEntry = {
   status: string;
@@ -84,6 +85,20 @@ export function worktreePathForRun(input: {
   const safeRunId = input.runId.replace(/[^a-zA-Z0-9._-]/g, "-");
   const root = input.worktreeRoot ?? `${input.workspacePath.replace(/\/$/, "")}/.worktrees/opentag`;
   return `${root.replace(/\/$/, "")}/${safeRunId}`;
+}
+
+export function executionPathForAttempt(input: {
+  workspace: ExecutorWorkspace;
+  runId: string;
+  attemptId: string;
+  worktreeRoot?: string;
+}): string {
+  if (input.workspace.kind === "scratch") return input.workspace.path;
+  return worktreePathForRun({
+    workspacePath: input.workspace.path,
+    runId: input.attemptId === input.runId ? input.runId : `${input.runId}-${input.attemptId}`,
+    ...(input.worktreeRoot ? { worktreeRoot: input.worktreeRoot } : {})
+  });
 }
 
 export async function createRunWorktree(input: {

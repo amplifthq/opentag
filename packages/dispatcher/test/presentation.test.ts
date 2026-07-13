@@ -16,13 +16,13 @@ describe("default callback presentation", () => {
   it("uses platform liveness capability to decide callback status and progress delivery", () => {
     const presentation = createDefaultCallbackPresentation();
 
-    expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(false);
-    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(false);
+    expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("telegram")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("github")).toBe(true);
     expect(presentation.shouldDeliverStatusUpdate("custom")).toBe(true);
-    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "running" })).toBe(false);
-    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "queued" })).toBe(false);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "running" })).toBe(true);
+    expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "lark", state: "queued" })).toBe(true);
     expect(presentation.shouldDeliverRunStatusUpdate?.({ provider: "github", state: "running" })).toBe(true);
 
     expect(presentation.shouldDeliverProgress("slack")).toBe(false);
@@ -30,6 +30,34 @@ describe("default callback presentation", () => {
     expect(presentation.shouldDeliverProgress("telegram")).toBe(true);
     expect(presentation.shouldDeliverProgress("github")).toBe(true);
     expect(presentation.shouldDeliverProgress("custom")).toBe(true);
+  });
+
+  it("renders the same queued and running Run Card semantics for native Slack and Lark channels", () => {
+    const presentation = createDefaultCallbackPresentation();
+
+    expect(presentation.shouldDeliverStatusUpdate("slack")).toBe(true);
+    expect(presentation.shouldDeliverStatusUpdate("lark")).toBe(true);
+    expect(presentation.shouldDeliverProgress("slack")).toBe(false);
+    expect(presentation.shouldDeliverProgress("lark")).toBe(false);
+
+    for (const state of ["queued", "running"] as const) {
+      const semantic = presentation.runStatusPresentation({
+        runId: "run_channel_parity",
+        state,
+        message: state === "queued" ? "Queued for the configured agent." : "Running with the configured agent.",
+        nextAction: "Wait for the next meaningful milestone.",
+        detailVisibility: "source_thread"
+      });
+      const slack = presentation.render({ provider: "slack", presentation: semantic });
+      const lark = presentation.render({ provider: "lark", presentation: semantic });
+
+      expect(slack.blocks?.length).toBeGreaterThan(0);
+      expect(JSON.stringify(slack.blocks)).toContain("run_channel_parity");
+      expect(JSON.stringify(slack.blocks)).toContain(state === "queued" ? "Queued" : "Running");
+      expect(lark.rich?.provider).toBe("lark");
+      expect(JSON.stringify(lark.rich)).toContain("run_channel_parity");
+      expect(JSON.stringify(lark.rich)).toContain(state === "queued" ? "Queued" : "Running");
+    }
   });
 
   it("renders GitHub and Slack with provider-specific markup", () => {
@@ -41,7 +69,9 @@ describe("default callback presentation", () => {
     };
 
     expect(presentation.acknowledgement({ provider: "github", runId: "run_1" })).toBe("OpenTag picked this up. Run: `run_1`");
-    expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe("Working on it.");
+    expect(presentation.acknowledgement({ provider: "slack", runId: "run_1" })).toBe(
+      "*OpenTag: Received*\nRun: `run_1`",
+    );
     expect(presentation.acknowledgement({ provider: "lark", runId: "run_1" })).toBe(
       ["Received. OpenTag is working.", "Run: run_1", "Use /status here for queue state; audit locally with opentag status --run run_1."].join("\n")
     );

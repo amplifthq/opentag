@@ -508,6 +508,15 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     );
   }
 
+  const linear = config.platforms.linear;
+  if (linear) {
+    const target = linear.projectTarget;
+    const callbackStatus = linear.auth?.method === "hosted_oauth_app" ? "hosted_oauth_install" : connectorStatus(configured(linear.token), "token");
+    lines.push(
+      `  linear: ingress=workspace_webhook path=${linear.webhookPath ?? "/linear/webhooks"} port=${linear.port ?? "default"}, callback=${callbackStatus}, target=${target ? `${target.repoProvider}:${target.owner}/${target.repo}` : "unset"}`
+    );
+  }
+
   const discord = config.platforms.discord;
   if (discord) {
     const mode = discord.mode ?? "gateway";
@@ -518,6 +527,13 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     } else {
       lines.push(`  discord: ingress=gateway ${connectorStatus(configured(discord.botToken), "botToken")}, callback=${connectorStatus(configured(discord.botToken), "botToken")}, tunnel=not required`);
     }
+  }
+
+  const teams = config.platforms.teams;
+  if (teams) {
+    lines.push(
+      `  teams: ingress=dispatcher_messages path=${teams.webhookPath ?? "/teams/messages"}, callback=${connectorStatus(configured(teams.appId) && configured(teams.appPassword), "appId/appPassword")}, tenant=${teams.tenantId ?? "any"}`
+    );
   }
 
   const slack = config.platforms.slack;

@@ -226,9 +226,9 @@ serve({
         return {
           botId: binding.accountId,
           chatId: binding.conversationId,
-          repoProvider: binding.repoProvider,
-          owner: binding.owner,
-          repo: binding.repo
+          ...(binding.repoProvider && binding.owner && binding.repo
+            ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+            : {})
         };
       } catch (error) {
         if (error instanceof Error && error.message.includes("channel_binding_not_found")) {

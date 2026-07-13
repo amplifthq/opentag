@@ -2,8 +2,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { readCliConfig } from "../src/config.js";
+import { readCliConfig, type OpenTagCliConfig } from "../src/config.js";
 import { runSetupCommand as runSetupCommandRaw, type SetupCommandDependencies, type SetupCommandOptions } from "../src/setup.js";
+import { formatSetupComplete } from "../src/setup/summary.js";
 import type { PromptAdapter, PromptOption } from "../src/ui/prompts.js";
 
 function tempDir(): string {
@@ -34,6 +35,7 @@ function testPrompts(overrides: Partial<PromptAdapter> = {}): PromptAdapter {
 function runSetupCommand(options: SetupCommandOptions, dependencies: SetupCommandDependencies = {}): Promise<void> {
   return runSetupCommandRaw(options, {
     validateLarkCredentials: vi.fn(async () => ({ botOpenId: "ou_verified_bot", botName: "OpenTag" })),
+    probeHermesProfile: vi.fn(async () => ({ ready: true })),
     ...dependencies
   });
 }
@@ -467,6 +469,130 @@ describe("OpenTag CLI setup", () => {
     expect(completeNote).toContain(`Project path: ${realpathSync.native(projectPath)}`);
     expect(completeNote).not.toContain("Project Target");
     expect(completeNote).not.toContain("path_");
+  });
+
+  it("summarizes Linear relay setup without local tunnel instructions", () => {
+    const config = {
+      schemaVersion: 1,
+      preferences: {
+        language: "en"
+      },
+      state: {
+        directory: "/tmp/opentag-state",
+        databasePath: "/tmp/opentag-state/opentag.db",
+        worktreeRoot: "/tmp/opentag-state/worktrees"
+      },
+      runtime: {
+        mode: "relay",
+        relayUrl: "https://relay.example",
+        relayProvider: "custom"
+      },
+      daemon: {
+        runnerId: "runner_local",
+        dispatcherUrl: "https://relay.example",
+        repositories: [
+          {
+            provider: "github",
+            owner: "acme",
+            repo: "demo",
+            checkoutPath: "/tmp/demo",
+            defaultExecutor: "echo",
+            baseBranch: "main",
+            pushRemote: "origin",
+            worktreeRoot: "/tmp/opentag-state/worktrees",
+            keepWorktree: "on_failure"
+          }
+        ],
+        pairingToken: "pairing_token",
+        pollIntervalMs: 5000,
+        heartbeatIntervalMs: 15000
+      },
+      platforms: {
+        linear: {
+          token: "lin_api_token",
+          webhookSecret: "linear_webhook_secret",
+          webhookPath: "/linear/webhooks",
+          port: 3070,
+          projectTarget: {
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          }
+        }
+      }
+    } as OpenTagCliConfig;
+
+    const summary = formatSetupComplete(config, "/tmp/opentag-config.json");
+
+    expect(summary).toContain("Webhook URL: https://relay.example/linear/webhooks");
+    expect(summary).toContain("Relay mode: Linear should call the relay URL above; no ngrok/cloudflared tunnel is needed.");
+    expect(summary).not.toContain("Local listener:");
+    expect(summary).not.toContain("ngrok http 3070");
+    expect(summary).not.toContain("https://<your-tunnel-host>/linear/webhooks");
+  });
+
+  it("summarizes hosted Linear OAuth Agent Session events", () => {
+    const config = {
+      schemaVersion: 1,
+      preferences: {
+        language: "en"
+      },
+      state: {
+        directory: "/tmp/opentag-state",
+        databasePath: "/tmp/opentag-state/opentag.db",
+        worktreeRoot: "/tmp/opentag-state/worktrees"
+      },
+      runtime: {
+        mode: "relay",
+        relayUrl: "https://relay.example",
+        relayProvider: "custom"
+      },
+      daemon: {
+        runnerId: "runner_local",
+        dispatcherUrl: "https://relay.example",
+        repositories: [
+          {
+            provider: "github",
+            owner: "acme",
+            repo: "demo",
+            checkoutPath: "/tmp/demo",
+            defaultExecutor: "echo",
+            baseBranch: "main",
+            pushRemote: "origin",
+            worktreeRoot: "/tmp/opentag-state/worktrees",
+            keepWorktree: "on_failure"
+          }
+        ],
+        pairingToken: "pairing_token",
+        pollIntervalMs: 5000,
+        heartbeatIntervalMs: 15000
+      },
+      platforms: {
+        linear: {
+          webhookPath: "/linear/oauth/webhooks",
+          port: 3070,
+          auth: {
+            method: "hosted_oauth_app",
+            actor: "app",
+            installationId: "install_hosted",
+            authorizationUrl: "https://linear.example/oauth/authorize?state=linear_state",
+            stateExpiresAt: "2026-07-07T01:00:00.000Z"
+          },
+          projectTarget: {
+            repoProvider: "github",
+            owner: "acme",
+            repo: "demo"
+          }
+        }
+      }
+    } as OpenTagCliConfig;
+
+    const summary = formatSetupComplete(config, "/tmp/opentag-config.json");
+
+    expect(summary).toContain("Linear OAuth install URL: https://linear.example/oauth/authorize?state=linear_state");
+    expect(summary).toContain("Webhook URL: https://relay.example/linear/oauth/webhooks");
+    expect(summary).toContain("Events: Comment and Agent Session events");
+    expect(summary).not.toContain("Events: Comment events");
   });
 
   it("defaults interactive setup to the background service run mode", async () => {
@@ -1156,30 +1282,35 @@ describe("OpenTag CLI setup", () => {
 
   it("writes Hermes setup options into daemon config", async () => {
     const configPath = join(tempDir(), "config.json");
+    const projectPath = tempDir();
+    const probeHermesProfile = vi.fn(async () => ({ ready: true }));
 
     await runSetupCommand(
       {
         config: configPath,
-        project: tempDir(),
+        project: projectPath,
         platform: "github",
         executor: "hermes",
         githubRepository: "acme/demo",
         githubToken: "ghp_test",
         hermesCommand: "custom-hermes",
         hermesProfile: "opentag-fixed",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
         force: true,
         yes: true
       },
-      { prompts: testPrompts() }
+      { prompts: testPrompts(), probeHermesProfile }
     );
 
     const config = readCliConfig(configPath);
     expect(config.daemon.repositories[0]?.defaultExecutor).toBe("hermes");
     expect(config.daemon.hermes).toEqual({
       command: "custom-hermes",
+      profile: "opentag-fixed"
+    });
+    expect(probeHermesProfile).toHaveBeenCalledWith({
+      hermesCommand: "custom-hermes",
       profile: "opentag-fixed",
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
+      cwd: projectPath
     });
   });
 
@@ -1246,7 +1377,7 @@ describe("OpenTag CLI setup", () => {
     });
   });
 
-  it("defaults Hermes profileTemplate when no fixed profile is provided", async () => {
+  it("defaults Hermes to the fixed opentag profile", async () => {
     const configPath = join(tempDir(), "config.json");
 
     await runSetupCommand(
@@ -1264,47 +1395,37 @@ describe("OpenTag CLI setup", () => {
     );
 
     expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate:
-        "opentag-{provider}-{accountId}-{conversationId}-{owner}-{repo}-i{issueNumber}-pr{pullRequestNumber}"
+      profile: "opentag"
     });
   });
 
-  it("does not keep an inherited Hermes fixed profile when a profileTemplate is explicitly provided", async () => {
+  it("does not write config when the Hermes profile probe fails", async () => {
     const configPath = join(tempDir(), "config.json");
     const projectPath = tempDir();
 
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfile: "opentag-fixed",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-    await runSetupCommand(
-      {
-        config: configPath,
-        project: projectPath,
-        platform: "github",
-        executor: "hermes",
-        githubRepository: "acme/demo",
-        githubToken: "ghp_test",
-        hermesProfileTemplate: "opentag-{provider}-{owner}-{repo}",
-        force: true,
-        yes: true
-      },
-      { prompts: testPrompts() }
-    );
-
-    expect(readCliConfig(configPath).daemon.hermes).toEqual({
-      profileTemplate: "opentag-{provider}-{owner}-{repo}"
-    });
+    await expect(
+      runSetupCommand(
+        {
+          config: configPath,
+          project: projectPath,
+          platform: "github",
+          executor: "hermes",
+          githubRepository: "acme/demo",
+          githubToken: "ghp_test",
+          force: true,
+          yes: true
+        },
+        {
+          prompts: testPrompts(),
+          probeHermesProfile: vi.fn(async () => ({
+            ready: false,
+            reason:
+              "Hermes profile 'opentag' is not ready. Create it with `hermes profile create opentag` or configure daemon.hermes.profile."
+          }))
+        }
+      )
+    ).rejects.toThrow("Hermes profile 'opentag' is not ready");
+    expect(existsSync(configPath)).toBe(false);
   });
 
   it("rejects Slack setup without an initial channel binding", async () => {

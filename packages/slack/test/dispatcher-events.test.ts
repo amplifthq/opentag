@@ -1,7 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
-import { createSlackDispatcherEventProcessorInput } from "../src/dispatcher-events.js";
+import { createSlackDispatcherEventProcessorInput, type SlackDispatcherEventConfig } from "../src/dispatcher-events.js";
 
 describe("Slack dispatcher-backed self-service", () => {
+  it.each([
+    ["appId", { dispatcherUrl: "http://dispatcher.test", appId: "A123" }],
+    ["channelPrincipalCredential", { dispatcherUrl: "http://dispatcher.test", channelPrincipalCredential: "slack_principal_123" }]
+  ])("rejects Slack dispatcher config with only %s", (_field, config) => {
+    expect(() => createSlackDispatcherEventProcessorInput(config as unknown as SlackDispatcherEventConfig)).toThrow(
+      "Slack appId and channelPrincipalCredential must be configured together."
+    );
+  });
+
+  it("does not expose a partial repository target from a dispatcher binding", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({
+      binding: {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        repoProvider: "github",
+        owner: "acme"
+      }
+    })) as unknown as typeof fetch;
+    const processorInput = createSlackDispatcherEventProcessorInput({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl
+    });
+
+    await expect(processorInput.resolveChannelBinding({ teamId: "T123", channelId: "C123" })).resolves.toEqual({
+      teamId: "T123",
+      channelId: "C123"
+    });
+  });
+
   it("renders dispatcher channel status and posts it back to the Slack thread", async () => {
     const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
@@ -237,14 +267,15 @@ describe("Slack dispatcher-backed self-service", () => {
   });
 
   it("binds a Slack channel through the dispatcher", async () => {
-    const requests: Array<{ url: string; authorization?: string; body?: unknown; method?: string }> = [];
+    const requests: Array<{ url: string; authorization?: string; principal?: string; body?: unknown; method?: string }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const href = String(url);
-      const headers = init?.headers as Record<string, string> | undefined;
+      const headers = new Headers(init?.headers);
       requests.push({
         url: href,
         ...(init?.method ? { method: init.method } : {}),
-        ...(headers?.authorization ? { authorization: headers.authorization } : {}),
+        ...(headers.get("authorization") ? { authorization: headers.get("authorization")! } : {}),
+        ...(headers.get("x-opentag-channel-principal") ? { principal: headers.get("x-opentag-channel-principal")! } : {}),
         ...(typeof init?.body === "string" ? { body: JSON.parse(init.body) as unknown } : {})
       });
       if (href === "http://dispatcher.test/v1/channel-bindings" && init?.method === "POST") {
@@ -256,6 +287,8 @@ describe("Slack dispatcher-backed self-service", () => {
     const processorInput = createSlackDispatcherEventProcessorInput({
       dispatcherUrl: "http://dispatcher.test",
       dispatcherToken: "dispatcher_token",
+      channelPrincipalCredential: "slack_principal_123",
+      appId: "A123",
       fetchImpl
     });
 
@@ -274,13 +307,15 @@ describe("Slack dispatcher-backed self-service", () => {
         url: "http://dispatcher.test/v1/channel-bindings",
         method: "POST",
         authorization: "Bearer dispatcher_token",
+        principal: "slack_principal_123",
         body: {
           provider: "slack",
           accountId: "T123",
           conversationId: "C123",
           repoProvider: "github",
           owner: "acme",
-          repo: "demo"
+          repo: "demo",
+          ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
         }
       }
     ]);

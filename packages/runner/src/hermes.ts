@@ -1,17 +1,57 @@
 import { contextPointerLabel, type ContextPacket, type ContextPointer } from "@opentag/core";
 import { assertCommandSucceeded, nodeCommandRunner, type CommandResult, type CommandRunner } from "./command.js";
 import { executorPolicyPromptLines } from "./executor-report.js";
-import { renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
+import { executorWorkspacePath, renderContextPacketForPrompt, type ExecutorAdapter } from "./executor.js";
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
-import { resolveAgentSessionProfile } from "./session-profile.js";
+
+export const DEFAULT_HERMES_PROFILE = "opentag";
 
 export type HermesExecutorOptions = {
   runner?: CommandRunner;
   hermesCommand?: string;
   profile?: string;
+  /** @deprecated Hermes profiles are fixed per OpenTag runtime until profile lifecycle management is implemented. */
   profileTemplate?: string;
 };
+
+export type HermesProfileReadiness = {
+  ready: boolean;
+  reason?: string;
+};
+
+function commandOutput(result: CommandResult): string {
+  return result.stderr.trim() || result.stdout.trim();
+}
+
+export async function probeHermesProfile(input: {
+  runner?: CommandRunner;
+  hermesCommand?: string;
+  profile?: string;
+  cwd: string;
+}): Promise<HermesProfileReadiness> {
+  const runner = input.runner ?? nodeCommandRunner;
+  const hermesCommand = input.hermesCommand ?? "hermes";
+  const profile = input.profile ?? DEFAULT_HERMES_PROFILE;
+
+  try {
+    const result = await runner.run(hermesCommand, ["-p", profile, "--version"], { cwd: input.cwd });
+    if (result.exitCode === 0) return { ready: true };
+
+    const detail = commandOutput(result) || `command exited with code ${result.exitCode}`;
+    return {
+      ready: false,
+      reason:
+        `Hermes profile '${profile}' is not ready: ${detail} ` +
+        `Create it with \`hermes profile create ${profile}\` or configure daemon.hermes.profile to an existing dedicated profile.`
+    };
+  } catch (error) {
+    return {
+      ready: false,
+      reason: `Hermes CLI is not available: ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+}
 
 function contextLines(context: ContextPointer[]): string {
   if (!context.length) return "No additional context pointers were provided.";
@@ -44,6 +84,7 @@ function buildPrompt(input: {
 export function createHermesExecutor(options: HermesExecutorOptions = {}): ExecutorAdapter {
   const runner = options.runner ?? nodeCommandRunner;
   const hermesCommand = options.hermesCommand ?? "hermes";
+  const profile = options.profile ?? DEFAULT_HERMES_PROFILE;
 
   return {
     id: "hermes",
@@ -65,6 +106,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       rawContextAccess: false,
       writeActionAccess: "none",
       workspaceIsolation: "branch",
+      sourceControl: "daemon_managed",
       requiredSecrets: [],
       completionSignals: [
         {
@@ -75,18 +117,13 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       ]
     },
     async canRun(input) {
-      try {
-        const hermesVersion = await runner.run(hermesCommand, ["--version"], { cwd: input.workspacePath });
-        if (hermesVersion.exitCode !== 0) {
-          return { ready: false, reason: `Hermes CLI is not available: ${hermesVersion.stderr || hermesVersion.stdout}` };
-        }
-      } catch (error) {
-        return { ready: false, reason: `Hermes CLI is not available: ${error instanceof Error ? error.message : String(error)}` };
-      }
+      const workspacePath = executorWorkspacePath(input);
+      const hermesReadiness = await probeHermesProfile({ runner, hermesCommand, profile, cwd: workspacePath });
+      if (!hermesReadiness.ready) return hermesReadiness;
 
       let gitStatus: CommandResult;
       try {
-        gitStatus = await runner.run("git", ["status", "--porcelain"], { cwd: input.workspacePath });
+        gitStatus = await runner.run("git", ["status", "--porcelain"], { cwd: workspacePath });
       } catch (error) {
         return { ready: false, reason: `Workspace is not a git checkout: ${error instanceof Error ? error.message : String(error)}` };
       }
@@ -100,6 +137,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
       return { ready: true };
     },
     async run(input, sink) {
+      const workspacePath = executorWorkspacePath(input);
       const branchName = branchNameForRun(input.runId);
       await sink.emit({
         type: "executor.started",
@@ -109,7 +147,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       await createRunBranch({
         runner,
-        workspacePath: input.workspacePath,
+        workspacePath,
         branchName,
         ...(input.baseBranch ? { startPoint: input.baseBranch } : {})
       });
@@ -127,24 +165,14 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
         contextPacket: input.contextPacket
       });
 
-      const profile = resolveAgentSessionProfile({
-        ...(options.profile ? { profile: options.profile } : {}),
-        ...(options.profileTemplate ? { profileTemplate: options.profileTemplate } : {}),
-        metadata: {
-          ...(input.metadata ?? {}),
-          runId: input.runId
-        },
-        ...(input.sessionProfile ? { fallback: input.sessionProfile } : {})
-      });
-
-      const args = [...(profile ? ["-p", profile.id] : []), "-z", prompt];
+      const args = ["-p", profile, "-z", prompt];
 
       let hermesResult: CommandResult | undefined;
       try {
-        hermesResult = await runner.run(hermesCommand, args, { cwd: input.workspacePath });
+        hermesResult = await runner.run(hermesCommand, args, { cwd: workspacePath });
         await assertCommandSucceeded(hermesResult, "hermes -z");
       } finally {
-        const cleanedArtifacts = await cleanupInternalArtifacts({ runner, workspacePath: input.workspacePath });
+        const cleanedArtifacts = await cleanupInternalArtifacts({ runner, workspacePath });
         if (cleanedArtifacts.length > 0) {
           await sink.emit({
             type: "executor.progress",
@@ -156,7 +184,7 @@ export function createHermesExecutor(options: HermesExecutorOptions = {}): Execu
 
       if (!hermesResult) throw new Error("Hermes did not return a result.");
 
-      const files = await changedFiles({ runner, workspacePath: input.workspacePath });
+      const files = await changedFiles({ runner, workspacePath });
       await sink.emit({
         type: "executor.completed",
         message: `Hermes executor completed with ${files.length} changed file(s)`,

@@ -317,6 +317,15 @@ export const DefaultCapabilityContracts = [
     requiredExecutorConditions: ["isolated branch exists"]
   },
   {
+    id: "create_issue",
+    semanticAction: "create_issue",
+    capabilityClass: "external_write",
+    requiresExplicitIntent: true,
+    mayAutoApplyByPolicy: false,
+    adapterTargets: ["linear"],
+    requiredPermissionScopes: ["issue:create"]
+  },
+  {
     id: "set_status",
     semanticAction: "transition_status",
     capabilityClass: "external_write",
@@ -388,6 +397,26 @@ function callbackConversationKey(callback: OpenTagEvent["callback"]): string {
   return `${callback.provider}:${callback.threadKey ?? callback.uri}`;
 }
 
+function canonicalTeamsConversationKey(callback: OpenTagEvent["callback"]): string | undefined {
+  if (callback.provider !== "teams" || !callback.threadKey) return undefined;
+  const firstSeparator = callback.threadKey.indexOf("|");
+  const lastSeparator = callback.threadKey.lastIndexOf("|");
+  if (firstSeparator <= 0 || lastSeparator <= firstSeparator + 1 || lastSeparator === callback.threadKey.length - 1) {
+    return undefined;
+  }
+
+  const serviceUrl = callback.threadKey.slice(0, firstSeparator);
+  const conversationId = callback.threadKey.slice(firstSeparator + 1, lastSeparator);
+  const activityId = callback.threadKey.slice(lastSeparator + 1);
+  const baseConversationId = conversationId.replace(/;messageid=[^;]+$/i, "");
+  if (baseConversationId === conversationId) return undefined;
+  return `teams:${serviceUrl}|${baseConversationId}|${activityId}`;
+}
+
+export function conversationKeysFromCallback(callback: OpenTagEvent["callback"]): string[] {
+  return [...new Set([callbackConversationKey(callback), canonicalTeamsConversationKey(callback)].filter((key): key is string => Boolean(key)))];
+}
+
 function metadataRecordString(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -415,7 +444,7 @@ export function conversationKeyFromEvent(event: OpenTagEvent): string {
 }
 
 export function conversationKeysFromEvent(event: OpenTagEvent): string[] {
-  return [...new Set([conversationKeyFromEvent(event), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
+  return [...new Set([...conversationKeysFromCallback(event.callback), legacyGitHubIssueConversationKey(event)].filter((key): key is string => Boolean(key)))];
 }
 
 export function workThreadFromEvent(event: OpenTagEvent): WorkThread | undefined {
@@ -453,19 +482,21 @@ export function capabilityForMutationIntent(
   const capabilityId =
     intent.action === "create_pull_request"
       ? "create_pr"
-      : intent.action === "request_review"
-        ? "request_review"
-        : intent.action === "link_artifact"
-          ? "attach_artifact"
-          : intent.domain === "status"
-            ? "set_status"
-            : intent.domain === "assignee"
-              ? "set_assignee"
-              : intent.domain === "priority"
-                ? "set_priority"
-                : intent.domain === "labels"
-                  ? "set_labels"
-                  : undefined;
+      : intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")
+        ? "create_issue"
+        : intent.action === "request_review"
+          ? "request_review"
+          : intent.action === "link_artifact"
+            ? "attach_artifact"
+            : intent.domain === "status"
+              ? "set_status"
+              : intent.domain === "assignee"
+                ? "set_assignee"
+                : intent.domain === "priority"
+                  ? "set_priority"
+                  : intent.domain === "labels"
+                    ? "set_labels"
+                    : undefined;
 
   return capabilityId ? capabilities.find((capability) => capability.id === capabilityId) : undefined;
 }

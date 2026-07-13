@@ -1,8 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   ApprovalDecisionSchema,
+  ActionPermissionRequestSchema,
+  ActionPermissionResolutionSchema,
+  ActionSchema,
+  actionScopeAllowsRunReuse,
+  MaterialActionReceiptSchema,
   ApplyIntentOutcomeSchema,
   ApplyPlanSchema,
+  AttemptSchema,
   ActionHintSchema,
   AdapterMutationMappingSchema,
   ContextPacketSchema,
@@ -13,6 +19,14 @@ import {
   PolicyRuleSchema,
   ProposalLineageSchema,
   preflightMutationIntent,
+  evaluateActionPermission,
+  grantMatchesAction,
+  containsCredentialLikeData,
+  isCredentialFieldName,
+  redactCredentialLikeData,
+  sanitizeCredentialLikeValue,
+  normalizeMaterialActionRequest,
+  OpenTagManagedChannelBindingOwnershipSchema,
   formatProjectTargetRef,
   projectTargetRefFromEvent,
   protocolRunFieldsFromEvent,
@@ -20,13 +34,20 @@ import {
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   SuggestedChangesSnapshotSchema,
+  VerificationEvidenceSchema,
   type ApprovalDecision,
+  type Action,
+  type ActionPermissionRequest,
+  type ActionPermissionResolution,
+  type MaterialActionReceipt,
+  type Attempt,
   type ApplyIntentOutcome,
   type ApplyPlan,
   type ActionHint,
   type AdapterMutationMapping,
   type MutationIntentActionability,
   type OpenTagEvent,
+  type OpenTagManagedChannelBindingOwnership,
   type OpenTagRun,
   type OpenTagRunResult,
   type PolicyRule,
@@ -37,13 +58,18 @@ import {
   type RunEventVisibility,
   type SuggestedChangesSnapshot
 } from "@opentag/core";
-import { and, asc, desc, eq, inArray, lt } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
+  attempts,
   approvalDecisions,
+  grants,
+  materialActions,
   channelBindings,
   controlPlaneEvents,
+  linearOAuthInstallStates,
+  linearRelayInstallations,
   repoBindings,
   repoMutationMappings,
   repoPolicyRules,
@@ -56,9 +82,19 @@ import {
   suggestedChanges
 } from "./schema.js";
 
-export type ClaimedOpenTagRun = {
+export type OpenTagRunWithEvent = {
   run: OpenTagRun;
   event: OpenTagEvent;
+};
+
+export class ChannelBindingCorruptionError extends Error {
+  override readonly name = "ChannelBindingCorruptionError";
+}
+
+export type ClaimedOpenTagRun = OpenTagRunWithEvent & {
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
 };
 
 export type OpenTagAuditEvent = {
@@ -139,11 +175,12 @@ export type ChannelBinding = {
   provider: string;
   accountId: string;
   conversationId: string;
-  repoProvider: string;
-  owner: string;
-  repo: string;
   metadata?: Record<string, unknown>;
-};
+  ownership?: OpenTagManagedChannelBindingOwnership;
+} & (
+  | { repoProvider: string; owner: string; repo: string }
+  | { repoProvider?: never; owner?: never; repo?: never }
+);
 
 export type SlackChannelBinding = {
   teamId: string;
@@ -151,6 +188,55 @@ export type SlackChannelBinding = {
   repoProvider?: string;
   owner: string;
   repo: string;
+};
+
+export type LinearRelayInstallation = {
+  id: string;
+  webhookPath: string;
+  webhookSecret: string;
+  token: string;
+  auth?: LinearRelayInstallationAuth;
+  graphqlUrl?: string;
+  repoProvider: string;
+  owner: string;
+  repo: string;
+  organizationId?: string;
+  teamId?: string;
+  teamKey?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type LinearRelayInstallationAuth =
+  | {
+      method: "api_key";
+    }
+  | {
+      method: "oauth_app";
+      actor: "app";
+      clientId?: string;
+      refreshToken?: string;
+      accessTokenExpiresAt?: string;
+      appUserId?: string;
+      scopes?: string[];
+    };
+
+export type LinearOAuthInstallState = {
+  state: string;
+  installationId: string;
+  webhookPath: string;
+  webhookSecret: string;
+  redirectUri: string;
+  graphqlUrl?: string;
+  repoProvider: string;
+  owner: string;
+  repo: string;
+  teamId?: string;
+  teamKey?: string;
+  scopes: string[];
+  createdAt: string;
+  expiresAt: string;
+  completedAt?: string;
 };
 
 export type RunnerRegistration = {
@@ -260,9 +346,14 @@ export type OpenTagAggregateMetrics = {
   staleIntentCount: number;
 };
 
-export type RecordProgressOutcome = "recorded" | "duplicate" | "not_found";
-export type MarkRunningOutcome = "running" | "duplicate" | "not_found";
-export type CompleteRunOutcome = "completed" | "duplicate" | "not_found";
+export type AttemptMutationConflict = "stale_attempt";
+export type HeartbeatOutcome = "updated" | AttemptMutationConflict | "not_found";
+export type RecordProgressOutcome =
+  | { outcome: "recorded" | "duplicate"; event: OpenTagAuditEvent }
+  | AttemptMutationConflict
+  | "not_found";
+export type MarkRunningOutcome = "running" | "duplicate" | AttemptMutationConflict | "not_found";
+export type CompleteRunOutcome = "completed" | "duplicate" | AttemptMutationConflict | "not_found";
 
 export type ControlPlaneEventSeverity = "info" | "warn" | "error";
 
@@ -305,6 +396,159 @@ function isIsoExpired(iso: string | null, now: Date): boolean {
   return new Date(iso).getTime() <= now.getTime();
 }
 
+function hasActiveAttemptLease(
+  attempt: Pick<typeof attempts.$inferSelect, "leaseExpiresAt">,
+  now = new Date()
+): boolean {
+  const leaseExpiresAt = attempt.leaseExpiresAt;
+  const parsed = AttemptSchema.shape.leaseExpiresAt.safeParse(leaseExpiresAt);
+  if (!parsed.success) return false;
+  const expiresAt = Date.parse(parsed.data);
+  return Number.isFinite(expiresAt) && expiresAt > now.getTime();
+}
+
+function newAttemptId(): string {
+  return `attempt_${randomUUID()}`;
+}
+
+function newFencingToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
+  return {
+    id: row.id,
+    runId: row.runId,
+    number: row.number,
+    runnerId: row.runnerId,
+    status: row.status as Attempt["status"],
+    startedAt: row.startedAt,
+    heartbeatAt: row.heartbeatAt,
+    leaseExpiresAt: row.leaseExpiresAt,
+    ...(row.finishedAt ? { finishedAt: row.finishedAt } : {}),
+    ...(row.resultJson ? { result: OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function actionFromRow(row: typeof materialActions.$inferSelect): Action {
+  return ActionSchema.parse({
+    id: row.id,
+    runId: row.runId,
+    attemptId: row.attemptId,
+    actionFamily: row.actionFamily,
+    capability: row.capability,
+    scope: JSON.parse(row.scopeJson) as unknown,
+    target: JSON.parse(row.targetJson) as unknown,
+    riskTier: row.riskTier,
+    status: row.status,
+    idempotencyKey: row.idempotencyKey,
+    ...(row.proposalId ? { proposalId: row.proposalId } : {}),
+    ...(row.proposalHash ? { proposalHash: row.proposalHash } : {}),
+    ...(row.decisionSnapshotHash ? { decisionSnapshotHash: row.decisionSnapshotHash } : {}),
+    attemptFenceDigest: row.attemptFenceDigest,
+    ...(row.receiptJson ? { receipt: JSON.parse(row.receiptJson) as unknown } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  });
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function progressIdempotencyDigest(idempotencyKey: string): string {
+  return createHash("sha256")
+    .update("opentag.progress-idempotency.v1\0", "utf8")
+    .update(idempotencyKey, "utf8")
+    .digest("hex");
+}
+
+function stableActionJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableActionJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableActionJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+const SAFE_RECEIPT_METADATA_KEYS = new Set([
+  "assurance",
+  "agentReportedOutcome",
+  "toolCallId",
+  "providerOperationId",
+  "statusCode",
+  "reconciliationIdempotencyKey",
+  "reconciliationSource",
+  "reconciliationActorId"
+]);
+
+function sanitizeMaterialActionReceipt(receipt: MaterialActionReceipt, options: { allowEvidence?: boolean } = {}): MaterialActionReceipt {
+  if (receipt.evidence?.length && !options.allowEvidence) {
+    throw new Error("Material action receipt evidence is not accepted until each evidence field has a durable safe-list policy.");
+  }
+  const evidence = options.allowEvidence ? receipt.evidence?.map((item) => VerificationEvidenceSchema.parse({
+    id: sanitizeCredentialLikeValue(item.id).toString().slice(0, 256),
+    kind: sanitizeCredentialLikeValue(item.kind).toString().slice(0, 128),
+    assurance: item.assurance,
+    subjectRef: sanitizeCredentialLikeValue(item.subjectRef).toString().slice(0, 512),
+    summary: sanitizeCredentialLikeValue(item.summary).toString().slice(0, 1_000),
+    ...(item.sourceRef ? { sourceRef: sanitizeCredentialLikeValue(item.sourceRef).toString().slice(0, 512) } : {}),
+    createdAt: item.createdAt
+  })) : undefined;
+  if (containsCredentialLikeData(receipt.receiptRef)) {
+    throw new Error("Material action receiptRef contains credential-like data.");
+  }
+  if (receipt.externalId && containsCredentialLikeData(receipt.externalId)) {
+    throw new Error("Material action externalId contains credential-like data.");
+  }
+  let externalUri = receipt.externalUri;
+  if (externalUri) {
+    const url = new URL(externalUri);
+    url.search = "";
+    url.hash = "";
+    externalUri = url.toString();
+    if (containsCredentialLikeData(externalUri)) {
+      throw new Error("Material action externalUri contains credential-like data.");
+    }
+  }
+  const metadata = receipt.metadata
+    ? Object.fromEntries(Object.entries(receipt.metadata).filter(([key, value]) =>
+        SAFE_RECEIPT_METADATA_KEYS.has(key) &&
+        !isCredentialFieldName(key) &&
+        (typeof value === "string" || typeof value === "number" || typeof value === "boolean") &&
+        !containsCredentialLikeData(`${key}:${String(value)}`)
+      ))
+    : undefined;
+  return MaterialActionReceiptSchema.parse({
+    id: receipt.id,
+    actionId: receipt.actionId,
+    provider: receipt.provider,
+    ...(receipt.connectionId ? { connectionId: receipt.connectionId } : {}),
+    ...(receipt.targetFingerprint ? { targetFingerprint: receipt.targetFingerprint } : {}),
+    receiptRef: receipt.receiptRef.slice(0, 512),
+    outcome: receipt.outcome,
+    ...(receipt.externalId ? { externalId: receipt.externalId.slice(0, 256) } : {}),
+    ...(externalUri ? { externalUri } : {}),
+    observedAt: receipt.observedAt,
+    ...(evidence?.length ? { evidence } : {}),
+    ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {})
+  });
+}
+
+type AttemptLease = {
+  runId: string;
+  runnerId: string;
+  attemptId: string;
+  fencingToken: string;
+};
+
+class StaleActionTransitionError extends Error {}
+
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
   const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
@@ -333,6 +577,15 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
 
 function terminalRunStatus(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "timed_out";
+}
+
+function releasedTerminalAttemptMatchesRun(
+  attempt: Pick<typeof attempts.$inferSelect, "status">,
+  run: Pick<typeof runs.$inferSelect, "status" | "currentAttemptId" | "assignedRunnerId">
+): boolean {
+  if (run.currentAttemptId !== null || run.assignedRunnerId !== null) return false;
+  if (attempt.status === "needs_human") return run.status === "needs_approval";
+  return terminalRunStatus(attempt.status) && attempt.status === run.status;
 }
 
 function ledgerCategoryForEventType(type: string): AgentWorkLedgerCategory {
@@ -539,16 +792,190 @@ function runProvenance(input: {
   };
 }
 
+const CHANNEL_BINDING_RECORD_VERSION = 2;
+const CHANNEL_BINDING_RECORD_RESERVED_FIELDS = new Set([
+  "__opentagChannelBindingRecord",
+  "management",
+  "ownership",
+  "metadata"
+]);
+
+function channelBindingRecordFromJson(value: string | null): {
+  metadata?: Record<string, unknown>;
+  ownership?: OpenTagManagedChannelBindingOwnership;
+} {
+  if (value === null) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new ChannelBindingCorruptionError("Stored channel binding record is not valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ChannelBindingCorruptionError("Stored channel binding record is not an object.");
+  }
+  const stored = parsed as Record<string, unknown>;
+  const storedVersion = stored["__opentagChannelBindingRecord"];
+  if (storedVersion === undefined) {
+    if (Object.keys(stored).some((field) => CHANNEL_BINDING_RECORD_RESERVED_FIELDS.has(field))) {
+      throw new ChannelBindingCorruptionError("Stored channel binding record uses reserved fields without a version discriminator.");
+    }
+    return { metadata: stored };
+  }
+  if (storedVersion !== CHANNEL_BINDING_RECORD_VERSION) {
+    throw new ChannelBindingCorruptionError("Stored channel binding record has an unsupported version.");
+  }
+  const metadata = stored["metadata"];
+  const management = stored["management"];
+  if (management !== "managed" && management !== "unmanaged") {
+    throw new ChannelBindingCorruptionError("Stored channel binding record has no valid management state.");
+  }
+  const ownership = OpenTagManagedChannelBindingOwnershipSchema.safeParse(stored["ownership"]);
+  if (management === "managed" && !ownership.success) {
+    throw new ChannelBindingCorruptionError("Stored managed channel binding has invalid ownership.");
+  }
+  if (management === "unmanaged" && stored["ownership"] !== undefined) {
+    throw new ChannelBindingCorruptionError("Stored unmanaged channel binding unexpectedly contains ownership.");
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(stored, "metadata") &&
+    (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
+  ) {
+    throw new ChannelBindingCorruptionError("Stored channel binding record has invalid metadata.");
+  }
+  return {
+    ...(metadata ? { metadata: metadata as Record<string, unknown> } : {}),
+    ...(management === "managed" && ownership.success ? { ownership: ownership.data } : {})
+  };
+}
+
+function channelBindingRecordJson(input: ChannelBinding): string | null {
+  return JSON.stringify({
+    __opentagChannelBindingRecord: CHANNEL_BINDING_RECORD_VERSION,
+    management: input.ownership ? "managed" : "unmanaged",
+    ...(input.metadata ? { metadata: input.metadata } : {}),
+    ...(input.ownership ? { ownership: OpenTagManagedChannelBindingOwnershipSchema.parse(input.ownership) } : {})
+  });
+}
+
 function channelBindingFromRow(row: typeof channelBindings.$inferSelect): ChannelBinding {
-  const metadata = recordFromJson(row.metadataJson);
+  const record = channelBindingRecordFromJson(row.metadataJson);
+  const repositoryValues = [row.repoProvider, row.owner, row.repo];
+  const repositoryFieldCount = repositoryValues.filter((value) => value !== null).length;
+  if (repositoryFieldCount !== 0 && repositoryFieldCount !== 3) {
+    throw new Error("Stored channel binding has partial repository fields.");
+  }
   return {
     provider: row.provider,
     accountId: row.accountId,
     conversationId: row.conversationId,
+    ...(row.repoProvider && row.owner && row.repo
+      ? { repoProvider: row.repoProvider, owner: row.owner, repo: row.repo }
+      : {}),
+    ...(record.metadata ? { metadata: record.metadata } : {}),
+    ...(record.ownership ? { ownership: record.ownership } : {})
+  };
+}
+
+function channelBindingRepositoryFields(input: ChannelBinding):
+  | { repoProvider: string; owner: string; repo: string }
+  | { repoProvider: null; owner: null; repo: null } {
+  const values = [input.repoProvider, input.owner, input.repo];
+  const present = values.filter((value) => value !== undefined).length;
+  if (present !== 0 && present !== 3) {
+    throw new Error("Channel binding repository fields repoProvider, owner, and repo must be provided together.");
+  }
+  return input.repoProvider && input.owner && input.repo
+    ? { repoProvider: input.repoProvider, owner: input.owner, repo: input.repo }
+    : { repoProvider: null, owner: null, repo: null };
+}
+
+function channelBindingsMatch(left: ChannelBinding, right: ChannelBinding): boolean {
+  return left.provider === right.provider
+    && left.accountId === right.accountId
+    && left.conversationId === right.conversationId
+    && left.repoProvider === right.repoProvider
+    && left.owner === right.owner
+    && left.repo === right.repo
+    && JSON.stringify(left.metadata ?? null) === JSON.stringify(right.metadata ?? null)
+    && left.ownership?.mode === right.ownership?.mode
+    && left.ownership?.exclusive === right.ownership?.exclusive
+    && left.ownership?.applicationId === right.ownership?.applicationId
+    && left.ownership?.botId === right.ownership?.botId;
+}
+
+function stringArrayFromJson(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseLinearRelayInstallationAuth(value: string | null): LinearRelayInstallationAuth | undefined {
+  if (!value) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (record.method === "api_key") return { method: "api_key" };
+  if (record.method !== "oauth_app" || record.actor !== "app") return undefined;
+  const scopes = Array.isArray(record.scopes) ? record.scopes.filter((item): item is string => typeof item === "string" && item.length > 0) : undefined;
+  return {
+    method: "oauth_app",
+    actor: "app",
+    ...(typeof record.clientId === "string" && record.clientId.length > 0 ? { clientId: record.clientId } : {}),
+    ...(typeof record.refreshToken === "string" && record.refreshToken.length > 0 ? { refreshToken: record.refreshToken } : {}),
+    ...(typeof record.accessTokenExpiresAt === "string" && record.accessTokenExpiresAt.length > 0
+      ? { accessTokenExpiresAt: record.accessTokenExpiresAt }
+      : {}),
+    ...(typeof record.appUserId === "string" && record.appUserId.length > 0 ? { appUserId: record.appUserId } : {}),
+    ...(scopes?.length ? { scopes } : {})
+  };
+}
+
+function linearRelayInstallationFromRow(row: typeof linearRelayInstallations.$inferSelect): LinearRelayInstallation {
+  const auth = parseLinearRelayInstallationAuth(row.authJson);
+  return {
+    id: row.id,
+    webhookPath: row.webhookPath,
+    webhookSecret: row.webhookSecret,
+    token: row.token,
+    ...(auth ? { auth } : {}),
+    ...(row.graphqlUrl ? { graphqlUrl: row.graphqlUrl } : {}),
     repoProvider: row.repoProvider,
     owner: row.owner,
     repo: row.repo,
-    ...(metadata ? { metadata } : {})
+    ...(row.organizationId ? { organizationId: row.organizationId } : {}),
+    ...(row.teamId ? { teamId: row.teamId } : {}),
+    ...(row.teamKey ? { teamKey: row.teamKey } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function linearOAuthInstallStateFromRow(row: typeof linearOAuthInstallStates.$inferSelect): LinearOAuthInstallState {
+  return {
+    state: row.state,
+    installationId: row.installationId,
+    webhookPath: row.webhookPath,
+    webhookSecret: row.webhookSecret,
+    redirectUri: row.redirectUri,
+    ...(row.graphqlUrl ? { graphqlUrl: row.graphqlUrl } : {}),
+    repoProvider: row.repoProvider,
+    owner: row.owner,
+    repo: row.repo,
+    ...(row.teamId ? { teamId: row.teamId } : {}),
+    ...(row.teamKey ? { teamKey: row.teamKey } : {}),
+    scopes: stringArrayFromJson(row.scopesJson),
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+    ...(row.completedAt ? { completedAt: row.completedAt } : {})
   };
 }
 
@@ -851,6 +1278,28 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  function activeAttemptLease(input: AttemptLease):
+    | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
+    | { outcome: "stale_attempt" | "not_found" } {
+    const run = db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+    if (!run) return { outcome: "not_found" };
+    if (run.currentAttemptId !== input.attemptId || run.assignedRunnerId !== input.runnerId) {
+      return { outcome: "stale_attempt" };
+    }
+    const attempt = db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+    if (
+      !attempt ||
+      attempt.runId !== input.runId ||
+      attempt.runnerId !== input.runnerId ||
+      attempt.fencingToken !== input.fencingToken ||
+      (attempt.status !== "assigned" && attempt.status !== "running") ||
+      !hasActiveAttemptLease(attempt)
+    ) {
+      return { outcome: "stale_attempt" };
+    }
+    return { outcome: "active", run, attempt };
+  }
+
   async function repoBindingRunnerId(projectTarget: ProjectTargetRef | null): Promise<string | null> {
     if (!projectTarget) return null;
     const row = await db
@@ -868,7 +1317,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     return row?.runnerId ?? null;
   }
 
-  async function appendRunEvent(input: {
+  function runEventValues(input: {
     runId: string;
     type: string;
     payload: unknown;
@@ -876,8 +1325,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     visibility?: RunEventVisibility;
     importance?: RunEventImportance;
     message?: string;
-  }): Promise<void> {
-    await db.insert(runEvents).values({
+  }): typeof runEvents.$inferInsert {
+    return {
       runId: input.runId,
       type: input.type,
       visibility: input.visibility ?? defaultRunEventMetadata(input.type).visibility,
@@ -885,7 +1334,81 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       message: input.message ?? null,
       payloadJson: JSON.stringify(input.payload),
       createdAt: input.createdAt ?? nowIso()
+    };
+  }
+
+  function runEventFromRow(row: typeof runEvents.$inferSelect): OpenTagAuditEvent {
+    return {
+      id: row.id,
+      runId: row.runId,
+      type: row.type,
+      visibility: RunEventVisibilitySchema.parse(row.visibility),
+      importance: RunEventImportanceSchema.parse(row.importance),
+      ...(row.message ? { message: row.message } : {}),
+      payload: JSON.parse(row.payloadJson) as unknown,
+      createdAt: row.createdAt
+    };
+  }
+
+  function sanitizeRunEventValue<T>(value: T, secrets: readonly string[]): T {
+    function sanitize(child: unknown): unknown {
+      if (typeof child === "string") {
+        const withoutRuntimeSecrets = secrets.reduce(
+          (safe, secret) => safe.split(secret).join("[redacted]"),
+          child
+        );
+        return redactCredentialLikeData(withoutRuntimeSecrets);
+      }
+      if (Array.isArray(child)) return child.map((entry) => sanitize(entry));
+      if (child && typeof child === "object") {
+        return Object.fromEntries(
+          Object.entries(child as Record<string, unknown>).map(([key, entry]) => [key, sanitize(entry)])
+        );
+      }
+      return child;
+    }
+    return sanitize(value) as T;
+  }
+
+  async function attemptFencingTokensForRun(runId: string): Promise<string[]> {
+    const knownAttempts = await db
+      .select({ fencingToken: attempts.fencingToken })
+      .from(attempts)
+      .where(eq(attempts.runId, runId));
+    return knownAttempts.map((attempt) => attempt.fencingToken);
+  }
+
+  async function sanitizeRunnerControlledInputForRun<T>(runId: string, input: T): Promise<T> {
+    return sanitizeCredentialLikeValue(input, {
+      secrets: await attemptFencingTokensForRun(runId)
     });
+  }
+
+  async function latestMaterialActionForSemanticKey(input: {
+    runId: string;
+    idempotencyKey: string;
+  }): Promise<typeof materialActions.$inferSelect | undefined> {
+    const row = await db
+      .select({ action: materialActions })
+      .from(materialActions)
+      .leftJoin(
+        attempts,
+        and(eq(materialActions.attemptId, attempts.id), eq(materialActions.runId, attempts.runId))
+      )
+      .where(and(eq(materialActions.runId, input.runId), eq(materialActions.idempotencyKey, input.idempotencyKey)))
+      .orderBy(
+        desc(attempts.number),
+        desc(materialActions.createdAt),
+        desc(sql<number>`"material_actions"._rowid_`)
+      )
+      .limit(1)
+      .get();
+    return row?.action;
+  }
+
+  async function appendRunEvent(input: Parameters<typeof runEventValues>[0]): Promise<void> {
+    const safeInput = sanitizeRunEventValue(input, await attemptFencingTokensForRun(input.runId));
+    await db.insert(runEvents).values(runEventValues(safeInput));
   }
 
   async function recordCreateRunReplay(input: {
@@ -1099,13 +1622,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     },
 
     async findActiveRunForConversation(input: { conversationKey: string }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
-      const row = await db
+      const rows = await db
         .select()
         .from(runs)
-        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running"])))
-        .orderBy(asc(runs.createdAt))
-        .limit(1)
-        .get();
+        .where(and(eq(runs.conversationKey, input.conversationKey), inArray(runs.status, ["assigned", "running", "needs_approval"])))
+        .orderBy(asc(runs.createdAt));
+      // A permission wait keeps its attempt attached so the runtime can heartbeat
+      // and resume it. A completed needs_human run clears the attempt and must not
+      // block later work in the same conversation.
+      const row = rows.find((candidate) => candidate.status !== "needs_approval" || candidate.currentAttemptId !== null);
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -1116,13 +1641,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async findCancelableRunForConversation(input: { conversationKeys: string[] }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
       const keys = [...new Set(input.conversationKeys.filter((key) => key.length > 0))];
       if (keys.length === 0) return null;
-      const row = await db
+      const rows = await db
         .select()
         .from(runs)
         .where(and(inArray(runs.conversationKey, keys), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
-        .orderBy(asc(runs.createdAt))
-        .limit(1)
-        .get();
+        .orderBy(asc(runs.createdAt));
+      // A run parked in needs_approval can sit in the conversation indefinitely; the run
+      // that is actually executing (or about to) is the one status/stop should target.
+      const row = rows.find((candidate) => candidate.status !== "needs_approval") ?? rows[0];
       if (!row) return null;
       return {
         run: runFromRow(row),
@@ -1132,23 +1658,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async findCancelableRunForSourceContainer(input: {
       source: string;
-      repoProvider: string;
-      owner: string;
-      repo: string;
+      repoProvider?: string;
+      owner?: string;
+      repo?: string;
       metadata: Record<string, string>;
     }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
-      const rows = await db
-        .select()
-        .from(runs)
-        .where(
-          and(
-            eq(runs.repoProvider, input.repoProvider),
-            eq(runs.repoOwner, input.owner),
-            eq(runs.repoName, input.repo),
-            inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])
-          )
-        )
-        .orderBy(asc(runs.createdAt));
+      const targetFields = [input.repoProvider, input.owner, input.repo];
+      const targetFieldCount = targetFields.filter((value) => value !== undefined).length;
+      if (targetFieldCount !== 0 && targetFieldCount !== 3) {
+        throw new Error("Cancelable source-container lookup repository fields must be provided together.");
+      }
+      const activeStatus = inArray(runs.status, ["queued", "assigned", "running", "needs_approval"]);
+      const rows = input.repoProvider && input.owner && input.repo
+        ? await db
+            .select()
+            .from(runs)
+            .where(
+              and(
+                eq(runs.repoProvider, input.repoProvider),
+                eq(runs.repoOwner, input.owner),
+                eq(runs.repoName, input.repo),
+                activeStatus
+              )
+            )
+            .orderBy(asc(runs.createdAt))
+        : await db.select().from(runs).where(activeStatus).orderBy(asc(runs.createdAt));
       for (const row of rows) {
         const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
         if (sourceContainerMetadataMatches({ event, source: input.source, metadata: input.metadata })) {
@@ -1159,59 +1693,111 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     },
 
     async cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunOutcome> {
-      const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-      if (!row) return { outcome: "not_found" };
-      const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
-      const existingRun = runFromRow(row);
-      if (terminalRunStatus(row.status)) {
-        return { outcome: "already_terminal", run: existingRun, event };
-      }
-
       const updatedAt = nowIso();
-      const result: OpenTagRunResult = {
-        conclusion: "cancelled",
-        summary: input.reason ?? "Cancellation was requested by a human.",
-        nextAction: "OpenTag will not treat this stop request as a successful completion."
-      };
-      await db
-        .update(runs)
-        .set({
-          status: "cancelled",
-          resultJson: JSON.stringify(result),
-          assignedRunnerId: null,
-          leasedAt: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
-          updatedAt
-        })
-        .where(eq(runs.id, input.runId));
-      await appendRunEvent({
-        runId: input.runId,
-        type: "run.cancel_requested",
-        payload: {
-          previousStatus: row.status,
-          previousRunnerId: row.assignedRunnerId,
-          terminalReason: "cancelled_by_user",
-          terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
-          ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}),
-          reason: result.summary
-        },
-        visibility: "audit",
-        importance: "high",
-        message: result.summary,
-        createdAt: updatedAt
+      return db.transaction((tx) => {
+        const current = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!current) return { outcome: "not_found" as const };
+        const event = OpenTagEventSchema.parse(JSON.parse(current.eventJson));
+        if (terminalRunStatus(current.status)) {
+          return { outcome: "already_terminal" as const, run: runFromRow(current), event };
+        }
+        const fencingTokens = tx
+          .select({ fencingToken: attempts.fencingToken })
+          .from(attempts)
+          .where(eq(attempts.runId, input.runId))
+          .all()
+          .map((attempt) => attempt.fencingToken);
+        const safeCancellation = sanitizeRunEventValue({
+          reason: input.reason ?? "Cancellation was requested by a human.",
+          ...(input.requestedBy ? { requestedBy: input.requestedBy } : {})
+        }, fencingTokens);
+        const result = OpenTagRunResultSchema.parse({
+          conclusion: "cancelled",
+          summary: safeCancellation.reason,
+          nextAction: "OpenTag will not treat this stop request as a successful completion."
+        });
+        const cas = tx.update(runs)
+          .set({
+            status: "cancelled",
+            resultJson: JSON.stringify(result),
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            currentAttemptId: null,
+            updatedAt
+          })
+          .where(and(eq(runs.id, input.runId), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
+          .run();
+        if (cas.changes !== 1) {
+          const winner = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          if (!winner) return { outcome: "not_found" as const };
+          if (terminalRunStatus(winner.status)) {
+            return {
+              outcome: "already_terminal" as const,
+              run: runFromRow(winner),
+              event: OpenTagEventSchema.parse(JSON.parse(winner.eventJson))
+            };
+          }
+          throw new Error(`Cancellation CAS lost while Run ${input.runId} remained active`);
+        }
+        if (current.currentAttemptId) {
+          const attemptCancellation = tx.update(attempts)
+            .set({ status: "cancelled", finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .where(and(
+              eq(attempts.id, current.currentAttemptId),
+              eq(attempts.runId, input.runId),
+              inArray(attempts.status, ["assigned", "running"])
+            ))
+            .run();
+          if (attemptCancellation.changes !== 1) {
+            throw new Error(`Cancellation could not terminate active Attempt ${current.currentAttemptId}`);
+          }
+        }
+        tx.update(materialActions)
+          .set({ status: "unknown", updatedAt })
+          .where(and(eq(materialActions.runId, input.runId), eq(materialActions.status, "executing")))
+          .run();
+        tx.update(materialActions)
+          .set({ status: "cancelled", updatedAt })
+          .where(and(
+            eq(materialActions.runId, input.runId),
+            inArray(materialActions.status, ["proposed", "waiting_approval", "authorized"])
+          ))
+          .run();
+        tx.update(grants)
+          .set({ revokedAt: updatedAt })
+          .where(and(
+            eq(grants.runId, input.runId),
+            isNotNull(grants.attemptId),
+            isNull(grants.revokedAt)
+          ))
+          .run();
+        const safeAuditEvent = sanitizeRunEventValue({
+          runId: input.runId,
+          type: "run.cancel_requested",
+          payload: {
+            previousStatus: current.status,
+            previousRunnerId: current.assignedRunnerId,
+            terminalReason: "cancelled_by_user",
+            terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
+            ...(safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
+            reason: result.summary
+          },
+          visibility: "audit" as const,
+          importance: "high" as const,
+          message: result.summary,
+          createdAt: updatedAt
+        }, fencingTokens);
+        tx.insert(runEvents)
+          .values(runEventValues(safeAuditEvent))
+          .run();
+        const cancelled = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!cancelled || cancelled.status !== "cancelled") {
+          throw new Error(`Cancelled Run ${input.runId} could not be loaded from the winning transaction`);
+        }
+        return { outcome: "cancelled" as const, run: runFromRow(cancelled), event };
       });
-      return {
-        outcome: "cancelled",
-        run: {
-          ...existingRun,
-          status: "cancelled",
-          assignedRunnerId: undefined,
-          updatedAt,
-          result
-        },
-        event
-      };
     },
 
     async createFollowUpRequest(input: {
@@ -1448,82 +2034,295 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return rows.map((row) => AdapterMutationMappingSchema.parse(JSON.parse(row.mappingJson)));
     },
 
-    async upsertChannelBinding(input: ChannelBinding): Promise<void> {
+    async upsertLinearRelayInstallation(input: {
+      id: string;
+      webhookPath: string;
+      webhookSecret: string;
+      token: string;
+      auth?: LinearRelayInstallationAuth;
+      graphqlUrl?: string;
+      repoProvider: string;
+      owner: string;
+      repo: string;
+      organizationId?: string;
+      teamId?: string;
+      teamKey?: string;
+    }): Promise<LinearRelayInstallation> {
+      const createdAt = nowIso();
+      const authJson = input.auth ? JSON.stringify(input.auth) : null;
       await db
-        .insert(channelBindings)
+        .insert(linearRelayInstallations)
         .values({
-          provider: input.provider,
-          accountId: input.accountId,
-          conversationId: input.conversationId,
+          id: input.id,
+          webhookPath: input.webhookPath,
+          webhookSecret: input.webhookSecret,
+          token: input.token,
+          authJson,
+          graphqlUrl: input.graphqlUrl ?? null,
           repoProvider: input.repoProvider,
           owner: input.owner,
           repo: input.repo,
-          metadataJson: input.metadata ? JSON.stringify(input.metadata) : null,
-          createdAt: nowIso()
+          organizationId: input.organizationId ?? null,
+          teamId: input.teamId ?? null,
+          teamKey: input.teamKey ?? null,
+          createdAt,
+          updatedAt: createdAt
         })
         .onConflictDoUpdate({
-          target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
+          target: linearRelayInstallations.id,
           set: {
+            webhookPath: input.webhookPath,
+            webhookSecret: input.webhookSecret,
+            token: input.token,
+            authJson,
+            graphqlUrl: input.graphqlUrl ?? null,
             repoProvider: input.repoProvider,
             owner: input.owner,
             repo: input.repo,
-            metadataJson: input.metadata ? JSON.stringify(input.metadata) : null
+            organizationId: input.organizationId ?? null,
+            teamId: input.teamId ?? null,
+            teamKey: input.teamKey ?? null,
+            updatedAt: createdAt
           }
         });
+      const [row] = await db.select().from(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id)).limit(1);
+      if (!row) {
+        throw new Error(`Linear relay installation ${input.id} was not stored.`);
+      }
+      return linearRelayInstallationFromRow(row);
+    },
+
+    async getLinearRelayInstallation(input: { id: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db.select().from(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id)).limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async getLinearRelayInstallationByOrganizationId(input: { organizationId: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db
+        .select()
+        .from(linearRelayInstallations)
+        .where(eq(linearRelayInstallations.organizationId, input.organizationId))
+        .limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async getLinearRelayInstallationByWebhookPath(input: { webhookPath: string }): Promise<LinearRelayInstallation | null> {
+      const [row] = await db
+        .select()
+        .from(linearRelayInstallations)
+        .where(eq(linearRelayInstallations.webhookPath, input.webhookPath))
+        .limit(1);
+      return row ? linearRelayInstallationFromRow(row) : null;
+    },
+
+    async deleteLinearRelayInstallation(input: { id: string }): Promise<boolean> {
+      const result = await db.delete(linearRelayInstallations).where(eq(linearRelayInstallations.id, input.id));
+      return result.changes > 0;
+    },
+
+    async createLinearOAuthInstallState(input: {
+      state: string;
+      installationId: string;
+      webhookPath: string;
+      webhookSecret: string;
+      redirectUri: string;
+      graphqlUrl?: string;
+      repoProvider: string;
+      owner: string;
+      repo: string;
+      teamId?: string;
+      teamKey?: string;
+      scopes: string[];
+      expiresAt: string;
+    }): Promise<LinearOAuthInstallState> {
+      const createdAt = nowIso();
+      await db
+        .insert(linearOAuthInstallStates)
+        .values({
+          state: input.state,
+          installationId: input.installationId,
+          webhookPath: input.webhookPath,
+          webhookSecret: input.webhookSecret,
+          redirectUri: input.redirectUri,
+          graphqlUrl: input.graphqlUrl ?? null,
+          repoProvider: input.repoProvider,
+          owner: input.owner,
+          repo: input.repo,
+          teamId: input.teamId ?? null,
+          teamKey: input.teamKey ?? null,
+          scopesJson: JSON.stringify(input.scopes),
+          createdAt,
+          expiresAt: input.expiresAt,
+          completedAt: null
+        })
+        .onConflictDoUpdate({
+          target: linearOAuthInstallStates.state,
+          set: {
+            installationId: input.installationId,
+            webhookPath: input.webhookPath,
+            webhookSecret: input.webhookSecret,
+            redirectUri: input.redirectUri,
+            graphqlUrl: input.graphqlUrl ?? null,
+            repoProvider: input.repoProvider,
+            owner: input.owner,
+            repo: input.repo,
+            teamId: input.teamId ?? null,
+            teamKey: input.teamKey ?? null,
+            scopesJson: JSON.stringify(input.scopes),
+            createdAt,
+            expiresAt: input.expiresAt,
+            completedAt: null
+          }
+        });
+      const [row] = await db.select().from(linearOAuthInstallStates).where(eq(linearOAuthInstallStates.state, input.state)).limit(1);
+      if (!row) {
+        throw new Error(`Linear OAuth install state ${input.state} was not stored.`);
+      }
+      return linearOAuthInstallStateFromRow(row);
+    },
+
+    async getLinearOAuthInstallState(input: { state: string }): Promise<LinearOAuthInstallState | null> {
+      const [row] = await db.select().from(linearOAuthInstallStates).where(eq(linearOAuthInstallStates.state, input.state)).limit(1);
+      return row ? linearOAuthInstallStateFromRow(row) : null;
+    },
+
+    async completeLinearOAuthInstallState(input: { state: string; completedAt?: string }): Promise<void> {
+      await db
+        .update(linearOAuthInstallStates)
+        .set({ completedAt: input.completedAt ?? nowIso() })
+        .where(eq(linearOAuthInstallStates.state, input.state));
+    },
+
+    async upsertChannelBinding(input: ChannelBinding & { allowManagedOwnershipOverride?: boolean }): Promise<void> {
+      const repositoryFields = channelBindingRepositoryFields(input);
+      const ownership = input.ownership ? OpenTagManagedChannelBindingOwnershipSchema.parse(input.ownership) : undefined;
+      db.transaction((tx) => {
+        const existingRow = tx
+          .select()
+          .from(channelBindings)
+          .where(
+            and(
+              eq(channelBindings.provider, input.provider),
+              eq(channelBindings.accountId, input.accountId),
+              eq(channelBindings.conversationId, input.conversationId)
+            )
+          )
+          .limit(1)
+          .get();
+        const existing = existingRow ? channelBindingFromRow(existingRow) : null;
+        if (!input.allowManagedOwnershipOverride && existing?.ownership && (
+          !ownership ||
+          ownership.applicationId !== existing.ownership.applicationId ||
+          ownership.botId !== existing.ownership.botId
+        )) {
+          throw new Error("Exclusive managed channel binding belongs to a different application identity.");
+        }
+        tx.insert(channelBindings)
+          .values({
+            provider: input.provider,
+            accountId: input.accountId,
+            conversationId: input.conversationId,
+            ...repositoryFields,
+            metadataJson: channelBindingRecordJson({ ...input, ...(ownership ? { ownership } : {}) }),
+            createdAt: nowIso()
+          })
+          .onConflictDoUpdate({
+            target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
+            set: {
+              ...repositoryFields,
+              metadataJson: channelBindingRecordJson({ ...input, ...(ownership ? { ownership } : {}) })
+            }
+          })
+          .run();
+      });
     },
 
     async deleteChannelBinding(input: {
       provider: string;
       accountId: string;
       conversationId: string;
+      expectedBinding?: ChannelBinding;
     }): Promise<boolean> {
-      const existing = await db
-        .select()
-        .from(channelBindings)
-        .where(
-          and(
-            eq(channelBindings.provider, input.provider),
-            eq(channelBindings.accountId, input.accountId),
-            eq(channelBindings.conversationId, input.conversationId)
+      return db.transaction((tx) => {
+        const existingRow = tx
+          .select()
+          .from(channelBindings)
+          .where(
+            and(
+              eq(channelBindings.provider, input.provider),
+              eq(channelBindings.accountId, input.accountId),
+              eq(channelBindings.conversationId, input.conversationId)
+            )
           )
-        )
-        .limit(1)
-        .get();
-      if (!existing) return false;
-      await db
-        .delete(channelBindings)
-        .where(
-          and(
-            eq(channelBindings.provider, input.provider),
-            eq(channelBindings.accountId, input.accountId),
-            eq(channelBindings.conversationId, input.conversationId)
+          .limit(1)
+          .get();
+        if (!existingRow) return false;
+        const existing = channelBindingFromRow(existingRow);
+        if (existing.ownership && !input.expectedBinding) return false;
+        if (input.expectedBinding && !channelBindingsMatch(existing, input.expectedBinding)) return false;
+        tx.delete(channelBindings)
+          .where(
+            and(
+              eq(channelBindings.provider, input.provider),
+              eq(channelBindings.accountId, input.accountId),
+              eq(channelBindings.conversationId, input.conversationId)
+            )
           )
-        );
-      return true;
+          .run();
+        return true;
+      });
     },
 
     async createSlackChannelBinding(input: SlackChannelBinding): Promise<void> {
       const repoProvider = input.repoProvider ?? "github";
-      await db
-        .insert(channelBindings)
-        .values({
+      db.transaction((tx) => {
+        const existingRow = tx
+          .select()
+          .from(channelBindings)
+          .where(
+            and(
+              eq(channelBindings.provider, "slack"),
+              eq(channelBindings.accountId, input.teamId),
+              eq(channelBindings.conversationId, input.channelId)
+            )
+          )
+          .limit(1)
+          .get();
+        const existing = existingRow ? channelBindingFromRow(existingRow) : null;
+        if (existing?.ownership) {
+          throw new Error("Exclusive managed channel binding cannot be mutated through the Slack compatibility store method.");
+        }
+        const binding: ChannelBinding = {
           provider: "slack",
           accountId: input.teamId,
           conversationId: input.channelId,
           repoProvider,
           owner: input.owner,
           repo: input.repo,
-          metadataJson: null,
-          createdAt: nowIso()
-        })
-        .onConflictDoUpdate({
-          target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
-          set: {
+          ...(existing?.metadata ? { metadata: existing.metadata } : {})
+        };
+        tx.insert(channelBindings)
+          .values({
+            provider: binding.provider,
+            accountId: binding.accountId,
+            conversationId: binding.conversationId,
             repoProvider,
             owner: input.owner,
-            repo: input.repo
-          }
-        });
+            repo: input.repo,
+            metadataJson: channelBindingRecordJson(binding),
+            createdAt: nowIso()
+          })
+          .onConflictDoUpdate({
+            target: [channelBindings.provider, channelBindings.accountId, channelBindings.conversationId],
+            set: {
+              repoProvider,
+              owner: input.owner,
+              repo: input.repo,
+              metadataJson: channelBindingRecordJson(binding)
+            }
+          })
+          .run();
+      });
     },
 
     async createRun(input: {
@@ -1729,41 +2528,78 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     async claimNextRun(input: { runnerId: string; leaseSeconds: number }): Promise<ClaimedOpenTagRun | null> {
       const now = new Date();
       const runnerHeartbeatAt = nowIso();
-      await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
       const activeRows = await db
         .select()
         .from(runs)
-        .where(inArray(runs.status, ["assigned", "running"]))
+        .where(inArray(runs.status, ["assigned", "running", "needs_approval"]))
         .orderBy(asc(runs.createdAt));
       for (const activeRow of activeRows) {
         if (!isIsoExpired(activeRow.leaseExpiresAt, now)) continue;
         const updatedAt = nowIso();
-        await db
-          .update(runs)
-          .set({
-            status: "queued",
-            assignedRunnerId: null,
-            leasedAt: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-            updatedAt
-          })
-          .where(eq(runs.id, activeRow.id));
-        await appendRunEvent({
-          runId: activeRow.id,
-          type: "run.lease_expired",
-          payload: { previousRunnerId: activeRow.assignedRunnerId, previousLeaseExpiresAt: activeRow.leaseExpiresAt },
-          visibility: "audit",
-          importance: "normal",
-          createdAt: updatedAt
+        const interrupted = db.transaction((tx) => {
+          const current = tx.select().from(runs).where(eq(runs.id, activeRow.id)).limit(1).get();
+          if (!current || !isIsoExpired(current.leaseExpiresAt, now) || !["assigned", "running", "needs_approval"].includes(current.status)) {
+            return false;
+          }
+          if (current.currentAttemptId) {
+            tx.update(attempts)
+              .set({
+                status: "interrupted",
+                finishedAt: updatedAt,
+                resultJson: JSON.stringify({ conclusion: "interrupted", summary: "Attempt lease expired." }),
+                updatedAt
+              })
+              .where(and(eq(attempts.id, current.currentAttemptId), inArray(attempts.status, ["assigned", "running"])))
+              .run();
+            tx.update(materialActions)
+              .set({ status: "unknown", updatedAt })
+              .where(and(eq(materialActions.attemptId, current.currentAttemptId), eq(materialActions.status, "executing")))
+              .run();
+            tx.update(materialActions)
+              .set({ status: "cancelled", updatedAt })
+              .where(and(eq(materialActions.attemptId, current.currentAttemptId), eq(materialActions.status, "waiting_approval")))
+              .run();
+          }
+          tx.update(runs)
+            .set({
+              status: "queued",
+              assignedRunnerId: null,
+              leasedAt: null,
+              leaseExpiresAt: null,
+              heartbeatAt: null,
+              currentAttemptId: null,
+              updatedAt
+            })
+            .where(eq(runs.id, current.id))
+            .run();
+          tx.insert(runEvents)
+            .values(
+              runEventValues({
+                runId: current.id,
+                type: "run.lease_expired",
+                payload: {
+                  previousRunnerId: current.assignedRunnerId,
+                  previousAttemptId: current.currentAttemptId,
+                  previousLeaseExpiresAt: current.leaseExpiresAt
+                },
+                visibility: "audit",
+                importance: "normal",
+                createdAt: updatedAt
+              })
+            )
+            .run();
+          return true;
         });
+        if (!interrupted) continue;
       }
 
       const queuedRows = await db.select().from(runs).where(eq(runs.status, "queued")).orderBy(asc(runs.createdAt));
       const row = queuedRows.find((candidate) => {
         const event = OpenTagEventSchema.parse(JSON.parse(candidate.eventJson));
         const repoKey = projectTargetRefFromEvent(event);
-        if (!repoKey) return false;
+        if (!repoKey) {
+          return Boolean(db.select().from(runners).where(eq(runners.runnerId, input.runnerId)).limit(1).get());
+        }
         const binding = db
           .select()
           .from(repoBindings)
@@ -1779,33 +2615,70 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           .get();
         return Boolean(binding);
       });
-      if (!row) return null;
+      if (!row) {
+        await db.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId));
+        return null;
+      }
 
       const updatedAt = nowIso();
       const leasedAt = updatedAt;
       const leaseExpiresAt = new Date(Date.now() + input.leaseSeconds * 1000).toISOString();
-      const updateResult = await db
-        .update(runs)
-        .set({
-          status: "assigned",
-          assignedRunnerId: input.runnerId,
-          leasedAt,
-          leaseExpiresAt,
-          heartbeatAt: leasedAt,
-          updatedAt
-        })
-        .where(and(eq(runs.id, row.id), eq(runs.status, "queued")));
-      if (updateResult.changes === 0) {
-        return null;
-      }
-      await appendRunEvent({
-        runId: row.id,
-        type: "run.claimed",
-        payload: { runnerId: input.runnerId, leasedAt, leaseExpiresAt },
-        visibility: "audit",
-        importance: "normal",
-        createdAt: updatedAt
+      const attemptId = newAttemptId();
+      const fencingToken = newFencingToken();
+      const attemptNumber = db.transaction((tx) => {
+        const previous = tx
+          .select({ number: attempts.number })
+          .from(attempts)
+          .where(eq(attempts.runId, row.id))
+          .orderBy(desc(attempts.number))
+          .limit(1)
+          .get();
+        const number = (previous?.number ?? 0) + 1;
+        const updateResult = tx
+          .update(runs)
+          .set({
+            status: "assigned",
+            assignedRunnerId: input.runnerId,
+            leasedAt,
+            leaseExpiresAt,
+            heartbeatAt: leasedAt,
+            currentAttemptId: attemptId,
+            updatedAt
+          })
+          .where(and(eq(runs.id, row.id), eq(runs.status, "queued")))
+          .run();
+        if (updateResult.changes === 0) return null;
+        tx.insert(attempts)
+          .values({
+            id: attemptId,
+            runId: row.id,
+            number,
+            runnerId: input.runnerId,
+            fencingToken,
+            status: "assigned",
+            startedAt: leasedAt,
+            heartbeatAt: leasedAt,
+            leaseExpiresAt,
+            createdAt: leasedAt,
+            updatedAt
+          })
+          .run();
+        tx.update(runners).set({ heartbeatAt: runnerHeartbeatAt }).where(eq(runners.runnerId, input.runnerId)).run();
+        tx.insert(runEvents)
+          .values(
+            runEventValues({
+              runId: row.id,
+              type: "run.claimed",
+              payload: { runnerId: input.runnerId, attemptId, attemptNumber: number, leasedAt, leaseExpiresAt },
+              visibility: "audit",
+              importance: "normal",
+              createdAt: updatedAt
+            })
+          )
+          .run();
+        return number;
       });
+      if (attemptNumber === null) return null;
 
       return {
         run: {
@@ -1819,7 +2692,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           assignedRunnerId: input.runnerId,
           updatedAt
         },
-        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson)),
+        attemptId,
+        attemptNumber,
+        fencingToken
       };
     },
 
@@ -1879,6 +2755,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .get();
       if (!row) return null;
       const binding = channelBindingFromRow(row);
+      if (!binding.repoProvider || !binding.owner || !binding.repo) return null;
       return {
         teamId: binding.accountId,
         channelId: binding.conversationId,
@@ -1888,93 +2765,163 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       };
     },
 
-    async heartbeat(input: { runId: string; runnerId: string; leaseSeconds?: number }): Promise<boolean> {
+    async heartbeat(input: AttemptLease & { leaseSeconds?: number }): Promise<HeartbeatOutcome> {
       const updatedAt = nowIso();
-      const row = await db
-        .select()
-        .from(runs)
-        .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
-        .limit(1)
-        .get();
-      if (!row) return false;
+      const lease = activeAttemptLease(input);
+      if (lease.outcome !== "active") return lease.outcome;
       const leaseSeconds = input.leaseSeconds ?? 60;
       const leaseExpiresAt = new Date(Date.now() + leaseSeconds * 1000).toISOString();
-      await db.update(runners).set({ heartbeatAt: updatedAt }).where(eq(runners.runnerId, input.runnerId));
-      await db
-        .update(runs)
-        .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
-        .where(eq(runs.id, input.runId));
+      const updated = db.transaction((tx) => {
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        if (
+          !currentRun ||
+          !currentAttempt ||
+          currentRun.assignedRunnerId !== input.runnerId ||
+          currentRun.currentAttemptId !== input.attemptId ||
+          !["assigned", "running", "needs_approval"].includes(currentRun.status) ||
+          currentAttempt.runId !== input.runId ||
+          currentAttempt.runnerId !== input.runnerId ||
+          currentAttempt.fencingToken !== input.fencingToken ||
+          (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") ||
+          !hasActiveAttemptLease(currentAttempt)
+        ) {
+          return false;
+        }
+        tx.update(attempts)
+          .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
+          .where(eq(attempts.id, input.attemptId))
+          .run();
+        tx.update(runs)
+          .set({ heartbeatAt: updatedAt, leaseExpiresAt, updatedAt })
+          .where(eq(runs.id, input.runId))
+          .run();
+        tx.update(runners).set({ heartbeatAt: updatedAt }).where(eq(runners.runnerId, input.runnerId)).run();
+        return true;
+      });
+      if (!updated) return "stale_attempt";
       await appendRunEvent({
         runId: input.runId,
         type: "run.heartbeat",
-        payload: { runnerId: input.runnerId, heartbeatAt: updatedAt, leaseExpiresAt },
+        payload: { runnerId: input.runnerId, attemptId: input.attemptId, heartbeatAt: updatedAt, leaseExpiresAt },
         visibility: "debug",
         importance: "low",
         createdAt: updatedAt
       });
-      return true;
+      return "updated";
     },
 
     async markRunning(input: {
       runId: string;
       executor: string;
       runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
       executorCapability?: unknown;
       runTimeoutMs?: number;
       idempotencyKey?: string;
     }): Promise<MarkRunningOutcome> {
       const updatedAt = nowIso();
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const conditions = [eq(runs.id, input.runId)];
       if (input.runnerId) {
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") return lease.outcome;
         conditions.push(eq(runs.assignedRunnerId, input.runnerId));
+        conditions.push(eq(runs.currentAttemptId, input.attemptId));
       }
-      if (input.idempotencyKey) {
+      if (safeInput.idempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
         for (const event of existing) {
           if (event.type !== "run.running") continue;
           const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+          if (payload?.["idempotencyKey"] === safeInput.idempotencyKey) return "duplicate";
         }
       }
-      const updateResult = await db
-        .update(runs)
-        .set({ status: "running", executor: input.executor, updatedAt })
-        .where(and(...conditions));
-      if (updateResult.changes === 0) {
-        return "not_found";
-      }
+      const mutationOutcome =
+        input.runnerId && input.attemptId && input.fencingToken
+          ? db.transaction((tx) => {
+              const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+              const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get();
+              if (
+                !currentRun ||
+                !currentAttempt ||
+                currentRun.assignedRunnerId !== input.runnerId ||
+                currentRun.currentAttemptId !== input.attemptId ||
+                (currentRun.status !== "assigned" && currentRun.status !== "running") ||
+                currentAttempt.runId !== input.runId ||
+                currentAttempt.runnerId !== input.runnerId ||
+                currentAttempt.fencingToken !== input.fencingToken ||
+                (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") ||
+                !hasActiveAttemptLease(currentAttempt)
+              ) {
+                return "stale_attempt" as const;
+              }
+              tx.update(runs)
+                .set({ status: "running", executor: safeInput.executor, updatedAt })
+                .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId!)))
+                .run();
+              tx.update(attempts)
+                .set({ status: "running", heartbeatAt: updatedAt, updatedAt })
+                .where(eq(attempts.id, input.attemptId!))
+                .run();
+              return "running" as const;
+            })
+          : (await db
+              .update(runs)
+              .set({ status: "running", executor: safeInput.executor, updatedAt })
+              .where(and(...conditions))).changes > 0
+            ? ("running" as const)
+            : ("not_found" as const);
+      if (mutationOutcome !== "running") return mutationOutcome;
       await appendRunEvent({
         runId: input.runId,
         type: "run.running",
         payload: {
-          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-          executor: input.executor,
-          ...(input.runTimeoutMs ? { runTimeoutMs: input.runTimeoutMs } : {})
+          ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
+          ...(safeInput.attemptId ? { attemptId: safeInput.attemptId } : {}),
+          ...(safeInput.idempotencyKey ? { idempotencyKey: safeInput.idempotencyKey } : {}),
+          executor: safeInput.executor,
+          ...(safeInput.runTimeoutMs ? { runTimeoutMs: safeInput.runTimeoutMs } : {})
         },
         visibility: "audit",
         importance: "normal",
         createdAt: updatedAt
       });
-      if (input.executorCapability) {
+      if (safeInput.executorCapability) {
         await appendRunEvent({
           runId: input.runId,
           type: "executor.capability.snapshot",
           payload: {
-            executor: input.executor,
-            capability: input.executorCapability
+            executor: safeInput.executor,
+            capability: safeInput.executorCapability
           },
           visibility: "audit",
           importance: "normal",
-          message: `Executor capability snapshot recorded for ${input.executor}.`,
+          message: `Executor capability snapshot recorded for ${safeInput.executor}.`,
           createdAt: updatedAt
         });
       }
       return "running";
     },
 
-    async completeRun(input: { runId: string; result: OpenTagRunResult; runnerId?: string; idempotencyKey?: string }): Promise<CompleteRunOutcome> {
-      const parsedResult = OpenTagRunResultSchema.parse(input.result);
+    async completeRun(input: {
+      runId: string;
+      result: OpenTagRunResult;
+      runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
+      idempotencyKey?: string;
+    }): Promise<CompleteRunOutcome> {
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const safeIdempotencyKey = safeInput.idempotencyKey;
+      const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
       const updatedAt = nowIso();
       const result = OpenTagRunResultSchema.parse({
         ...parsedResult,
@@ -2006,103 +2953,826 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
       }
-      if (input.idempotencyKey) {
+      if (input.runnerId) {
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") {
+          const completedAttempt = await db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const duplicateTerminalAttempt =
+            completedAttempt?.runId === input.runId &&
+            completedAttempt.runnerId === input.runnerId &&
+            completedAttempt.fencingToken === input.fencingToken &&
+            releasedTerminalAttemptMatchesRun(completedAttempt, runRow);
+          if (duplicateTerminalAttempt && status === runRow.status) return "duplicate";
+          if (duplicateTerminalAttempt && safeIdempotencyKey) {
+            const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
+            for (const event of existing) {
+              if (event.type !== "run.completed") continue;
+              const payload = recordFromJson(event.payloadJson);
+              if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate";
+            }
+          }
+          return lease.outcome;
+        }
+      }
+      if (safeIdempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
         for (const event of existing) {
           if (event.type !== "run.completed") continue;
           const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+          if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate";
         }
       }
       if (terminalRunStatus(runRow.status)) {
-        return "not_found";
-      }
-      if (input.runnerId && runRow.assignedRunnerId !== input.runnerId) {
-        return "not_found";
+        return input.runnerId ? "duplicate" : "not_found";
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
-      await db
-        .update(runs)
-        .set({
-          status,
-          resultJson: JSON.stringify(result),
-          assignedRunnerId: null,
-          leasedAt: null,
-          leaseExpiresAt: null,
-          heartbeatAt: null,
-          updatedAt
-        })
-        .where(input.runnerId ? and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)) : eq(runs.id, input.runId));
-      for (const snapshot of result.suggestedChanges ?? []) {
-        const parsedSnapshot = SuggestedChangesSnapshotSchema.parse({
+      const attemptId = input.attemptId ?? runRow.currentAttemptId ?? undefined;
+      const attemptStatus =
+        result.conclusion === "success"
+          ? "succeeded"
+          : result.conclusion === "cancelled"
+            ? "cancelled"
+            : result.conclusion === "interrupted"
+              ? "interrupted"
+              : result.conclusion === "timed_out"
+                ? "timed_out"
+                : result.conclusion === "needs_human"
+                  ? "needs_human"
+                  : "failed";
+      const parsedSnapshots = (result.suggestedChanges ?? []).map((snapshot) =>
+        SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
           sourceRunId: snapshot.sourceRunId ?? input.runId,
           ...(snapshot.workThread || !runThread ? {} : { workThread: runThread })
-        });
-        await db
-          .insert(suggestedChanges)
-          .values({
-            proposalId: parsedSnapshot.proposalId,
+        })
+      );
+      const completionEvents: Array<typeof runEvents.$inferInsert> = [
+        ...parsedSnapshots.map((snapshot) =>
+          runEventValues({
             runId: input.runId,
-            snapshotJson: JSON.stringify(parsedSnapshot),
-            createdAt: parsedSnapshot.createdAt
+            type: "proposal.snapshot.created",
+            payload: snapshot,
+            visibility: "audit",
+            importance: "high",
+            message: snapshot.summary,
+            createdAt: updatedAt
           })
-          .onConflictDoUpdate({
-            target: suggestedChanges.proposalId,
-            set: {
-              runId: input.runId,
-              snapshotJson: JSON.stringify(parsedSnapshot),
-              createdAt: parsedSnapshot.createdAt
-            }
-          });
-        await appendRunEvent({
+        ),
+        ...(result.artifacts ?? []).map((artifact) =>
+          runEventValues({
+            runId: input.runId,
+            type: "artifact.created",
+            payload: artifact,
+            visibility: "audit",
+            importance: "normal",
+            message: artifact.summary ?? artifact.title,
+            createdAt: updatedAt
+          })
+        ),
+        runEventValues({
           runId: input.runId,
-          type: "proposal.snapshot.created",
-          payload: parsedSnapshot,
-          visibility: "audit",
-          importance: "high",
-          message: parsedSnapshot.summary,
-          createdAt: updatedAt
-        });
-      }
-      for (const artifact of result.artifacts ?? []) {
-        await appendRunEvent({
-          runId: input.runId,
-          type: "artifact.created",
-          payload: artifact,
-          visibility: "audit",
-          importance: "normal",
-          message: artifact.summary ?? artifact.title,
-          createdAt: updatedAt
-        });
-      }
-      await appendRunEvent({
-        runId: input.runId,
-        type: "run.completed",
-        payload: {
-          ...result,
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
-        },
-        visibility: "audit",
-        importance: "high",
-        message: result.summary,
-        createdAt: updatedAt
-      });
-      if ((result.suggestedChanges?.length ?? 0) > 0 || (result.artifacts?.length ?? 0) > 0) {
-        await appendRunEvent({
-          runId: input.runId,
-          type: "success_metric.observed",
+          type: "run.completed",
           payload: {
-            metric: "time_to_first_useful_artifact",
-            artifactCount: result.artifacts?.length ?? 0,
-            suggestedChangesCount: result.suggestedChanges?.length ?? 0
+            ...result,
+            ...(attemptId ? { attemptId } : {}),
+            ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {})
           },
           visibility: "audit",
-          importance: "normal",
+          importance: "high",
+          message: result.summary,
           createdAt: updatedAt
+        }),
+        ...((result.suggestedChanges?.length ?? 0) > 0 || (result.artifacts?.length ?? 0) > 0
+          ? [
+              runEventValues({
+                runId: input.runId,
+                type: "success_metric.observed",
+                payload: {
+                  metric: "time_to_first_useful_artifact",
+                  artifactCount: result.artifacts?.length ?? 0,
+                  suggestedChangesCount: result.suggestedChanges?.length ?? 0
+                },
+                visibility: "audit",
+                importance: "normal",
+                createdAt: updatedAt
+              })
+            ]
+          : [])
+      ];
+      const completionOutcome = db.transaction((tx) => {
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!currentRun) return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        let currentAttempt: typeof attempts.$inferSelect | undefined;
+        if (input.runnerId && input.attemptId && input.fencingToken) {
+          currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          if (
+            !currentAttempt ||
+            currentAttempt.runId !== input.runId ||
+            currentAttempt.runnerId !== input.runnerId ||
+            currentAttempt.fencingToken !== input.fencingToken
+          ) {
+            return "stale_attempt" as const;
+          }
+          if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
+            return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
+          }
+          if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
+            return "stale_attempt" as const;
+          }
+          if (!hasActiveAttemptLease(currentAttempt)) return "stale_attempt" as const;
+          if (currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId) {
+            return "stale_attempt" as const;
+          }
+          if (currentRun.status !== "assigned" && currentRun.status !== "running") return "stale_attempt" as const;
+        } else if (terminalRunStatus(currentRun.status)) {
+          return "not_found" as const;
+        }
+        tx.update(runs)
+          .set({
+            status,
+            resultJson: JSON.stringify(result),
+            assignedRunnerId: null,
+            leasedAt: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            currentAttemptId: null,
+            updatedAt
+          })
+          .where(eq(runs.id, input.runId))
+          .run();
+        if (attemptId) {
+          tx.update(materialActions)
+            .set({ status: "unknown", updatedAt })
+            .where(and(eq(materialActions.attemptId, attemptId), eq(materialActions.status, "executing")))
+            .run();
+          tx.update(attempts)
+            .set({ status: attemptStatus, finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .where(eq(attempts.id, attemptId))
+            .run();
+        }
+        for (const snapshot of parsedSnapshots) {
+          tx.insert(suggestedChanges)
+            .values({
+              proposalId: snapshot.proposalId,
+              runId: input.runId,
+              snapshotJson: JSON.stringify(snapshot),
+              createdAt: snapshot.createdAt
+            })
+            .onConflictDoUpdate({
+              target: suggestedChanges.proposalId,
+              set: {
+                runId: input.runId,
+                snapshotJson: JSON.stringify(snapshot),
+                createdAt: snapshot.createdAt
+              }
+            })
+            .run();
+        }
+        for (const event of completionEvents) {
+          tx.insert(runEvents).values(event).run();
+        }
+        return "completed" as const;
+      });
+      if (completionOutcome !== "completed") return completionOutcome;
+      return "completed";
+    },
+
+    async requestActionPermission(input: {
+      runnerId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      request: ActionPermissionRequest;
+    }): Promise<ActionPermissionResolution | null> {
+      const request = ActionPermissionRequestSchema.parse(input.request);
+      if (activeAttemptLease(input).outcome !== "active") return null;
+
+      const normalized = normalizeMaterialActionRequest({
+        title: request.title,
+        ...(request.kind ? { kind: request.kind } : {}),
+        permissionScopes: request.permissionScopes,
+        provider: request.provider,
+        connectionId: request.connectionId,
+        operation: request.operation,
+        ...(request.resource ? { resource: request.resource } : {}),
+        ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
+        ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
+        ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
+        ...(request.grantScope ? { grantScope: request.grantScope } : {})
+      });
+      const reusableIdentity = actionScopeAllowsRunReuse(normalized.scope);
+      const semanticKey = reusableIdentity
+        ? stableActionJson({
+            runId: input.runId,
+            actionFamily: normalized.actionFamily,
+            scope: normalized.scope,
+            target: normalized.target
+          })
+        : stableActionJson({
+            runId: input.runId,
+            attemptId: input.attemptId,
+            opaqueToolCallId: createHmac("sha256", input.fencingToken).update(request.toolCallId).digest("hex"),
+            actionFamily: normalized.actionFamily,
+            provider: normalized.scope["provider"],
+            connectionId: normalized.scope["connectionId"],
+            operation: normalized.scope["operation"]
+          });
+      const idempotencyKey = `action:${sha256(semanticKey)}`;
+      const actionId = `action_${sha256(stableActionJson({ semanticKey, attemptId: input.attemptId })).slice(0, 24)}`;
+      const candidateProposalHash = reusableIdentity
+        ? sha256(stableActionJson({ actionId, normalized }))
+        : sha256(stableActionJson({ actionId, semanticKey, reuse: "deny" }));
+      const hasSameExactAction = (row: typeof materialActions.$inferSelect): boolean => stableActionJson({
+        scope: JSON.parse(row.scopeJson) as unknown,
+        target: JSON.parse(row.targetJson) as unknown
+      }) === stableActionJson({ scope: normalized.scope, target: normalized.target });
+      const currentOwnedAuthorizedAction = (currentActionId: string): ReturnType<typeof actionFromRow> | undefined =>
+        db.transaction((tx) => {
+          const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const currentAction = tx.select().from(materialActions).where(eq(materialActions.id, currentActionId)).limit(1).get();
+          if (
+            !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
+            currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+            !hasActiveAttemptLease(currentAttempt) ||
+            currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId ||
+            currentAction.status !== "authorized" || currentAction.attemptId !== input.attemptId ||
+            currentAction.attemptFenceDigest !== sha256(input.fencingToken)
+          ) return undefined;
+          return actionFromRow(currentAction);
+        });
+      const failClosedOnTargetDrift = (row: typeof materialActions.$inferSelect): ActionPermissionResolution | null => db.transaction((tx) => {
+        const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const currentAction = tx.select().from(materialActions).where(eq(materialActions.id, row.id)).limit(1).get();
+        if (
+          !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
+          currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+          !hasActiveAttemptLease(currentAttempt) ||
+          currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+        ) return null;
+        const reason = "The opaque ACP request identity was replayed with a different exact target. The prior approval was not reused.";
+        if (currentAction.status === "executing") {
+          tx.update(materialActions)
+            .set({ status: "unknown", updatedAt: nowIso() })
+            .where(and(eq(materialActions.id, currentAction.id), eq(materialActions.status, "executing")))
+            .run();
+          const unknown = tx.select().from(materialActions).where(eq(materialActions.id, currentAction.id)).limit(1).get();
+          return { state: "unknown", action: actionFromRow(unknown!), reason };
+        }
+        if (currentAction.status === "succeeded" || currentAction.status === "unknown") {
+          return { state: "unknown", action: actionFromRow(currentAction), reason };
+        }
+        if (["proposed", "waiting_approval", "authorized"].includes(currentAction.status)) {
+          const updatedAt = nowIso();
+          tx.update(materialActions)
+            .set({ status: "cancelled", updatedAt })
+            .where(and(eq(materialActions.id, currentAction.id), inArray(materialActions.status, ["proposed", "waiting_approval", "authorized"])))
+            .run();
+          tx.update(runs)
+            .set({ status: "running", updatedAt })
+            .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId)))
+            .run();
+          const cancelled = tx.select().from(materialActions).where(eq(materialActions.id, currentAction.id)).limit(1).get();
+          return { state: "denied", action: actionFromRow(cancelled!), decision: "deny", reason };
+        }
+        return { state: "denied", action: actionFromRow(currentAction), decision: "deny", reason };
+      });
+      const existing = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
+      if (existing) {
+        if (activeAttemptLease(input).outcome !== "active") return null;
+        if (!reusableIdentity && !hasSameExactAction(existing)) return failClosedOnTargetDrift(existing);
+        const action = actionFromRow(existing);
+        if (action.status === "succeeded" && action.receipt) {
+          return ActionPermissionResolutionSchema.parse({ state: "reconciled", action, decision: "deny", receipt: action.receipt, reason: "Known success reused; the ACP tool must not execute again." });
+        }
+        if (action.status === "unknown") {
+          return ActionPermissionResolutionSchema.parse({ state: "unknown", action, reason: "The provider outcome is unknown and requires human reconciliation." });
+        }
+        if (action.status === "failed") {
+          return ActionPermissionResolutionSchema.parse({ state: "denied", action, decision: "deny", reason: "Known failure is not automatically retried without a new policy decision." });
+        }
+        if (action.status === "authorized" || action.status === "executing") {
+          const sameOwner = action.attemptId === input.attemptId && action.attemptFenceDigest === sha256(input.fencingToken);
+          if (sameOwner && action.status === "authorized" && !normalized.material) {
+            const current = currentOwnedAuthorizedAction(action.id);
+            return current
+              ? { state: "authorized", action: current, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." }
+              : null;
+          }
+          if (sameOwner && action.status === "authorized") {
+            return this.resolveActionPermission({
+              runnerId: input.runnerId,
+              runId: input.runId,
+              attemptId: input.attemptId,
+              fencingToken: input.fencingToken,
+              actionId: action.id
+            });
+          }
+          const unknown = db.transaction((tx) => {
+            const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+            const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+            if (
+              !currentAttempt || !currentRun || currentAttempt.runnerId !== input.runnerId ||
+              currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+              !hasActiveAttemptLease(currentAttempt) ||
+              currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+            ) return undefined;
+            tx.update(materialActions).set({ status: "unknown", updatedAt: nowIso() }).where(and(eq(materialActions.id, action.id), inArray(materialActions.status, ["authorized", "executing"]))).run();
+            return tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
+          });
+          return unknown ? { state: "unknown", action: actionFromRow(unknown), reason: "Execution ownership changed or a duplicate arrived before a trusted receipt; reconciliation is required." } : null;
+        }
+        if (!(action.status === "cancelled" && action.attemptId !== input.attemptId)) {
+          return this.resolveActionPermission({
+            runnerId: input.runnerId,
+            runId: input.runId,
+            attemptId: input.attemptId,
+            fencingToken: input.fencingToken,
+            actionId: action.id
+          });
+        }
+        // An expired approval belongs to its originating Attempt. A replacement
+        // Attempt gets a fresh proposal epoch while retaining the provider
+        // idempotency key represented by semanticKey.
+      }
+
+      let inserted:
+        | { kind: "stale" }
+        | { kind: "conflict" }
+        | { kind: "resolved"; resolution: ActionPermissionResolution };
+      try {
+        inserted = db.transaction((tx) => {
+          const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          if (
+            !currentAttempt || !currentRun || currentAttempt.runId !== input.runId ||
+            currentAttempt.runnerId !== input.runnerId || currentAttempt.fencingToken !== input.fencingToken ||
+            !["assigned", "running"].includes(currentAttempt.status) || !hasActiveAttemptLease(currentAttempt) ||
+            currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+          ) return { kind: "stale" as const };
+          const storedGrants = tx.select().from(grants).where(eq(grants.runId, input.runId)).all();
+          const matches = (row: typeof grants.$inferSelect): boolean => grantMatchesAction({
+            runId: row.runId,
+            ...(row.attemptId ? { attemptId: row.attemptId } : {}),
+            capability: row.capability,
+            resourceScope: JSON.parse(row.resourceScopeJson) as Record<string, unknown>,
+            ...(row.constraintsJson ? { constraints: JSON.parse(row.constraintsJson) as Record<string, unknown> } : {}),
+            ...(row.expiresAt ? { expiresAt: row.expiresAt } : {}),
+            ...(row.revokedAt ? { revokedAt: row.revokedAt } : {})
+          }, { runId: input.runId, attemptId: input.attemptId, actionId, proposalHash: candidateProposalHash, action: normalized });
+          const matchingGrant = storedGrants.some(matches);
+          const policy = evaluateActionPermission({ mode: request.mode, action: normalized, matchingGrant });
+          const createdAt = nowIso();
+          const proposalId = policy.outcome === "needs_approval" ? `proposal_${actionId}` : undefined;
+          const proposalHash = proposalId ? candidateProposalHash : undefined;
+          const approvalEpoch = proposalHash
+            ? sha256(stableActionJson({ actionId, attemptId: input.attemptId, proposalHash }))
+            : undefined;
+          const status = policy.outcome === "authorized"
+            ? normalized.material ? "executing" : "authorized"
+            : policy.outcome === "blocked" ? "cancelled" : "waiting_approval";
+          const snapshot = proposalId && proposalHash
+            ? SuggestedChangesSnapshotSchema.parse({
+                proposalId,
+                sourceRunId: input.runId,
+                createdAt,
+                summary: `Allow ${request.title}`,
+                intents: [{
+                  intentId: `intent_${actionId}`,
+                  domain: "agent_permission",
+                  action: normalized.actionFamily,
+                  summary: `Allow ${request.title}`,
+                  params: {
+                    actionId,
+                    actionFamily: normalized.actionFamily,
+                    scope: normalized.scope,
+                    target: normalized.target,
+                    riskTier: normalized.riskTier,
+                    decisions: actionScopeAllowsRunReuse(normalized.scope) ? ["allow_once", "allow_run", "deny"] : ["allow_once", "deny"]
+                  }
+                }],
+                preconditions: ["The originating Attempt must remain active.", "The normalized action family and scope must not change."],
+                metadata: { kind: "acp_permission", actionId, approvalMode: request.mode, proposalHash, approvalEpoch }
+              })
+            : undefined;
+          const result = tx.insert(materialActions).values({
+            id: actionId,
+            runId: input.runId,
+            attemptId: input.attemptId,
+            actionFamily: normalized.actionFamily,
+            capability: normalized.actionFamily,
+            scopeJson: JSON.stringify(normalized.scope),
+            targetJson: JSON.stringify(normalized.target),
+            riskTier: normalized.riskTier,
+            status,
+            idempotencyKey,
+            proposalId: proposalId ?? null,
+            proposalHash: proposalHash ?? null,
+            decisionSnapshotHash: policy.outcome === "authorized" ? sha256(stableActionJson({ mode: request.mode, policy })) : null,
+            attemptFenceDigest: sha256(input.fencingToken),
+            receiptJson: null,
+            createdAt,
+            updatedAt: createdAt
+          }).onConflictDoNothing().run();
+          if (result.changes === 0) return { kind: "conflict" as const };
+          const activeAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const activeRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          if (
+            !activeAttempt || !activeRun || activeAttempt.runnerId !== input.runnerId ||
+            activeAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(activeAttempt.status) ||
+            !hasActiveAttemptLease(activeAttempt) ||
+            activeRun.currentAttemptId !== input.attemptId || activeRun.assignedRunnerId !== input.runnerId
+          ) throw new StaleActionTransitionError("Attempt ownership changed during action creation.");
+          if (matchingGrant && !tx.select().from(grants).where(eq(grants.runId, input.runId)).all().some(matches)) {
+            throw new StaleActionTransitionError("The matching grant changed during action authorization.");
+          }
+          if (snapshot && proposalId) {
+            tx.insert(suggestedChanges).values({ proposalId, runId: input.runId, snapshotJson: JSON.stringify(snapshot), createdAt }).onConflictDoNothing().run();
+            const paused = tx.update(runs).set({ status: "needs_approval", updatedAt: createdAt }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId))).run();
+            if (paused.changes !== 1) throw new StaleActionTransitionError("Attempt ownership changed while creating an action proposal.");
+            tx.insert(runEvents).values(runEventValues({
+              runId: input.runId,
+              type: "action.permission.waiting",
+              payload: { actionId, proposalId, actionFamily: normalized.actionFamily, scope: normalized.scope, riskTier: normalized.riskTier },
+              visibility: "human",
+              importance: "high",
+              message: snapshot.summary,
+              createdAt
+            })).run();
+          }
+          const row = tx.select().from(materialActions).where(eq(materialActions.id, actionId)).limit(1).get();
+          if (!row) throw new Error(`Material action ${actionId} was not stored.`);
+          const action = actionFromRow(row);
+          const resolution: ActionPermissionResolution = policy.outcome === "blocked"
+            ? { state: "denied", action, decision: "deny", reason: policy.reason }
+            : policy.outcome === "authorized"
+              ? { state: "authorized", action, decision: matchingGrant ? "allow_run" : "allow_once", reason: policy.reason }
+              : { state: "waiting", action, reason: policy.reason };
+          return { kind: "resolved" as const, resolution };
+        });
+      } catch (error) {
+        if (error instanceof StaleActionTransitionError) return null;
+        throw error;
+      }
+      if (inserted.kind === "stale") return null;
+      if (inserted.kind === "conflict") {
+        const winnerRow = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
+        if (!winnerRow || winnerRow.id !== actionId) return null;
+        if (activeAttemptLease(input).outcome !== "active") return null;
+        if (!reusableIdentity && !hasSameExactAction(winnerRow)) return failClosedOnTargetDrift(winnerRow);
+        const winner = actionFromRow(winnerRow);
+        if (winner.status === "succeeded" && winner.receipt) {
+          return { state: "reconciled", action: winner, decision: "deny", receipt: winner.receipt, reason: "Known success reused; the ACP tool must not execute again." };
+        }
+        if (winner.status === "unknown") {
+          return { state: "unknown", action: winner, reason: "The provider outcome is unknown and requires human reconciliation." };
+        }
+        if (winner.status === "authorized" && !normalized.material) {
+          const current = currentOwnedAuthorizedAction(winner.id);
+          return current
+            ? { state: "authorized", action: current, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." }
+            : null;
+        }
+        if (winner.status === "executing") {
+          const unknown = db.transaction((tx) => {
+            const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+            const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+            if (
+              !currentAttempt || !currentRun || currentAttempt.runnerId !== input.runnerId ||
+              currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+              !hasActiveAttemptLease(currentAttempt) ||
+              currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+            ) return undefined;
+            tx.update(materialActions)
+              .set({ status: "unknown", updatedAt: nowIso() })
+              .where(and(eq(materialActions.id, winner.id), eq(materialActions.status, "executing")))
+              .run();
+            return tx.select().from(materialActions).where(eq(materialActions.id, winner.id)).limit(1).get();
+          });
+          return unknown
+            ? { state: "unknown", action: actionFromRow(unknown), reason: "Execution ownership changed or a duplicate arrived before a trusted receipt; reconciliation is required." }
+            : null;
+        }
+        return this.resolveActionPermission({
+          runnerId: input.runnerId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken,
+          actionId: winner.id
         });
       }
-      return "completed";
+      return inserted.resolution;
+    },
+
+    async resolveActionPermission(input: {
+      runnerId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      actionId: string;
+    }): Promise<ActionPermissionResolution | null> {
+      if (activeAttemptLease(input).outcome !== "active") {
+        const staleRow = await db.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return staleRow
+          ? { state: "stale", action: actionFromRow(staleRow), reason: "The originating Attempt is no longer active." }
+          : null;
+      }
+      try {
+        return db.transaction((tx) => {
+          const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const row = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+          if (!row) return null;
+          const action = actionFromRow(row);
+          if (
+            !attempt || !run || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId ||
+            attempt.fencingToken !== input.fencingToken || run.currentAttemptId !== input.attemptId ||
+            run.assignedRunnerId !== input.runnerId || action.attemptFenceDigest !== sha256(input.fencingToken) ||
+            !["assigned", "running"].includes(attempt.status) || !hasActiveAttemptLease(attempt)
+          ) return { state: "stale" as const, action, reason: "The originating Attempt is no longer active." };
+          if (action.status === "succeeded" && action.receipt) return { state: "reconciled" as const, action, decision: "deny" as const, receipt: action.receipt };
+          if (action.status === "unknown") return { state: "unknown" as const, action, reason: "The action outcome is unknown." };
+          if (action.status === "executing") {
+            tx.update(materialActions).set({ status: "unknown", updatedAt: nowIso() }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "executing"))).run();
+            const unknown = tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
+            return { state: "unknown" as const, action: actionFromRow(unknown!), reason: "Execution was already released without a trusted terminal receipt." };
+          }
+          if (action.status === "authorized") {
+            const activeGrants = tx.select().from(grants).where(eq(grants.runId, action.runId)).all();
+            const hasRunGrant = activeGrants.some((grant) => {
+              const constraints = grant.constraintsJson ? JSON.parse(grant.constraintsJson) as Record<string, unknown> : undefined;
+              return constraints?.["permissionDecision"] === "allow_run" && !grant.attemptId && grantMatchesAction({
+                runId: grant.runId,
+                capability: grant.capability,
+                resourceScope: JSON.parse(grant.resourceScopeJson) as Record<string, unknown>,
+                ...(constraints ? { constraints } : {}),
+                ...(grant.expiresAt ? { expiresAt: grant.expiresAt } : {}),
+                ...(grant.revokedAt ? { revokedAt: grant.revokedAt } : {})
+              }, {
+                runId: input.runId,
+                attemptId: input.attemptId,
+                actionId: action.id,
+                ...(action.proposalHash ? { proposalHash: action.proposalHash } : {}),
+                action: {
+                  actionFamily: action.actionFamily,
+                  scope: action.scope,
+                  target: action.target,
+                  riskTier: action.riskTier,
+                  material: action.riskTier !== "low",
+                  internallyBlocked: false
+                }
+              });
+            });
+            const updatedAt = nowIso();
+            const released = tx.update(materialActions).set({ status: "executing", updatedAt }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "authorized"))).run();
+            const resumed = tx.update(runs).set({ status: "running", updatedAt }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId))).run();
+            if (released.changes !== 1 || resumed.changes !== 1) throw new StaleActionTransitionError("Attempt ownership changed during action authorization.");
+            const executing = tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
+            return { state: "authorized" as const, action: actionFromRow(executing!), decision: hasRunGrant ? "allow_run" as const : "allow_once" as const };
+          }
+          if (action.status === "cancelled" || action.status === "failed") return { state: "denied" as const, action, decision: "deny" as const };
+          if (!action.proposalId) return { state: "denied" as const, action, decision: "deny" as const, reason: "The action has no approval proposal." };
+          const decisionRow = tx.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, action.proposalId)).orderBy(desc(approvalDecisions.createdAt)).limit(1).get();
+          if (!decisionRow) return { state: "waiting" as const, action };
+          const decision = ApprovalDecisionSchema.parse(JSON.parse(decisionRow.decisionJson));
+          const intentId = `intent_${action.id}`;
+          const approved = decision.approvedIntentIds.includes(intentId) && !(decision.rejectedIntentIds ?? []).includes(intentId);
+          const decisionKind = approved && decision.metadata?.["permissionDecision"] === "allow_run" && actionScopeAllowsRunReuse(action.scope)
+            ? "allow_run" as const
+            : approved ? "allow_once" as const : "deny" as const;
+          const updatedAt = nowIso();
+          if (decisionKind === "deny") {
+            const cancelled = tx.update(materialActions).set({ status: "cancelled", decisionSnapshotHash: sha256(stableActionJson(decision)), updatedAt }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "waiting_approval"))).run();
+            const resumed = tx.update(runs).set({ status: "running", updatedAt }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId))).run();
+            if (cancelled.changes !== 1 || resumed.changes !== 1) throw new StaleActionTransitionError("Attempt ownership changed during action denial.");
+            const updated = tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
+            return { state: "denied" as const, action: actionFromRow(updated!), decision: "deny" as const };
+          }
+          tx.insert(grants).values({
+            id: `grant_${sha256(`${decision.id}:${action.id}:${decisionKind}`).slice(0, 24)}`,
+            connectionId: String(action.target["connectionId"]),
+            capability: action.actionFamily,
+            resourceScopeJson: JSON.stringify(action.scope),
+            runId: action.runId,
+            attemptId: decisionKind === "allow_once" ? action.attemptId : null,
+            expiresAt: null,
+            constraintsJson: JSON.stringify({
+              permissionDecision: decisionKind,
+              decisionId: decision.id,
+              actionId: action.id,
+              proposalHash: action.proposalHash,
+              targetFingerprint: action.target["targetFingerprint"],
+              riskTier: action.riskTier
+            }),
+            revokedAt: null,
+            createdAt: updatedAt
+          }).onConflictDoNothing().run();
+          const released = tx.update(materialActions).set({ status: "executing", decisionSnapshotHash: sha256(stableActionJson(decision)), updatedAt }).where(and(eq(materialActions.id, action.id), eq(materialActions.status, "waiting_approval"))).run();
+          const resumed = tx.update(runs).set({ status: "running", updatedAt }).where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId))).run();
+          if (released.changes !== 1 || resumed.changes !== 1) throw new StaleActionTransitionError("Attempt ownership changed during action authorization.");
+          const updated = tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
+          return { state: "authorized" as const, action: actionFromRow(updated!), decision: decisionKind };
+        });
+      } catch (error) {
+        if (!(error instanceof StaleActionTransitionError)) throw error;
+        const row = await db.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        if (!row) return null;
+        return { state: "stale", action: actionFromRow(row), reason: error.message };
+      }
+    },
+
+    async recordMaterialActionReceipt(input: {
+      runnerId: string;
+      runId: string;
+      attemptId: string;
+      fencingToken: string;
+      actionId: string;
+      receipt: MaterialActionReceipt;
+    }): Promise<ActionPermissionResolution | null> {
+      let receipt = sanitizeMaterialActionReceipt(MaterialActionReceiptSchema.parse(input.receipt));
+      if (receipt.actionId !== input.actionId) throw new Error("Material action receipt actionId must match the governed action.");
+      if (activeAttemptLease(input).outcome !== "active") {
+        const staleRow = await db.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return staleRow
+          ? { state: "stale", action: actionFromRow(staleRow), reason: "The receipt writer does not own the active fenced Attempt." }
+          : null;
+      }
+      const updatedAt = nowIso();
+      const outcome = db.transaction((tx) => {
+        const actionRow = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        if (!actionRow) return { kind: "not_found" as const };
+        const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const action = actionFromRow(actionRow);
+        if (
+          !attempt || !run || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId ||
+          attempt.fencingToken !== input.fencingToken || run.currentAttemptId !== input.attemptId ||
+          run.assignedRunnerId !== input.runnerId || action.runId !== input.runId ||
+          action.attemptId !== input.attemptId || action.attemptFenceDigest !== sha256(input.fencingToken) ||
+          !["assigned", "running"].includes(attempt.status) || !hasActiveAttemptLease(attempt)
+        ) return { kind: "stale" as const, action };
+        if (action.receipt || ["succeeded", "failed", "unknown"].includes(action.status)) {
+          return { kind: "existing" as const, action };
+        }
+        if (action.status !== "executing") return { kind: "not_executing" as const, action };
+
+        if (receipt.provider === "acp" && receipt.outcome !== "unknown") {
+          receipt = MaterialActionReceiptSchema.parse({ ...receipt, outcome: "unknown" });
+        }
+        if (receipt.outcome !== "unknown") {
+          const expectedProvider = String(action.target["provider"] ?? "");
+          const expectedConnectionId = String(action.target["connectionId"] ?? "");
+          const expectedFingerprint = action.target["targetFingerprint"];
+          if (receipt.provider !== expectedProvider) throw new Error("Material action receipt provider must match the approved target.");
+          if (receipt.connectionId !== expectedConnectionId) throw new Error("Material action receipt connectionId must match the approved target.");
+          if (expectedFingerprint === undefined || receipt.targetFingerprint === undefined) {
+            receipt = MaterialActionReceiptSchema.parse({ ...receipt, outcome: "unknown" });
+          } else if (receipt.targetFingerprint !== expectedFingerprint) {
+            throw new Error("Material action receipt targetFingerprint must match the approved target.");
+          }
+        }
+        const status = receipt.outcome === "succeeded" ? "succeeded" : receipt.outcome === "failed" ? "failed" : "unknown";
+
+        const recorded = tx.update(materialActions)
+          .set({ status, receiptJson: JSON.stringify(receipt), updatedAt })
+          .where(and(
+            eq(materialActions.id, input.actionId),
+            eq(materialActions.runId, input.runId),
+            eq(materialActions.attemptId, input.attemptId),
+            eq(materialActions.attemptFenceDigest, sha256(input.fencingToken)),
+            eq(materialActions.status, "executing"),
+            isNull(materialActions.receiptJson)
+          ))
+          .run();
+        if (recorded.changes === 0) {
+          const winnerRow = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+          return winnerRow
+            ? { kind: "existing" as const, action: actionFromRow(winnerRow) }
+            : { kind: "not_found" as const };
+        }
+        tx.insert(runEvents).values(runEventValues({
+          runId: input.runId,
+          type: "material_action.receipt.recorded",
+          payload: receipt,
+          visibility: "human",
+          importance: "high",
+          message: `Material action ${input.actionId} ${receipt.outcome}.`,
+          createdAt: updatedAt
+        })).run();
+        const updatedRow = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        if (!updatedRow) throw new Error("Material action disappeared after recording its receipt.");
+        return { kind: "recorded" as const, action: actionFromRow(updatedRow) };
+      });
+      if (outcome.kind === "not_found") return null;
+      if (outcome.kind === "stale") {
+        return { state: "stale", action: outcome.action, reason: "The receipt writer does not own the active fenced Attempt." };
+      }
+      if (outcome.kind === "not_executing") return this.resolveActionPermission(input);
+      const action = outcome.action;
+      return action.status === "succeeded"
+        ? { state: "reconciled", action, decision: "deny", ...(action.receipt ? { receipt: action.receipt } : {}) }
+        : action.status === "unknown"
+          ? { state: "unknown", action, ...(action.receipt ? { receipt: action.receipt } : {}) }
+          : { state: "denied", action, decision: "deny", ...(action.receipt ? { receipt: action.receipt } : {}) };
+    },
+
+    async reconcileUnknownMaterialAction(input: {
+      actionId: string;
+      outcome: "succeeded" | "failed";
+      idempotencyKey: string;
+      receiptRef: string;
+      source: "control_plane_admin" | "trusted_provider";
+      actorId: string;
+      evidence?: MaterialActionReceipt["evidence"];
+    }): Promise<{
+      outcome: "reconciled" | "replayed" | "conflict" | "not_found";
+      action?: ReturnType<typeof actionFromRow>;
+    }> {
+      const updatedAt = nowIso();
+      const actionRun = await db
+        .select({ runId: materialActions.runId })
+        .from(materialActions)
+        .where(eq(materialActions.id, input.actionId))
+        .limit(1)
+        .get();
+      if (!actionRun) return { outcome: "not_found" };
+      const safeInput = await sanitizeRunnerControlledInputForRun(actionRun.runId, input);
+      return db.transaction((tx) => {
+        const row = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        if (!row) return { outcome: "not_found" as const };
+        const current = actionFromRow(row);
+        const sameReconciliation =
+          current.receipt?.metadata?.["reconciliationIdempotencyKey"] === safeInput.idempotencyKey &&
+          current.status === safeInput.outcome;
+        if (row.status !== "unknown") {
+          return {
+            outcome: sameReconciliation ? "replayed" as const : "conflict" as const,
+            action: current
+          };
+        }
+
+        const provider = String(current.target["provider"] ?? "");
+        const connectionId = current.target["connectionId"];
+        const targetFingerprint = current.target["targetFingerprint"];
+        const receipt = sanitizeMaterialActionReceipt(MaterialActionReceiptSchema.parse({
+          id: `reconciliation_${sha256(stableActionJson({ actionId: safeInput.actionId, idempotencyKey: safeInput.idempotencyKey })).slice(0, 24)}`,
+          actionId: safeInput.actionId,
+          provider,
+          ...(typeof connectionId === "string" ? { connectionId } : {}),
+          ...(typeof targetFingerprint === "string" ? { targetFingerprint } : {}),
+          receiptRef: safeInput.receiptRef,
+          outcome: safeInput.outcome,
+          observedAt: updatedAt,
+          ...(safeInput.evidence ? { evidence: safeInput.evidence } : {}),
+          metadata: {
+            reconciliationIdempotencyKey: safeInput.idempotencyKey,
+            reconciliationSource: safeInput.source,
+            reconciliationActorId: safeInput.actorId
+          }
+        }), { allowEvidence: true });
+        const changed = tx.update(materialActions)
+          .set({ status: safeInput.outcome, receiptJson: JSON.stringify(receipt), updatedAt })
+          .where(and(eq(materialActions.id, input.actionId), eq(materialActions.status, "unknown")))
+          .run();
+        if (changed.changes !== 1) {
+          const winner = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+          return winner ? { outcome: "conflict" as const, action: actionFromRow(winner) } : { outcome: "not_found" as const };
+        }
+        const auditPayload = sanitizeCredentialLikeValue({
+          actionId: safeInput.actionId,
+          runId: row.runId,
+          outcome: safeInput.outcome,
+          idempotencyKey: safeInput.idempotencyKey,
+          source: safeInput.source,
+          actorId: safeInput.actorId,
+          receipt
+        });
+        tx.insert(runEvents).values(runEventValues({
+          runId: row.runId,
+          type: "material_action.reconciled",
+          payload: auditPayload,
+          visibility: "human",
+          importance: "high",
+          message: `Material action ${input.actionId} reconciled as ${safeInput.outcome}.`,
+          createdAt: updatedAt
+        })).run();
+        tx.insert(controlPlaneEvents).values({
+          type: "material_action.reconciled",
+          severity: "info",
+          subject: input.actionId,
+          payloadJson: JSON.stringify(auditPayload),
+          createdAt: updatedAt
+        }).run();
+        const updated = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return { outcome: "reconciled" as const, action: actionFromRow(updated!) };
+      });
     },
 
     async getSuggestedChanges(input: { proposalId: string }): Promise<StoredSuggestedChangesSnapshot | null> {
@@ -2188,22 +3858,74 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!storedProposalRow) return null;
-      await db
-        .insert(approvalDecisions)
-        .values({
-          id: decision.id,
-          proposalId: decision.proposalId,
-          decisionJson: JSON.stringify(decision),
-          createdAt: decision.approvedAt
-        })
-        .onConflictDoUpdate({
-          target: approvalDecisions.id,
-          set: {
+      const snapshot = SuggestedChangesSnapshotSchema.parse(JSON.parse(storedProposalRow.snapshotJson));
+      if (snapshot.metadata?.["kind"] === "acp_permission") {
+        const actionId = snapshot.metadata["actionId"];
+        const proposalHash = snapshot.metadata["proposalHash"];
+        const approvalEpoch = snapshot.metadata["approvalEpoch"];
+        const intentId = typeof actionId === "string" ? `intent_${actionId}` : undefined;
+        const permissionDecision = decision.metadata?.["permissionDecision"];
+        const approved = intentId ? decision.approvedIntentIds.includes(intentId) : false;
+        const rejected = intentId ? (decision.rejectedIntentIds ?? []).includes(intentId) : false;
+        if (
+          typeof actionId !== "string" || typeof proposalHash !== "string" || typeof approvalEpoch !== "string" ||
+          decision.metadata?.["actionId"] !== actionId || decision.metadata?.["proposalHash"] !== proposalHash ||
+          decision.metadata?.["approvalEpoch"] !== approvalEpoch ||
+          !intentId || !snapshot.intents.some((intent) => intent.intentId === intentId) ||
+          (permissionDecision !== "allow_once" && permissionDecision !== "allow_run" && permissionDecision !== "deny") ||
+          (permissionDecision === "deny" ? !rejected || approved : !approved || rejected)
+        ) return null;
+        const winner = db.transaction((tx) => {
+          const actionRow = tx.select().from(materialActions).where(and(eq(materialActions.id, actionId), eq(materialActions.proposalId, decision.proposalId))).limit(1).get();
+          if (!actionRow || actionRow.status !== "waiting_approval" || actionRow.proposalHash !== proposalHash) return null;
+          const runRow = tx.select().from(runs).where(eq(runs.id, actionRow.runId)).limit(1).get();
+          const attemptRow = tx.select().from(attempts).where(eq(attempts.id, actionRow.attemptId)).limit(1).get();
+          if (
+            !runRow || !attemptRow || runRow.status !== "needs_approval" ||
+            runRow.currentAttemptId !== actionRow.attemptId || attemptRow.runId !== runRow.id ||
+            !["assigned", "running"].includes(attemptRow.status) || !hasActiveAttemptLease(attemptRow)
+          ) return null;
+          if (actionRow.decisionSnapshotHash) {
+            const existing = tx.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, decision.proposalId)).orderBy(asc(approvalDecisions.createdAt)).limit(1).get();
+            return existing ? ApprovalDecisionSchema.parse(JSON.parse(existing.decisionJson)) : null;
+          }
+          const decisionHash = sha256(stableActionJson(decision));
+          const claimed = tx.update(materialActions)
+            .set({ decisionSnapshotHash: decisionHash, updatedAt: decision.approvedAt })
+            .where(and(eq(materialActions.id, actionId), eq(materialActions.proposalId, decision.proposalId), isNull(materialActions.decisionSnapshotHash)))
+            .run();
+          if (claimed.changes === 0) {
+            const existing = tx.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, decision.proposalId)).orderBy(asc(approvalDecisions.createdAt)).limit(1).get();
+            return existing ? ApprovalDecisionSchema.parse(JSON.parse(existing.decisionJson)) : null;
+          }
+          tx.insert(approvalDecisions).values({
+            id: decision.id,
             proposalId: decision.proposalId,
             decisionJson: JSON.stringify(decision),
             createdAt: decision.approvedAt
-          }
+          }).run();
+          return decision;
         });
+        if (!winner) return null;
+        if (winner.id !== decision.id) return winner;
+      } else {
+        await db
+          .insert(approvalDecisions)
+          .values({
+            id: decision.id,
+            proposalId: decision.proposalId,
+            decisionJson: JSON.stringify(decision),
+            createdAt: decision.approvedAt
+          })
+          .onConflictDoUpdate({
+            target: approvalDecisions.id,
+            set: {
+              proposalId: decision.proposalId,
+              decisionJson: JSON.stringify(decision),
+              createdAt: decision.approvedAt
+            }
+          });
+      }
       await appendRunEvent({
         runId: storedProposalRow.runId,
         type: "approval.decision.recorded",
@@ -2357,44 +4079,128 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       visibility?: RunEventVisibility;
       importance?: RunEventImportance;
       runnerId?: string;
+      attemptId?: string;
+      fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<RecordProgressOutcome> {
+      const idempotencyDigest = input.idempotencyKey === undefined
+        ? undefined
+        : progressIdempotencyDigest(input.idempotencyKey);
+      const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
+      const safeMessage = safeInput.message;
+      const safeType = safeInput.type;
       if (input.runnerId) {
-        const row = await db
-          .select()
-          .from(runs)
-          .where(and(eq(runs.id, input.runId), eq(runs.assignedRunnerId, input.runnerId)))
-          .limit(1)
+        if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") return lease.outcome;
+        const createdAt = safeInput.at ?? nowIso();
+        return db.transaction((tx) => {
+          const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId!)).limit(1).get();
+          if (!run) return "not_found" as const;
+          if (
+            !attempt ||
+            run.assignedRunnerId !== input.runnerId ||
+            run.currentAttemptId !== input.attemptId ||
+            (run.status !== "assigned" && run.status !== "running" && run.status !== "needs_approval") ||
+            attempt.runId !== input.runId ||
+            attempt.runnerId !== input.runnerId ||
+            attempt.fencingToken !== input.fencingToken ||
+            (attempt.status !== "assigned" && attempt.status !== "running") ||
+            !hasActiveAttemptLease(attempt)
+          ) {
+            return "stale_attempt" as const;
+          }
+          const inserted = tx.insert(runEvents)
+            .values({
+              runId: input.runId,
+              type: "run.progress",
+              payloadJson: JSON.stringify({
+                runnerId: safeInput.runnerId,
+                attemptId: safeInput.attemptId,
+                type: safeType ?? "progress",
+                message: safeMessage,
+                at: createdAt
+              }),
+              progressIdempotencyDigest: idempotencyDigest ?? null,
+              visibility: safeInput.visibility ?? "audit",
+              importance: safeInput.importance ?? "normal",
+              message: safeMessage,
+              createdAt
+            })
+            .onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] })
+            .returning()
+            .get();
+          if (!inserted) {
+            if (!idempotencyDigest) throw new Error("progress event was not created");
+            const existing = tx
+              .select()
+              .from(runEvents)
+              .where(and(
+                eq(runEvents.runId, input.runId),
+                eq(runEvents.progressIdempotencyDigest, idempotencyDigest)
+              ))
+              .limit(1)
+              .get();
+            if (!existing) throw new Error("duplicate progress event could not be loaded");
+            return { outcome: "duplicate" as const, event: runEventFromRow(existing) };
+          }
+          return { outcome: "recorded" as const, event: runEventFromRow(inserted) };
+        });
+      }
+      const createdAt = safeInput.at ?? nowIso();
+      return db.transaction((tx) => {
+        const inserted = tx
+          .insert(runEvents)
+          .values({
+            ...runEventValues({
+              runId: input.runId,
+              type: "run.progress",
+              payload: {
+                ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
+                type: safeType ?? "progress",
+                message: safeMessage,
+                at: createdAt
+              },
+              visibility: safeInput.visibility ?? "audit",
+              importance: safeInput.importance ?? "normal",
+              message: safeMessage,
+              createdAt
+            }),
+            progressIdempotencyDigest: idempotencyDigest ?? null
+          })
+          .onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] })
+          .returning()
           .get();
-        if (!row) return "not_found";
-      }
-      if (input.idempotencyKey) {
-        const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
-        for (const event of existing) {
-          if (event.type !== "run.progress") continue;
-          const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === input.idempotencyKey) return "duplicate";
+        if (!inserted) {
+          if (!idempotencyDigest) throw new Error("progress event was not created");
+          const existing = tx
+            .select()
+            .from(runEvents)
+            .where(and(
+              eq(runEvents.runId, input.runId),
+              eq(runEvents.progressIdempotencyDigest, idempotencyDigest)
+            ))
+            .limit(1)
+            .get();
+          if (!existing) throw new Error("duplicate progress event could not be loaded");
+          return { outcome: "duplicate" as const, event: runEventFromRow(existing) };
         }
-      }
-      await appendRunEvent({
-        runId: input.runId,
-        type: "run.progress",
-        payload: {
-          ...(input.runnerId ? { runnerId: input.runnerId } : {}),
-          ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
-          type: input.type ?? "progress",
-          message: input.message,
-          at: input.at ?? nowIso()
-        },
-        visibility: input.visibility ?? "audit",
-        importance: input.importance ?? "normal",
-        message: input.message,
-        createdAt: input.at ?? nowIso()
+        return { outcome: "recorded" as const, event: runEventFromRow(inserted) };
       });
-      return "recorded";
     },
 
-    async getRun(input: { runId: string }): Promise<ClaimedOpenTagRun | null> {
+    async listAttempts(input: { runId: string }): Promise<Attempt[]> {
+      const rows = await db.select().from(attempts).where(eq(attempts.runId, input.runId)).orderBy(asc(attempts.number));
+      return rows.map(attemptFromRow);
+    },
+
+    async getRun(input: { runId: string }): Promise<OpenTagRunWithEvent | null> {
       const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!row) return null;
       return {
@@ -2580,23 +4386,32 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       blocks?: unknown[];
       rich?: unknown;
     }): Promise<CallbackDelivery> {
+      const safeDelivery = sanitizeCredentialLikeValue({
+        uri: input.uri,
+        body: input.body,
+        ...(input.threadKey ? { threadKey: input.threadKey } : {}),
+        ...(input.agentId ? { agentId: input.agentId } : {}),
+        ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
+        ...(input.blocks ? { blocks: input.blocks } : {}),
+        ...(input.rich !== undefined ? { rich: input.rich } : {})
+      });
       const createdAt = nowIso();
-      const idempotencyKey = callbackIdempotencyKey(input);
+      const idempotencyKey = callbackIdempotencyKey({ ...input, ...safeDelivery });
       const rows = await db
         .insert(callbackDeliveries)
         .values({
           runId: input.runId,
           kind: input.kind,
           provider: input.provider,
-          uri: input.uri,
-          body: input.body,
-          threadKey: input.threadKey ?? null,
+          uri: safeDelivery.uri,
+          body: safeDelivery.body,
+          threadKey: safeDelivery.threadKey ?? null,
           idempotencyKey,
           metadataJson: JSON.stringify({
-            ...(input.agentId ? { agentId: input.agentId } : {}),
-            ...(input.statusMessageKey ? { statusMessageKey: input.statusMessageKey } : {}),
-            ...(input.blocks ? { blocks: input.blocks } : {}),
-            ...(input.rich !== undefined ? { rich: input.rich } : {})
+            ...(safeDelivery.agentId ? { agentId: safeDelivery.agentId } : {}),
+            ...(safeDelivery.statusMessageKey ? { statusMessageKey: safeDelivery.statusMessageKey } : {}),
+            ...(safeDelivery.blocks ? { blocks: safeDelivery.blocks } : {}),
+            ...(safeDelivery.rich !== undefined ? { rich: safeDelivery.rich } : {})
           }),
           status: "pending",
           createdAt,
@@ -2690,10 +4505,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .limit(1)
         .get();
       if (!row) return;
-      const attempts = row.attempts + 1;
+      const safeError = sanitizeCredentialLikeValue(input.error, {
+        secrets: await attemptFencingTokensForRun(row.runId)
+      });
+      const attemptCount = row.attempts + 1;
       await db
         .update(callbackDeliveries)
-        .set({ status: "failed", attempts, lastError: input.error, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
+        .set({ status: "failed", attempts: attemptCount, lastError: safeError, nextAttemptAt: input.nextAttemptAt ?? null, updatedAt })
         .where(eq(callbackDeliveries.id, input.deliveryId));
       await appendRunEvent({
         runId: row.runId,
@@ -2701,8 +4519,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         payload: {
           ...callbackDeliveryFromRow(row),
           status: "failed",
-          attempts,
-          lastError: input.error,
+          attempts: attemptCount,
+          lastError: safeError,
           ...(input.nextAttemptAt ? { nextAttemptAt: input.nextAttemptAt } : {}),
           updatedAt
         },
@@ -2710,16 +4528,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         importance: "normal",
         createdAt: updatedAt
       });
-      if (input.maxAttempts !== undefined && attempts >= input.maxAttempts && !input.nextAttemptAt) {
+      if (input.maxAttempts !== undefined && attemptCount >= input.maxAttempts && !input.nextAttemptAt) {
         await appendRunEvent({
           runId: row.runId,
           type: `callback.${row.kind}.suppressed`,
           payload: {
             ...callbackDeliveryFromRow(row),
             status: "failed",
-            attempts,
+            attempts: attemptCount,
             maxAttempts: input.maxAttempts,
-            lastError: input.error,
+            lastError: safeError,
             updatedAt
           },
           visibility: "audit",

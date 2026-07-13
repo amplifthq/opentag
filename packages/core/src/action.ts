@@ -1,5 +1,154 @@
 import { parseOpenTagMention } from "./mention.js";
-import type { MutationIntent, OpenTagRunResult, SuggestedChangesSnapshot } from "./schema.js";
+import type {
+  ApprovalMode,
+  Grant,
+  MutationIntent,
+  NormalizedMaterialAction,
+  OpenTagRunResult,
+  SuggestedChangesSnapshot
+} from "./schema.js";
+
+export type MaterialActionRequestInput = {
+  title: string;
+  kind?: string | null;
+  permissionScopes?: string[];
+  provider?: string;
+  connectionId?: string;
+  operation?: string;
+  resource?: string;
+  resourceVersion?: string;
+  targetFingerprint?: string;
+  targetConstraints?: Record<string, unknown>;
+  grantScope?: Record<string, unknown>;
+  target?: Record<string, unknown>;
+};
+
+const MATERIAL_ACTION_PATTERN = /(?:push|deploy|publish|release|create|update|delete|write|mutat|send|post|merge|issue|connector)/iu;
+const CRITICAL_ACTION_PATTERN = /(?:credential|secret|token|security[_ -]?override|disable[_ -]?(?:guard|safety))/iu;
+const OPAQUE_MATERIAL_ACTION_KINDS = new Set(["execute", "tool", "fetch", "edit", "delete", "move", "other"]);
+const CANONICAL_TARGET_KEYS = new Set([
+  "title", "kind", "provider", "connectionId", "operation", "resource", "resourceVersion",
+  "targetFingerprint", "targetConstraints", "grantScope"
+]);
+
+function normalizedRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function targetExtensions(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => !CANONICAL_TARGET_KEYS.has(key)));
+}
+
+export function normalizeMaterialActionRequest(input: MaterialActionRequestInput): NormalizedMaterialAction {
+  const title = input.title.trim().replace(/\s+/gu, " ").slice(0, 240) || "untitled action";
+  const kind = input.kind?.trim().toLowerCase().replace(/[^a-z0-9._:-]+/gu, "_") || "tool";
+  const actionFamily = kind === "tool" ? title.toLowerCase().split(/\s+/u).slice(0, 3).join("_").replace(/[^a-z0-9._:-]+/gu, "_") : kind;
+  const permissionScopes = [...new Set(input.permissionScopes ?? [])].map((scope) => scope.trim()).filter(Boolean).sort();
+  const provider = input.provider?.trim().toLowerCase() || "acp";
+  const connectionId = input.connectionId?.trim() || `${provider}:agent-managed`;
+  const operation = input.operation?.trim().toLowerCase() || actionFamily || kind;
+  const resource = input.resource?.trim() || title;
+  const resourceVersion = input.resourceVersion?.trim();
+  const targetFingerprint = input.targetFingerprint?.trim().toLowerCase();
+  const probe = `${actionFamily} ${title} ${permissionScopes.join(" ")}`;
+  const internallyBlocked = CRITICAL_ACTION_PATTERN.test(probe);
+  const material = OPAQUE_MATERIAL_ACTION_KINDS.has(kind) || MATERIAL_ACTION_PATTERN.test(probe) || permissionScopes.some((scope) => /(?:write|publish|deploy|admin|mutate)/iu.test(scope));
+  const riskTier = internallyBlocked ? "critical" : /(?:push|deploy|publish|release|merge)/iu.test(probe) ? "high" : material ? "medium" : "low";
+  const scope = input.grantScope
+    ? normalizedRecord({
+        permissionScopes,
+        provider,
+        connectionId,
+        operation,
+        grantScope: normalizedRecord(input.grantScope),
+        ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {})
+      })
+    : normalizedRecord({
+        permissionScopes,
+        provider,
+        connectionId,
+        operation,
+        resource,
+        ...(resourceVersion ? { resourceVersion } : {}),
+        ...(targetFingerprint ? { targetFingerprint } : {}),
+        ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {})
+      });
+  return {
+    actionFamily: actionFamily || "tool",
+    scope,
+    target: normalizedRecord({
+      ...targetExtensions(input.target),
+      title,
+      provider,
+      connectionId,
+      operation,
+      resource,
+      ...(resourceVersion ? { resourceVersion } : {}),
+      ...(targetFingerprint ? { targetFingerprint } : {}),
+      ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {}),
+      ...(input.grantScope ? { grantScope: normalizedRecord(input.grantScope) } : {}),
+      ...(input.kind ? { kind } : {})
+    }),
+    riskTier,
+    material,
+    internallyBlocked,
+    ...(internallyBlocked ? { blockReason: "OpenTag internal guardrails prohibit credential export or safety bypass actions." } : {})
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function grantMatchesAction(
+  grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt" | "constraints">,
+  input: { runId: string; attemptId: string; actionId?: string; proposalHash?: string; action: NormalizedMaterialAction; now?: string }
+): boolean {
+  const constraints = grant.constraints ?? {};
+  const permissionDecision = constraints["permissionDecision"];
+  const grantActionId = constraints["actionId"];
+  const grantProposalHash = constraints["proposalHash"];
+  const exactOneShot = permissionDecision === "allow_once" &&
+    typeof grant.attemptId === "string" && grant.attemptId.trim().length > 0 && grant.attemptId === input.attemptId &&
+    typeof grantActionId === "string" && grantActionId.trim().length > 0 &&
+    typeof input.actionId === "string" && input.actionId.trim().length > 0 && grantActionId === input.actionId &&
+    typeof grantProposalHash === "string" && grantProposalHash.trim().length > 0 &&
+    typeof input.proposalHash === "string" && input.proposalHash.trim().length > 0 && grantProposalHash === input.proposalHash;
+  if (!exactOneShot && !actionScopeAllowsRunReuse(input.action.scope)) return false;
+  if (grant.revokedAt) return false;
+  if (grant.expiresAt && grant.expiresAt <= (input.now ?? new Date().toISOString())) return false;
+  if (grant.runId !== input.runId || grant.capability !== input.action.actionFamily) return false;
+  if (grant.attemptId && grant.attemptId !== input.attemptId) return false;
+  if (permissionDecision === "allow_once" && !exactOneShot) return false;
+  return stableJson(grant.resourceScope) === stableJson(input.action.scope);
+}
+
+export function actionScopeAllowsRunReuse(scope: Record<string, unknown>): boolean {
+  const targetConstraints = scope["targetConstraints"];
+  return !(targetConstraints && typeof targetConstraints === "object" && !Array.isArray(targetConstraints) &&
+    (targetConstraints as Record<string, unknown>)["reuse"] === "deny");
+}
+
+export function evaluateActionPermission(input: {
+  mode: ApprovalMode;
+  action: NormalizedMaterialAction;
+  matchingGrant?: boolean;
+}): { outcome: "authorized" | "needs_approval" | "blocked"; reason: string } {
+  if (input.action.internallyBlocked) {
+    return { outcome: "blocked", reason: input.action.blockReason ?? "Blocked by OpenTag internal guardrails." };
+  }
+  if (input.matchingGrant) return { outcome: "authorized", reason: "A matching durable grant covers this action family and scope." };
+  if (input.mode === "autonomous") return { outcome: "authorized", reason: "Autonomous mode authorizes this action within internal guardrails." };
+  if (input.mode === "auto" && !input.action.material) return { outcome: "authorized", reason: "Auto mode authorizes low-risk non-material actions." };
+  return { outcome: "needs_approval", reason: `${input.mode} mode requires a durable approval for this action.` };
+}
 
 export type ThreadActionVerb = "approve" | "apply" | "continue" | "reject";
 export type ThreadControlVerb = "status" | "doctor" | "stop";
@@ -88,6 +237,10 @@ const DOMAIN_ALIASES: Record<string, string> = {
   reviews: "review",
   artifact: "artifact_links",
   artifacts: "artifact_links",
+  issue: "issue",
+  issues: "issue",
+  ticket: "issue",
+  tickets: "issue",
   pr: "pull_request",
   prs: "pull_request",
   pull_request: "pull_request",
@@ -227,6 +380,7 @@ export function suggestedActionCandidatesFromResult(result: OpenTagRunResult): S
 
 function defaultActionTargetLabel(intent: MutationIntent): string {
   if (intent.action === "create_pull_request") return "GitHub pull request";
+  if (intent.action === "create_issue" || (intent.domain === "issue" && intent.action === "create")) return "Linear issue";
   if (intent.domain === "labels") return "GitHub labels";
   if (intent.domain === "assignee" || intent.domain === "assignees") return "GitHub assignees";
   if (intent.domain === "review") return "GitHub review request";
@@ -296,4 +450,67 @@ export function buildActionReceipt(candidate: SuggestedActionCandidate, context:
 
 export function buildActionReceiptsFromResult(result: OpenTagRunResult, context: ActionReceiptContext = {}): ActionReceipt[] {
   return suggestedActionCandidatesFromResult(result).map((candidate) => buildActionReceipt(candidate, context));
+}
+
+export type WorkContextMutationDomain = "priority" | "status" | "assignee" | "label";
+
+export type WorkContextMutationRequest = {
+  domain: WorkContextMutationDomain;
+  value: string;
+};
+
+const WORK_CONTEXT_MUTATION_CLAUSES: Array<{ domain: WorkContextMutationDomain; pattern: RegExp }> = [
+  {
+    domain: "priority",
+    pattern: /^set\s+(?:the\s+)?(?:(?:this|the)\s+)?(?:issue(?:'s)?\s+)?priority\s+(?:to\s+)?(.+)$/i
+  },
+  {
+    domain: "status",
+    pattern: /^(?:set\s+(?:the\s+)?(?:(?:this|the)\s+)?(?:issue(?:'s)?\s+)?(?:status|state)\s+(?:to\s+)?|move\s+(?:(?:this|the)\s+issue\s+)?to\s+)(.+)$/i
+  },
+  {
+    domain: "assignee",
+    pattern: /^(?:assign\s+(?:(?:this|the)\s+issue\s+)?(?:to\s+)?|set\s+(?:the\s+)?(?:issue(?:'s)?\s+)?assignee\s+(?:to\s+)?)(.+)$/i
+  },
+  {
+    domain: "label",
+    pattern: /^(?:add|set)\s+(?:the\s+)?label(?:s)?\s+(?:to\s+)?(.+)$/i
+  }
+];
+
+function cleanMutationValue(raw: string): string | undefined {
+  const value = raw
+    .trim()
+    .replace(/^["'`「『]+|["'`」』]+$/gu, "")
+    .replace(/[.,;:!?，。；：！？]+$/u, "")
+    .trim();
+  return value.length > 0 && value.length <= 120 ? value : undefined;
+}
+
+/**
+ * Parse a source-thread command that consists purely of work-context mutation
+ * statements ("set priority to High", "assign to alice and add label bug").
+ * Returns null unless every clause is a recognized mutation, so anything that
+ * mixes in other work ("fix the bug and set priority high") still routes to an
+ * executor run.
+ */
+export function parseWorkContextMutationCommand(rawText: string): WorkContextMutationRequest[] | null {
+  const text = threadCommandText(rawText);
+  if (!text || /[\n\r]/.test(text)) return null;
+
+  const clauses = text
+    .split(/\s+(?:and\s+then|and|then)\s+|[;；]/iu)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+  if (clauses.length === 0) return null;
+
+  const requests: WorkContextMutationRequest[] = [];
+  for (const clause of clauses) {
+    const matched = WORK_CONTEXT_MUTATION_CLAUSES.find((candidate) => candidate.pattern.test(clause));
+    if (!matched) return null;
+    const value = cleanMutationValue(clause.match(matched.pattern)?.[1] ?? "");
+    if (!value) return null;
+    requests.push({ domain: matched.domain, value });
+  }
+  return requests.length > 0 ? requests : null;
 }
