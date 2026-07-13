@@ -19,6 +19,7 @@ type DeliveryProbe = {
 
 const LARK_CLI = process.env.OPENTAG_LARK_CLI ?? "lark-cli";
 const DEFAULT_REPO = "amplifthq/opentag-test";
+const LIVE_TENANT_KEY = "lark-live-e2e";
 
 let idempotencySequence = 0;
 
@@ -31,11 +32,20 @@ async function main(): Promise<void> {
   const source = getOrCreateSourceMessage(authStatus);
   const runnerId = `lark-live-patch-${Date.now().toString(36)}`;
   const runId = `run_lark_patch_${Date.now()}`;
+  const channelApplicationId = getString(authStatus, ["appId"]);
+  const channelPrincipalCredential = `lark-live-principal-${runId}`;
 
   const deliveryLog: DeliveryProbe[] = [];
   const liveLarkSink = createLarkCallbackSink({ client: createLiveLarkClient(source.messageId) });
   const app = createDispatcherApp({
     databasePath: ":memory:",
+    channelPrincipals: [
+      {
+        provider: "lark",
+        applicationId: channelApplicationId,
+        credential: channelPrincipalCredential,
+      },
+    ],
     callbackSink: {
       async deliver(message) {
         const probe: DeliveryProbe = {
@@ -79,11 +89,35 @@ async function main(): Promise<void> {
     201,
   );
 
+  await requestJson(
+    app,
+    "/v1/channel-bindings",
+    {
+      method: "POST",
+      headers: { "x-opentag-channel-principal": channelPrincipalCredential },
+      body: {
+        provider: "lark",
+        accountId: LIVE_TENANT_KEY,
+        conversationId: source.chatId,
+        repoProvider: "github",
+        owner: repoRef.owner,
+        repo: repoRef.repo,
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: channelApplicationId,
+        },
+      },
+    },
+    201,
+  );
+
   const createRunResponse = await requestJson(
     app,
     "/v1/runs",
     {
       method: "POST",
+      headers: { "x-opentag-channel-principal": channelPrincipalCredential },
       body: {
         runId,
         event: createLarkEvent({
@@ -255,7 +289,6 @@ function createLarkEvent(args: {
   chatId: string;
   messageId: string;
 }): JsonObject {
-  const tenantKey = "lark-live-e2e";
   return {
     id: `evt_${args.runId}`,
     source: "lark",
@@ -272,7 +305,7 @@ function createLarkEvent(args: {
       {
         provider: "lark",
         kind: "message",
-        uri: `lark://tenant/${tenantKey}/chat/${args.chatId}/message/${args.messageId}`,
+        uri: `lark://tenant/${LIVE_TENANT_KEY}/chat/${args.chatId}/message/${args.messageId}`,
         visibility: "organization",
         title: "Lark message",
       },
@@ -281,10 +314,10 @@ function createLarkEvent(args: {
     callback: {
       provider: "lark",
       uri: "lark://im/v1/messages",
-      threadKey: `${tenantKey}|${args.chatId}|${args.messageId}`,
+      threadKey: `${LIVE_TENANT_KEY}|${args.chatId}|${args.messageId}`,
     },
     metadata: {
-      tenantKey,
+      tenantKey: LIVE_TENANT_KEY,
       chatId: args.chatId,
       messageId: args.messageId,
       repoProvider: "github",
@@ -297,12 +330,15 @@ function createLarkEvent(args: {
 async function requestJson(
   app: ReturnType<typeof createDispatcherApp>,
   path: string,
-  options: { method: string; body?: JsonObject },
+  options: { method: string; body?: JsonObject; headers?: Record<string, string> },
   expectedStatus: number,
 ): Promise<JsonObject> {
   const response = await app.request(path, {
     method: options.method,
-    headers: options.body ? { "content-type": "application/json" } : undefined,
+    headers: {
+      ...(options.body ? { "content-type": "application/json" } : {}),
+      ...options.headers,
+    },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const bodyText = await response.text();

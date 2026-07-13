@@ -14,6 +14,14 @@ The release is first published on the npm `next` dist-tag, tested from the
 registry, then promoted to `latest`. The exact commit that produced the npm
 artifacts must also receive the matching `v0.5.0` git tag and GitHub Release.
 
+npm also creates `latest` when a package name receives its first version, even
+when that version is published with `--tag next`. For 0.5.0, this applies to the
+new Discord, Linear, and Teams packages. Treat those unavoidable initial
+`latest` pointers as a registry constraint, not as completion of the promotion
+gate: run every registry and live-platform check before the explicit,
+idempotent all-package promotion below. The other packages must remain on their
+previous `latest` version until that gate passes.
+
 ## Public package discovery and order
 
 The release helpers discover packages from `packages/*/package.json`. A package
@@ -142,7 +150,9 @@ done
 ## Promote the same artifacts to `latest`
 
 Promotion changes dist-tags only; it must not rebuild or republish. After all
-registry and live-platform checks pass:
+registry and live-platform checks pass, run the same command for every package.
+It is intentionally idempotent for first-release packages whose `latest` tag
+was created by npm:
 
 ```bash
 for manifest in packages/*/package.json; do
@@ -178,13 +188,17 @@ identify version `0.5.0`.
 
 Do not unpublish immutable package versions during rollback.
 
-- If canary validation fails before promotion, leave `latest` untouched. After
-  preserving diagnostics, remove the failed canary tag from every package with
-  `npm dist-tag rm <package> next`, or move `next` to a corrected version.
+- If canary validation fails before promotion, leave the existing packages'
+  previous `latest` tags untouched and stop the rollout. npm has already
+  created `latest` for any first-release package and rejects removing that tag;
+  if the new package is unsafe, deprecate the bad version and publish a fixed
+  version rather than trying to erase immutable history. Preserve `next` for
+  diagnosis or move it to the corrected version.
 - If `latest` promotion fails partway, first finish or retry the idempotent
   promotion loop. If 0.5.0 itself must be withdrawn, restore `0.4.0` where it
-  exists. The Discord, Linear, and Teams adapters are first published in 0.5.0,
-  so remove their `latest` tags instead. Leave 0.5.0 on `next` for diagnosis:
+  exists. The Discord, Linear, and Teams adapters have no previous version to
+  restore, so flag them for an incident decision instead. Leave 0.5.0 on
+  `next` for diagnosis:
 
 ```bash
 for manifest in packages/*/package.json; do
@@ -193,7 +207,7 @@ for manifest in packages/*/package.json; do
   if npm view "$package@0.4.0" version >/dev/null 2>&1; then
     npm dist-tag add "$package@0.4.0" latest
   else
-    npm dist-tag rm "$package" latest || true
+    echo "$package has no pre-0.5.0 version; latest cannot be rolled back" >&2
   fi
   npm dist-tag add "$package@0.5.0" next
 done
