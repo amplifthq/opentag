@@ -1,5 +1,6 @@
 import {
   commandFromRawText,
+  isRepositoryFreePermissionScope,
   OpenTagChannelInboundMessageSchema,
   type ContextPointer,
   type OpenTagChannelInboundMessage,
@@ -103,8 +104,6 @@ const UNKNOWN_WRITE_VERB_PATTERN = /\b(add|append|apply|change|commit|create|del
 const REPO_WRITE_TARGET_PATTERN =
   /\b(repo|repository|code|file|files|branch|commit|diff|patch|readme|pr|pull\s+request|package\.json|pnpm|npm|test|build)\b|(?:^|\s)[./\w-]+\.(?:cjs|css|gitignore|go|html|js|json|jsx|lock|md|mjs|py|rb|rs|sh|toml|ts|tsx|txt|yaml|yml)\b|(?:^|[\s`'"(])(?:[./\w-]+\/)?(?:Dockerfile|Makefile|Procfile|Rakefile|Gemfile|Brewfile|Justfile|Taskfile|\.dockerignore|\.env(?:\.[\w-]+)?|\.gitignore|\.npmrc)(?=$|[\s`'",.):])/i;
 const LINEAR_ISSUE_CREATE_PATTERN = /(?=.*\blinear\b)(?=.*\b(?:issue|task|ticket)\b)(?=.*\b(?:add|create|file|open)\b)/i;
-const REPOSITORY_PERMISSION_SCOPES = new Set(["repo:read", "repo:write", "pr:create", "pr:update"]);
-
 function repositoryMetadataFromBinding(
   binding: SlackChannelBinding
 ): { repoProvider: string; owner: string; repo: string } | undefined {
@@ -170,7 +169,7 @@ function permissionsForCommand(command: OpenTagCommand, hasRepositoryTarget: boo
   }
 
   for (const scope of command.parsed?.requestedScopes ?? []) {
-    if (!hasRepositoryTarget && REPOSITORY_PERMISSION_SCOPES.has(scope)) continue;
+    if (!hasRepositoryTarget && !isRepositoryFreePermissionScope(scope)) continue;
     addPermissionGrant(permissions, {
       scope,
       reason: "requested explicitly in the source-thread command"

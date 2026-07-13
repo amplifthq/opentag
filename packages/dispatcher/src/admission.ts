@@ -1,5 +1,6 @@
 import {
   conversationKeysFromEvent,
+  isRepositoryFreePermissionScope,
   projectTargetRefFromEvent,
   RunAdmissionDecisionSchema,
   type OpenTagEvent,
@@ -55,6 +56,24 @@ export type AdmitRunResult =
 
 function isWriteCapable(event: OpenTagEvent): boolean {
   return event.permissions.some((permission) => ["repo:write", "pr:create", "pr:update"].includes(permission.scope));
+}
+
+function sourceRequiresRepositoryContext(source: OpenTagEvent["source"]): source is "github" | "gitlab" {
+  return source === "github" || source === "gitlab";
+}
+
+function nativeRepositoryContextMatchesSource(event: OpenTagEvent): boolean {
+  if (!sourceRequiresRepositoryContext(event.source)) return true;
+  const metadata = event.metadata ?? {};
+  return (
+    typeof metadata["repoProvider"] === "string" &&
+    metadata["repoProvider"].trim().length > 0 &&
+    metadata["repoProvider"] === event.source &&
+    typeof metadata["owner"] === "string" &&
+    metadata["owner"].trim().length > 0 &&
+    typeof metadata["repo"] === "string" &&
+    metadata["repo"].trim().length > 0
+  );
 }
 
 function actorInAllowedList(event: OpenTagEvent, allowedActors: string[]): boolean {
@@ -164,21 +183,30 @@ export function createAdmissionRuntime(input: {
 
       const repoKey = projectTargetRefFromEvent(request.event);
       let binding: RepoBinding | undefined;
-      if (!repoKey) {
-        const metadata = request.event.metadata ?? {};
-        const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
-        if (request.event.source === "github" || request.event.source === "gitlab" || hasRepositoryMetadata) {
-          return {
-            outcome: "needs_human_decision",
-            decision: admissionDecision({
-              action: "needs_human_decision",
-              reason: "The repository-bearing event did not resolve to a complete repository context.",
-              reasonCode: "repo_context_missing",
-              event: request.event
-            })
-          };
-        }
-      } else {
+      const metadata = request.event.metadata ?? {};
+      const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
+      const hasUnsafeRepositoryFreePermission = request.event.permissions.some(
+        (permission) => !isRepositoryFreePermissionScope(permission.scope)
+      );
+      const nativeRepositoryContextInvalid =
+        sourceRequiresRepositoryContext(request.event.source) && !nativeRepositoryContextMatchesSource(request.event);
+
+      if (
+        nativeRepositoryContextInvalid ||
+        (!repoKey && (hasRepositoryMetadata || hasUnsafeRepositoryFreePermission))
+      ) {
+        return {
+          outcome: "needs_human_decision",
+          decision: admissionDecision({
+            action: "needs_human_decision",
+            reason: "The repository-bearing event did not resolve to a complete repository context.",
+            reasonCode: "repo_context_missing",
+            event: request.event
+          })
+        };
+      }
+
+      if (repoKey) {
         binding = (await input.repo.getRepoBinding(repoKey)) ?? undefined;
         if (!binding) {
           return {

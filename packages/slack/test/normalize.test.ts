@@ -289,7 +289,7 @@ describe("Slack normalization", () => {
       channelId: "C123",
       userId: "U456",
       text:
-        "<@U_APP> fix auth --scope repo:read --scope repo:write --scope pr:create --scope pr:update --scope issue:create",
+        "<@U_APP> fix auth --scope repo:read --scope repo:write --scope pr:create --scope pr:update --scope issue:create --network restricted",
       ts: "1710000000.000100",
       eventId: "EvExplicitRepoFree",
       eventTime: 1710000000,
@@ -302,13 +302,15 @@ describe("Slack normalization", () => {
       "repo:write",
       "pr:create",
       "pr:update",
-      "issue:create"
+      "issue:create",
+      "network:restricted"
     ]);
     expect(event?.permissions.map((permission) => permission.scope)).toEqual([
       "chat:postMessage",
       "reactions:write",
       "runner:local",
-      "issue:create"
+      "issue:create",
+      "network:restricted"
     ]);
   });
 

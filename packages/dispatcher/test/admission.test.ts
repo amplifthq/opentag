@@ -13,7 +13,7 @@ const event = {
   context: [],
   permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
   callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-  metadata: { owner: "acme", repo: "demo" }
+  metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
 describe("Admission Runtime", () => {
@@ -222,7 +222,7 @@ describe("Admission Runtime", () => {
         uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
         threadKey: "acme/demo#1"
       },
-      metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 }
     };
     const admission = createAdmissionRuntime({
       repo: {
@@ -324,9 +324,23 @@ describe("Admission Runtime", () => {
   });
 
   it.each([
-    ["missing", {}],
-    ["partial", { repoProvider: "gitlab", owner: "acme" }]
-  ])("fails closed when a GitLab event has %s repository context", async (_label, metadata) => {
+    ["github", "missing metadata", {}],
+    ["github", "owner+repo without an explicit provider", { owner: "acme", repo: "demo" }],
+    ["github", "missing owner", { repoProvider: "github", repo: "demo" }],
+    ["github", "missing repo", { repoProvider: "github", owner: "acme" }],
+    ["github", "blank provider", { repoProvider: "   ", owner: "acme", repo: "demo" }],
+    ["github", "blank owner", { repoProvider: "github", owner: "   ", repo: "demo" }],
+    ["github", "blank repo", { repoProvider: "github", owner: "acme", repo: "   " }],
+    ["github", "mismatched provider", { repoProvider: "gitlab", owner: "acme", repo: "demo" }],
+    ["gitlab", "missing metadata", {}],
+    ["gitlab", "owner+repo without an explicit provider", { owner: "acme", repo: "demo" }],
+    ["gitlab", "missing owner", { repoProvider: "gitlab", repo: "demo" }],
+    ["gitlab", "missing repo", { repoProvider: "gitlab", owner: "acme" }],
+    ["gitlab", "blank provider", { repoProvider: "   ", owner: "acme", repo: "demo" }],
+    ["gitlab", "blank owner", { repoProvider: "gitlab", owner: "   ", repo: "demo" }],
+    ["gitlab", "blank repo", { repoProvider: "gitlab", owner: "acme", repo: "   " }],
+    ["gitlab", "mismatched provider", { repoProvider: "github", owner: "acme", repo: "demo" }]
+  ] as const)("fails closed when a %s event has %s repository context", async (source, label, metadata) => {
     const getRepoBinding = vi.fn(async () => {
       throw new Error("should not resolve a binding without complete repository context");
     });
@@ -343,15 +357,104 @@ describe("Admission Runtime", () => {
     });
 
     const result = await admission.admitRun({
-      requestId: `req_gitlab_${_label}`,
+      requestId: `req_${source}_${label.replaceAll(" ", "_")}`,
       event: {
         ...event,
-        id: `evt_gitlab_${_label}`,
-        source: "gitlab",
-        sourceEventId: `note_${_label}`,
-        actor: { provider: "gitlab", providerUserId: "42", handle: "octocat" },
-        callback: { provider: "gitlab", uri: "https://gitlab.example/api/v4/projects/1/notes" },
+        id: `evt_${source}_${label.replaceAll(" ", "_")}`,
+        source,
+        sourceEventId: `note_${label.replaceAll(" ", "_")}`,
+        actor: { provider: source, providerUserId: "42", handle: "octocat" },
+        callback:
+          source === "github"
+            ? { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" }
+            : { provider: "gitlab", uri: "https://gitlab.example/api/v4/projects/1/notes" },
+        context: [],
         metadata
+      }
+    });
+
+    expect(result).toMatchObject({
+      outcome: "needs_human_decision",
+      decision: { reasonCode: "repo_context_missing" }
+    });
+    expect(getRepoBinding).not.toHaveBeenCalled();
+  });
+
+  it.each(["github", "gitlab"] as const)(
+    "resolves a complete source-bound %s repository context",
+    async (source) => {
+      const projectTarget = { provider: source, owner: "acme", repo: "demo" };
+      const getRepoBinding = vi.fn(async () => ({ ...projectTarget, runnerId: "runner_1" }));
+      const admission = createAdmissionRuntime({
+        repo: {
+          getRunByEventId: async () => null,
+          getRepoBinding,
+          findActiveRunForConversation: async () => null,
+          createFollowUpRequest: async () => {
+            throw new Error("should not queue follow-up");
+          },
+          appendRunEvent: async () => undefined
+        } as never
+      });
+
+      const result = await admission.admitRun({
+        requestId: `req_${source}_complete`,
+        event: {
+          ...event,
+          id: `evt_${source}_complete`,
+          source,
+          sourceEventId: `note_${source}_complete`,
+          actor: { provider: source, providerUserId: "42", handle: "octocat" },
+          callback:
+            source === "github"
+              ? { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" }
+              : { provider: "gitlab", uri: "https://gitlab.example/api/v4/projects/1/notes" },
+          context: [],
+          metadata: { repoProvider: source, owner: "acme", repo: "demo" }
+        }
+      });
+
+      expect(result).toMatchObject({ outcome: "start", binding: { runnerId: "runner_1" } });
+      expect(getRepoBinding).toHaveBeenCalledWith(projectTarget);
+    }
+  );
+
+  it.each(
+    (["slack", "lark"] as const).flatMap((source) =>
+      ["repo:read", "repo:write", "pr:create", "pr:update", "git:push", "branch:write"].map(
+        (scope) => [source, scope] as const
+      )
+    )
+  )("fails closed when a repository-free %s event requests unsafe scope %s", async (source, scope) => {
+    const getRepoBinding = vi.fn(async () => {
+      throw new Error("should not resolve a repository binding for channel-native work");
+    });
+    const admission = createAdmissionRuntime({
+      repo: {
+        getRunByEventId: async () => null,
+        getRepoBinding,
+        findActiveRunForConversation: async () => null,
+        createFollowUpRequest: async () => {
+          throw new Error("should not queue follow-up");
+        },
+        appendRunEvent: async () => undefined
+      } as never
+    });
+    const isSlack = source === "slack";
+
+    const result = await admission.admitRun({
+      requestId: `req_${source}_${scope}`,
+      event: {
+        ...event,
+        id: `evt_${source}_${scope}`,
+        source,
+        sourceEventId: `message_${source}_${scope}`,
+        actor: { provider: source, providerUserId: "channel_user" },
+        permissions: [{ scope, reason: "adapter requested authority without a repository target" }],
+        callback: isSlack
+          ? { provider: "slack", uri: "https://slack.com/api/chat.postMessage", threadKey: "T|C|1.0" }
+          : { provider: "lark", uri: "lark://im/v1/messages", threadKey: "tk|oc|om" },
+        metadata: isSlack ? { teamId: "T", channelId: "C" } : { tenantKey: "tk", chatId: "oc" }
       }
     });
 
@@ -389,7 +492,12 @@ describe("Admission Runtime", () => {
         actor: { provider: source, providerUserId: "channel_user" },
         permissions: [
           { scope: "chat:postMessage", reason: "reply in the source thread" },
-          { scope: "runner:local", reason: "execute on a paired local daemon" }
+          { scope: "reactions:write", reason: "mark the source message as received" },
+          { scope: "runner:local", reason: "execute on a paired local daemon" },
+          { scope: "issue:create", reason: "create an explicitly requested issue" },
+          { scope: "issue:comment", reason: "reply to an issue thread" },
+          { scope: "agent:activity", reason: "publish agent activity" },
+          { scope: "network:restricted", reason: "use restricted network access" }
         ],
         callback: isSlack
           ? { provider: "slack", uri: "https://slack.com/api/chat.postMessage", threadKey: "T|C|1.0" }

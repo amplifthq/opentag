@@ -5,6 +5,7 @@ export * from "./channel-protocol.js";
 export * from "./integration-protocol.js";
 export * from "./json-schema.js";
 export * from "./mention.js";
+export * from "./permission-scope.js";
 export * from "./presentation.js";
 export * from "./project-target.js";
 export * from "./protocol.js";
