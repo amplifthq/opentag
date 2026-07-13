@@ -121,6 +121,17 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function expireRunnerLease(databasePath: string, runId: string, attemptId: string): void {
+  const sqlite = new Database(databasePath);
+  try {
+    const expiredAt = "2000-01-01T00:00:00.000Z";
+    sqlite.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(expiredAt, runId);
+    sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?").run(expiredAt, attemptId);
+  } finally {
+    sqlite.close();
+  }
+}
+
 function tokenFingerprint(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -3425,10 +3436,13 @@ describe("dispatcher API", () => {
   });
 
   it("sanitizes every runner-controlled sibling field before persistence or presentation", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "opentag-safe-runner-ingress-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const databasePath = join(directory, "dispatcher.sqlite");
     const delivered: unknown[] = [];
     const app = createDispatcherApp({
-      databasePath: ":memory:",
-      runnerLeaseSeconds: 0,
+      databasePath,
+      runnerLeaseSeconds: 60,
       callbackSink: {
         async deliver(message) {
           delivered.push(message);
@@ -3454,6 +3468,7 @@ describe("dispatcher API", () => {
     expect((await app.request("/v1/runs", jsonRequest({ runId: "run_safe_runner_ingress", event }))).status).toBe(201);
     const firstClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
     const firstLease = await firstClaim.json() as { attemptId: string; fencingToken: string };
+    expireRunnerLease(databasePath, "run_safe_runner_ingress", firstLease.attemptId);
     const secondClaim = await app.request("/v1/runners/runner_safe_ingress/claim", { method: "POST" });
     const lease = await secondClaim.json() as { attemptId: string; fencingToken: string };
 
@@ -5423,7 +5438,10 @@ describe("dispatcher API", () => {
   });
 
   it("rejects every stale runner mutation after a lease is reclaimed", async () => {
-    const app = createDispatcherApp({ databasePath: ":memory:", runnerLeaseSeconds: 0 });
+    const directory = mkdtempSync(join(tmpdir(), "opentag-runner-fencing-"));
+    onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
+    const databasePath = join(directory, "dispatcher.sqlite");
+    const app = createDispatcherApp({ databasePath, runnerLeaseSeconds: 60 });
     await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }));
     await app.request(
       "/v1/repo-bindings",
@@ -5433,6 +5451,7 @@ describe("dispatcher API", () => {
 
     const firstResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
     const first = (await firstResponse.json()) as { attemptId: string; attemptNumber: number; fencingToken: string };
+    expireRunnerLease(databasePath, "run_http_fenced", first.attemptId);
     const secondResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
     const second = (await secondResponse.json()) as { attemptId: string; attemptNumber: number; fencingToken: string };
     expect(first.attemptNumber).toBe(1);
