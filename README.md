@@ -183,15 +183,24 @@ OpenTag's CLI path is local-first.
 | `opentag setup` | Create or update local OpenTag config, then offer to start it |
 | `opentag setup --service` | Create or update local OpenTag config, then install and start the background service |
 | `opentag start` | Start the local OpenTag stack in the current terminal |
+| `opentag pair` | Pair this local runner with a remote relay |
+| `opentag service install` | Install the OpenTag background service |
 | `opentag service start` | Start the installed background service |
 | `opentag service stop` | Stop the installed background service |
+| `opentag service restart` | Restart the installed background service |
 | `opentag service status` | Show background service status and runtime readiness |
 | `opentag service logs` | Show recent background service logs |
+| `opentag service uninstall` | Uninstall the OpenTag background service |
+| `opentag service autostart enable` | Enable background service login autostart |
+| `opentag service autostart disable` | Disable background service login autostart |
 | `opentag status` | Show local config and runtime status; add `--run <run_id>` or `--channel provider:account/conversation` for scoped detail |
 | `opentag cancel` | Request cancellation for a run or the active run in a source container |
-| `opentag doctor` | Run deeper setup checks |
+| `opentag doctor` | Check dispatcher, bindings, checkouts, and executors |
+| `opentag ingest` | Ingest a fenced local external agent progress or completion event |
+| `opentag ingest-template` | Print a shell template or manifest for local external agent hook ingest |
 | `opentag platforms` | List platform setup support and runtime capabilities |
 | `opentag executors` | List available coding agents and runtime capabilities |
+| `opentag maintenance prune-source-deliveries` | Prune stale source delivery replay keys after their runs are terminal |
 | `opentag config path` | Print the local config path |
 | `opentag config show` | Print redacted local config |
 
