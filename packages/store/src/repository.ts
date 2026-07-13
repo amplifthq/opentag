@@ -8,6 +8,7 @@ import {
   MaterialActionReceiptSchema,
   ApplyIntentOutcomeSchema,
   ApplyPlanSchema,
+  AttemptSchema,
   ActionHintSchema,
   AdapterMutationMappingSchema,
   ContextPacketSchema,
@@ -395,6 +396,17 @@ function isIsoExpired(iso: string | null, now: Date): boolean {
   return new Date(iso).getTime() <= now.getTime();
 }
 
+function hasActiveAttemptLease(
+  attempt: Pick<typeof attempts.$inferSelect, "leaseExpiresAt">,
+  now = new Date()
+): boolean {
+  const leaseExpiresAt = attempt.leaseExpiresAt;
+  const parsed = AttemptSchema.shape.leaseExpiresAt.safeParse(leaseExpiresAt);
+  if (!parsed.success) return false;
+  const expiresAt = Date.parse(parsed.data);
+  return Number.isFinite(expiresAt) && expiresAt > now.getTime();
+}
+
 function newAttemptId(): string {
   return `attempt_${randomUUID()}`;
 }
@@ -558,6 +570,15 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
 
 function terminalRunStatus(status: string): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "timed_out";
+}
+
+function releasedTerminalAttemptMatchesRun(
+  attempt: Pick<typeof attempts.$inferSelect, "status">,
+  run: Pick<typeof runs.$inferSelect, "status" | "currentAttemptId" | "assignedRunnerId">
+): boolean {
+  if (run.currentAttemptId !== null || run.assignedRunnerId !== null) return false;
+  if (attempt.status === "needs_human") return run.status === "needs_approval";
+  return terminalRunStatus(attempt.status) && attempt.status === run.status;
 }
 
 function ledgerCategoryForEventType(type: string): AgentWorkLedgerCategory {
@@ -1264,7 +1285,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       attempt.runId !== input.runId ||
       attempt.runnerId !== input.runnerId ||
       attempt.fencingToken !== input.fencingToken ||
-      (attempt.status !== "assigned" && attempt.status !== "running")
+      (attempt.status !== "assigned" && attempt.status !== "running") ||
+      !hasActiveAttemptLease(attempt)
     ) {
       return { outcome: "stale_attempt" };
     }
@@ -2713,7 +2735,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           currentAttempt.runId !== input.runId ||
           currentAttempt.runnerId !== input.runnerId ||
           currentAttempt.fencingToken !== input.fencingToken ||
-          (currentAttempt.status !== "assigned" && currentAttempt.status !== "running")
+          (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") ||
+          !hasActiveAttemptLease(currentAttempt)
         ) {
           return false;
         }
@@ -2787,7 +2810,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 currentAttempt.runId !== input.runId ||
                 currentAttempt.runnerId !== input.runnerId ||
                 currentAttempt.fencingToken !== input.fencingToken ||
-                (currentAttempt.status !== "assigned" && currentAttempt.status !== "running")
+                (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") ||
+                !hasActiveAttemptLease(currentAttempt)
               ) {
                 return "stale_attempt" as const;
               }
@@ -2883,25 +2907,21 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
-        const attempt = await db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-        if (
-          !attempt ||
-          attempt.runId !== input.runId ||
-          attempt.runnerId !== input.runnerId ||
-          attempt.fencingToken !== input.fencingToken
-        ) {
-          return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") {
+          const completedAttempt = await db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const duplicateTerminalAttempt =
+            completedAttempt?.runId === input.runId &&
+            completedAttempt.runnerId === input.runnerId &&
+            completedAttempt.fencingToken === input.fencingToken &&
+            releasedTerminalAttemptMatchesRun(completedAttempt, runRow);
+          return duplicateTerminalAttempt ? "duplicate" : lease.outcome;
         }
-        if (attempt.status !== "assigned" && attempt.status !== "running") {
-          return attempt.status === "succeeded" ||
-            attempt.status === "failed" ||
-            attempt.status === "timed_out" ||
-            attempt.status === "needs_human"
-            ? "duplicate"
-            : "stale_attempt";
-        }
-        if (runRow.currentAttemptId !== input.attemptId) return "stale_attempt";
-        if (runRow.assignedRunnerId !== input.runnerId) return "stale_attempt";
       }
       if (safeIdempotencyKey) {
         const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
@@ -3002,14 +3022,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ) {
             return "stale_attempt" as const;
           }
+          if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) return "duplicate" as const;
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
-            return currentAttempt.status === "succeeded" ||
-              currentAttempt.status === "failed" ||
-              currentAttempt.status === "timed_out" ||
-              currentAttempt.status === "needs_human"
-              ? ("duplicate" as const)
-              : ("stale_attempt" as const);
+            return "stale_attempt" as const;
           }
+          if (!hasActiveAttemptLease(currentAttempt)) return "stale_attempt" as const;
           if (currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId) {
             return "stale_attempt" as const;
           }
@@ -3075,13 +3092,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       request: ActionPermissionRequest;
     }): Promise<ActionPermissionResolution | null> {
       const request = ActionPermissionRequestSchema.parse(input.request);
-      const attempt = await db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-      const run = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-      if (
-        !attempt || !run || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId ||
-        attempt.fencingToken !== input.fencingToken || run.currentAttemptId !== input.attemptId ||
-        run.assignedRunnerId !== input.runnerId || !["assigned", "running"].includes(attempt.status)
-      ) return null;
+      if (activeAttemptLease(input).outcome !== "active") return null;
 
       const normalized = normalizeMaterialActionRequest({
         title: request.title,
@@ -3122,6 +3133,21 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         scope: JSON.parse(row.scopeJson) as unknown,
         target: JSON.parse(row.targetJson) as unknown
       }) === stableActionJson({ scope: normalized.scope, target: normalized.target });
+      const currentOwnedAuthorizedAction = (currentActionId: string): ReturnType<typeof actionFromRow> | undefined =>
+        db.transaction((tx) => {
+          const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+          const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          const currentAction = tx.select().from(materialActions).where(eq(materialActions.id, currentActionId)).limit(1).get();
+          if (
+            !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
+            currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+            !hasActiveAttemptLease(currentAttempt) ||
+            currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId ||
+            currentAction.status !== "authorized" || currentAction.attemptId !== input.attemptId ||
+            currentAction.attemptFenceDigest !== sha256(input.fencingToken)
+          ) return undefined;
+          return actionFromRow(currentAction);
+        });
       const failClosedOnTargetDrift = (row: typeof materialActions.$inferSelect): ActionPermissionResolution | null => db.transaction((tx) => {
         const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
         const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
@@ -3129,6 +3155,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (
           !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
           currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+          !hasActiveAttemptLease(currentAttempt) ||
           currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
         ) return null;
         const reason = "The opaque ACP request identity was replayed with a different exact target. The prior approval was not reused.";
@@ -3160,6 +3187,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
       const existing = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
       if (existing) {
+        if (activeAttemptLease(input).outcome !== "active") return null;
         if (!reusableIdentity && !hasSameExactAction(existing)) return failClosedOnTargetDrift(existing);
         const action = actionFromRow(existing);
         if (action.status === "succeeded" && action.receipt) {
@@ -3174,19 +3202,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (action.status === "authorized" || action.status === "executing") {
           const sameOwner = action.attemptId === input.attemptId && action.attemptFenceDigest === sha256(input.fencingToken);
           if (sameOwner && action.status === "authorized" && !normalized.material) {
-            const current = db.transaction((tx) => {
-              const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
-              const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-              const currentAction = tx.select().from(materialActions).where(eq(materialActions.id, action.id)).limit(1).get();
-              if (
-                !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
-                currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
-                currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId ||
-                currentAction.status !== "authorized" || currentAction.attemptId !== input.attemptId ||
-                currentAction.attemptFenceDigest !== sha256(input.fencingToken)
-              ) return undefined;
-              return actionFromRow(currentAction);
-            });
+            const current = currentOwnedAuthorizedAction(action.id);
             return current
               ? { state: "authorized", action: current, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." }
               : null;
@@ -3206,6 +3222,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             if (
               !currentAttempt || !currentRun || currentAttempt.runnerId !== input.runnerId ||
               currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+              !hasActiveAttemptLease(currentAttempt) ||
               currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
             ) return undefined;
             tx.update(materialActions).set({ status: "unknown", updatedAt: nowIso() }).where(and(eq(materialActions.id, action.id), inArray(materialActions.status, ["authorized", "executing"]))).run();
@@ -3238,7 +3255,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (
             !currentAttempt || !currentRun || currentAttempt.runId !== input.runId ||
             currentAttempt.runnerId !== input.runnerId || currentAttempt.fencingToken !== input.fencingToken ||
-            !["assigned", "running"].includes(currentAttempt.status) ||
+            !["assigned", "running"].includes(currentAttempt.status) || !hasActiveAttemptLease(currentAttempt) ||
             currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
           ) return { kind: "stale" as const };
           const storedGrants = tx.select().from(grants).where(eq(grants.runId, input.runId)).all();
@@ -3311,6 +3328,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (
             !activeAttempt || !activeRun || activeAttempt.runnerId !== input.runnerId ||
             activeAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(activeAttempt.status) ||
+            !hasActiveAttemptLease(activeAttempt) ||
             activeRun.currentAttemptId !== input.attemptId || activeRun.assignedRunnerId !== input.runnerId
           ) throw new StaleActionTransitionError("Attempt ownership changed during action creation.");
           if (matchingGrant && !tx.select().from(grants).where(eq(grants.runId, input.runId)).all().some(matches)) {
@@ -3348,6 +3366,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (inserted.kind === "conflict") {
         const winnerRow = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
         if (!winnerRow || winnerRow.id !== actionId) return null;
+        if (activeAttemptLease(input).outcome !== "active") return null;
         if (!reusableIdentity && !hasSameExactAction(winnerRow)) return failClosedOnTargetDrift(winnerRow);
         const winner = actionFromRow(winnerRow);
         if (winner.status === "succeeded" && winner.receipt) {
@@ -3357,7 +3376,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           return { state: "unknown", action: winner, reason: "The provider outcome is unknown and requires human reconciliation." };
         }
         if (winner.status === "authorized" && !normalized.material) {
-          return { state: "authorized", action: winner, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." };
+          const current = currentOwnedAuthorizedAction(winner.id);
+          return current
+            ? { state: "authorized", action: current, decision: "allow_once", reason: "Non-material Auto action does not require receipt tracking." }
+            : null;
         }
         if (winner.status === "executing") {
           const unknown = db.transaction((tx) => {
@@ -3366,6 +3388,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             if (
               !currentAttempt || !currentRun || currentAttempt.runnerId !== input.runnerId ||
               currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+              !hasActiveAttemptLease(currentAttempt) ||
               currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
             ) return undefined;
             tx.update(materialActions)
@@ -3396,6 +3419,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken: string;
       actionId: string;
     }): Promise<ActionPermissionResolution | null> {
+      if (activeAttemptLease(input).outcome !== "active") {
+        const staleRow = await db.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return staleRow
+          ? { state: "stale", action: actionFromRow(staleRow), reason: "The originating Attempt is no longer active." }
+          : null;
+      }
       try {
         return db.transaction((tx) => {
           const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
@@ -3407,7 +3436,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             !attempt || !run || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId ||
             attempt.fencingToken !== input.fencingToken || run.currentAttemptId !== input.attemptId ||
             run.assignedRunnerId !== input.runnerId || action.attemptFenceDigest !== sha256(input.fencingToken) ||
-            !["assigned", "running"].includes(attempt.status)
+            !["assigned", "running"].includes(attempt.status) || !hasActiveAttemptLease(attempt)
           ) return { state: "stale" as const, action, reason: "The originating Attempt is no longer active." };
           if (action.status === "succeeded" && action.receipt) return { state: "reconciled" as const, action, decision: "deny" as const, receipt: action.receipt };
           if (action.status === "unknown") return { state: "unknown" as const, action, reason: "The action outcome is unknown." };
@@ -3510,6 +3539,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     }): Promise<ActionPermissionResolution | null> {
       let receipt = sanitizeMaterialActionReceipt(MaterialActionReceiptSchema.parse(input.receipt));
       if (receipt.actionId !== input.actionId) throw new Error("Material action receipt actionId must match the governed action.");
+      if (activeAttemptLease(input).outcome !== "active") {
+        const staleRow = await db.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
+        return staleRow
+          ? { state: "stale", action: actionFromRow(staleRow), reason: "The receipt writer does not own the active fenced Attempt." }
+          : null;
+      }
       const updatedAt = nowIso();
       const outcome = db.transaction((tx) => {
         const actionRow = tx.select().from(materialActions).where(eq(materialActions.id, input.actionId)).limit(1).get();
@@ -3522,7 +3557,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           attempt.fencingToken !== input.fencingToken || run.currentAttemptId !== input.attemptId ||
           run.assignedRunnerId !== input.runnerId || action.runId !== input.runId ||
           action.attemptId !== input.attemptId || action.attemptFenceDigest !== sha256(input.fencingToken) ||
-          !["assigned", "running"].includes(attempt.status)
+          !["assigned", "running"].includes(attempt.status) || !hasActiveAttemptLease(attempt)
         ) return { kind: "stale" as const, action };
         if (action.receipt || ["succeeded", "failed", "unknown"].includes(action.status)) {
           return { kind: "existing" as const, action };
@@ -3789,7 +3824,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           if (
             !runRow || !attemptRow || runRow.status !== "needs_approval" ||
             runRow.currentAttemptId !== actionRow.attemptId || attemptRow.runId !== runRow.id ||
-            !["assigned", "running"].includes(attemptRow.status) || isIsoExpired(attemptRow.leaseExpiresAt, new Date())
+            !["assigned", "running"].includes(attemptRow.status) || !hasActiveAttemptLease(attemptRow)
           ) return null;
           if (actionRow.decisionSnapshotHash) {
             const existing = tx.select().from(approvalDecisions).where(eq(approvalDecisions.proposalId, decision.proposalId)).orderBy(asc(approvalDecisions.createdAt)).limit(1).get();
@@ -3995,6 +4030,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const safeIdempotencyKey = safeInput.idempotencyKey;
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
+        const lease = activeAttemptLease({
+          runId: input.runId,
+          runnerId: input.runnerId,
+          attemptId: input.attemptId,
+          fencingToken: input.fencingToken
+        });
+        if (lease.outcome !== "active") return lease.outcome;
         const createdAt = safeInput.at ?? nowIso();
         return db.transaction((tx) => {
           const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
@@ -4008,7 +4050,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             attempt.runId !== input.runId ||
             attempt.runnerId !== input.runnerId ||
             attempt.fencingToken !== input.fencingToken ||
-            (attempt.status !== "assigned" && attempt.status !== "running")
+            (attempt.status !== "assigned" && attempt.status !== "running") ||
+            !hasActiveAttemptLease(attempt)
           ) {
             return "stale_attempt" as const;
           }

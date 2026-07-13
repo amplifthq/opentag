@@ -666,6 +666,42 @@ describe("OpenTag repository", () => {
     expect(events.map((event) => event.type)).toContain("run.lease_expired");
   });
 
+  it("does not treat an interrupted recovery Attempt as a duplicate while the Run is queued", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({
+      id: "run_recovery_window",
+      event: larkEvent({ id: "evt_recovery_window", sourceEventId: "message_recovery_window" })
+    });
+    const expired = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 0 });
+    if (!expired) throw new Error("expected initial expired Attempt");
+
+    await expect(repo.claimNextRun({ runnerId: "runner_without_binding", leaseSeconds: 60 })).resolves.toBeNull();
+    expect(sqlite.prepare(`
+      SELECT status, current_attempt_id AS currentAttemptId, assigned_runner_id AS assignedRunnerId
+      FROM runs WHERE id = ?
+    `).get("run_recovery_window")).toEqual({ status: "queued", currentAttemptId: null, assignedRunnerId: null });
+    await expect(repo.listAttempts({ runId: "run_recovery_window" })).resolves.toEqual([
+      expect.objectContaining({ id: expired.attemptId, status: "interrupted" })
+    ]);
+
+    await expect(repo.completeRun({
+      runId: "run_recovery_window",
+      runnerId: "runner_1",
+      attemptId: expired.attemptId,
+      fencingToken: expired.fencingToken,
+      result: { conclusion: "success", summary: "late completion during recovery" }
+    })).resolves.toBe("stale_attempt");
+    await expect(repo.listRunEvents({ runId: "run_recovery_window" })).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "run.completed" })])
+    );
+  });
+
   it("fences stale attempts after lease recovery", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
@@ -925,31 +961,49 @@ describe("OpenTag repository", () => {
     });
   });
 
-  it("treats duplicate completion from the same active attempt as idempotent", async () => {
-    const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
-    migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
+  it("treats duplicate completion for every terminal Attempt status as idempotent", async () => {
+    const cases = [
+      { conclusion: "success", attemptStatus: "succeeded" },
+      { conclusion: "failure", attemptStatus: "failed" },
+      { conclusion: "cancelled", attemptStatus: "cancelled" },
+      { conclusion: "interrupted", attemptStatus: "interrupted" },
+      { conclusion: "timed_out", attemptStatus: "timed_out" },
+      { conclusion: "needs_human", attemptStatus: "needs_human" }
+    ] as const;
 
-    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
-    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
-    await repo.createRun({ id: "run_attempt_replay", event: larkEvent({ id: "evt_attempt_replay", sourceEventId: "message_attempt_replay" }) });
-    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
-    const lease = {
-      runId: "run_attempt_replay",
-      runnerId: "runner_1",
-      attemptId: claimed!.attemptId,
-      fencingToken: claimed!.fencingToken,
-      result: { conclusion: "success" as const, summary: "done once" }
-    };
+    for (const { conclusion, attemptStatus } of cases) {
+      const sqlite = new Database(":memory:");
+      const db = drizzle(sqlite);
+      migrateSchema(sqlite);
+      const repo = createOpenTagRepository(db);
+      const runId = `run_attempt_replay_${conclusion}`;
 
-    await expect(repo.completeRun(lease)).resolves.toBe("completed");
-    await expect(repo.completeRun(lease)).resolves.toBe("duplicate");
-    await expect(repo.listRunEvents({ runId: "run_attempt_replay" })).resolves.toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "run.completed", message: "done once" })])
-    );
-    const events = await repo.listRunEvents({ runId: "run_attempt_replay" });
-    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+      await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+      await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+      await repo.createRun({
+        id: runId,
+        event: larkEvent({ id: `evt_attempt_replay_${conclusion}`, sourceEventId: `message_attempt_replay_${conclusion}` })
+      });
+      const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+      const lease = {
+        runId,
+        runnerId: "runner_1",
+        attemptId: claimed!.attemptId,
+        fencingToken: claimed!.fencingToken,
+        result: { conclusion, summary: `done once: ${conclusion}` }
+      };
+
+      await expect(repo.completeRun(lease)).resolves.toBe("completed");
+      await expect(repo.completeRun(lease)).resolves.toBe("duplicate");
+      await expect(repo.listAttempts({ runId })).resolves.toEqual([
+        expect.objectContaining({ id: claimed!.attemptId, status: attemptStatus })
+      ]);
+      const events = await repo.listRunEvents({ runId });
+      expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "run.completed", message: `done once: ${conclusion}` })
+      ]));
+    }
   });
 
   it("stores generic channel to repo bindings", async () => {
@@ -2871,6 +2925,12 @@ describe("durable ACP material actions", () => {
     return { sqlite, repo, claimed: { ...claimed, attemptId: fixedAttemptId, fencingToken: fixedFencingToken } };
   }
 
+  function expireAttemptLease(sqlite: Database.Database, attemptId: string, runId = "run_action") {
+    const expiredAt = "2000-01-01T00:00:00.000Z";
+    sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?").run(expiredAt, attemptId);
+    sqlite.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(expiredAt, runId);
+  }
+
   async function approvalIdentity(
     repo: ReturnType<typeof createOpenTagRepository>,
     action: { id: string; proposalId?: string; proposalHash?: string }
@@ -2881,6 +2941,184 @@ describe("durable ACP material actions", () => {
     if (typeof approvalEpoch !== "string") throw new Error("expected approval epoch");
     return { actionId: action.id, proposalHash: action.proposalHash, approvalEpoch };
   }
+
+  it("fails closed when an Attempt lease is blank, malformed, or expired even if the Run mirror is live", async () => {
+    for (const leaseExpiresAt of [
+      "",
+      "not-a-timestamp",
+      "2000-01-01T00:00:00.000Z",
+      "2099-01-01",
+      "01/01/2099",
+      "July 13, 2099"
+    ]) {
+      const fixture = await claimedRepository();
+      const lease = {
+        runnerId: "runner_1",
+        runId: "run_action",
+        attemptId: fixture.claimed.attemptId,
+        fencingToken: fixture.claimed.fencingToken
+      };
+      fixture.sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?")
+        .run(leaseExpiresAt, fixture.claimed.attemptId);
+
+      await expect(fixture.repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("stale_attempt");
+      expect(fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM runs WHERE id = ?").get("run_action"))
+        .toMatchObject({ leaseExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u) });
+    }
+  });
+
+  it("does not let an expired Attempt resurrect runner-controlled Run mutations", async () => {
+    const fixture = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
+
+    await expect(fixture.repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.markRunning({ ...lease, executor: "acp" })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.recordProgress({ ...lease, message: "late progress" })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.completeRun({
+      ...lease,
+      result: { conclusion: "success", summary: "late completion" }
+    })).resolves.toBe("stale_attempt");
+
+    const events = await fixture.repo.listRunEvents({ runId: "run_action" });
+    expect(events.map((event) => event.type)).not.toEqual(expect.arrayContaining([
+      "run.heartbeat",
+      "run.running",
+      "run.progress",
+      "run.completed"
+    ]));
+    await expect(fixture.repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "assigned" } });
+  });
+
+  it("does not request, resolve, or receipt material actions after the Attempt lease expires", async () => {
+    const requestFixture = await claimedRepository();
+    const requestLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: requestFixture.claimed.attemptId,
+      fencingToken: requestFixture.claimed.fencingToken
+    };
+    expireAttemptLease(requestFixture.sqlite, requestFixture.claimed.attemptId);
+    await expect(requestFixture.repo.requestActionPermission({
+      ...requestLease,
+      request: {
+        toolCallId: "tool_after_expiry",
+        title: "Publish after expiry",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    })).resolves.toBeNull();
+    expect(requestFixture.sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 0 });
+
+    const resolveFixture = await claimedRepository();
+    const resolveLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: resolveFixture.claimed.attemptId,
+      fencingToken: resolveFixture.claimed.fencingToken
+    };
+    const waiting = await resolveFixture.repo.requestActionPermission({
+      ...resolveLease,
+      request: {
+        toolCallId: "tool_resolve_after_expiry",
+        title: "Publish after approval",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    });
+    await resolveFixture.repo.recordApprovalDecision({
+      id: "approval_before_expiry",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(resolveFixture.repo, waiting!.action) }
+    });
+    expireAttemptLease(resolveFixture.sqlite, resolveFixture.claimed.attemptId);
+    await expect(resolveFixture.repo.resolveActionPermission({
+      ...resolveLease,
+      actionId: waiting!.action.id
+    })).resolves.toMatchObject({ state: "stale", action: { status: "waiting_approval" } });
+    expect(resolveFixture.sqlite.prepare("SELECT count(*) AS count FROM grants").get()).toEqual({ count: 0 });
+
+    const receiptFixture = await claimedRepository();
+    const receiptLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: receiptFixture.claimed.attemptId,
+      fencingToken: receiptFixture.claimed.fencingToken
+    };
+    const executing = await receiptFixture.repo.requestActionPermission({
+      ...receiptLease,
+      request: {
+        toolCallId: "tool_receipt_after_expiry",
+        title: "Read metadata",
+        kind: "execute",
+        permissionScopes: [],
+        mode: "autonomous",
+        provider: "acp"
+      }
+    });
+    expireAttemptLease(receiptFixture.sqlite, receiptFixture.claimed.attemptId);
+    await expect(receiptFixture.repo.recordMaterialActionReceipt({
+      ...receiptLease,
+      actionId: executing!.action.id,
+      receipt: {
+        id: "receipt_after_expiry",
+        actionId: executing!.action.id,
+        provider: "acp",
+        receiptRef: "acp:late",
+        outcome: "unknown",
+        observedAt: new Date().toISOString()
+      }
+    })).resolves.toMatchObject({ state: "stale", action: { status: "executing" } });
+    expect(receiptFixture.sqlite.prepare("SELECT receipt_json AS receiptJson FROM material_actions WHERE id = ?")
+      .get(executing!.action.id)).toEqual({ receiptJson: null });
+  });
+
+  it("rolls back action creation when the Attempt lease expires inside the transaction", async () => {
+    const fixture = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    const originalLease = fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?")
+      .get(fixture.claimed.attemptId);
+    fixture.sqlite.exec(`
+      CREATE TRIGGER expire_attempt_during_action_creation
+      BEFORE INSERT ON material_actions
+      BEGIN
+        UPDATE attempts SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = NEW.attempt_id;
+      END
+    `);
+
+    await expect(fixture.repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_interleaved_expiry",
+        title: "Publish during expiry",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    })).resolves.toBeNull();
+    expect(fixture.sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 0 });
+    expect(fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?")
+      .get(fixture.claimed.attemptId)).toEqual(originalLease);
+  });
 
   it("waits on the existing proposal approval path, creates an attempt grant, and reuses a known-success receipt", async () => {
     const { repo, claimed } = await claimedRepository();
@@ -3386,6 +3624,91 @@ describe("durable ACP material actions", () => {
     expect(repeated!.action.receipt).toBeUndefined();
   });
 
+  it("transactionally fences a non-material authorization returned from an insert conflict", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    sqlite.exec(`
+      CREATE TRIGGER create_non_material_conflict_winner
+      BEFORE INSERT ON material_actions
+      WHEN NEW.status = 'authorized'
+      BEGIN
+        INSERT INTO material_actions (
+          id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+          status, idempotency_key, proposal_id, proposal_hash, decision_snapshot_hash,
+          attempt_fence_digest, receipt_json, created_at, updated_at
+        ) VALUES (
+          NEW.id, NEW.run_id, NEW.attempt_id, NEW.action_family, NEW.capability, NEW.scope_json,
+          NEW.target_json, NEW.risk_tier, NEW.status, NEW.idempotency_key, NEW.proposal_id,
+          NEW.proposal_hash, NEW.decision_snapshot_hash, NEW.attempt_fence_digest, NEW.receipt_json,
+          NEW.created_at, NEW.updated_at
+        );
+      END
+    `);
+
+    const resolution = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_non_material_conflict",
+        title: "Read conflict metadata",
+        kind: "read",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "read",
+        resource: "@acme/report",
+        permissionScopes: [],
+        mode: "auto"
+      }
+    });
+
+    expect(resolution).toMatchObject({
+      state: "authorized",
+      decision: "allow_once",
+      action: { status: "authorized", attemptId: claimed.attemptId }
+    });
+    expect(sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+  });
+
+  it("never authorizes a non-material insert-conflict winner owned by a different Attempt", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    sqlite.exec(`
+      CREATE TRIGGER create_wrong_owner_non_material_conflict_winner
+      BEFORE INSERT ON material_actions
+      WHEN NEW.status = 'authorized'
+      BEGIN
+        INSERT INTO material_actions (
+          id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+          status, idempotency_key, proposal_id, proposal_hash, decision_snapshot_hash,
+          attempt_fence_digest, receipt_json, created_at, updated_at
+        ) VALUES (
+          NEW.id, NEW.run_id, 'attempt_wrong_owner', NEW.action_family, NEW.capability, NEW.scope_json,
+          NEW.target_json, NEW.risk_tier, NEW.status, NEW.idempotency_key, NEW.proposal_id,
+          NEW.proposal_hash, NEW.decision_snapshot_hash, 'wrong-fence-digest', NEW.receipt_json,
+          NEW.created_at, NEW.updated_at
+        );
+      END
+    `);
+
+    await expect(repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_wrong_owner_conflict",
+        title: "Read wrong-owner metadata",
+        kind: "read",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "read",
+        resource: "@acme/report",
+        permissionScopes: [],
+        mode: "auto"
+      }
+    })).resolves.toBeNull();
+    expect(sqlite.prepare("SELECT attempt_id AS attemptId, status FROM material_actions").get()).toEqual({
+      attemptId: "attempt_wrong_owner",
+      status: "authorized"
+    });
+  });
+
   it("keeps the first proposal terminal decision immutable and validates governed proposal identity", async () => {
     const { repo, claimed } = await claimedRepository();
     const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
@@ -3440,7 +3763,7 @@ describe("durable ACP material actions", () => {
   });
 
   it("cancels an expired waiting proposal and creates a new approval epoch for the replacement Attempt", async () => {
-    const waitingFixture = await claimedRepository(0);
+    const waitingFixture = await claimedRepository();
     const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: waitingFixture.claimed.attemptId, fencingToken: waitingFixture.claimed.fencingToken };
     const request = {
       toolCallId: "tool_rebind",
@@ -3452,6 +3775,7 @@ describe("durable ACP material actions", () => {
       provider: "npm"
     };
     const waiting = await waitingFixture.repo.requestActionPermission({ ...firstLease, request });
+    expireAttemptLease(waitingFixture.sqlite, waitingFixture.claimed.attemptId);
     const secondClaim = await waitingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: secondClaim!.attemptId, fencingToken: secondClaim!.fencingToken };
     const replacement = await waitingFixture.repo.requestActionPermission({ ...secondLease, request: { ...request, toolCallId: "tool_replacement" } });
@@ -3466,7 +3790,7 @@ describe("durable ACP material actions", () => {
     expect(stale).toMatchObject({ state: "stale" });
     expect(stale).not.toHaveProperty("decision");
 
-    const executingFixture = await claimedRepository(0);
+    const executingFixture = await claimedRepository();
     const executingFirstLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingFixture.claimed.attemptId, fencingToken: executingFixture.claimed.fencingToken };
     const executingRequest = {
       toolCallId: "tool_execute",
@@ -3479,6 +3803,7 @@ describe("durable ACP material actions", () => {
     };
     const executing = await executingFixture.repo.requestActionPermission({ ...executingFirstLease, request: executingRequest });
     expect(executing).toMatchObject({ state: "authorized", action: { status: "executing" } });
+    expireAttemptLease(executingFixture.sqlite, executingFixture.claimed.attemptId);
     const executingSecondClaim = await executingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     const executingSecondLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingSecondClaim!.attemptId, fencingToken: executingSecondClaim!.fencingToken };
     const staleReceipt = await executingFixture.repo.recordMaterialActionReceipt({
@@ -3504,7 +3829,7 @@ describe("durable ACP material actions", () => {
   });
 
   it("selects the replacement action epoch by Attempt number when timestamps tie", async () => {
-    const fixture = await claimedRepository(0);
+    const fixture = await claimedRepository();
     const firstLease = {
       runnerId: "runner_1",
       runId: "run_action",
@@ -3521,6 +3846,7 @@ describe("durable ACP material actions", () => {
       provider: "npm"
     };
     const first = await fixture.repo.requestActionPermission({ ...firstLease, request });
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
     const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     if (!first || !secondClaim) throw new Error("expected replacement Attempt and approval epoch");
     const secondLease = {
@@ -3656,7 +3982,7 @@ describe("durable ACP material actions", () => {
   });
 
   it("reconciles an unknown action once with sanitized, auditable evidence", async () => {
-    const fixture = await claimedRepository(0);
+    const fixture = await claimedRepository();
     const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
     const executing = await fixture.repo.requestActionPermission({
       ...lease,
@@ -3666,6 +3992,7 @@ describe("durable ACP material actions", () => {
         targetFingerprint: `sha256:${"8".repeat(64)}`, permissionScopes: ["npm:publish"], mode: "autonomous"
       }
     });
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
     await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
 
     const first = await fixture.repo.reconcileUnknownMaterialAction({
