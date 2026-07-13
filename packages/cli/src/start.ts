@@ -22,6 +22,7 @@ import {
 import {
   createDaemonRuntimeInput,
   dispatcherRuntimeHardeningInputFromEnv,
+  hermesProfileConfigurationWarning,
   normalizeChannelBindings,
   serveDaemon,
   startDispatcher,
@@ -934,6 +935,8 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     logger.log("OpenTag is running.");
     logger.log(`Config: ${input.configPath}`);
     logger.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
+    const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
+    if (hermesWarning) logger.log(hermesWarning);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
         const slack = config.platforms.slack!;
@@ -1048,6 +1051,8 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     logger.log(relayTrustWarning(relayUrl));
     logger.log("Local dispatcher: disabled");
     logger.log(`Runner: ${config.daemon.runnerId}`);
+    const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
+    if (hermesWarning) logger.log(hermesWarning);
     if (config.platforms.github) {
       logger.log(`GitHub webhook URL: ${githubRelayWebhookUrl(config)}`);
       logger.log("GitHub webhook secret: the relay must verify the configured secret before creating runs.");

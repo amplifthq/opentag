@@ -168,7 +168,7 @@ use `--permission-mode plan`.
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `claudeCode` | none | Claude Code executor settings |
-| `hermes` | none | Hermes executor command/profile settings; `profile` and `profileTemplate` still override the Hermes CLI `-p` argument |
+| `hermes` | fixed profile `opentag` when Hermes is selected during setup | Hermes command and one dedicated, pre-existing profile. Every readiness probe and invocation passes `hermes -p <profile>`; legacy `profileTemplate` values are parsed but ignored. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
@@ -178,6 +178,42 @@ use `--permission-mode plan`.
 | `pollIntervalMs` | `5000` | Poll interval for `serve` |
 | `heartbeatIntervalMs` | `15000` | Heartbeat interval for claimed runs |
 | `runTimeoutMs` | none | Optional hard timeout for one executor run. When it fires, OpenTag requests cancellation and records the run as `timed_out`. |
+
+### Hermes execution profile
+
+OpenTag uses one fixed Hermes profile as the executor identity boundary. Setup
+defaults this value to `opentag`, writes it to `daemon.hermes.profile`, and
+validates the profile before saving the configuration with a non-mutating probe:
+
+```bash
+hermes -p opentag --version
+```
+
+Create the dedicated profile first if necessary:
+
+```bash
+hermes profile create opentag
+```
+
+You may instead configure another dedicated, pre-existing profile with
+`opentag setup --executor hermes --hermes-profile <profile>`. OpenTag passes the
+selected profile on every execution as `hermes -p <profile> -z <prompt>`. If the
+profile probe fails, setup, doctor, and runtime readiness fail closed rather than
+falling back to Hermes' mutable sticky/global profile.
+
+Older configs may still contain `daemon.hermes.profileTemplate` or
+`OPENTAG_HERMES_PROFILE_TEMPLATE`. These values remain parse-compatible for
+upgrades, but OpenTag does not use them to derive per-source or per-thread
+profiles. Startup and doctor warn when a legacy template is present. Automatic
+profile creation, cloning, locking, retention, and cleanup require a separate
+lifecycle design and are intentionally deferred.
+
+To run the opt-in Hermes v0.18.2 CLI contract smoke test against an existing
+profile without creating or changing it:
+
+```bash
+OPENTAG_HERMES_SMOKE_PROFILE=<profile> pnpm smoke:hermes-profile-contract
+```
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the
 runner has marked the run as running, the command prefers the run-specific
