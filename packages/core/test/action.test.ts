@@ -115,6 +115,64 @@ describe("governed material actions", () => {
     expect(JSON.stringify(first)).not.toContain("secret-value");
   });
 
+  it("keeps normalized target identity canonical when extensions reuse reserved fields", () => {
+    const normalized = normalizeMaterialActionRequest({
+      title: "Publish report",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      targetConstraints: { queryMode: "canonical", reuse: "exact" },
+      grantScope: { package: "@acme/report", versions: "*" },
+      target: {
+        title: "Delete production",
+        kind: "delete",
+        provider: "forged",
+        connectionId: "forged:admin",
+        operation: "delete",
+        resource: "production",
+        resourceVersion: "latest",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { reuse: "deny" },
+        grantScope: { package: "*", versions: "*" },
+        displayLabel: "Release report"
+      }
+    });
+
+    expect(normalized.target).toMatchObject({
+      title: "Publish report",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/report",
+      resourceVersion: "next",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      targetConstraints: { queryMode: "canonical", reuse: "exact" },
+      grantScope: { package: "@acme/report", versions: "*" },
+      displayLabel: "Release report"
+    });
+
+    const withoutOptionalIdentity = normalizeMaterialActionRequest({
+      title: "Publish report",
+      target: {
+        kind: "delete",
+        resourceVersion: "latest",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { reuse: "deny" },
+        grantScope: { package: "*", versions: "*" },
+        displayLabel: "Release report"
+      }
+    });
+    expect(withoutOptionalIdentity.target).toMatchObject({ displayLabel: "Release report" });
+    for (const reserved of ["kind", "resourceVersion", "targetFingerprint", "targetConstraints", "grantScope"]) {
+      expect(withoutOptionalIdentity.target).not.toHaveProperty(reserved);
+    }
+  });
+
   it("matches allow_once only to an attempt and allow_run only to the exact normalized family and scope", () => {
     const once = {
       id: "grant_once",
@@ -193,6 +251,68 @@ describe("governed material actions", () => {
     });
     const deniedReuseGrant = { ...runGrant, capability: nonReusable.actionFamily, resourceScope: nonReusable.scope };
     expect(grantMatchesAction(deniedReuseGrant, { runId: "run_1", attemptId: "attempt_2", action: nonReusable })).toBe(false);
+  });
+
+  it("preserves an exact allow_once grant when the target denies run reuse", () => {
+    const nonReusable = normalizeMaterialActionRequest({
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny" }
+    });
+    const exactGrant = {
+      runId: "run_1",
+      attemptId: "attempt_1",
+      capability: nonReusable.actionFamily,
+      resourceScope: nonReusable.scope,
+      constraints: {
+        permissionDecision: "allow_once",
+        actionId: "action_1",
+        proposalHash: "proposal_hash_1"
+      }
+    };
+    const exactInput = {
+      runId: "run_1",
+      attemptId: "attempt_1",
+      actionId: "action_1",
+      proposalHash: "proposal_hash_1",
+      action: nonReusable
+    };
+
+    expect(grantMatchesAction(exactGrant, exactInput)).toBe(true);
+    const inexactCases = [
+      { label: "missing grant attempt", grant: { ...exactGrant, attemptId: undefined }, input: exactInput },
+      { label: "mismatched attempt", grant: exactGrant, input: { ...exactInput, attemptId: "attempt_2" } },
+      {
+        label: "missing grant action",
+        grant: { ...exactGrant, constraints: { permissionDecision: "allow_once", proposalHash: "proposal_hash_1" } },
+        input: exactInput
+      },
+      { label: "missing input action", grant: exactGrant, input: { ...exactInput, actionId: undefined } },
+      { label: "mismatched action", grant: exactGrant, input: { ...exactInput, actionId: "action_2" } },
+      {
+        label: "missing grant proposal",
+        grant: { ...exactGrant, constraints: { permissionDecision: "allow_once", actionId: "action_1" } },
+        input: exactInput
+      },
+      { label: "missing input proposal", grant: exactGrant, input: { ...exactInput, proposalHash: undefined } },
+      { label: "mismatched proposal", grant: exactGrant, input: { ...exactInput, proposalHash: "proposal_hash_2" } }
+    ];
+    for (const { label, grant, input } of inexactCases) {
+      expect({ label, matches: grantMatchesAction(grant, input) }).toEqual({ label, matches: false });
+    }
+    expect(grantMatchesAction({
+      ...exactGrant,
+      attemptId: undefined,
+      constraints: { permissionDecision: "allow_run" }
+    }, {
+      runId: "run_1",
+      attemptId: "attempt_1",
+      action: nonReusable
+    })).toBe(false);
   });
 
   it("keeps internal guardrails active in autonomous mode", () => {

@@ -26,9 +26,17 @@ export type MaterialActionRequestInput = {
 const MATERIAL_ACTION_PATTERN = /(?:push|deploy|publish|release|create|update|delete|write|mutat|send|post|merge|issue|connector)/iu;
 const CRITICAL_ACTION_PATTERN = /(?:credential|secret|token|security[_ -]?override|disable[_ -]?(?:guard|safety))/iu;
 const OPAQUE_MATERIAL_ACTION_KINDS = new Set(["execute", "tool", "fetch", "edit", "delete", "move", "other"]);
+const CANONICAL_TARGET_KEYS = new Set([
+  "title", "kind", "provider", "connectionId", "operation", "resource", "resourceVersion",
+  "targetFingerprint", "targetConstraints", "grantScope"
+]);
 
 function normalizedRecord(value: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function targetExtensions(value: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value ?? {}).filter(([key]) => !CANONICAL_TARGET_KEYS.has(key)));
 }
 
 export function normalizeMaterialActionRequest(input: MaterialActionRequestInput): NormalizedMaterialAction {
@@ -69,6 +77,7 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
     actionFamily: actionFamily || "tool",
     scope,
     target: normalizedRecord({
+      ...targetExtensions(input.target),
       title,
       provider,
       connectionId,
@@ -78,7 +87,6 @@ export function normalizeMaterialActionRequest(input: MaterialActionRequestInput
       ...(targetFingerprint ? { targetFingerprint } : {}),
       ...(input.targetConstraints ? { targetConstraints: normalizedRecord(input.targetConstraints) } : {}),
       ...(input.grantScope ? { grantScope: normalizedRecord(input.grantScope) } : {}),
-      ...(input.target ?? {}),
       ...(input.kind ? { kind } : {})
     }),
     riskTier,
@@ -103,14 +111,22 @@ export function grantMatchesAction(
   grant: Pick<Grant, "runId" | "attemptId" | "capability" | "resourceScope" | "expiresAt" | "revokedAt" | "constraints">,
   input: { runId: string; attemptId: string; actionId?: string; proposalHash?: string; action: NormalizedMaterialAction; now?: string }
 ): boolean {
-  if (!actionScopeAllowsRunReuse(input.action.scope)) return false;
+  const constraints = grant.constraints ?? {};
+  const permissionDecision = constraints["permissionDecision"];
+  const grantActionId = constraints["actionId"];
+  const grantProposalHash = constraints["proposalHash"];
+  const exactOneShot = permissionDecision === "allow_once" &&
+    typeof grant.attemptId === "string" && grant.attemptId.trim().length > 0 && grant.attemptId === input.attemptId &&
+    typeof grantActionId === "string" && grantActionId.trim().length > 0 &&
+    typeof input.actionId === "string" && input.actionId.trim().length > 0 && grantActionId === input.actionId &&
+    typeof grantProposalHash === "string" && grantProposalHash.trim().length > 0 &&
+    typeof input.proposalHash === "string" && input.proposalHash.trim().length > 0 && grantProposalHash === input.proposalHash;
+  if (!exactOneShot && !actionScopeAllowsRunReuse(input.action.scope)) return false;
   if (grant.revokedAt) return false;
   if (grant.expiresAt && grant.expiresAt <= (input.now ?? new Date().toISOString())) return false;
   if (grant.runId !== input.runId || grant.capability !== input.action.actionFamily) return false;
   if (grant.attemptId && grant.attemptId !== input.attemptId) return false;
-  if (grant.constraints?.["permissionDecision"] === "allow_once") {
-    if (grant.constraints["actionId"] !== input.actionId || grant.constraints["proposalHash"] !== input.proposalHash) return false;
-  }
+  if (permissionDecision === "allow_once" && !exactOneShot) return false;
   return stableJson(grant.resourceScope) === stableJson(input.action.scope);
 }
 

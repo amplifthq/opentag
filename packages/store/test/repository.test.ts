@@ -2856,7 +2856,7 @@ describe("durable ACP material actions", () => {
     } as const;
   }
 
-  async function claimedRepository(leaseSeconds = 60) {
+  async function claimedRepository(leaseSeconds = 60, fixedAttemptId?: string, fixedFencingToken = "fixed-test-fencing-token") {
     const sqlite = new Database(":memory:");
     const repo = createOpenTagRepository(drizzle(sqlite));
     migrateSchema(sqlite);
@@ -2865,7 +2865,10 @@ describe("durable ACP material actions", () => {
     await repo.createRun({ id: "run_action", event: permissionEvent("action") });
     const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds });
     if (!claimed) throw new Error("expected claimed run");
-    return { sqlite, repo, claimed };
+    if (!fixedAttemptId) return { sqlite, repo, claimed };
+    sqlite.prepare("UPDATE attempts SET id = ?, fencing_token = ? WHERE id = ?").run(fixedAttemptId, fixedFencingToken, claimed.attemptId);
+    sqlite.prepare("UPDATE runs SET current_attempt_id = ? WHERE id = ?").run(fixedAttemptId, "run_action");
+    return { sqlite, repo, claimed: { ...claimed, attemptId: fixedAttemptId, fencingToken: fixedFencingToken } };
   }
 
   async function approvalIdentity(
@@ -3112,6 +3115,203 @@ describe("durable ACP material actions", () => {
     });
     await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
     expect(sqlite.prepare("SELECT attempt_id AS attemptId FROM grants").get()).toEqual({ attemptId: claimed.attemptId });
+  });
+
+  it("keeps denied exact targets out of opaque one-shot action identity while retaining their stored constraints", async () => {
+    const firstFixture = await claimedRepository(60, "attempt_opaque_identity");
+    const secondFixture = await claimedRepository(60, "attempt_opaque_identity");
+    const request = {
+      toolCallId: "tool_opaque_identity",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await firstFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: firstFixture.claimed.attemptId,
+      fencingToken: firstFixture.claimed.fencingToken,
+      request: {
+        ...request,
+        resource: "https://example.test/report-blue",
+        targetFingerprint: `sha256:${"a".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" }
+      }
+    });
+    const second = await secondFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondFixture.claimed.attemptId,
+      fencingToken: secondFixture.claimed.fencingToken,
+      request: {
+        ...request,
+        resource: "https://example.test/report-green",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "green" }
+      }
+    });
+
+    expect(first).toMatchObject({ state: "waiting", action: { scope: { targetConstraints: { exactTarget: "blue" } } } });
+    expect(second).toMatchObject({ state: "waiting", action: { scope: { targetConstraints: { exactTarget: "green" } } } });
+    expect(second!.action.id).toBe(first!.action.id);
+    expect(second!.action.idempotencyKey).toBe(first!.action.idempotencyKey);
+    expect(second!.action.proposalId).toBe(first!.action.proposalId);
+    expect(second!.action.proposalHash).toBe(first!.action.proposalHash);
+    await expect(approvalIdentity(secondFixture.repo, second!.action)).resolves.toEqual(
+      await approvalIdentity(firstFixture.repo, first!.action)
+    );
+  });
+
+  it("keys agent-controlled opaque tool identity to private Attempt fencing material", async () => {
+    const firstFixture = await claimedRepository(60, "attempt_keyed_identity", "first-private-fencing-key");
+    const secondFixture = await claimedRepository(60, "attempt_keyed_identity", "second-private-fencing-key");
+    const request = {
+      toolCallId: "authorization=agent-controlled-sensitive-value",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" },
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await firstFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: firstFixture.claimed.attemptId,
+      fencingToken: firstFixture.claimed.fencingToken,
+      request
+    });
+    const second = await secondFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondFixture.claimed.attemptId,
+      fencingToken: secondFixture.claimed.fencingToken,
+      request
+    });
+
+    expect(first).toMatchObject({ state: "waiting" });
+    expect(second).toMatchObject({ state: "waiting" });
+    expect(second!.action.id).not.toBe(first!.action.id);
+    expect(second!.action.idempotencyKey).not.toBe(first!.action.idempotencyKey);
+    expect(JSON.stringify([first, second])).not.toContain(request.toolCallId);
+  });
+
+  it("fails closed when one opaque tool identity drifts to a different denied exact target", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_drifting_identity",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        ...request,
+        resource: "https://example.test/report-blue",
+        targetFingerprint: `sha256:${"a".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" }
+      }
+    });
+    await repo.recordApprovalDecision({
+      id: "approval_before_target_drift",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, waiting!.action) }
+    });
+
+    const drifted = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        ...request,
+        resource: "https://example.test/report-green",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "green" }
+      }
+    });
+
+    expect(drifted).toMatchObject({
+      state: "denied",
+      decision: "deny",
+      action: {
+        id: waiting!.action.id,
+        status: "cancelled",
+        scope: { targetConstraints: { exactTarget: "blue" } }
+      }
+    });
+    expect(JSON.stringify(drifted)).not.toContain("green");
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({
+      state: "denied",
+      action: { status: "cancelled" }
+    });
+  });
+
+  it("keeps distinct opaque tool calls eligible for separate exact one-shot approvals", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" },
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_one_shot_first" } });
+    await repo.recordApprovalDecision({
+      id: "approval_one_shot_first",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, first!.action) }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({
+      state: "authorized",
+      decision: "allow_once"
+    });
+
+    const second = await repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_one_shot_second" } });
+    expect(second).toMatchObject({ state: "waiting" });
+    expect(second!.action.id).not.toBe(first!.action.id);
+    expect(second!.action.proposalHash).not.toBe(first!.action.proposalHash);
+    await repo.recordApprovalDecision({
+      id: "approval_one_shot_second",
+      proposalId: second!.action.proposalId!,
+      approvedIntentIds: [`intent_${second!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:02:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, second!.action) }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: second!.action.id })).resolves.toMatchObject({
+      state: "authorized",
+      decision: "allow_once"
+    });
+    const grantedActionIds = (sqlite.prepare("SELECT constraints_json AS constraintsJson FROM grants").all() as Array<{ constraintsJson: string }>).map(
+      ({ constraintsJson }) => String((JSON.parse(constraintsJson) as Record<string, unknown>)["actionId"])
+    ).sort();
+    expect(grantedActionIds).toEqual([first!.action.id, second!.action.id].sort());
   });
 
   it("rolls back grant-based authorization when the grant is revoked or Attempt is reassigned during creation", async () => {

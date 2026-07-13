@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   ApprovalDecisionSchema,
   ActionPermissionRequestSchema,
@@ -3096,17 +3096,71 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
         ...(request.grantScope ? { grantScope: request.grantScope } : {})
       });
-      const semanticKey = stableActionJson({
-        runId: input.runId,
-        actionFamily: normalized.actionFamily,
-        scope: normalized.scope,
-        target: normalized.target
-      });
+      const reusableIdentity = actionScopeAllowsRunReuse(normalized.scope);
+      const semanticKey = reusableIdentity
+        ? stableActionJson({
+            runId: input.runId,
+            actionFamily: normalized.actionFamily,
+            scope: normalized.scope,
+            target: normalized.target
+          })
+        : stableActionJson({
+            runId: input.runId,
+            attemptId: input.attemptId,
+            opaqueToolCallId: createHmac("sha256", input.fencingToken).update(request.toolCallId).digest("hex"),
+            actionFamily: normalized.actionFamily,
+            provider: normalized.scope["provider"],
+            connectionId: normalized.scope["connectionId"],
+            operation: normalized.scope["operation"]
+          });
       const idempotencyKey = `action:${sha256(semanticKey)}`;
       const actionId = `action_${sha256(stableActionJson({ semanticKey, attemptId: input.attemptId })).slice(0, 24)}`;
-      const candidateProposalHash = sha256(stableActionJson({ actionId, normalized }));
+      const candidateProposalHash = reusableIdentity
+        ? sha256(stableActionJson({ actionId, normalized }))
+        : sha256(stableActionJson({ actionId, semanticKey, reuse: "deny" }));
+      const hasSameExactAction = (row: typeof materialActions.$inferSelect): boolean => stableActionJson({
+        scope: JSON.parse(row.scopeJson) as unknown,
+        target: JSON.parse(row.targetJson) as unknown
+      }) === stableActionJson({ scope: normalized.scope, target: normalized.target });
+      const failClosedOnTargetDrift = (row: typeof materialActions.$inferSelect): ActionPermissionResolution | null => db.transaction((tx) => {
+        const currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
+        const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        const currentAction = tx.select().from(materialActions).where(eq(materialActions.id, row.id)).limit(1).get();
+        if (
+          !currentAttempt || !currentRun || !currentAction || currentAttempt.runnerId !== input.runnerId ||
+          currentAttempt.fencingToken !== input.fencingToken || !["assigned", "running"].includes(currentAttempt.status) ||
+          currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId
+        ) return null;
+        const reason = "The opaque ACP request identity was replayed with a different exact target. The prior approval was not reused.";
+        if (currentAction.status === "executing") {
+          tx.update(materialActions)
+            .set({ status: "unknown", updatedAt: nowIso() })
+            .where(and(eq(materialActions.id, currentAction.id), eq(materialActions.status, "executing")))
+            .run();
+          const unknown = tx.select().from(materialActions).where(eq(materialActions.id, currentAction.id)).limit(1).get();
+          return { state: "unknown", action: actionFromRow(unknown!), reason };
+        }
+        if (currentAction.status === "succeeded" || currentAction.status === "unknown") {
+          return { state: "unknown", action: actionFromRow(currentAction), reason };
+        }
+        if (["proposed", "waiting_approval", "authorized"].includes(currentAction.status)) {
+          const updatedAt = nowIso();
+          tx.update(materialActions)
+            .set({ status: "cancelled", updatedAt })
+            .where(and(eq(materialActions.id, currentAction.id), inArray(materialActions.status, ["proposed", "waiting_approval", "authorized"])))
+            .run();
+          tx.update(runs)
+            .set({ status: "running", updatedAt })
+            .where(and(eq(runs.id, input.runId), eq(runs.currentAttemptId, input.attemptId), eq(runs.assignedRunnerId, input.runnerId)))
+            .run();
+          const cancelled = tx.select().from(materialActions).where(eq(materialActions.id, currentAction.id)).limit(1).get();
+          return { state: "denied", action: actionFromRow(cancelled!), decision: "deny", reason };
+        }
+        return { state: "denied", action: actionFromRow(currentAction), decision: "deny", reason };
+      });
       const existing = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
       if (existing) {
+        if (!reusableIdentity && !hasSameExactAction(existing)) return failClosedOnTargetDrift(existing);
         const action = actionFromRow(existing);
         if (action.status === "succeeded" && action.receipt) {
           return ActionPermissionResolutionSchema.parse({ state: "reconciled", action, decision: "deny", receipt: action.receipt, reason: "Known success reused; the ACP tool must not execute again." });
@@ -3294,6 +3348,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (inserted.kind === "conflict") {
         const winnerRow = await latestMaterialActionForSemanticKey({ runId: input.runId, idempotencyKey });
         if (!winnerRow || winnerRow.id !== actionId) return null;
+        if (!reusableIdentity && !hasSameExactAction(winnerRow)) return failClosedOnTargetDrift(winnerRow);
         const winner = actionFromRow(winnerRow);
         if (winner.status === "succeeded" && winner.receipt) {
           return { state: "reconciled", action: winner, decision: "deny", receipt: winner.receipt, reason: "Known success reused; the ACP tool must not execute again." };

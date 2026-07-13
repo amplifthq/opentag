@@ -15,6 +15,30 @@ if (mode === "malformed-live") {
   await new Promise(() => undefined);
 }
 
+if (mode === "oversized-complete" || mode === "oversized-incomplete") {
+  await writeFile(join(process.cwd(), "acp-child-pid.txt"), `${process.pid}\n`);
+  let requestBuffer = "";
+  for await (const chunk of process.stdin) {
+    requestBuffer += chunk.toString("utf8");
+    const newline = requestBuffer.indexOf("\n");
+    if (newline < 0) continue;
+    const request = JSON.parse(requestBuffer.slice(0, newline));
+    const frame = JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        protocolVersion: 1,
+        agentCapabilities: {},
+        agentInfo: { name: "opentag-test-agent", version: "1.0.0" },
+        padding: "界".repeat(400_000)
+      }
+    });
+    process.stdout.write(mode === "oversized-complete" ? `${frame}\n` : frame);
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    process.exit(0);
+  }
+}
+
 if (mode === "child-exit") {
   process.stderr.write("publish failed: token=SENTINEL_CHILD_STDERR_SECRET\n");
   process.exit(7);

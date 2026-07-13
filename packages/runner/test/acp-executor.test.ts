@@ -288,6 +288,31 @@ describe("ACP executor", () => {
     expect(JSON.stringify(requests)).not.toMatch(/password|operator|signed-secret|X-Amz-Signature|#token|example test/iu);
   }, 15_000);
 
+  it("derives stable target fingerprints only from sanitized reusable identity", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const resources = [
+      "https://first-user:first-password@example.test/deploy?environment=staging&access_token=first-secret#token=first",
+      "https://second-user:second-password@example.test/deploy?environment=staging&access_token=second-secret#token=second",
+      "https://example.test/deploy?custom_target=blue",
+      "https://example.test/deploy?custom_target=green"
+    ];
+    for (const [index, resource] of resources.entries()) {
+      const executor = createAcpExecutor({ manifest: permissionManifest() });
+      await executor.run({
+        ...input({ kind: "scratch", path: permissionWorkspace(`credential-safe-fingerprint-${index}`, { OPENTAG_ACP_TEST_RESOURCE: resource }) }, `run_credential_safe_fingerprint_${index}`),
+        permissionResolver: async (request) => {
+          requests.push(request);
+          return { actionId: `action_credential_safe_fingerprint_${index}`, decision: "allow_once", material: true };
+        }
+      }, { emit: async () => undefined });
+    }
+
+    expect(requests[0]?.["targetFingerprint"]).toBe(requests[1]?.["targetFingerprint"]);
+    expect(requests[2]?.["targetFingerprint"]).toBe(requests[3]?.["targetFingerprint"]);
+    expect(requests.every((request) => request["resource"] === "https://example.test/deploy")).toBe(true);
+    expect(JSON.stringify(requests)).not.toMatch(/resourceFingerprint|queryFingerprint|first-password|second-password|first-secret|second-secret/iu);
+  }, 20_000);
+
   it("fingerprints generic ACP version, environment, force, visibility, and provider constraints exactly", async () => {
     const fingerprints: string[] = [];
     const variants: Array<Record<string, string>> = [
@@ -480,6 +505,32 @@ describe("ACP executor", () => {
 
     await expect(
       executor.run(input({ kind: "scratch", path: scratch }, "run_malformed"), { emit: async (event) => void events.push(event.message) })
+    ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
+    expect(events.join("\n")).toMatch(/ACP diagnostic \(protocol\).*invalid NDJSON/iu);
+    const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it("rejects an oversized complete ACP frame by UTF-8 bytes through protocol cleanup", async () => {
+    const scratch = tempDir("oversized-complete");
+    const executor = createAcpExecutor({ manifest: manifest("oversized-complete"), cancelGraceMs: 100 });
+    const events: string[] = [];
+
+    await expect(
+      executor.run(input({ kind: "scratch", path: scratch }, "run_oversized_complete"), { emit: async (event) => void events.push(event.message) })
+    ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
+    expect(events.join("\n")).toMatch(/ACP diagnostic \(protocol\).*invalid NDJSON/iu);
+    const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it("rejects an oversized incomplete ACP frame by UTF-8 bytes before EOF", async () => {
+    const scratch = tempDir("oversized-incomplete");
+    const executor = createAcpExecutor({ manifest: manifest("oversized-incomplete"), cancelGraceMs: 100 });
+    const events: string[] = [];
+
+    await expect(
+      executor.run(input({ kind: "scratch", path: scratch }, "run_oversized_incomplete"), { emit: async (event) => void events.push(event.message) })
     ).rejects.toThrow(/ACP agent fixture-agent.*(?:protocol|exit)/i);
     expect(events.join("\n")).toMatch(/ACP diagnostic \(protocol\).*invalid NDJSON/iu);
     const pid = Number(readFileSync(join(scratch, "acp-child-pid.txt"), "utf8"));

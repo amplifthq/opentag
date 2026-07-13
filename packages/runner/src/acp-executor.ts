@@ -38,6 +38,7 @@ import { scrubEnvironment } from "./security.js";
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
 const CHILD_EXIT_GRACE_MS = 500;
 const MAX_ACP_DIAGNOSTIC_BYTES = 16 * 1024;
+const MAX_ACP_FRAME_BYTES = 1024 * 1024;
 
 class AcpPublicFailure extends Error {}
 
@@ -80,25 +81,30 @@ function safeProvider(value: unknown): string | undefined {
   return normalized && /^[a-z0-9][a-z0-9._-]*$/u.test(normalized) ? normalized : undefined;
 }
 
-function safeResourceIdentity(value: unknown): { resource?: string; constraints?: Record<string, unknown> } {
+function safeResourceIdentity(value: unknown): {
+  resource?: string;
+  constraints?: Record<string, unknown>;
+  fingerprintConstraints?: Record<string, unknown>;
+} {
   if (typeof value !== "string") return {};
   const normalized = value.replace(CONTROL_CHARACTER_PATTERN, "").trim().slice(0, 512);
   if (!normalized) return {};
   if (!/^[a-z][a-z0-9+.-]*:\/\//iu.test(normalized)) {
     return containsCredentialLikeData(normalized)
-      ? { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } }
+      ? { constraints: { resourceMode: "credential_path", reuse: "deny" } }
       : { resource: normalized };
   }
   try {
     const url = new URL(normalized);
     if (!SAFE_RESOURCE_PROTOCOLS.has(url.protocol)) {
-      return { constraints: { resourceMode: "unsupported_scheme", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+      return { constraints: { resourceMode: "unsupported_scheme", reuse: "deny" } };
     }
     const hadUserInfo = Boolean(url.username || url.password);
     const hadCredentialFragment = Boolean(url.hash && containsCredentialLikeData(url.hash));
     const queryEntries = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
       leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
     const disclosedQuery: Record<string, string | string[]> = {};
+    const reusableQuery: Record<string, string | string[]> = {};
     let denyReuse = hadUserInfo || hadCredentialFragment;
     let strippedCredentials = false;
     let hasUnclassifiedQuery = false;
@@ -115,6 +121,9 @@ function safeResourceIdentity(value: unknown): { resource?: string; constraints?
       if (!REUSABLE_QUERY_KEYS.has(key.toLowerCase())) {
         hasUnclassifiedQuery = true;
         denyReuse = true;
+      } else {
+        const reusable = reusableQuery[key];
+        reusableQuery[key] = reusable === undefined ? queryValue : Array.isArray(reusable) ? [...reusable, queryValue] : [reusable, queryValue];
       }
       const existing = disclosedQuery[key];
       disclosedQuery[key] = existing === undefined ? queryValue : Array.isArray(existing) ? [...existing, queryValue] : [existing, queryValue];
@@ -127,34 +136,43 @@ function safeResourceIdentity(value: unknown): { resource?: string; constraints?
     try {
       decodedPath = decodeURIComponent(url.pathname);
     } catch {
-      return { constraints: { resourceMode: "invalid_encoding", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+      return { constraints: { resourceMode: "invalid_encoding", reuse: "deny" } };
     }
     if (containsCredentialLikeData(decodedPath)) {
-      return { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+      return { constraints: { resourceMode: "credential_path", reuse: "deny" } };
     }
     const resource = url.toString().replace(/\/$/u, url.pathname === "/" ? "/" : "");
     const constraints = queryEntries.length > 0 || hadUserInfo || hadCredentialFragment
       ? {
           ...(hadUserInfo || hadCredentialFragment
-            ? { resourceMode: "credential_stripped", resourceFingerprint: canonicalTargetFingerprint(normalized) }
+            ? { resourceMode: "credential_stripped" }
             : {}),
           ...(Object.keys(disclosedQuery).length > 0 ? { urlQuery: disclosedQuery } : {}),
           ...(queryEntries.length > 0
             ? {
                 queryMode: strippedCredentials ? "credential_stripped" : hasUnclassifiedQuery ? "unclassified_exact" : "canonical",
-                ...(strippedCredentials || hasUnclassifiedQuery
-                  ? { queryFingerprint: canonicalTargetFingerprint(queryEntries) }
-                  : {})
               }
             : {}),
           reuse: denyReuse ? "deny" : "exact"
         }
       : undefined;
-    return { resource, ...(constraints ? { constraints } : {}) };
+    const fingerprintConstraints = constraints
+      ? {
+          ...(constraints["resourceMode"] ? { resourceMode: constraints["resourceMode"] } : {}),
+          ...(Object.keys(reusableQuery).length > 0 ? { urlQuery: reusableQuery } : {}),
+          ...(constraints["queryMode"] ? { queryMode: constraints["queryMode"] } : {}),
+          reuse: constraints["reuse"]
+        }
+      : undefined;
+    return {
+      resource,
+      ...(constraints ? { constraints } : {}),
+      ...(fingerprintConstraints ? { fingerprintConstraints } : {})
+    };
   } catch {
     return containsCredentialLikeData(normalized)
-      ? { constraints: { resourceMode: "credential_path", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } }
-      : { constraints: { resourceMode: "invalid_url", resourceFingerprint: canonicalTargetFingerprint(normalized), reuse: "deny" } };
+      ? { constraints: { resourceMode: "credential_path", reuse: "deny" } }
+      : { constraints: { resourceMode: "invalid_url", reuse: "deny" } };
   }
 }
 
@@ -232,7 +250,7 @@ function structuredPermissionTarget(rawInput: unknown, kind: string | null | und
     operation,
     ...(resource ? { resource } : {}),
     ...(resourceVersion ? { resourceVersion } : {}),
-    ...(resourceIdentity.constraints ? { targetConstraints: resourceIdentity.constraints } : {})
+    ...(resourceIdentity.fingerprintConstraints ? { targetConstraints: resourceIdentity.fingerprintConstraints } : {})
   });
   return {
     provider,
@@ -347,6 +365,7 @@ function permissionResponseForDecision(
 function strictAcpOutput(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let pending = "";
+  let pendingBytes = 0;
 
   function validate(line: string): void {
     if (!line.trim()) return;
@@ -361,6 +380,16 @@ function strictAcpOutput(source: ReadableStream<Uint8Array>): ReadableStream<Uin
   return source.pipeThrough(
     new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
+        let frameStart = 0;
+        for (let index = 0; index < chunk.length; index += 1) {
+          if (chunk[index] !== 0x0a) continue;
+          pendingBytes += index - frameStart;
+          if (pendingBytes > MAX_ACP_FRAME_BYTES) throw new Error("ACP agent emitted an invalid NDJSON frame.");
+          pendingBytes = 0;
+          frameStart = index + 1;
+        }
+        pendingBytes += chunk.length - frameStart;
+        if (pendingBytes > MAX_ACP_FRAME_BYTES) throw new Error("ACP agent emitted an invalid NDJSON frame.");
         pending += decoder.decode(chunk, { stream: true });
         const lines = pending.split("\n");
         pending = lines.pop() ?? "";
