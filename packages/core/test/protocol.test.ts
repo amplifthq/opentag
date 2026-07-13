@@ -74,6 +74,27 @@ describe("protocol helpers", () => {
     expect(conversationKeysFromEvent(githubEvent)).toEqual(["github:acme/demo"]);
   });
 
+  it("keeps a canonical Teams thread alias when the reply conversation id includes messageid", () => {
+    const teamsEvent: OpenTagEvent = {
+      ...githubEvent,
+      id: "evt_teams_1",
+      source: "teams",
+      sourceEventId: "activity_1",
+      actor: { provider: "teams", providerUserId: "aad-1", handle: "Ada" },
+      callback: {
+        provider: "teams",
+        uri: "https://smba.trafficmanager.net/amer/",
+        threadKey: "https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2;messageid=root-1|root-1"
+      },
+      metadata: { tenantId: "tenant-1", conversationId: "19:abc@thread.tacv2;messageid=root-1" }
+    };
+
+    expect(conversationKeysFromEvent(teamsEvent)).toEqual([
+      "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2;messageid=root-1|root-1",
+      "teams:https://smba.trafficmanager.net/amer/|19:abc@thread.tacv2|root-1"
+    ]);
+  });
+
   it("does not invent a canonical work item when only a Slack thread is known", () => {
     const { workItem: _githubWorkItem, ...githubEventWithoutWorkItem } = githubEvent;
     const slackEvent: OpenTagEvent = {

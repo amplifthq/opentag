@@ -22,6 +22,7 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
   const linear = config.platforms.linear;
   const telegram = config.platforms.telegram;
   const discord = config.platforms.discord;
+  const teams = config.platforms.teams;
   const hermes = config.daemon.hermes;
   const agentSessionProfile = config.daemon.agentSessionProfile;
   const lastSetup = config.preferences?.lastSetup;
@@ -46,7 +47,9 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
                   ? { platform: "telegram" }
                   : discord
                     ? { platform: "discord" }
-                    : {}),
+                    : teams
+                      ? { platform: "teams" }
+                      : {}),
     ...(repository?.checkoutPath ? { projectPath: repository.checkoutPath } : {}),
     ...(repository?.defaultExecutor ? { executor: repository.defaultExecutor } : {}),
     ...(hermes?.command ? { hermesCommand: hermes.command } : {}),
@@ -106,6 +109,16 @@ export function setupDefaultsFromConfig(config: OpenTagCliConfig): SetupDefaults
       ? { discordWebhookPath: lastSetup.discordWebhookPath }
       : discord?.webhookPath
         ? { discordWebhookPath: discord.webhookPath }
+        : {}),
+    ...(lastSetup?.teamsTenantId
+      ? { teamsTenantId: lastSetup.teamsTenantId }
+      : teams?.tenantId
+        ? { teamsTenantId: teams.tenantId }
+        : {}),
+    ...(lastSetup?.teamsWebhookPath
+      ? { teamsWebhookPath: lastSetup.teamsWebhookPath }
+      : teams?.webhookPath
+        ? { teamsWebhookPath: teams.webhookPath }
         : {}),
     ...(savedLarkCredentials ? { savedLarkCredentials } : {})
   };

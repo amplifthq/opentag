@@ -44,6 +44,10 @@ type MessageKey =
   | "discordPublicKey"
   | "discordBotToken"
   | "discordWebhookPath"
+  | "teamsAppId"
+  | "teamsAppPassword"
+  | "teamsTenantId"
+  | "teamsWebhookPath"
   | "bindingMethod"
   | "confirmSetup"
   | "cancelled"
@@ -93,6 +97,10 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     discordPublicKey: "Discord application public key",
     discordBotToken: "Discord bot token",
     discordWebhookPath: "Discord interactions webhook path",
+    teamsAppId: "Microsoft Teams app ID",
+    teamsAppPassword: "Microsoft Teams app password",
+    teamsTenantId: "Microsoft Teams tenant ID (optional)",
+    teamsWebhookPath: "Microsoft Teams webhook path",
     bindingMethod: "How should Lark chats bind to this project?",
     confirmSetup: "Write this OpenTag config?",
     cancelled: "OpenTag setup cancelled.",
@@ -141,6 +149,10 @@ const MESSAGES: Record<CliLanguage, Record<MessageKey, string>> = {
     discordPublicKey: "Discord application public key",
     discordBotToken: "Discord bot token",
     discordWebhookPath: "Discord interactions webhook path",
+    teamsAppId: "Microsoft Teams 应用 ID",
+    teamsAppPassword: "Microsoft Teams 应用密码",
+    teamsTenantId: "Microsoft Teams 租户 ID（可选）",
+    teamsWebhookPath: "Microsoft Teams webhook path",
     bindingMethod: "Lark 群聊要如何绑定到这个项目？",
     confirmSetup: "写入这份 OpenTag 配置？",
     cancelled: "OpenTag 设置已取消。",

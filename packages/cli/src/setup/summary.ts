@@ -8,6 +8,7 @@ import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhook
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "../platforms/gitlab/display.js";
 import { formatLarkPersonalAgentSummary } from "../platforms/lark/display.js";
 import { linearApiSettingsUrl, linearLocalWebhookUrl, linearPublicWebhookUrlPlaceholder, linearWebhookSettingsUrl } from "../platforms/linear/display.js";
+import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "../platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "../platforms/telegram/display.js";
 import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEAR_WEBHOOK_PORT, DEFAULT_SLACK_EVENTS_PORT } from "../platforms/ports.js";
 import type { LarkSetupMethod, OpenTagSetupInput } from "./types.js";
@@ -233,6 +234,24 @@ export function formatSetupReview(input: OpenTagSetupInput, configPath: string):
       ).filter((line): line is string => Boolean(line))
     );
   }
+  if (input.teams) {
+    platformLines.push(
+      ...(input.language === "zh-CN"
+        ? [
+            "Microsoft Teams 连接方式: Webhook（需要公网 HTTPS Messaging endpoint）",
+            input.teams.tenantId ? `Microsoft Teams Tenant ID: ${input.teams.tenantId}` : undefined,
+            `Microsoft Teams 本地 messaging endpoint: ${teamsLocalWebhookUrl({ webhookPath: input.teams.webhookPath })}`,
+            `Microsoft Teams Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(input.teams.webhookPath)}`
+          ]
+        : [
+            "Microsoft Teams connection: Webhook (public HTTPS Messaging endpoint required)",
+            input.teams.tenantId ? `Microsoft Teams Tenant ID: ${input.teams.tenantId}` : undefined,
+            `Microsoft Teams local messaging endpoint: ${teamsLocalWebhookUrl({ webhookPath: input.teams.webhookPath })}`,
+            `Microsoft Teams Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(input.teams.webhookPath)}`
+          ]
+      ).filter((line): line is string => Boolean(line))
+    );
+  }
   const sessionProfileLines =
     input.agentSessionProfile && (input.agentSessionProfile.profile || input.agentSessionProfile.profileTemplate)
       ? input.language === "zh-CN"
@@ -258,6 +277,7 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
   const slack = config.platforms.slack;
   const telegram = config.platforms.telegram;
   const discord = config.platforms.discord;
+  const teams = config.platforms.teams;
   const githubPort = github?.port ?? DEFAULT_GITHUB_WEBHOOK_PORT;
   const gitlabPort = gitlab?.port ?? DEFAULT_GITLAB_WEBHOOK_PORT;
   const linearPort = linear?.port ?? DEFAULT_LINEAR_WEBHOOK_PORT;
@@ -345,6 +365,13 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
         : undefined,
       discord?.mode !== "webhook" && discord
         ? "默认 Gateway 模式不需要公网 tunnel；注册 /opentag slash command 并安装 app 到目标 server。"
+        : undefined,
+      teams ? "" : undefined,
+      teams ? "Microsoft Teams 下一步：" : undefined,
+      teams ? `Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(teams.webhookPath ?? "/teams/messages")}` : undefined,
+      teams ? `本地 endpoint: ${teamsLocalWebhookUrl({ webhookPath: teams.webhookPath })}` : undefined,
+      teams
+        ? "在 Azure Bot 资源的 Configuration 页面填写 Messaging endpoint，并把应用安装到目标 Teams 租户。"
         : undefined
     ]
       .filter((line): line is string => Boolean(line))
@@ -414,6 +441,13 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
       : undefined,
     discord?.mode !== "webhook" && discord
       ? "Default Gateway mode does not need a public tunnel; register /opentag and install the app into the target server."
+      : undefined,
+    teams ? "" : undefined,
+    teams ? "Microsoft Teams next steps:" : undefined,
+    teams ? `Messaging Endpoint URL: ${teamsPublicWebhookUrlPlaceholder(teams.webhookPath ?? "/teams/messages")}` : undefined,
+    teams ? `Local endpoint: ${teamsLocalWebhookUrl({ webhookPath: teams.webhookPath })}` : undefined,
+    teams
+      ? "Paste the Messaging endpoint on the Azure Bot resource's Configuration page, then install the app into the target Teams tenant."
       : undefined
   ]
     .filter((line): line is string => Boolean(line))

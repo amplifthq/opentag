@@ -11,6 +11,7 @@ import {
   VerificationEvidenceSchema,
   capabilityForMutationIntent,
   channelProgressVisibility,
+  conversationKeysFromCallback,
   conversationKeysFromEvent,
   parseThreadActionCommand,
   parseThreadControlCommand,
@@ -841,8 +842,7 @@ function conversationKeysFromThreadAction(input: {
   callback: { provider: string; uri: string; threadKey?: string | undefined };
   metadata?: Record<string, unknown> | undefined;
 }): string[] {
-  const primary = conversationKeyFromCallback(input.callback);
-  const keys = [primary];
+  const keys = conversationKeysFromCallback(input.callback);
   const issueNumber = metadataIssueNumber(input.metadata);
   if (input.callback.provider === "github" && input.callback.threadKey && issueNumber) {
     const suffix = `#${issueNumber}`;
@@ -1597,6 +1597,50 @@ async function actionReceiptContextForFinal(input: {
   return { capabilityByIntentId: Object.fromEntries(capabilityEntries) };
 }
 
+function threadActionChannelBindingMismatch(): { ok: false; reason: string; message: string } {
+  return {
+    ok: false,
+    reason: "channel_binding_mismatch",
+    message: "The source channel binding is missing or no longer points at the proposal repository."
+  };
+}
+
+function baseTeamsConversationId(conversationId: string): string {
+  return conversationId.replace(/;messageid=[^;]+$/i, "");
+}
+
+async function getTeamsThreadActionChannelBinding(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  tenantId: string;
+  conversationId: string;
+}) {
+  const exactBinding = await input.repo.getChannelBinding({
+    provider: "teams",
+    accountId: input.tenantId,
+    conversationId: input.conversationId
+  });
+
+  const baseConversationId = baseTeamsConversationId(input.conversationId);
+  if (baseConversationId === input.conversationId) return exactBinding;
+
+  const baseBinding = await input.repo.getChannelBinding({
+    provider: "teams",
+    accountId: input.tenantId,
+    conversationId: baseConversationId
+  });
+  if (
+    exactBinding &&
+    baseBinding &&
+    (exactBinding.repoProvider !== baseBinding.repoProvider ||
+      exactBinding.owner !== baseBinding.owner ||
+      exactBinding.repo !== baseBinding.repo)
+  ) {
+    return null;
+  }
+
+  return exactBinding ?? baseBinding;
+}
+
 async function authorizeThreadAction(input: {
   repo: ReturnType<typeof createOpenTagRepository>;
   resolved: ResolvedThreadAction;
@@ -1667,12 +1711,31 @@ async function authorizeThreadAction(input: {
         channelBinding.owner !== repoKey.owner ||
         channelBinding.repo !== repoKey.repo
       ) {
-        return {
-          ok: false,
-          reason: "channel_binding_mismatch",
-          message: "The source channel binding is missing or no longer points at the proposal repository."
-        };
+        return threadActionChannelBindingMismatch();
       }
+    }
+  }
+
+  if (input.resolved.proposal.event.source === "teams") {
+    const tenantId = input.resolved.proposal.event.metadata["tenantId"];
+    const conversationId = input.resolved.proposal.event.metadata["conversationId"];
+    if (typeof tenantId !== "string" || !tenantId.trim() || typeof conversationId !== "string" || !conversationId.trim()) {
+      return threadActionChannelBindingMismatch();
+    }
+
+    const channelBinding = await getTeamsThreadActionChannelBinding({
+      repo: input.repo,
+      tenantId,
+      conversationId
+    });
+
+    if (
+      !channelBinding ||
+      channelBinding.repoProvider !== repoKey.provider ||
+      channelBinding.owner !== repoKey.owner ||
+      channelBinding.repo !== repoKey.repo
+    ) {
+      return threadActionChannelBindingMismatch();
     }
   }
 

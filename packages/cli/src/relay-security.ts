@@ -125,10 +125,11 @@ export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySe
     });
   }
 
-  if (config.platforms.slack || config.platforms.lark) {
+  if (config.platforms.slack || config.platforms.lark || config.platforms.teams) {
     const unsupported = [
       config.platforms.slack ? "Slack" : undefined,
-      config.platforms.lark ? "Lark / Feishu" : undefined
+      config.platforms.lark ? "Lark / Feishu" : undefined,
+      config.platforms.teams ? "Microsoft Teams" : undefined
     ]
       .filter((value): value is string => Boolean(value))
       .join(", ");

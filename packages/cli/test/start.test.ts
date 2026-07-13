@@ -1160,6 +1160,47 @@ describe("OpenTag CLI start wiring", () => {
     expect(logs.join("\n")).toContain("Discord tunnel: not required in Gateway mode");
   });
 
+  it("logs the Teams endpoint with the configured dispatcher port", async () => {
+    const built = config();
+    delete built.platforms.lark;
+    built.platforms.teams = {
+      appId: "teams_app_id",
+      appPassword: "teams_app_password",
+      webhookPath: "/teams/messages"
+    };
+    built.daemon.dispatcherUrl = "http://localhost:4040";
+    const logs: string[] = [];
+    const dispatcherHandle = {
+      url: "http://localhost:4040",
+      server: {},
+      async close() {}
+    } as ReturnType<NonNullable<StartRuntimeDependencies["startDispatcher"]>>;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher() {
+          return dispatcherHandle;
+        },
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        async serveDaemon() {},
+        logger: {
+          log(message) {
+            logs.push(message);
+          }
+        }
+      }
+    });
+
+    expect(logs).toContain("Microsoft Teams local messaging endpoint: http://127.0.0.1:4040/teams/messages");
+    expect(logs).toContain("Tunnel example: ngrok http 4040");
+  });
+
   it("fails clearly for relay mode platform ingress that is not supported in the MVP", async () => {
     const built = config();
     built.runtime = {

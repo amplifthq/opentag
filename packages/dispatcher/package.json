@@ -41,6 +41,7 @@
     "@opentag/lark": "workspace:*",
     "@opentag/linear": "workspace:*",
     "@opentag/slack": "workspace:*",
+    "@opentag/teams": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/store": "workspace:*",
     "better-sqlite3": "^11.7.0",

@@ -529,6 +529,13 @@ function formatConnectorReadiness(config: OpenTagCliConfig): string[] {
     }
   }
 
+  const teams = config.platforms.teams;
+  if (teams) {
+    lines.push(
+      `  teams: ingress=dispatcher_messages path=${teams.webhookPath ?? "/teams/messages"}, callback=${connectorStatus(configured(teams.appId) && configured(teams.appPassword), "appId/appPassword")}, tenant=${teams.tenantId ?? "any"}`
+    );
+  }
+
   const slack = config.platforms.slack;
   if (slack) {
     const mode = slack.mode ?? "events_api";
