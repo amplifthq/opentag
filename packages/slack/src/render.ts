@@ -82,6 +82,8 @@ export type SlackSourceReceiptState = "received" | "running";
 
 const MAX_SLACK_SUGGESTED_ACTION_CANDIDATES = 20;
 const MAX_SLACK_COMPACT_FINAL_ACTIONS = 3;
+// Slack section text is capped at 3000 characters; reserve space for the final-summary prefix.
+const MAX_SLACK_FINAL_SUMMARY_LENGTH = 2500;
 
 export type SlackRenderOptions = {
   receiptContext?: ActionReceiptContext;
@@ -237,10 +239,39 @@ function firstMarkdownSection(text: string, heading: string): string | undefined
   return match?.[1]?.trim();
 }
 
+// Apply the limit after mrkdwn conversion because Slack escaping can expand the source text.
+function truncateSlackMrkdwn(text: string, maxLength: number): string {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const rendered = markdownToSlackMrkdwn(normalized);
+  if (rendered.length <= maxLength) return rendered;
+
+  const characters = Array.from(normalized);
+  let low = 0;
+  let high = Math.min(characters.length, Math.max(0, maxLength - 1));
+  let best = "…";
+
+  while (low <= high) {
+    const midpoint = Math.floor((low + high) / 2);
+    const candidate = markdownToSlackMrkdwn(`${characters.slice(0, midpoint).join("").trimEnd()}…`);
+    if (candidate.length <= maxLength) {
+      best = candidate;
+      low = midpoint + 1;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+
+  return best;
+}
+
 function compactSlackSummary(summary: string): string {
   const whatChanged = firstMarkdownSection(summary, "What changed");
   const selected = whatChanged ?? summary;
-  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), 2800);
+  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), MAX_SLACK_FINAL_SUMMARY_LENGTH);
+}
+
+function renderCompactSlackSummary(summary: string): string {
+  return truncateSlackMrkdwn(compactSlackSummary(summary), MAX_SLACK_FINAL_SUMMARY_LENGTH);
 }
 
 function compactNextAction(nextAction: string): string {
@@ -614,7 +645,7 @@ export function renderSlackFinalResult(result: OpenTagRunResult, options: SlackR
 }
 
 export function renderSlackFinalSummaryPresentation(presentation: OpenTagFinalSummaryPresentation): string {
-  const lines = [`*Finished: ${presentation.outcome}.*`, markdownToSlackMrkdwn(compactSlackSummary(presentation.summary))];
+  const lines = [`*Finished: ${presentation.outcome}.*`, renderCompactSlackSummary(presentation.summary)];
 
   if (presentation.verification?.length) {
     lines.push(
@@ -664,7 +695,7 @@ export function createSlackFinalSummaryBlocks(presentation: OpenTagFinalSummaryP
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Finished: ${presentation.outcome}.*\n${markdownToSlackMrkdwn(compactSlackSummary(presentation.summary))}`
+        text: `*Finished: ${presentation.outcome}.*\n${renderCompactSlackSummary(presentation.summary)}`
       }
     }
   ];

@@ -170,6 +170,20 @@ describe("Slack callback rendering", () => {
     ]);
   });
 
+  it("keeps escaped final summaries within Slack section text limits", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "success",
+      summary: "&<>".repeat(1000)
+    });
+
+    const summaryBlock = blocks[0];
+    if (summaryBlock?.type !== "section") throw new Error("expected summary section");
+    expect(summaryBlock.text.text).toContain("&amp;&lt;&gt;");
+    expect(summaryBlock.text.text.length).toBeLessThanOrEqual(3000);
+    expect(summaryBlock.text.text.split("\n", 2)[1]?.length).toBeLessThanOrEqual(2500);
+    expect(summaryBlock.text.text.endsWith("…")).toBe(true);
+  });
+
   it("builds Block Kit sections for source-thread status", () => {
     const blocks = createSlackSourceThreadStatusBlocks(
       createSourceThreadStatusPresentation({
