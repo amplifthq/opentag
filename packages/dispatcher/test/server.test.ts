@@ -5849,6 +5849,152 @@ describe("dispatcher API", () => {
     });
   });
 
+  it("restricts managed channel status to the owning adapter principal or an audited admin override", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_status",
+      channelPrincipals: [
+        { provider: "slack", applicationId: "A123", credential: "slack_principal_123" },
+        { provider: "slack", applicationId: "A999", credential: "slack_principal_999" }
+      ]
+    });
+    const sharedHeaders = { authorization: "Bearer pair_status" };
+    const ownerHeaders = { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_123" };
+    const foreignHeaders = { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_999" };
+    const binding = await app.request("/v1/channel-bindings", {
+      ...jsonRequest({
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      }),
+      headers: { "content-type": "application/json", ...ownerHeaders }
+    });
+    expect(binding.status).toBe(201);
+
+    for (const headers of [sharedHeaders, foreignHeaders]) {
+      const denied = await app.request("/v1/channel-bindings/slack/T123/C123/status", { headers });
+      expect(denied.status).toBe(403);
+      await expect(denied.json()).resolves.toEqual({ error: "managed_channel_principal_required" });
+    }
+
+    const owner = await app.request("/v1/channel-bindings/slack/T123/C123/status", { headers: ownerHeaders });
+    expect(owner.status).toBe(200);
+    await expect(owner.json()).resolves.toMatchObject({
+      binding: { provider: "slack", accountId: "T123", conversationId: "C123" },
+      queuedFollowUps: []
+    });
+
+    const override = await app.request("/v1/channel-bindings/slack/T123/C123/status", {
+      headers: { ...sharedHeaders, "x-opentag-channel-admin-override": "true" }
+    });
+    expect(override.status).toBe(200);
+
+    const audit = await app.request("/v1/control-plane-events?type=binding.channel.admin_override", {
+      headers: sharedHeaders
+    });
+    await expect(audit.json()).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: "binding.channel.admin_override",
+          severity: "warn",
+          subject: "slack:T123/C123",
+          payload: { provider: "slack", accountId: "T123", conversationId: "C123", operation: "status" }
+        })
+      ]
+    });
+  });
+
+  it("restricts managed channel cancellation without mutating the run on denial", async () => {
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      pairingToken: "pair_cancel",
+      channelPrincipals: [
+        { provider: "slack", applicationId: "A123", credential: "slack_principal_123" },
+        { provider: "slack", applicationId: "A999", credential: "slack_principal_999" }
+      ]
+    });
+    const sharedHeaders = { "content-type": "application/json", authorization: "Bearer pair_cancel" };
+    const ownerHeaders = { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_123" };
+    const foreignHeaders = { ...sharedHeaders, "x-opentag-channel-principal": "slack_principal_999" };
+    await app.request("/v1/repo-bindings", authorizedJsonRequest({
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      runnerId: "runner_managed_cancel",
+      workspacePath: "/Users/test/demo",
+      defaultExecutor: "echo"
+    }, "pair_cancel"));
+    const binding = await app.request("/v1/channel-bindings", {
+      ...jsonRequest({
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        repoProvider: "github",
+        owner: "acme",
+        repo: "demo",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      }),
+      headers: ownerHeaders
+    });
+    expect(binding.status).toBe(201);
+
+    const createRunningRun = async (runId: string, eventId: string) => {
+      const created = await app.request("/v1/runs", {
+        ...jsonRequest({
+          runId,
+          event: slackRepoEvent({ id: eventId, sourceEventId: `${eventId}_source`, threadKey: "T123|C123|1710000000.000100" })
+        }),
+        headers: ownerHeaders
+      });
+      expect(created.status).toBe(201);
+      expect((await app.request("/v1/runners/runner_managed_cancel/claim", { method: "POST", headers: sharedHeaders })).status).toBe(200);
+      expect((await app.request(`/v1/runners/runner_managed_cancel/runs/${runId}/running`, {
+        ...jsonRequest({ executor: "echo" }),
+        headers: sharedHeaders
+      })).status).toBe(200);
+    };
+
+    await createRunningRun("run_managed_cancel_denied", "evt_managed_cancel_denied");
+    for (const headers of [sharedHeaders, foreignHeaders]) {
+      const denied = await app.request("/v1/channel-bindings/slack/T123/C123/cancel-active-run", {
+        ...jsonRequest({ reason: "denied" }),
+        headers
+      });
+      expect(denied.status).toBe(403);
+      await expect(denied.json()).resolves.toEqual({ error: "managed_channel_principal_required" });
+      const stored = await app.request("/v1/runs/run_managed_cancel_denied", { headers: sharedHeaders });
+      await expect(stored.json()).resolves.toMatchObject({ run: { status: "running" } });
+    }
+
+    const ownerCancel = await app.request("/v1/channel-bindings/slack/T123/C123/cancel-active-run", {
+      ...jsonRequest({ reason: "owner requested" }),
+      headers: ownerHeaders
+    });
+    expect(ownerCancel.status).toBe(200);
+
+    await createRunningRun("run_managed_cancel_override", "evt_managed_cancel_override");
+    const override = await app.request("/v1/channel-bindings/slack/T123/C123/cancel-active-run", {
+      ...jsonRequest({ reason: "admin requested" }),
+      headers: { ...sharedHeaders, "x-opentag-channel-admin-override": "true" }
+    });
+    expect(override.status).toBe(200);
+
+    const audit = await app.request("/v1/control-plane-events?type=binding.channel.admin_override", {
+      headers: sharedHeaders
+    });
+    await expect(audit.json()).resolves.toMatchObject({
+      events: [
+        expect.objectContaining({
+          type: "binding.channel.admin_override",
+          severity: "warn",
+          subject: "slack:T123/C123",
+          payload: { provider: "slack", accountId: "T123", conversationId: "C123", operation: "cancel" }
+        })
+      ]
+    });
+  });
+
   it("rejects partial repository fields on generic channel bindings", async () => {
     const app = createDispatcherApp({ databasePath: ":memory:" });
 

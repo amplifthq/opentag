@@ -349,6 +349,7 @@ describe("@opentag/client", () => {
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
       pairingToken: "pair_1",
+      channelPrincipalCredential: "lark_principal_owner",
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse({
@@ -395,7 +396,9 @@ describe("@opentag/client", () => {
     expect(status.binding).toEqual({ provider: "lark", accountId: "tenant_1", conversationId: "oc_chat" });
 
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant_1/oc_chat/status");
-    expect(requests[0]?.init?.headers).toMatchObject({ authorization: "Bearer pair_1" });
+    const headers = new Headers(requests[0]?.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer pair_1");
+    expect(headers.get("x-opentag-channel-principal")).toBe("lark_principal_owner");
     expect(status.activeRun?.id).toBe("run_active");
     expect(status.runTimeoutPolicy).toEqual({ hardTimeoutMs: 30_000 });
     expect(status.queuedFollowUps.map((followUp) => followUp.id)).toEqual(["follow_up_1"]);
@@ -552,6 +555,7 @@ describe("@opentag/client", () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({
       dispatcherUrl: "http://dispatcher.test",
+      channelPrincipalCredential: "lark_principal_owner",
       fetchImpl: async (url, init) => {
         requests.push({ url: String(url), init });
         return jsonResponse({
@@ -577,6 +581,7 @@ describe("@opentag/client", () => {
 
     expect(requests[0]?.url).toBe("http://dispatcher.test/v1/channel-bindings/lark/tenant%201/oc%2Fchat/cancel-active-run");
     expect(requests[0]?.init?.method).toBe("POST");
+    expect(new Headers(requests[0]?.init?.headers).get("x-opentag-channel-principal")).toBe("lark_principal_owner");
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual({ reason: "Stop requested." });
   });
 

@@ -4072,6 +4072,18 @@ export function createDispatcherApp(input: {
     const conversationId = c.req.param("conversationId");
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "status" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
       ...(binding.repoProvider && binding.owner && binding.repo
@@ -4136,6 +4148,18 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CancelRunSchema);
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "cancel" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
       ...(binding.repoProvider && binding.owner && binding.repo
