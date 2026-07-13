@@ -29,6 +29,7 @@ export type LarkIngressConfig = {
   appSecret: string;
   dispatcherUrl: string;
   dispatcherToken?: string;
+  channelPrincipalCredential?: string;
   domain: "lark" | "feishu";
   agentId: string;
   botOpenId?: string;
@@ -123,10 +124,23 @@ function csvList(value: string | undefined): string[] | undefined {
   return items?.length ? items : undefined;
 }
 
+function optionalNonBlankEnv(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim()) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
 export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressConfig {
-  const appId = env.LARK_APP_ID;
-  const appSecret = env.LARK_APP_SECRET;
+  const appId = optionalNonBlankEnv("LARK_APP_ID", env.LARK_APP_ID);
+  const appSecret = optionalNonBlankEnv("LARK_APP_SECRET", env.LARK_APP_SECRET);
+  const channelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
   const dispatcherUrl = env.OPENTAG_DISPATCHER_URL;
+  if (Boolean(appId) !== Boolean(channelPrincipalCredential)) {
+    throw new Error("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
   if (!appId || !appSecret) {
     throw new Error("LARK_APP_ID and LARK_APP_SECRET are required");
   }
@@ -147,6 +161,7 @@ export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressCon
     domain: domainFromEnv(env.LARK_DOMAIN),
     agentId: env.OPENTAG_LARK_AGENT_ID ?? DEFAULT_AGENT_ID,
     ...(env.OPENTAG_DISPATCHER_TOKEN ? { dispatcherToken: env.OPENTAG_DISPATCHER_TOKEN } : {}),
+    ...(channelPrincipalCredential ? { channelPrincipalCredential } : {}),
     ...(env.LARK_BOT_OPEN_ID ? { botOpenId: env.LARK_BOT_OPEN_ID } : {}),
     ...(bindingAdminOpenIds ? { bindingAdminOpenIds } : {}),
     ...(bindingAdminUserIds ? { bindingAdminUserIds } : {}),
@@ -203,8 +218,9 @@ function logIgnored(outcome: LarkMessageHandlerOutcome): void {
   console.log(`[lark] ignored event: ${outcome.status}${outcome.chatId ? ` chat_id=${outcome.chatId}` : ""}`);
 }
 
-function formatProjectTarget(input: { repoProvider: string; owner: string; repo: string }): string {
-  return `${input.repoProvider}:${input.owner}/${input.repo}`;
+function formatProjectTarget(input: { repoProvider?: string; owner?: string; repo?: string }): string {
+  if (!input.owner || !input.repo) return "not bound";
+  return `${input.repoProvider ?? "github"}:${input.owner}/${input.repo}`;
 }
 
 function queuedFollowUpsSummary(status: ChannelRuntimeStatus): string {
@@ -303,11 +319,11 @@ function larkRuntimeDoctorReply(input: { tenantKey: string; chatId: string; stat
   };
 }
 
-function formatStatusUnavailable(input: { binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function formatStatusUnavailable(input: { binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag status:",
-    input.binding ? `- Project Target: ${formatProjectTarget({ repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo })}` : "- Project Target: not bound.",
+    input.binding ? `- Project Target: ${formatProjectTarget(input.binding)}` : "- Project Target: not bound.",
     "- Runtime status: unavailable from dispatcher.",
     `- Reason: ${message}`,
     "- Next action: check `opentag service status` and `opentag status` locally."
@@ -317,7 +333,7 @@ function formatStatusUnavailable(input: { binding?: { repoProvider?: string; own
 function formatDoctorUnavailable(input: {
   tenantKey: string;
   chatId: string;
-  binding?: { repoProvider?: string; owner: string; repo: string };
+  binding?: { repoProvider?: string; owner?: string; repo?: string };
   error: unknown;
 }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
@@ -325,7 +341,7 @@ function formatDoctorUnavailable(input: {
     "OpenTag doctor (redacted):",
     `- Source container: lark:${input.tenantKey}/${input.chatId}`,
     input.binding
-      ? `- Project Target: ${formatProjectTarget({ repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo })}`
+      ? `- Project Target: ${formatProjectTarget(input.binding)}`
       : "- Project Target: not bound.",
     "- Dispatcher: source-container status unavailable.",
     `- Reason: ${message}`,
@@ -337,7 +353,8 @@ function formatDoctorUnavailable(input: {
 export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIngressDependencies = {}): LarkIngressHandle {
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
-    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {})
+    ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {}),
+    ...(config.channelPrincipalCredential ? { channelPrincipalCredential: config.channelPrincipalCredential } : {})
   });
   let replyClient: ReturnType<typeof createLarkReplyClient> | undefined;
   const reply =
@@ -357,9 +374,9 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
       return {
         tenantKey: binding.accountId,
         chatId: binding.conversationId,
-        repoProvider: binding.repoProvider,
-        owner: binding.owner,
-        repo: binding.repo
+        ...(binding.repoProvider
+          ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+          : {})
       };
     } catch (error) {
       if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
@@ -371,6 +388,7 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
 
   const handler = createLarkMessageHandler({
     agentId: config.agentId,
+    applicationId: config.appId,
     suppressRunCreatedReply: true,
     domain: config.domain,
     ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
@@ -383,7 +401,13 @@ export function startLarkIngress(config: LarkIngressConfig, dependencies: LarkIn
         conversationId: input.chatId,
         repoProvider: input.repoProvider,
         owner: input.owner,
-        repo: input.repo
+        repo: input.repo,
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: config.appId,
+          ...(config.botOpenId ? { botId: config.botOpenId } : {})
+        }
       });
     },
     async unbindChannel(input) {

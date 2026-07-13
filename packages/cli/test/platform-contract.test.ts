@@ -213,14 +213,18 @@ describe("CLI platform contract smoke", () => {
       },
       client: {
         claim: () => client.claim({ runnerId: config.daemon.runnerId }),
-        markRunning: (runId, executor) => client.markRunning({ runnerId: config.daemon.runnerId, runId, executor }),
-        heartbeat: (runId) => client.heartbeat({ runnerId: config.daemon.runnerId, runId }),
-        progress: (runId, input) => client.progress({ runnerId: config.daemon.runnerId, runId, ...input }),
-        complete: (runId, result) => client.complete({ runnerId: config.daemon.runnerId, runId, result })
+        markRunning: (runId, executor, lease) => client.markRunning({ runnerId: config.daemon.runnerId, runId, ...lease, executor }),
+        heartbeat: (runId, lease) => client.heartbeat({ runnerId: config.daemon.runnerId, runId, ...lease }),
+        progress: (runId, lease, input) => client.progress({ runnerId: config.daemon.runnerId, runId, ...lease, ...input }),
+        complete: (runId, lease, result) => client.complete({ runnerId: config.daemon.runnerId, runId, ...lease, result })
       }
     });
 
-    expect(gitCommands).toEqual(["git push -u origin opentag/run_github_contract"]);
+    expect(gitCommands).toEqual([
+      "git add -- README.md",
+      "git commit -m OpenTag run run_github_contract",
+      "git push -u origin opentag/run_github_contract"
+    ]);
     expect(delivered.some((message) => message.kind === "final" && message.body.includes("Create a pull request"))).toBe(true);
 
     const applyBody = JSON.stringify({
@@ -415,10 +419,10 @@ describe("CLI platform contract smoke", () => {
       executors: { codex: changingExecutor },
       client: {
         claim: () => client.claim({ runnerId: config.daemon.runnerId }),
-        markRunning: (runId, executor) => client.markRunning({ runnerId: config.daemon.runnerId, runId, executor }),
-        heartbeat: (runId) => client.heartbeat({ runnerId: config.daemon.runnerId, runId }),
-        progress: (runId, input) => client.progress({ runnerId: config.daemon.runnerId, runId, ...input }),
-        complete: (runId, result) => client.complete({ runnerId: config.daemon.runnerId, runId, result })
+        markRunning: (runId, executor, lease) => client.markRunning({ runnerId: config.daemon.runnerId, runId, ...lease, executor }),
+        heartbeat: (runId, lease) => client.heartbeat({ runnerId: config.daemon.runnerId, runId, ...lease }),
+        progress: (runId, lease, input) => client.progress({ runnerId: config.daemon.runnerId, runId, ...lease, ...input }),
+        complete: (runId, lease, result) => client.complete({ runnerId: config.daemon.runnerId, runId, ...lease, result })
       }
     });
 

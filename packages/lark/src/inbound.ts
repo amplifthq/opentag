@@ -80,6 +80,7 @@ export type LarkCardActionEvent = {
 
 export type LarkMessageHandlerConfig = {
   agentId: string;
+  applicationId?: string;
   botOpenId?: string;
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
@@ -685,6 +686,7 @@ export function createLarkMessageHandler(config: LarkMessageHandlerConfig) {
       eventId,
       eventTimeMs,
       agentId: config.agentId,
+      ...(config.applicationId ? { applicationId: config.applicationId } : {}),
       ...(config.botOpenId ? { botOpenId: config.botOpenId } : {}),
       ...(config.domain ? { domain: config.domain } : {}),
       renderLocale,
@@ -797,6 +799,10 @@ export function createLarkCardActionHandler(config: LarkCardActionHandlerConfig)
         ...(data.action?.name ? { actionName: data.action.name } : {}),
         ...(parsedValue.proposalId ? { proposalId: parsedValue.proposalId } : {}),
         ...(parsedValue.intentId ? { intentId: parsedValue.intentId } : {}),
+        ...(parsedValue.permissionDecision ? { permissionDecision: parsedValue.permissionDecision } : {}),
+        ...(parsedValue.proposalHash ? { proposalHash: parsedValue.proposalHash } : {}),
+        ...(parsedValue.approvalEpoch ? { approvalEpoch: parsedValue.approvalEpoch } : {}),
+        ...(parsedValue.actionId ? { governedActionId: parsedValue.actionId } : {}),
         repoProvider: binding.repoProvider ?? "github",
         owner: binding.owner,
         repo: binding.repo

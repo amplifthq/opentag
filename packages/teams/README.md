@@ -80,7 +80,7 @@ The binding identity is effectively:
 
 - `tenantId`
 - base Teams channel conversation id
-- local repository binding / owner / repo / executor config
+- optional repository target / owner / repo / executor config for coding tasks
 
 ### Source-thread actions
 
@@ -93,8 +93,9 @@ the reply activity id. Otherwise dispatcher lookup cannot find the action
 receipt and the user sees a generic failure for `apply 1` / `reject 1`.
 Before recording a decision, creating an ApplyPlan, or executing an adapter
 mutation, Dispatcher revalidates the tenant/channel stored on the proposal and
-requires the current Teams channel binding to still target the same repository.
-Removed, rebound, or identity-incomplete bindings fail closed.
+requires the current Teams channel binding to retain the same identity and, for
+repository actions, the same repository target. Removed, rebound, or
+identity-incomplete bindings fail closed.
 
 ### Callback replies
 

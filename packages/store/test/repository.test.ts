@@ -2,7 +2,7 @@ import { projectTargetRefFromLocalPath } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { createOpenTagRepository } from "../src/repository.js";
+import { ChannelBindingCorruptionError, createOpenTagRepository } from "../src/repository.js";
 import { migrateSchema } from "../src/schema.js";
 
 function githubIssueContext(issueNumber: number) {
@@ -80,6 +80,131 @@ describe("OpenTag repository", () => {
     expect(columns.map((column) => column.name)).toContain("idempotency_key");
     const indexes = sqlite.prepare("PRAGMA index_list(callback_deliveries)").all() as { name: string }[];
     expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
+  });
+
+  it("migrates legacy run events before creating the progress idempotency index", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE run_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        visibility TEXT NOT NULL DEFAULT 'audit',
+        importance TEXT NOT NULL DEFAULT 'normal',
+        message TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const columns = sqlite.prepare("PRAGMA table_info(run_events)").all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain("progress_idempotency_digest");
+    const indexes = sqlite.prepare("PRAGMA index_list(run_events)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toContainEqual(
+      expect.objectContaining({ name: "run_events_progress_idempotency_idx", unique: 1 })
+    );
+  });
+
+  it("migrates repository-required channel bindings to nullable repository fields without losing rows", async () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE channel_bindings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        repo_provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES ('slack', 'T123', 'C456', 'github', 'acme', 'demo', NULL, '2026-07-12T00:00:00.000Z');
+    `);
+
+    migrateSchema(sqlite);
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name)).every((column) => column.notnull === 0)).toBe(true);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toMatchObject({
+      repoProvider: "github",
+      owner: "acme",
+      repo: "demo"
+    });
+  });
+
+  it("rolls back the legacy channel binding rebuild when destructive DDL fails mid-migration", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE channel_bindings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        repo_provider TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        repo TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX channel_bindings_provider_account_conversation_idx
+        ON channel_bindings(provider, account_id, conversation_id);
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (
+        'slack', 'T123', 'C456', 'github', 'acme', 'demo', '{"legacy":true}', '2026-07-12T00:00:00.000Z'
+      );
+    `);
+    const originalExecMethod = sqlite.exec;
+    const originalExec = sqlite.exec.bind(sqlite);
+    let destructiveMidpointObserved = false;
+    sqlite.exec = ((source: string) => {
+      if (source.includes("ALTER TABLE channel_bindings_nullable_repo RENAME TO channel_bindings")) {
+        const tables = sqlite.prepare(`
+          SELECT name FROM sqlite_master
+          WHERE type = 'table' AND name IN ('channel_bindings', 'channel_bindings_nullable_repo')
+        `).all() as Array<{ name: string }>;
+        const tableNames = new Set(tables.map((table) => table.name));
+        destructiveMidpointObserved = !tableNames.has("channel_bindings") && tableNames.has("channel_bindings_nullable_repo");
+        throw new Error("injected channel binding rebuild failure");
+      }
+      return originalExec(source);
+    }) as typeof sqlite.exec;
+
+    try {
+      expect(() => migrateSchema(sqlite)).toThrow("injected channel binding rebuild failure");
+    } finally {
+      sqlite.exec = originalExecMethod;
+    }
+
+    expect(destructiveMidpointObserved).toBe(true);
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings'").get()).toBeTruthy();
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_bindings_nullable_repo'").get()).toBeUndefined();
+    expect(sqlite.prepare("SELECT * FROM channel_bindings").all()).toEqual([
+      expect.objectContaining({
+        provider: "slack",
+        account_id: "T123",
+        conversation_id: "C456",
+        repo_provider: "github",
+        owner: "acme",
+        repo: "demo",
+        metadata_json: '{"legacy":true}'
+      })
+    ]);
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name))).toEqual([
+      expect.objectContaining({ name: "repo_provider", notnull: 1 }),
+      expect.objectContaining({ name: "owner", notnull: 1 }),
+      expect.objectContaining({ name: "repo", notnull: 1 })
+    ]);
+    const indexes = sqlite.prepare("PRAGMA index_list(channel_bindings)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toContainEqual(
+      expect.objectContaining({ name: "channel_bindings_provider_account_conversation_idx", unique: 1 })
+    );
   });
 
   it("migrates legacy Linear relay installations before OAuth auth metadata", () => {
@@ -343,12 +468,18 @@ describe("OpenTag repository", () => {
       }
     });
     const events = await repo.listRunEvents({ runId: "run_cancel" });
-    expect(events.map((event) => event.type)).toContain("run.cancel_requested");
+    expect(events.filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
     expect(events.find((event) => event.type === "run.cancel_requested")?.payload).toMatchObject({
+      previousStatus: "queued",
       terminalReason: "cancelled_by_user",
       terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
       requestedBy: "lark:ou_sender"
     });
+    await expect(repo.cancelRun({ runId: "run_cancel", reason: "Stop again." })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: { status: "cancelled", result: { conclusion: "cancelled" } }
+    });
+    expect((await repo.listRunEvents({ runId: "run_cancel" })).filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
   });
 
   it("records timed_out as a terminal run status and prevents late success from overriding it", async () => {
@@ -579,13 +710,20 @@ describe("OpenTag repository", () => {
         metadata: { owner: "acme", repo: "demo" }
       }
     });
-    await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
     await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
       runnerId: "runner_1",
       heartbeatAt: expect.any(String)
     });
 
-    await expect(repo.heartbeat({ runId: "run_heartbeat", runnerId: "runner_1" })).resolves.toBe(true);
+    await expect(
+      repo.heartbeat({
+        runId: "run_heartbeat",
+        runnerId: "runner_1",
+        attemptId: claimed!.attemptId,
+        fencingToken: claimed!.fencingToken
+      })
+    ).resolves.toBe("updated");
     await expect(repo.getRunner({ runnerId: "runner_1" })).resolves.toMatchObject({
       runnerId: "runner_1",
       heartbeatAt: expect.any(String)
@@ -627,6 +765,355 @@ describe("OpenTag repository", () => {
 
     const events = await repo.listRunEvents({ runId: "run_expire" });
     expect(events.map((event) => event.type)).toContain("run.lease_expired");
+  });
+
+  it("does not treat an interrupted recovery Attempt as a duplicate while the Run is queued", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({
+      id: "run_recovery_window",
+      event: larkEvent({ id: "evt_recovery_window", sourceEventId: "message_recovery_window" })
+    });
+    const expired = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 0 });
+    if (!expired) throw new Error("expected initial expired Attempt");
+
+    await expect(repo.claimNextRun({ runnerId: "runner_without_binding", leaseSeconds: 60 })).resolves.toBeNull();
+    expect(sqlite.prepare(`
+      SELECT status, current_attempt_id AS currentAttemptId, assigned_runner_id AS assignedRunnerId
+      FROM runs WHERE id = ?
+    `).get("run_recovery_window")).toEqual({ status: "queued", currentAttemptId: null, assignedRunnerId: null });
+    await expect(repo.listAttempts({ runId: "run_recovery_window" })).resolves.toEqual([
+      expect.objectContaining({ id: expired.attemptId, status: "interrupted" })
+    ]);
+
+    await expect(repo.completeRun({
+      runId: "run_recovery_window",
+      runnerId: "runner_1",
+      attemptId: expired.attemptId,
+      fencingToken: expired.fencingToken,
+      result: { conclusion: "success", summary: "late completion during recovery" }
+    })).resolves.toBe("stale_attempt");
+    await expect(repo.listRunEvents({ runId: "run_recovery_window" })).resolves.not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "run.completed" })])
+    );
+  });
+
+  it("fences stale attempts after lease recovery", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_fenced", event: larkEvent({ id: "evt_fenced", sourceEventId: "message_fenced" }) });
+
+    const first = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 0 });
+    expect(first).toMatchObject({ attemptId: expect.any(String), fencingToken: expect.any(String), attemptNumber: 1 });
+
+    const second = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    expect(second).toMatchObject({ attemptId: expect.any(String), fencingToken: expect.any(String), attemptNumber: 2 });
+    expect(second?.attemptId).not.toBe(first?.attemptId);
+    expect(second?.fencingToken).not.toBe(first?.fencingToken);
+
+    const staleLease = {
+      runId: "run_fenced",
+      runnerId: "runner_1",
+      attemptId: first!.attemptId,
+      fencingToken: first!.fencingToken
+    };
+    await expect(repo.heartbeat(staleLease)).resolves.toBe("stale_attempt");
+    await expect(repo.recordProgress({ ...staleLease, message: "late progress" })).resolves.toBe("stale_attempt");
+    await expect(
+      repo.completeRun({ ...staleLease, result: { conclusion: "success", summary: "late completion" } })
+    ).resolves.toBe("stale_attempt");
+
+    const activeLease = {
+      runId: "run_fenced",
+      runnerId: "runner_1",
+      attemptId: second!.attemptId,
+      fencingToken: second!.fencingToken
+    };
+    await expect(repo.heartbeat(activeLease)).resolves.toBe("updated");
+    await expect(repo.markRunning({
+      ...activeLease,
+      executor: first!.fencingToken,
+      executorCapability: { nested: { historicalFence: first!.fencingToken } },
+      idempotencyKey: first!.fencingToken
+    })).resolves.toBe("running");
+    await expect(repo.recordProgress({
+      ...activeLease,
+      message: `current progress ${first!.fencingToken}`,
+      type: first!.fencingToken,
+      idempotencyKey: first!.fencingToken
+    })).resolves.toMatchObject({ outcome: "recorded", event: { type: "run.progress" } });
+    await expect(repo.recordProgress({
+      ...activeLease,
+      message: "duplicate current progress",
+      idempotencyKey: first!.fencingToken
+    })).resolves.toMatchObject({
+      outcome: "duplicate",
+      event: { message: "current progress [redacted]" }
+    });
+    await expect(
+      repo.completeRun({
+        ...activeLease,
+        result: {
+          conclusion: "success",
+          summary: `current completion ${first!.fencingToken}`,
+          artifacts: [{ title: "result", uri: "workspace/result.md", metadata: { historicalFence: first!.fencingToken } }],
+          verification: [{ command: "verify", outcome: "passed", excerpt: first!.fencingToken }]
+        },
+        idempotencyKey: first!.fencingToken
+      })
+    ).resolves.toBe("completed");
+
+    const storedRun = await repo.getRun({ runId: "run_fenced" });
+    const storedAttempts = await repo.listAttempts({ runId: "run_fenced" });
+    expect(storedAttempts).toMatchObject([
+      { id: first!.attemptId, number: 1, status: "interrupted" },
+      { id: second!.attemptId, number: 2, status: "succeeded" }
+    ]);
+    const events = await repo.listRunEvents({ runId: "run_fenced" });
+    expect(events.filter((event) => event.type === "run.progress")).toHaveLength(1);
+    expect(events.find((event) => event.type === "run.progress")?.payload).not.toHaveProperty("idempotencyKey");
+    expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+    const durable = JSON.stringify({ storedRun, storedAttempts, events });
+    expect(durable).not.toContain(first!.fencingToken);
+    expect(durable).not.toContain(second!.fencingToken);
+  });
+
+  it("sanitizes runner output and callback payloads before any durable write", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_safe", name: "Safe Runner" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_safe" });
+    await repo.createRun({ id: "run_safe_output", event: larkEvent({ id: "evt_safe_output", sourceEventId: "msg_safe_output" }) });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_safe", leaseSeconds: 60 });
+    if (!claimed) throw new Error("expected claimed run");
+    const lease = {
+      runId: "run_safe_output",
+      runnerId: "runner_safe",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    const providerToken = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+
+    await expect(
+      repo.markRunning({
+        ...lease,
+        executor: claimed.fencingToken,
+        executorCapability: { nested: { credential: "opaque-executor-secret", fence: claimed.fencingToken } },
+        idempotencyKey: claimed.fencingToken
+      })
+    ).resolves.toBe("running");
+    await expect(
+      repo.recordProgress({
+        ...lease,
+        message: `using ${providerToken} and ${claimed.fencingToken}`,
+        type: claimed.fencingToken,
+        idempotencyKey: claimed.fencingToken
+      })
+    ).resolves.toMatchObject({ outcome: "recorded", event: { message: "using [redacted] and [redacted]" } });
+    const providerFailure = `provider failed ${claimed.fencingToken} Bearer ${providerToken} -----BEGIN PRIVATE KEY----- secret`;
+    await repo.appendRunEvent({
+      runId: "run_safe_output",
+      type: "source_receipt.failed",
+      payload: { provider: "lark", error: providerFailure },
+      message: providerFailure
+    });
+    await repo.appendRunEvent({
+      runId: "run_safe_output",
+      type: "callback.progress.failed",
+      payload: { provider: "lark", reason: "delayed_status_card", error: providerFailure },
+      message: providerFailure
+    });
+    await expect(
+      repo.completeRun({
+        ...lease,
+        result: {
+          conclusion: "success",
+          summary: `done with ${providerToken}`,
+          artifacts: [
+            {
+              title: "credential report",
+              uri: "workspace/report.md",
+              metadata: { accessToken: "opaque-secret" }
+            }
+          ],
+          verification: [{ command: "check", outcome: "passed", excerpt: `fence=${claimed.fencingToken}` }]
+        },
+        idempotencyKey: claimed.fencingToken
+      })
+    ).resolves.toBe("completed");
+    await repo.enqueueCallbackDelivery({
+      runId: "run_safe_output",
+      kind: "final",
+      provider: "slack",
+      uri: "https://example.test/callback",
+      body: `callback ${providerToken}`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: `Bearer ${providerToken}` } }],
+      rich: { accessToken: "opaque-callback-secret" }
+    });
+
+    const durable = {
+      stored: await repo.getRun({ runId: "run_safe_output" }),
+      events: await repo.listRunEvents({ runId: "run_safe_output" }),
+      callbacks: await repo.claimPendingCallbackDeliveries({ limit: 10 })
+    };
+    const serialized = JSON.stringify(durable);
+    expect(serialized).not.toContain(providerToken);
+    expect(serialized).not.toContain(claimed.fencingToken);
+    expect(serialized).not.toContain("opaque-secret");
+    expect(serialized).not.toContain("opaque-executor-secret");
+    expect(serialized).not.toContain("opaque-callback-secret");
+    expect(serialized).not.toContain("-----BEGIN PRIVATE KEY-----");
+    expect(serialized).toContain("[redacted]");
+  });
+
+  it("rolls back run assignment and attempt creation when the claimed event cannot be persisted", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_claim_atomic", event: larkEvent({ id: "evt_claim_atomic", sourceEventId: "message_claim_atomic" }) });
+    sqlite.exec(`
+      CREATE TEMP TRIGGER fail_run_claimed
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.claimed'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected run.claimed failure');
+      END;
+    `);
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).rejects.toThrow("injected run.claimed failure");
+    await expect(repo.getRun({ runId: "run_claim_atomic" })).resolves.toMatchObject({ run: { status: "queued" } });
+    await expect(repo.listAttempts({ runId: "run_claim_atomic" })).resolves.toEqual([]);
+    expect((await repo.listRunEvents({ runId: "run_claim_atomic" })).filter((event) => event.type === "run.claimed")).toHaveLength(0);
+
+    sqlite.exec("DROP TRIGGER fail_run_claimed");
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toMatchObject({
+      run: { id: "run_claim_atomic", status: "assigned" },
+      attemptNumber: 1
+    });
+  });
+
+  it("rolls back terminal state and completion materialization when an event insert aborts", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+    await repo.createRun({ id: "run_complete_atomic", event: larkEvent({ id: "evt_complete_atomic", sourceEventId: "message_complete_atomic" }) });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const completion = {
+      runId: "run_complete_atomic",
+      runnerId: "runner_1",
+      attemptId: claimed!.attemptId,
+      fencingToken: claimed!.fencingToken,
+      result: {
+        conclusion: "success" as const,
+        summary: "Prepared an atomic proposal.",
+        suggestedChanges: [
+          {
+            proposalId: "proposal_complete_atomic",
+            createdAt: "2026-07-12T00:00:00.000Z",
+            summary: "Add the bug label.",
+            intents: [
+              {
+                intentId: "intent_complete_atomic",
+                domain: "labels",
+                action: "add_label",
+                summary: "Add the bug label.",
+                params: { label: "bug" }
+              }
+            ]
+          }
+        ]
+      }
+    };
+    sqlite.exec(`
+      CREATE TEMP TRIGGER fail_completion_materialization
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'proposal.snapshot.created'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected completion materialization failure');
+      END;
+    `);
+
+    await expect(repo.completeRun(completion)).rejects.toThrow("injected completion materialization failure");
+    await expect(repo.getRun({ runId: "run_complete_atomic" })).resolves.toMatchObject({ run: { status: "assigned" } });
+    await expect(repo.listAttempts({ runId: "run_complete_atomic" })).resolves.toMatchObject([
+      { id: claimed!.attemptId, status: "assigned" }
+    ]);
+    await expect(repo.getSuggestedChanges({ proposalId: "proposal_complete_atomic" })).resolves.toBeNull();
+    expect(
+      (await repo.listRunEvents({ runId: "run_complete_atomic" })).filter((event) =>
+        ["proposal.snapshot.created", "artifact.created", "run.completed", "success_metric.observed"].includes(event.type)
+      )
+    ).toHaveLength(0);
+
+    sqlite.exec("DROP TRIGGER fail_completion_materialization");
+    await expect(repo.completeRun(completion)).resolves.toBe("completed");
+    await expect(repo.getSuggestedChanges({ proposalId: "proposal_complete_atomic" })).resolves.toMatchObject({
+      runId: "run_complete_atomic"
+    });
+  });
+
+  it("treats duplicate completion for every terminal Attempt status as idempotent", async () => {
+    const cases = [
+      { conclusion: "success", attemptStatus: "succeeded" },
+      { conclusion: "failure", attemptStatus: "failed" },
+      { conclusion: "cancelled", attemptStatus: "cancelled" },
+      { conclusion: "interrupted", attemptStatus: "interrupted" },
+      { conclusion: "timed_out", attemptStatus: "timed_out" },
+      { conclusion: "needs_human", attemptStatus: "needs_human" }
+    ] as const;
+
+    for (const { conclusion, attemptStatus } of cases) {
+      const sqlite = new Database(":memory:");
+      const db = drizzle(sqlite);
+      migrateSchema(sqlite);
+      const repo = createOpenTagRepository(db);
+      const runId = `run_attempt_replay_${conclusion}`;
+
+      await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+      await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1" });
+      await repo.createRun({
+        id: runId,
+        event: larkEvent({ id: `evt_attempt_replay_${conclusion}`, sourceEventId: `message_attempt_replay_${conclusion}` })
+      });
+      const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+      const lease = {
+        runId,
+        runnerId: "runner_1",
+        attemptId: claimed!.attemptId,
+        fencingToken: claimed!.fencingToken,
+        result: { conclusion, summary: `done once: ${conclusion}` }
+      };
+
+      await expect(repo.completeRun(lease)).resolves.toBe("completed");
+      await expect(repo.completeRun(lease)).resolves.toBe("duplicate");
+      await expect(repo.listAttempts({ runId })).resolves.toEqual([
+        expect.objectContaining({ id: claimed!.attemptId, status: attemptStatus })
+      ]);
+      const events = await repo.listRunEvents({ runId });
+      expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "run.completed", message: `done once: ${conclusion}` })
+      ]));
+    }
   });
 
   it("stores generic channel to repo bindings", async () => {
@@ -691,42 +1178,45 @@ describe("OpenTag repository", () => {
     ).resolves.toBe(false);
   });
 
-  it("ignores malformed channel binding metadata instead of throwing", async () => {
+  it.each([
+    ["invalid JSON", "{bad-json"],
+    ["JSON null", "null"],
+    ["an array", "[]"],
+    ["a string primitive", "\"legacy\""],
+    ["a number primitive", "42"]
+  ])("fails closed when channel binding metadata is %s", async (_label, metadataJson) => {
     const sqlite = new Database(":memory:");
-    const db = drizzle(sqlite);
     migrateSchema(sqlite);
-    const repo = createOpenTagRepository(db);
-
-    sqlite.exec(`
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    sqlite.prepare(`
       INSERT INTO channel_bindings (
-        provider,
-        account_id,
-        conversation_id,
-        repo_provider,
-        owner,
-        repo,
-        metadata_json,
-        created_at
-      ) VALUES (
-        'telegram',
-        'bot_123',
-        'chat_456',
-        'github',
-        'acme',
-        'demo',
-        '{bad-json',
-        '2026-06-25T00:00:00.000Z'
-      );
-    `);
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("telegram", "bot_123", "chat_456", "github", "acme", "demo", metadataJson, "2026-06-25T00:00:00.000Z");
 
-    await expect(repo.getChannelBinding({ provider: "telegram", accountId: "bot_123", conversationId: "chat_456" })).resolves.toEqual({
-      provider: "telegram",
-      accountId: "bot_123",
-      conversationId: "chat_456",
-      repoProvider: "github",
-      owner: "acme",
-      repo: "demo"
-    });
+    await expect(
+      repo.getChannelBinding({ provider: "telegram", accountId: "bot_123", conversationId: "chat_456" })
+    ).rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
+  it.each([
+    ["management", { management: "managed" }],
+    ["ownership", { ownership: { mode: "managed", exclusive: true, applicationId: "A123" } }],
+    ["metadata", { metadata: { title: "reserved envelope" } }],
+    ["a deleted discriminator", { management: "managed", metadata: {}, ownership: { mode: "managed", exclusive: true, applicationId: "A123" } }]
+  ])("rejects a versionless channel binding object containing reserved v2 field %s", async (_label, stored) => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    sqlite.prepare(`
+      INSERT INTO channel_bindings (
+        provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("slack", "T123", "C456", "github", "acme", "demo", JSON.stringify(stored), "2026-06-25T00:00:00.000Z");
+
+    await expect(
+      repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })
+    ).rejects.toBeInstanceOf(ChannelBindingCorruptionError);
   });
 
   it("stores Slack channel bindings through the generic channel binding table", async () => {
@@ -943,6 +1433,15 @@ describe("OpenTag repository", () => {
     migrateSchema(sqlite);
     const repo = createOpenTagRepository(db);
 
+    await repo.registerRunner({ runnerId: "runner_callback_guard", name: "Callback Guard" });
+    await repo.createRepoBinding({ provider: "github", owner: "acme", repo: "demo", runnerId: "runner_callback_guard" });
+    await repo.createRun({
+      id: "run_callback_storm_guard",
+      event: larkEvent({ id: "evt_callback_storm_guard", sourceEventId: "msg_callback_storm_guard" })
+    });
+    const runClaim = await repo.claimNextRun({ runnerId: "runner_callback_guard", leaseSeconds: 60 });
+    if (!runClaim) throw new Error("expected callback guard run claim");
+
     await repo.enqueueCallbackDelivery({
       runId: "run_callback_storm_guard",
       kind: "final",
@@ -957,19 +1456,30 @@ describe("OpenTag repository", () => {
     expect(claimed).toHaveLength(1);
     await repo.markCallbackFailed({
       deliveryId: claimed[0]!.id,
-      error: "rate_limited",
+      error: `rate_limited ${runClaim.fencingToken} xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz Bearer ghp\x5fabcdefghijklmnopqrstuvwxyz123456 -----BEGIN PRIVATE KEY----- secret`,
       maxAttempts: 1
     });
 
     await expect(repo.claimPendingCallbackDeliveries({ limit: 10, maxAttempts: 1 })).resolves.toEqual([]);
 
     const events = await repo.listRunEvents({ runId: "run_callback_storm_guard" });
-    expect(events.map((event) => event.type)).toEqual(["callback.final.queued", "callback.final.failed", "callback.final.suppressed"]);
+    expect(events.filter((event) => event.type.startsWith("callback.")).map((event) => event.type)).toEqual([
+      "callback.final.queued",
+      "callback.final.failed",
+      "callback.final.suppressed"
+    ]);
     expect(events.at(-1)).toMatchObject({
       visibility: "audit",
       importance: "high",
       message: "Callback delivery retry budget exhausted; further delivery attempts are suppressed to avoid duplicate storms."
     });
+    const failedRow = sqlite.prepare("SELECT last_error FROM callback_deliveries WHERE id = ?").get(claimed[0]!.id);
+    const failurePersistence = JSON.stringify({ failedRow, events });
+    expect(failurePersistence).not.toContain(runClaim.fencingToken);
+    expect(failurePersistence).not.toContain("xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz");
+    expect(failurePersistence).not.toContain("ghp\x5fabcdefghijklmnopqrstuvwxyz123456");
+    expect(failurePersistence).not.toContain("-----BEGIN PRIVATE KEY-----");
+    expect(failurePersistence).toContain("[redacted]");
   });
 
   it("records control-plane events that are not tied to a run", async () => {
@@ -1720,11 +2230,12 @@ describe("OpenTag repository", () => {
     ]);
   });
 
-  it("deduplicates runner progress events by idempotency key", async () => {
+  it("deduplicates non-runner progress events by idempotency key", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
     migrateSchema(sqlite);
     const repo = createOpenTagRepository(db);
+    const idempotencyKey = "hermes:run_progress_replay:post_llm_call:1";
 
     await expect(
       repo.recordProgress({
@@ -1732,28 +2243,127 @@ describe("OpenTag repository", () => {
         message: "external hook progress",
         type: "ingest.hermes.post_llm_call",
         at: "2026-06-24T00:00:01.000Z",
-        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+        idempotencyKey
       })
-    ).resolves.toBe("recorded");
+    ).resolves.toMatchObject({ outcome: "recorded", event: { message: "external hook progress" } });
     await expect(
       repo.recordProgress({
         runId: "run_progress_replay",
         message: "external hook progress duplicate",
         type: "ingest.hermes.post_llm_call",
         at: "2026-06-24T00:00:02.000Z",
-        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+        idempotencyKey
       })
-    ).resolves.toBe("duplicate");
+    ).resolves.toMatchObject({ outcome: "duplicate", event: { message: "external hook progress" } });
 
     await expect(repo.listRunEvents({ runId: "run_progress_replay" })).resolves.toEqual([
       expect.objectContaining({
         type: "run.progress",
         message: "external hook progress",
-        payload: expect.objectContaining({
-          idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
-        })
+        payload: expect.not.objectContaining({ idempotencyKey: expect.anything() })
       })
     ]);
+    const stored = sqlite.prepare(`
+      SELECT progress_idempotency_digest AS digest, payload_json AS payloadJson
+      FROM run_events
+      WHERE run_id = ? AND type = 'run.progress'
+    `).get("run_progress_replay") as { digest: string; payloadJson: string };
+    expect(stored.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.payloadJson).not.toContain(idempotencyKey);
+    expect(stored.payloadJson).not.toContain("[redacted]");
+  });
+
+  it("keeps credential-like progress keys distinct without persisting either key representation", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const firstKey = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const secondKey = "xoxb\x2d0987654321-zyxwvutsrqponmlkjihgfedcba";
+
+    await expect(repo.recordProgress({
+      runId: "run_progress_credential_keys",
+      message: "first hook",
+      idempotencyKey: firstKey
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.recordProgress({
+      runId: "run_progress_credential_keys",
+      message: "second hook",
+      idempotencyKey: secondKey
+    })).resolves.toMatchObject({ outcome: "recorded" });
+
+    const stored = sqlite.prepare(`
+      SELECT progress_idempotency_digest AS digest, payload_json AS payloadJson
+      FROM run_events
+      WHERE run_id = ? AND type = 'run.progress'
+      ORDER BY id
+    `).all("run_progress_credential_keys") as Array<{ digest: string; payloadJson: string }>;
+    expect(stored).toHaveLength(2);
+    expect(new Set(stored.map((row) => row.digest)).size).toBe(2);
+    for (const row of stored) {
+      expect(row.digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.payloadJson).not.toContain(firstKey);
+      expect(row.payloadJson).not.toContain(secondKey);
+      expect(row.payloadJson).not.toContain("[redacted]");
+      expect(JSON.parse(row.payloadJson)).not.toHaveProperty("idempotencyKey");
+    }
+  });
+
+  it("deduplicates progress replay after more than 250 later events", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const idempotencyKey = "hermes:run_progress_long_replay:first";
+
+    const original = await repo.recordProgress({
+      runId: "run_progress_long_replay",
+      message: "original progress",
+      idempotencyKey
+    });
+    expect(original).toMatchObject({ outcome: "recorded" });
+    for (let index = 0; index < 300; index += 1) {
+      await repo.recordProgress({
+        runId: "run_progress_long_replay",
+        message: `later progress ${index}`
+      });
+    }
+
+    await expect(repo.recordProgress({
+      runId: "run_progress_long_replay",
+      message: "late replay",
+      idempotencyKey
+    })).resolves.toMatchObject({
+      outcome: "duplicate",
+      event: { message: "original progress" }
+    });
+    await expect(repo.listRunEvents({ runId: "run_progress_long_replay" })).resolves.toHaveLength(301);
+  });
+
+  it("converges concurrent non-runner progress replays on one event", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const results = await Promise.all([
+      repo.recordProgress({
+        runId: "run_progress_concurrent_replay",
+        message: "first concurrent progress",
+        idempotencyKey: "concurrent-progress-key"
+      }),
+      repo.recordProgress({
+        runId: "run_progress_concurrent_replay",
+        message: "second concurrent progress",
+        idempotencyKey: "concurrent-progress-key"
+      })
+    ]);
+
+    expect(results.map((result) => typeof result === "string" ? result : result.outcome).sort()).toEqual([
+      "duplicate",
+      "recorded"
+    ]);
+    await expect(repo.listRunEvents({ runId: "run_progress_concurrent_replay" })).resolves.toHaveLength(1);
   });
 
   it("stores needs_human results as needs_approval", async () => {
@@ -1845,6 +2455,13 @@ describe("OpenTag repository", () => {
                 action: "add_label",
                 summary: "Add the bug label.",
                 params: { label: "bug" }
+              },
+              {
+                intentId: "intent_status_ready",
+                domain: "status",
+                action: "set_status",
+                summary: "Set status to ready.",
+                params: { status: "ready" }
               }
             ]
           }
@@ -1864,6 +2481,15 @@ describe("OpenTag repository", () => {
       scope: "manual"
     });
     expect(decision?.approvedIntentIds).toEqual(["intent_label_bug"]);
+    const secondDecision = await repo.recordApprovalDecision({
+      id: "approval_protocol_status",
+      proposalId: "proposal_protocol",
+      approvedIntentIds: ["intent_status_ready"],
+      approvedBy: { provider: "github", providerUserId: "43", handle: "reviewer" },
+      approvedAt: "2026-06-24T00:00:02.500Z",
+      scope: "manual"
+    });
+    expect(secondDecision?.approvedIntentIds).toEqual(["intent_status_ready"]);
 
     const planResult = await repo.createApplyPlanOnce({
       id: "apply_protocol",
@@ -1882,6 +2508,7 @@ describe("OpenTag repository", () => {
     expect(plan?.outcomes?.[0]?.message).toContain("adapter execution is not implemented");
 
     await expect(repo.getApprovalDecision({ id: "approval_protocol" })).resolves.toMatchObject({ id: "approval_protocol" });
+    await expect(repo.getApprovalDecision({ id: "approval_protocol_status" })).resolves.toMatchObject({ id: "approval_protocol_status" });
     await expect(repo.getApplyPlan({ id: "apply_protocol" })).resolves.toMatchObject({ id: "apply_protocol" });
     await expect(
       repo.createApplyPlanOnce({
@@ -1911,8 +2538,8 @@ describe("OpenTag repository", () => {
     expect(metrics).toMatchObject({
       runId: "run_protocol",
       humanCallbackCount: 0,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1,
       childRunCount: 0,
       applyOutcomeCounts: {
@@ -1928,8 +2555,8 @@ describe("OpenTag repository", () => {
       scope: "repo",
       scopeId: "github:acme/demo",
       runCount: 1,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1
     });
     const storedRun = await repo.getRun({ runId: "run_protocol" });
@@ -1939,8 +2566,8 @@ describe("OpenTag repository", () => {
       scope: "work_thread",
       scopeId: threadId,
       runCount: 1,
-      suggestedChangesCount: 1,
-      approvalDecisionCount: 1,
+      suggestedChangesCount: 2,
+      approvalDecisionCount: 2,
       applyPlanCount: 1
     });
   });
@@ -2260,5 +2887,1832 @@ describe("OpenTag repository", () => {
       expect.objectContaining({ intentId: "intent_priority_p1", outcome: "stale" }),
       expect.objectContaining({ intentId: "intent_assignee_alice", outcome: "skipped" })
     ]);
+  });
+});
+
+describe("non-repository runner eligibility", () => {
+  function ordinaryEvent(id: string, metadata: Record<string, unknown> = {}) {
+    return {
+      id: `evt_${id}`,
+      source: "slack",
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "summarize this thread", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback" },
+      metadata
+    } as const;
+  }
+
+  it("lets a registered runner claim an ordinary run without a Project Target", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRun({ id: "run_scratch", event: ordinaryEvent("scratch") });
+
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
+    expect(claimed).toMatchObject({ run: { id: "run_scratch" }, event: { id: "evt_scratch" }, attemptNumber: 1 });
+  });
+
+  it("does not let an unbound repository target fall back to scratch eligibility", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.createRun({
+      id: "run_unbound_repo",
+      event: ordinaryEvent("unbound_repo", { repoProvider: "github", owner: "acme", repo: "private" })
+    });
+
+    await expect(repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 })).resolves.toBeNull();
+  });
+});
+
+describe("repository-optional channel bindings", () => {
+  it("refuses to let a different application take over an exclusive managed channel binding", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+    await expect(repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999", botId: "U999" }
+    })).rejects.toThrow(/managed channel binding.*different application/iu);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toMatchObject({
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+  });
+
+  it("does not let the Slack compatibility store method mutate a managed binding", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "original",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    });
+
+    await expect(repo.createSlackChannelBinding({
+      teamId: "T123",
+      channelId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "replacement"
+    })).rejects.toThrow(/managed channel binding.*compatibility/iu);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .resolves.toMatchObject({ repo: "original" });
+  });
+
+  it("does not delete a managed binding after its authorized snapshot has been rebound", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    const original = {
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      repoProvider: "github",
+      owner: "acme",
+      repo: "original",
+      ownership: { mode: "managed" as const, exclusive: true as const, applicationId: "A123" }
+    };
+    await repo.upsertChannelBinding(original);
+    const authorizedSnapshot = await repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+    expect(authorizedSnapshot).not.toBeNull();
+
+    await repo.upsertChannelBinding({
+      ...original,
+      repo: "replacement",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A999" },
+      allowManagedOwnershipOverride: true
+    });
+
+    await expect(repo.deleteChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      expectedBinding: authorizedSnapshot!
+    })).resolves.toBe(false);
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .resolves.toMatchObject({ repo: "replacement", ownership: { applicationId: "A999" } });
+  });
+
+  it("fails closed when persisted managed ownership is malformed", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U123" }
+    });
+    sqlite.prepare("UPDATE channel_bindings SET metadata_json = ? WHERE provider = ? AND account_id = ? AND conversation_id = ?").run(
+      JSON.stringify({
+        __opentagChannelBindingRecord: 2,
+        management: "managed",
+        ownership: { mode: "managed", exclusive: true, applicationId: "bad\u0000application" }
+      }),
+      "slack",
+      "T123",
+      "C456"
+    );
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
+  it.each([
+    {
+      name: "ownership is missing",
+      record: { __opentagChannelBindingRecord: 2, management: "managed" }
+    },
+    {
+      name: "the record version is altered",
+      record: {
+        __opentagChannelBindingRecord: 999,
+        management: "managed",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+      }
+    }
+  ])("fails closed when $name", async ({ record }) => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456",
+      ownership: { mode: "managed", exclusive: true, applicationId: "A123" }
+    });
+    sqlite.prepare("UPDATE channel_bindings SET metadata_json = ?").run(JSON.stringify(record));
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" }))
+      .rejects.toBeInstanceOf(ChannelBindingCorruptionError);
+  });
+
+  it("stores a generic channel binding with no repository target", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await repo.upsertChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+
+    await expect(repo.getChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" })).resolves.toEqual({
+      provider: "slack",
+      accountId: "T123",
+      conversationId: "C456"
+    });
+    const columns = sqlite.prepare("PRAGMA table_info(channel_bindings)").all() as Array<{ name: string; notnull: number }>;
+    expect(columns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name)).every((column) => column.notnull === 0)).toBe(true);
+  });
+
+  it("rejects partial repository fields at the store boundary", async () => {
+    const sqlite = new Database(":memory:");
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    migrateSchema(sqlite);
+
+    await expect(
+      repo.upsertChannelBinding({
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        owner: "acme"
+      })
+    ).rejects.toThrow(/repository|repoProvider|owner|repo/u);
+  });
+});
+
+describe("durable ACP material actions", () => {
+  function permissionEvent(id: string) {
+    return {
+      id: `evt_${id}`,
+      source: "slack",
+      sourceEventId: `source_${id}`,
+      receivedAt: "2026-07-12T00:00:00.000Z",
+      actor: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      target: { mention: "@opentag", agentId: "opentag", executorHint: "custom" },
+      command: { rawText: "publish the package", intent: "run", args: {} },
+      context: [],
+      permissions: [],
+      callback: { provider: "slack", uri: "https://example.com/callback", threadKey: "T123|C456|ts1" },
+      metadata: { teamId: "T123", channelId: "C456" }
+    } as const;
+  }
+
+  async function claimedRepository(leaseSeconds = 60, fixedAttemptId?: string, fixedFencingToken = "fixed-test-fencing-token") {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    const repo = createOpenTagRepository(db);
+    migrateSchema(sqlite);
+    await repo.registerRunner({ runnerId: "runner_1", name: "Runner One" });
+    await repo.upsertChannelBinding({ provider: "slack", accountId: "T123", conversationId: "C456" });
+    await repo.createRun({ id: "run_action", event: permissionEvent("action") });
+    const claimed = await repo.claimNextRun({ runnerId: "runner_1", leaseSeconds });
+    if (!claimed) throw new Error("expected claimed run");
+    if (!fixedAttemptId) return { sqlite, db, repo, claimed };
+    sqlite.prepare("UPDATE attempts SET id = ?, fencing_token = ? WHERE id = ?").run(fixedAttemptId, fixedFencingToken, claimed.attemptId);
+    sqlite.prepare("UPDATE runs SET current_attempt_id = ? WHERE id = ?").run(fixedAttemptId, "run_action");
+    return { sqlite, db, repo, claimed: { ...claimed, attemptId: fixedAttemptId, fencingToken: fixedFencingToken } };
+  }
+
+  function expireAttemptLease(sqlite: Database.Database, attemptId: string, runId = "run_action") {
+    const expiredAt = "2000-01-01T00:00:00.000Z";
+    sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?").run(expiredAt, attemptId);
+    sqlite.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(expiredAt, runId);
+  }
+
+  function seedCancellationChildren(sqlite: Database.Database, attemptId: string) {
+    const createdAt = "2026-07-12T00:00:30.000Z";
+    const historicalAttemptId = "attempt_historical";
+    const historicalFencingToken = "historical-fencing-token-not-detected-by-pattern";
+    const renumbered = sqlite.prepare("UPDATE attempts SET number = 2 WHERE id = ? AND number = 1").run(attemptId);
+    if (renumbered.changes !== 1) throw new Error("expected the current cancellation fixture to be Attempt 1");
+    sqlite.prepare(`
+      INSERT INTO attempts (
+        id, run_id, number, runner_id, fencing_token, status, started_at, heartbeat_at,
+        lease_expires_at, finished_at, result_json, created_at, updated_at
+      ) VALUES (?, 'run_action', 1, 'runner_historical', ?, 'interrupted', ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      historicalAttemptId,
+      historicalFencingToken,
+      "2026-07-11T23:58:00.000Z",
+      "2026-07-11T23:59:00.000Z",
+      "2026-07-11T23:59:30.000Z",
+      "2026-07-12T00:00:00.000Z",
+      JSON.stringify({ conclusion: "interrupted", summary: "Historical Attempt was interrupted." }),
+      "2026-07-11T23:58:00.000Z",
+      "2026-07-12T00:00:00.000Z"
+    );
+    const insertAction = sqlite.prepare(`
+      INSERT INTO material_actions (
+        id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+        status, idempotency_key, attempt_fence_digest, created_at, updated_at
+      ) VALUES (?, 'run_action', ?, 'test', 'test:cancel', '{}', '{}', 'material', ?, ?, 'digest', ?, ?)
+    `);
+    for (const status of ["executing", "proposed", "waiting_approval", "authorized", "succeeded"]) {
+      insertAction.run(`action_cancel_${status}`, attemptId, status, `cancel:${status}`, createdAt, createdAt);
+    }
+    insertAction.run("action_cancel_historical_executing", historicalAttemptId, "executing", "cancel:historical:executing", createdAt, createdAt);
+    insertAction.run("action_cancel_historical_authorized", historicalAttemptId, "authorized", "cancel:historical:authorized", createdAt, createdAt);
+    sqlite.prepare(`
+      INSERT INTO grants (
+        id, connection_id, capability, resource_scope_json, run_id, attempt_id, revoked_at, created_at
+      ) VALUES
+        ('grant_cancel_attempt', 'connection:test', 'test:cancel', '{}', 'run_action', ?, NULL, ?),
+        ('grant_cancel_historical', 'connection:test', 'test:cancel', '{}', 'run_action', ?, NULL, ?),
+        ('grant_cancel_run', 'connection:test', 'test:cancel', '{}', 'run_action', NULL, NULL, ?)
+    `).run(attemptId, createdAt, historicalAttemptId, createdAt, createdAt);
+    sqlite.prepare(`
+      INSERT INTO suggested_changes (proposal_id, run_id, snapshot_json, created_at)
+      VALUES ('proposal_cancel_evidence', 'run_action', '{"evidence":"proposal"}', ?)
+    `).run(createdAt);
+    sqlite.prepare(`
+      INSERT INTO approval_decisions (id, proposal_id, decision_json, created_at)
+      VALUES ('approval_cancel_evidence', 'proposal_cancel_evidence', '{"evidence":"approval"}', ?)
+    `).run(createdAt);
+    return { historicalAttemptId, historicalFencingToken };
+  }
+
+  it("atomically cancels an active Attempt and all run-scoped execution authority", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await expect(repo.markRunning({ ...lease, executor: "acp" })).resolves.toBe("running");
+    const { historicalFencingToken } = seedCancellationChildren(sqlite, claimed.attemptId);
+    const proposalEvidenceBefore = sqlite.prepare("SELECT * FROM suggested_changes").all();
+    const approvalEvidenceBefore = sqlite.prepare("SELECT * FROM approval_decisions").all();
+    const credentialLikeToken = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+    const secrets = [claimed.fencingToken, historicalFencingToken, credentialLikeToken];
+    expect(sqlite.prepare(`
+      SELECT status, fencing_token AS fencingToken, finished_at AS finishedAt
+      FROM attempts WHERE id = 'attempt_historical'
+    `).get()).toEqual({
+      status: "interrupted",
+      fencingToken: historicalFencingToken,
+      finishedAt: "2026-07-12T00:00:00.000Z"
+    });
+
+    const cancellation = await repo.cancelRun({
+      runId: "run_action",
+      reason: `Stop current ${claimed.fencingToken}; prior ${historicalFencingToken}; credential ${credentialLikeToken}.`,
+      requestedBy: `operator:${claimed.fencingToken}:${historicalFencingToken}:${credentialLikeToken}`
+    });
+    expect(cancellation).toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_action",
+        status: "cancelled",
+        assignedRunnerId: undefined,
+        result: { conclusion: "cancelled", summary: "Stop current [redacted]; prior [redacted]; credential [redacted]." }
+      }
+    });
+
+    expect(sqlite.prepare(`
+      SELECT status, finished_at AS finishedAt, result_json AS resultJson
+      FROM attempts WHERE id = ?
+    `).get(claimed.attemptId)).toMatchObject({
+      status: "cancelled",
+      finishedAt: expect.any(String),
+      resultJson: expect.stringContaining('"conclusion":"cancelled"')
+    });
+    expect(sqlite.prepare("SELECT id, status FROM material_actions ORDER BY id").all()).toEqual([
+      { id: "action_cancel_authorized", status: "cancelled" },
+      { id: "action_cancel_executing", status: "unknown" },
+      { id: "action_cancel_historical_authorized", status: "cancelled" },
+      { id: "action_cancel_historical_executing", status: "unknown" },
+      { id: "action_cancel_proposed", status: "cancelled" },
+      { id: "action_cancel_succeeded", status: "succeeded" },
+      { id: "action_cancel_waiting_approval", status: "cancelled" }
+    ]);
+    expect(sqlite.prepare("SELECT id, revoked_at AS revokedAt FROM grants ORDER BY id").all()).toEqual([
+      { id: "grant_cancel_attempt", revokedAt: expect.any(String) },
+      { id: "grant_cancel_historical", revokedAt: expect.any(String) },
+      { id: "grant_cancel_run", revokedAt: null }
+    ]);
+    expect(sqlite.prepare("SELECT * FROM suggested_changes").all()).toEqual(proposalEvidenceBefore);
+    expect(sqlite.prepare("SELECT * FROM approval_decisions").all()).toEqual(approvalEvidenceBefore);
+
+    const events = await repo.listRunEvents({ runId: "run_action" });
+    const cancellationEvents = events.filter((event) => event.type === "run.cancel_requested");
+    expect(cancellationEvents).toHaveLength(1);
+    expect(cancellationEvents[0]).toMatchObject({
+      message: "Stop current [redacted]; prior [redacted]; credential [redacted].",
+      payload: {
+        previousStatus: "running",
+        previousRunnerId: "runner_1",
+        requestedBy: "operator:[redacted]:[redacted]:[redacted]",
+        reason: "Stop current [redacted]; prior [redacted]; credential [redacted]."
+      }
+    });
+    const persistedRun = await repo.getRun({ runId: "run_action" });
+    const persistedCancellation = {
+      cancellation,
+      persistedRun,
+      cancellationEvents,
+      rawResult: sqlite.prepare("SELECT result_json AS resultJson FROM runs WHERE id = 'run_action'").get(),
+      rawAudit: sqlite.prepare("SELECT message, payload_json AS payloadJson FROM run_events WHERE type = 'run.cancel_requested'").get()
+    };
+    for (const secret of secrets) expect(JSON.stringify(persistedCancellation)).not.toContain(secret);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "Stop again." })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: { status: "cancelled", result: { conclusion: "cancelled" } }
+    });
+    expect((await repo.listRunEvents({ runId: "run_action" })).filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
+    await expect(repo.completeRun({
+      ...lease,
+      result: { conclusion: "success", summary: "late success" }
+    })).resolves.toBe("stale_attempt");
+  });
+
+  it("fences a late completion when cancellation wins after the outer lease preflight", async () => {
+    const { sqlite, db, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await expect(repo.markRunning({ ...lease, executor: "acp" })).resolves.toBe("running");
+
+    const originalTransaction = db.transaction.bind(db) as typeof db.transaction;
+    let cancellationWinner: ReturnType<typeof repo.cancelRun> | undefined;
+    let injected = false;
+    db.transaction = ((transaction, config) => {
+      if (!injected) {
+        injected = true;
+        db.transaction = originalTransaction;
+        cancellationWinner = repo.cancelRun({ runId: "run_action", reason: "Cancellation wins the completion race." });
+      }
+      return originalTransaction(transaction, config);
+    }) as typeof db.transaction;
+
+    await expect(repo.completeRun({
+      ...lease,
+      result: { conclusion: "success", summary: "late success after active preflight" }
+    })).resolves.toBe("stale_attempt");
+    if (!cancellationWinner) throw new Error("expected cancellation to be injected before the completion transaction");
+    await expect(cancellationWinner).resolves.toMatchObject({ outcome: "cancelled", run: { status: "cancelled" } });
+    expect(injected).toBe(true);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.completed'").get()).toEqual({ count: 0 });
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 1 });
+  });
+
+  it("rolls back cancellation rather than overwriting an attached needs_human Attempt", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    sqlite.prepare("UPDATE attempts SET status = 'needs_human', finished_at = ?, result_json = ? WHERE id = ?")
+      .run(
+        "2026-07-12T00:01:00.000Z",
+        JSON.stringify({ conclusion: "needs_human", summary: "Human decision required." }),
+        claimed.attemptId
+      );
+    const before = {
+      run: sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get(),
+      attempt: sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)
+    };
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "Do not overwrite terminal Attempt state." }))
+      .rejects.toThrow(`Cancellation could not terminate active Attempt ${claimed.attemptId}`);
+
+    expect(sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get()).toEqual(before.run);
+    expect(sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)).toEqual(before.attempt);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 0 });
+  });
+
+  it("rolls back Run and execution authority when the cancellation audit insert fails", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await repo.markRunning({ ...lease, executor: "acp" });
+    seedCancellationChildren(sqlite, claimed.attemptId);
+    const before = {
+      run: sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get(),
+      attempt: sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId),
+      actions: sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all(),
+      grants: sqlite.prepare("SELECT * FROM grants ORDER BY id").all()
+    };
+    sqlite.exec(`
+      CREATE TRIGGER abort_cancel_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.cancel_requested'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected cancel audit failure');
+      END
+    `);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "This must roll back." }))
+      .rejects.toThrow("injected cancel audit failure");
+
+    expect(sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get()).toEqual(before.run);
+    expect(sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)).toEqual(before.attempt);
+    expect(sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all()).toEqual(before.actions);
+    expect(sqlite.prepare("SELECT * FROM grants ORDER BY id").all()).toEqual(before.grants);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 0 });
+  });
+
+  it("returns the real terminal CAS winner without cleaning authority or writing cancellation audit", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await repo.markRunning({ ...lease, executor: "acp" });
+    seedCancellationChildren(sqlite, claimed.attemptId);
+    const attemptBefore = sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId);
+    const actionsBefore = sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all();
+    const grantsBefore = sqlite.prepare("SELECT * FROM grants ORDER BY id").all();
+    sqlite.exec(`
+      CREATE TRIGGER terminal_wins_cancel
+      BEFORE UPDATE OF status ON runs
+      WHEN OLD.id = 'run_action' AND NEW.status = 'cancelled'
+      BEGIN
+        UPDATE runs SET
+          status = 'succeeded',
+          result_json = '{"conclusion":"success","summary":"terminal winner"}',
+          assigned_runner_id = NULL,
+          leased_at = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = NULL,
+          current_attempt_id = NULL,
+          updated_at = '2026-07-12T00:02:00.000Z'
+        WHERE id = OLD.id;
+        SELECT RAISE(IGNORE);
+      END
+    `);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "losing cancellation" })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: {
+        status: "succeeded",
+        assignedRunnerId: undefined,
+        updatedAt: "2026-07-12T00:02:00.000Z",
+        result: { conclusion: "success", summary: "terminal winner" }
+      }
+    });
+    expect(sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)).toEqual(attemptBefore);
+    expect(sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all()).toEqual(actionsBefore);
+    expect(sqlite.prepare("SELECT * FROM grants ORDER BY id").all()).toEqual(grantsBefore);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 0 });
+  });
+
+  async function approvalIdentity(
+    repo: ReturnType<typeof createOpenTagRepository>,
+    action: { id: string; proposalId?: string; proposalHash?: string }
+  ) {
+    if (!action.proposalId || !action.proposalHash) throw new Error("expected governed approval action");
+    const proposal = await repo.getSuggestedChanges({ proposalId: action.proposalId });
+    const approvalEpoch = proposal?.snapshot.metadata?.["approvalEpoch"];
+    if (typeof approvalEpoch !== "string") throw new Error("expected approval epoch");
+    return { actionId: action.id, proposalHash: action.proposalHash, approvalEpoch };
+  }
+
+  it("fails closed when an Attempt lease is blank, malformed, or expired even if the Run mirror is live", async () => {
+    for (const leaseExpiresAt of [
+      "",
+      "not-a-timestamp",
+      "2000-01-01T00:00:00.000Z",
+      "2099-01-01",
+      "01/01/2099",
+      "July 13, 2099"
+    ]) {
+      const fixture = await claimedRepository();
+      const lease = {
+        runnerId: "runner_1",
+        runId: "run_action",
+        attemptId: fixture.claimed.attemptId,
+        fencingToken: fixture.claimed.fencingToken
+      };
+      fixture.sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?")
+        .run(leaseExpiresAt, fixture.claimed.attemptId);
+
+      await expect(fixture.repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("stale_attempt");
+      expect(fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM runs WHERE id = ?").get("run_action"))
+        .toMatchObject({ leaseExpiresAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u) });
+    }
+  });
+
+  it("does not let an expired Attempt resurrect runner-controlled Run mutations", async () => {
+    const fixture = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
+
+    await expect(fixture.repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.markRunning({ ...lease, executor: "acp" })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.recordProgress({ ...lease, message: "late progress" })).resolves.toBe("stale_attempt");
+    await expect(fixture.repo.completeRun({
+      ...lease,
+      result: { conclusion: "success", summary: "late completion" }
+    })).resolves.toBe("stale_attempt");
+
+    const events = await fixture.repo.listRunEvents({ runId: "run_action" });
+    expect(events.map((event) => event.type)).not.toEqual(expect.arrayContaining([
+      "run.heartbeat",
+      "run.running",
+      "run.progress",
+      "run.completed"
+    ]));
+    await expect(fixture.repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "assigned" } });
+  });
+
+  it("does not request, resolve, or receipt material actions after the Attempt lease expires", async () => {
+    const requestFixture = await claimedRepository();
+    const requestLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: requestFixture.claimed.attemptId,
+      fencingToken: requestFixture.claimed.fencingToken
+    };
+    expireAttemptLease(requestFixture.sqlite, requestFixture.claimed.attemptId);
+    await expect(requestFixture.repo.requestActionPermission({
+      ...requestLease,
+      request: {
+        toolCallId: "tool_after_expiry",
+        title: "Publish after expiry",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    })).resolves.toBeNull();
+    expect(requestFixture.sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 0 });
+
+    const resolveFixture = await claimedRepository();
+    const resolveLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: resolveFixture.claimed.attemptId,
+      fencingToken: resolveFixture.claimed.fencingToken
+    };
+    const waiting = await resolveFixture.repo.requestActionPermission({
+      ...resolveLease,
+      request: {
+        toolCallId: "tool_resolve_after_expiry",
+        title: "Publish after approval",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    });
+    await resolveFixture.repo.recordApprovalDecision({
+      id: "approval_before_expiry",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(resolveFixture.repo, waiting!.action) }
+    });
+    expireAttemptLease(resolveFixture.sqlite, resolveFixture.claimed.attemptId);
+    await expect(resolveFixture.repo.resolveActionPermission({
+      ...resolveLease,
+      actionId: waiting!.action.id
+    })).resolves.toMatchObject({ state: "stale", action: { status: "waiting_approval" } });
+    expect(resolveFixture.sqlite.prepare("SELECT count(*) AS count FROM grants").get()).toEqual({ count: 0 });
+
+    const receiptFixture = await claimedRepository();
+    const receiptLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: receiptFixture.claimed.attemptId,
+      fencingToken: receiptFixture.claimed.fencingToken
+    };
+    const executing = await receiptFixture.repo.requestActionPermission({
+      ...receiptLease,
+      request: {
+        toolCallId: "tool_receipt_after_expiry",
+        title: "Read metadata",
+        kind: "execute",
+        permissionScopes: [],
+        mode: "autonomous",
+        provider: "acp"
+      }
+    });
+    expireAttemptLease(receiptFixture.sqlite, receiptFixture.claimed.attemptId);
+    await expect(receiptFixture.repo.recordMaterialActionReceipt({
+      ...receiptLease,
+      actionId: executing!.action.id,
+      receipt: {
+        id: "receipt_after_expiry",
+        actionId: executing!.action.id,
+        provider: "acp",
+        receiptRef: "acp:late",
+        outcome: "unknown",
+        observedAt: new Date().toISOString()
+      }
+    })).resolves.toMatchObject({ state: "stale", action: { status: "executing" } });
+    expect(receiptFixture.sqlite.prepare("SELECT receipt_json AS receiptJson FROM material_actions WHERE id = ?")
+      .get(executing!.action.id)).toEqual({ receiptJson: null });
+  });
+
+  it("rolls back action creation when the Attempt lease expires inside the transaction", async () => {
+    const fixture = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    const originalLease = fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?")
+      .get(fixture.claimed.attemptId);
+    fixture.sqlite.exec(`
+      CREATE TRIGGER expire_attempt_during_action_creation
+      BEFORE INSERT ON material_actions
+      BEGIN
+        UPDATE attempts SET lease_expires_at = '2000-01-01T00:00:00.000Z' WHERE id = NEW.attempt_id;
+      END
+    `);
+
+    await expect(fixture.repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_interleaved_expiry",
+        title: "Publish during expiry",
+        kind: "publish",
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    })).resolves.toBeNull();
+    expect(fixture.sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 0 });
+    expect(fixture.sqlite.prepare("SELECT lease_expires_at AS leaseExpiresAt FROM attempts WHERE id = ?")
+      .get(fixture.claimed.attemptId)).toEqual(originalLease);
+  });
+
+  it("waits on the existing proposal approval path, creates an attempt grant, and reuses a known-success receipt", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_1",
+      title: "Publish package",
+      kind: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "@acme/pkg",
+      targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } },
+      targetFingerprint: `sha256:${"1".repeat(64)}`
+    };
+    const waiting = await repo.requestActionPermission({ ...lease, request });
+    expect(waiting).toMatchObject({ state: "waiting", action: { status: "waiting_approval", riskTier: "high" } });
+    expect(waiting?.action.attemptFenceDigest).not.toBe(claimed.fencingToken);
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
+    await expect(repo.heartbeat({ ...lease, leaseSeconds: 60 })).resolves.toBe("updated");
+    await expect(repo.recordProgress({ ...lease, message: "Waiting for the governed decision." })).resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "needs_approval" } });
+
+    const premature = await repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: waiting!.action.id,
+      receipt: { id: "receipt_too_early", actionId: waiting!.action.id, provider: "npm", receiptRef: "npm:early", outcome: "succeeded", observedAt: "2026-07-12T00:00:30.000Z" }
+    });
+    expect(premature?.state).toBe("waiting");
+    expect(premature?.action.receipt).toBeUndefined();
+
+    const proposalId = waiting?.action.proposalId;
+    expect(proposalId).toBeTruthy();
+    const storedProposal = await repo.getSuggestedChanges({ proposalId: proposalId! });
+    expect(storedProposal?.snapshot.intents[0]?.params).toMatchObject({
+      target: { targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } } }
+    });
+    expect(JSON.stringify(storedProposal)).not.toMatch(/authorization|password|secret|token=/iu);
+    await repo.recordApprovalDecision({
+      id: "approval_once",
+      proposalId: proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123", handle: "alice" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: {
+        source: "thread_action",
+        permissionDecision: "allow_once",
+        ...await approvalIdentity(repo, waiting!.action)
+      }
+    });
+    const allowed = await repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id });
+    expect(allowed).toMatchObject({ state: "authorized", decision: "allow_once", action: { status: "executing" } });
+    await expect(repo.getRun({ runId: "run_action" })).resolves.toMatchObject({ run: { status: "running" } });
+
+    const receipt = {
+      id: "receipt_1",
+      actionId: waiting!.action.id,
+      provider: "npm",
+      connectionId: "npm:team",
+      targetFingerprint: `sha256:${"1".repeat(64)}`,
+      receiptRef: "npm:publish:acme-pkg@1.0.0",
+      outcome: "succeeded" as const,
+      observedAt: "2026-07-12T00:02:00.000Z"
+    };
+    await expect(repo.recordMaterialActionReceipt({ ...lease, actionId: waiting!.action.id, receipt: { ...receipt, actionId: "action_other" } })).rejects.toThrow(/actionId/u);
+    await repo.recordMaterialActionReceipt({ ...lease, actionId: waiting!.action.id, receipt });
+    await expect(repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })).resolves.toMatchObject({
+      state: "reconciled",
+      decision: "deny",
+      receipt: { receiptRef: "npm:publish:acme-pkg@1.0.0" }
+    });
+  });
+
+  it("converges concurrent semantic request replays on one durable action", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = { toolCallId: "tool_1", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask" as const, provider: "npm" };
+    const results = await Promise.all([
+      repo.requestActionPermission({ ...lease, request }),
+      repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })
+    ]);
+    expect(results[0]?.action.id).toBe(results[1]?.action.id);
+    expect(results.every((result) => result?.state === "waiting")).toBe(true);
+  });
+
+  it("keeps provider and credential-safe target fingerprints in action identity and never broadens allow_once", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const firstRequest = {
+      toolCallId: "tool_target_a",
+      title: "Execute deployment",
+      kind: "execute",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      permissionScopes: ["deploy:write"],
+      mode: "auto" as const,
+      provider: "acp"
+    };
+    const first = await repo.requestActionPermission({ ...lease, request: firstRequest });
+    const second = await repo.requestActionPermission({
+      ...lease,
+      request: { ...firstRequest, toolCallId: "tool_target_b", targetFingerprint: `sha256:${"b".repeat(64)}` }
+    });
+    const otherProvider = await repo.requestActionPermission({
+      ...lease,
+      request: { ...firstRequest, toolCallId: "tool_target_c", provider: "connector" }
+    });
+    expect(first).toMatchObject({ state: "waiting", action: { status: "waiting_approval" } });
+    expect(new Set([first?.action.id, second?.action.id, otherProvider?.action.id]).size).toBe(3);
+
+    await repo.recordApprovalDecision({
+      id: "approval_exact_once",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: {
+        source: "thread_action",
+        permissionDecision: "allow_once",
+        ...await approvalIdentity(repo, first!.action)
+      }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: second!.action.id })).resolves.toMatchObject({ state: "waiting" });
+  });
+
+  it("reuses allow_run for a distinct exact action inside the approved structured resource scope only", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const first = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_scope_next",
+        title: "Publish report next",
+        kind: "execute",
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        resource: "@acme/report",
+        resourceVersion: "next",
+        targetFingerprint: `sha256:${"1".repeat(64)}`,
+        grantScope: { package: "@acme/report", versions: "*" },
+        permissionScopes: ["npm:publish"],
+        mode: "ask"
+      }
+    });
+    await repo.recordApprovalDecision({
+      id: "approval_bounded_run",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: {
+        permissionDecision: "allow_run",
+        ...await approvalIdentity(repo, first!.action)
+      }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_run" });
+
+    const inside = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_scope_stable",
+        title: "Publish report stable",
+        kind: "execute",
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        resource: "@acme/report",
+        resourceVersion: "stable",
+        targetFingerprint: `sha256:${"2".repeat(64)}`,
+        grantScope: { package: "@acme/report", versions: "*" },
+        permissionScopes: ["npm:publish"],
+        mode: "auto"
+      }
+    });
+    expect(inside).toMatchObject({ state: "authorized", decision: "allow_run", action: { status: "executing" } });
+    expect(inside!.action.id).not.toBe(first!.action.id);
+
+    await expect(repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_scope_outside",
+        title: "Publish other stable",
+        kind: "execute",
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        resource: "@acme/other",
+        resourceVersion: "stable",
+        targetFingerprint: `sha256:${"3".repeat(64)}`,
+        grantScope: { package: "@acme/other", versions: "*" },
+        permissionScopes: ["npm:publish"],
+        mode: "auto"
+      }
+    })).resolves.toMatchObject({ state: "waiting", action: { status: "waiting_approval" } });
+  });
+
+  it("does not offer or persist run reuse for an unsafe or unclassified exact target", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_non_reusable",
+        title: "Publish signed target",
+        kind: "execute",
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        resource: "https://example.test/report",
+        targetFingerprint: `sha256:${"9".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", queryFingerprint: `sha256:${"8".repeat(64)}`, reuse: "deny" },
+        permissionScopes: ["npm:publish"],
+        mode: "ask"
+      }
+    });
+    const proposal = await repo.getSuggestedChanges({ proposalId: waiting!.action.proposalId! });
+    expect(proposal?.snapshot.intents[0]?.params?.["decisions"]).toEqual(["allow_once", "deny"]);
+    await repo.recordApprovalDecision({
+      id: "approval_non_reusable",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_run", ...await approvalIdentity(repo, waiting!.action) }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+    expect(sqlite.prepare("SELECT attempt_id AS attemptId FROM grants").get()).toEqual({ attemptId: claimed.attemptId });
+  });
+
+  it("keeps denied exact targets out of opaque one-shot action identity while retaining their stored constraints", async () => {
+    const firstFixture = await claimedRepository(60, "attempt_opaque_identity");
+    const secondFixture = await claimedRepository(60, "attempt_opaque_identity");
+    const request = {
+      toolCallId: "tool_opaque_identity",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await firstFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: firstFixture.claimed.attemptId,
+      fencingToken: firstFixture.claimed.fencingToken,
+      request: {
+        ...request,
+        resource: "https://example.test/report-blue",
+        targetFingerprint: `sha256:${"a".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" }
+      }
+    });
+    const second = await secondFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondFixture.claimed.attemptId,
+      fencingToken: secondFixture.claimed.fencingToken,
+      request: {
+        ...request,
+        resource: "https://example.test/report-green",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "green" }
+      }
+    });
+
+    expect(first).toMatchObject({ state: "waiting", action: { scope: { targetConstraints: { exactTarget: "blue" } } } });
+    expect(second).toMatchObject({ state: "waiting", action: { scope: { targetConstraints: { exactTarget: "green" } } } });
+    expect(second!.action.id).toBe(first!.action.id);
+    expect(second!.action.idempotencyKey).toBe(first!.action.idempotencyKey);
+    expect(second!.action.proposalId).toBe(first!.action.proposalId);
+    expect(second!.action.proposalHash).toBe(first!.action.proposalHash);
+    await expect(approvalIdentity(secondFixture.repo, second!.action)).resolves.toEqual(
+      await approvalIdentity(firstFixture.repo, first!.action)
+    );
+  });
+
+  it("keys agent-controlled opaque tool identity to private Attempt fencing material", async () => {
+    const firstFixture = await claimedRepository(60, "attempt_keyed_identity", "first-private-fencing-key");
+    const secondFixture = await claimedRepository(60, "attempt_keyed_identity", "second-private-fencing-key");
+    const request = {
+      toolCallId: "authorization=agent-controlled-sensitive-value",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" },
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await firstFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: firstFixture.claimed.attemptId,
+      fencingToken: firstFixture.claimed.fencingToken,
+      request
+    });
+    const second = await secondFixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondFixture.claimed.attemptId,
+      fencingToken: secondFixture.claimed.fencingToken,
+      request
+    });
+
+    expect(first).toMatchObject({ state: "waiting" });
+    expect(second).toMatchObject({ state: "waiting" });
+    expect(second!.action.id).not.toBe(first!.action.id);
+    expect(second!.action.idempotencyKey).not.toBe(first!.action.idempotencyKey);
+    expect(JSON.stringify([first, second])).not.toContain(request.toolCallId);
+  });
+
+  it("fails closed when one opaque tool identity drifts to a different denied exact target", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_drifting_identity",
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        ...request,
+        resource: "https://example.test/report-blue",
+        targetFingerprint: `sha256:${"a".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" }
+      }
+    });
+    await repo.recordApprovalDecision({
+      id: "approval_before_target_drift",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, waiting!.action) }
+    });
+
+    const drifted = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        ...request,
+        resource: "https://example.test/report-green",
+        targetFingerprint: `sha256:${"b".repeat(64)}`,
+        targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "green" }
+      }
+    });
+
+    expect(drifted).toMatchObject({
+      state: "denied",
+      decision: "deny",
+      action: {
+        id: waiting!.action.id,
+        status: "cancelled",
+        scope: { targetConstraints: { exactTarget: "blue" } }
+      }
+    });
+    expect(JSON.stringify(drifted)).not.toContain("green");
+    expect(sqlite.prepare("SELECT COUNT(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({
+      state: "denied",
+      action: { status: "cancelled" }
+    });
+  });
+
+  it("keeps distinct opaque tool calls eligible for separate exact one-shot approvals", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      title: "Publish signed target",
+      kind: "execute",
+      provider: "npm",
+      connectionId: "npm:team",
+      operation: "publish",
+      resource: "https://example.test/report",
+      targetConstraints: { queryMode: "credential_stripped", reuse: "deny", exactTarget: "blue" },
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const
+    };
+    const first = await repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_one_shot_first" } });
+    await repo.recordApprovalDecision({
+      id: "approval_one_shot_first",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, first!.action) }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: first!.action.id })).resolves.toMatchObject({
+      state: "authorized",
+      decision: "allow_once"
+    });
+
+    const second = await repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_one_shot_second" } });
+    expect(second).toMatchObject({ state: "waiting" });
+    expect(second!.action.id).not.toBe(first!.action.id);
+    expect(second!.action.proposalHash).not.toBe(first!.action.proposalHash);
+    await repo.recordApprovalDecision({
+      id: "approval_one_shot_second",
+      proposalId: second!.action.proposalId!,
+      approvedIntentIds: [`intent_${second!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:02:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, second!.action) }
+    });
+    await expect(repo.resolveActionPermission({ ...lease, actionId: second!.action.id })).resolves.toMatchObject({
+      state: "authorized",
+      decision: "allow_once"
+    });
+    const grantedActionIds = (sqlite.prepare("SELECT constraints_json AS constraintsJson FROM grants").all() as Array<{ constraintsJson: string }>).map(
+      ({ constraintsJson }) => String((JSON.parse(constraintsJson) as Record<string, unknown>)["actionId"])
+    ).sort();
+    expect(grantedActionIds).toEqual([first!.action.id, second!.action.id].sort());
+  });
+
+  it("rolls back grant-based authorization when the grant is revoked or Attempt is reassigned during creation", async () => {
+    for (const interleaving of ["revoke_grant", "reassign_attempt"] as const) {
+      const { sqlite, repo, claimed } = await claimedRepository();
+      const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+      const grantScope = { package: "@acme/report", versions: "*" };
+      const first = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_${interleaving}_first`, title: "Publish report next", kind: "execute", provider: "npm",
+          connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next",
+          targetFingerprint: `sha256:${"4".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "ask"
+        }
+      });
+      await repo.recordApprovalDecision({
+        id: `approval_${interleaving}`,
+        proposalId: first!.action.proposalId!,
+        approvedIntentIds: [`intent_${first!.action.id}`],
+        approvedBy: { provider: "slack", providerUserId: "U123" },
+        approvedAt: "2026-07-12T00:01:00.000Z",
+        scope: "manual",
+        metadata: { permissionDecision: "allow_run", ...await approvalIdentity(repo, first!.action) }
+      });
+      await repo.resolveActionPermission({ ...lease, actionId: first!.action.id });
+      sqlite.exec(interleaving === "revoke_grant" ? `
+        CREATE TRIGGER force_grant_revoke
+        AFTER INSERT ON material_actions
+        BEGIN
+          UPDATE grants SET revoked_at = '2026-07-12T00:01:30.000Z' WHERE run_id = NEW.run_id;
+        END
+      ` : `
+        CREATE TRIGGER force_attempt_reassignment_during_creation
+        AFTER INSERT ON material_actions
+        BEGIN
+          UPDATE runs SET current_attempt_id = 'attempt_forced_reassignment' WHERE id = NEW.run_id;
+        END
+      `);
+      const second = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_${interleaving}_second`, title: "Publish report stable", kind: "execute", provider: "npm",
+          connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "stable",
+          targetFingerprint: `sha256:${"5".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "auto"
+        }
+      });
+      expect(second).toBeNull();
+      expect(sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+      expect(sqlite.prepare("SELECT count(*) AS count FROM grants WHERE revoked_at IS NOT NULL").get()).toEqual({ count: 0 });
+      expect(sqlite.prepare("SELECT current_attempt_id AS attemptId FROM runs WHERE id = ?").get("run_action")).toEqual({ attemptId: claimed.attemptId });
+    }
+  });
+
+  it("keeps repeat non-material Auto permissions usable without releasing a receipt-tracked execution", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_read_once",
+      title: "Read report metadata",
+      kind: "read",
+      provider: "acp",
+      connectionId: "acp:agent-managed",
+      operation: "read",
+      resource: "@acme/report",
+      permissionScopes: [] as string[],
+      mode: "auto" as const
+    };
+    const first = await repo.requestActionPermission({ ...lease, request });
+    expect(first).toMatchObject({ state: "authorized", decision: "allow_once", action: { status: "authorized" } });
+    const repeated = await repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_read_again" } });
+    expect(repeated).toMatchObject({ state: "authorized", decision: "allow_once", action: { id: first!.action.id, status: "authorized" } });
+    expect(repeated!.action.receipt).toBeUndefined();
+  });
+
+  it("transactionally fences a non-material authorization returned from an insert conflict", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    sqlite.exec(`
+      CREATE TRIGGER create_non_material_conflict_winner
+      BEFORE INSERT ON material_actions
+      WHEN NEW.status = 'authorized'
+      BEGIN
+        INSERT INTO material_actions (
+          id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+          status, idempotency_key, proposal_id, proposal_hash, decision_snapshot_hash,
+          attempt_fence_digest, receipt_json, created_at, updated_at
+        ) VALUES (
+          NEW.id, NEW.run_id, NEW.attempt_id, NEW.action_family, NEW.capability, NEW.scope_json,
+          NEW.target_json, NEW.risk_tier, NEW.status, NEW.idempotency_key, NEW.proposal_id,
+          NEW.proposal_hash, NEW.decision_snapshot_hash, NEW.attempt_fence_digest, NEW.receipt_json,
+          NEW.created_at, NEW.updated_at
+        );
+      END
+    `);
+
+    const resolution = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_non_material_conflict",
+        title: "Read conflict metadata",
+        kind: "read",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "read",
+        resource: "@acme/report",
+        permissionScopes: [],
+        mode: "auto"
+      }
+    });
+
+    expect(resolution).toMatchObject({
+      state: "authorized",
+      decision: "allow_once",
+      action: { status: "authorized", attemptId: claimed.attemptId }
+    });
+    expect(sqlite.prepare("SELECT count(*) AS count FROM material_actions").get()).toEqual({ count: 1 });
+  });
+
+  it("never authorizes a non-material insert-conflict winner owned by a different Attempt", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    sqlite.exec(`
+      CREATE TRIGGER create_wrong_owner_non_material_conflict_winner
+      BEFORE INSERT ON material_actions
+      WHEN NEW.status = 'authorized'
+      BEGIN
+        INSERT INTO material_actions (
+          id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+          status, idempotency_key, proposal_id, proposal_hash, decision_snapshot_hash,
+          attempt_fence_digest, receipt_json, created_at, updated_at
+        ) VALUES (
+          NEW.id, NEW.run_id, 'attempt_wrong_owner', NEW.action_family, NEW.capability, NEW.scope_json,
+          NEW.target_json, NEW.risk_tier, NEW.status, NEW.idempotency_key, NEW.proposal_id,
+          NEW.proposal_hash, NEW.decision_snapshot_hash, 'wrong-fence-digest', NEW.receipt_json,
+          NEW.created_at, NEW.updated_at
+        );
+      END
+    `);
+
+    await expect(repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_wrong_owner_conflict",
+        title: "Read wrong-owner metadata",
+        kind: "read",
+        provider: "acp",
+        connectionId: "acp:agent-managed",
+        operation: "read",
+        resource: "@acme/report",
+        permissionScopes: [],
+        mode: "auto"
+      }
+    })).resolves.toBeNull();
+    expect(sqlite.prepare("SELECT attempt_id AS attemptId, status FROM material_actions").get()).toEqual({
+      attemptId: "attempt_wrong_owner",
+      status: "authorized"
+    });
+  });
+
+  it("keeps the first proposal terminal decision immutable and validates governed proposal identity", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_terminal",
+        title: "Publish package",
+        kind: "publish",
+        targetFingerprint: `sha256:${"c".repeat(64)}`,
+        permissionScopes: ["npm:publish"],
+        mode: "ask",
+        provider: "npm"
+      }
+    });
+    const identity = {
+      ...await approvalIdentity(repo, waiting!.action),
+      permissionDecision: "allow_once"
+    };
+    const invalid = await repo.recordApprovalDecision({
+      id: "approval_invalid_hash",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:00:30.000Z",
+      scope: "manual",
+      metadata: { ...identity, proposalHash: "tampered" }
+    });
+    expect(invalid).toBeNull();
+
+    const first = await repo.recordApprovalDecision({
+      id: "approval_first_terminal",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: identity
+    });
+    const conflicting = await repo.recordApprovalDecision({
+      id: "approval_conflicting_terminal",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [],
+      rejectedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U999" },
+      approvedAt: "2026-07-12T00:02:00.000Z",
+      scope: "manual",
+      metadata: { ...identity, permissionDecision: "deny" }
+    });
+    expect(conflicting).toEqual(first);
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_once" });
+  });
+
+  it("cancels an expired waiting proposal and creates a new approval epoch for the replacement Attempt", async () => {
+    const waitingFixture = await claimedRepository();
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: waitingFixture.claimed.attemptId, fencingToken: waitingFixture.claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_rebind",
+      title: "Publish package",
+      kind: "publish",
+      targetFingerprint: `sha256:${"d".repeat(64)}`,
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const waiting = await waitingFixture.repo.requestActionPermission({ ...firstLease, request });
+    expireAttemptLease(waitingFixture.sqlite, waitingFixture.claimed.attemptId);
+    const secondClaim = await waitingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: secondClaim!.attemptId, fencingToken: secondClaim!.fencingToken };
+    const replacement = await waitingFixture.repo.requestActionPermission({ ...secondLease, request: { ...request, toolCallId: "tool_replacement" } });
+    expect(replacement).toMatchObject({
+      state: "waiting",
+      action: { status: "waiting_approval", attemptId: secondClaim!.attemptId }
+    });
+    expect(replacement!.action.id).not.toBe(waiting!.action.id);
+    expect(replacement!.action.proposalId).not.toBe(waiting!.action.proposalId);
+    expect(replacement!.action.proposalHash).not.toBe(waiting!.action.proposalHash);
+    const stale = await waitingFixture.repo.resolveActionPermission({ ...firstLease, actionId: waiting!.action.id });
+    expect(stale).toMatchObject({ state: "stale" });
+    expect(stale).not.toHaveProperty("decision");
+
+    const executingFixture = await claimedRepository();
+    const executingFirstLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingFixture.claimed.attemptId, fencingToken: executingFixture.claimed.fencingToken };
+    const executingRequest = {
+      toolCallId: "tool_execute",
+      title: "Read metadata",
+      kind: "execute",
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      permissionScopes: [],
+      mode: "autonomous" as const,
+      provider: "acp"
+    };
+    const executing = await executingFixture.repo.requestActionPermission({ ...executingFirstLease, request: executingRequest });
+    expect(executing).toMatchObject({ state: "authorized", action: { status: "executing" } });
+    expireAttemptLease(executingFixture.sqlite, executingFixture.claimed.attemptId);
+    const executingSecondClaim = await executingFixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const executingSecondLease = { runnerId: "runner_1", runId: "run_action", attemptId: executingSecondClaim!.attemptId, fencingToken: executingSecondClaim!.fencingToken };
+    const staleReceipt = await executingFixture.repo.recordMaterialActionReceipt({
+      ...executingFirstLease,
+      actionId: executing!.action.id,
+      receipt: {
+        id: "receipt_from_stale_attempt",
+        actionId: executing!.action.id,
+        provider: "acp",
+        receiptRef: "acp:stale-attempt",
+        outcome: "succeeded",
+        observedAt: "2026-07-12T00:02:00.000Z"
+      }
+    });
+    expect(staleReceipt).toMatchObject({ state: "stale", action: { id: executing!.action.id, status: "unknown" } });
+    expect(staleReceipt).not.toHaveProperty("decision");
+    expect(staleReceipt?.action.receipt).toBeUndefined();
+    expect(JSON.stringify(await executingFixture.repo.listRunEvents({ runId: "run_action" }))).not.toContain("receipt_from_stale_attempt");
+    await expect(executingFixture.repo.requestActionPermission({ ...executingSecondLease, request: { ...executingRequest, toolCallId: "tool_execute_retry" } })).resolves.toMatchObject({
+      state: "unknown",
+      action: { id: executing!.action.id, status: "unknown" }
+    });
+  });
+
+  it("selects the replacement action epoch by Attempt number when timestamps tie", async () => {
+    const fixture = await claimedRepository();
+    const firstLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: fixture.claimed.attemptId,
+      fencingToken: fixture.claimed.fencingToken
+    };
+    const request = {
+      toolCallId: "tool_same_timestamp_first",
+      title: "Publish package",
+      kind: "publish",
+      targetFingerprint: `sha256:${"f".repeat(64)}`,
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const first = await fixture.repo.requestActionPermission({ ...firstLease, request });
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    if (!first || !secondClaim) throw new Error("expected replacement Attempt and approval epoch");
+    const secondLease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim.attemptId,
+      fencingToken: secondClaim.fencingToken
+    };
+    const replacement = await fixture.repo.requestActionPermission({
+      ...secondLease,
+      request: { ...request, toolCallId: "tool_same_timestamp_replacement" }
+    });
+    if (!replacement) throw new Error("expected replacement action epoch");
+
+    fixture.sqlite.prepare("UPDATE material_actions SET created_at = ? WHERE id IN (?, ?)")
+      .run("2026-07-12T00:00:00.000Z", first.action.id, replacement.action.id);
+    fixture.sqlite.exec(`
+      CREATE TRIGGER reject_duplicate_current_epoch_insert
+      BEFORE INSERT ON material_actions
+      WHEN NEW.id = '${replacement.action.id}'
+      BEGIN
+        SELECT RAISE(FAIL, 'current action epoch must be read, not inserted again');
+      END;
+    `);
+
+    await expect(fixture.repo.requestActionPermission({
+      ...secondLease,
+      request: { ...request, toolCallId: "tool_same_timestamp_retry" }
+    })).resolves.toMatchObject({
+      state: "waiting",
+      action: { id: replacement.action.id, attemptId: secondClaim.attemptId, status: "waiting_approval" }
+    });
+  });
+
+  it("rejects a decision submitted after its approval Attempt lease expired", async () => {
+    const fixture = await claimedRepository(60);
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const waiting = await fixture.repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_late_decision", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+    });
+    const proposal = await fixture.repo.getSuggestedChanges({ proposalId: waiting!.action.proposalId! });
+    await fixture.repo.heartbeat({ ...lease, leaseSeconds: 0 });
+
+    await expect(fixture.repo.recordApprovalDecision({
+      id: "approval_after_expiry",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: {
+        permissionDecision: "allow_once",
+        actionId: waiting!.action.id,
+        proposalHash: waiting!.action.proposalHash,
+        approvalEpoch: proposal!.snapshot.metadata!["approvalEpoch"]
+      }
+    })).resolves.toBeNull();
+  });
+
+  it("does not let an unconsumed allow_once decision authorize a replacement Attempt", async () => {
+    const fixture = await claimedRepository(60);
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const request = {
+      toolCallId: "tool_unconsumed_once",
+      title: "Publish package",
+      kind: "publish",
+      permissionScopes: ["npm:publish"],
+      mode: "ask" as const,
+      provider: "npm"
+    };
+    const first = await fixture.repo.requestActionPermission({ ...firstLease, request });
+    await fixture.repo.recordApprovalDecision({
+      id: "approval_unconsumed_once",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(fixture.repo, first!.action) }
+    });
+    await fixture.repo.heartbeat({ ...firstLease, leaseSeconds: 0 });
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const replacement = await fixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim!.attemptId,
+      fencingToken: secondClaim!.fencingToken,
+      request: { ...request, toolCallId: "tool_replacement_once" }
+    });
+
+    expect(replacement).toMatchObject({ state: "waiting", action: { status: "waiting_approval", attemptId: secondClaim!.attemptId } });
+    expect(replacement!.action.id).not.toBe(first!.action.id);
+  });
+
+  it("keeps an explicit allow_run grant valid across replacement Attempts", async () => {
+    const fixture = await claimedRepository(60);
+    const firstLease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const grantScope = { package: "@acme/report", versions: "*" };
+    const first = await fixture.repo.requestActionPermission({
+      ...firstLease,
+      request: {
+        toolCallId: "tool_allow_run_next", title: "Publish report next", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next",
+        targetFingerprint: `sha256:${"6".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "ask"
+      }
+    });
+    await fixture.repo.recordApprovalDecision({
+      id: "approval_cross_attempt_run",
+      proposalId: first!.action.proposalId!,
+      approvedIntentIds: [`intent_${first!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: new Date().toISOString(),
+      scope: "manual",
+      metadata: { permissionDecision: "allow_run", ...await approvalIdentity(fixture.repo, first!.action) }
+    });
+    await expect(fixture.repo.resolveActionPermission({ ...firstLease, actionId: first!.action.id })).resolves.toMatchObject({ state: "authorized", decision: "allow_run" });
+    await fixture.repo.heartbeat({ ...firstLease, leaseSeconds: 0 });
+    const secondClaim = await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+    const second = await fixture.repo.requestActionPermission({
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: secondClaim!.attemptId,
+      fencingToken: secondClaim!.fencingToken,
+      request: {
+        toolCallId: "tool_allow_run_stable", title: "Publish report stable", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "stable",
+        targetFingerprint: `sha256:${"7".repeat(64)}`, grantScope, permissionScopes: ["npm:publish"], mode: "auto"
+      }
+    });
+
+    expect(second).toMatchObject({ state: "authorized", decision: "allow_run", action: { status: "executing", attemptId: secondClaim!.attemptId } });
+  });
+
+  it("reconciles an unknown action once with sanitized, auditable evidence", async () => {
+    const fixture = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+    const executing = await fixture.repo.requestActionPermission({
+      ...lease,
+      request: {
+        toolCallId: "tool_unknown_reconcile", title: "Publish report", kind: "execute", provider: "npm",
+        connectionId: "npm:team", operation: "publish", resource: "@acme/report",
+        targetFingerprint: `sha256:${"8".repeat(64)}`, permissionScopes: ["npm:publish"], mode: "autonomous"
+      }
+    });
+    expireAttemptLease(fixture.sqlite, fixture.claimed.attemptId);
+    await fixture.repo.claimNextRun({ runnerId: "runner_1", leaseSeconds: 60 });
+
+    const first = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "succeeded",
+      idempotencyKey: "reconcile_provider_check_1",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin",
+      evidence: [{
+        id: "evidence_provider_1", kind: "provider_lookup", assurance: "verified", subjectRef: "@acme/report",
+        summary: "Provider confirms the package was published.", createdAt: new Date().toISOString(),
+        metadata: { authorization: "Bearer must-not-persist" }
+      }]
+    });
+    const replay = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "succeeded",
+      idempotencyKey: "reconcile_provider_check_1",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin"
+    });
+    const conflict = await fixture.repo.reconcileUnknownMaterialAction({
+      actionId: executing!.action.id,
+      outcome: "failed",
+      idempotencyKey: "reconcile_conflict",
+      receiptRef: "npm:publish:@acme/report",
+      source: "control_plane_admin",
+      actorId: "pairing_admin"
+    });
+
+    expect(first).toMatchObject({ outcome: "reconciled", action: { status: "succeeded" } });
+    expect(replay).toMatchObject({ outcome: "replayed", action: { status: "succeeded" } });
+    expect(conflict).toMatchObject({ outcome: "conflict", action: { status: "succeeded" } });
+    expect(JSON.stringify(first)).not.toContain("must-not-persist");
+    await expect(fixture.repo.listControlPlaneEvents({ type: "material_action.reconciled" })).resolves.toHaveLength(1);
+  });
+
+  it("rolls back grant creation and execution release when ownership changes inside the authorization transaction", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const waiting = await repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_interleave", title: "Publish package", kind: "publish", permissionScopes: ["npm:publish"], mode: "ask", provider: "npm" }
+    });
+    await repo.recordApprovalDecision({
+      id: "approval_interleave",
+      proposalId: waiting!.action.proposalId!,
+      approvedIntentIds: [`intent_${waiting!.action.id}`],
+      approvedBy: { provider: "slack", providerUserId: "U123" },
+      approvedAt: "2026-07-12T00:01:00.000Z",
+      scope: "manual",
+      metadata: { permissionDecision: "allow_once", ...await approvalIdentity(repo, waiting!.action) }
+    });
+    sqlite.exec(`
+      CREATE TRIGGER force_action_reassignment
+      BEFORE UPDATE OF status ON material_actions
+      WHEN NEW.status = 'executing'
+      BEGIN
+        UPDATE runs SET current_attempt_id = 'attempt_forced_reassignment' WHERE id = NEW.run_id;
+      END
+    `);
+    await expect(repo.resolveActionPermission({ ...lease, actionId: waiting!.action.id })).resolves.toMatchObject({ state: "stale", reason: expect.stringMatching(/ownership changed/u) });
+    expect(sqlite.prepare("SELECT status FROM material_actions WHERE id = ?").get(waiting!.action.id)).toEqual({ status: "waiting_approval" });
+    expect(sqlite.prepare("SELECT count(*) AS count FROM grants WHERE run_id = ?").get("run_action")).toEqual({ count: 0 });
+    expect(sqlite.prepare("SELECT current_attempt_id AS attemptId FROM runs WHERE id = ?").get("run_action")).toEqual({ attemptId: claimed.attemptId });
+  });
+
+  it("accepts only the first fenced terminal receipt and strips credential-bearing receipt fields", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const allowed = await repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_receipt", title: "Read metadata", kind: "execute", permissionScopes: [], mode: "autonomous", provider: "connector", connectionId: "connector:team", operation: "write", resource: "report:123", targetFingerprint: `sha256:${"a".repeat(64)}` }
+    });
+    const success = {
+      id: "receipt_success",
+      actionId: allowed!.action.id,
+      provider: "connector",
+      connectionId: "connector:team",
+      targetFingerprint: `sha256:${"a".repeat(64)}`,
+      receiptRef: "connector:operation:123",
+      outcome: "succeeded" as const,
+      externalId: "operation_123",
+      externalUri: "https://connector.example/operations/123?access_token=secret#authorization",
+      observedAt: "2026-07-12T00:02:00.000Z",
+      metadata: {
+        assurance: "trusted_provider",
+        toolCallId: "tool_receipt",
+        authorization: "Bearer secret",
+        cookie: "session=secret",
+        password: "hunter2",
+        credential: "private",
+        private_key: "pem-data",
+        statusCode: 200
+      }
+    };
+    await expect(repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { ...success, id: "receipt_wrong_provider", provider: "other" }
+    })).rejects.toThrow(/provider.*approved target/u);
+    await expect(repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { ...success, id: "receipt_wrong_connection", connectionId: "connector:other" }
+    })).rejects.toThrow(/connectionId.*approved target/u);
+    await expect(repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { ...success, id: "receipt_wrong_target", targetFingerprint: `sha256:${"b".repeat(64)}` }
+    })).rejects.toThrow(/targetFingerprint.*approved target/u);
+    const [winner, loser] = await Promise.all([
+      repo.recordMaterialActionReceipt({ ...lease, actionId: allowed!.action.id, receipt: success }),
+      repo.recordMaterialActionReceipt({ ...lease, actionId: allowed!.action.id, receipt: { ...success, id: "receipt_failed", outcome: "failed" } })
+    ]);
+    expect(winner).toMatchObject({ state: "reconciled", action: { status: "succeeded", receipt: { id: "receipt_success", externalUri: "https://connector.example/operations/123" } } });
+    expect(loser).toMatchObject({ state: "reconciled", action: { receipt: { id: "receipt_success" } } });
+    const events = await repo.listRunEvents({ runId: "run_action" });
+    const durable = JSON.stringify(events);
+    expect(durable).not.toContain("access_token");
+    expect(durable).not.toContain("Bearer secret");
+    expect(durable).not.toContain("session=secret");
+    expect(durable).not.toContain("hunter2");
+    expect(durable).not.toContain("pem-data");
+    const second = await claimedRepository();
+    const secondLease = { runnerId: "runner_1", runId: "run_action", attemptId: second.claimed.attemptId, fencingToken: second.claimed.fencingToken };
+    const secondAllowed = await second.repo.requestActionPermission({ ...secondLease, request: { toolCallId: "tool_secret_ref", title: "Read metadata", kind: "execute", permissionScopes: [], mode: "autonomous", provider: "connector" } });
+    await expect(second.repo.recordMaterialActionReceipt({
+      ...secondLease,
+      actionId: secondAllowed!.action.id,
+      receipt: { id: "receipt_secret_id", actionId: secondAllowed!.action.id, provider: "connector", receiptRef: "connector:operation:456", externalId: "password=hunter2", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
+    })).rejects.toThrow(/externalId.*credential-like/u);
+    await expect(second.repo.recordMaterialActionReceipt({
+      ...secondLease,
+      actionId: secondAllowed!.action.id,
+      receipt: { id: "receipt_secret", actionId: secondAllowed!.action.id, provider: "connector", receiptRef: "authorization=Bearer secret", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
+    })).rejects.toThrow(/credential-like/u);
+    await expect(second.repo.recordMaterialActionReceipt({
+      ...secondLease,
+      actionId: secondAllowed!.action.id,
+      receipt: {
+        id: "receipt_evidence",
+        actionId: secondAllowed!.action.id,
+        provider: "connector",
+        receiptRef: "connector:operation:789",
+        outcome: "unknown",
+        observedAt: "2026-07-12T00:02:00.000Z",
+        evidence: [{ id: "ev_1", kind: "log", assurance: "reported", subjectRef: "op", summary: "done", createdAt: "2026-07-12T00:02:00.000Z" }]
+      }
+    })).rejects.toThrow(/evidence.*safe-list/u);
+    expect(JSON.stringify(await second.repo.listRunEvents({ runId: "run_action" }))).not.toContain("Bearer secret");
+  });
+
+  it("stops automatic retry when the provider outcome is unknown", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const request = { toolCallId: "tool_1", title: "Read metadata", kind: "execute", permissionScopes: [], mode: "autonomous" as const, provider: "acp" };
+    const allowed = await repo.requestActionPermission({ ...lease, request });
+    expect(allowed?.state).toBe("authorized");
+    await repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { id: "receipt_unknown", actionId: allowed!.action.id, provider: "acp", receiptRef: "acp:tool_1", outcome: "unknown", observedAt: "2026-07-12T00:02:00.000Z" }
+    });
+    await expect(repo.requestActionPermission({ ...lease, request: { ...request, toolCallId: "tool_retry" } })).resolves.toMatchObject({ state: "unknown" });
+  });
+
+  it("never treats a generic ACP self-report as a trusted known outcome", async () => {
+    const { repo, claimed } = await claimedRepository();
+    const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+    const allowed = await repo.requestActionPermission({
+      ...lease,
+      request: { toolCallId: "tool_generic", title: "Execute remote action", kind: "execute", permissionScopes: [], mode: "autonomous", provider: "acp" }
+    });
+    await expect(repo.recordMaterialActionReceipt({
+      ...lease,
+      actionId: allowed!.action.id,
+      receipt: { id: "receipt_generic", actionId: allowed!.action.id, provider: "acp", receiptRef: "acp:self-report", outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z" }
+    })).resolves.toMatchObject({ state: "unknown", action: { status: "unknown", receipt: { outcome: "unknown" } } });
+  });
+
+  it("downgrades a connector known outcome when either side lacks an exact target fingerprint", async () => {
+    for (const missing of ["approved", "receipt"] as const) {
+      const { repo, claimed } = await claimedRepository();
+      const lease = { runnerId: "runner_1", runId: "run_action", attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
+      const fingerprint = `sha256:${"f".repeat(64)}`;
+      const allowed = await repo.requestActionPermission({
+        ...lease,
+        request: {
+          toolCallId: `tool_missing_${missing}`, title: "Execute connector action", kind: "execute", provider: "connector",
+          connectionId: "connector:team", operation: "write", resource: "report:123", permissionScopes: [], mode: "autonomous",
+          ...(missing === "approved" ? {} : { targetFingerprint: fingerprint })
+        }
+      });
+      await expect(repo.recordMaterialActionReceipt({
+        ...lease,
+        actionId: allowed!.action.id,
+        receipt: {
+          id: `receipt_missing_${missing}`, actionId: allowed!.action.id, provider: "connector", connectionId: "connector:team",
+          ...(missing === "receipt" ? {} : { targetFingerprint: fingerprint }),
+          receiptRef: `connector:missing:${missing}`, outcome: "succeeded", observedAt: "2026-07-12T00:02:00.000Z"
+        }
+      })).resolves.toMatchObject({ state: "unknown", action: { status: "unknown", receipt: { outcome: "unknown" } } });
+    }
+  });
+
+  it("fences every executing material action to unknown when its Attempt terminates", async () => {
+    for (const conclusion of ["success", "failure", "cancelled"] as const) {
+      const fixture = await claimedRepository();
+      const lease = { runnerId: "runner_1", runId: "run_action", attemptId: fixture.claimed.attemptId, fencingToken: fixture.claimed.fencingToken };
+      const action = await fixture.repo.requestActionPermission({
+        ...lease,
+        request: { toolCallId: `tool_${conclusion}`, title: "Execute remote action", kind: "execute", permissionScopes: [], mode: "autonomous", provider: "acp" }
+      });
+      expect(action).toMatchObject({ state: "authorized", action: { status: "executing" } });
+      await expect(fixture.repo.completeRun({ ...lease, result: { conclusion, summary: conclusion } })).resolves.toBe("completed");
+      expect(fixture.sqlite.prepare("SELECT status FROM material_actions WHERE id = ?").get(action!.action.id)).toEqual({ status: "unknown" });
+      await expect(fixture.repo.requestActionPermission({
+        ...lease,
+        request: { toolCallId: `retry_${conclusion}`, title: "Execute remote action", kind: "execute", permissionScopes: [], mode: "autonomous", provider: "acp" }
+      })).resolves.toBeNull();
+      const events = await fixture.repo.listRunEvents({ runId: "run_action" });
+      expect(JSON.stringify(events)).not.toContain('"outcome":"succeeded"');
+    }
   });
 });

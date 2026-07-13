@@ -58,7 +58,7 @@ describe("Claude Code executor", () => {
     await expect(
       executor.canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -68,7 +68,7 @@ describe("Claude Code executor", () => {
     const result = await executor.run(
       {
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
         contextPacket: {
@@ -183,7 +183,7 @@ describe("Claude Code executor", () => {
     const result = await createClaudeCodeExecutor({ runner }).run(
       {
         runId: "run_blocked",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       },
@@ -220,7 +220,7 @@ describe("Claude Code executor", () => {
     await createClaudeCodeExecutor({ runner, permissionMode: "acceptEdits" }).run(
       {
         runId: "run_read_only",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "investigate this", intent: "investigate", args: {} },
         context: [],
         permissions: [
@@ -262,7 +262,7 @@ describe("Claude Code executor", () => {
     await createClaudeCodeExecutor({ runner, dangerouslySkipPermissions: true }).run(
       {
         runId: "run_skip",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "summarize this repo", intent: "unknown", args: {} },
         context: [],
         permissions: [{ scope: "repo:write", reason: "allow write-capable Claude mode" }],
@@ -304,7 +304,7 @@ describe("Claude Code executor", () => {
     await expect(
       createClaudeCodeExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -324,7 +324,7 @@ describe("Claude Code executor", () => {
     await expect(
       createClaudeCodeExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })

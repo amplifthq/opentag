@@ -4,6 +4,10 @@ import { createDoctorSummaryPresentation, createSourceThreadStatusPresentation, 
 import type { SlackEventProcessorInput, SlackSelfServiceReply, SlackStopRunResult } from "./events.js";
 import { createSlackDoctorSummaryBlocks, createSlackPostMessagePayload, createSlackSourceThreadStatusBlocks } from "./render.js";
 
+export type SlackChannelPrincipalConfig =
+  | { appId: string; channelPrincipalCredential: string }
+  | { appId?: never; channelPrincipalCredential?: never };
+
 export type SlackDispatcherEventConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
@@ -12,9 +16,19 @@ export type SlackDispatcherEventConfig = {
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   fetchImpl?: typeof fetch;
-};
+} & SlackChannelPrincipalConfig;
 
-function formatProjectTarget(input: { repoProvider?: string; owner: string; repo: string }): string {
+function assertSlackChannelPrincipalConfig(config: {
+  appId?: string;
+  channelPrincipalCredential?: string;
+}): void {
+  if (Boolean(config.appId) !== Boolean(config.channelPrincipalCredential)) {
+    throw new Error("Slack appId and channelPrincipalCredential must be configured together.");
+  }
+}
+
+function formatProjectTarget(input: { repoProvider?: string; owner?: string; repo?: string }): string {
+  if (!input.owner || !input.repo) return "not bound";
   return `${input.repoProvider ?? "github"}:${input.owner}/${input.repo}`;
 }
 
@@ -100,7 +114,7 @@ function slackRuntimeDoctorReply(input: { teamId: string; channelId: string; sta
   };
 }
 
-function statusUnavailable(input: { binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function statusUnavailable(input: { binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag status:",
@@ -111,7 +125,7 @@ function statusUnavailable(input: { binding?: { repoProvider?: string; owner: st
   ].join("\n");
 }
 
-function doctorUnavailable(input: { teamId: string; channelId: string; binding?: { repoProvider?: string; owner: string; repo: string }; error: unknown }): string {
+function doctorUnavailable(input: { teamId: string; channelId: string; binding?: { repoProvider?: string; owner?: string; repo?: string }; error: unknown }): string {
   const message = input.error instanceof Error ? input.error.message : String(input.error);
   return [
     "OpenTag doctor (redacted):",
@@ -136,10 +150,12 @@ function mapStopError(input: { error: unknown; runId?: string }): SlackStopRunRe
 }
 
 export function createSlackDispatcherEventProcessorInput(config: SlackDispatcherEventConfig): SlackEventProcessorInput {
+  assertSlackChannelPrincipalConfig(config);
   const fetchImpl = config.fetchImpl ?? fetch;
   const dispatcherClient = createOpenTagClient({
     dispatcherUrl: config.dispatcherUrl,
     ...(config.dispatcherToken ? { pairingToken: config.dispatcherToken } : {}),
+    ...(config.channelPrincipalCredential ? { channelPrincipalCredential: config.channelPrincipalCredential } : {}),
     fetchImpl
   });
 
@@ -154,9 +170,13 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         return {
           teamId: binding.accountId,
           channelId: binding.conversationId,
-          repoProvider: binding.repoProvider,
-          owner: binding.owner,
-          repo: binding.repo
+          ...(binding.owner?.trim() && binding.repo?.trim()
+            ? {
+                repoProvider: binding.repoProvider?.trim() || "github",
+                owner: binding.owner.trim(),
+                repo: binding.repo.trim()
+              }
+            : {})
         };
       } catch (error) {
         if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
@@ -177,7 +197,10 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         conversationId: input.channelId,
         repoProvider: input.repoProvider,
         owner: input.owner,
-        repo: input.repo
+        repo: input.repo,
+        ...(config.appId
+          ? { ownership: { mode: "managed" as const, exclusive: true as const, applicationId: config.appId } }
+          : {})
       });
     },
     async submitThreadAction(action) {

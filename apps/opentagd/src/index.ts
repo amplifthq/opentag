@@ -167,13 +167,17 @@ program
         provider: binding.provider,
         accountId: binding.accountId,
         conversationId: binding.conversationId,
-        repoProvider: binding.repoProvider,
-        owner: binding.owner,
-        repo: binding.repo,
-        ...(binding.metadata ? { metadata: binding.metadata } : {})
+        ...(binding.repoProvider && binding.owner && binding.repo
+          ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+          : {}),
+        ...(binding.metadata ? { metadata: binding.metadata } : {}),
+        ...(binding.ownership ? { ownership: binding.ownership } : {})
       });
+      const target = binding.repoProvider && binding.owner && binding.repo
+        ? `${binding.repoProvider}:${binding.owner}/${binding.repo}`
+        : "general agent execution";
       console.log(
-        `Bound ${binding.provider}:${binding.accountId}/${binding.conversationId} to ${binding.repoProvider}:${binding.owner}/${binding.repo}`
+        `Bound ${binding.provider}:${binding.accountId}/${binding.conversationId} to ${target}`
       );
     }
     if (!bindings.length) {

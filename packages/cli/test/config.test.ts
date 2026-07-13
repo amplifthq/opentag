@@ -96,6 +96,95 @@ describe("OpenTag CLI config", () => {
     expect(relayUrlFromConfig(parsed)).toBeUndefined();
   });
 
+  it("accepts a repository-free managed Slack channel backed by an ACP agent", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      daemon: {
+        ...source.daemon,
+        repositories: [],
+        agents: {
+          reviewer: {
+            protocol: "opentag.integration.v1",
+            id: "reviewer",
+            label: "Review Agent",
+            bindings: {
+              agent: { kind: "stdio", command: "review-agent", args: ["acp"] }
+            },
+            roles: {
+              agent: {
+                protocol: "agent-client-protocol",
+                protocolVersion: 1,
+                binding: "agent"
+              }
+            },
+            resources: {}
+          }
+        },
+        channelBindings: [
+          {
+            provider: "slack",
+            accountId: "T123",
+            conversationId: "C123",
+            ownership: {
+              mode: "managed",
+              exclusive: true,
+              applicationId: "A123",
+              botId: "U123"
+            }
+          }
+        ]
+      },
+      platforms: {
+        slack: {
+          mode: "socket_mode",
+          appToken: "xapp-token",
+          botToken: "xoxb-token",
+          appId: "A123",
+          teamId: "T123",
+          channelId: "C123"
+        }
+      }
+    });
+
+    expect(parsed.daemon.repositories).toEqual([]);
+    expect(parsed.daemon.agents.reviewer?.roles.agent?.protocol).toBe("agent-client-protocol");
+    expect(parsed.daemon.channelBindings).toEqual([
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: "A123",
+          botId: "U123"
+        }
+      }
+    ]);
+  });
+
+  it("rejects a repository-free channel binding with only part of a repository target", () => {
+    const source = config();
+    expect(() =>
+      parseCliConfig({
+        ...source,
+        daemon: {
+          ...source.daemon,
+          repositories: [],
+          channelBindings: [
+            {
+              provider: "slack",
+              accountId: "T123",
+              conversationId: "C123",
+              repoProvider: "github"
+            }
+          ]
+        }
+      })
+    ).toThrow("repoProvider, owner, and repo must be provided together");
+  });
+
   it("does not chmod an existing custom config directory", () => {
     const parent = tempDir();
     chmodSync(parent, 0o755);
@@ -503,6 +592,12 @@ describe("OpenTag CLI config", () => {
       worktreeRoot: join(stateDirectory, "worktrees")
     });
     expect(built.state.databasePath).toBe(join(stateDirectory, "opentag.db"));
+    expect(built.daemon).toMatchObject({
+      agents: {},
+      scratchRoot: join(stateDirectory, "scratch"),
+      keepScratch: "on_failure",
+      approvalMode: "auto"
+    });
     expect(built.platforms.lark?.domain).toBe("feishu");
     expect(built.platforms.lark?.defaultProjectBinding).toBe(false);
     expect(built.preferences?.language).toBe("zh-CN");

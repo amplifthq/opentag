@@ -167,7 +167,7 @@ export function createTeamsWebhookApp(input: TeamsWebhookAppInput) {
         await input.notifyConversation?.({
           serviceUrl: message.serviceUrl,
           conversationId: message.conversationId,
-          text: "This channel is not bound to a repository. Bind it before mentioning OpenTag."
+          text: "This channel is not configured for OpenTag. Configure it before mentioning OpenTag."
         });
         return;
       }

@@ -1,4 +1,6 @@
 import { createServer, type Server } from "node:net";
+import { createOpenTagClient } from "@opentag/client";
+import type { OpenTagEvent } from "@opentag/core";
 import { computeLinearSignature } from "@opentag/linear";
 import { describe, expect, it, vi } from "vitest";
 import { dispatcherRuntimeInputFromEnv, startDispatcher, type LocalDispatcherRuntimeInput } from "../src/dispatcher.js";
@@ -39,7 +41,7 @@ async function withDispatcherServer(
   input: Omit<LocalDispatcherRuntimeInput, "port" | "databasePath">,
   test: (baseUrl: string) => Promise<void>
 ) {
-  const handle = startDispatcher({ port: 0, databasePath: ":memory:", ...input });
+  const handle = startDispatcher({ ...input, port: 0, databasePath: ":memory:" });
   const address = handle.server.address();
   if (!address || typeof address === "string") {
     await handle.close();
@@ -52,7 +54,162 @@ async function withDispatcherServer(
   }
 }
 
+function managedChannelEvent(input: {
+  provider: "slack" | "lark";
+  accountId: string;
+  conversationId: string;
+  suffix: string;
+}): OpenTagEvent {
+  return {
+    id: `evt_${input.suffix}`,
+    source: input.provider,
+    sourceEventId: `message_${input.suffix}`,
+    receivedAt: "2026-07-13T00:00:00.000Z",
+    actor: { provider: input.provider, providerUserId: "user_1" },
+    target: { mention: "@opentag", agentId: "opentag" },
+    command: { rawText: "summarize this channel", intent: "run", args: {} },
+    context: [],
+    permissions: [],
+    callback: { provider: "test", uri: "https://example.invalid/callback" },
+    metadata:
+      input.provider === "slack"
+        ? { teamId: input.accountId, channelId: input.conversationId }
+        : { tenantKey: input.accountId, chatId: input.conversationId }
+  };
+}
+
 describe("local dispatcher runtime", () => {
+  it("registers matching standalone Slack and Lark channel principals from env", () => {
+    expect(
+      dispatcherRuntimeInputFromEnv({
+        OPENTAG_SLACK_APP_ID: "A123",
+        OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL: "slack_principal_123",
+        LARK_APP_ID: "cli_test",
+        LARK_APP_SECRET: "secret_test",
+        LARK_BOT_OPEN_ID: "ou_bot",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test"
+      }).channelPrincipals
+    ).toEqual([
+      { provider: "slack", applicationId: "A123", credential: "slack_principal_123" },
+      { provider: "lark", applicationId: "cli_test", botId: "ou_bot", credential: "lark_principal_test" }
+    ]);
+  });
+
+  it.each([
+    {
+      name: "Slack application without a credential",
+      env: { OPENTAG_SLACK_APP_ID: "A123" },
+      error: "OPENTAG_SLACK_APP_ID and OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together."
+    },
+    {
+      name: "Slack credential without an application",
+      env: { OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL: "slack_principal_123" },
+      error: "OPENTAG_SLACK_APP_ID and OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together."
+    },
+    {
+      name: "blank Slack credential",
+      env: { OPENTAG_SLACK_APP_ID: "A123", OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL: "   " },
+      error: "OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be a non-empty string"
+    },
+    {
+      name: "Lark application without a credential",
+      env: { LARK_APP_ID: "cli_test", LARK_APP_SECRET: "secret_test" },
+      error: "LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together."
+    },
+    {
+      name: "Lark credential without an application",
+      env: { OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test" },
+      error: "LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together."
+    },
+    {
+      name: "blank Lark credential",
+      env: {
+        LARK_APP_ID: "cli_test",
+        LARK_APP_SECRET: "secret_test",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "   "
+      },
+      error: "OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be a non-empty string"
+    }
+  ])("rejects $name", ({ env, error }) => {
+    expect(() => dispatcherRuntimeInputFromEnv(env)).toThrow(error);
+  });
+
+  it.each([
+    {
+      provider: "slack" as const,
+      env: {
+        OPENTAG_SLACK_APP_ID: "A123",
+        OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL: "slack_principal_123"
+      },
+      applicationId: "A123",
+      credential: "slack_principal_123",
+      accountId: "T123",
+      conversationId: "C123"
+    },
+    {
+      provider: "lark" as const,
+      env: {
+        LARK_APP_ID: "cli_test",
+        LARK_APP_SECRET: "secret_test",
+        LARK_BOT_OPEN_ID: "ou_bot",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test"
+      },
+      applicationId: "cli_test",
+      credential: "lark_principal_test",
+      botId: "ou_bot",
+      accountId: "tenant_1",
+      conversationId: "oc_chat"
+    }
+  ])("admits a managed $provider run only for the env-derived adapter principal", async (input) => {
+    const runtimeInput = dispatcherRuntimeInputFromEnv(input.env);
+    await withDispatcherServer(runtimeInput, async (baseUrl) => {
+      const owner = createOpenTagClient({
+        dispatcherUrl: baseUrl,
+        channelPrincipalCredential: input.credential
+      });
+      await owner.bindChannel({
+        provider: input.provider,
+        accountId: input.accountId,
+        conversationId: input.conversationId,
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: input.applicationId,
+          ...(input.botId ? { botId: input.botId } : {})
+        }
+      });
+
+      const missing = await fetch(`${baseUrl}/v1/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          runId: `run_${input.provider}_missing_principal`,
+          event: managedChannelEvent({ ...input, suffix: `${input.provider}_missing_principal` })
+        })
+      });
+      expect(missing.status).toBe(403);
+      await expect(missing.json()).resolves.toEqual({ error: "managed_channel_ownership_unverified" });
+
+      const foreign = createOpenTagClient({
+        dispatcherUrl: baseUrl,
+        channelPrincipalCredential: `${input.credential}_wrong`
+      });
+      await expect(
+        foreign.createRun({
+          runId: `run_${input.provider}_foreign_principal`,
+          event: managedChannelEvent({ ...input, suffix: `${input.provider}_foreign_principal` })
+        })
+      ).rejects.toThrow("403");
+
+      await expect(
+        owner.createRun({
+          runId: `run_${input.provider}_owner_principal`,
+          event: managedChannelEvent({ ...input, suffix: `${input.provider}_owner_principal` })
+        })
+      ).resolves.toMatchObject({ outcome: "run_created" });
+    });
+  });
+
   it("parses per-agent Slack bot tokens from env", () => {
     expect(
       dispatcherRuntimeInputFromEnv({

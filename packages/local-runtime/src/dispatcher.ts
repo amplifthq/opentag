@@ -15,6 +15,7 @@ import {
   createSlackSourceReceiptSink,
   createTeamsCallbackSink,
   createTelegramCallbackSink,
+  type ChannelPrincipalCredential,
   type LinearTokenProvider
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
@@ -50,6 +51,7 @@ export type LocalDispatcherRuntimeInput = {
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
+  channelPrincipals?: ChannelPrincipalCredential[];
   /**
    * Backward-compatible GitHub token. When specific callback/apply tokens are
    * omitted, this token is used for both callback delivery and direct apply.
@@ -249,6 +251,12 @@ function parseCsvList(raw: string | undefined): string[] | undefined {
     .map((item) => item.trim())
     .filter(Boolean);
   return items?.length ? items : undefined;
+}
+
+function optionalNonBlankEnv(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim()) throw new Error(`${name} must be a non-empty string`);
+  return value;
 }
 
 function parseScopeList(raw: string | undefined): string[] | undefined {
@@ -481,10 +489,41 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     throw new Error(`PORT must be a positive integer, received ${env.PORT ?? "3030"}`);
   }
 
+  const slackApplicationId = optionalNonBlankEnv("OPENTAG_SLACK_APP_ID", env.OPENTAG_SLACK_APP_ID);
+  const slackChannelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
+  if (Boolean(slackApplicationId) !== Boolean(slackChannelPrincipalCredential)) {
+    throw new Error("OPENTAG_SLACK_APP_ID and OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
+  const larkApplicationId = optionalNonBlankEnv("LARK_APP_ID", env.LARK_APP_ID);
+  const larkAppSecret = optionalNonBlankEnv("LARK_APP_SECRET", env.LARK_APP_SECRET);
+  const larkBotId = optionalNonBlankEnv("LARK_BOT_OPEN_ID", env.LARK_BOT_OPEN_ID);
+  const larkChannelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
+  if (Boolean(larkApplicationId) !== Boolean(larkChannelPrincipalCredential)) {
+    throw new Error("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
   const larkDomain = larkDomainFromEnv(env.LARK_DOMAIN);
-  if (Boolean(env.LARK_APP_ID) !== Boolean(env.LARK_APP_SECRET)) {
+  if (Boolean(larkApplicationId) !== Boolean(larkAppSecret)) {
     throw new Error("LARK_APP_ID and LARK_APP_SECRET must be configured together.");
   }
+  const channelPrincipals: ChannelPrincipalCredential[] = [
+    ...(slackApplicationId && slackChannelPrincipalCredential
+      ? [{ provider: "slack", applicationId: slackApplicationId, credential: slackChannelPrincipalCredential }]
+      : []),
+    ...(larkApplicationId && larkChannelPrincipalCredential
+      ? [{
+          provider: "lark",
+          applicationId: larkApplicationId,
+          ...(larkBotId ? { botId: larkBotId } : {}),
+          credential: larkChannelPrincipalCredential
+        }]
+      : [])
+  ];
   const slackBotTokensByAgentId = parseAgentTokenMap("OPENTAG_SLACK_BOT_TOKENS_JSON", env.OPENTAG_SLACK_BOT_TOKENS_JSON);
   const runnerTokens = parseStringList("OPENTAG_RUNNER_TOKENS_JSON", env.OPENTAG_RUNNER_TOKENS_JSON);
   const revokedRunnerTokenFingerprints = parseStringList(
@@ -532,6 +571,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_RUNNER_TOKEN ? { runnerToken: env.OPENTAG_RUNNER_TOKEN } : {}),
     ...(runnerTokens ? { runnerTokens } : {}),
     ...(revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints } : {}),
+    ...(channelPrincipals.length ? { channelPrincipals } : {}),
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
@@ -545,11 +585,11 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_LINEAR_WEBHOOK_SECRET ? { linearWebhookSecret: env.OPENTAG_LINEAR_WEBHOOK_SECRET } : {}),
     ...(env.OPENTAG_LINEAR_WEBHOOK_PATH ? { linearWebhookPath: env.OPENTAG_LINEAR_WEBHOOK_PATH } : {}),
     ...(linearProjectTarget ? { linearProjectTarget } : {}),
-    ...(env.LARK_APP_ID && env.LARK_APP_SECRET
+    ...(larkApplicationId && larkAppSecret
       ? {
           lark: {
-            appId: env.LARK_APP_ID,
-            appSecret: env.LARK_APP_SECRET,
+            appId: larkApplicationId,
+            appSecret: larkAppSecret,
             domain: larkDomain ?? "lark"
           }
         }
@@ -699,6 +739,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),
     ...(input.revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints: input.revokedRunnerTokenFingerprints } : {}),
+    ...(input.channelPrincipals ? { channelPrincipals: input.channelPrincipals } : {}),
     ...(input.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: input.maxRequestBodyBytes } : {}),
     ...(input.rateLimit !== undefined ? { rateLimit: input.rateLimit } : {}),
     relayCapabilities: {
@@ -862,9 +903,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             return {
               botId: binding.accountId,
               chatId: binding.conversationId,
-              owner: binding.owner,
-              repo: binding.repo,
-              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+              ...(binding.repoProvider
+                ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+                : {})
             };
           } catch (error) {
             if (error instanceof Error && error.message.includes("channel_binding_not_found")) {
@@ -1026,9 +1067,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             return {
               applicationId,
               channelId,
-              owner: binding.owner,
-              repo: binding.repo,
-              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+              ...(binding.repoProvider
+                ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+                : {})
             };
           } catch (error) {
             // A real backend failure (network/5xx/timeout) is otherwise indistinguishable
@@ -1071,9 +1112,9 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
           return {
             applicationId,
             channelId,
-            owner: binding.owner,
-            repo: binding.repo,
-            ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+            ...(binding.repoProvider
+              ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+              : {})
           };
         } catch (error) {
           console.error("discord.resolveChannelBinding failed", error);
@@ -1147,9 +1188,13 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
             return {
               tenantId,
               conversationId,
-              owner: binding.owner,
-              repo: binding.repo,
-              ...(binding.repoProvider ? { repoProvider: binding.repoProvider } : {})
+              ...(binding.owner && binding.repo
+                ? {
+                    repoProvider: binding.repoProvider ?? "github",
+                    owner: binding.owner,
+                    repo: binding.repo
+                  }
+                : {})
             };
           } catch (error) {
             // A real backend failure (network/5xx/timeout) is not the same as an

@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { createOpenTagClient } from "@opentag/client";
 import { DEFAULT_MAX_REQUEST_BODY_BYTES, RequestBodyTooLargeError, readRequestTextWithLimit } from "@opentag/core";
 import { Hono } from "hono";
-import { createSlackDispatcherEventProcessorInput } from "./dispatcher-events.js";
+import { createSlackDispatcherEventProcessorInput, type SlackChannelPrincipalConfig } from "./dispatcher-events.js";
 import { createSlackEventProcessor, type SlackAppRuntimeConfig, type SlackEventProcessorInput, type SlackIngressPayload } from "./events.js";
 
 export type SlackEventsAppInput = {
@@ -29,11 +29,11 @@ export type SlackEventsApiIngressConfig = {
   botToken?: string;
   port?: number;
   agentId?: string;
-  appId?: string;
   callbackUri?: string;
+  bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   maxRequestBodyBytes?: number;
-};
+} & SlackChannelPrincipalConfig;
 
 export type SlackIngressConfig = SlackEventsApiIngressConfig;
 

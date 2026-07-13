@@ -215,7 +215,7 @@ conversationId: 19:...@thread.tacv2
 
 OpenTag also handles full thread conversation ids containing `;messageid=...` for replies and thread actions. Replies use the full Teams conversation id so they land in the same thread.
 
-If the channel is not bound yet, OpenTag acknowledges inbound activities but cannot start a run. Use the dispatcher API or local config to bind the Teams channel to a configured repository.
+If the channel is not configured yet, OpenTag acknowledges inbound activities but cannot start a run. Use the dispatcher API or local config to create a Teams channel binding. A repository target is optional for general ACP work and required only for repository-backed coding or pull-request tasks.
 
 ## Trigger Runs
 
@@ -237,12 +237,12 @@ Expected behavior:
 
 - Teams posts the Activity to your Messaging endpoint over the tunnel.
 - OpenTag validates the inbound Bot Framework JWT signature, issuer, audience, required `serviceUrl` claim, and the signing key's `msteams` endorsement before processing. The signed `serviceUrl` must exactly match the Activity body, so a body-controlled reply URL cannot receive the bot Connector token.
-- The local runner starts against the bound checkout.
+- The local runner starts in the configured repository checkout or in an isolated scratch workspace for repository-free work.
 - OpenTag replies in the same Teams channel/thread as plain text.
 
 ## Apply Actions And Create Pull Requests
 
-`@OpenTag apply 1` is supported from Teams threads, but creating a pull request requires a GitHub or GitLab repository binding and apply credentials. Before any apply/reject decision or adapter mutation, OpenTag revalidates the proposal's stored Teams tenant/channel against the current channel binding and requires it to still point at the same repository. Historical actions fail closed if the channel was unbound or rebound.
+`@OpenTag apply 1` is supported from Teams threads, but creating a pull request requires a GitHub or GitLab repository target and apply credentials. Before any apply/reject decision or adapter mutation, OpenTag revalidates the proposal's stored Teams tenant/channel against the current channel binding and, for repository actions, requires it to still point at the same repository. Historical actions fail closed if the channel was removed or rebound.
 
 For GitHub pull request apply, configure the repository as GitHub, not local-only:
 

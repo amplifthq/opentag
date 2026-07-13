@@ -6,10 +6,7 @@ export type DiscordChannelBinding = {
   applicationId: string;
   guildId?: string;
   channelId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type DiscordInteractionInput = {
   interactionId: string;
@@ -189,9 +186,9 @@ export function normalizeDiscordInteraction(input: DiscordInteractionInput): Ope
       channelId: input.channelId,
       ...(input.guildId ? { guildId: input.guildId } : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...(input.binding.owner && input.binding.repo
+        ? { repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo }
+        : {})
     }
   };
 }

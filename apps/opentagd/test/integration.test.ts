@@ -1,3 +1,8 @@
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { OpenTagEvent } from "@opentag/core";
 import { createOpenTagClient, createDispatcherAdminClient, createDispatcherClient } from "@opentag/client";
 import { createDispatcherApp } from "@opentag/dispatcher";
@@ -27,7 +32,7 @@ const event: OpenTagEvent = {
   },
   permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
   callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-  metadata: { owner: "acme", repo: "demo" }
+  metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
 function fetchForApp(app: ReturnType<typeof createDispatcherApp>): typeof fetch {
@@ -37,7 +42,76 @@ function fetchForApp(app: ReturnType<typeof createDispatcherApp>): typeof fetch 
   }) as typeof fetch;
 }
 
+function runOpentagd(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(join(process.cwd(), "apps/opentagd/node_modules/.bin/tsx"), [
+      join(process.cwd(), "apps/opentagd/src/index.ts"),
+      ...args
+    ], { env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
 describe("opentagd local integration", () => {
+  it("preserves managed ownership in generic bind-channels requests", async () => {
+    const requests: unknown[] = [];
+    const server = createServer((request, response) => {
+      let rawBody = "";
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => {
+        rawBody += chunk;
+      });
+      request.on("end", () => {
+        requests.push(JSON.parse(rawBody) as unknown);
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Expected a TCP server address.");
+    const directory = mkdtempSync(join(tmpdir(), "opentagd-bind-channels-"));
+    const configPath = join(directory, "opentag.local.json");
+    writeFileSync(configPath, JSON.stringify({
+      dispatcherUrl: `http://127.0.0.1:${address.port}`,
+      repositories: [],
+      channelBindings: [{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U_APP" }
+      }]
+    }));
+
+    try {
+      const result = await runOpentagd(["bind-channels"], {
+        ...process.env,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, "--conditions=development"].filter(Boolean).join(" "),
+        OPENTAG_CONFIG_PATH: configPath
+      });
+
+      expect(result).toMatchObject({ code: 0, stderr: "" });
+      expect(requests).toEqual([{
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C456",
+        ownership: { mode: "managed", exclusive: true, applicationId: "A123", botId: "U_APP" }
+      }]);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("registers a runner, creates a run, executes echo once, and records callback queue events", async () => {
     const delivered: string[] = [];
     const app = createDispatcherApp({

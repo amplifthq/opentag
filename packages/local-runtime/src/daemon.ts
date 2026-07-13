@@ -1,10 +1,18 @@
+import { createHash } from "node:crypto";
+import { lstat, mkdir, rm } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 import {
   formatProjectTargetRef,
   parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
+  sanitizeCredentialLikeValue,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
+  type ActionPermissionRequest,
+  type ActionPermissionResolution,
+  type ApprovalMode,
+  type MaterialActionReceipt,
   type ProjectTargetRef
 } from "@opentag/core";
 import {
@@ -13,9 +21,12 @@ import {
   createAgentSessionProfileForEvent,
   createWorkContextMutationRunResult,
   resolveAgentSessionProfile,
+  resolveRunnerSecurityPaths,
   type ExecutorAdapter,
+  type ExecutorMaterialActionReport,
+  type ExecutorWorkspace,
   type RunnerSecurityPolicy,
-  worktreePathForRun
+  executionPathForAttempt
 } from "@opentag/runner";
 import type { AgentSessionProfileConfig, RepositoryBindingConfig } from "./config.js";
 import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
@@ -23,19 +34,34 @@ import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 export type ClaimedRun = {
   run: OpenTagRun;
   event: OpenTagEvent;
+  attemptId: string;
+  attemptNumber: number;
+  fencingToken: string;
 };
+
+export type AttemptLease = Pick<ClaimedRun, "attemptId" | "fencingToken">;
 
 export type DaemonClient = {
   claim(): Promise<ClaimedRun | null>;
   markRunning(
     runId: string,
     executor: string,
+    lease: AttemptLease,
     options?: { executorCapability?: Record<string, unknown>; runTimeoutMs?: number; idempotencyKey?: string }
   ): Promise<void>;
-  heartbeat(runId: string): Promise<void>;
-  progress(runId: string, input: { type: string; message: string; at: string }): Promise<void>;
-  complete(runId: string, result: OpenTagRunResult): Promise<void>;
+  heartbeat(runId: string, lease: AttemptLease): Promise<void>;
+  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
+  requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
+  resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
+  recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
 };
+
+export type TrustedMaterialActionReceiptProvider = (input: {
+  runId: string;
+  attemptId: string;
+  report: ExecutorMaterialActionReport;
+}) => Promise<MaterialActionReceipt | null>;
 
 export function resolveRepositoryBinding(event: OpenTagEvent, repositories: RepositoryBindingConfig[]): RepositoryBindingConfig | null {
   const projectTargetRef = projectTargetRefFromEvent(event);
@@ -61,10 +87,13 @@ function claimedProjectTargetFailure(input: {
   repositories: RepositoryBindingConfig[];
 }): OpenTagRunResult | null {
   if (!input.projectTargetRef) {
+    const metadata = input.event.metadata ?? {};
+    const hasRepositoryMetadata = ["repoProvider", "owner", "repo"].some((key) => metadata[key] !== undefined);
+    if (input.event.source !== "github" && !hasRepositoryMetadata) return null;
     return {
       conclusion: "needs_human",
-      summary: "No Project Target metadata is configured for this run.",
-      nextAction: "Reject this run or replay it from a source that includes repoProvider, owner, and repo metadata."
+      summary: "Repository-bearing events require complete Project Target metadata.",
+      nextAction: "Replay this event with repoProvider, owner, and repo metadata before allowing repository execution."
     };
   }
 
@@ -91,6 +120,12 @@ function claimedProjectTargetFailure(input: {
   }
 
   return null;
+}
+
+function scratchPathForAttempt(root: string, attemptId: string): string {
+  if (!isAbsolute(root)) throw new Error(`Scratch root must be absolute: ${root}`);
+  const segment = createHash("sha256").update(attemptId).digest("hex").slice(0, 24);
+  return join(resolve(root), `attempt-${segment}`);
 }
 
 function errorMessage(error: unknown): string {
@@ -120,7 +155,7 @@ function timedOutRunResult(input: { executorName: string; timeoutMs: number }): 
 
 function runNoLongerClaimed(error: unknown): boolean {
   const message = errorMessage(error);
-  return message.includes("run_not_claimed_by_runner") || message.includes("run_not_found");
+  return message.includes("stale_attempt") || message.includes("run_not_claimed_by_runner") || message.includes("run_not_found");
 }
 
 type ExecutorRunOutcome =
@@ -170,6 +205,10 @@ export async function runOneDaemonIteration(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
+  scratchRoot?: string;
+  keepScratch?: "always" | "on_failure" | "never";
+  approvalMode?: ApprovalMode;
+  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -179,6 +218,7 @@ export async function runOneDaemonIteration(input: {
 }): Promise<boolean> {
   const claimed = await input.client.claim();
   if (!claimed) return false;
+  const lease: AttemptLease = { attemptId: claimed.attemptId, fencingToken: claimed.fencingToken };
 
   const projectTargetRef = projectTargetRefFromEvent(claimed.event);
   const claimedTargetFailure = claimedProjectTargetFailure({
@@ -187,32 +227,39 @@ export async function runOneDaemonIteration(input: {
     repositories: input.repositories
   });
   if (claimedTargetFailure) {
-    await input.client.complete(claimed.run.id, claimedTargetFailure);
+    await input.client.complete(claimed.run.id, lease, claimedTargetFailure);
+    return true;
+  }
+  // Pure source-thread mutations stay on the governed apply path and do not
+  // allocate either a repository worktree or a scratch attempt directory.
+  const mutationRequests = parseWorkContextMutationCommand(claimed.event.command.rawText);
+  if (mutationRequests) {
+    await input.client.complete(
+      claimed.run.id,
+      lease,
+      createWorkContextMutationRunResult({ runId: claimed.run.id, requests: mutationRequests })
+    );
     return true;
   }
   const binding = resolveRepositoryBinding(claimed.event, input.repositories);
-  if (!binding) {
-    await input.client.complete(claimed.run.id, {
+  if (projectTargetRef && !binding) {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: "No local workspace mapping is configured for this run's repository."
     });
     return true;
   }
-  // Pure work-context mutation requests ("set priority to High") never need an
-  // executor: compile them into a suggested-changes proposal so the source thread
-  // gets an action receipt and the mutation stays behind the governed apply path.
-  const mutationRequests = parseWorkContextMutationCommand(claimed.event.command.rawText);
-  if (mutationRequests) {
-    await input.client.complete(
-      claimed.run.id,
-      createWorkContextMutationRunResult({ runId: claimed.run.id, requests: mutationRequests })
-    );
-    return true;
-  }
-  const executorId = claimed.event.target.executorHint ?? binding.defaultExecutor ?? "echo";
+  const scratchRoot = resolve(input.scratchRoot ?? join(process.cwd(), ".opentag", "scratch"));
+  const workspace: ExecutorWorkspace = binding
+    ? { kind: "repository", path: binding.checkoutPath }
+    : {
+        kind: "scratch",
+        path: scratchPathForAttempt(scratchRoot, claimed.attemptId)
+      };
+  const executorId = claimed.event.target.executorHint ?? binding?.defaultExecutor ?? "echo";
   const executor = input.executors[executorId];
   if (!executor) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: `No local executor is configured for '${executorId}'.`
     });
@@ -238,33 +285,59 @@ export async function runOneDaemonIteration(input: {
       })
     : fallbackSessionProfile;
 
-  const executionPath =
-    executorId === "codex"
-      ? worktreePathForRun({
-          workspacePath: binding.checkoutPath,
-          runId: claimed.run.id,
-          ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {})
-        })
-      : binding.checkoutPath;
+  const executionPath = executionPathForAttempt({
+    workspace,
+    runId: claimed.run.id,
+    attemptId: claimed.attemptId,
+    ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {})
+  });
+  if (workspace.kind === "scratch") {
+    const existing = await lstat(workspace.path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (existing) {
+      await input.client.complete(claimed.run.id, lease, {
+        conclusion: "needs_human",
+        summary: "Scratch attempt workspace already exists; refusing to reuse it.",
+        nextAction: "Inspect and preserve the existing attempt path, then retry the Run with a new Attempt."
+      });
+      return true;
+    }
+  }
+  const securityPaths = await resolveRunnerSecurityPaths({
+    workspacePath: workspace.path,
+    executionPath,
+    ...(workspace.kind === "scratch"
+      ? { allowedWorkspaceRoot: scratchRoot }
+      : input.security?.allowedWorkspaceRoot
+        ? { allowedWorkspaceRoot: input.security.allowedWorkspaceRoot }
+        : {})
+  });
 
   const securityAssessment = assessRunnerSecurity({
     executorId,
-    workspacePath: binding.checkoutPath,
-    executionPath,
+    workspaceKind: workspace.kind,
+    workspacePath: securityPaths.workspacePath,
+    executionPath: securityPaths.executionPath,
     command: claimed.event.command,
     context: claimed.event.context,
     permissions: claimed.event.permissions,
-    ...(input.security ? { policy: input.security } : {})
+    ...(workspace.kind === "scratch"
+      ? { policy: { ...(input.security ?? {}), allowedWorkspaceRoot: securityPaths.allowedWorkspaceRoot ?? scratchRoot } }
+      : input.security
+        ? { policy: { ...input.security, ...(securityPaths.allowedWorkspaceRoot ? { allowedWorkspaceRoot: securityPaths.allowedWorkspaceRoot } : {}) } }
+        : {})
   });
   if (securityAssessment.findings.length > 0) {
-    await input.client.progress(claimed.run.id, {
+    await input.client.progress(claimed.run.id, lease, {
       type: securityAssessment.allowed ? "security.audit" : "security.blocked",
       message: formatSecurityAssessment(securityAssessment),
       at: new Date().toISOString()
     });
   }
   if (!securityAssessment.allowed) {
-    await input.client.complete(claimed.run.id, {
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: formatSecurityAssessment(securityAssessment),
       nextAction: "Review the request and rerun with a narrower prompt or an explicit local policy override if appropriate."
@@ -272,28 +345,53 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
+  let scratchAttemptCreated = false;
+  if (workspace.kind === "scratch") {
+    await mkdir(scratchRoot, { recursive: true, mode: 0o700 });
+    try {
+      await mkdir(workspace.path, { mode: 0o700 });
+      scratchAttemptCreated = true;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      await input.client.complete(claimed.run.id, lease, {
+        conclusion: "needs_human",
+        summary: "Scratch attempt workspace already exists; refusing to reuse it.",
+        nextAction: "Inspect and preserve the existing attempt path, then retry the Run with a new Attempt."
+      });
+      return true;
+    }
+  }
+  async function cleanupUnexecutedScratch(): Promise<void> {
+    if (!scratchAttemptCreated || workspace.kind !== "scratch") return;
+    await rm(workspace.path, { recursive: true, force: true });
+    scratchAttemptCreated = false;
+  }
+
   let readiness: Awaited<ReturnType<ExecutorAdapter["canRun"]>>;
   try {
     readiness = await executor.canRun({
       runId: claimed.run.id,
-      workspacePath: binding.checkoutPath,
+      attemptId: claimed.attemptId,
+      workspace,
       command: claimed.event.command,
       context: claimed.event.context,
       ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
       permissions: claimed.event.permissions,
       metadata,
       ...(sessionProfile ? { sessionProfile } : {}),
-      ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
-      ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
-      ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
+      ...(binding?.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+      ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+      ...(binding?.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
     });
   } catch (error) {
-    await input.client.complete(claimed.run.id, failedRunResult(`${executor.displayName} readiness check`, error));
+    await cleanupUnexecutedScratch();
+    await input.client.complete(claimed.run.id, lease, failedRunResult(`${executor.displayName} readiness check`, error));
     return true;
   }
 
   if (!readiness.ready) {
-    await input.client.complete(claimed.run.id, {
+    await cleanupUnexecutedScratch();
+    await input.client.complete(claimed.run.id, lease, {
       conclusion: "needs_human",
       summary: readiness.reason ?? `${executor.displayName} is not ready`
     });
@@ -301,15 +399,22 @@ export async function runOneDaemonIteration(input: {
   }
 
   const runId = claimed.run.id;
+  const attemptId = claimed.attemptId;
   const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
   const runTimeoutMs = input.runTimeoutMs;
-  await input.client.markRunning(runId, activeExecutor.id, {
-    ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
-    idempotencyKey: `${input.runnerId}:${runId}:running`,
-    ...(runTimeoutMs ? { runTimeoutMs } : {})
-  });
+  try {
+    await input.client.markRunning(runId, activeExecutor.id, lease, {
+      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
+      idempotencyKey: `${input.runnerId}:${runId}:running`,
+      ...(runTimeoutMs ? { runTimeoutMs } : {})
+    });
+  } catch (error) {
+    await cleanupUnexecutedScratch();
+    throw error;
+  }
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
+  let heartbeatInFlight: Promise<void> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   let cancellationDetected = false;
   let cancelPromise: Promise<void> | undefined;
@@ -319,39 +424,111 @@ export async function runOneDaemonIteration(input: {
       return;
     }
     cancellationDetected = true;
-    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
+    cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
       console.warn(`OpenTag executor cancellation failed for ${runId}:`, cancelError);
     });
   }
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
-      void input.client.heartbeat(runId).catch(requestExecutorCancel);
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = input.client.heartbeat(runId, lease)
+        .catch(requestExecutorCancel)
+        .finally(() => {
+          heartbeatInFlight = undefined;
+        });
     }, heartbeatIntervalMs);
   }
+  const trustedReceiptsByActionId = new Map<string, Promise<MaterialActionReceipt | null>>();
 
   const executorRunPromise: Promise<ExecutorRunOutcome> = activeExecutor
     .run(
       {
         runId,
-        workspacePath: binding.checkoutPath,
+        attemptId: claimed.attemptId,
+        workspace,
         command: claimed.event.command,
         context: claimed.event.context,
         ...(claimed.run.contextPacket ? { contextPacket: claimed.run.contextPacket } : {}),
         permissions: claimed.event.permissions,
+        permissionResolver: async (request) => {
+          let resolution = await input.client.requestActionPermission(runId, lease, {
+            toolCallId: request.toolCallId,
+            title: request.title,
+            ...(request.kind ? { kind: request.kind } : {}),
+            connectionId: request.connectionId,
+            operation: request.operation,
+            ...(request.resource ? { resource: request.resource } : {}),
+            ...(request.resourceVersion ? { resourceVersion: request.resourceVersion } : {}),
+            ...(request.targetFingerprint ? { targetFingerprint: request.targetFingerprint } : {}),
+            ...(request.targetConstraints ? { targetConstraints: request.targetConstraints } : {}),
+            ...(request.grantScope ? { grantScope: request.grantScope } : {}),
+            permissionScopes: request.permissionScopes,
+            mode: input.approvalMode ?? "auto",
+            provider: request.provider
+          });
+          while (resolution.state === "waiting") {
+            await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+            try {
+              resolution = await input.client.resolveActionPermission(runId, lease, resolution.action.id);
+            } catch (error) {
+              if (runNoLongerClaimed(error)) return { actionId: resolution.action.id, decision: "deny" as const };
+              throw error;
+            }
+          }
+          if (resolution.state === "authorized") {
+            return {
+              actionId: resolution.action.id,
+              decision: resolution.decision === "allow_run" ? "allow_run" as const : "allow_once" as const,
+              material: resolution.action.riskTier !== "low"
+            };
+          }
+          if (resolution.state === "reconciled") {
+            return {
+              actionId: resolution.action.id,
+              decision: "deny" as const,
+              reconciled: true,
+              ...(resolution.receipt ? { receipt: { receiptRef: resolution.receipt.receiptRef, outcome: resolution.receipt.outcome } } : {})
+            };
+          }
+          return { actionId: resolution.action.id, decision: "deny" as const };
+        },
+        materialActionReporter: async (report) => {
+          let trustedReceiptPromise = trustedReceiptsByActionId.get(report.actionId);
+          if (!trustedReceiptPromise && input.trustedMaterialActionReceipt) {
+            const createdReceiptPromise = input.trustedMaterialActionReceipt({ runId, attemptId: lease.attemptId, report });
+            trustedReceiptsByActionId.set(report.actionId, createdReceiptPromise);
+            trustedReceiptPromise = createdReceiptPromise;
+          }
+          const trustedReceipt = await trustedReceiptPromise;
+          await input.client.recordMaterialActionReceipt(runId, lease, report.actionId, trustedReceipt ?? {
+            id: `receipt_${createHash("sha256").update(`${report.actionId}:${report.receiptRef}`).digest("hex").slice(0, 24)}`,
+            actionId: report.actionId,
+            provider: report.provider,
+            receiptRef: report.receiptRef,
+            outcome: report.outcome,
+            observedAt: new Date().toISOString(),
+            metadata: {
+              toolCallId: report.toolCallId,
+              assurance: "reported",
+              ...(report.reportedOutcome ? { agentReportedOutcome: report.reportedOutcome } : {})
+            }
+          });
+        },
         metadata,
         ...(sessionProfile ? { sessionProfile } : {}),
-        ...(binding.baseBranch ? { baseBranch: binding.baseBranch } : {}),
-        ...(binding.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
-        ...(binding.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
+        ...(binding?.baseBranch ? { baseBranch: binding.baseBranch } : {}),
+        ...(binding?.worktreeRoot ? { worktreeRoot: binding.worktreeRoot } : {}),
+        ...(binding?.keepWorktree !== undefined ? { keepWorktree: binding.keepWorktree } : {})
       },
       {
         emit: async (event) => {
-          console.log(`[${event.type}] ${event.message}`);
+          const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
+          console.log(`[${safeEvent.type}] ${safeEvent.message}`);
           try {
-            await input.client.progress(runId, {
-              type: event.type,
-              message: event.message,
-              at: event.at
+            await input.client.progress(runId, lease, {
+              type: safeEvent.type,
+              message: safeEvent.message,
+              at: safeEvent.at
             });
           } catch (error) {
             if (runNoLongerClaimed(error)) {
@@ -381,6 +558,7 @@ export async function runOneDaemonIteration(input: {
   } finally {
     if (heartbeatHandle) clearInterval(heartbeatHandle);
     if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (heartbeatInFlight) await heartbeatInFlight;
   }
 
   if (executorOutcome.kind === "timeout") {
@@ -389,12 +567,22 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     cancellationDetected = true;
-    cancelPromise ??= activeExecutor.cancel(runId).catch((cancelError: unknown) => {
-      console.warn(`OpenTag executor cancellation failed after timeout for ${runId}:`, cancelError);
+    cancelPromise ??= activeExecutor.cancel(runId, attemptId).catch((cancelError: unknown) => {
+      console.warn(
+        `OpenTag executor cancellation failed after timeout for ${runId}:`,
+        sanitizeCredentialLikeValue(String(cancelError), { secrets: [lease.fencingToken] })
+      );
     });
     await cancelPromise;
     try {
-      await input.client.complete(runId, timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }));
+      await input.client.complete(
+        runId,
+        lease,
+        sanitizeCredentialLikeValue(
+          timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }),
+          { secrets: [lease.fencingToken] }
+        )
+      );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -410,7 +598,13 @@ export async function runOneDaemonIteration(input: {
       return true;
     }
     try {
-      await input.client.complete(runId, failedRunResult(activeExecutor.displayName, executorOutcome.error));
+      await input.client.complete(
+        runId,
+        lease,
+        sanitizeCredentialLikeValue(failedRunResult(activeExecutor.displayName, executorOutcome.error), {
+          secrets: [lease.fencingToken]
+        })
+      );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
         return true;
@@ -424,27 +618,43 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
-  const executorResult = executorOutcome.result;
+  const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
+    secrets: [lease.fencingToken]
+  });
   let result: OpenTagRunResult;
   try {
-    result = await maybeCreatePullRequest({
-      run: claimed.run,
-      executor: executorId,
-      event: claimed.event,
-      binding,
-      result: executorResult,
-      options: input.pullRequestOptions ?? {}
-    });
+    result = binding
+      ? await maybeCreatePullRequest({
+          run: claimed.run,
+          ...(executor.capability ? { executorCapability: executor.capability } : {}),
+          event: claimed.event,
+          binding,
+          result: executorResult,
+          options: input.pullRequestOptions ?? {}
+        })
+      : executorResult;
   } catch (error) {
-    result = pullRequestPreparationFailureResult(executorResult, error);
+    result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
+      secrets: [lease.fencingToken]
+    });
   }
   try {
-    await input.client.complete(runId, result);
+    await input.client.complete(runId, lease, result);
   } catch (error) {
     if (runNoLongerClaimed(error)) {
       return true;
     }
     throw error;
+  }
+  if (workspace.kind === "scratch" && result.conclusion === "success" && (input.keepScratch ?? "on_failure") !== "always") {
+    try {
+      await rm(workspace.path, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(
+        `OpenTag could not clean scratch workspace ${workspace.path}:`,
+        sanitizeCredentialLikeValue(String(error), { secrets: [lease.fencingToken] })
+      );
+    }
   }
   return true;
 }
@@ -471,6 +681,10 @@ export async function serveDaemon(input: {
   runnerId: string;
   repositories: RepositoryBindingConfig[];
   executors: Record<string, ExecutorAdapter>;
+  scratchRoot?: string;
+  keepScratch?: "always" | "on_failure" | "never";
+  approvalMode?: ApprovalMode;
+  trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
   pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
@@ -487,6 +701,10 @@ export async function serveDaemon(input: {
         runnerId: input.runnerId,
         repositories: input.repositories,
         executors: input.executors,
+        ...(input.scratchRoot ? { scratchRoot: input.scratchRoot } : {}),
+        ...(input.keepScratch ? { keepScratch: input.keepScratch } : {}),
+        ...(input.approvalMode ? { approvalMode: input.approvalMode } : {}),
+        ...(input.trustedMaterialActionReceipt ? { trustedMaterialActionReceipt: input.trustedMaterialActionReceipt } : {}),
         ...(input.security ? { security: input.security } : {}),
         ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
         ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),

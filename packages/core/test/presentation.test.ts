@@ -5,11 +5,56 @@ import {
   createFinalSummaryPresentation,
   createRunStatusPresentation,
   createSourceThreadStatusPresentation,
+  OpenTagApprovalPromptPresentationSchema,
+  OpenTagFinalSummaryPresentationSchema,
   OpenTagPresentationSchema,
   renderOpenTagPresentationPlainText
 } from "../src/presentation.js";
+import { sanitizeCredentialLikeValue } from "../src/credential-safety.js";
 
 describe("OpenTagPresentation", () => {
+  it("models a provider-neutral approval prompt", () => {
+    const presentation = OpenTagApprovalPromptPresentationSchema.parse({
+      kind: "approval_prompt",
+      runId: "run_approval_1",
+      approvalId: "approval_1",
+      proposalId: "proposal_1",
+      intentId: "intent_action_1",
+      actionId: "action_1",
+      proposalHash: "sha256:abc123",
+      approvalEpoch: "epoch_1",
+      title: "Deploy the verified build?",
+      summary: "This will update the production service.",
+      target: { provider: "deploy", connectionId: "deploy:prod", operation: "update", resource: "service:web", resourceVersion: "build-42" },
+      runScope: { provider: "deploy", connectionId: "deploy:prod", operation: "update", grantScope: { environment: "production", services: "*" } },
+      decisions: ["allow_once", "allow_run", "deny"]
+    });
+
+    expect(OpenTagPresentationSchema.parse(presentation)).toEqual(presentation);
+    expect(renderOpenTagPresentationPlainText(presentation)).toContain("Deploy the verified build?");
+    expect(renderOpenTagPresentationPlainText(presentation)).toContain('grantScope={"environment":"production","services":"*"}');
+  });
+
+  it("rejects credential-bearing approval snapshots before channel rendering", () => {
+    const base = {
+      kind: "approval_prompt" as const,
+      runId: "run_unsafe",
+      approvalId: "approval_unsafe",
+      proposalId: "proposal_unsafe",
+      intentId: "intent_unsafe",
+      actionId: "action_unsafe",
+      proposalHash: "sha256:unsafe",
+      approvalEpoch: "epoch_unsafe",
+      title: "Allow publish?",
+      summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report" },
+      runScope: { provider: "npm", targetConstraints: { environment: "staging" } },
+      decisions: ["allow_once", "allow_run", "deny"] as const
+    };
+    expect(() => OpenTagApprovalPromptPresentationSchema.parse({ ...base, title: "Publish ghp\x5fabcdefghijklmnopqrstuvwxyz123456" })).toThrow();
+    expect(() => OpenTagApprovalPromptPresentationSchema.parse({ ...base, runScope: { authorization: "Bearer abcdefghijklmnopqrstuvwxyz" } })).toThrow();
+  });
+
   it("creates a provider-neutral final summary presentation", () => {
     const presentation = createFinalSummaryPresentation({
       result: {
@@ -54,6 +99,26 @@ describe("OpenTagPresentation", () => {
     expect(rendered).toContain("- Log summary: opentag/run_1-log.md");
     expect(rendered).toContain("- Pull request: https://github.com/acme/demo/pull/1");
     expect(rendered).toContain("Audit: opentag status --run run_1");
+  });
+
+  it("rejects credential-bearing final presentation fields and accepts the centrally sanitized shape", () => {
+    const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const unsafe = {
+      kind: "final_summary" as const,
+      outcome: "success",
+      summary: `finished with ${raw}`,
+      artifacts: [{ title: "Report", uri: "workspace/report.md", metadata: { accessToken: "opaque-secret" } }],
+      verification: [{ command: "check", outcome: "passed" as const, excerpt: `Bearer ${raw}` }],
+      result: {
+        conclusion: "success" as const,
+        summary: `finished with ${raw}`,
+        artifacts: [{ title: "Report", uri: "workspace/report.md", metadata: { accessToken: "opaque-secret" } }],
+        verification: [{ command: "check", outcome: "passed" as const, excerpt: `Bearer ${raw}` }]
+      }
+    };
+
+    expect(() => OpenTagFinalSummaryPresentationSchema.parse(unsafe)).toThrow();
+    expect(() => OpenTagFinalSummaryPresentationSchema.parse(sanitizeCredentialLikeValue(unsafe))).not.toThrow();
   });
 
   it("carries action receipt semantics without provider-native UI fields", () => {

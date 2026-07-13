@@ -172,7 +172,7 @@ program
 
 program
   .command("ingest")
-  .description("Ingest a local external agent progress or completion event")
+  .description("Ingest a fenced local external agent progress or completion event")
   .option("--config <path>", "Config file path")
   .requiredOption("--run <runId>", "OpenTag run id")
   .requiredOption("--event <event>", "Event: progress, post_llm_call, before_agent_finalize, agent_end, failed, cancelled, timed_out, or interrupted")

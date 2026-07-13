@@ -53,7 +53,7 @@ describe("daemon agent session profile", () => {
       },
       client: {
         async claim() {
-          return { run, event: slackEvent };
+          return { run, event: slackEvent, attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" };
         },
         async markRunning() {},
         async heartbeat() {},

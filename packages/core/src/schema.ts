@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
@@ -134,6 +135,176 @@ export const PermissionGrantSchema = z.object({
   reason: z.string().min(1),
   expiresAt: z.string().datetime().optional()
 });
+
+/** An opaque reference to connector credentials held outside the durable run model. */
+export const ConnectionRefSchema = z
+  .object({
+    id: z.string().min(1),
+    provider: ProviderSchema,
+    custody: z.enum(["agent", "opentag", "operator"]),
+    brokerRef: z.string().min(1),
+    declaredCapabilities: z.array(z.string().min(1))
+  })
+  .strict();
+
+export const VerificationEvidenceSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.string().min(1),
+    assurance: z.enum(["verified", "reported", "unverifiable"]),
+    subjectRef: z.string().min(1),
+    summary: z.string().min(1),
+    sourceRef: z.string().min(1).optional(),
+    createdAt: z.string().datetime(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
+
+export const AttemptStatusSchema = z.enum([
+  "assigned",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "timed_out",
+  "needs_human"
+]);
+
+export const AttemptSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    number: z.number().int().positive(),
+    runnerId: z.string().min(1),
+    status: AttemptStatusSchema,
+    startedAt: z.string().datetime(),
+    heartbeatAt: z.string().datetime(),
+    leaseExpiresAt: z.string().datetime(),
+    finishedAt: z.string().datetime().optional(),
+    result: z.lazy(() => OpenTagRunResultSchema).optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const GrantSchema = z
+  .object({
+    id: z.string().min(1),
+    connectionId: z.string().min(1),
+    capability: z.string().min(1),
+    resourceScope: z.record(z.unknown()),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1).optional(),
+    expiresAt: z.string().datetime().optional(),
+    constraints: z.record(z.unknown()).optional(),
+    revokedAt: z.string().datetime().optional()
+  })
+  .strict();
+
+export const ApprovalModeSchema = z.enum(["ask", "auto", "autonomous"]);
+export const PermissionDecisionKindSchema = z.enum(["allow_once", "allow_run", "deny"]);
+export const ActionRiskTierSchema = z.enum(["low", "medium", "high", "critical"]);
+const CredentialSafeRecordSchema = z.record(z.unknown()).refine(isCredentialSafeValue, {
+  message: "Record must not contain credential-like keys or values."
+});
+const CredentialSafeActionTitleSchema = z.string().min(1).max(240)
+  .regex(/^[^\u0000-\u001f\u007f]+$/u)
+  .refine(isCredentialSafeText, { message: "Action title must not contain credential-like data." });
+
+export const NormalizedMaterialActionSchema = z
+  .object({
+    actionFamily: z.string().min(1),
+    scope: CredentialSafeRecordSchema,
+    target: CredentialSafeRecordSchema,
+    riskTier: ActionRiskTierSchema,
+    material: z.boolean(),
+    internallyBlocked: z.boolean(),
+    blockReason: z.string().min(1).optional()
+  })
+  .strict();
+
+export const MaterialActionReceiptSchema = z
+  .object({
+    id: z.string().min(1),
+    actionId: z.string().min(1),
+    provider: ProviderSchema,
+    connectionId: z.string().min(1).max(128).optional(),
+    targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    receiptRef: z.string().min(1),
+    outcome: z.enum(["succeeded", "failed", "unknown"]),
+    externalId: z.string().min(1).optional(),
+    externalUri: z.string().url().optional(),
+    observedAt: z.string().datetime(),
+    evidence: z.array(VerificationEvidenceSchema).optional(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
+
+export const ActionSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1),
+    actionFamily: z.string().min(1),
+    capability: z.string().min(1),
+    scope: CredentialSafeRecordSchema,
+    target: CredentialSafeRecordSchema,
+    riskTier: ActionRiskTierSchema,
+    status: z.enum(["proposed", "waiting_approval", "authorized", "executing", "succeeded", "failed", "unknown", "cancelled"]),
+    idempotencyKey: z.string().min(1),
+    proposalId: z.string().min(1).optional(),
+    proposalHash: z.string().min(1).optional(),
+    decisionSnapshotHash: z.string().min(1).optional(),
+    attemptFenceDigest: z.string().min(1),
+    receipt: MaterialActionReceiptSchema.optional(),
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const ActionPermissionRequestSchema = z
+  .object({
+    toolCallId: z.string().min(1),
+    title: CredentialSafeActionTitleSchema,
+    kind: z.string().min(1).nullable().optional(),
+    connectionId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).default("acp:agent-managed"),
+    operation: z.string().min(1).max(64).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).default("tool"),
+    resource: z.string().min(1).max(512).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeDisplayResource).optional(),
+    resourceVersion: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/u).refine(isCredentialSafeText).optional(),
+    targetFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u).optional(),
+    targetConstraints: CredentialSafeRecordSchema.optional(),
+    grantScope: CredentialSafeRecordSchema.optional(),
+    permissionScopes: z.array(z.string().min(1)).default([]),
+    mode: ApprovalModeSchema.default("auto"),
+    provider: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/u).default("acp")
+  })
+  .strict();
+
+export const ActionPermissionResolutionSchema = z
+  .object({
+    state: z.enum(["authorized", "waiting", "denied", "reconciled", "unknown", "stale"]),
+    action: ActionSchema,
+    decision: PermissionDecisionKindSchema.optional(),
+    receipt: MaterialActionReceiptSchema.optional(),
+    reason: z.string().min(1).optional()
+  })
+  .strict();
+
+export const ArtifactSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1),
+    attemptId: z.string().min(1).optional(),
+    kind: z.string().min(1),
+    title: z.string().min(1),
+    uri: z.string().min(1).optional(),
+    summary: z.string().min(1).optional(),
+    evidence: z.array(VerificationEvidenceSchema).optional(),
+    createdAt: z.string().datetime(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .strict();
 
 export const CapabilityClassSchema = z.enum(["read_only", "callback", "external_write"]);
 
@@ -509,6 +680,20 @@ export type ContextPacketSource = z.infer<typeof ContextPacketSourceSchema>;
 export type ContextPacketFactConfidence = z.infer<typeof ContextPacketFactConfidenceSchema>;
 export type ContextPacket = z.infer<typeof ContextPacketSchema>;
 export type PermissionGrant = z.infer<typeof PermissionGrantSchema>;
+export type ConnectionRef = z.infer<typeof ConnectionRefSchema>;
+export type VerificationEvidence = z.infer<typeof VerificationEvidenceSchema>;
+export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
+export type Attempt = z.infer<typeof AttemptSchema>;
+export type Grant = z.infer<typeof GrantSchema>;
+export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
+export type PermissionDecisionKind = z.infer<typeof PermissionDecisionKindSchema>;
+export type ActionRiskTier = z.infer<typeof ActionRiskTierSchema>;
+export type NormalizedMaterialAction = z.infer<typeof NormalizedMaterialActionSchema>;
+export type MaterialActionReceipt = z.infer<typeof MaterialActionReceiptSchema>;
+export type Action = z.infer<typeof ActionSchema>;
+export type ActionPermissionRequest = z.infer<typeof ActionPermissionRequestSchema>;
+export type ActionPermissionResolution = z.infer<typeof ActionPermissionResolutionSchema>;
+export type Artifact = z.infer<typeof ArtifactSchema>;
 export type CapabilityClass = z.infer<typeof CapabilityClassSchema>;
 export type CapabilityContract = z.infer<typeof CapabilityContractSchema>;
 export type PolicyScope = z.infer<typeof PolicyScopeSchema>;

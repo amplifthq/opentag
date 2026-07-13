@@ -3,7 +3,11 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { AdapterMutationMappingSchema } from "@opentag/core";
+import {
+  AdapterMutationMappingSchema,
+  OpenTagIntegrationManifestSchema,
+  OpenTagManagedChannelBindingOwnershipSchema
+} from "@opentag/core";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
 import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
@@ -135,12 +139,24 @@ const ChannelBindingSchema = z
     provider: z.string().min(1),
     accountId: z.string().min(1),
     conversationId: z.string().min(1),
-    repoProvider: z.string().min(1),
-    owner: z.string().min(1),
-    repo: z.string().min(1),
-    metadata: z.record(z.string(), z.unknown()).optional()
+    repoProvider: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    repo: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
   })
-  .strict();
+  .strict()
+  .superRefine((binding, context) => {
+    const repositoryFields = [binding.repoProvider, binding.owner, binding.repo];
+    const configuredCount = repositoryFields.filter((value) => value !== undefined).length;
+    if (configuredCount !== 0 && configuredCount !== repositoryFields.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repoProvider"],
+        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
+      });
+    }
+  });
 
 const ClaudeCodeSchema = z
   .object({
@@ -179,7 +195,11 @@ const DaemonConfigSchema = z
   .object({
     runnerId: z.string().min(1),
     dispatcherUrl: z.string().url(),
-    repositories: z.array(RepositoryBindingSchema).min(1),
+    repositories: z.array(RepositoryBindingSchema).default([]),
+    agents: z.record(OpenTagIntegrationManifestSchema).optional(),
+    scratchRoot: z.string().min(1).optional(),
+    keepScratch: KeepWorktreeSchema.optional(),
+    approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
     channelBindings: z.array(ChannelBindingSchema).optional(),
     claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),

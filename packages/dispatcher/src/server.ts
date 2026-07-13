@@ -3,12 +3,21 @@ import {
   AdapterMutationMappingSchema,
   ActorIdentitySchema,
   ActionHintSchema,
+  actionScopeAllowsRunReuse,
+  ActionPermissionRequestSchema,
+  OpenTagApprovalPromptPresentationSchema,
+  OpenTagManagedChannelBindingOwnershipSchema,
+  MaterialActionReceiptSchema,
+  VerificationEvidenceSchema,
   capabilityForMutationIntent,
+  channelProgressVisibility,
   conversationKeysFromCallback,
   conversationKeysFromEvent,
   parseThreadActionCommand,
   parseThreadControlCommand,
   permissionScopesAllowCapability,
+  redactCredentialLikeData,
+  sanitizeCredentialLikeValue,
   projectTargetRefFromEvent,
   suggestedActionCandidatesFromSnapshots,
   type ActorIdentity,
@@ -78,7 +87,7 @@ import {
   type LinearMutationOperation
 } from "@opentag/linear";
 import type { SlackBlock } from "@opentag/slack";
-import { createOpenTagRepository, migrateSchema } from "@opentag/store";
+import { ChannelBindingCorruptionError, createOpenTagRepository, migrateSchema } from "@opentag/store";
 import type { LinearRelayInstallation, LinearRelayInstallationAuth } from "@opentag/store";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -366,7 +375,9 @@ function shouldDeliverRunStatusUpdate(
 }
 
 function lifecycleStatusMessageKey(input: { provider: string; runId: string }): string | undefined {
-  return input.provider === "lark" || input.provider === "linear" || input.provider === "telegram" ? `${input.runId}:status` : undefined;
+  return input.provider === "slack" || input.provider === "lark" || input.provider === "linear" || input.provider === "telegram"
+    ? `${input.runId}:status`
+    : undefined;
 }
 
 const DEFAULT_LINEAR_OAUTH_INSTALL_STATE_TTL_MS = 10 * 60 * 1000;
@@ -398,8 +409,12 @@ function isTerminalRun(run: OpenTagRun): boolean {
   return ["succeeded", "failed", "cancelled", "interrupted", "timed_out"].includes(run.status);
 }
 
-function shouldUseDelayedLarkStatusCard(provider: string, options: LarkDelayedStatusCardOptions): boolean {
-  return provider === "lark" && options.enabled !== false;
+function shouldUseDelayedLarkStatusCard(
+  provider: string,
+  options: LarkDelayedStatusCardOptions,
+  nativeStatusDelivery: boolean
+): boolean {
+  return provider === "lark" && options.enabled !== false && !nativeStatusDelivery;
 }
 
 function safeExecutorLabel(executor: string | undefined): string {
@@ -430,15 +445,100 @@ const CreateSlackChannelBindingSchema = z.object({
   repo: z.string().min(1)
 });
 
-const CreateChannelBindingSchema = z.object({
-  provider: z.string().min(1),
-  accountId: z.string().min(1),
-  conversationId: z.string().min(1),
-  repoProvider: z.string().min(1),
-  owner: z.string().min(1),
-  repo: z.string().min(1),
-  metadata: z.record(z.string(), z.unknown()).optional()
-});
+const CreateChannelBindingSchema = z
+  .object({
+    provider: z.string().min(1),
+    accountId: z.string().min(1),
+    conversationId: z.string().min(1),
+    repoProvider: z.string().min(1).optional(),
+    owner: z.string().min(1).optional(),
+    repo: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    ownership: OpenTagManagedChannelBindingOwnershipSchema.optional()
+  })
+  .superRefine((binding, ctx) => {
+    const present = [binding.repoProvider, binding.owner, binding.repo].filter((value) => value !== undefined).length;
+    if (present !== 0 && present !== 3) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repoProvider"],
+        message: "Channel binding repository fields repoProvider, owner, and repo must be provided together."
+      });
+    }
+  });
+
+function channelBindingScopeFromEvent(event: OpenTagEvent): { accountId: string; conversationId: string } | null {
+  const metadata = event.metadata ?? {};
+  const accountId = metadataString(metadata, "accountId")
+    ?? metadataString(metadata, "teamId")
+    ?? metadataString(metadata, "tenantKey")
+    ?? metadataString(metadata, "botId");
+  const conversationId = metadataString(metadata, "conversationId")
+    ?? metadataString(metadata, "channelId")
+    ?? metadataString(metadata, "chatId");
+  return accountId && conversationId ? { accountId, conversationId } : null;
+}
+
+async function managedChannelOwnershipVerified(input: {
+  repo: ReturnType<typeof createOpenTagRepository>;
+  event: OpenTagEvent;
+  principal?: ChannelPrincipalIdentity;
+}): Promise<boolean> {
+  const scope = channelBindingScopeFromEvent(input.event);
+  if (!scope) return input.event.source !== "slack" && input.event.source !== "lark";
+  const binding = await input.repo.getChannelBinding({ provider: input.event.source, ...scope });
+  if (!binding) return input.event.source !== "slack" && input.event.source !== "lark";
+  if (!binding.ownership) return true;
+  return input.principal?.provider === input.event.source
+    && input.principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || input.principal.botId === binding.ownership.botId);
+}
+
+export type ChannelPrincipalCredential = {
+  provider: string;
+  applicationId: string;
+  botId?: string;
+  credential: string;
+};
+
+type ChannelPrincipalIdentity = Omit<ChannelPrincipalCredential, "credential">;
+
+function channelPrincipalCredentialDigest(credential: string): string {
+  return createHash("sha256").update(credential).digest("hex");
+}
+
+function configuredChannelPrincipals(principals: ChannelPrincipalCredential[] | undefined): Map<string, ChannelPrincipalIdentity> {
+  const configured = new Map<string, ChannelPrincipalIdentity>();
+  for (const principal of principals ?? []) {
+    const credential = principal.credential.trim();
+    if (!credential || !principal.provider.trim() || !principal.applicationId.trim()) {
+      throw new Error("Channel principals require provider, applicationId, and credential.");
+    }
+    const digest = channelPrincipalCredentialDigest(credential);
+    if (configured.has(digest)) throw new Error("Channel principal credentials must be unique per adapter.");
+    configured.set(digest, {
+      provider: principal.provider,
+      applicationId: principal.applicationId,
+      ...(principal.botId ? { botId: principal.botId } : {})
+    });
+  }
+  return configured;
+}
+
+function channelPrincipalFromRequest(request: Request, principals: Map<string, ChannelPrincipalIdentity>): ChannelPrincipalIdentity | undefined {
+  const credential = request.headers.get("x-opentag-channel-principal")?.trim();
+  return credential ? principals.get(channelPrincipalCredentialDigest(credential)) : undefined;
+}
+
+function principalOwnsManagedBinding(principal: ChannelPrincipalIdentity | undefined, binding: {
+  provider: string;
+  ownership?: { applicationId: string; botId?: string | undefined } | undefined;
+}): boolean {
+  if (!binding.ownership) return true;
+  return principal?.provider === binding.provider
+    && principal.applicationId === binding.ownership.applicationId
+    && (!binding.ownership.botId || principal.botId === binding.ownership.botId);
+}
 
 const UpsertPolicyRuleSchema = z.object({
   rule: PolicyRuleSchema
@@ -537,12 +637,27 @@ const PromoteFollowUpRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
-const CompleteRunSchema = z.object({
+const AttemptLeaseSchema = z.object({
+  attemptId: z.string().min(1),
+  fencingToken: z.string().min(1)
+});
+
+const ActionPermissionInputSchema = AttemptLeaseSchema.extend({ request: ActionPermissionRequestSchema });
+const ActionPermissionResolutionInputSchema = AttemptLeaseSchema;
+const MaterialActionReceiptInputSchema = AttemptLeaseSchema.extend({ receipt: MaterialActionReceiptSchema });
+const ReconcileUnknownMaterialActionSchema = z.object({
+  outcome: z.enum(["succeeded", "failed"]),
+  idempotencyKey: z.string().min(1).max(256),
+  receiptRef: z.string().min(1).max(512),
+  evidence: z.array(VerificationEvidenceSchema).max(20).optional()
+}).strict();
+
+const CompleteRunSchema = AttemptLeaseSchema.extend({
   result: OpenTagRunResultSchema,
   idempotencyKey: z.string().min(1).max(256).optional()
 });
 
-const MarkRunningSchema = z.object({
+const MarkRunningSchema = AttemptLeaseSchema.extend({
   executor: z.string().min(1),
   executorCapability: z.record(z.string(), z.unknown()).optional(),
   runTimeoutMs: z.number().int().positive().optional(),
@@ -613,7 +728,7 @@ const CHILD_EVENT_METADATA_REPLAY_KEYS = [
   "githubSignatureVerified"
 ] as const;
 
-const ProgressSchema = z.object({
+const ProgressSchema = AttemptLeaseSchema.extend({
   type: z.string().min(1).optional(),
   message: z.string().min(1),
   at: z.string().datetime().optional(),
@@ -1534,7 +1649,24 @@ async function authorizeThreadAction(input: {
 }): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
   const repoKey = projectTargetRefFromEvent(input.resolved.proposal.event);
   if (!repoKey) {
-    return { ok: false, reason: "repo_context_missing", message: "The proposal does not resolve to a repository binding." };
+    const event = input.resolved.proposal.event;
+    const metadata = event.metadata ?? {};
+    const accountId = metadataString(metadata, "accountId") ?? metadataString(metadata, "teamId") ?? metadataString(metadata, "tenantKey") ?? metadataString(metadata, "botId");
+    const conversationId = metadataString(metadata, "conversationId") ?? metadataString(metadata, "channelId") ?? metadataString(metadata, "chatId");
+    if (!accountId || !conversationId || input.actor.provider !== event.source) {
+      return { ok: false, reason: "channel_identity_missing", message: "The non-repository proposal does not resolve to a managed source-channel identity." };
+    }
+    const channelBinding = await input.repo.getChannelBinding({ provider: event.source, accountId, conversationId });
+    if (!channelBinding || channelBinding.repoProvider || channelBinding.owner || channelBinding.repo) {
+      return { ok: false, reason: "channel_binding_mismatch", message: "The non-repository proposal is not owned by the expected managed channel binding." };
+    }
+    const allowedActors = Array.isArray(channelBinding.metadata?.["allowedActors"])
+      ? channelBinding.metadata["allowedActors"].filter((value): value is string => typeof value === "string")
+      : undefined;
+    if (!actorAllowedByList(input.actor, allowedActors)) {
+      return { ok: false, reason: "actor_not_allowed", message: "This actor is not allowed to approve actions for the managed channel." };
+    }
+    return { ok: true };
   }
 
   const binding = await input.repo.getRepoBinding(repoKey);
@@ -1825,11 +1957,7 @@ function applyOutcomeReceiptLines(outcomes: ApplyIntentOutcome[]): string[] {
 }
 
 function sanitizeApplyFailureDetail(detail: unknown): string {
-  return String(detail ?? "")
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{8,}\b/g, "[redacted]")
-    .replace(/\bglpat-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\bx(?:ox[baprs]|app)-[A-Za-z0-9-]{8,}\b/g, "[redacted]")
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted private key]")
+  return redactCredentialLikeData(String(detail ?? ""))
     .replace(/\/Users\/[A-Za-z0-9._-]+\/(?:repos|Library|Desktop|Downloads|\.config)\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/\/(?:home|root)\/[A-Za-z0-9._-]+\/[^\s"'`]+/g, "[redacted local path]")
     .replace(/[A-Za-z]:\\Users\\[^\s"'`]+/g, "[redacted local path]")
@@ -1910,6 +2038,28 @@ function renderThreadActionRecordedBody(input: {
     ].join("\n");
   }
   return [`Rejected: ${sentenceWithTerminalPunctuation(title)}`, "No external write will be performed for this action."].join("\n");
+}
+
+type GovernedPermissionDecision = "allow_once" | "allow_run" | "deny";
+
+function governedPermissionDecision(value: unknown): GovernedPermissionDecision | undefined {
+  return value === "allow_once" || value === "allow_run" || value === "deny" ? value : undefined;
+}
+
+function renderGovernedPermissionDecisionBody(input: {
+  decision: GovernedPermissionDecision;
+  selectionText: string;
+}): string {
+  const title = sentenceWithTerminalPunctuation(
+    selectedActionReceiptTitle(input.selectionText).replace(/^Allow\s+/iu, "")
+  );
+  if (input.decision === "allow_once") {
+    return [`Allowed once: ${title}`, "Permission recorded for this attempt. The agent may now perform this governed action."].join("\n");
+  }
+  if (input.decision === "allow_run") {
+    return [`Allowed for this run: ${title}`, "Permission recorded for this run. The agent may now perform this governed action."].join("\n");
+  }
+  return [`Denied: ${title}`, "The agent was not allowed to perform this governed action."].join("\n");
 }
 
 async function selectedDirectApplyStatus(input: {
@@ -2043,6 +2193,7 @@ export type CallbackMessage = {
   provider: string;
   uri: string;
   body: string;
+  idempotencyKey?: string;
   agentId?: string;
   threadKey?: string;
   statusMessageKey?: string;
@@ -2387,17 +2538,19 @@ async function deliverAndAudit(input: {
   message: CallbackMessage;
   retry?: CallbackRetryOptions;
 }): Promise<boolean> {
+  const safeMessage = sanitizeCredentialLikeValue(input.message);
   const delivery = await input.repo.enqueueCallbackDelivery({
-    runId: input.message.runId,
-    kind: input.message.kind,
-    provider: input.message.provider,
-    uri: input.message.uri,
-    body: input.message.body,
-    ...(input.message.threadKey ? { threadKey: input.message.threadKey } : {}),
-    ...(input.message.agentId ? { agentId: input.message.agentId } : {}),
-    ...(input.message.statusMessageKey ? { statusMessageKey: input.message.statusMessageKey } : {}),
-    ...(input.message.blocks ? { blocks: input.message.blocks } : {}),
-    ...(input.message.rich ? { rich: input.message.rich } : {})
+    runId: safeMessage.runId,
+    kind: safeMessage.kind,
+    provider: safeMessage.provider,
+    uri: safeMessage.uri,
+    body: safeMessage.body,
+    ...(safeMessage.idempotencyKey ? { idempotencyKey: safeMessage.idempotencyKey } : {}),
+    ...(safeMessage.threadKey ? { threadKey: safeMessage.threadKey } : {}),
+    ...(safeMessage.agentId ? { agentId: safeMessage.agentId } : {}),
+    ...(safeMessage.statusMessageKey ? { statusMessageKey: safeMessage.statusMessageKey } : {}),
+    ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
+    ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
   });
   return deliverCallbackDelivery({
     repo: input.repo,
@@ -2456,7 +2609,9 @@ type DispatcherAuthResult =
 function isRunnerRuntimeEndpoint(method: string, path: string): boolean {
   if (method !== "POST") return false;
   if (/^\/v1\/runners\/[^/]+\/claim$/.test(path)) return true;
-  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/(running|heartbeat|progress|complete|action-permissions)$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/action-permissions\/[^/]+\/resolve$/.test(path)) return true;
+  if (/^\/v1\/runners\/[^/]+\/runs\/[^/]+\/material-actions\/[^/]+\/receipt$/.test(path)) return true;
   return /^\/v1\/runs\/[^/]+\/(running|progress|complete)$/.test(path);
 }
 
@@ -2558,6 +2713,7 @@ export function createDispatcherApp(input: {
   runnerToken?: string;
   runnerTokens?: string[];
   revokedRunnerTokenFingerprints?: string[];
+  channelPrincipals?: ChannelPrincipalCredential[];
   presentation?: CallbackPresentation;
   githubApply?: GitHubApplyOptions;
   gitlabApply?: GitLabApplyOptions;
@@ -2568,6 +2724,7 @@ export function createDispatcherApp(input: {
   agentAccessProfileCheck?: AgentAccessProfileCheck;
   maxRequestBodyBytes?: number;
   rateLimit?: DispatcherRateLimitOptions | false;
+  runnerLeaseSeconds?: number;
   relayCapabilities?: {
     platforms?: RelayPlatformCapability[];
   };
@@ -2576,6 +2733,7 @@ export function createDispatcherApp(input: {
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const app = new Hono();
+  const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
   const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
   const sourceReceiptSink = input.sourceReceiptSink ?? noopSourceReceiptSink;
   const presentation = input.presentation ?? createDefaultCallbackPresentation();
@@ -2588,6 +2746,7 @@ export function createDispatcherApp(input: {
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
   const runnerTokens = configuredRunnerTokens(input);
   const revokedRunnerTokenFingerprints = normalizeRevokedRunnerTokenFingerprints(input.revokedRunnerTokenFingerprints);
   const requestEndpoint = (c: Context) => normalizeRateLimitedEndpoint(c.req.method, new URL(c.req.url).pathname);
@@ -2976,7 +3135,11 @@ export function createDispatcherApp(input: {
     phase: DelayedLarkStatusPhase;
     createIfMissing?: boolean;
   }): Promise<boolean> {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return false;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return false;
     if (!input.event.callback.threadKey) return false;
     if (isTerminalRun(input.run)) return false;
 
@@ -3032,7 +3195,11 @@ export function createDispatcherApp(input: {
   }
 
   function scheduleDelayedLarkStatusCard(input: { run: OpenTagRun; event: OpenTagEvent }): void {
-    if (!shouldUseDelayedLarkStatusCard(input.event.callback.provider, larkStatusCardOptions)) return;
+    if (!shouldUseDelayedLarkStatusCard(
+      input.event.callback.provider,
+      larkStatusCardOptions,
+      presentation.shouldDeliverStatusUpdate(input.event.callback.provider)
+    )) return;
     if (!input.event.callback.threadKey) return;
     if (larkStatusCardDelayMs < 0) return;
     const existing = delayedLarkStatusCards.get(input.run.id);
@@ -3830,15 +3997,47 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateChannelBindingSchema);
-    await repo.upsertChannelBinding({
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    const existing = await repo.getChannelBinding({
       provider: parsed.provider,
       accountId: parsed.accountId,
-      conversationId: parsed.conversationId,
-      repoProvider: parsed.repoProvider,
-      owner: parsed.owner,
-      repo: parsed.repo,
-      ...(parsed.metadata ? { metadata: parsed.metadata } : {})
+      conversationId: parsed.conversationId
     });
+    const requestedManagedBinding = parsed.ownership
+      ? { provider: parsed.provider, ownership: parsed.ownership }
+      : undefined;
+    if (
+      (requestedManagedBinding && !principalOwnsManagedBinding(principal, requestedManagedBinding))
+      || (existing?.ownership && !principalOwnsManagedBinding(principal, existing))
+    ) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${parsed.provider}:${parsed.accountId}/${parsed.conversationId}`,
+        payload: { provider: parsed.provider, accountId: parsed.accountId, conversationId: parsed.conversationId, operation: "upsert" }
+      });
+    }
+    try {
+      await repo.upsertChannelBinding({
+        provider: parsed.provider,
+        accountId: parsed.accountId,
+        conversationId: parsed.conversationId,
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
+        ...(parsed.metadata ? { metadata: parsed.metadata } : {}),
+        ...(parsed.ownership ? { ownership: parsed.ownership } : {}),
+        ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+      });
+    } catch (error) {
+      if (error instanceof Error && /Exclusive managed channel binding/u.test(error.message)) {
+        return c.json({ error: "managed_channel_binding_conflict" }, 409);
+      }
+      throw error;
+    }
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -3847,10 +4046,11 @@ export function createDispatcherApp(input: {
         provider: parsed.provider,
         accountId: parsed.accountId,
         conversationId: parsed.conversationId,
-        repoProvider: parsed.repoProvider,
-        owner: parsed.owner,
-        repo: parsed.repo,
-        hasMetadata: Boolean(parsed.metadata)
+        ...(parsed.repoProvider && parsed.owner && parsed.repo
+          ? { repoProvider: parsed.repoProvider, owner: parsed.owner, repo: parsed.repo }
+          : {}),
+        hasMetadata: Boolean(parsed.metadata),
+        ...(parsed.ownership ? { managedOwnership: true } : {})
       }
     });
     return c.json({ ok: true }, 201);
@@ -3872,11 +4072,23 @@ export function createDispatcherApp(input: {
     const conversationId = c.req.param("conversationId");
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "status" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     const queuedFollowUps = active ? await repo.listQueuedFollowUpsForActiveRun({ activeRunId: active.run.id }) : [];
@@ -3893,12 +4105,29 @@ export function createDispatcherApp(input: {
     const provider = c.req.param("provider");
     const accountId = c.req.param("accountId");
     const conversationId = c.req.param("conversationId");
+    const existing = await repo.getChannelBinding({ provider, accountId, conversationId });
+    if (!existing) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing.ownership && !principalOwnsManagedBinding(principal, existing) && !adminOverride) {
+      return c.json({ error: "managed_channel_principal_required" }, 403);
+    }
+    if (existing.ownership && adminOverride && !principalOwnsManagedBinding(principal, existing)) {
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "delete" }
+      });
+    }
     const deleted = await repo.deleteChannelBinding({
       provider,
       accountId,
-      conversationId
+      conversationId,
+      expectedBinding: existing
     });
-    if (!deleted) return c.json({ error: "channel_binding_not_found" }, 404);
+    if (!deleted) return c.json({ error: "channel_binding_changed" }, 409);
     await recordControlPlaneEvent({
       type: "binding.channel.deleted",
       severity: "info",
@@ -3919,11 +4148,23 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CancelRunSchema);
     const binding = await repo.getChannelBinding({ provider, accountId, conversationId });
     if (!binding) return c.json({ error: "channel_binding_not_found" }, 404);
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (binding.ownership && !principalOwnsManagedBinding(principal, binding)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `${provider}:${accountId}/${conversationId}`,
+        payload: { provider, accountId, conversationId, operation: "cancel" }
+      });
+    }
     const active = await repo.findCancelableRunForSourceContainer({
       source: provider,
-      repoProvider: binding.repoProvider,
-      owner: binding.owner,
-      repo: binding.repo,
+      ...(binding.repoProvider && binding.owner && binding.repo
+        ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+        : {}),
       metadata: sourceContainerMetadata({ provider, accountId, conversationId })
     });
     if (!active) return c.json({ error: "active_run_not_found" }, 404);
@@ -3941,7 +4182,39 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/slack-channel-bindings", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateSlackChannelBindingSchema);
-    await repo.createSlackChannelBinding(parsed);
+    const existing = await repo.getChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId
+    });
+    const principal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    const adminOverride = c.req.header("x-opentag-channel-admin-override") === "true"
+      && authMatches(c.req.raw, input.pairingToken);
+    if (existing?.ownership && !principalOwnsManagedBinding(principal, existing)) {
+      if (!adminOverride) return c.json({ error: "managed_channel_principal_required" }, 403);
+      await recordControlPlaneEvent({
+        type: "binding.channel.admin_override",
+        severity: "warn",
+        subject: `slack:${parsed.teamId}/${parsed.channelId}`,
+        payload: {
+          provider: "slack",
+          accountId: parsed.teamId,
+          conversationId: parsed.channelId,
+          operation: "compatibility_upsert"
+        }
+      });
+    }
+    await repo.upsertChannelBinding({
+      provider: "slack",
+      accountId: parsed.teamId,
+      conversationId: parsed.channelId,
+      repoProvider: parsed.repoProvider ?? "github",
+      owner: parsed.owner,
+      repo: parsed.repo,
+      ...(existing?.metadata ? { metadata: existing.metadata } : {}),
+      ...(existing?.ownership ? { ownership: existing.ownership } : {}),
+      ...(adminOverride ? { allowManagedOwnershipOverride: true } : {})
+    });
     await recordControlPlaneEvent({
       type: "binding.channel.upserted",
       severity: "info",
@@ -3971,6 +4244,33 @@ export function createDispatcherApp(input: {
 
   app.post("/v1/runs", async (c) => {
     const parsed = await parseDispatcherBody(c, CreateRunSchema);
+    const channelPrincipal = channelPrincipalFromRequest(c.req.raw, channelPrincipals);
+    let ownershipVerified = false;
+    try {
+      ownershipVerified = await managedChannelOwnershipVerified({
+        repo,
+        event: parsed.event,
+        ...(channelPrincipal ? { principal: channelPrincipal } : {})
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelBindingCorruptionError)) throw error;
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_binding_corrupt",
+        severity: "error",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_binding_corrupt" }, 403);
+    }
+    if (!ownershipVerified) {
+      await recordControlPlaneEvent({
+        type: "admission.managed_channel_ownership_unverified",
+        severity: "warn",
+        subject: parsed.runId,
+        payload: { runId: parsed.runId, source: parsed.event.source, sourceEventId: parsed.event.sourceEventId }
+      });
+      return c.json({ error: "managed_channel_ownership_unverified" }, 403);
+    }
     const admitted = await admission.admitRun({ requestId: parsed.runId, event: parsed.event });
 
     if (admitted.outcome === "needs_human_decision") {
@@ -4137,6 +4437,28 @@ export function createDispatcherApp(input: {
       return c.json({ outcome: "unauthorized", reason: authorization.reason, message: authorization.message }, 403);
     }
 
+    const proposalMetadata = resolved.resolved.proposal.snapshot.metadata;
+    const governedPermission = proposalMetadata?.["kind"] === "acp_permission";
+    const requestedPermissionDecision = governedPermissionDecision(parsed.metadata?.["permissionDecision"]);
+    if (governedPermission) {
+      const expectedActionId = proposalMetadata?.["actionId"];
+      const expectedProposalHash = proposalMetadata?.["proposalHash"];
+      const expectedApprovalEpoch = proposalMetadata?.["approvalEpoch"];
+      const expectedIntentId = typeof expectedActionId === "string" ? `intent_${expectedActionId}` : undefined;
+      const compatibleVerb = requestedPermissionDecision === "deny" ? command.verb === "reject" : command.verb === "approve";
+      if (
+        !requestedPermissionDecision ||
+        parsed.metadata?.["proposalHash"] !== expectedProposalHash ||
+        parsed.metadata?.["approvalEpoch"] !== expectedApprovalEpoch ||
+        parsed.metadata?.["governedActionId"] !== expectedActionId ||
+        parsed.metadata?.["proposalId"] !== resolved.resolved.proposal.snapshot.proposalId ||
+        parsed.metadata?.["intentId"] !== expectedIntentId ||
+        !compatibleVerb
+      ) {
+        return c.json({ outcome: "approval_identity_mismatch", message: "The governed approval payload does not match the immutable proposal." }, 409);
+      }
+    }
+
     const selectionText = selectedActionSummary(resolved.resolved.selectedCandidates);
     const selectedIntents = resolved.resolved.proposal.snapshot.intents.filter((intent) =>
       resolved.resolved.selectedIntentIds.includes(intent.intentId)
@@ -4227,6 +4549,16 @@ export function createDispatcherApp(input: {
         verb: command.verb,
         selection: command.selection,
         callback: parsed.callback,
+        ...(governedPermission
+          ? {
+              permissionDecision: requestedPermissionDecision,
+              actionId: proposalMetadata?.["actionId"],
+              proposalHash: proposalMetadata?.["proposalHash"],
+              approvalEpoch: proposalMetadata?.["approvalEpoch"]
+            }
+          : parsed.metadata?.["permissionDecision"] === "allow_run" || /(?:always|this run|本次运行|同类任务)/iu.test(command.reason ?? "")
+            ? { permissionDecision: "allow_run" }
+            : { permissionDecision: command.verb === "reject" ? "deny" : "allow_once" }),
         ...(parsed.metadata ? { ingressMetadata: parsed.metadata } : {})
       }
     });
@@ -4238,10 +4570,9 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_rejected", decision }, 200);
       }
-      const body = renderThreadActionRecordedBody({
-        verb: "reject",
-        selectionText
-      });
+      const body = governedPermission && requestedPermissionDecision
+        ? renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText })
+        : renderThreadActionRecordedBody({ verb: "reject", selectionText });
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -4262,21 +4593,26 @@ export function createDispatcherApp(input: {
       if (existingDecision) {
         return c.json({ outcome: "already_approved", decision }, 200);
       }
-      const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
-      const directApply = await selectedDirectApplyStatus({
-        event: resolved.resolved.proposal.event,
-        callbackProvider: parsed.callback.provider,
-        candidates: resolved.resolved.selectedCandidates,
-        ...(input.githubApply ? { githubApply: input.githubApply } : {}),
-        ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
-        ...(linearApply ? { linearApply } : {})
-      });
-      const body = renderThreadActionRecordedBody({
-        verb: "approve",
-        selectionText,
-        applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
-        directApply
-      });
+      let body: string;
+      if (governedPermission && requestedPermissionDecision) {
+        body = renderGovernedPermissionDecisionBody({ decision: requestedPermissionDecision, selectionText });
+      } else {
+        const linearApply = await linearApplyOptionsForEvent(resolved.resolved.proposal.event);
+        const directApply = await selectedDirectApplyStatus({
+          event: resolved.resolved.proposal.event,
+          callbackProvider: parsed.callback.provider,
+          candidates: resolved.resolved.selectedCandidates,
+          ...(input.githubApply ? { githubApply: input.githubApply } : {}),
+          ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
+          ...(linearApply ? { linearApply } : {})
+        });
+        body = renderThreadActionRecordedBody({
+          verb: "approve",
+          selectionText,
+          applyIndex: resolved.resolved.selectedCandidates[0]?.index ?? 1,
+          directApply
+        });
+      }
       await deliverAndAudit({
         repo,
         sink: callbackSink,
@@ -4499,15 +4835,151 @@ export function createDispatcherApp(input: {
   });
 
   app.post("/v1/runners/:runnerId/claim", async (c) => {
-    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: 60 });
+    const claimed = await repo.claimNextRun({ runnerId: c.req.param("runnerId"), leaseSeconds: runnerLeaseSeconds });
     if (!claimed) return c.body(null, 204);
     return c.json(claimed, 200);
   });
 
   app.post("/v1/runners/:runnerId/runs/:runId/heartbeat", async (c) => {
-    const ok = await repo.heartbeat({ runnerId: c.req.param("runnerId"), runId: c.req.param("runId") });
-    if (!ok) return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    const body = await parseDispatcherBody(c, AttemptLeaseSchema);
+    const outcome = await repo.heartbeat({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     return c.json({ ok: true });
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions", async (c) => {
+    const runnerId = c.req.param("runnerId");
+    const runId = c.req.param("runId");
+    const body = await parseDispatcherBody(c, ActionPermissionInputSchema);
+    const resolution = await repo.requestActionPermission({
+      runnerId,
+      runId,
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      request: body.request
+    });
+    if (!resolution) return c.json({ error: "stale_attempt" }, 409);
+    if (resolution.state === "waiting" && resolution.action.proposalId) {
+      const stored = await repo.getRun({ runId });
+      const proposal = await repo.getSuggestedChanges({ proposalId: resolution.action.proposalId });
+      const approvalEpoch = proposal?.snapshot.metadata?.["approvalEpoch"];
+      if (stored && proposal && resolution.action.proposalHash && typeof approvalEpoch === "string") {
+        const approvalPrompt = OpenTagApprovalPromptPresentationSchema.parse({
+          kind: "approval_prompt",
+          runId,
+          approvalId: `approval_${resolution.action.id}`,
+          proposalId: proposal.snapshot.proposalId,
+          intentId: `intent_${resolution.action.id}`,
+          actionId: resolution.action.id,
+          proposalHash: resolution.action.proposalHash,
+          approvalEpoch,
+          title: `Allow ${resolution.action.actionFamily}?`,
+          summary: proposal.snapshot.summary,
+          target: {
+            provider: resolution.action.target["provider"],
+            connectionId: resolution.action.target["connectionId"],
+            operation: resolution.action.target["operation"],
+            resource: resolution.action.target["resource"],
+            ...(typeof resolution.action.target["resourceVersion"] === "string" ? { resourceVersion: resolution.action.target["resourceVersion"] } : {})
+          },
+          runScope: resolution.action.scope,
+          decisions: actionScopeAllowsRunReuse(resolution.action.scope) ? ["allow_once", "allow_run", "deny"] : ["allow_once", "deny"]
+        });
+        const rendered = presentation.render({
+          provider: stored.event.callback.provider,
+          ...larkRenderLocaleRenderOption(stored.event),
+          presentation: approvalPrompt
+        });
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: rendered.body,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+            ...(rendered.rich ? { rich: rendered.rich } : {}),
+            idempotencyKey: `action-permission:${resolution.action.id}`,
+            statusMessageKey: `${runId}:status`
+          }
+        });
+      }
+    }
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/action-permissions/:actionId/resolve", async (c) => {
+    const body = await parseDispatcherBody(c, ActionPermissionResolutionInputSchema);
+    const resolution = await repo.resolveActionPermission({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    return c.json({ resolution }, resolution.state === "waiting" ? 202 : resolution.state === "stale" ? 409 : 200);
+  });
+
+  app.post("/v1/runners/:runnerId/runs/:runId/material-actions/:actionId/receipt", async (c) => {
+    const body = await parseDispatcherBody(c, MaterialActionReceiptInputSchema);
+    const resolution = await repo.recordMaterialActionReceipt({
+      runnerId: c.req.param("runnerId"),
+      runId: c.req.param("runId"),
+      actionId: c.req.param("actionId"),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      receipt: body.receipt
+    });
+    if (!resolution) return c.json({ error: "action_not_found" }, 404);
+    if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
+    return c.json({ resolution }, 200);
+  });
+
+  app.post("/v1/material-actions/:actionId/reconcile", async (c) => {
+    const body = await parseDispatcherBody(c, ReconcileUnknownMaterialActionSchema);
+    const result = await repo.reconcileUnknownMaterialAction({
+      actionId: c.req.param("actionId"),
+      outcome: body.outcome,
+      idempotencyKey: body.idempotencyKey,
+      receiptRef: body.receiptRef,
+      source: "control_plane_admin",
+      actorId: "pairing-authenticated-admin",
+      ...(body.evidence ? { evidence: body.evidence } : {})
+    });
+    if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
+    if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
+    if (result.outcome === "reconciled" && result.action) {
+      const stored = await repo.getRun({ runId: result.action.runId });
+      if (stored) {
+        const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
+        await deliverAndAudit({
+          repo,
+          sink: callbackSink,
+          retry: callbackRetry,
+          message: {
+            runId: result.action.runId,
+            kind: "progress",
+            provider: stored.event.callback.provider,
+            uri: stored.event.callback.uri,
+            body: bodyText,
+            ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
+            idempotencyKey: `material-action-reconciliation:${body.idempotencyKey}`
+          }
+        });
+      }
+    }
+    return c.json({ result, replayed: result.outcome === "replayed" }, 200);
   });
 
   app.post("/v1/runs/:runId/running", async (c) => {
@@ -4522,15 +4994,23 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, MarkRunningSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeRunningFields = sanitizeCredentialLikeValue({
+      executor: body.executor,
+      ...(body.executorCapability !== undefined ? { executorCapability: body.executorCapability } : {}),
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [body.fencingToken] });
     const runningOutcome = await repo.markRunning({
       runId,
       runnerId: c.req.param("runnerId"),
-      executor: body.executor,
-      ...(body.executorCapability ? { executorCapability: body.executorCapability } : {}),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      executor: safeRunningFields.executor,
+      ...(safeRunningFields.executorCapability !== undefined ? { executorCapability: safeRunningFields.executorCapability } : {}),
       ...(body.runTimeoutMs ? { runTimeoutMs: body.runTimeoutMs } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(safeRunningFields.idempotencyKey ? { idempotencyKey: safeRunningFields.idempotencyKey } : {})
     });
     if (runningOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (runningOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (runningOutcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
@@ -4552,7 +5032,7 @@ export function createDispatcherApp(input: {
       const runningPresentation = presentation.runStatusPresentation({
         runId,
         state: "running",
-        message: `Running with ${body.executor}.`,
+        message: `Running with ${safeExecutorLabel(stored.run.executor)}.`,
         nextAction: "Wait for the final reply, send a follow-up to queue more context, or request cancellation with /stop.",
         detailVisibility: "source_thread"
       });
@@ -4601,24 +5081,37 @@ export function createDispatcherApp(input: {
     const body = await parseDispatcherBody(c, ProgressSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeProgressFields = sanitizeCredentialLikeValue({
+      message: body.message,
+      ...(body.type ? { type: body.type } : {})
+    }, { secrets: [body.fencingToken] });
+    const progressVisibility = channelProgressVisibility({
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
+      ...(body.visibility ? { requested: body.visibility } : {})
+    });
     const progressOutcome = await repo.recordProgress({
       runId,
       runnerId: c.req.param("runnerId"),
-      message: body.message,
-      ...(body.type ? { type: body.type } : {}),
+      attemptId: body.attemptId,
+      fencingToken: body.fencingToken,
+      message: safeProgressFields.message,
+      ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
       ...(body.at ? { at: body.at } : {}),
-      ...(body.visibility ? { visibility: body.visibility } : {}),
+      visibility: progressVisibility,
       ...(body.importance ? { importance: body.importance } : {}),
       ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
-    if (progressOutcome === "duplicate") return c.json({ ok: true, replayed: true });
+    if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
+    if (typeof progressOutcome === "object" && progressOutcome.outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
-    const progressVisibility = body.visibility ?? "audit";
     const shouldDeliverProgress = presentation.shouldDeliverProgress(stored.event.callback.provider);
     if (progressVisibility === "human" && shouldDeliverProgress) {
-      const progressPresentation = presentation.progressPresentation({ runId, message: body.message });
+      const progressPresentation = presentation.progressPresentation({
+        runId,
+        message: typeof progressOutcome === "object" ? progressOutcome.event.message ?? "Progress update recorded." : "Progress update recorded."
+      });
       const progress = presentation.render({
         provider: stored.event.callback.provider,
         ...larkRenderLocaleRenderOption(stored.event),
@@ -4638,6 +5131,7 @@ export function createDispatcherApp(input: {
           ...(stored.event.callback.threadKey ? { threadKey: stored.event.callback.threadKey } : {}),
           ...(progress.blocks?.length ? { blocks: progress.blocks } : {}),
           ...(progress.rich ? { rich: progress.rich } : {}),
+          ...(typeof progressOutcome === "object" ? { idempotencyKey: `run-progress:${progressOutcome.event.id}` } : {}),
           statusMessageKey: `${runId}:status`
         }
       });
@@ -4677,27 +5171,36 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, CompleteRunSchema);
     const headerIdempotencyKey = c.req.header("idempotency-key")?.trim();
     const idempotencyKey = parsed.idempotencyKey?.trim() || headerIdempotencyKey;
+    const safeCompleteFields = sanitizeCredentialLikeValue({
+      result: parsed.result,
+      ...(idempotencyKey ? { idempotencyKey } : {})
+    }, { secrets: [parsed.fencingToken] });
+    const safeResult = OpenTagRunResultSchema.parse(safeCompleteFields.result);
     const outcome = await repo.completeRun({
       runId,
       runnerId: c.req.param("runnerId"),
-      result: parsed.result,
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      attemptId: parsed.attemptId,
+      fencingToken: parsed.fencingToken,
+      result: safeResult,
+      ...(safeCompleteFields.idempotencyKey ? { idempotencyKey: safeCompleteFields.idempotencyKey } : {})
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
+    if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
     if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
       event: stored.event,
-      result: parsed.result,
+      result: completedResult,
       ...(input.githubApply ? { githubApply: input.githubApply } : {}),
       ...(input.gitlabApply ? { gitlabApply: input.gitlabApply } : {}),
       ...(linearApply ? { linearApply } : {})
     });
     if (
-      parsed.result.conclusion === "needs_human" &&
+      completedResult.conclusion === "needs_human" &&
       shouldDeliverRunStatusUpdate(presentation, { provider: stored.event.callback.provider, state: "waiting_for_approval" })
     ) {
       const waitingPresentation = presentation.runStatusPresentation({
@@ -4731,7 +5234,7 @@ export function createDispatcherApp(input: {
       });
     }
     const finalPresentation = presentation.finalPresentation({
-      result: parsed.result,
+      result: completedResult,
       runId,
       receiptContext
     });
@@ -4759,7 +5262,7 @@ export function createDispatcherApp(input: {
       }
     });
     clearDelayedLarkStatusCard(runId);
-    const shouldPromoteFollowUp = parsed.result.conclusion !== "needs_human" && parsed.result.conclusion !== "cancelled";
+    const shouldPromoteFollowUp = completedResult.conclusion !== "needs_human" && completedResult.conclusion !== "cancelled";
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,

@@ -56,6 +56,95 @@ Minimal local config:
 }
 ```
 
+Named ACP agents use the same manifest-backed runtime path. Hermes is an
+ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
+
+```json
+{
+  "agents": {
+    "hermes-acp": {
+      "protocol": "opentag.integration.v1",
+      "id": "hermes-acp",
+      "label": "Hermes ACP",
+      "bindings": {
+        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"] }
+      },
+      "roles": {
+        "agent": {
+          "protocol": "agent-client-protocol",
+          "protocolVersion": 1,
+          "binding": "agent"
+        }
+      },
+      "resources": {}
+    }
+  },
+  "scratchRoot": "/absolute/path/to/opentag-state/scratch",
+  "keepScratch": "on_failure"
+}
+```
+
+### ACP-first setup choices
+
+The basic setup model has four choices:
+
+1. **Channel** — the Slack, Lark, or other source scope allowed to create Runs.
+2. **Agent** — the named ACP Agent Profile that executes Attempts.
+3. **Connections** — external resource accounts that policy may grant.
+4. **Mode** — `ask`, `auto`, or `autonomous`; `auto` is the default.
+
+No repository is required for a repository-free task. Basic setup also does not
+require a cross-provider principal, policy DSL, Worker ID, ACP transport detail,
+presentation rule, or custom user limit.
+
+For managed Slack and Lark channels, prefer the generic `channelBindings` form
+so the administrator can pin the immutable provider application identity:
+
+```json
+{
+  "channelBindings": [
+    {
+      "provider": "slack",
+      "accountId": "T123",
+      "conversationId": "C123",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "A123",
+        "botId": "U123"
+      }
+    },
+    {
+      "provider": "lark",
+      "accountId": "tenant_1",
+      "conversationId": "oc_chat",
+      "ownership": {
+        "mode": "managed",
+        "exclusive": true,
+        "applicationId": "cli_app_123",
+        "botId": "ou_bot"
+      }
+    }
+  ],
+  "approvalMode": "auto"
+}
+```
+
+Application and bot IDs name the configured adapter application. The adapter
+authenticates to the dispatcher as a channel principal in request context; that
+principal, not provider payloads or normalized event metadata, is authoritative
+for managed Run admission and binding mutation. Bot display names can be changed
+freely and are never used as binding identity. A managed Run fails closed when
+the authenticated request principal is missing or does not match. Replacing or
+deleting the binding remains an authenticated administrator operation; the
+Slack compatibility binding endpoint follows the same rule.
+
+If Hermes supplies both a channel gateway and ACP execution, configure them as
+separate runtime identities. The gateway owns only Slack/Lark transport
+credentials; the `hermes acp` binding owns only its Agent Profile and granted
+Attempt capabilities. Do not share profiles, environment variables, credentials,
+logs, or lifecycle supervision between those roles.
+
 Add Slack channel bindings when a chat surface should route work to a Project Target:
 
 ```json
@@ -164,6 +253,10 @@ use `--permission-mode plan`.
 | `runnerTokens` | none | Additional runner-scoped tokens accepted by the local dispatcher during a rotation window |
 | `revokedRunnerTokenFingerprints` | none | SHA-256 fingerprints of revoked runner tokens that must fail closed |
 | `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
+| `agents` | `{}` | Named `opentag.integration.v1` manifests whose ACP agent role is hosted by the generic ACP executor |
+| `scratchRoot` | local OpenTag state directory | Absolute root for attempt-scoped non-repository workspaces |
+| `keepScratch` | `on_failure` | Scratch retention: `always`, `on_failure`, or `never`; failed attempts retain evidence |
+| `approvalMode` | `auto` | Autonomy mode: `ask`, `auto`, or `autonomous`. Every mode remains inside administrator-defined hard boundaries. |
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
@@ -389,7 +482,7 @@ manifest instead of a shell script:
 opentag ingest-template --source hermes --format manifest
 ```
 
-The manifest declares required environment variables, event aliases,
+The ingest manifest declares required runtime references, event aliases,
 idempotency suffixes, terminal-event semantics, and the hook ingest permission
 boundary. Hook ingest itself does not request source-thread transcript access,
 does not mutate prompts, does not read raw provider context, and does not

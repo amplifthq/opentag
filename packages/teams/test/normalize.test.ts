@@ -126,4 +126,24 @@ describe("normalizeTeamsActivity", () => {
     const scopes = event.permissions.map((p) => p.scope);
     expect(scopes).toEqual(expect.arrayContaining(["repo:read", "repo:write", "pr:create"]));
   });
+
+  it("supports repository-free channel bindings without requesting repository permissions", () => {
+    const event = normalizeTeamsActivity({
+      ...base,
+      text: "fix the quarterly report",
+      binding: {
+        tenantId: "t1",
+        teamId: "19:team",
+        channelId: "19:chan",
+        conversationId: "19:conv@thread.tacv2"
+      }
+    })!;
+
+    expect(event.metadata).not.toHaveProperty("repoProvider");
+    expect(event.metadata).not.toHaveProperty("owner");
+    expect(event.metadata).not.toHaveProperty("repo");
+    expect(event.permissions.map((permission) => permission.scope)).not.toEqual(
+      expect.arrayContaining(["repo:read", "repo:write", "pr:create"])
+    );
+  });
 });

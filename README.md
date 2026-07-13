@@ -234,6 +234,7 @@ The default loop is artifact-first rather than chat-first: a final reply should 
 - [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
 - [Replay harness](docs/replay-harness.md)
 - [Agent Work Protocol](docs/agent-work-protocol.md)
+- [ACP-First Agent Runtime and Channel Integration](docs/acp-first-agent-runtime-design.md)
 - [Local npm release guide](docs/npm-release.md)
 
 ## Development

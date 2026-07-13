@@ -3,10 +3,7 @@ import { commandFromRawText, type ContextPointer, type OpenTagCommand, type Open
 export type TelegramChannelBinding = {
   botId: string;
   chatId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type TelegramMessageInput = {
   botId: string;
@@ -221,9 +218,9 @@ export function normalizeTelegramMessage(input: TelegramMessageInput): OpenTagEv
       ...(input.messageThreadId ? { messageThreadId: input.messageThreadId } : {}),
       ...(input.botUsername ? { telegramBotUsername: input.botUsername.replace(/^@/, "") } : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...(input.binding.owner && input.binding.repo
+        ? { repoProvider: input.binding.repoProvider ?? "github", owner: input.binding.owner, repo: input.binding.repo }
+        : {})
     }
   };
 }

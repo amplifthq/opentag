@@ -62,7 +62,7 @@ describe("Codex executor", () => {
     await expect(
       executor.canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [],
         permissions: [{ scope: "repo:write", reason: "write branch" }]
@@ -73,7 +73,7 @@ describe("Codex executor", () => {
     const result = await executor.run(
       {
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [{ provider: "github", kind: "issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
         contextPacket: {
@@ -190,7 +190,7 @@ describe("Codex executor", () => {
     const result = await createCodexExecutor({ runner }).run(
       {
         runId: "run_no_change",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "hi", intent: "unknown", args: {} },
         context: [],
         permissions: [{ scope: "repo:write", reason: "write branch" }],
@@ -230,7 +230,7 @@ describe("Codex executor", () => {
     await createCodexExecutor({ runner }).run(
       {
         runId: "run_read_sandbox",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "summarize this repo", intent: "unknown", args: {} },
         context: [],
         permissions: [{ scope: "repo:read", reason: "read-only summary" }],
@@ -290,7 +290,7 @@ describe("Codex executor", () => {
     const result = await createCodexExecutor({ runner }).run(
       {
         runId: "run_readonly",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "Summarize this repo at a high level. Do not modify files.", intent: "unknown", args: {} },
         context: [],
         permissions: [{ scope: "repo:read", reason: "read-only summary" }],
@@ -326,7 +326,7 @@ describe("Codex executor", () => {
     await expect(
       createCodexExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -376,10 +376,10 @@ describe("git helpers", () => {
   });
 
   it("stages and commits selected changed files", async () => {
-    const calls: string[] = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
     const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options?.cwd });
         if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
           return { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" };
         }
@@ -394,9 +394,9 @@ describe("git helpers", () => {
     });
 
     expect(calls).toEqual([
-      "git -c core.quotePath=false status --porcelain -z",
-      "git add -- src/demo.ts test/demo.test.ts",
-      "git commit -m OpenTag run run_1"
+      { command: "git", args: ["-c", "core.quotePath=false", "status", "--porcelain", "-z"], cwd: "/tmp/demo" },
+      { command: "git", args: ["add", "--", "src/demo.ts", "test/demo.test.ts"], cwd: "/tmp/demo" },
+      { command: "git", args: ["commit", "-m", "OpenTag run run_1"], cwd: "/tmp/demo" }
     ]);
   });
 });

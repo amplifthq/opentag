@@ -228,6 +228,8 @@ try {
   await client.complete({
     runnerId,
     runId,
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     result: {
       conclusion: "needs_human",
       summary: "Prepared a Linear live smoke issue update.",
@@ -412,6 +414,8 @@ async function runAgentSessionSmoke(input: {
   await input.client.markRunning({
     runnerId: input.runnerId,
     runId: createdRunId,
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     executor: "linear-live-smoke"
   });
 
@@ -468,6 +472,8 @@ async function runAgentSessionSmoke(input: {
   await input.client.complete({
     runnerId: input.runnerId,
     runId: createdRunId,
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     result: {
       conclusion: "success",
       summary: "Completed the Linear native agent session smoke.",
@@ -495,6 +501,8 @@ async function runAgentSessionSmoke(input: {
   await input.client.complete({
     runnerId: input.runnerId,
     runId: promptedRunId,
+    attemptId: promptedClaimed.attemptId,
+    fencingToken: promptedClaimed.fencingToken,
     result: {
       conclusion: "success",
       summary: "Completed the Linear native agent session prompted smoke.",

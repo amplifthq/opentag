@@ -1,4 +1,4 @@
-import { createDispatcherClient, type DispatcherRunnerClient } from "@opentag/client";
+import { createDispatcherClient, type AttemptLease, type DispatcherRunnerClient } from "@opentag/client";
 import { OpenTagRunResultSchema, type OpenTagRunResult } from "@opentag/core";
 import { defaultConfigPath, readCliConfig, runnerDispatcherToken } from "./config.js";
 
@@ -23,10 +23,21 @@ export type IngestTemplateCommandOptions = {
 
 export type IngestDependencies = {
   client?: Pick<DispatcherRunnerClient, "progress" | "complete">;
+  lease?: AttemptLease;
+  env?: NodeJS.ProcessEnv;
   now?(): Date;
   fetchImpl?: typeof fetch;
   logger?: Pick<Console, "log">;
 };
+
+function ingestAttemptLease(dependencies: IngestDependencies): AttemptLease {
+  if (dependencies.lease) return dependencies.lease;
+  const env = dependencies.env ?? process.env;
+  return {
+    attemptId: nonEmpty(env.OPENTAG_ATTEMPT_ID, "OPENTAG_ATTEMPT_ID"),
+    fencingToken: nonEmpty(env.OPENTAG_FENCING_TOKEN, "OPENTAG_FENCING_TOKEN")
+  };
+}
 
 type NormalizedIngestEvent = "progress" | "completed" | "failed" | "cancelled" | "interrupted" | "timed_out";
 type IngestTemplateFormat = "shell" | "manifest";
@@ -432,7 +443,7 @@ export function createIngestHookManifest(options: IngestTemplateCommandOptions =
     kind: "opentag_hook_ingest_manifest",
     source,
     command,
-    requiredEnv: ["OPENTAG_RUN_ID"],
+    requiredEnv: ["OPENTAG_RUN_ID", "OPENTAG_ATTEMPT_ID", "OPENTAG_FENCING_TOKEN"],
     optionalEnv: ["OPENTAG_INGEST_SOURCE", "OPENTAG_INGEST_COMMAND", "OPENTAG_INGEST_IDEMPOTENCY_PREFIX"],
     permissions: {
       conversationAccess: "none",
@@ -468,6 +479,8 @@ export function renderIngestShellTemplate(options: IngestTemplateCommandOptions 
     "# Requires a paired local config with runnerId, dispatcherUrl, and runnerToken or legacy pairingToken.",
     "# Do not paste dispatcher tokens, local checkout paths, or raw tool logs into source threads.",
     ": \"${OPENTAG_RUN_ID:?Set OPENTAG_RUN_ID to the OpenTag run id}\"",
+    ": \"${OPENTAG_ATTEMPT_ID:?Set OPENTAG_ATTEMPT_ID to the active OpenTag attempt id}\"",
+    ": \"${OPENTAG_FENCING_TOKEN:?Set OPENTAG_FENCING_TOKEN to the active OpenTag fencing token}\"",
     `OPENTAG_INGEST_SOURCE="\${OPENTAG_INGEST_SOURCE:-${source}}"`,
     `OPENTAG_INGEST_COMMAND="\${OPENTAG_INGEST_COMMAND:-${shellParameterDefault(command)}}"`,
     'OPENTAG_INGEST_IDEMPOTENCY_PREFIX="${OPENTAG_INGEST_IDEMPOTENCY_PREFIX:-$OPENTAG_INGEST_SOURCE:$OPENTAG_RUN_ID}"',
@@ -491,11 +504,12 @@ export async function runIngestCommand(options: IngestCommandOptions, dependenci
   const rawEventName = normalizeIngestEventName(options.event);
   const event = normalizeIngestEvent(options.event);
   const client = clientFromConfig(configPath, dependencies);
+  const lease = ingestAttemptLease(dependencies);
   const logger = dependencies.logger ?? console;
 
   if (event === "progress") {
     const message = nonEmpty(options.message, "--message");
-    await client.progress(runId, {
+    await client.progress(runId, lease, {
       type: options.type?.trim() || `ingest.${source}.${rawEventName}`,
       message,
       at: (dependencies.now?.() ?? new Date()).toISOString(),
@@ -509,9 +523,9 @@ export async function runIngestCommand(options: IngestCommandOptions, dependenci
   const result = resultFromOptions(options, event);
   const idempotencyKey = options.idempotencyKey?.trim();
   if (idempotencyKey) {
-    await client.complete(runId, result, { idempotencyKey });
+    await client.complete(runId, lease, result, { idempotencyKey });
   } else {
-    await client.complete(runId, result);
+    await client.complete(runId, lease, result);
   }
   logger.log(`Ingested ${event} result for ${runId}.`);
 }

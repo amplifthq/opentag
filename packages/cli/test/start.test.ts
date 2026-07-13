@@ -244,8 +244,19 @@ describe("OpenTag CLI start wiring", () => {
         appId: "cli_test",
         appSecret: "secret_test",
         domain: "lark"
-      }
+      },
+      channelPrincipals: [
+        {
+          provider: "lark",
+          applicationId: "cli_test",
+          botId: "ou_bot",
+          credential: expect.any(String)
+        }
+      ]
     });
+    expect(dispatcher.channelPrincipals?.[0]?.credential).toBe(
+      larkIngressConfigFromCliConfig(built).channelPrincipalCredential
+    );
   });
 
   it("adds dispatcher hardening env to the local dispatcher without overriding config authority", () => {
@@ -276,20 +287,31 @@ describe("OpenTag CLI start wiring", () => {
     const built = slackConfig();
     built.daemon.runTimeoutMs = 30_000;
 
-    expect(dispatcherRuntimeInputFromCliConfig(built)).toMatchObject({
+    const dispatcher = dispatcherRuntimeInputFromCliConfig(built);
+    expect(dispatcher).toMatchObject({
       port: 3030,
       databasePath: built.state.databasePath,
       pairingToken: built.daemon.pairingToken,
-      slackBotToken: "xoxb-token"
+      slackBotToken: "xoxb-token",
+      channelPrincipals: [
+        {
+          provider: "slack",
+          applicationId: "A123",
+          credential: expect.any(String)
+        }
+      ]
     });
-    expect(slackIngressConfigFromCliConfig(built)).toMatchObject({
+    const ingress = slackIngressConfigFromCliConfig(built);
+    expect(ingress).toMatchObject({
       signingSecret: "slack_signing_secret",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       botToken: "xoxb-token",
       appId: "A123",
+      channelPrincipalCredential: expect.any(String),
       runTimeoutMs: 30_000
     });
+    expect(dispatcher.channelPrincipals?.[0]?.credential).toBe(ingress.channelPrincipalCredential);
   });
 
   it("passes the service request body limit to Slack Events API ingress", () => {
@@ -317,6 +339,7 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherToken: built.daemon.pairingToken,
       botToken: "xoxb-token",
       appId: "A123",
+      channelPrincipalCredential: expect.any(String),
       runTimeoutMs: 30_000
     });
   });
@@ -636,6 +659,7 @@ describe("OpenTag CLI start wiring", () => {
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
       agentId: "opentag",
+      channelPrincipalCredential: expect.any(String),
       botOpenId: "ou_bot",
       runTimeoutMs: 30_000,
       defaultRepoBinding: {
@@ -684,6 +708,41 @@ describe("OpenTag CLI start wiring", () => {
       `repo:${built.daemon.repositories[0]!.provider}:${built.daemon.repositories[0]!.owner}/${built.daemon.repositories[0]!.repo}`,
       "channel:lark:tenant_1/chat_1"
     ]);
+  });
+
+  it("bootstraps a repository-free managed channel without creating a repository binding", async () => {
+    const built = slackSocketModeConfig();
+    built.daemon.repositories = [];
+    built.daemon.channelBindings = [
+      {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        ownership: {
+          mode: "managed",
+          exclusive: true,
+          applicationId: "A123",
+          botId: "U123"
+        }
+      }
+    ];
+    const calls: string[] = [];
+
+    await bootstrapLocalDispatcher(built, {
+      async registerRunner(name) {
+        calls.push(`runner:${name}`);
+      },
+      async bindRepository(binding) {
+        calls.push(`repo:${binding.provider}:${binding.owner}/${binding.repo}`);
+      },
+      async bindChannel(binding) {
+        calls.push(
+          `channel:${binding.provider}:${binding.accountId}/${binding.conversationId}:${binding.ownership?.applicationId ?? "unmanaged"}`
+        );
+      }
+    });
+
+    expect(calls).toEqual(["runner:runner_local", "channel:slack:T123/C123:A123"]);
   });
 
   it("uploads discovered Linear mutation mappings during dispatcher bootstrap", async () => {

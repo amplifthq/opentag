@@ -7,18 +7,20 @@ import {
 } from "@opentag/core";
 import { encodeTeamsThreadKey } from "./thread-key.js";
 
-/** Channel → repository binding, keyed on the dispatcher by
- * `("teams", tenantId, conversationId)`. `channelId` may be absent for the
- * team's General channel, so `conversationId` is the reliable key. */
+/** Channel binding, optionally carrying a repository target, keyed on the
+ * dispatcher by `("teams", tenantId, conversationId)`. `channelId` may be
+ * absent for the team's General channel, so `conversationId` is the reliable
+ * key. */
+type TeamsChannelRepositoryTarget =
+  | { repoProvider?: string; owner: string; repo: string }
+  | { repoProvider?: never; owner?: never; repo?: never };
+
 export type TeamsChannelBinding = {
   tenantId: string;
   teamId?: string;
   channelId?: string;
   conversationId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & TeamsChannelRepositoryTarget;
 
 export type TeamsExtractedMessage = {
   activityId: string;
@@ -126,12 +128,12 @@ export function extractTeamsMessage(activity: Record<string, unknown>): TeamsExt
   };
 }
 
-function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+function permissionsForIntent(intent: OpenTagCommand["intent"], hasRepository: boolean): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     { scope: "chat:postMessage", reason: "reply in the originating Teams channel thread" },
     { scope: "runner:local", reason: "execute the run on a paired local daemon" }
   ];
-  if (intent === "fix" || intent === "run") {
+  if (hasRepository && (intent === "fix" || intent === "run")) {
     permissions.push(
       { scope: "repo:read", reason: "inspect the repository in the paired local checkout" },
       { scope: "repo:write", reason: "commit code changes on an isolated run branch" },
@@ -188,6 +190,14 @@ export function normalizeTeamsActivity(input: TeamsActivityInput): OpenTagEvent 
   if (!rawText) return null;
 
   const command = commandFromRawText(rawText);
+  const repositoryMetadata =
+    input.binding.owner && input.binding.repo
+      ? {
+          repoProvider: input.binding.repoProvider ?? "github",
+          owner: input.binding.owner,
+          repo: input.binding.repo
+        }
+      : {};
 
   return {
     id: `evt_teams_${input.activityId}`,
@@ -216,7 +226,7 @@ export function normalizeTeamsActivity(input: TeamsActivityInput): OpenTagEvent 
       },
       ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForIntent(command.intent),
+    permissions: permissionsForIntent(command.intent, Boolean(input.binding.owner && input.binding.repo)),
     callback: {
       provider: "teams",
       uri: input.serviceUrl,
@@ -233,9 +243,7 @@ export function normalizeTeamsActivity(input: TeamsActivityInput): OpenTagEvent 
       conversationId: input.conversationId,
       serviceUrl: input.serviceUrl,
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...repositoryMetadata
     }
   };
 }

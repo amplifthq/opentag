@@ -24,6 +24,7 @@ export const runs = sqliteTable(
     leasedAt: text("leased_at"),
     leaseExpiresAt: text("lease_expires_at"),
     heartbeatAt: text("heartbeat_at"),
+    currentAttemptId: text("current_attempt_id"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull()
   },
@@ -33,6 +34,30 @@ export const runs = sqliteTable(
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
     conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
+  })
+);
+
+export const attempts = sqliteTable(
+  "attempts",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull(),
+    number: integer("number").notNull(),
+    runnerId: text("runner_id").notNull(),
+    fencingToken: text("fencing_token").notNull(),
+    status: text("status").notNull(),
+    startedAt: text("started_at").notNull(),
+    heartbeatAt: text("heartbeat_at").notNull(),
+    leaseExpiresAt: text("lease_expires_at").notNull(),
+    finishedAt: text("finished_at"),
+    resultJson: text("result_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    runNumberIdx: uniqueIndex("attempts_run_number_idx").on(table.runId, table.number),
+    runIdx: index("attempts_run_idx").on(table.runId),
+    runnerIdx: index("attempts_runner_idx").on(table.runnerId)
   })
 );
 
@@ -66,10 +91,15 @@ export const runEvents = sqliteTable(
     importance: text("importance").notNull().default("normal"),
     message: text("message"),
     payloadJson: text("payload_json").notNull(),
+    progressIdempotencyDigest: text("progress_idempotency_digest"),
     createdAt: text("created_at").notNull()
   },
   (table) => ({
-    runIdx: index("run_events_run_idx").on(table.runId)
+    runIdx: index("run_events_run_idx").on(table.runId),
+    progressIdempotencyIdx: uniqueIndex("run_events_progress_idempotency_idx").on(
+      table.runId,
+      table.progressIdempotencyDigest
+    )
   })
 );
 
@@ -117,6 +147,51 @@ export const approvalDecisions = sqliteTable("approval_decisions", {
   decisionJson: text("decision_json").notNull(),
   createdAt: text("created_at").notNull()
 });
+
+export const grants = sqliteTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    connectionId: text("connection_id").notNull(),
+    capability: text("capability").notNull(),
+    resourceScopeJson: text("resource_scope_json").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id"),
+    expiresAt: text("expires_at"),
+    constraintsJson: text("constraints_json"),
+    revokedAt: text("revoked_at"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({ runIdx: index("grants_run_idx").on(table.runId), attemptIdx: index("grants_attempt_idx").on(table.attemptId) })
+);
+
+export const materialActions = sqliteTable(
+  "material_actions",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    actionFamily: text("action_family").notNull(),
+    capability: text("capability").notNull(),
+    scopeJson: text("scope_json").notNull(),
+    targetJson: text("target_json").notNull(),
+    riskTier: text("risk_tier").notNull(),
+    status: text("status").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    proposalId: text("proposal_id"),
+    proposalHash: text("proposal_hash"),
+    decisionSnapshotHash: text("decision_snapshot_hash"),
+    attemptFenceDigest: text("attempt_fence_digest").notNull(),
+    receiptJson: text("receipt_json"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    idempotencyIdx: index("material_actions_idempotency_idx").on(table.idempotencyKey),
+    runIdx: index("material_actions_run_idx").on(table.runId),
+    proposalIdx: index("material_actions_proposal_idx").on(table.proposalId)
+  })
+);
 
 export const applyPlans = sqliteTable("apply_plans", {
   id: text("id").primaryKey(),
@@ -230,9 +305,9 @@ export const channelBindings = sqliteTable(
     provider: text("provider").notNull(),
     accountId: text("account_id").notNull(),
     conversationId: text("conversation_id").notNull(),
-    repoProvider: text("repo_provider").notNull(),
-    owner: text("owner").notNull(),
-    repo: text("repo").notNull(),
+    repoProvider: text("repo_provider"),
+    owner: text("owner"),
+    repo: text("repo"),
     metadataJson: text("metadata_json"),
     createdAt: text("created_at").notNull()
   },
@@ -294,12 +369,31 @@ export function migrateSchema(sqlite: Database.Database): void {
       leased_at TEXT,
       lease_expires_at TEXT,
       heartbeat_at TEXT,
+      current_attempt_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status);
     CREATE INDEX IF NOT EXISTS runs_runner_idx ON runs(assigned_runner_id);
     CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key);
+    CREATE TABLE IF NOT EXISTS attempts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      runner_id TEXT NOT NULL,
+      fencing_token TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      finished_at TEXT,
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS attempts_run_number_idx ON attempts(run_id, number);
+    CREATE INDEX IF NOT EXISTS attempts_run_idx ON attempts(run_id);
+    CREATE INDEX IF NOT EXISTS attempts_runner_idx ON attempts(runner_id);
     CREATE TABLE IF NOT EXISTS run_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -308,6 +402,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       importance TEXT NOT NULL DEFAULT 'normal',
       message TEXT,
       payload_json TEXT NOT NULL,
+      progress_idempotency_digest TEXT,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id);
@@ -345,6 +440,25 @@ export function migrateSchema(sqlite: Database.Database): void {
       decision_json TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS grants (
+      id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, capability TEXT NOT NULL,
+      resource_scope_json TEXT NOT NULL, run_id TEXT NOT NULL, attempt_id TEXT,
+      expires_at TEXT, constraints_json TEXT, revoked_at TEXT, created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS grants_run_idx ON grants(run_id);
+    CREATE INDEX IF NOT EXISTS grants_attempt_idx ON grants(attempt_id);
+    CREATE TABLE IF NOT EXISTS material_actions (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+      action_family TEXT NOT NULL, capability TEXT NOT NULL, scope_json TEXT NOT NULL,
+      target_json TEXT NOT NULL, risk_tier TEXT NOT NULL, status TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL, proposal_id TEXT, proposal_hash TEXT,
+      decision_snapshot_hash TEXT, attempt_fence_digest TEXT NOT NULL, receipt_json TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    DROP INDEX IF EXISTS material_actions_idempotency_idx;
+    CREATE INDEX IF NOT EXISTS material_actions_idempotency_idx ON material_actions(idempotency_key);
+    CREATE INDEX IF NOT EXISTS material_actions_run_idx ON material_actions(run_id);
+    CREATE INDEX IF NOT EXISTS material_actions_proposal_idx ON material_actions(proposal_id);
     CREATE TABLE IF NOT EXISTS apply_plans (
       id TEXT PRIMARY KEY,
       proposal_id TEXT NOT NULL,
@@ -433,9 +547,9 @@ export function migrateSchema(sqlite: Database.Database): void {
       provider TEXT NOT NULL,
       account_id TEXT NOT NULL,
       conversation_id TEXT NOT NULL,
-      repo_provider TEXT NOT NULL,
-      owner TEXT NOT NULL,
-      repo TEXT NOT NULL,
+      repo_provider TEXT,
+      owner TEXT,
+      repo TEXT,
       metadata_json TEXT,
       created_at TEXT NOT NULL
     );
@@ -499,6 +613,38 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!channelBindingColumnNames.has("metadata_json")) {
     sqlite.exec("ALTER TABLE channel_bindings ADD COLUMN metadata_json TEXT");
   }
+  const repositoryColumns = channelBindingColumns.filter((column) => ["repo_provider", "owner", "repo"].includes(column.name));
+  if (repositoryColumns.some((column) => (column as { notnull?: number }).notnull === 1)) {
+    sqlite.transaction(() => {
+      sqlite.exec("DROP INDEX IF EXISTS channel_bindings_provider_account_conversation_idx");
+      sqlite.exec(`
+        CREATE TABLE channel_bindings_nullable_repo (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          account_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          repo_provider TEXT,
+          owner TEXT,
+          repo TEXT,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL
+        )
+      `);
+      sqlite.exec(`
+        INSERT INTO channel_bindings_nullable_repo (
+          id, provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+        )
+        SELECT id, provider, account_id, conversation_id, repo_provider, owner, repo, metadata_json, created_at
+        FROM channel_bindings
+      `);
+      sqlite.exec("DROP TABLE channel_bindings");
+      sqlite.exec("ALTER TABLE channel_bindings_nullable_repo RENAME TO channel_bindings");
+      sqlite.exec(`
+        CREATE UNIQUE INDEX channel_bindings_provider_account_conversation_idx
+          ON channel_bindings(provider, account_id, conversation_id)
+      `);
+    })();
+  }
   const runColumns = sqlite.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
   const runColumnNames = new Set(runColumns.map((column) => column.name));
   if (!runColumnNames.has("leased_at")) {
@@ -537,9 +683,32 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runColumnNames.has("conversation_key")) {
     sqlite.exec("ALTER TABLE runs ADD COLUMN conversation_key TEXT");
   }
+  if (!runColumnNames.has("current_attempt_id")) {
+    sqlite.exec("ALTER TABLE runs ADD COLUMN current_attempt_id TEXT");
+  }
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_repo_idx ON runs(repo_provider, repo_owner, repo_name)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_idx ON runs(work_thread_id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key)");
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS attempts (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      number INTEGER NOT NULL,
+      runner_id TEXT NOT NULL,
+      fencing_token TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      heartbeat_at TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      finished_at TEXT,
+      result_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS attempts_run_number_idx ON attempts(run_id, number)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_run_idx ON attempts(run_id)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS attempts_runner_idx ON attempts(runner_id)");
   sqlite.exec(`
     UPDATE runs
     SET event_id = event_id || '#duplicate:' || id
@@ -567,7 +736,14 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runEventColumnNames.has("message")) {
     sqlite.exec("ALTER TABLE run_events ADD COLUMN message TEXT");
   }
+  if (!runEventColumnNames.has("progress_idempotency_digest")) {
+    sqlite.exec("ALTER TABLE run_events ADD COLUMN progress_idempotency_digest TEXT");
+  }
   sqlite.exec("CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id)");
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS run_events_progress_idempotency_idx
+      ON run_events(run_id, progress_idempotency_digest)
+  `);
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS source_deliveries (
       source TEXT NOT NULL,

@@ -318,7 +318,7 @@ async function checkGitCheckout(input: {
   try {
     const readiness = await executor.canRun({
       runId: "doctor",
-      workspacePath: input.repository.checkoutPath,
+      workspace: { kind: "repository", path: input.repository.checkoutPath },
       ...(input.repository.baseBranch ? { baseBranch: input.repository.baseBranch } : {}),
       ...(input.repository.worktreeRoot ? { worktreeRoot: input.repository.worktreeRoot } : {}),
       ...(input.repository.keepWorktree ? { keepWorktree: input.repository.keepWorktree } : {}),

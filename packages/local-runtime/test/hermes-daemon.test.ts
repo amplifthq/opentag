@@ -59,11 +59,11 @@ function runForEvent(input: { event: OpenTagEvent; profile: string; profileReady
   };
   let completed: OpenTagRunResult | undefined;
   const client: DaemonClient = {
-    claim: async () => ({ run, event: input.event }),
+    claim: async () => ({ run, event: input.event, attemptId: "attempt_1", attemptNumber: 1, fencingToken: "fence_1" }),
     markRunning: async () => {},
     heartbeat: async () => {},
     progress: async () => {},
-    complete: async (_runId, result) => {
+    complete: async (_runId, _lease, result) => {
       completed = result;
     }
   };

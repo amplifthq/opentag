@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation } from "@opentag/core";
+import { createActionReceiptPresentation, createDoctorSummaryPresentation, createFinalSummaryPresentation, createSourceThreadStatusPresentation, OpenTagApprovalPromptPresentationSchema } from "@opentag/core";
 import {
   createSlackActionReceiptBlocks,
+  createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks,
   createSlackFinalSummaryBlocks,
   parseSlackSuggestedActionButtonValue,
@@ -19,6 +20,49 @@ import {
 } from "../src/render.js";
 
 describe("Slack callback rendering", () => {
+  it("renders immutable governed permission choices as native buttons", () => {
+    const prompt = OpenTagApprovalPromptPresentationSchema.parse({
+      kind: "approval_prompt",
+      runId: "run_1",
+      approvalId: "approval_action_1",
+      proposalId: "proposal_action_1",
+      intentId: "intent_action_1",
+      actionId: "action_1",
+      proposalHash: "hash_1",
+      approvalEpoch: "epoch_1",
+      title: "Allow publish?",
+      summary: "Publish the package.",
+      target: { provider: "npm", connectionId: "npm:team", operation: "publish", resource: "@acme/report", resourceVersion: "next" },
+      runScope: {
+        provider: "npm",
+        connectionId: "npm:team",
+        operation: "publish",
+        grantScope: { package: "@acme/report", versions: "*" },
+        targetConstraints: { queryMode: "canonical", reuse: "exact", urlQuery: { environment: "staging", force: "false" } }
+      },
+      decisions: ["allow_once", "allow_run", "deny"]
+    });
+    const blocks = createSlackApprovalPromptBlocks(prompt);
+    expect(JSON.stringify(blocks)).toContain("npm / npm:team / publish / @acme/report / next");
+    expect(JSON.stringify(blocks)).toContain('grantScope={\\"package\\":\\"@acme/report\\",\\"versions\\":\\"*\\"}');
+    expect(JSON.stringify(blocks)).toContain("Allow for run applies only to the Run scope shown above");
+    expect(JSON.stringify(blocks)).toContain('\\"urlQuery\\":{\\"environment\\":\\"staging\\",\\"force\\":\\"false\\"}');
+    const actions = blocks.find((block) => block.type === "actions");
+    expect(actions).toMatchObject({
+      type: "actions",
+      elements: [
+        { text: { text: "Allow once" }, style: "primary" },
+        { text: { text: "Allow for run" } },
+        { text: { text: "Deny" }, style: "danger" }
+      ]
+    });
+    if (!actions || actions.type !== "actions") throw new Error("expected actions");
+    expect(actions.elements.map((button) => parseSlackSuggestedActionButtonValue(button.value))).toEqual([
+      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_once", proposalHash: "hash_1", actionId: "action_1" }),
+      expect.objectContaining({ command: "approve 1", permissionDecision: "allow_run", proposalHash: "hash_1", actionId: "action_1" }),
+      expect.objectContaining({ command: "reject 1", permissionDecision: "deny", proposalHash: "hash_1", actionId: "action_1" })
+    ]);
+  });
   it("renders Slack-friendly acknowledgement messages", () => {
     expect(renderSlackAcknowledgement("run_1")).toBe("Working on it.");
   });

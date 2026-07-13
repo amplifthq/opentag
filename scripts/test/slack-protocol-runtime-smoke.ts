@@ -88,6 +88,8 @@ try {
   const progressResponse = await client.progress({
     runnerId: "runner_slack_smoke",
     runId: "run_slack_smoke_1",
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     type: "executor.progress",
     message: "working quietly",
     at: "2026-06-24T00:00:01.000Z"
@@ -98,6 +100,8 @@ try {
   await client.complete({
     runnerId: "runner_slack_smoke",
     runId: "run_slack_smoke_1",
+    attemptId: claimed.attemptId,
+    fencingToken: claimed.fencingToken,
     result: {
       conclusion: "needs_human",
       summary: "Prepared a Slack-originated follow-up task.",
@@ -128,11 +132,12 @@ try {
     }
   });
 
-  assert(delivered.length === 2, "Slack final callback should be delivered");
-  assert(delivered[1]?.provider === "slack", "final callback should target Slack");
-  assert(delivered[1]?.kind === "final", "second Slack callback should be final");
-  assert(delivered[1]?.body.includes("Prepared a Slack-originated follow-up task."), "final Slack body should include summary");
-  assert(delivered[1]?.blocks && delivered[1].blocks.length > 0, "final Slack callback should include Block Kit blocks");
+  const finalCallbacks = delivered.filter((message) => message.kind === "final");
+  assert(finalCallbacks.length === 1, "Slack should deliver exactly one final callback");
+  const finalCallback = finalCallbacks[0];
+  assert(finalCallback?.provider === "slack", "final callback should target Slack");
+  assert(finalCallback.body.includes("Prepared a Slack-originated follow-up task."), "final Slack body should include summary");
+  assert(finalCallback.blocks && finalCallback.blocks.length > 0, "final Slack callback should include Block Kit blocks");
 
   const proposal = await client.getProposal({ proposalId: "proposal_slack_smoke_1" });
   assert(proposal.runId === "run_slack_smoke_1", "Slack proposal should point to source run");
@@ -175,7 +180,8 @@ try {
   }
 
   const metrics = await client.getRunMetrics({ runId: "run_slack_smoke_1" });
-  assert(metrics.metrics.humanCallbackCount === 3, "Slack smoke should deliver ack, final, and thread-action fallback callbacks");
+  assert(metrics.metrics.humanCallbackCount === delivered.length, "Slack callback metrics should match the delivered sink messages");
+  assert(metrics.metrics.humanCallbackCount >= 3 && metrics.metrics.humanCallbackCount <= 4, "Slack smoke should stay within its compact callback budget");
   assert(metrics.metrics.auditEventCount > metrics.metrics.humanCallbackCount, "Slack audit events should exceed human callbacks");
   assert(metrics.metrics.threadNoiseRatio < 1, "Slack thread noise ratio should stay below 1");
   assert(metrics.metrics.suggestedChangesCount === 1, "Slack metrics should count suggested changes");

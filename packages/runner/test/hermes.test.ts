@@ -45,7 +45,7 @@ describe("Hermes executor", () => {
     await expect(
       executor.canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: [],
         metadata: { provider: "slack", accountId: "T123", conversationId: 456 }
@@ -54,7 +54,7 @@ describe("Hermes executor", () => {
 
     const result = await executor.run({
       runId: "run_1",
-      workspacePath: "/tmp/demo",
+      workspace: { kind: "repository", path: "/tmp/demo" },
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [{ kind: "github.issue", uri: "https://github.com/acme/demo/issues/1", visibility: "public" }],
       contextPacket: {
@@ -124,7 +124,7 @@ describe("Hermes executor", () => {
     await expect(
       createHermesExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/missing",
+        workspace: { kind: "repository", path: "/tmp/missing" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -132,10 +132,10 @@ describe("Hermes executor", () => {
   });
 
   it("fails readiness with actionable guidance when the fixed profile is unavailable", async () => {
-    const calls: { command: string; args: string[] }[] = [];
+    const calls: { command: string; args: string[]; cwd: string }[] = [];
     const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push({ command, args });
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options.cwd });
         return { exitCode: 1, stdout: "", stderr: "Profile 'opentag' does not exist" };
       }
     };
@@ -143,7 +143,7 @@ describe("Hermes executor", () => {
     await expect(
       createHermesExecutor({ runner }).canRun({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "scratch", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       })
@@ -153,7 +153,7 @@ describe("Hermes executor", () => {
         "Hermes profile 'opentag' is not ready: Profile 'opentag' does not exist " +
         "Create it with `hermes profile create opentag` or configure daemon.hermes.profile to an existing dedicated profile."
     });
-    expect(calls).toEqual([{ command: "hermes", args: ["-p", "opentag", "--version"] }]);
+    expect(calls).toEqual([{ command: "hermes", args: ["-p", "opentag", "--version"], cwd: "/tmp/demo" }]);
   });
 
   it("uses the fixed default profile instead of a derived agent session profile", async () => {
@@ -179,7 +179,7 @@ describe("Hermes executor", () => {
 
     await createHermesExecutor({ runner }).run({
       runId: "run_1",
-      workspacePath: "/tmp/demo",
+      workspace: { kind: "repository", path: "/tmp/demo" },
       command: { rawText: "fix this", intent: "fix", args: {} },
       context: [],
       sessionProfile: {
@@ -224,7 +224,7 @@ describe("Hermes executor", () => {
     await expect(
       createHermesExecutor({ runner }).run({
         runId: "run_1",
-        workspacePath: "/tmp/demo",
+        workspace: { kind: "repository", path: "/tmp/demo" },
         command: { rawText: "fix this", intent: "fix", args: {} },
         context: []
       }, {

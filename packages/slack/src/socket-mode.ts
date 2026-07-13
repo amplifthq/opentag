@@ -51,9 +51,6 @@ export type SlackSocketModeAppInput = {
 export type SlackSocketModeIngressConfig = SlackDispatcherEventConfig & {
   appToken: string;
   agentId?: string;
-  appId?: string;
-  callbackUri?: string;
-  botToken?: string;
 };
 
 export type SlackSocketModeIngressHandle = {

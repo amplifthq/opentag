@@ -1,10 +1,12 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
+  createAcpExecutor,
   createClaudeCodeExecutor,
   createCodexExecutor,
   createEchoExecutor,
   createHermesExecutor,
   DEFAULT_HERMES_PROFILE,
+  type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
 import { runnerDispatcherToken, type OpenTagDaemonConfig } from "./config.js";
@@ -36,7 +38,7 @@ export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): 
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
   const security = securityFromConfig(config);
 
-  return {
+  const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),
     codex: createCodexExecutor({
       ...(security ? { security } : {})
@@ -55,6 +57,13 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
     })
   };
+  for (const manifest of Object.values(config.agents)) {
+    if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {
+      throw new Error(`Configured ACP agent '${manifest.id}' cannot replace built-in executor '${manifest.id}'.`);
+    }
+    executors[manifest.id] = createAcpExecutor({ manifest });
+  }
+  return executors;
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
@@ -86,6 +95,9 @@ export function createDaemonRuntimeInput(config: OpenTagDaemonConfig) {
     runnerId: config.runnerId,
     repositories: config.repositories,
     executors: executorsFromConfig(config),
+    scratchRoot: config.scratchRoot,
+    keepScratch: config.keepScratch,
+    approvalMode: config.approvalMode,
     ...(security ? { security } : {}),
     ...(pullRequestOptions ? { pullRequestOptions } : {}),
     ...(config.heartbeatIntervalMs ? { heartbeatIntervalMs: config.heartbeatIntervalMs } : {}),

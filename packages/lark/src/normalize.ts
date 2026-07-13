@@ -1,13 +1,18 @@
-import { commandFromRawText, type ContextPointer, type OpenTagCommand, type OpenTagEvent, type PermissionGrant } from "@opentag/core";
+import {
+  commandFromRawText,
+  OpenTagChannelInboundMessageSchema,
+  type ContextPointer,
+  type OpenTagChannelInboundMessage,
+  type OpenTagCommand,
+  type OpenTagEvent,
+  type PermissionGrant
+} from "@opentag/core";
 import { larkRenderLocaleFromDomain, type LarkRenderLocale } from "./render.js";
 
 export type LarkChannelBinding = {
   tenantKey: string;
   chatId: string;
-  repoProvider?: string;
-  owner: string;
-  repo: string;
-};
+} & ({ repoProvider?: string; owner: string; repo: string } | { repoProvider?: never; owner?: never; repo?: never });
 
 export type LarkMessageInput = {
   tenantKey: string;
@@ -20,6 +25,7 @@ export type LarkMessageInput = {
   eventId: string;
   eventTimeMs: number;
   agentId?: string;
+  applicationId?: string;
   botOpenId?: string;
   domain?: "lark" | "feishu";
   renderLocale?: LarkRenderLocale;
@@ -47,7 +53,41 @@ export function parseLarkThreadKey(threadKey: string): { tenantKey: string; chat
   return { tenantKey, chatId, messageId };
 }
 
-function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant[] {
+export function normalizeLarkChannelMessage(input: LarkMessageInput): OpenTagChannelInboundMessage | null {
+  const text = stripLarkMention(input.text);
+  if (!text) return null;
+  const rootMessageId = input.rootId ?? input.messageId;
+  const channel = { provider: "lark", workspace: input.tenantKey, id: input.chatId };
+  const thread = { provider: "lark", id: rootMessageId, parentMessageId: rootMessageId };
+  return OpenTagChannelInboundMessageSchema.parse({
+    protocol: "opentag.channel.v1",
+    eventId: input.eventId,
+    occurredAt: new Date(input.eventTimeMs).toISOString(),
+    trigger: "mention",
+    source: {
+      kind: "channel_message",
+      channel,
+      thread,
+      actor: { provider: "lark", id: input.senderOpenId }
+    },
+    text,
+    attachments: [],
+    replyTarget: { channel, thread, purpose: "all" }
+  });
+}
+
+function repositoryMetadataFromBinding(
+  binding: LarkChannelBinding
+): { repoProvider: string; owner: string; repo: string } | undefined {
+  if (!binding.owner?.trim() || !binding.repo?.trim()) return undefined;
+  return {
+    repoProvider: binding.repoProvider?.trim() || "github",
+    owner: binding.owner,
+    repo: binding.repo
+  };
+}
+
+function permissionsForIntent(intent: OpenTagCommand["intent"], hasRepositoryTarget: boolean): PermissionGrant[] {
   const permissions: PermissionGrant[] = [
     {
       scope: "chat:postMessage",
@@ -59,7 +99,7 @@ function permissionsForIntent(intent: OpenTagCommand["intent"]): PermissionGrant
     }
   ];
 
-  if (intent === "fix" || intent === "run") {
+  if (hasRepositoryTarget && (intent === "fix" || intent === "run")) {
     permissions.push(
       {
         scope: "repo:read",
@@ -124,12 +164,14 @@ function commandMetadata(command: OpenTagCommand): Record<string, unknown> {
 }
 
 export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | null {
-  const rawText = stripLarkMention(input.text);
-  if (!rawText) return null;
+  const channelMessage = normalizeLarkChannelMessage(input);
+  if (!channelMessage?.text) return null;
+  const rawText = channelMessage.text;
 
   const command = commandFromRawText(rawText);
   const agentId = input.agentId ?? "opentag";
   const renderLocale = input.renderLocale ?? larkRenderLocaleFromDomain(input.domain);
+  const repositoryMetadata = repositoryMetadataFromBinding(input.binding);
 
   return {
     id: `evt_lark_message_${input.eventId}`,
@@ -164,7 +206,7 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       },
       ...contextPointersForCommand(command)
     ],
-    permissions: permissionsForIntent(command.intent),
+    permissions: permissionsForIntent(command.intent, repositoryMetadata !== undefined),
     callback: {
       provider: "lark",
       uri: input.callbackUri ?? "lark://im/v1/messages",
@@ -185,10 +227,10 @@ export function normalizeLarkMessage(input: LarkMessageInput): OpenTagEvent | nu
       larkRenderLocale: renderLocale,
       ...(input.rootId ? { rootId: input.rootId } : {}),
       ...(input.botOpenId ? { larkBotOpenId: input.botOpenId } : {}),
+      ...(input.applicationId ? { channelApplicationId: input.applicationId } : {}),
+      ...(input.botOpenId ? { channelBotId: input.botOpenId } : {}),
       ...commandMetadata(command),
-      repoProvider: input.binding.repoProvider ?? "github",
-      owner: input.binding.owner,
-      repo: input.binding.repo
+      ...repositoryMetadata
     }
   };
 }

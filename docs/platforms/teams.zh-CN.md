@@ -213,7 +213,7 @@ conversationId: 19:...@thread.tacv2
 
 OpenTag 也能处理包含 `;messageid=...` 的完整 thread conversation id，用于回复和 thread action。回复会使用 Teams 的完整 conversation id，以确保落在同一个 thread。
 
-如果 channel 还没绑定，OpenTag 会 ack 收到的 activity，但不能启动 run。请通过 dispatcher API 或本地 config 把 Teams channel 绑定到已配置的 repository。
+如果 channel 还没配置，OpenTag 会 ack 收到的 activity，但不能启动 run。请通过 dispatcher API 或本地 config 创建 Teams channel binding。通用 ACP 工作可以不带 repository target；只有基于仓库的编码或 pull request 任务才要求配置 repository。
 
 ## 触发 Run
 
@@ -235,12 +235,12 @@ setup 和绑定完成后，在目标 channel 里 mention bot：
 
 - Teams 通过 tunnel 把 Activity 发送到你的 Messaging endpoint。
 - OpenTag 在处理前校验入站 Bot Framework JWT 的签名、issuer、audience、必需的 `serviceUrl` claim，以及签名 key 的 `msteams` endorsement。签名保护的 `serviceUrl` 必须与 Activity body 完全一致，避免把 bot Connector token 发往 body 控制的地址。
-- 本地 runner 针对已绑定 checkout 启动。
+- 本地 runner 会在已配置的 repository checkout 中启动；无仓库任务则使用隔离的 scratch workspace。
 - OpenTag 在同一个 Teams channel/thread 中以纯文本回复。
 
 ## Apply Action 和创建 Pull Request
 
-Teams thread 中支持 `@OpenTag apply 1`，但创建 pull request 需要 GitHub 或 GitLab repository binding 和 apply credentials。在记录 apply/reject 决定或执行 adapter mutation 之前，OpenTag 会使用 proposal 中保存的 Teams tenant/channel 重新检查当前 channel binding，并要求它仍然指向同一个 repository。如果 channel 已解绑或重绑，历史 thread action 会 fail closed。
+Teams thread 中支持 `@OpenTag apply 1`，但创建 pull request 需要 GitHub 或 GitLab repository target 和 apply credentials。在记录 apply/reject 决定或执行 adapter mutation 之前，OpenTag 会使用 proposal 中保存的 Teams tenant/channel 重新检查当前 channel binding；对于 repository action，还会要求它仍然指向同一个 repository。如果 channel 已移除或重绑，历史 thread action 会 fail closed。
 
 如果要使用 GitHub pull request apply，请把 repository 配置成 GitHub，而不是只配置成本地 repo：
 
