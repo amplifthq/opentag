@@ -54,6 +54,31 @@ describe("parseDaemonConfig ACP agents", () => {
     ).toThrow(/reviewer|different-id/u);
   });
 
+  it.each(["echo", "codex", "claude-code", "hermes"])(
+    "rejects a configured ACP agent that collides with built-in executor %s",
+    (executorId) => {
+      expect(() =>
+        parseDaemonConfig({
+          agents: {
+            [executorId]: acpManifest({ id: executorId, label: "Collision", command: "custom-agent" })
+          }
+        })
+      ).toThrow(/built-in executor/iu);
+    }
+  );
+
+  it("defensively rejects a built-in executor collision when parsed config is bypassed", () => {
+    const config = parseDaemonConfig({});
+    const bypassed = {
+      ...config,
+      agents: {
+        echo: acpManifest({ id: "echo", label: "Replacement Echo", command: "custom-echo" })
+      }
+    } as unknown as Parameters<typeof executorsFromConfig>[0];
+
+    expect(() => executorsFromConfig(bypassed)).toThrow(/built-in executor 'echo'/iu);
+  });
+
   it("rejects literal environment values in ACP bindings", () => {
     const configured = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
     expect(() => parseDaemonConfig({
@@ -119,6 +144,28 @@ describe("parseDaemonConfig generic channel bindings", () => {
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), "opentag-local-runtime-test-"));
 }
+
+describe("parseDaemonConfig scratchRoot", () => {
+  it("evaluates the default state directory for each parse", () => {
+    const previousStateDirectory = process.env.OPENTAG_STATE_DIR;
+    const firstStateDirectory = join(tempDir(), "first-state");
+    const secondStateDirectory = join(tempDir(), "second-state");
+
+    try {
+      process.env.OPENTAG_STATE_DIR = firstStateDirectory;
+      expect(parseDaemonConfig({}).scratchRoot).toBe(join(firstStateDirectory, "scratch"));
+
+      process.env.OPENTAG_STATE_DIR = secondStateDirectory;
+      expect(parseDaemonConfig({}).scratchRoot).toBe(join(secondStateDirectory, "scratch"));
+    } finally {
+      if (previousStateDirectory === undefined) {
+        delete process.env.OPENTAG_STATE_DIR;
+      } else {
+        process.env.OPENTAG_STATE_DIR = previousStateDirectory;
+      }
+    }
+  });
+});
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {

@@ -58,6 +58,9 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     })
   };
   for (const manifest of Object.values(config.agents)) {
+    if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {
+      throw new Error(`Configured ACP agent '${manifest.id}' cannot replace built-in executor '${manifest.id}'.`);
+    }
     executors[manifest.id] = createAcpExecutor({ manifest });
   }
   return executors;

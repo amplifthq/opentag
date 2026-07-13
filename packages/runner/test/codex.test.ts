@@ -376,10 +376,10 @@ describe("git helpers", () => {
   });
 
   it("stages and commits selected changed files", async () => {
-    const calls: string[] = [];
+    const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
     const runner: CommandRunner = {
-      async run(command, args) {
-        calls.push(`${command} ${args.join(" ")}`);
+      async run(command, args, options) {
+        calls.push({ command, args, cwd: options?.cwd });
         if (command === "git" && args.join(" ") === "-c core.quotePath=false status --porcelain -z") {
           return { exitCode: 0, stdout: " M src/demo.ts\0?? test/demo.test.ts\0", stderr: "" };
         }
@@ -389,14 +389,14 @@ describe("git helpers", () => {
 
     await commitRunChanges({
       runner,
-      workspace: { kind: "repository", path: "/tmp/demo" },
+      workspacePath: "/tmp/demo",
       message: "OpenTag run run_1"
     });
 
     expect(calls).toEqual([
-      "git -c core.quotePath=false status --porcelain -z",
-      "git add -- src/demo.ts test/demo.test.ts",
-      "git commit -m OpenTag run run_1"
+      { command: "git", args: ["-c", "core.quotePath=false", "status", "--porcelain", "-z"], cwd: "/tmp/demo" },
+      { command: "git", args: ["add", "--", "src/demo.ts", "test/demo.test.ts"], cwd: "/tmp/demo" },
+      { command: "git", args: ["commit", "-m", "OpenTag run run_1"], cwd: "/tmp/demo" }
     ]);
   });
 });

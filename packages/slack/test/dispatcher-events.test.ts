@@ -11,6 +11,27 @@ describe("Slack dispatcher-backed self-service", () => {
     );
   });
 
+  it("does not expose a partial repository target from a dispatcher binding", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({
+      binding: {
+        provider: "slack",
+        accountId: "T123",
+        conversationId: "C123",
+        repoProvider: "github",
+        owner: "acme"
+      }
+    })) as unknown as typeof fetch;
+    const processorInput = createSlackDispatcherEventProcessorInput({
+      dispatcherUrl: "http://dispatcher.test",
+      fetchImpl
+    });
+
+    await expect(processorInput.resolveChannelBinding({ teamId: "T123", channelId: "C123" })).resolves.toEqual({
+      teamId: "T123",
+      channelId: "C123"
+    });
+  });
+
   it("renders dispatcher channel status and posts it back to the Slack thread", async () => {
     const requests: Array<{ url: string; authorization?: string; body?: unknown }> = [];
     const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {

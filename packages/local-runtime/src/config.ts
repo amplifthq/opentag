@@ -5,11 +5,10 @@ import { isAbsolute, join, resolve } from "node:path";
 import { OpenTagIntegrationManifestSchema, OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
-// Accept any trimmed non-empty executor id. The built-ins are echo, codex,
-// claude-code, and hermes, but custom executors registered by a standalone runner are
-// equally valid — config validation must not be stricter than the runtime
-// dispatch (which resolves executors by id) or the dispatcher wire contract
-// (executor: z.string().min(1)).
+const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "hermes"] as const;
+
+// Accept any trimmed non-empty executor id. Custom executors registered by a
+// standalone runner are valid, but daemon ACP agents cannot replace built-ins.
 const ExecutorSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
 const PositiveIntegerSchema = z.number().int().positive();
@@ -176,7 +175,7 @@ export const OpenTagDaemonConfigSchema = z
     dispatcherUrl: z.string().url().default("http://localhost:3030"),
     repositories: z.array(RepositoryBindingConfigSchema).default([]),
     agents: z.record(OpenTagIntegrationManifestSchema).default({}),
-    scratchRoot: AbsolutePathSchema.default(join(defaultLocalStateDirectory(), "scratch")),
+    scratchRoot: AbsolutePathSchema.default(() => join(defaultLocalStateDirectory(), "scratch")),
     keepScratch: KeepWorktreeSchema.default("on_failure"),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).default("auto"),
     channelBindings: z.array(ChannelBindingConfigSchema).optional(),
@@ -200,6 +199,13 @@ export const OpenTagDaemonConfigSchema = z
   })
   .superRefine((config, ctx) => {
     for (const [name, manifest] of Object.entries(config.agents)) {
+      if (BUILT_IN_EXECUTOR_IDS.some((executorId) => executorId === manifest.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["agents", name, "id"],
+          message: `Configured ACP agent '${manifest.id}' cannot replace the built-in executor with the same id.`
+        });
+      }
       if (manifest.id !== name) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

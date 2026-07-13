@@ -237,8 +237,20 @@ function formatStopResultText(result: SlackStopRunResult): string {
     : "No active run was found for this Slack channel and Project Target.";
 }
 
+function repositoryMetadataFromBinding(
+  binding: SlackChannelBinding
+): { repoProvider: string; owner: string; repo: string } | undefined {
+  if (!binding.owner?.trim() || !binding.repo?.trim()) return undefined;
+  return {
+    repoProvider: binding.repoProvider?.trim() || "github",
+    owner: binding.owner.trim(),
+    repo: binding.repo.trim()
+  };
+}
+
 function formatProjectTarget(binding: SlackChannelBinding): string {
-  return `${binding.repoProvider ?? "github"}:${binding.owner}/${binding.repo}`;
+  const repository = repositoryMetadataFromBinding(binding);
+  return repository ? `${repository.repoProvider}:${repository.owner}/${repository.repo}` : "not bound";
 }
 
 function statusPresentation(input: SlackSelfServiceContext): OpenTagSourceThreadStatusPresentation {
@@ -369,9 +381,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
         ...(parsedValue?.proposalHash ? { proposalHash: parsedValue.proposalHash } : {}),
         ...(parsedValue?.approvalEpoch ? { approvalEpoch: parsedValue.approvalEpoch } : {}),
         ...(parsedValue?.actionId ? { governedActionId: parsedValue.actionId } : {}),
-        repoProvider: binding.repoProvider ?? "github",
-        owner: binding.owner,
-        repo: binding.repo
+        ...repositoryMetadataFromBinding(binding)
       }
     });
     return json({ ok: true });
@@ -628,9 +638,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
             ...(typeof verification.signatureVerified === "boolean"
               ? { webhookSignatureVerified: verification.signatureVerified, signatureState: verification.signatureVerified ? "verified" : "unverified" }
               : {}),
-            repoProvider: binding.repoProvider ?? "github",
-            owner: binding.owner,
-            repo: binding.repo
+            ...repositoryMetadataFromBinding(binding)
           }
         });
         return json({ ok: true });

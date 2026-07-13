@@ -170,8 +170,12 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
         return {
           teamId: binding.accountId,
           channelId: binding.conversationId,
-          ...(binding.repoProvider
-            ? { repoProvider: binding.repoProvider, owner: binding.owner, repo: binding.repo }
+          ...(binding.owner?.trim() && binding.repo?.trim()
+            ? {
+                repoProvider: binding.repoProvider?.trim() || "github",
+                owner: binding.owner.trim(),
+                repo: binding.repo.trim()
+              }
             : {})
         };
       } catch (error) {

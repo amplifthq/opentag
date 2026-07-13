@@ -93,7 +93,7 @@ export const OpenTagIntegrationManifestSchema = z
     }
     for (const roleName of ["agent", "channel"] as const) {
       const role = manifest.roles[roleName];
-      if (role && !manifest.bindings[role.binding]) {
+      if (role && !Object.prototype.hasOwnProperty.call(manifest.bindings, role.binding)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["roles", roleName, "binding"],

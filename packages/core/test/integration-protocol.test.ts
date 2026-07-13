@@ -98,6 +98,35 @@ describe("OpenTag integration manifest", () => {
     ).toThrow("missing binding");
   });
 
+  it("requires role references to name an own binding property", () => {
+    const manifest = acpManifest();
+
+    expect(() =>
+      OpenTagIntegrationManifestSchema.parse({
+        ...manifest,
+        roles: {
+          ...manifest.roles,
+          agent: { ...manifest.roles.agent, binding: "toString" }
+        }
+      })
+    ).toThrow("missing binding 'toString'");
+
+    const parsed = OpenTagIntegrationManifestSchema.parse({
+      ...manifest,
+      bindings: {
+        ...manifest.bindings,
+        toString: { kind: "stdio", command: "own-binding" }
+      },
+      roles: {
+        ...manifest.roles,
+        agent: { ...manifest.roles.agent, binding: "toString" }
+      }
+    });
+
+    expect(parsed.roles.agent?.binding).toBe("toString");
+    expect(parsed.bindings.toString).toMatchObject({ command: "own-binding" });
+  });
+
   it.each(["", "   ", ".", "..", "./hermes", "bin/hermes", "../hermes", "C:agent"])(
     "rejects a blank or relative command: %j",
     (command) => {

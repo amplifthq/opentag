@@ -416,28 +416,34 @@ describe("ACP executor", () => {
     expect(reportAttempts).toBe(2);
   }, 15_000);
 
-  it("rejects a reconciled known-success permission so the ACP tool cannot execute twice", async () => {
-    const scratch = tempDir("reconciled");
-    const reports: unknown[] = [];
-    const executor = createAcpExecutor({ manifest: manifest("permission") });
+  it.each(["allow_once", "allow_run"] as const)(
+    "rejects a reconciled known-success permission even when the resolver returns %s",
+    async (decision) => {
+      const scratch = tempDir(`reconciled-${decision}`);
+      const reports: unknown[] = [];
+      const progress: string[] = [];
+      const executor = createAcpExecutor({ manifest: manifest("permission") });
 
-    await executor.run({
-      ...input({ kind: "scratch", path: scratch }, "run_reconciled"),
-      permissionResolver: async () => ({
-        actionId: "action_publish",
-        decision: "deny",
-        reconciled: true,
-        material: true,
-        receipt: { receiptRef: "npm:publish:pkg@1", outcome: "succeeded" }
-      }),
-      materialActionReporter: async (report) => void reports.push(report)
-    }, { emit: async () => undefined });
+      await executor.run({
+        ...input({ kind: "scratch", path: scratch }, `run_reconciled_${decision}`),
+        permissionResolver: async () => ({
+          actionId: "action_publish",
+          decision,
+          reconciled: true,
+          material: true,
+          receipt: { receiptRef: "npm:publish:pkg@1", outcome: "succeeded" }
+        }),
+        materialActionReporter: async (report) => void reports.push(report)
+      }, { emit: async (event) => void progress.push(event.message) });
 
-    expect(JSON.parse(readFileSync(join(scratch, "acp-permission.json"), "utf8"))).toEqual({
-      outcome: { outcome: "selected", optionId: "reject-once" }
-    });
-    expect(reports).toEqual([]);
-  }, 15_000);
+      expect(JSON.parse(readFileSync(join(scratch, "acp-permission.json"), "utf8"))).toEqual({
+        outcome: { outcome: "selected", optionId: "reject-once" }
+      });
+      expect(progress).toContain("Material action action_publish already has a durable receipt; skipping duplicate execution.");
+      expect(reports).toEqual([]);
+    },
+    15_000
+  );
 
   it("sends ACP cancellation and terminates a bounded child run", async () => {
     const scratch = tempDir("cancel");

@@ -696,6 +696,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     message: `Material action ${resolution.actionId} already has a durable receipt; skipping duplicate execution.`,
                     at: new Date().toISOString()
                   });
+                  return permissionResponseForDecision({ decision: "deny" }, requestOptions);
                 }
                 return permissionResponseForDecision({ decision: resolution.decision }, requestOptions);
               }
