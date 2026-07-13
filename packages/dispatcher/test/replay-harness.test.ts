@@ -24,6 +24,14 @@ function jsonRequest(body: unknown) {
   };
 }
 
+function channelPrincipalJsonRequest(body: unknown, credential: string) {
+  const request = jsonRequest(body);
+  return {
+    ...request,
+    headers: { ...request.headers, "x-opentag-channel-principal": credential }
+  };
+}
+
 function loadFixture(name: string): ReplayFixture {
   const raw = JSON.parse(readFileSync(new URL(`./fixtures/replay/${name}.json`, import.meta.url), "utf8")) as ReplayFixture;
   return {
@@ -48,6 +56,28 @@ function repoBindingFor(event: OpenTagEvent): { provider: string; owner: string;
   return { provider, owner, repo };
 }
 
+function managedChannelReplayConfig(event: OpenTagEvent) {
+  if (event.source !== "slack" && event.source !== "lark") return undefined;
+  const metadata = event.metadata ?? {};
+  const accountId = event.source === "slack" ? metadata.teamId : metadata.tenantKey;
+  const conversationId = event.source === "slack" ? metadata.channelId : metadata.chatId;
+  if (typeof accountId !== "string" || typeof conversationId !== "string") {
+    throw new Error(`Replay fixture has incomplete ${event.source} channel identity.`);
+  }
+  const applicationId = `${event.source}_replay_app`;
+  const credential = `${event.source}_replay_principal`;
+  return {
+    credential,
+    principal: { provider: event.source, applicationId, credential },
+    binding: {
+      provider: event.source,
+      accountId,
+      conversationId,
+      ownership: { mode: "managed", exclusive: true, applicationId }
+    }
+  };
+}
+
 function expectSourceThreadBodyIsRedacted(body: string) {
   expect(body).not.toMatch(/\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b/);
   expect(body).not.toMatch(/\bglpat-[A-Za-z0-9_-]{20,}\b/);
@@ -65,8 +95,10 @@ describe("source-thread replay harness", () => {
   for (const fixture of fixtures) {
     it(`replays ${fixture.name}`, async () => {
       const delivered: Array<{ kind: string; body: string }> = [];
+      const managedChannel = managedChannelReplayConfig(fixture.event);
       const app = createDispatcherApp({
         databasePath: ":memory:",
+        ...(managedChannel ? { channelPrincipals: [managedChannel.principal] } : {}),
         callbackSink: {
           async deliver(message) {
             delivered.push({ kind: message.kind, body: message.body });
@@ -92,8 +124,30 @@ describe("source-thread replay harness", () => {
           })
         )
       ).resolves.toMatchObject({ status: 201 });
+      if (managedChannel) {
+        await expect(
+          app.request(
+            "/v1/channel-bindings",
+            channelPrincipalJsonRequest(
+              {
+                ...managedChannel.binding,
+                repoProvider: repoBinding.provider,
+                owner: repoBinding.owner,
+                repo: repoBinding.repo
+              },
+              managedChannel.credential
+            )
+          )
+        ).resolves.toMatchObject({ status: 201 });
+      }
 
-      const createResponse = await app.request("/v1/runs", jsonRequest({ runId: fixture.runId, event: fixture.event }));
+      const runRequest = { runId: fixture.runId, event: fixture.event };
+      const createResponse = await app.request(
+        "/v1/runs",
+        managedChannel
+          ? channelPrincipalJsonRequest(runRequest, managedChannel.credential)
+          : jsonRequest(runRequest)
+      );
       expect(createResponse.status).toBe(201);
 
       const claimResponse = await app.request("/v1/runners/runner_1/claim", { method: "POST" });
