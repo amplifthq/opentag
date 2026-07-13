@@ -19,3 +19,19 @@ Plan: `docs/superpowers/plans/2026-07-12-acp-first-agent-runtime.md`
 - Task 4 approved after making scratch security and early cleanup workspace-aware, following result-declared PR branches, carrying repository targets as an all-or-none group, and failing closed on pre-existing scratch attempt paths.
 - Task 5 approved after binding ACP action identity to credential-safe structured targets, making reusable grants explicit and transactionally fenced, rendering native Slack/Lark decisions, reconciling trusted receipts exactly once, and proving crash/approval/provider behavior end to end.
 - Task 6 approved after authenticating managed channel ownership outside event metadata, failing closed on corrupt binding records, preserving one Slack Run Card across restarts, and sanitizing provider credentials plus every historical Attempt fence before durable or source-thread output.
+
+## PR #88 Review Remediation
+
+Plan: `.superpowers/sdd/pr88-review-remediation-plan.md`
+
+- Phase 1: complete (`19c36423..37773c17`, review approved)
+- Phase 2: complete (`37773c17..6a2d0df7`, review approved)
+- Phase 3: complete (review approved)
+  - 3A lease authority: complete (`6a2d0df7..acb4d5b6`, review approved)
+  - 3B progress idempotency: complete (`acb4d5b6..b5d4c129`, review approved)
+  - 3C channel binding migration: complete (`b5d4c129..68ba3f09`, review approved)
+  - 3D cancellation atomicity: complete (`68ba3f09..cc89eef1`, review approved)
+- Phase 4: complete (`cc89eef1..15222897`, review approved)
+- Phase 5: complete (`15222897..bc7fdda6`, review approved)
+- Phase 6: complete (19 requested review threads replied to and resolved; #13 resolved at the documented deployment/worker sandbox boundary; #2 intentionally left open as outside this remediation scope)
+- Final verification/review/push: complete (`fd3ebdaf`; independent code and architecture reviews approved; build, lint, typecheck, 1502 tests, governance matrix 7/7, and privacy scan passed; pushed to PR #88)
