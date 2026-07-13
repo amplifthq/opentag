@@ -194,11 +194,11 @@ OpenTag 的 CLI 路径是本地优先的。
 | `opentag status` | 查看本地配置和运行状态；可以加 `--run <run_id>` 或 `--channel provider:account/conversation` 查看局部详情 |
 | `opentag cancel` | 请求取消某个 run，或取消 source container 中的 active run |
 | `opentag doctor` | 检查 dispatcher、bindings、checkout 和 executor |
-| `opentag ingest` | 上报本地外部 agent 的进度或完成事件 |
-| `opentag ingest-template` | 打印外部 agent hook ingest 的 shell 模板或 manifest |
+| `opentag ingest` | 上报经过 active-attempt fence 校验的本地外部 agent 进度或完成事件 |
+| `opentag ingest-template` | 打印本地外部 agent hook ingest 的 shell 模板或 manifest |
 | `opentag platforms` | 查看平台 setup 支持状态 |
 | `opentag executors` | 查看可用 coding agent |
-| `opentag maintenance prune-source-deliveries` | 清理已终结 run 的 source delivery 重放 key |
+| `opentag maintenance prune-source-deliveries` | 清理已终结 run 的过期 source delivery 重放 key |
 | `opentag config path` | 输出本地配置文件路径 |
 | `opentag config show` | 输出脱敏后的本地配置 |
 
