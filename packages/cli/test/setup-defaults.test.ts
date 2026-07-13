@@ -52,4 +52,19 @@ describe("setupDefaultsFromConfig executor", () => {
   it("rejects whitespace-only stored executor ids", () => {
     expect(() => cliConfig("   ")).toThrow();
   });
+
+  it("does not reuse a legacy Hermes profile template as a setup default", () => {
+    const config = cliConfig("hermes");
+    config.daemon.hermes = {
+      command: "custom-hermes",
+      profileTemplate: "opentag-{provider}-{conversationId}"
+    };
+
+    expect(setupDefaultsFromConfig(config)).toMatchObject({
+      executor: "hermes",
+      hermesCommand: "custom-hermes"
+    });
+    expect(setupDefaultsFromConfig(config).hermesProfile).toBeUndefined();
+  });
+
 });

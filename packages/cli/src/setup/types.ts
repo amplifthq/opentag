@@ -110,8 +110,7 @@ export type TeamsSetupInput = {
 
 export type HermesSetupInput = {
   command?: string;
-  profile?: string;
-  profileTemplate?: string;
+  profile: string;
 };
 
 export type AgentSessionProfileSetupInput = {
@@ -179,7 +178,6 @@ export type SetupDefaults = Partial<{
   teamsWebhookPath: string;
   hermesCommand: string;
   hermesProfile: string;
-  hermesProfileTemplate: string;
   agentProfile: string;
   agentProfileTemplate: string;
   savedLarkCredentials: SavedLarkCredentials;
