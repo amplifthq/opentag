@@ -303,14 +303,13 @@ PY
 
 issue_comments_contain() {
   local pattern="$1"
-  gh issue view "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --json comments --jq '[
-    .comments[].body
-  ] | join("\n--- opentag-comment-boundary ---\n")' | grep -F "$pattern" >/dev/null
+  gh api --paginate "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+    --jq '.[].body' | grep -F "$pattern" >/dev/null
 }
 
 applied_receipt_has_double_period() {
-  gh issue view "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --json comments --jq '
-    .comments[].body
+  gh api --paginate "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" --jq '
+    .[].body
     | split("\n")[]
     | select(startswith("Applied:"))
   ' | grep -E '\.\.$' >/dev/null
@@ -510,15 +509,29 @@ if [[ -z "${status:-}" || "$status" == "queued" || "$status" == "assigned" || "$
   echo "Timed out waiting for run completion. Last status: ${status:-unknown}" >&2
   exit 1
 fi
+if [[ "$status" != "succeeded" ]]; then
+  echo "GitHub webhook run did not succeed. Final status: $status" >&2
+  exit 1
+fi
 print_metrics "$RUN_ID"
 
 echo "Recent issue comments after final receipt:"
-gh issue view "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --json comments --jq '.comments[-4:][] | {author: .author.login, body: (.body | split("\n")[0:8] | join("\n"))}'
+gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?sort=created&direction=desc&per_page=4" \
+  --jq 'reverse[] | {author: .user.login, body: (.body | split("\n")[0:8] | join("\n"))}'
 EXPECTED_HEADING="<summary>Ready to apply</summary>"
 if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
   EXPECTED_HEADING="<summary>Needs setup</summary>"
 fi
-if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
+if [[ "$OPENTAG_GH_LIVE_EXECUTOR" == "echo" ]]; then
+  if ! issue_comments_contain "OpenTag finished with **success**."; then
+    echo "Expected the Echo smoke to post a successful final receipt." >&2
+    exit 1
+  fi
+  if issue_comments_contain '`apply 1`'; then
+    echo "Expected the Echo smoke not to advertise apply actions." >&2
+    exit 1
+  fi
+elif bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN"; then
   if ! issue_comments_contain "$EXPECTED_HEADING"; then
     echo "Expected the final GitHub receipt to render '$EXPECTED_HEADING'." >&2
     exit 1
@@ -599,7 +612,8 @@ PY
   gh pr view "$PR_URL" --json number,state,headRefName,baseRefName,url --jq '{number,state,headRefName,baseRefName,url}'
   print_metrics "$RUN_ID"
   echo "Recent issue comments after apply receipt:"
-  gh issue view "$ISSUE_NUMBER" --repo "${OWNER}/${REPO}" --json comments --jq '.comments[-5:][] | {author: .author.login, body: (.body | split("\n")[0:8] | join("\n"))}'
+  gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?sort=created&direction=desc&per_page=5" \
+    --jq 'reverse[] | {author: .user.login, body: (.body | split("\n")[0:8] | join("\n"))}'
   if ! issue_comments_contain "Applied:"; then
     echo "Expected the GitHub thread to contain an applied receipt." >&2
     exit 1
