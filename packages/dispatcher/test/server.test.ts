@@ -3088,12 +3088,15 @@ describe("dispatcher API", () => {
       importance: "normal",
       message: "Hermes post_llm_call completed.",
       payload: expect.objectContaining({
-        type: "ingest.hermes.post_llm_call",
-        idempotencyKey: "hermes:run_hook_ingest_progress:progress:post_llm_call"
+        type: "ingest.hermes.post_llm_call"
       })
     });
+    expect(progressEvents[0].payload).not.toHaveProperty("idempotencyKey");
     expect(events.some((event: { type: string }) => event.type.startsWith("callback.progress."))).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("retry should stay invisible");
+    const serializedEvents = JSON.stringify(events);
+    expect(serializedEvents).not.toContain("retry should stay invisible");
+    expect(serializedEvents).not.toContain(progressBody.idempotencyKey);
+    expect(serializedEvents).not.toContain("[redacted]");
   });
 
   it("requires runner-scoped progress and completion after claim", async () => {
@@ -5157,12 +5160,15 @@ describe("dispatcher API", () => {
     expect(createResponse.status).toBe(201);
     await app.request("/v1/runners/runner_1/claim", { method: "POST" });
 
+    const initialIdempotencyKey = "runner_1:run_progress_replay:progress:1";
+    const firstCredentialLikeKey = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const secondCredentialLikeKey = "xoxb\x2d0987654321-zyxwvutsrqponmlkjihgfedcba";
     const body = {
       type: "milestone.progress",
       message: "working",
       at: "2026-06-24T00:00:01.000Z",
       visibility: "human",
-      idempotencyKey: "runner_1:run_progress_replay:progress:1"
+      idempotencyKey: initialIdempotencyKey
     };
     const first = await app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest(body));
     const replay = await app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({ ...body, message: "working retry" }));
@@ -5172,10 +5178,10 @@ describe("dispatcher API", () => {
 
     const [concurrentA, concurrentB] = await Promise.all([
       app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({
-        ...body, message: "parallel A", idempotencyKey: "runner_1:run_progress_replay:progress:A"
+        ...body, message: "parallel A", idempotencyKey: firstCredentialLikeKey
       })),
       app.request("/v1/runners/runner_1/runs/run_progress_replay/progress", jsonRequest({
-        ...body, message: "parallel B", idempotencyKey: "runner_1:run_progress_replay:progress:B"
+        ...body, message: "parallel B", idempotencyKey: secondCredentialLikeKey
       }))
     ]);
     expect([concurrentA.status, concurrentB.status]).toEqual([200, 200]);
@@ -5193,9 +5199,14 @@ describe("dispatcher API", () => {
     expect(events.filter((event: { type: string }) => event.type === "run.progress")).toHaveLength(3);
     expect(events.filter((event: { type: string }) => event.type === "callback.progress.delivered")).toHaveLength(3);
     expect(events.find((event: { type: string }) => event.type === "run.progress")).toMatchObject({
-      payload: expect.objectContaining({ idempotencyKey: "runner_1:run_progress_replay:progress:1" })
+      payload: expect.not.objectContaining({ idempotencyKey: expect.anything() })
     });
-    expect(JSON.stringify(events)).not.toContain("working retry");
+    const serializedEvents = JSON.stringify(events);
+    expect(serializedEvents).not.toContain("working retry");
+    expect(serializedEvents).not.toContain(initialIdempotencyKey);
+    expect(serializedEvents).not.toContain(firstCredentialLikeKey);
+    expect(serializedEvents).not.toContain(secondCredentialLikeKey);
+    expect(serializedEvents).not.toContain("[redacted]");
   });
 
   it("deduplicates runner completion retries by idempotency key before final callback delivery", async () => {

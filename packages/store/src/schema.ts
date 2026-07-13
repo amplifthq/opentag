@@ -91,10 +91,15 @@ export const runEvents = sqliteTable(
     importance: text("importance").notNull().default("normal"),
     message: text("message"),
     payloadJson: text("payload_json").notNull(),
+    progressIdempotencyDigest: text("progress_idempotency_digest"),
     createdAt: text("created_at").notNull()
   },
   (table) => ({
-    runIdx: index("run_events_run_idx").on(table.runId)
+    runIdx: index("run_events_run_idx").on(table.runId),
+    progressIdempotencyIdx: uniqueIndex("run_events_progress_idempotency_idx").on(
+      table.runId,
+      table.progressIdempotencyDigest
+    )
   })
 );
 
@@ -397,6 +402,7 @@ export function migrateSchema(sqlite: Database.Database): void {
       importance TEXT NOT NULL DEFAULT 'normal',
       message TEXT,
       payload_json TEXT NOT NULL,
+      progress_idempotency_digest TEXT,
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id);
@@ -724,7 +730,14 @@ export function migrateSchema(sqlite: Database.Database): void {
   if (!runEventColumnNames.has("message")) {
     sqlite.exec("ALTER TABLE run_events ADD COLUMN message TEXT");
   }
+  if (!runEventColumnNames.has("progress_idempotency_digest")) {
+    sqlite.exec("ALTER TABLE run_events ADD COLUMN progress_idempotency_digest TEXT");
+  }
   sqlite.exec("CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id)");
+  sqlite.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS run_events_progress_idempotency_idx
+      ON run_events(run_id, progress_idempotency_digest)
+  `);
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS source_deliveries (
       source TEXT NOT NULL,

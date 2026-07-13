@@ -5059,8 +5059,7 @@ export function createDispatcherApp(input: {
     const idempotencyKey = body.idempotencyKey?.trim() || headerIdempotencyKey;
     const safeProgressFields = sanitizeCredentialLikeValue({
       message: body.message,
-      ...(body.type ? { type: body.type } : {}),
-      ...(idempotencyKey ? { idempotencyKey } : {})
+      ...(body.type ? { type: body.type } : {})
     }, { secrets: [body.fencingToken] });
     const progressVisibility = channelProgressVisibility({
       ...(safeProgressFields.type ? { type: safeProgressFields.type } : {}),
@@ -5076,7 +5075,7 @@ export function createDispatcherApp(input: {
       ...(body.at ? { at: body.at } : {}),
       visibility: progressVisibility,
       ...(body.importance ? { importance: body.importance } : {}),
-      ...(safeProgressFields.idempotencyKey ? { idempotencyKey: safeProgressFields.idempotencyKey } : {})
+      ...(idempotencyKey ? { idempotencyKey } : {})
     });
     if (progressOutcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (progressOutcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);

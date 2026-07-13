@@ -458,6 +458,13 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function progressIdempotencyDigest(idempotencyKey: string): string {
+  return createHash("sha256")
+    .update("opentag.progress-idempotency.v1\0", "utf8")
+    .update(idempotencyKey, "utf8")
+    .digest("hex");
+}
+
 function stableActionJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableActionJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -4024,10 +4031,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       fencingToken?: string;
       idempotencyKey?: string;
     }): Promise<RecordProgressOutcome> {
+      const idempotencyDigest = input.idempotencyKey === undefined
+        ? undefined
+        : progressIdempotencyDigest(input.idempotencyKey);
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeMessage = safeInput.message;
       const safeType = safeInput.type;
-      const safeIdempotencyKey = safeInput.idempotencyKey;
       if (input.runnerId) {
         if (!input.attemptId || !input.fencingToken) return "stale_attempt";
         const lease = activeAttemptLease({
@@ -4055,16 +4064,6 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ) {
             return "stale_attempt" as const;
           }
-          if (safeIdempotencyKey) {
-            const existing = tx.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250).all();
-            for (const event of existing) {
-              if (event.type !== "run.progress") continue;
-              const payload = recordFromJson(event.payloadJson);
-              if (payload?.["idempotencyKey"] === safeIdempotencyKey) {
-                return { outcome: "duplicate" as const, event: runEventFromRow(event) };
-              }
-            }
-          }
           const inserted = tx.insert(runEvents)
             .values({
               runId: input.runId,
@@ -4072,49 +4071,76 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
               payloadJson: JSON.stringify({
                 runnerId: safeInput.runnerId,
                 attemptId: safeInput.attemptId,
-                ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
                 type: safeType ?? "progress",
                 message: safeMessage,
                 at: createdAt
               }),
+              progressIdempotencyDigest: idempotencyDigest ?? null,
               visibility: safeInput.visibility ?? "audit",
               importance: safeInput.importance ?? "normal",
               message: safeMessage,
               createdAt
             })
+            .onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] })
             .returning()
             .get();
+          if (!inserted) {
+            if (!idempotencyDigest) throw new Error("progress event was not created");
+            const existing = tx
+              .select()
+              .from(runEvents)
+              .where(and(
+                eq(runEvents.runId, input.runId),
+                eq(runEvents.progressIdempotencyDigest, idempotencyDigest)
+              ))
+              .limit(1)
+              .get();
+            if (!existing) throw new Error("duplicate progress event could not be loaded");
+            return { outcome: "duplicate" as const, event: runEventFromRow(existing) };
+          }
           return { outcome: "recorded" as const, event: runEventFromRow(inserted) };
         });
       }
-      if (safeIdempotencyKey) {
-        const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
-        for (const event of existing) {
-          if (event.type !== "run.progress") continue;
-          const payload = recordFromJson(event.payloadJson);
-          if (payload?.["idempotencyKey"] === safeIdempotencyKey) {
-            return { outcome: "duplicate" as const, event: runEventFromRow(event) };
-          }
+      const createdAt = safeInput.at ?? nowIso();
+      return db.transaction((tx) => {
+        const inserted = tx
+          .insert(runEvents)
+          .values({
+            ...runEventValues({
+              runId: input.runId,
+              type: "run.progress",
+              payload: {
+                ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
+                type: safeType ?? "progress",
+                message: safeMessage,
+                at: createdAt
+              },
+              visibility: safeInput.visibility ?? "audit",
+              importance: safeInput.importance ?? "normal",
+              message: safeMessage,
+              createdAt
+            }),
+            progressIdempotencyDigest: idempotencyDigest ?? null
+          })
+          .onConflictDoNothing({ target: [runEvents.runId, runEvents.progressIdempotencyDigest] })
+          .returning()
+          .get();
+        if (!inserted) {
+          if (!idempotencyDigest) throw new Error("progress event was not created");
+          const existing = tx
+            .select()
+            .from(runEvents)
+            .where(and(
+              eq(runEvents.runId, input.runId),
+              eq(runEvents.progressIdempotencyDigest, idempotencyDigest)
+            ))
+            .limit(1)
+            .get();
+          if (!existing) throw new Error("duplicate progress event could not be loaded");
+          return { outcome: "duplicate" as const, event: runEventFromRow(existing) };
         }
-      }
-      const inserted = await db.insert(runEvents).values(runEventValues({
-        runId: input.runId,
-        type: "run.progress",
-        payload: {
-          ...(safeInput.runnerId ? { runnerId: safeInput.runnerId } : {}),
-          ...(safeIdempotencyKey ? { idempotencyKey: safeIdempotencyKey } : {}),
-          type: safeType ?? "progress",
-          message: safeMessage,
-          at: safeInput.at ?? nowIso()
-        },
-        visibility: safeInput.visibility ?? "audit",
-        importance: safeInput.importance ?? "normal",
-        message: safeMessage,
-        createdAt: safeInput.at ?? nowIso()
-      })).returning();
-      const event = inserted[0];
-      if (!event) return "not_found";
-      return { outcome: "recorded", event: runEventFromRow(event) };
+        return { outcome: "recorded" as const, event: runEventFromRow(inserted) };
+      });
     },
 
     async listAttempts(input: { runId: string }): Promise<Attempt[]> {

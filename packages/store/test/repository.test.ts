@@ -82,6 +82,30 @@ describe("OpenTag repository", () => {
     expect(indexes.map((index) => index.name)).toContain("callback_deliveries_idempotency_key_idx");
   });
 
+  it("migrates legacy run events before creating the progress idempotency index", () => {
+    const sqlite = new Database(":memory:");
+    sqlite.exec(`
+      CREATE TABLE run_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        visibility TEXT NOT NULL DEFAULT 'audit',
+        importance TEXT NOT NULL DEFAULT 'normal',
+        message TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+
+    expect(() => migrateSchema(sqlite)).not.toThrow();
+    const columns = sqlite.prepare("PRAGMA table_info(run_events)").all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain("progress_idempotency_digest");
+    const indexes = sqlite.prepare("PRAGMA index_list(run_events)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes).toContainEqual(
+      expect.objectContaining({ name: "run_events_progress_idempotency_idx", unique: 1 })
+    );
+  });
+
   it("migrates repository-required channel bindings to nullable repository fields without losing rows", async () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`
@@ -751,6 +775,14 @@ describe("OpenTag repository", () => {
       type: first!.fencingToken,
       idempotencyKey: first!.fencingToken
     })).resolves.toMatchObject({ outcome: "recorded", event: { type: "run.progress" } });
+    await expect(repo.recordProgress({
+      ...activeLease,
+      message: "duplicate current progress",
+      idempotencyKey: first!.fencingToken
+    })).resolves.toMatchObject({
+      outcome: "duplicate",
+      event: { message: "current progress [redacted]" }
+    });
     await expect(
       repo.completeRun({
         ...activeLease,
@@ -772,6 +804,7 @@ describe("OpenTag repository", () => {
     ]);
     const events = await repo.listRunEvents({ runId: "run_fenced" });
     expect(events.filter((event) => event.type === "run.progress")).toHaveLength(1);
+    expect(events.find((event) => event.type === "run.progress")?.payload).not.toHaveProperty("idempotencyKey");
     expect(events.filter((event) => event.type === "run.completed")).toHaveLength(1);
     const durable = JSON.stringify({ storedRun, storedAttempts, events });
     expect(durable).not.toContain(first!.fencingToken);
@@ -2120,11 +2153,12 @@ describe("OpenTag repository", () => {
     ]);
   });
 
-  it("deduplicates runner progress events by idempotency key", async () => {
+  it("deduplicates non-runner progress events by idempotency key", async () => {
     const sqlite = new Database(":memory:");
     const db = drizzle(sqlite);
     migrateSchema(sqlite);
     const repo = createOpenTagRepository(db);
+    const idempotencyKey = "hermes:run_progress_replay:post_llm_call:1";
 
     await expect(
       repo.recordProgress({
@@ -2132,7 +2166,7 @@ describe("OpenTag repository", () => {
         message: "external hook progress",
         type: "ingest.hermes.post_llm_call",
         at: "2026-06-24T00:00:01.000Z",
-        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+        idempotencyKey
       })
     ).resolves.toMatchObject({ outcome: "recorded", event: { message: "external hook progress" } });
     await expect(
@@ -2141,7 +2175,7 @@ describe("OpenTag repository", () => {
         message: "external hook progress duplicate",
         type: "ingest.hermes.post_llm_call",
         at: "2026-06-24T00:00:02.000Z",
-        idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
+        idempotencyKey
       })
     ).resolves.toMatchObject({ outcome: "duplicate", event: { message: "external hook progress" } });
 
@@ -2149,11 +2183,110 @@ describe("OpenTag repository", () => {
       expect.objectContaining({
         type: "run.progress",
         message: "external hook progress",
-        payload: expect.objectContaining({
-          idempotencyKey: "hermes:run_progress_replay:post_llm_call:1"
-        })
+        payload: expect.not.objectContaining({ idempotencyKey: expect.anything() })
       })
     ]);
+    const stored = sqlite.prepare(`
+      SELECT progress_idempotency_digest AS digest, payload_json AS payloadJson
+      FROM run_events
+      WHERE run_id = ? AND type = 'run.progress'
+    `).get("run_progress_replay") as { digest: string; payloadJson: string };
+    expect(stored.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.payloadJson).not.toContain(idempotencyKey);
+    expect(stored.payloadJson).not.toContain("[redacted]");
+  });
+
+  it("keeps credential-like progress keys distinct without persisting either key representation", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const firstKey = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
+    const secondKey = "xoxb\x2d0987654321-zyxwvutsrqponmlkjihgfedcba";
+
+    await expect(repo.recordProgress({
+      runId: "run_progress_credential_keys",
+      message: "first hook",
+      idempotencyKey: firstKey
+    })).resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.recordProgress({
+      runId: "run_progress_credential_keys",
+      message: "second hook",
+      idempotencyKey: secondKey
+    })).resolves.toMatchObject({ outcome: "recorded" });
+
+    const stored = sqlite.prepare(`
+      SELECT progress_idempotency_digest AS digest, payload_json AS payloadJson
+      FROM run_events
+      WHERE run_id = ? AND type = 'run.progress'
+      ORDER BY id
+    `).all("run_progress_credential_keys") as Array<{ digest: string; payloadJson: string }>;
+    expect(stored).toHaveLength(2);
+    expect(new Set(stored.map((row) => row.digest)).size).toBe(2);
+    for (const row of stored) {
+      expect(row.digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.payloadJson).not.toContain(firstKey);
+      expect(row.payloadJson).not.toContain(secondKey);
+      expect(row.payloadJson).not.toContain("[redacted]");
+      expect(JSON.parse(row.payloadJson)).not.toHaveProperty("idempotencyKey");
+    }
+  });
+
+  it("deduplicates progress replay after more than 250 later events", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const idempotencyKey = "hermes:run_progress_long_replay:first";
+
+    const original = await repo.recordProgress({
+      runId: "run_progress_long_replay",
+      message: "original progress",
+      idempotencyKey
+    });
+    expect(original).toMatchObject({ outcome: "recorded" });
+    for (let index = 0; index < 300; index += 1) {
+      await repo.recordProgress({
+        runId: "run_progress_long_replay",
+        message: `later progress ${index}`
+      });
+    }
+
+    await expect(repo.recordProgress({
+      runId: "run_progress_long_replay",
+      message: "late replay",
+      idempotencyKey
+    })).resolves.toMatchObject({
+      outcome: "duplicate",
+      event: { message: "original progress" }
+    });
+    await expect(repo.listRunEvents({ runId: "run_progress_long_replay" })).resolves.toHaveLength(301);
+  });
+
+  it("converges concurrent non-runner progress replays on one event", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+
+    const results = await Promise.all([
+      repo.recordProgress({
+        runId: "run_progress_concurrent_replay",
+        message: "first concurrent progress",
+        idempotencyKey: "concurrent-progress-key"
+      }),
+      repo.recordProgress({
+        runId: "run_progress_concurrent_replay",
+        message: "second concurrent progress",
+        idempotencyKey: "concurrent-progress-key"
+      })
+    ]);
+
+    expect(results.map((result) => typeof result === "string" ? result : result.outcome).sort()).toEqual([
+      "duplicate",
+      "recorded"
+    ]);
+    await expect(repo.listRunEvents({ runId: "run_progress_concurrent_replay" })).resolves.toHaveLength(1);
   });
 
   it("stores needs_human results as needs_approval", async () => {
