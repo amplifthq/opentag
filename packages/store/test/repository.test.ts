@@ -468,12 +468,18 @@ describe("OpenTag repository", () => {
       }
     });
     const events = await repo.listRunEvents({ runId: "run_cancel" });
-    expect(events.map((event) => event.type)).toContain("run.cancel_requested");
+    expect(events.filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
     expect(events.find((event) => event.type === "run.cancel_requested")?.payload).toMatchObject({
+      previousStatus: "queued",
       terminalReason: "cancelled_by_user",
       terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
       requestedBy: "lark:ou_sender"
     });
+    await expect(repo.cancelRun({ runId: "run_cancel", reason: "Stop again." })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: { status: "cancelled", result: { conclusion: "cancelled" } }
+    });
+    expect((await repo.listRunEvents({ runId: "run_cancel" })).filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
   });
 
   it("records timed_out as a terminal run status and prevents late success from overriding it", async () => {
@@ -3134,6 +3140,196 @@ describe("durable ACP material actions", () => {
     sqlite.prepare("UPDATE attempts SET lease_expires_at = ? WHERE id = ?").run(expiredAt, attemptId);
     sqlite.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").run(expiredAt, runId);
   }
+
+  function seedCancellationChildren(sqlite: Database.Database, attemptId: string) {
+    const createdAt = "2026-07-12T00:00:30.000Z";
+    const insertAction = sqlite.prepare(`
+      INSERT INTO material_actions (
+        id, run_id, attempt_id, action_family, capability, scope_json, target_json, risk_tier,
+        status, idempotency_key, attempt_fence_digest, created_at, updated_at
+      ) VALUES (?, 'run_action', ?, 'test', 'test:cancel', '{}', '{}', 'material', ?, ?, 'digest', ?, ?)
+    `);
+    for (const status of ["executing", "proposed", "waiting_approval", "authorized", "succeeded"]) {
+      insertAction.run(`action_cancel_${status}`, attemptId, status, `cancel:${status}`, createdAt, createdAt);
+    }
+    insertAction.run("action_cancel_historical_executing", "attempt_historical", "executing", "cancel:historical:executing", createdAt, createdAt);
+    insertAction.run("action_cancel_historical_authorized", "attempt_historical", "authorized", "cancel:historical:authorized", createdAt, createdAt);
+    sqlite.prepare(`
+      INSERT INTO grants (
+        id, connection_id, capability, resource_scope_json, run_id, attempt_id, revoked_at, created_at
+      ) VALUES
+        ('grant_cancel_attempt', 'connection:test', 'test:cancel', '{}', 'run_action', ?, NULL, ?),
+        ('grant_cancel_historical', 'connection:test', 'test:cancel', '{}', 'run_action', 'attempt_historical', NULL, ?),
+        ('grant_cancel_run', 'connection:test', 'test:cancel', '{}', 'run_action', NULL, NULL, ?)
+    `).run(attemptId, createdAt, createdAt, createdAt);
+    sqlite.prepare(`
+      INSERT INTO suggested_changes (proposal_id, run_id, snapshot_json, created_at)
+      VALUES ('proposal_cancel_evidence', 'run_action', '{"evidence":"proposal"}', ?)
+    `).run(createdAt);
+    sqlite.prepare(`
+      INSERT INTO approval_decisions (id, proposal_id, decision_json, created_at)
+      VALUES ('approval_cancel_evidence', 'proposal_cancel_evidence', '{"evidence":"approval"}', ?)
+    `).run(createdAt);
+  }
+
+  it("atomically cancels an active Attempt and all run-scoped execution authority", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await expect(repo.markRunning({ ...lease, executor: "acp" })).resolves.toBe("running");
+    seedCancellationChildren(sqlite, claimed.attemptId);
+    const proposalEvidenceBefore = sqlite.prepare("SELECT * FROM suggested_changes").all();
+    const approvalEvidenceBefore = sqlite.prepare("SELECT * FROM approval_decisions").all();
+
+    await expect(repo.cancelRun({
+      runId: "run_action",
+      reason: `Stop the active run ${claimed.fencingToken}.`,
+      requestedBy: `operator:${claimed.fencingToken}`
+    })).resolves.toMatchObject({
+      outcome: "cancelled",
+      run: {
+        id: "run_action",
+        status: "cancelled",
+        assignedRunnerId: undefined,
+        result: { conclusion: "cancelled", summary: "Stop the active run [redacted]." }
+      }
+    });
+
+    expect(sqlite.prepare(`
+      SELECT status, finished_at AS finishedAt, result_json AS resultJson
+      FROM attempts WHERE id = ?
+    `).get(claimed.attemptId)).toMatchObject({
+      status: "cancelled",
+      finishedAt: expect.any(String),
+      resultJson: expect.stringContaining('"conclusion":"cancelled"')
+    });
+    expect(sqlite.prepare("SELECT id, status FROM material_actions ORDER BY id").all()).toEqual([
+      { id: "action_cancel_authorized", status: "cancelled" },
+      { id: "action_cancel_executing", status: "unknown" },
+      { id: "action_cancel_historical_authorized", status: "cancelled" },
+      { id: "action_cancel_historical_executing", status: "unknown" },
+      { id: "action_cancel_proposed", status: "cancelled" },
+      { id: "action_cancel_succeeded", status: "succeeded" },
+      { id: "action_cancel_waiting_approval", status: "cancelled" }
+    ]);
+    expect(sqlite.prepare("SELECT id, revoked_at AS revokedAt FROM grants ORDER BY id").all()).toEqual([
+      { id: "grant_cancel_attempt", revokedAt: expect.any(String) },
+      { id: "grant_cancel_historical", revokedAt: expect.any(String) },
+      { id: "grant_cancel_run", revokedAt: null }
+    ]);
+    expect(sqlite.prepare("SELECT * FROM suggested_changes").all()).toEqual(proposalEvidenceBefore);
+    expect(sqlite.prepare("SELECT * FROM approval_decisions").all()).toEqual(approvalEvidenceBefore);
+
+    const events = await repo.listRunEvents({ runId: "run_action" });
+    const cancellationEvents = events.filter((event) => event.type === "run.cancel_requested");
+    expect(cancellationEvents).toHaveLength(1);
+    expect(cancellationEvents[0]).toMatchObject({
+      message: "Stop the active run [redacted].",
+      payload: {
+        previousStatus: "running",
+        previousRunnerId: "runner_1",
+        requestedBy: "operator:[redacted]",
+        reason: "Stop the active run [redacted]."
+      }
+    });
+    expect(JSON.stringify({ cancellationEvents, run: await repo.getRun({ runId: "run_action" }) })).not.toContain(claimed.fencingToken);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "Stop again." })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: { status: "cancelled", result: { conclusion: "cancelled" } }
+    });
+    expect((await repo.listRunEvents({ runId: "run_action" })).filter((event) => event.type === "run.cancel_requested")).toHaveLength(1);
+    await expect(repo.completeRun({
+      ...lease,
+      result: { conclusion: "success", summary: "late success" }
+    })).resolves.toBe("stale_attempt");
+  });
+
+  it("rolls back Run and execution authority when the cancellation audit insert fails", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await repo.markRunning({ ...lease, executor: "acp" });
+    seedCancellationChildren(sqlite, claimed.attemptId);
+    const before = {
+      run: sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get(),
+      attempt: sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId),
+      actions: sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all(),
+      grants: sqlite.prepare("SELECT * FROM grants ORDER BY id").all()
+    };
+    sqlite.exec(`
+      CREATE TRIGGER abort_cancel_audit
+      BEFORE INSERT ON run_events
+      WHEN NEW.type = 'run.cancel_requested'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected cancel audit failure');
+      END
+    `);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "This must roll back." }))
+      .rejects.toThrow("injected cancel audit failure");
+
+    expect(sqlite.prepare("SELECT * FROM runs WHERE id = 'run_action'").get()).toEqual(before.run);
+    expect(sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)).toEqual(before.attempt);
+    expect(sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all()).toEqual(before.actions);
+    expect(sqlite.prepare("SELECT * FROM grants ORDER BY id").all()).toEqual(before.grants);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 0 });
+  });
+
+  it("returns the real terminal CAS winner without cleaning authority or writing cancellation audit", async () => {
+    const { sqlite, repo, claimed } = await claimedRepository();
+    const lease = {
+      runnerId: "runner_1",
+      runId: "run_action",
+      attemptId: claimed.attemptId,
+      fencingToken: claimed.fencingToken
+    };
+    await repo.markRunning({ ...lease, executor: "acp" });
+    seedCancellationChildren(sqlite, claimed.attemptId);
+    const attemptBefore = sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId);
+    const actionsBefore = sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all();
+    const grantsBefore = sqlite.prepare("SELECT * FROM grants ORDER BY id").all();
+    sqlite.exec(`
+      CREATE TRIGGER terminal_wins_cancel
+      BEFORE UPDATE OF status ON runs
+      WHEN OLD.id = 'run_action' AND NEW.status = 'cancelled'
+      BEGIN
+        UPDATE runs SET
+          status = 'succeeded',
+          result_json = '{"conclusion":"success","summary":"terminal winner"}',
+          assigned_runner_id = NULL,
+          leased_at = NULL,
+          lease_expires_at = NULL,
+          heartbeat_at = NULL,
+          current_attempt_id = NULL,
+          updated_at = '2026-07-12T00:02:00.000Z'
+        WHERE id = OLD.id;
+        SELECT RAISE(IGNORE);
+      END
+    `);
+
+    await expect(repo.cancelRun({ runId: "run_action", reason: "losing cancellation" })).resolves.toMatchObject({
+      outcome: "already_terminal",
+      run: {
+        status: "succeeded",
+        assignedRunnerId: undefined,
+        updatedAt: "2026-07-12T00:02:00.000Z",
+        result: { conclusion: "success", summary: "terminal winner" }
+      }
+    });
+    expect(sqlite.prepare("SELECT * FROM attempts WHERE id = ?").get(claimed.attemptId)).toEqual(attemptBefore);
+    expect(sqlite.prepare("SELECT * FROM material_actions ORDER BY id").all()).toEqual(actionsBefore);
+    expect(sqlite.prepare("SELECT * FROM grants ORDER BY id").all()).toEqual(grantsBefore);
+    expect(sqlite.prepare("SELECT count(*) AS count FROM run_events WHERE type = 'run.cancel_requested'").get()).toEqual({ count: 0 });
+  });
 
   async function approvalIdentity(
     repo: ReturnType<typeof createOpenTagRepository>,

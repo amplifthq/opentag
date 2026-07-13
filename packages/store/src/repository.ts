@@ -58,7 +58,7 @@ import {
   type RunEventVisibility,
   type SuggestedChangesSnapshot
 } from "@opentag/core";
-import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import {
   applyPlans,
@@ -1693,30 +1693,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     },
 
     async cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunOutcome> {
-      const row = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-      if (!row) return { outcome: "not_found" };
-      const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
-      const existingRun = runFromRow(row);
-      if (terminalRunStatus(row.status)) {
-        return { outcome: "already_terminal", run: existingRun, event };
-      }
-
       const updatedAt = nowIso();
-      const result: OpenTagRunResult = {
-        conclusion: "cancelled",
-        summary: input.reason ?? "Cancellation was requested by a human.",
-        nextAction: "OpenTag will not treat this stop request as a successful completion."
-      };
-      db.transaction((tx) => {
+      return db.transaction((tx) => {
         const current = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-        if (!current || terminalRunStatus(current.status)) return;
-        if (current.currentAttemptId) {
-          tx.update(attempts)
-            .set({ status: "cancelled", finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
-            .where(eq(attempts.id, current.currentAttemptId))
-            .run();
+        if (!current) return { outcome: "not_found" as const };
+        const event = OpenTagEventSchema.parse(JSON.parse(current.eventJson));
+        if (terminalRunStatus(current.status)) {
+          return { outcome: "already_terminal" as const, run: runFromRow(current), event };
         }
-        tx.update(runs)
+        const fencingTokens = tx
+          .select({ fencingToken: attempts.fencingToken })
+          .from(attempts)
+          .where(eq(attempts.runId, input.runId))
+          .all()
+          .map((attempt) => attempt.fencingToken);
+        const safeCancellation = sanitizeRunEventValue({
+          reason: input.reason ?? "Cancellation was requested by a human.",
+          ...(input.requestedBy ? { requestedBy: input.requestedBy } : {})
+        }, fencingTokens);
+        const result = OpenTagRunResultSchema.parse({
+          conclusion: "cancelled",
+          summary: safeCancellation.reason,
+          nextAction: "OpenTag will not treat this stop request as a successful completion."
+        });
+        const cas = tx.update(runs)
           .set({
             status: "cancelled",
             resultJson: JSON.stringify(result),
@@ -1727,36 +1727,77 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             currentAttemptId: null,
             updatedAt
           })
-          .where(eq(runs.id, input.runId))
+          .where(and(eq(runs.id, input.runId), inArray(runs.status, ["queued", "assigned", "running", "needs_approval"])))
           .run();
+        if (cas.changes !== 1) {
+          const winner = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+          if (!winner) return { outcome: "not_found" as const };
+          if (terminalRunStatus(winner.status)) {
+            return {
+              outcome: "already_terminal" as const,
+              run: runFromRow(winner),
+              event: OpenTagEventSchema.parse(JSON.parse(winner.eventJson))
+            };
+          }
+          throw new Error(`Cancellation CAS lost while Run ${input.runId} remained active`);
+        }
+        if (current.currentAttemptId) {
+          const attemptCancellation = tx.update(attempts)
+            .set({ status: "cancelled", finishedAt: updatedAt, resultJson: JSON.stringify(result), updatedAt })
+            .where(and(
+              eq(attempts.id, current.currentAttemptId),
+              eq(attempts.runId, input.runId),
+              inArray(attempts.status, ["assigned", "running", "needs_human"])
+            ))
+            .run();
+          if (attemptCancellation.changes !== 1) {
+            throw new Error(`Cancellation could not terminate active Attempt ${current.currentAttemptId}`);
+          }
+        }
+        tx.update(materialActions)
+          .set({ status: "unknown", updatedAt })
+          .where(and(eq(materialActions.runId, input.runId), eq(materialActions.status, "executing")))
+          .run();
+        tx.update(materialActions)
+          .set({ status: "cancelled", updatedAt })
+          .where(and(
+            eq(materialActions.runId, input.runId),
+            inArray(materialActions.status, ["proposed", "waiting_approval", "authorized"])
+          ))
+          .run();
+        tx.update(grants)
+          .set({ revokedAt: updatedAt })
+          .where(and(
+            eq(grants.runId, input.runId),
+            isNotNull(grants.attemptId),
+            isNull(grants.revokedAt)
+          ))
+          .run();
+        const safeAuditEvent = sanitizeRunEventValue({
+          runId: input.runId,
+          type: "run.cancel_requested",
+          payload: {
+            previousStatus: current.status,
+            previousRunnerId: current.assignedRunnerId,
+            terminalReason: "cancelled_by_user",
+            terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
+            ...(safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
+            reason: result.summary
+          },
+          visibility: "audit" as const,
+          importance: "high" as const,
+          message: result.summary,
+          createdAt: updatedAt
+        }, fencingTokens);
+        tx.insert(runEvents)
+          .values(runEventValues(safeAuditEvent))
+          .run();
+        const cancelled = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!cancelled || cancelled.status !== "cancelled") {
+          throw new Error(`Cancelled Run ${input.runId} could not be loaded from the winning transaction`);
+        }
+        return { outcome: "cancelled" as const, run: runFromRow(cancelled), event };
       });
-      await appendRunEvent({
-        runId: input.runId,
-        type: "run.cancel_requested",
-        payload: {
-          previousStatus: row.status,
-          previousRunnerId: row.assignedRunnerId,
-          terminalReason: "cancelled_by_user",
-          terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
-          ...(input.requestedBy ? { requestedBy: input.requestedBy } : {}),
-          reason: result.summary
-        },
-        visibility: "audit",
-        importance: "high",
-        message: result.summary,
-        createdAt: updatedAt
-      });
-      return {
-        outcome: "cancelled",
-        run: {
-          ...existingRun,
-          status: "cancelled",
-          assignedRunnerId: undefined,
-          updatedAt,
-          result
-        },
-        event
-      };
     },
 
     async createFollowUpRequest(input: {
@@ -2927,7 +2968,16 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             completedAttempt.runnerId === input.runnerId &&
             completedAttempt.fencingToken === input.fencingToken &&
             releasedTerminalAttemptMatchesRun(completedAttempt, runRow);
-          return duplicateTerminalAttempt ? "duplicate" : lease.outcome;
+          if (duplicateTerminalAttempt && status === runRow.status) return "duplicate";
+          if (duplicateTerminalAttempt && safeIdempotencyKey) {
+            const existing = await db.select().from(runEvents).where(eq(runEvents.runId, input.runId)).orderBy(desc(runEvents.id)).limit(250);
+            for (const event of existing) {
+              if (event.type !== "run.completed") continue;
+              const payload = recordFromJson(event.payloadJson);
+              if (payload?.["idempotencyKey"] === safeIdempotencyKey) return "duplicate";
+            }
+          }
+          return lease.outcome;
         }
       }
       if (safeIdempotencyKey) {
