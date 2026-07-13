@@ -74,7 +74,7 @@ const validEvent = {
   },
   permissions: [{ scope: "issue:comment", reason: "reply to source thread" }],
   callback: { provider: "github", uri: "https://api.github.com/repos/acme/demo/issues/1/comments" },
-  metadata: { owner: "acme", repo: "demo" }
+  metadata: { repoProvider: "github", owner: "acme", repo: "demo" }
 };
 
 function jsonRequest(body: unknown) {
@@ -150,7 +150,7 @@ function githubIssueEvent(input: { id: string; sourceEventId: string; threadKey?
       uri: "https://api.github.com/repos/acme/demo/issues/1/comments",
       ...(input.threadKey ? { threadKey: input.threadKey } : {})
     },
-    metadata: { owner: "acme", repo: "demo", issueNumber: 1 }
+    metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 1 }
   };
 }
 
@@ -180,7 +180,7 @@ function githubPullRequestEvent(input: { id: string; sourceEventId: string; thre
       uri: "https://api.github.com/repos/acme/demo/issues/2/comments",
       ...(input.threadKey ? { threadKey: input.threadKey } : {})
     },
-    metadata: { owner: "acme", repo: "demo", pullRequestNumber: 2 }
+    metadata: { repoProvider: "github", owner: "acme", repo: "demo", pullRequestNumber: 2 }
   };
 }
 
@@ -4192,7 +4192,7 @@ describe("dispatcher API", () => {
         ...validEvent.permissions,
         { scope: "repo:write", reason: "mutate labels after approval" }
       ],
-      metadata: { owner: "acme", repo: "demo", issueNumber: 2 }
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 2 }
     };
     const createResponse = await app.request("/v1/runs", {
       method: "POST",
@@ -4430,7 +4430,7 @@ describe("dispatcher API", () => {
       id: "evt_execute",
       sourceEventId: "comment_execute",
       permissions: [...validEvent.permissions, { scope: "repo:write", reason: "mutate issue fields after approval" }],
-      metadata: { owner: "acme", repo: "demo", issueNumber: 7 }
+      metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 7 }
     };
     await app.request("/v1/runs", {
       method: "POST",
@@ -4558,7 +4558,7 @@ describe("dispatcher API", () => {
           id: "evt_apply_prevalidation",
           sourceEventId: "comment_apply_prevalidation",
           permissions: [...validEvent.permissions, { scope: "repo:write", reason: "mutate labels after approval" }],
-          metadata: { owner: "acme", repo: "demo", issueNumber: 9 }
+          metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 9 }
         }
       })
     });
@@ -4671,7 +4671,7 @@ describe("dispatcher API", () => {
           id: "evt_status_mapping",
           sourceEventId: "comment_status_mapping",
           permissions: [...validEvent.permissions, { scope: "repo:write", reason: "mutate issue status after approval" }],
-          metadata: { owner: "acme", repo: "demo", issueNumber: 8 }
+          metadata: { repoProvider: "github", owner: "acme", repo: "demo", issueNumber: 8 }
         }
       })
     });
