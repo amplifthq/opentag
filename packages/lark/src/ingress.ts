@@ -124,10 +124,23 @@ function csvList(value: string | undefined): string[] | undefined {
   return items?.length ? items : undefined;
 }
 
+function optionalNonBlankEnv(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim()) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
 export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressConfig {
-  const appId = env.LARK_APP_ID;
-  const appSecret = env.LARK_APP_SECRET;
+  const appId = optionalNonBlankEnv("LARK_APP_ID", env.LARK_APP_ID);
+  const appSecret = optionalNonBlankEnv("LARK_APP_SECRET", env.LARK_APP_SECRET);
+  const channelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
   const dispatcherUrl = env.OPENTAG_DISPATCHER_URL;
+  if (Boolean(appId) !== Boolean(channelPrincipalCredential)) {
+    throw new Error("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
   if (!appId || !appSecret) {
     throw new Error("LARK_APP_ID and LARK_APP_SECRET are required");
   }
@@ -148,6 +161,7 @@ export function larkIngressConfigFromEnv(env: NodeJS.ProcessEnv): LarkIngressCon
     domain: domainFromEnv(env.LARK_DOMAIN),
     agentId: env.OPENTAG_LARK_AGENT_ID ?? DEFAULT_AGENT_ID,
     ...(env.OPENTAG_DISPATCHER_TOKEN ? { dispatcherToken: env.OPENTAG_DISPATCHER_TOKEN } : {}),
+    ...(channelPrincipalCredential ? { channelPrincipalCredential } : {}),
     ...(env.LARK_BOT_OPEN_ID ? { botOpenId: env.LARK_BOT_OPEN_ID } : {}),
     ...(bindingAdminOpenIds ? { bindingAdminOpenIds } : {}),
     ...(bindingAdminUserIds ? { bindingAdminUserIds } : {}),

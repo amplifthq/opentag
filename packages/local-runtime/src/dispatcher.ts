@@ -253,6 +253,12 @@ function parseCsvList(raw: string | undefined): string[] | undefined {
   return items?.length ? items : undefined;
 }
 
+function optionalNonBlankEnv(name: string, value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim()) throw new Error(`${name} must be a non-empty string`);
+  return value;
+}
+
 function parseScopeList(raw: string | undefined): string[] | undefined {
   const items = raw
     ?.split(/[,\s]+/)
@@ -483,10 +489,41 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     throw new Error(`PORT must be a positive integer, received ${env.PORT ?? "3030"}`);
   }
 
+  const slackApplicationId = optionalNonBlankEnv("OPENTAG_SLACK_APP_ID", env.OPENTAG_SLACK_APP_ID);
+  const slackChannelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
+  if (Boolean(slackApplicationId) !== Boolean(slackChannelPrincipalCredential)) {
+    throw new Error("OPENTAG_SLACK_APP_ID and OPENTAG_SLACK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
+  const larkApplicationId = optionalNonBlankEnv("LARK_APP_ID", env.LARK_APP_ID);
+  const larkAppSecret = optionalNonBlankEnv("LARK_APP_SECRET", env.LARK_APP_SECRET);
+  const larkBotId = optionalNonBlankEnv("LARK_BOT_OPEN_ID", env.LARK_BOT_OPEN_ID);
+  const larkChannelPrincipalCredential = optionalNonBlankEnv(
+    "OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL",
+    env.OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL
+  );
+  if (Boolean(larkApplicationId) !== Boolean(larkChannelPrincipalCredential)) {
+    throw new Error("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+  }
   const larkDomain = larkDomainFromEnv(env.LARK_DOMAIN);
-  if (Boolean(env.LARK_APP_ID) !== Boolean(env.LARK_APP_SECRET)) {
+  if (Boolean(larkApplicationId) !== Boolean(larkAppSecret)) {
     throw new Error("LARK_APP_ID and LARK_APP_SECRET must be configured together.");
   }
+  const channelPrincipals: ChannelPrincipalCredential[] = [
+    ...(slackApplicationId && slackChannelPrincipalCredential
+      ? [{ provider: "slack", applicationId: slackApplicationId, credential: slackChannelPrincipalCredential }]
+      : []),
+    ...(larkApplicationId && larkChannelPrincipalCredential
+      ? [{
+          provider: "lark",
+          applicationId: larkApplicationId,
+          ...(larkBotId ? { botId: larkBotId } : {}),
+          credential: larkChannelPrincipalCredential
+        }]
+      : [])
+  ];
   const slackBotTokensByAgentId = parseAgentTokenMap("OPENTAG_SLACK_BOT_TOKENS_JSON", env.OPENTAG_SLACK_BOT_TOKENS_JSON);
   const runnerTokens = parseStringList("OPENTAG_RUNNER_TOKENS_JSON", env.OPENTAG_RUNNER_TOKENS_JSON);
   const revokedRunnerTokenFingerprints = parseStringList(
@@ -534,6 +571,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_RUNNER_TOKEN ? { runnerToken: env.OPENTAG_RUNNER_TOKEN } : {}),
     ...(runnerTokens ? { runnerTokens } : {}),
     ...(revokedRunnerTokenFingerprints ? { revokedRunnerTokenFingerprints } : {}),
+    ...(channelPrincipals.length ? { channelPrincipals } : {}),
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
@@ -547,11 +585,11 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_LINEAR_WEBHOOK_SECRET ? { linearWebhookSecret: env.OPENTAG_LINEAR_WEBHOOK_SECRET } : {}),
     ...(env.OPENTAG_LINEAR_WEBHOOK_PATH ? { linearWebhookPath: env.OPENTAG_LINEAR_WEBHOOK_PATH } : {}),
     ...(linearProjectTarget ? { linearProjectTarget } : {}),
-    ...(env.LARK_APP_ID && env.LARK_APP_SECRET
+    ...(larkApplicationId && larkAppSecret
       ? {
           lark: {
-            appId: env.LARK_APP_ID,
-            appSecret: env.LARK_APP_SECRET,
+            appId: larkApplicationId,
+            appSecret: larkAppSecret,
             domain: larkDomain ?? "lark"
           }
         }

@@ -12,9 +12,33 @@ describe("Lark ingress runtime", () => {
     expect(() =>
       larkIngressConfigFromEnv({
         LARK_APP_ID: "cli_test",
-        LARK_APP_SECRET: "secret_test"
+        LARK_APP_SECRET: "secret_test",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test"
       })
     ).toThrow("OPENTAG_DISPATCHER_URL is required");
+  });
+
+  it("rejects partial or blank managed principal configuration", () => {
+    expect(() =>
+      larkIngressConfigFromEnv({
+        LARK_APP_ID: "cli_test",
+        LARK_APP_SECRET: "secret_test",
+        OPENTAG_DISPATCHER_URL: "http://localhost:3030"
+      })
+    ).toThrow("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+    expect(() =>
+      larkIngressConfigFromEnv({
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test"
+      })
+    ).toThrow("LARK_APP_ID and OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be configured together.");
+    expect(() =>
+      larkIngressConfigFromEnv({
+        LARK_APP_ID: "cli_test",
+        LARK_APP_SECRET: "secret_test",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "   ",
+        OPENTAG_DISPATCHER_URL: "http://localhost:3030"
+      })
+    ).toThrow("OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL must be a non-empty string");
   });
 
   it("normalizes environment values into an ingress config", () => {
@@ -26,6 +50,7 @@ describe("Lark ingress runtime", () => {
         LARK_BOT_OPEN_ID: "ou_bot",
         OPENTAG_DISPATCHER_URL: "http://localhost:3030",
         OPENTAG_DISPATCHER_TOKEN: "pairing_test",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test",
         OPENTAG_RUN_TIMEOUT_MS: "30000",
         OPENTAG_LARK_DEFAULT_REPO: "local:path_abc/opentag",
         OPENTAG_LARK_BINDING_ADMIN_OPEN_IDS: "ou_admin, ou_backup",
@@ -37,6 +62,7 @@ describe("Lark ingress runtime", () => {
       appSecret: "secret_test",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: "pairing_test",
+      channelPrincipalCredential: "lark_principal_test",
       domain: "feishu",
       agentId: DEFAULT_AGENT_ID,
       botOpenId: "ou_bot",
@@ -58,6 +84,7 @@ describe("Lark ingress runtime", () => {
         LARK_APP_ID: "cli_test",
         LARK_APP_SECRET: "secret_test",
         LARK_DOMAIN: "feishu ",
+        OPENTAG_LARK_CHANNEL_PRINCIPAL_CREDENTIAL: "lark_principal_test",
         OPENTAG_DISPATCHER_URL: "http://localhost:3030"
       })
     ).toThrow("LARK_DOMAIN must be either lark or feishu");
