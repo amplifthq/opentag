@@ -18,6 +18,7 @@ import {
   createSlackSourceReceiptSink,
   createTelegramCallbackSink
 } from "../src/callbacks.js";
+import { createDefaultCallbackPresentation } from "../src/presentation.js";
 import { processPendingCallbacks } from "../src/server.js";
 
 describe("createGitHubCallbackSink", () => {
@@ -736,6 +737,74 @@ describe("createGitHubCallbackSink", () => {
     ]);
   });
 
+  it("posts and updates rendered Slack final summaries without encoding mrkdwn twice", async () => {
+    const requests: unknown[] = [];
+    const sink = createSlackCallbackSink({
+      botToken: "xoxb-test",
+      fetchImpl: (async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return Response.json({ ok: true, ts: "1710000000.000200" });
+      }) as typeof fetch
+    });
+    const rendered = createDefaultCallbackPresentation().final({
+      provider: "slack",
+      result: {
+        conclusion: "success",
+        summary: "Use <tag> & [docs](https://example.com?a=1&b=2)"
+      }
+    });
+    await sink.deliver({
+      runId: "run_rendered_slack",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      body: rendered.body,
+      ...(rendered.blocks ? { blocks: rendered.blocks } : {})
+    });
+    await sink.deliver({
+      runId: "run_rendered_slack_update",
+      kind: "final",
+      provider: "slack",
+      uri: "https://slack.com/api/chat.postMessage",
+      threadKey: "T123|C123|1710000000.000100",
+      externalMessageId: "1710000000.000200",
+      body: rendered.body,
+      ...(rendered.blocks ? { blocks: rendered.blocks } : {})
+    });
+
+    expect(requests).toEqual([
+      {
+        channel: "C123",
+        text: "*Finished: success.*\nUse &lt;tag&gt; &amp; <https://example.com?a=1&b=2|docs>",
+        thread_ts: "1710000000.000100",
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "*Finished: success.*\nUse &lt;tag&gt; &amp; <https://example.com?a=1&b=2|docs>"
+            }
+          }
+        ]
+      },
+      {
+        channel: "C123",
+        text: "*Finished: success.*\nUse &lt;tag&gt; &amp; <https://example.com?a=1&b=2|docs>",
+        ts: "1710000000.000200",
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "*Finished: success.*\nUse &lt;tag&gt; &amp; <https://example.com?a=1&b=2|docs>"
+            }
+          }
+        ]
+      }
+    ]);
+  });
+
   it("sanitizes credential-like Slack text and blocks before provider rendering", async () => {
     const payloads: unknown[] = [];
     const raw = "xoxb\x2d1234567890-abcdefghijklmnopqrstuvwxyz";
@@ -1169,7 +1238,7 @@ describe("createGitHubCallbackSink", () => {
       provider: "slack",
       uri: "https://slack.com/api/chat.postMessage",
       threadKey: "T123|C123|1710000000.000100",
-      body: "**done**",
+      body: "*done*",
       blocks: [
         {
           type: "section",

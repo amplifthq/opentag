@@ -228,9 +228,13 @@ export function createSlackReactionPayload(input: { channelId: string; messageTs
 }
 
 function truncateSlackText(text: string, maxLength: number): string {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const normalized = text.replace(/\s+/g, " ").trim();
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+function normalizeSlackMultilineText(text: string): string {
+  return text.replace(/\r\n?/g, "\n").trim();
 }
 
 function firstMarkdownSection(text: string, heading: string): string | undefined {
@@ -241,7 +245,7 @@ function firstMarkdownSection(text: string, heading: string): string | undefined
 
 // Apply the limit after mrkdwn conversion because Slack escaping can expand the source text.
 function truncateSlackMrkdwn(text: string, maxLength: number): string {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
+  const normalized = normalizeSlackMultilineText(text);
   const rendered = markdownToSlackMrkdwn(normalized);
   if (rendered.length <= maxLength) return rendered;
 
@@ -267,7 +271,7 @@ function truncateSlackMrkdwn(text: string, maxLength: number): string {
 function compactSlackSummary(summary: string): string {
   const whatChanged = firstMarkdownSection(summary, "What changed");
   const selected = whatChanged ?? summary;
-  return truncateSlackText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""), MAX_SLACK_FINAL_SUMMARY_LENGTH);
+  return normalizeSlackMultilineText(selected.replace(/^\*\*[^*]+:\*\*\s*/i, ""));
 }
 
 function renderCompactSlackSummary(summary: string): string {
@@ -821,19 +825,31 @@ export function createSlackSourceThreadStatusBlocks(presentation: OpenTagSourceT
   return blocks;
 }
 
-export function createSlackPostMessagePayload(input: { channelId: string; text: string; threadTs: string; blocks?: SlackBlock[] }): SlackMessagePayload {
+export function createSlackPostMessagePayload(input: {
+  channelId: string;
+  text: string;
+  textFormat?: "markdown" | "mrkdwn";
+  threadTs: string;
+  blocks?: SlackBlock[];
+}): SlackMessagePayload {
   return {
     channel: input.channelId,
-    text: markdownToSlackMrkdwn(input.text),
+    text: input.textFormat === "mrkdwn" ? input.text : markdownToSlackMrkdwn(input.text),
     thread_ts: input.threadTs,
     ...(input.blocks?.length ? { blocks: input.blocks } : {})
   };
 }
 
-export function createSlackUpdateMessagePayload(input: { channelId: string; text: string; messageTs: string; blocks?: SlackBlock[] }): SlackMessagePayload {
+export function createSlackUpdateMessagePayload(input: {
+  channelId: string;
+  text: string;
+  textFormat?: "markdown" | "mrkdwn";
+  messageTs: string;
+  blocks?: SlackBlock[];
+}): SlackMessagePayload {
   return {
     channel: input.channelId,
-    text: markdownToSlackMrkdwn(input.text),
+    text: input.textFormat === "mrkdwn" ? input.text : markdownToSlackMrkdwn(input.text),
     ts: input.messageTs,
     ...(input.blocks?.length ? { blocks: input.blocks } : {})
   };

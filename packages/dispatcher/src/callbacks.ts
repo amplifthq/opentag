@@ -459,12 +459,14 @@ export function createSlackCallbackSink(input: {
             ? createSlackUpdateMessagePayload({
                 channelId: thread.channelId,
                 text: message.body,
+                textFormat: "mrkdwn",
                 messageTs: existingStatusTs,
                 ...(message.blocks?.length ? { blocks: message.blocks } : {})
               })
             : createSlackPostMessagePayload({
                 channelId: thread.channelId,
                 text: message.body,
+                textFormat: "mrkdwn",
                 threadTs: thread.threadTs,
                 ...(message.blocks?.length ? { blocks: message.blocks } : {})
               })
