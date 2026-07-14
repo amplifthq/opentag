@@ -307,6 +307,36 @@ describe("default callback presentation", () => {
     expect(JSON.stringify(presentation.render({ provider: "lark", presentation: status }).rich)).toContain("label this bug");
   });
 
+  it("escapes Slack fallbacks for plain doctor and source-thread presentations", () => {
+    const presentation = createDefaultCallbackPresentation();
+    const doctor = createDoctorSummaryPresentation({
+      title: "OpenTag doctor <redacted> & ready",
+      checks: [{ status: "ok", name: "dispatcher <local>", message: "reachable & healthy" }]
+    });
+    const status = createSourceThreadStatusPresentation({
+      sourceContainer: "slack:T123/C456",
+      projectTarget: "github:acme/demo",
+      bindingState: "bound",
+      queuedFollowUps: [],
+      queuedFollowUpsTotal: 0,
+      currentCommand: "fix <tag> & [docs](https://example.com)",
+      nextAction: "wait & review <output>"
+    });
+
+    const slackDoctor = presentation.render({ provider: "slack", presentation: doctor });
+    expect(slackDoctor.body).toContain("OpenTag doctor &lt;redacted&gt; &amp; ready");
+    expect(slackDoctor.body).toContain("dispatcher &lt;local&gt;: reachable &amp; healthy");
+    expect(slackDoctor.blocks).toBeDefined();
+
+    const slackStatus = presentation.render({ provider: "slack", presentation: status });
+    expect(slackStatus.body).toContain("Command: fix &lt;tag&gt; &amp; <https://example.com|docs>");
+    expect(slackStatus.body).toContain("Next action: wait &amp; review &lt;output&gt;");
+    expect(slackStatus.blocks).toBeDefined();
+
+    expect(presentation.render({ provider: "github", presentation: doctor }).body).toContain("OpenTag doctor <redacted> & ready");
+    expect(presentation.render({ provider: "custom", presentation: status }).body).toContain("Command: fix <tag> & [docs](https://example.com)");
+  });
+
   it("renders standalone action receipts as Slack and Lark native UI with plain-text fallback", () => {
     const presentation = createDefaultCallbackPresentation();
     const receipt = createActionReceiptPresentation({

@@ -45,6 +45,7 @@ import {
   createSlackFinalSummaryBlocks,
   createSlackRunStatusBlocks,
   createSlackSourceThreadStatusBlocks,
+  markdownToSlackMrkdwn,
   renderSlackActionReceiptPresentation,
   renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
@@ -213,7 +214,7 @@ function renderDoctorSummary(provider: CallbackProvider, presentation: OpenTagDo
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
-      body,
+      body: markdownToSlackMrkdwn(body),
       blocks: createSlackDoctorSummaryBlocks(presentation)
     };
   }
@@ -234,7 +235,7 @@ function renderSourceThreadStatus(provider: CallbackProvider, presentation: Open
   const canRenderRich = supportsRichPresentation(provider);
   if (canRenderRich && provider === "slack") {
     return {
-      body,
+      body: markdownToSlackMrkdwn(body),
       blocks: createSlackSourceThreadStatusBlocks(presentation)
     };
   }
