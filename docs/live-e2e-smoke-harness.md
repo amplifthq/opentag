@@ -1,9 +1,10 @@
 # Live E2E Smoke Harness
 
 The replay harness proves protocol behavior without live provider APIs. The live
-E2E smoke harness is the next layer: it collects the existing GitHub, Slack,
-Lark, and Linear dogfood scripts behind one safe entry point so a release or PR
-reviewer can run the live cases intentionally and keep a JSON evidence report.
+E2E smoke harness is the next layer: it collects the existing ACP, GitHub,
+Slack, Lark, and Linear dogfood scripts behind one safe entry point so a release
+or PR reviewer can run the live cases intentionally and keep a JSON evidence
+report.
 
 The harness does not run live provider calls by default. You must select cases
 with `--case` or `--all`.
@@ -20,6 +21,7 @@ Current cases:
 | --- | --- | --- |
 | `protocol-runtime` | No | In-memory GitHub-shaped protocol smoke using dispatcher/client/store paths |
 | `slack-protocol` | No | In-memory Slack-shaped protocol smoke with quiet progress and Block Kit final callback |
+| `openclaw-acp` | Yes | Fail-closed OpenClaw 2026.7.1 candidate gate for worktree cwd, scratch cwd, fresh sessions, and cancellation through the generic ACP host |
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, final action receipt, optional `apply 1` PR flow |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
@@ -85,6 +87,44 @@ artifacts exist, and provider-visible action receipts do not expose raw executor
 logs.
 
 ## Case Notes
+
+### OpenClaw ACP
+
+`openclaw-acp` wraps `corepack pnpm smoke:openclaw-acp-conformance`. It expects
+OpenClaw `2026.7.1`, a running Gateway, and an isolated profile named
+`opentag-conformance` by default. Override the command, profile, Gateway URL, or
+expected version with `OPENTAG_OPENCLAW_COMMAND`, `OPENTAG_OPENCLAW_PROFILE`,
+`OPENTAG_OPENCLAW_GATEWAY_URL`, and
+`OPENTAG_OPENCLAW_EXPECTED_VERSION`.
+
+The case uses OpenTag's generic ACP executor; it does not invoke a dedicated
+OpenClaw adapter. It fails closed unless real file tools write into the exact
+OpenTag-created repository worktree and repository-free scratch directory,
+each ACP process creates a distinct disposable Gateway session, a long-running
+real tool call stops before its completion marker, and no marker appears in the
+source checkout or OpenClaw's configured default workspace. The stock OpenClaw
+bridge carries the ACP cwd into the Gateway request using its default cwd prefix,
+so do not add `--no-prefix-cwd` to the integration binding.
+
+The current stock 2026.7.1 result is intentionally non-zero. Worktree, scratch,
+and distinct Gateway session checks pass, but after ACP cancellation marks the
+Gateway session `killed`, the in-flight shell still reaches its completion
+marker. Until that external effect stops, this gate does not authorize an
+OpenClaw manifest and OpenTag does not ship one.
+
+The test Gateway may use no authentication only when it is isolated and bound
+to loopback. A reusable or remote profile must own its Gateway authentication;
+do not put tokens in an OpenTag manifest. To retain a sanitized case report:
+
+```bash
+OPENTAG_OPENCLAW_CONFORMANCE_REPORT=.omx/live-e2e/openclaw-acp.json \
+corepack pnpm smoke:live -- --case openclaw-acp
+```
+
+This live case covers OpenClaw-specific workspace, session, and cancellation
+behavior. Run it alongside the generic ACP executor tests, governance matrix,
+and privacy scan for the permission, Action fencing, presentation, and
+credential-isolation parts of the full conformance checklist.
 
 ### GitHub Repository Webhook
 
