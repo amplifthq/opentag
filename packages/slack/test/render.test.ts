@@ -184,6 +184,42 @@ describe("Slack callback rendering", () => {
     expect(summaryBlock.text.text.endsWith("…")).toBe(true);
   });
 
+  it("preserves final-summary paragraphs while normalizing CRLF and lone CR", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "success",
+      summary: "first paragraph\r\n\r\nsecond paragraph\rthird line"
+    });
+
+    const summaryBlock = blocks[0];
+    if (summaryBlock?.type !== "section") throw new Error("expected summary section");
+    expect(summaryBlock.text.text).toBe("*Finished: success.*\nfirst paragraph\n\nsecond paragraph\nthird line");
+  });
+
+  it("keeps truncated final summaries as well-formed Unicode", () => {
+    const blocks = createSlackFinalResultBlocks({
+      conclusion: "success",
+      summary: "😀".repeat(1300)
+    });
+
+    const summaryBlock = blocks[0];
+    if (summaryBlock?.type !== "section") throw new Error("expected summary section");
+    const summaryText = summaryBlock.text.text.split("\n", 2)[1] ?? "";
+    expect(summaryText.isWellFormed()).toBe(true);
+    expect(summaryText.length).toBeLessThanOrEqual(2500);
+    expect(summaryText.endsWith("…")).toBe(true);
+  });
+
+  it("keeps compact one-line fields collapsed", () => {
+    const text = renderSlackFinalResult({
+      conclusion: "success",
+      summary: "Done.",
+      nextAction: "open the thread\r\nthen\tfollow up"
+    });
+
+    expect(text).toContain("Next: open the thread then follow up");
+    expect(text).not.toContain("open the thread\nthen");
+  });
+
   it("builds Block Kit sections for source-thread status", () => {
     const blocks = createSlackSourceThreadStatusBlocks(
       createSourceThreadStatusPresentation({
