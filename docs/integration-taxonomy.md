@@ -32,12 +32,19 @@ The manifest is not a runtime event stream and must not contain credentials.
     "agent": {
       "protocol": "agent-client-protocol",
       "protocolVersion": 1,
-      "binding": "agent"
+      "binding": "agent",
+      "workspace": { "sessionCwd": "required" }
     }
   },
   "resources": {}
 }
 ```
+
+The Agent workspace declaration attests that the integration's real file tools
+honor the ACP session `cwd`; ACP transport alone does not prove this. OpenTag
+rejects an ACP Agent role during manifest parsing when the declaration is
+absent. Integrators must verify real-tool behavior in worktree and scratch
+Attempts before making the attestation.
 
 ## Active roles
 

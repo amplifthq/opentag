@@ -88,7 +88,7 @@ function checkInstalledDoctorCommand(installDir) {
   if (doctor.status !== 1) {
     throw new Error(`Expected the intentionally incomplete doctor config to exit 1, received ${doctor.status ?? "no status"}.`);
   }
-  for (const expected of ["OpenTag doctor", "FAIL repository config: No repositories are configured."]) {
+  for (const expected of ["OpenTag doctor", "FAIL repository config: No repositories or agents are configured."]) {
     if (!doctorOutput.includes(expected)) {
       throw new Error(`Installed opentag doctor output did not contain ${JSON.stringify(expected)}.`);
     }

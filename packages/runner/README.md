@@ -17,7 +17,7 @@ pnpm add @opentag/runner
 - `createCodexExecutor`: executor that runs `codex exec` in a mapped local checkout.
 - Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
 - Command helpers such as `nodeCommandRunner` and `assertCommandSucceeded`.
-- Built-in executors expose an optional `capability` contract so setup, doctor, status, and service surfaces can report profile, cancellation, hook-completion, progress-event, approval-boundary, prompt/context trust gates, workspace-isolation, secret, and completion-signal support honestly.
+- Built-in and generic ACP executors expose an optional `capability` contract so setup, doctor, status, and service surfaces can report profile, cancellation, hook-completion, progress-event, approval-boundary, prompt/context trust gates, workspace isolation, ACP session-cwd conformance, secret, and completion-signal support honestly.
 
 ## Example
 

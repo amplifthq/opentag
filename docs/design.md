@@ -365,10 +365,17 @@ type ExecutorCapability = {
   rawContextAccess: boolean;
   writeActionAccess: "none" | "propose" | "execute";
   workspaceIsolation: "none" | "branch" | "worktree" | "external";
+  workspaceCwdConformance?: "declared" | "unverified";
   requiredSecrets: SecretRefRequirement[];
   completionSignals: CompletionSignalDescriptor[];
 };
 ```
+
+`workspaceCwdConformance` is a shared audit surface for executor adapters.
+Generic ACP manifests require the explicit `declared` attestation and fail
+schema parsing without it; `unverified` remains available for other adapters
+that must report they cannot attest session-cwd behavior. Transport of the path
+alone is not evidence that an agent's real file tools honor it.
 
 Spawn-based executors remain the simplest path: OpenTag creates an isolated
 branch or worktree, starts the command with bounded context, captures output,
