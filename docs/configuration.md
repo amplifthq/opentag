@@ -73,7 +73,8 @@ ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
         "agent": {
           "protocol": "agent-client-protocol",
           "protocolVersion": 1,
-          "binding": "agent"
+          "binding": "agent",
+          "workspace": { "sessionCwd": "required" }
         }
       },
       "resources": {}
@@ -83,6 +84,12 @@ ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
   "keepScratch": "on_failure"
 }
 ```
+
+The workspace declaration is a manifest attestation, not runtime proof. ACP
+transports the session `cwd`, but the agent's real file tools must be tested in
+repository worktrees and scratch directories before the declaration is added.
+An ACP Agent manifest without it is invalid configuration and is rejected while
+loading the config, before an executor can start.
 
 ### ACP-first setup choices
 

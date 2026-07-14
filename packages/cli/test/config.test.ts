@@ -115,7 +115,8 @@ describe("OpenTag CLI config", () => {
               agent: {
                 protocol: "agent-client-protocol",
                 protocolVersion: 1,
-                binding: "agent"
+                binding: "agent",
+                workspace: { sessionCwd: "required" }
               }
             },
             resources: {}

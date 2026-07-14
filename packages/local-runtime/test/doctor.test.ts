@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createHermesExecutor, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
+import { createAcpExecutor, createHermesExecutor, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
 import type { OpenTagDaemonConfig } from "../src/config.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "../src/doctor.js";
 
@@ -54,6 +54,19 @@ const codexExecutor: ExecutorAdapter = {
   async cancel() {}
 };
 
+function withUnverifiedWorkspaceCapability(executor: ExecutorAdapter): ExecutorAdapter {
+  if (!executor.capability) throw new Error("Expected executor capability in doctor test fixture.");
+  return {
+    ...executor,
+    capability: {
+      ...executor.capability,
+      writeAccess: "external",
+      workspaceIsolation: "external",
+      workspaceCwdConformance: "unverified"
+    }
+  };
+}
+
 function tokenFingerprint(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -61,7 +74,11 @@ function tokenFingerprint(token: string): string {
 async function runCodexDoctor(
   codexConfig: string,
   configOverrides: Partial<OpenTagDaemonConfig> = {},
-  options: { executors?: Record<string, ExecutorAdapter>; env?: Record<string, string | undefined> } = {}
+  options: {
+    executors?: Record<string, ExecutorAdapter>;
+    env?: Record<string, string | undefined>;
+    repositoryDefaultExecutor?: string;
+  } = {}
 ) {
   const root = mkdtempSync(join(tmpdir(), "opentag-local-runtime-doctor-"));
   const checkoutPath = join(root, "demo");
@@ -81,7 +98,7 @@ async function runCodexDoctor(
             owner: "acme",
             repo: "demo",
             checkoutPath,
-            defaultExecutor: "codex",
+            defaultExecutor: options.repositoryDefaultExecutor ?? "codex",
             baseBranch: "main",
             pushRemote: "origin",
             keepWorktree: "on_failure"
@@ -138,8 +155,171 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain("context=context_packet,context_pointers,workspace");
     expect(formatDoctorChecks(checks)).toContain("prompt=executor_adapter, write=workspace");
     expect(formatDoctorChecks(checks)).toContain("conversation=request, prompt_mutation=none, raw_context=no, write_actions=none");
+    expect(formatDoctorChecks(checks)).toContain("isolation=worktree, cwd_conformance=not_applicable");
     expect(formatDoctorChecks(checks)).toContain("OK   github:acme/demo checkout: Workspace path configured (hasWorkspacePath=yes).");
     expect(formatDoctorChecks(checks)).not.toContain("opentag-local-runtime-doctor-");
+  });
+
+  it("reports a repository-free executor's unverified workspace capability", async () => {
+    const manifest = {
+      protocol: "opentag.integration.v1" as const,
+      id: "scratch-agent",
+      label: "Scratch ACP Agent",
+      bindings: {
+        agent: { kind: "stdio" as const, command: "scratch-agent", args: ["acp"] }
+      },
+      roles: {
+        agent: {
+          protocol: "agent-client-protocol" as const,
+          protocolVersion: 1 as const,
+          binding: "agent",
+          workspace: { sessionCwd: "required" as const }
+        }
+      },
+      resources: {}
+    };
+    const executor = withUnverifiedWorkspaceCapability(createAcpExecutor({ manifest }));
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { repositories: [], agents: { "scratch-agent": manifest } },
+      { executors: { "scratch-agent": executor } }
+    );
+    const output = formatDoctorChecks(checks);
+
+    expect(output).toContain("OK   scratch-agent configured agent: Scratch ACP Agent (scratch-agent)");
+    expect(output).toContain("FAIL scratch-agent capability:");
+    expect(output).toContain("isolation=external, cwd_conformance=unverified");
+    expect(doctorHasFailures(checks)).toBe(true);
+  });
+
+  it("passes repository-free doctor checks for a declared scratch-only ACP agent", async () => {
+    const manifest = {
+      protocol: "opentag.integration.v1" as const,
+      id: "declared-agent",
+      label: "Declared ACP Agent",
+      bindings: { agent: { kind: "stdio" as const, command: "declared-agent" } },
+      roles: {
+        agent: {
+          protocol: "agent-client-protocol" as const,
+          protocolVersion: 1 as const,
+          binding: "agent",
+          workspace: { sessionCwd: "required" as const }
+        }
+      },
+      resources: {}
+    };
+    const executor = createAcpExecutor({ manifest });
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { repositories: [], agents: { "declared-agent": manifest } },
+      { executors: { "declared-agent": executor } }
+    );
+    const output = formatDoctorChecks(checks);
+
+    expect(output).toContain("OK   repository config: 1 configured agent supports repository-free Runs.");
+    expect(output).toContain("OK   declared-agent capability:");
+    expect(doctorHasFailures(checks)).toBe(false);
+  });
+
+  it("fails repository configuration when neither repositories nor agents are configured", async () => {
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { repositories: [], agents: {} },
+      { executors: {} }
+    );
+
+    expect(formatDoctorChecks(checks)).toContain(
+      "FAIL repository config: No repositories or agents are configured."
+    );
+    expect(doctorHasFailures(checks)).toBe(true);
+  });
+
+  it("fails when a repository-free configured ACP agent has no local executor", async () => {
+    const manifest = {
+      protocol: "opentag.integration.v1" as const,
+      id: "missing-agent",
+      label: "Missing ACP Agent",
+      bindings: { agent: { kind: "stdio" as const, command: "missing-agent" } },
+      roles: {
+        agent: {
+          protocol: "agent-client-protocol" as const,
+          protocolVersion: 1 as const,
+          binding: "agent",
+          workspace: { sessionCwd: "required" as const }
+        }
+      },
+      resources: {}
+    };
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { repositories: [], agents: { "missing-agent": manifest } },
+      { executors: {} }
+    );
+
+    expect(formatDoctorChecks(checks)).toContain(
+      "FAIL missing-agent configured agent: No local executor is configured with this id."
+    );
+  });
+
+  it("does not duplicate an unverified executor capability already covered by a repository default", async () => {
+    const manifest = {
+      protocol: "opentag.integration.v1" as const,
+      id: "repo-agent",
+      label: "Repository ACP Agent",
+      bindings: { agent: { kind: "stdio" as const, command: "repo-agent" } },
+      roles: {
+        agent: {
+          protocol: "agent-client-protocol" as const,
+          protocolVersion: 1 as const,
+          binding: "agent",
+          workspace: { sessionCwd: "required" as const }
+        }
+      },
+      resources: {}
+    };
+    const acpExecutor = withUnverifiedWorkspaceCapability(createAcpExecutor({ manifest }));
+    const executor: ExecutorAdapter = { ...acpExecutor, canRun: async () => ({ ready: true }) };
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { agents: { "repo-agent": manifest } },
+      { executors: { "repo-agent": executor }, repositoryDefaultExecutor: "repo-agent" }
+    );
+    const output = formatDoctorChecks(checks);
+
+    expect(output.match(/repo-agent capability:/gu)).toHaveLength(1);
+    expect(output).toContain("FAIL repo-agent capability:");
+    expect(output).not.toContain("repo-agent configured agent:");
+    expect(doctorHasFailures(checks)).toBe(true);
+  });
+
+  it("fails a healthy repository doctor when a secondary configured ACP agent is unverified", async () => {
+    const manifest = {
+      protocol: "opentag.integration.v1" as const,
+      id: "secondary-agent",
+      label: "Secondary ACP Agent",
+      bindings: { agent: { kind: "stdio" as const, command: "secondary-agent" } },
+      roles: {
+        agent: {
+          protocol: "agent-client-protocol" as const,
+          protocolVersion: 1 as const,
+          binding: "agent",
+          workspace: { sessionCwd: "required" as const }
+        }
+      },
+      resources: {}
+    };
+    const secondaryExecutor = withUnverifiedWorkspaceCapability(createAcpExecutor({ manifest }));
+    const checks = await runCodexDoctor(
+      'service_tier = "fast"\n',
+      { agents: { "secondary-agent": manifest } },
+      { executors: { codex: codexExecutor, "secondary-agent": secondaryExecutor } }
+    );
+    const output = formatDoctorChecks(checks);
+
+    expect(output).toContain("OK   github:acme/demo git repo: Git checkout detected");
+    expect(output).toContain("FAIL secondary-agent capability:");
+    expect(output).toContain("cwd_conformance=unverified");
+    expect(doctorHasFailures(checks)).toBe(true);
   });
 
   it("fails Hermes readiness when the configured fixed profile is unavailable", async () => {

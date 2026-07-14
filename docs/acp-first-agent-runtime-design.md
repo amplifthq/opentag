@@ -157,11 +157,19 @@ Agent declaration:
     "agent": {
       "protocol": "agent-client-protocol",
       "protocolVersion": 1,
-      "binding": "hermesAcp"
+      "binding": "hermesAcp",
+      "workspace": { "sessionCwd": "required" }
     }
   }
 }
 ```
+
+`workspace.sessionCwd: "required"` is a manifest attestation that the Agent's
+real file tools honor the ACP session `cwd`. It is not negotiated runtime proof
+and does not turn `cwd` into a sandbox. The integration schema rejects an ACP
+Agent role when this required attestation is absent, before the Generic ACP Host
+is constructed. Integrators make it only after worktree and scratch conformance
+tests pass.
 
 A Hermes integration may also declare a Channel role, but the two roles use isolated runtime profiles and processes.
 
@@ -707,7 +715,7 @@ When the system cannot determine whether a material effect occurred, it records 
 5. Executor capabilities never enter a Channel runtime.
 6. Raw connection credentials never enter durable Run content or prompts.
 7. ACP permission interaction is not the authority boundary; OpenTag policy and the execution envelope are.
-8. The ACP `cwd` is a working directory, not a sandbox. Worker isolation and grants enforce the boundary.
+8. The ACP `cwd` is a working directory, not a sandbox. A manifest declaration attests that real Agent tools honor it; Worker isolation and grants enforce the boundary.
 9. Material external mutations require stable action identity and an observable receipt or reconciliation path.
 10. A stale Worker cannot update a reassigned Attempt.
 11. Agent completion cannot bypass Output Contract verification.
@@ -768,7 +776,7 @@ The former `opentag.executor.v1` and `stdio-jsonl-basic` implementation was remo
 
 The completed replacement:
 
-1. uses `agent-client-protocol`, `protocolVersion: 1`, and a separate `stdio` binding in Agent manifests;
+1. uses `agent-client-protocol`, `protocolVersion: 1`, a required session-cwd attestation, and a separate `stdio` binding in Agent manifests;
 2. hosts ACP through the Generic ACP Host;
 3. maps ACP session updates into internal Attempt events instead of Core domain or channel events;
 4. supplies execution context through the Input Snapshot, prompt, absolute `cwd`, and optional run-scoped MCP;

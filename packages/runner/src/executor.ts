@@ -143,6 +143,7 @@ export type ExecutorWriteAccess = "none" | "workspace" | "external";
 export type ExecutorConversationAccess = "none" | "request" | "thread_transcript";
 export type ExecutorPromptMutation = "none" | "append" | "replace";
 export type ExecutorWriteActionAccess = "none" | "propose" | "execute";
+export type ExecutorWorkspaceCwdConformance = "declared" | "unverified";
 
 export type ExecutorCapabilityContract = {
   id: string;
@@ -161,6 +162,7 @@ export type ExecutorCapabilityContract = {
   rawContextAccess: boolean;
   writeActionAccess: ExecutorWriteActionAccess;
   workspaceIsolation: "none" | "branch" | "worktree" | "external";
+  workspaceCwdConformance?: ExecutorWorkspaceCwdConformance;
   sourceControl?: "none" | "daemon_managed" | "self_committing";
   requiredSecrets: ExecutorSecretRequirement[];
   completionSignals: ExecutorCompletionSignal[];

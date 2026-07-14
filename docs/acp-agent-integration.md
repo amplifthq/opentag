@@ -52,7 +52,8 @@ Add a named `opentag.integration.v1` manifest under `agents`:
         "agent": {
           "protocol": "agent-client-protocol",
           "protocolVersion": 1,
-          "binding": "agent"
+          "binding": "agent",
+          "workspace": { "sessionCwd": "required" }
         }
       },
       "resources": {}
@@ -69,6 +70,14 @@ Connection or secret-reference resolver, not in a reusable manifest.
 
 The map key, manifest `id`, and executor selection name must match. Selecting
 `example-acp` causes the Generic ACP Host to launch the declared binding.
+
+`workspace.sessionCwd: "required"` is the integration author's attestation
+that the agent's real file tools honor the absolute `cwd` supplied to ACP
+`session/new`. ACP transports that value but does not prove how an agent or an
+external gateway uses it. The field is required: OpenTag rejects an ACP Agent
+manifest without it during schema parsing, before constructing an executor.
+Declare it only after testing the real tools in both an isolated repository
+worktree and a scratch directory; it is not runtime proof or a sandbox claim.
 
 ## ACP session lifecycle
 
@@ -211,7 +220,8 @@ runtime identities:
         "agent": {
           "protocol": "agent-client-protocol",
           "protocolVersion": 1,
-          "binding": "agent"
+          "binding": "agent",
+          "workspace": { "sessionCwd": "required" }
         }
       },
       "resources": {}
@@ -245,6 +255,8 @@ Before describing an ACP integration as ready, verify that it:
 
 - completes ACP initialization and a fresh session over stdio;
 - honors the absolute Attempt `cwd` for its real tools;
+- declares `roles.agent.workspace.sessionCwd: "required"` only after that
+  real-tool check passes;
 - works in both repository worktrees and repository-free scratch directories;
 - supports cancellation without changing a cancelled Run to success;
 - routes permission requests through OpenTag instead of prompting separately;

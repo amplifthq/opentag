@@ -25,7 +25,8 @@ function acpManifest() {
       agent: {
         protocol: "agent-client-protocol",
         protocolVersion: 1,
-        binding: "hermesAcp"
+        binding: "hermesAcp",
+        workspace: { sessionCwd: "required" }
       },
       channel: {
         protocol: "opentag.channel.v1",
@@ -56,10 +57,49 @@ describe("OpenTag integration manifest", () => {
     expect(manifest.roles.agent).toEqual({
       protocol: "agent-client-protocol",
       protocolVersion: 1,
-      binding: "hermesAcp"
+      binding: "hermesAcp",
+      workspace: { sessionCwd: "required" }
     });
     expect(manifest.roles.channel?.ownership).toEqual({ mode: "managed", exclusive: true });
     expect(manifest.resources["custom.report"]).toEqual({ refs: false, read: true, write: false });
+  });
+
+  it("requires a strict ACP session cwd conformance declaration", () => {
+    const parsed = OpenTagIntegrationManifestSchema.parse(acpManifest());
+
+    expect(parsed.roles.agent?.workspace).toEqual({ sessionCwd: "required" });
+  });
+
+  it("rejects an ACP agent role without the session cwd conformance declaration", () => {
+    const manifest = acpManifest();
+    const { workspace: _workspace, ...agentWithoutWorkspace } = manifest.roles.agent;
+
+    expect(() =>
+      OpenTagIntegrationManifestSchema.parse({
+        ...manifest,
+        roles: {
+          ...manifest.roles,
+          agent: agentWithoutWorkspace
+        }
+      })
+    ).toThrow();
+  });
+
+  it.each([
+    { sessionCwd: "optional" },
+    { sessionCwd: "required", extra: true }
+  ])("rejects an invalid ACP workspace conformance declaration: %j", (workspace) => {
+    const manifest = acpManifest();
+
+    expect(() =>
+      OpenTagIntegrationManifestSchema.parse({
+        ...manifest,
+        roles: {
+          ...manifest.roles,
+          agent: { ...manifest.roles.agent, workspace }
+        }
+      })
+    ).toThrow();
   });
 
   it("rejects an empty binding map", () => {

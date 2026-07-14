@@ -31,11 +31,18 @@ export const OpenTagStdioBindingSchema = z
 
 export const OpenTagIntegrationBindingSchema = OpenTagStdioBindingSchema;
 
+export const OpenTagAgentWorkspaceConformanceSchema = z
+  .object({
+    sessionCwd: z.literal("required")
+  })
+  .strict();
+
 export const OpenTagAgentIntegrationRoleSchema = z
   .object({
     protocol: OpenTagAgentProtocolSchema,
     protocolVersion: OpenTagAgentProtocolVersionSchema,
-    binding: z.string().trim().min(1)
+    binding: z.string().trim().min(1),
+    workspace: OpenTagAgentWorkspaceConformanceSchema
   })
   .strict();
 
@@ -223,6 +230,7 @@ export type OpenTagStdioBindingKind = z.infer<typeof OpenTagStdioBindingKindSche
 export type OpenTagStdioBindingInput = z.input<typeof OpenTagStdioBindingSchema>;
 export type OpenTagStdioBinding = z.infer<typeof OpenTagStdioBindingSchema>;
 export type OpenTagIntegrationBinding = z.infer<typeof OpenTagIntegrationBindingSchema>;
+export type OpenTagAgentWorkspaceConformance = z.infer<typeof OpenTagAgentWorkspaceConformanceSchema>;
 export type OpenTagAgentIntegrationRoleInput = z.input<typeof OpenTagAgentIntegrationRoleSchema>;
 export type OpenTagAgentIntegrationRole = z.infer<typeof OpenTagAgentIntegrationRoleSchema>;
 export type OpenTagManagedChannelOwnership = z.infer<typeof OpenTagManagedChannelOwnershipSchema>;

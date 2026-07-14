@@ -20,7 +20,12 @@ function acpManifest(input: { id: string; label: string; command: string; args?:
       agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [] }
     },
     roles: {
-      agent: { protocol: "agent-client-protocol" as const, protocolVersion: 1 as const, binding: "agent" }
+      agent: {
+        protocol: "agent-client-protocol" as const,
+        protocolVersion: 1 as const,
+        binding: "agent",
+        workspace: { sessionCwd: "required" as const }
+      }
     },
     resources: {}
   };
@@ -39,6 +44,7 @@ describe("parseDaemonConfig ACP agents", () => {
     const executors = executorsFromConfig(config);
     expect(executors["hermes-acp"]).toMatchObject({ id: "hermes-acp", displayName: "Hermes ACP" });
     expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
+    expect(executors.reviewer?.capability).toMatchObject({ workspaceCwdConformance: "declared" });
     expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(
       executors.reviewer?.capability?.completionSignals
     );
@@ -52,6 +58,22 @@ describe("parseDaemonConfig ACP agents", () => {
         }
       })
     ).toThrow(/reviewer|different-id/u);
+  });
+
+  it("rejects an ACP agent manifest without the required session cwd conformance", () => {
+    const manifest = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
+    const { workspace: _workspace, ...agentWithoutWorkspace } = manifest.roles.agent;
+
+    expect(() =>
+      parseDaemonConfig({
+        agents: {
+          reviewer: {
+            ...manifest,
+            roles: { agent: agentWithoutWorkspace }
+          }
+        }
+      })
+    ).toThrow(/workspace/u);
   });
 
   it.each(["echo", "codex", "claude-code", "hermes"])(

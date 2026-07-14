@@ -302,7 +302,11 @@ function normalizeManifest(input: OpenTagIntegrationManifestInput): NormalizedAc
   if (!role) throw new Error("ACP executor manifest must declare roles.agent.");
   const binding = manifest.bindings[role.binding];
   if (!binding) throw new Error(`ACP agent role references missing binding '${role.binding}'.`);
-  return { id: manifest.id, label: manifest.label, binding };
+  return {
+    id: manifest.id,
+    label: manifest.label,
+    binding
+  };
 }
 
 function assertExplicitWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
@@ -552,6 +556,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       rawContextAccess: false,
       writeActionAccess: "propose",
       workspaceIsolation: "worktree",
+      workspaceCwdConformance: "declared",
       sourceControl: "self_committing",
       requiredSecrets: [],
       completionSignals: [{ type: "stream_event", required: true, description: "ACP session/prompt stop response." }]

@@ -45,9 +45,18 @@ function formatExecutorCapability(capability: ExecutorCapabilityContract): strin
     `raw_context=${yesNo(capability.rawContextAccess)}`,
     `write_actions=${capability.writeActionAccess}`,
     `isolation=${capability.workspaceIsolation}`,
+    `cwd_conformance=${capability.workspaceCwdConformance ?? "not_applicable"}`,
     `secrets=${secrets}`,
     `completion=${completion}`
   ].join(", ");
+}
+
+function checkExecutorCapability(name: string, capability: ExecutorCapabilityContract): DoctorCheck {
+  return check(
+    capability.workspaceCwdConformance === "unverified" ? "fail" : "ok",
+    `${name} capability`,
+    formatExecutorCapability(capability)
+  );
 }
 
 function envSecretConfigured(env: Record<string, string | undefined>, name: string): boolean {
@@ -305,7 +314,7 @@ async function checkGitCheckout(input: {
   }
   checks.push(
     executor.capability
-      ? check("ok", `${input.repository.defaultExecutor} capability`, formatExecutorCapability(executor.capability))
+      ? checkExecutorCapability(input.repository.defaultExecutor, executor.capability)
       : check(
           "warn",
           `${input.repository.defaultExecutor} capability`,
@@ -391,7 +400,16 @@ export async function runDoctor(input: {
   checks.push(...checkRunnerTokenRotation(input.config));
 
   if (!input.config.repositories.length) {
-    checks.push(check("fail", "repository config", "No repositories are configured."));
+    const configuredAgentCount = Object.keys(input.config.agents ?? {}).length;
+    checks.push(
+      configuredAgentCount > 0
+        ? check(
+            "ok",
+            "repository config",
+            `${configuredAgentCount} configured agent${configuredAgentCount === 1 ? "" : "s"} support${configuredAgentCount === 1 ? "s" : ""} repository-free Runs.`
+          )
+        : check("fail", "repository config", "No repositories or agents are configured.")
+    );
   }
 
   if (shouldCheckCodexConfig(input.config)) {
@@ -422,6 +440,29 @@ export async function runDoctor(input: {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       checks.push(check(message.includes("repo_binding_not_found") ? "warn" : "fail", `${repository.owner}/${repository.repo} binding`, message));
+    }
+  }
+
+  const repositoryExecutorIds = new Set(input.config.repositories.map((repository) => repository.defaultExecutor));
+  for (const agentId of Object.keys(input.config.agents ?? {})) {
+    if (repositoryExecutorIds.has(agentId)) continue;
+    const executor = input.executors[agentId];
+    if (!executor) {
+      checks.push(check("fail", `${agentId} configured agent`, "No local executor is configured with this id."));
+      continue;
+    }
+    checks.push(check("ok", `${agentId} configured agent`, `${executor.displayName} (${executor.id})`));
+    checks.push(
+      executor.capability
+        ? checkExecutorCapability(agentId, executor.capability)
+        : check(
+            "warn",
+            `${agentId} capability`,
+            "Executor does not declare a capability contract; readiness may be incomplete."
+          )
+    );
+    if (executor.capability) {
+      checks.push(...checkExecutorSecretRequirements({ capability: executor.capability, env }));
     }
   }
 

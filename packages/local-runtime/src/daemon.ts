@@ -367,6 +367,20 @@ export async function runOneDaemonIteration(input: {
     scratchAttemptCreated = false;
   }
 
+  const runId = claimed.run.id;
+  const activeExecutor = executor;
+  const runTimeoutMs = input.runTimeoutMs;
+  try {
+    await input.client.markRunning(runId, activeExecutor.id, lease, {
+      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
+      idempotencyKey: `${input.runnerId}:${runId}:running`,
+      ...(runTimeoutMs ? { runTimeoutMs } : {})
+    });
+  } catch (error) {
+    await cleanupUnexecutedScratch();
+    throw error;
+  }
+
   let readiness: Awaited<ReturnType<ExecutorAdapter["canRun"]>>;
   try {
     readiness = await executor.canRun({
@@ -398,21 +412,8 @@ export async function runOneDaemonIteration(input: {
     return true;
   }
 
-  const runId = claimed.run.id;
   const attemptId = claimed.attemptId;
-  const activeExecutor = executor;
   const heartbeatIntervalMs = input.heartbeatIntervalMs ?? 15_000;
-  const runTimeoutMs = input.runTimeoutMs;
-  try {
-    await input.client.markRunning(runId, activeExecutor.id, lease, {
-      ...(activeExecutor.capability ? { executorCapability: activeExecutor.capability as unknown as Record<string, unknown> } : {}),
-      idempotencyKey: `${input.runnerId}:${runId}:running`,
-      ...(runTimeoutMs ? { runTimeoutMs } : {})
-    });
-  } catch (error) {
-    await cleanupUnexecutedScratch();
-    throw error;
-  }
   let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
   let heartbeatInFlight: Promise<void> | undefined;
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;

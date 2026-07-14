@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAcpExecutor, type AcpPermissionResolver } from "../src/acp-executor.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/acp-agent.mjs", import.meta.url));
@@ -50,10 +50,25 @@ function manifest(mode = "success") {
       agent: {
         protocol: "agent-client-protocol" as const,
         protocolVersion: 1 as const,
-        binding: "agent"
+        binding: "agent",
+        workspace: { sessionCwd: "required" as const }
       }
     },
     resources: {}
+  };
+}
+
+function unverifiedManifest(mode = "success") {
+  const configured = manifest(mode);
+  return {
+    ...configured,
+    roles: {
+      agent: {
+        protocol: configured.roles.agent.protocol,
+        protocolVersion: configured.roles.agent.protocolVersion,
+        binding: configured.roles.agent.binding
+      }
+    }
   };
 }
 
@@ -112,6 +127,24 @@ async function waitForFile(path: string): Promise<void> {
 }
 
 describe("ACP executor", () => {
+  it("derives workspace capability from the required manifest conformance declaration", () => {
+    expect(createAcpExecutor({ manifest: manifest() }).capability).toMatchObject({
+      writeAccess: "workspace",
+      workspaceIsolation: "worktree",
+      workspaceCwdConformance: "declared"
+    });
+  });
+
+  it("rejects an ACP manifest before executor construction when session cwd conformance is undeclared", () => {
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+
+    expect(() =>
+      createAcpExecutor({ manifest: unverifiedManifest() as never, runner: { run } })
+    ).toThrow(/workspace/u);
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("streams normalized plan, tool, and message updates and commits repository changes", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest() });

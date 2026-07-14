@@ -54,8 +54,12 @@
     protocol: "agent-client-protocol";
     protocolVersion: 1;
     binding: string;
+    workspace: { sessionCwd: "required" };
   }
   ```
+
+  The workspace attestation is required; manifests that omit it fail schema
+  parsing rather than entering a compatibility or deferred-readiness path.
 
 - Add an optional `roles.channel` declaration using `opentag.channel.v1`. The manifest role only declares its binding and managed/exclusive ownership metadata; it does not execute agent work.
 - Keep resources extensible with `z.record(OpenTagResourceCapabilitySchema)` so OpenTag is not repository-bound.

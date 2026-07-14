@@ -214,7 +214,7 @@ describe("ACP daemon workspaces", () => {
             args: [acpFixture, "permission"]
           }
         },
-        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent", workspace: { sessionCwd: "required" } } },
         resources: {}
       }
     });
@@ -365,7 +365,7 @@ describe("ACP daemon workspaces", () => {
         id: "fixture-agent",
         label: "Fixture ACP Agent",
         bindings: { agent: { kind: "stdio", command: process.execPath, args: [acpFixture] } },
-        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent", workspace: { sessionCwd: "required" } } },
         resources: {}
       }
     });
@@ -403,7 +403,7 @@ describe("ACP daemon workspaces", () => {
         id: "fixture-agent",
         label: "Fixture ACP Agent",
         bindings: { agent: { kind: "stdio", command: process.execPath, args: [acpFixture] } },
-        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent", workspace: { sessionCwd: "required" } } },
         resources: {}
       }
     });
@@ -473,6 +473,91 @@ describe("ACP daemon workspaces", () => {
     expect(existsSync(scratchRoot)).toBe(true);
     expect(readdirSync(scratchRoot)).toEqual([]);
     expect(completed[0]).toMatchObject({ conclusion: "needs_human", summary: "not configured" });
+  });
+
+  it("snapshots an unverified custom capability before readiness rejects without running the executor", async () => {
+    const scratchRoot = join(mkdtempSync(join(tmpdir(), "opentag-scratch-parent-")), "scratch");
+    const completed: OpenTagRunResult[] = [];
+    const order: string[] = [];
+    const markRunningCalls: Array<{
+      executor: string;
+      options: Parameters<DaemonClient["markRunning"]>[3];
+    }> = [];
+    const acpExecutor = createAcpExecutor({
+      manifest: {
+        protocol: "opentag.integration.v1",
+        id: "reviewer",
+        label: "Unverified ACP Agent",
+        bindings: { agent: { kind: "stdio", command: process.execPath, args: [acpFixture] } },
+        roles: {
+          agent: {
+            protocol: "agent-client-protocol",
+            protocolVersion: 1,
+            binding: "agent",
+            workspace: { sessionCwd: "required" }
+          }
+        },
+        resources: {}
+      }
+    });
+    if (!acpExecutor.capability) throw new Error("Expected ACP capability in daemon test fixture.");
+    const run = vi.fn(async () => ({ conclusion: "success" as const, summary: "unexpected execution" }));
+    const executor: ExecutorAdapter = {
+      ...acpExecutor,
+      capability: {
+        ...acpExecutor.capability,
+        writeAccess: "external",
+        workspaceIsolation: "external",
+        workspaceCwdConformance: "unverified"
+      },
+      async canRun() {
+        order.push("canRun:start");
+        order.push("canRun:end");
+        return { ready: false, reason: "Executor workspace conformance is unverified." };
+      },
+      run
+    };
+    const client = clientFor({
+      claimed: claimed({ event: event({ id: "evt_unverified_snapshot" }) }),
+      completed
+    });
+    client.markRunning = async (_runId, selectedExecutor, _lease, options) => {
+      order.push("markRunning");
+      markRunningCalls.push({ executor: selectedExecutor, options });
+    };
+    client.complete = async (_runId, _lease, result) => {
+      order.push("complete");
+      completed.push(result);
+    };
+
+    await runOneDaemonIteration({
+      runnerId: "runner_local",
+      repositories: [],
+      executors: { reviewer: executor },
+      scratchRoot,
+      heartbeatIntervalMs: 0,
+      client
+    });
+
+    expect(order).toEqual(["markRunning", "canRun:start", "canRun:end", "complete"]);
+    expect(markRunningCalls).toEqual([
+      expect.objectContaining({
+        executor: "reviewer",
+        options: expect.objectContaining({
+          executorCapability: expect.objectContaining({
+            writeAccess: "external",
+            workspaceIsolation: "external",
+            workspaceCwdConformance: "unverified"
+          })
+        })
+      })
+    ]);
+    expect(run).not.toHaveBeenCalled();
+    expect(completed[0]).toMatchObject({
+      conclusion: "needs_human",
+      summary: "Executor workspace conformance is unverified."
+    });
+    expect(readdirSync(scratchRoot)).toEqual([]);
   });
 
   it("never removes a sibling attempt while cleaning a readiness failure", async () => {
@@ -743,7 +828,7 @@ describe("ACP daemon workspaces", () => {
             args: [acpFixture, "success", fixtureConfigPath]
           }
         },
-        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent" } },
+        roles: { agent: { protocol: "agent-client-protocol", protocolVersion: 1, binding: "agent", workspace: { sessionCwd: "required" } } },
         resources: {}
       }
     });
