@@ -52,19 +52,29 @@ describe("built-in ACP coding agents", () => {
   it("keeps compatibility aliases as data-only definitions", () => {
     const definitions = builtInAcpAgentDefinitions();
 
-    expect(definitions.codex).toMatchObject({ id: "codex", registry: { id: "codex-acp", version: "1.1.2" } });
+    expect(definitions.codex).toMatchObject({
+      id: "codex",
+      registry: { id: "codex-acp", version: "1.1.2" },
+      capabilities: { supportsCancel: true }
+    });
     expect(definitions["claude-code"]).toMatchObject({
       id: "claude-code",
       sessionModeId: "default",
-      registry: { id: "claude-acp", version: "0.59.0" }
+      registry: { id: "claude-acp", version: "0.59.0" },
+      capabilities: { supportsCancel: true }
     });
     expect(definitions.codex.readinessTimeoutMs).toBe(30_000);
     expect(definitions["claude-code"].readinessTimeoutMs).toBe(30_000);
-    expect(definitions.cursor).toMatchObject({ id: "cursor", launch: { command: "cursor-agent", args: ["acp"] } });
+    expect(definitions.cursor).toMatchObject({
+      id: "cursor",
+      launch: { command: "cursor-agent", args: ["acp"] },
+      capabilities: { supportsCancel: true }
+    });
     expect(definitions.opencode).toMatchObject({
       id: "opencode",
       registry: { id: "opencode", version: "1.18.1" },
       launch: { command: "npx", args: ["--yes", "opencode-ai@1.18.1", "acp"] },
+      capabilities: { supportsCancel: true },
       launchEnvironment: {
         OPENCODE_DISABLE_TERMINAL_TITLE: "true",
         OPENCODE_PURE: "true"
@@ -72,7 +82,10 @@ describe("built-in ACP coding agents", () => {
     });
     expect(definitions.cursor.readinessTimeoutMs).toBe(30_000);
     expect(definitions.opencode.readinessTimeoutMs).toBe(30_000);
-    expect(definitions.hermes).toMatchObject({ id: "hermes", capabilities: { supportsProfile: true } });
+    expect(definitions.hermes).toMatchObject({
+      id: "hermes",
+      capabilities: { supportsProfile: true, supportsCancel: true }
+    });
     expect(definitions.openclaw).toMatchObject({
       id: "openclaw",
       launch: { command: "openclaw", args: ["acp"] },

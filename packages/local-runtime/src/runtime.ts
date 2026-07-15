@@ -4,6 +4,7 @@ import {
   createBuiltInAcpExecutors,
   createEchoExecutor,
   DEFAULT_HERMES_PROFILE,
+  type BuiltInAcpAgentOptions,
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
@@ -33,9 +34,9 @@ export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): 
   );
 }
 
-export function executorsFromConfig(config: OpenTagDaemonConfig) {
+export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltInAcpAgentOptions {
   const security = securityFromConfig(config);
-  const builtInAcpExecutors = createBuiltInAcpExecutors({
+  return {
     ...(security ? { security } : {}),
     hermes: {
       ...(config.hermes?.command ? { command: config.hermes.command } : {}),
@@ -46,7 +47,12 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
       ...(config.openclaw?.profile ? { profile: config.openclaw.profile } : {}),
       ...(config.openclaw?.gatewayUrl ? { gatewayUrl: config.openclaw.gatewayUrl } : {})
     }
-  });
+  };
+}
+
+export function executorsFromConfig(config: OpenTagDaemonConfig) {
+  const security = securityFromConfig(config);
+  const builtInAcpExecutors = createBuiltInAcpExecutors(builtInAcpOptionsFromConfig(config));
 
   const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),

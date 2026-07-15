@@ -116,11 +116,6 @@ OPENTAG_BUILTIN_ACP_AGENTS=cursor,opencode \
 corepack pnpm smoke:live -- --case builtin-acp
 ```
 
-Set `OPENTAG_ACP_CONFORMANCE_REGISTRY` to a Registry JSON snapshot to add every
-launchable `npx`/`uvx` entry to the same batch. Binary distributions and entries
-with environment overlays are reported as `needs_setup`; they are not launched
-implicitly.
-
 ### OpenClaw ACP
 
 `openclaw-acp` wraps `corepack pnpm smoke:openclaw-acp-conformance`. It expects

@@ -17,11 +17,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type AcpAgentDefinition,
-  type AcpRegistryResolution,
   builtInAcpAgentDefinitions,
   createAcpAgentExecutor,
-  parseAcpRegistry,
-  resolveAcpRegistryAgent,
   type ExecutorEventSink,
   type ExecutorRunInput
 } from "../../packages/runner/src/index.js";
@@ -35,10 +32,10 @@ const openclawProfile = process.env.OPENTAG_OPENCLAW_PROFILE?.trim();
 const openclawGatewayUrl = process.env.OPENTAG_OPENCLAW_GATEWAY_URL?.trim();
 const reportPath = process.env.OPENTAG_BUILTIN_ACP_CONFORMANCE_REPORT?.trim();
 const keepFixtures = process.env.OPENTAG_BUILTIN_ACP_KEEP_FIXTURES === "true";
-const registryPath = process.env.OPENTAG_ACP_CONFORMANCE_REGISTRY?.trim();
 const quiet = process.env.OPENTAG_ACP_CONFORMANCE_QUIET === "true";
 const runTimeoutMs = Number(process.env.OPENTAG_BUILTIN_ACP_RUN_TIMEOUT_MS || 180_000);
 const cancelStartTimeoutMs = Number(process.env.OPENTAG_BUILTIN_ACP_CANCEL_START_TIMEOUT_MS || 120_000);
+const cancelCleanupTimeoutMs = Number(process.env.OPENTAG_BUILTIN_ACP_CANCEL_CLEANUP_TIMEOUT_MS || 10_000);
 const cancelSleepSeconds = 30;
 
 type CaseId = "readiness" | "scratch-cwd" | "worktree-cwd" | "cancel-process-tree";
@@ -104,7 +101,7 @@ export type AcpConformanceStatus = "passed" | "needs_setup" | "failed_conformanc
 export function cancellationConformanceApplies(definition: {
   capabilities?: { supportsCancel?: boolean };
 }): boolean {
-  return definition.capabilities?.supportsCancel !== false;
+  return definition.capabilities?.supportsCancel === true;
 }
 
 export function propagatedConformanceStatus(
@@ -131,82 +128,18 @@ export function classifyBuiltInAcpFailure(error: unknown): "provider_status" | "
   return classifyAcpConformanceFailure(error) === "needs_setup" ? "provider_status" : "conformance";
 }
 
-export type RegistryConformanceBatch = {
-  targets: AcpAgentDefinition[];
-  needsSetup: Extract<AcpRegistryResolution, { status: "needs_setup" }>[];
-};
-
-const stableRegistryAliases: Record<string, string> = {
-  "codex-acp": "codex",
-  "claude-acp": "claude-code"
-};
-
-export function registryConformanceTargets(
-  value: unknown,
-  options: {
-    aliases?: Record<string, string>;
-    selectedRegistryIds?: readonly string[];
-    platform?: NodeJS.Platform;
-    arch?: string;
-  } = {}
-): RegistryConformanceBatch {
-  const registry = parseAcpRegistry(value);
-  const selected = options.selectedRegistryIds ? new Set(options.selectedRegistryIds) : undefined;
-  const aliases = { ...stableRegistryAliases, ...options.aliases };
-  const targets: AcpAgentDefinition[] = [];
-  const needsSetup: RegistryConformanceBatch["needsSetup"] = [];
-  for (const entry of registry.agents) {
-    if (selected && !selected.has(entry.id)) continue;
-    const resolution = resolveAcpRegistryAgent(registry, entry.id, {
-      ...(aliases[entry.id] ? { executorId: aliases[entry.id] } : {}),
-      ...(options.platform ? { platform: options.platform } : {}),
-      ...(options.arch ? { arch: options.arch } : {})
-    });
-    if (resolution.status === "needs_setup") {
-      needsSetup.push(resolution);
-      continue;
-    }
-    targets.push({
-      ...resolution.agent,
-      workspaceCwd: "required",
-      ...(entry.id === "claude-acp" ? { sessionModeId: "default" } : {})
-    });
-  }
-  return { targets, needsSetup };
-}
-
-type ConformanceTarget =
-  | { id: string; definition: AcpAgentDefinition }
-  | { id: string; setup: Extract<AcpRegistryResolution, { status: "needs_setup" }> };
-
-function allConformanceTargets(): ConformanceTarget[] {
-  const builtIns = Object.values(builtInAcpAgentDefinitions({
+function allConformanceTargets(): AcpAgentDefinition[] {
+  return Object.values(builtInAcpAgentDefinitions({
     hermes: { command: hermesCommand, profile: hermesProfile },
     openclaw: {
       command: openclawCommand,
       ...(openclawProfile ? { profile: openclawProfile } : {}),
       ...(openclawGatewayUrl ? { gatewayUrl: openclawGatewayUrl } : {})
     }
-  })).map((definition) => ({
-    id: definition.id,
-    definition
   }));
-  if (!registryPath) return builtIns;
-
-  const registryValue = JSON.parse(readFileSync(resolve(repositoryRoot, registryPath), "utf8")) as unknown;
-  const registryBatch = registryConformanceTargets(registryValue);
-  const combined = new Map<string, ConformanceTarget>(builtIns.map((target) => [target.id, target]));
-  for (const definition of registryBatch.targets) {
-    combined.set(definition.id, { id: definition.id, definition });
-  }
-  for (const setup of registryBatch.needsSetup) {
-    const id = stableRegistryAliases[setup.registryId] ?? setup.registryId;
-    if (!combined.has(id)) combined.set(id, { id, setup });
-  }
-  return [...combined.values()];
 }
 
-function selectedTargets(): ConformanceTarget[] {
+function selectedTargets(): AcpAgentDefinition[] {
   const available = allConformanceTargets();
   const byId = new Map(available.map((target) => [target.id, target]));
   const requested = (process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",") ?? available.map((target) => target.id))
@@ -256,23 +189,38 @@ function sink(agent: string, failureDiagnostics: string[] = []): ExecutorEventSi
   };
 }
 
+class ConformanceDeadlineError extends Error {}
+
+export async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new ConformanceDeadlineError(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function boundedRun(
   agent: string,
   executor: ReturnType<typeof createAcpAgentExecutor>,
   input: ExecutorRunInput,
   failureDiagnostics: string[]
 ) {
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    void executor.cancel(input.runId, input.attemptId).catch(() => undefined);
-  }, runTimeoutMs);
+  const running = executor.run(input, sink(agent, failureDiagnostics));
   try {
-    const result = await executor.run(input, sink(agent, failureDiagnostics));
-    assert(!timedOut, `${agent} run '${input.runId}' exceeded ${runTimeoutMs}ms.`);
-    return result;
-  } finally {
-    clearTimeout(timer);
+    return await withDeadline(running, runTimeoutMs, `${agent} run '${input.runId}' exceeded ${runTimeoutMs}ms.`);
+  } catch (error) {
+    if (!(error instanceof ConformanceDeadlineError)) throw error;
+    void running.catch(() => undefined);
+    await withDeadline(
+      Promise.allSettled([executor.cancel(input.runId, input.attemptId), running]),
+      cancelCleanupTimeoutMs,
+      `${agent} run '${input.runId}' did not settle after cancellation.`
+    ).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -516,11 +464,14 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       sink(agent, failureDiagnostics)
     );
     let settled = false;
-    const safetyTimer = setTimeout(() => void runningExecutor.cancel(runId).catch(() => undefined), runTimeoutMs);
     try {
       const observation = await Promise.race([
         waitForPath(join(cancelScratch, startedName), cancelStartTimeoutMs).then(() => ({ kind: "started" }) as const),
-        running.then((result) => ({ kind: "completed", result }) as const)
+        withDeadline(
+          running,
+          runTimeoutMs,
+          `${agent} cancellation run '${runId}' exceeded ${runTimeoutMs}ms.`
+        ).then((result) => ({ kind: "completed", result }) as const)
       ]);
       if (observation.kind === "completed") {
         fail(`${agent} cancellation run concluded '${observation.result.conclusion}' before the tool started.`);
@@ -532,17 +483,28 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       assert(processIsAlive(shellPid), `${agent} shell process exited before cancellation.`);
       assert(processIsAlive(sleepPid), `${agent} sleep process exited before cancellation.`);
 
-      await runningExecutor.cancel(runId);
-      const result = await running;
+      await withDeadline(
+        runningExecutor.cancel(runId),
+        cancelCleanupTimeoutMs,
+        `${agent} cancellation request for '${runId}' did not settle.`
+      );
+      const result = await withDeadline(
+        running,
+        cancelCleanupTimeoutMs,
+        `${agent} cancellation run '${runId}' did not settle after cancellation.`
+      );
       settled = true;
       assert(result.conclusion === "cancelled", `${agent} cancelled run concluded '${result.conclusion}'.`);
       await Promise.all([waitForProcessExit(shellPid), waitForProcessExit(sleepPid)]);
       assert(!existsSync(join(cancelScratch, completedName)), `${agent} cancelled tool reached its completion marker.`);
     } finally {
-      clearTimeout(safetyTimer);
       if (!settled) {
-        await runningExecutor.cancel(runId).catch(() => undefined);
-        await running.catch(() => undefined);
+        void running.catch(() => undefined);
+        await withDeadline(
+          Promise.allSettled([runningExecutor.cancel(runId), running]),
+          cancelCleanupTimeoutMs,
+          `${agent} cancellation cleanup for '${runId}' did not settle.`
+        ).catch(() => undefined);
       }
     }
   });
@@ -551,15 +513,11 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
 async function main(): Promise<void> {
   assert(Number.isFinite(runTimeoutMs) && runTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_RUN_TIMEOUT_MS must be positive.");
   assert(Number.isFinite(cancelStartTimeoutMs) && cancelStartTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_CANCEL_START_TIMEOUT_MS must be positive.");
+  assert(Number.isFinite(cancelCleanupTimeoutMs) && cancelCleanupTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_CANCEL_CLEANUP_TIMEOUT_MS must be positive.");
   const root = mkdtempSync(join(tmpdir(), "opentag-builtin-acp-conformance-"));
   try {
     for (const target of selectedTargets()) {
-      if ("setup" in target) {
-        results.push({ agent: target.id, case: "readiness", status: "needs_setup", durationMs: 0, error: target.setup.reason });
-        recordRemainingCases(target.id, "needs_setup", target.setup.reason);
-      } else {
-        await testAgent(target.definition, root);
-      }
+      await testAgent(target, root);
     }
     const ok = results.length > 0 && results.every((result) => result.status === "passed" || result.status === "not_applicable");
     writeReport(ok);

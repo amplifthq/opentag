@@ -15,7 +15,7 @@ created pull request.
 
 Required:
   gh CLI authenticated as a user with admin access to the target repository.
-  claude CLI installed and logged in, unless OPENTAG_GH_LIVE_EXECUTOR is changed.
+  The selected built-in ACP agent command is installed and authenticated; Claude Code uses npx by default.
   ngrok installed when OPENTAG_GH_LIVE_START_NGROK=true.
 
 Helpful env:

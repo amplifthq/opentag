@@ -299,6 +299,8 @@ type ActiveRun = {
   client?: acp.ClientContext;
   sessionId?: string;
   cancelRequested: boolean;
+  terminationPromise?: Promise<boolean>;
+  terminationConfirmed?: boolean;
 };
 
 function activeRunKey(runId: string, attemptId?: string): string {
@@ -507,8 +509,8 @@ async function waitForProcessTreeExit(child: ChildProcessWithoutNullStreams, tim
   return true;
 }
 
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (process.platform !== "win32" && child.pid !== undefined) {
+function signalPosixProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal);
       return;
@@ -519,13 +521,50 @@ function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS
   if (child.exitCode === null && child.signalCode === null) child.kill(signal);
 }
 
-async function terminateChild(child: ChildProcessWithoutNullStreams, graceMs = CHILD_EXIT_GRACE_MS): Promise<void> {
+async function terminateWindowsProcessTree(
+  child: ChildProcessWithoutNullStreams,
+  graceMs: number,
+  runner: CommandRunner
+): Promise<boolean> {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return false;
+  let taskkillSucceeded = false;
+  try {
+    const result = await runner.run("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
+    taskkillSucceeded = result.exitCode === 0;
+  } catch {
+    // Fall through to root-process cleanup without claiming tree termination.
+  }
+  if (!taskkillSucceeded && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  const rootExited = await waitForExit(child, graceMs);
+  return taskkillSucceeded && rootExited;
+}
+
+async function terminateChild(
+  child: ChildProcessWithoutNullStreams,
+  graceMs = CHILD_EXIT_GRACE_MS,
+  runner: CommandRunner = nodeCommandRunner
+): Promise<boolean> {
   if (!child.stdin.destroyed) child.stdin.end();
-  if (await waitForProcessTreeExit(child, graceMs)) return;
-  signalProcessTree(child, "SIGTERM");
-  if (await waitForProcessTreeExit(child, graceMs)) return;
-  signalProcessTree(child, "SIGKILL");
-  await waitForProcessTreeExit(child, graceMs);
+  if (process.platform === "win32") return terminateWindowsProcessTree(child, graceMs, runner);
+  if (await waitForProcessTreeExit(child, graceMs)) return true;
+  signalPosixProcessTree(child, "SIGTERM");
+  if (await waitForProcessTreeExit(child, graceMs)) return true;
+  signalPosixProcessTree(child, "SIGKILL");
+  return waitForProcessTreeExit(child, graceMs);
+}
+
+async function waitForSettled(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise.catch(() => undefined),
+      new Promise<void>((resolveWait) => {
+        timer = setTimeout(resolveWait, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function probeAcpInitialization(input: {
@@ -684,7 +723,16 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
   const activeRuns = new Map<string, ActiveRun>();
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
-  const supportsCancel = options.capabilityOverrides?.supportsCancel ?? true;
+  const supportsCancel = options.capabilityOverrides?.supportsCancel ?? false;
+  const terminateActiveChild = (active: ActiveRun, child: ChildProcessWithoutNullStreams): Promise<boolean> => {
+    if (!active.terminationPromise) {
+      active.terminationPromise = terminateChild(child, cancelGraceMs, runner).then((confirmed) => {
+        if (confirmed) active.terminationConfirmed = true;
+        return active.terminationConfirmed === true;
+      });
+    }
+    return active.terminationPromise;
+  };
 
   return {
     id: manifest.id,
@@ -768,7 +816,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             at: new Date().toISOString()
           });
           if (active.cancelRequested) {
-            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
+            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
           }
           await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
           worktreeCreated = true;
@@ -781,11 +829,11 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
         }
         const childCwd = await safeAcpCwd(executionPath, manifest.binding.cwd);
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
         }
         const child = spawnAcpChild(manifest, childCwd, options.security, launchEnvironment);
         active.child = child;
@@ -803,8 +851,17 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           spawnErrorCode = error.code ?? "spawn_error";
         });
         if (active.cancelRequested) {
-          await terminateChild(child, cancelGraceMs);
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
+          const terminationObserved = await terminateActiveChild(active, child);
+          return stopResult({
+            stopReason: "cancelled",
+            manifest,
+            run: input,
+            branchName,
+            baseBranch,
+            output: "",
+            files: [],
+            cancelTerminationConfirmed: supportsCancel && terminationObserved
+          });
         }
 
         const output: string[] = [];
@@ -958,7 +1015,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           }
         }
 
-        await terminateChild(child);
+        const terminationObserved = await terminateActiveChild(active, child);
         for (const [toolCallId, governed] of governedActions) {
           if (governed.reported) continue;
           governed.reported = true;
@@ -996,7 +1053,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           baseBranch,
           output: output.join("").trim(),
           files,
-          cancelTerminationConfirmed: supportsCancel
+          cancelTerminationConfirmed: supportsCancel && terminationObserved
         });
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",
@@ -1015,7 +1072,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         throw error;
       } finally {
         activeRuns.delete(activeKey);
-        if (active.child) await terminateChild(active.child);
+        if (active.child) await terminateActiveChild(active, active.child);
         if (workspace.kind === "repository" && worktreeCreated) {
           const keepWorktree = input.keepWorktree ?? "on_failure";
           const shouldRemove = repositoryCompleted && keepWorktree !== "always";
@@ -1046,14 +1103,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       if (!child) return;
       try {
         if (active.client && active.sessionId) {
-          await active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId });
+          await waitForSettled(
+            active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId }),
+            cancelGraceMs
+          );
         }
       } catch {
         // A broken ACP connection must not prevent forced child termination.
       } finally {
-        if (!(await waitForExit(child, cancelGraceMs))) {
-          await terminateChild(child, cancelGraceMs);
-        }
+        await terminateActiveChild(active, child);
       }
     }
   };

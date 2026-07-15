@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAcpExecutor, type AcpPermissionResolver } from "../src/acp-executor.js";
+import type { CommandRunner } from "../src/command.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/acp-agent.mjs", import.meta.url));
 const tempRoots: string[] = [];
@@ -632,9 +633,82 @@ describe("ACP executor", () => {
     await executor.cancel("run_immediate_cancel");
     const result = await running;
 
-    expect(result.conclusion).toBe("cancelled");
+    expect(result).toMatchObject({
+      conclusion: "cancelled",
+      summary: "Fixture ACP Agent cancelled the ACP attempt."
+    });
     expect(existsSync(join(scratch, "acp-session.json"))).toBe(false);
     expect(existsSync(join(scratch, "acp-prompt.json"))).toBe(false);
+  }, 15_000);
+
+  it("uses Windows taskkill tree termination as observed cancellation evidence", async () => {
+    const scratch = tempDir("windows-tree-cancel");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const runner: CommandRunner = {
+      run: vi.fn(async (command, args) => {
+        expect(command).toBe("taskkill");
+        expect(args.slice(0, 1)).toEqual(["/PID"]);
+        expect(args.slice(2)).toEqual(["/T", "/F"]);
+        process.kill(Number(args[1]), "SIGKILL");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      })
+    };
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    try {
+      const executor = createAcpExecutor({
+        manifest: manifest("cancel"),
+        cancelGraceMs: 100,
+        capabilityOverrides: { supportsCancel: true },
+        runner
+      });
+      const running = executor.run(input({ kind: "scratch", path: scratch }, "run_windows_tree_cancel"), {
+        emit: async () => undefined
+      });
+      await waitForFile(join(scratch, "acp-waiting.json"));
+
+      await executor.cancel("run_windows_tree_cancel");
+      const result = await running;
+
+      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        conclusion: "cancelled",
+        summary: "Fixture ACP Agent cancelled the ACP attempt."
+      });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  }, 15_000);
+
+  it("does not claim Windows process-tree termination when taskkill fails", async () => {
+    const scratch = tempDir("windows-tree-cancel-failure");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const runner: CommandRunner = {
+      run: vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: "taskkill failed" }))
+    };
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    try {
+      const executor = createAcpExecutor({
+        manifest: manifest("cancel"),
+        cancelGraceMs: 100,
+        capabilityOverrides: { supportsCancel: true },
+        runner
+      });
+      const running = executor.run(input({ kind: "scratch", path: scratch }, "run_windows_tree_cancel_failure"), {
+        emit: async () => undefined
+      });
+      await waitForFile(join(scratch, "acp-waiting.json"));
+
+      await executor.cancel("run_windows_tree_cancel_failure");
+      const result = await running;
+
+      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        conclusion: "cancelled",
+        summary: expect.stringContaining("provider-owned tool subprocess termination is not confirmed")
+      });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   }, 15_000);
 
   it("cancels a delayed session/new without ever submitting a prompt", async () => {

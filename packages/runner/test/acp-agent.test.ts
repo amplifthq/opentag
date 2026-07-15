@@ -49,6 +49,7 @@ describe("generic ACP agent definitions", () => {
     expect(executor.id).toBe("local-agent");
     expect(executor.capability).toMatchObject({
       supportsProfile: true,
+      supportsCancel: false,
       workspaceCwdConformance: "declared"
     });
   });

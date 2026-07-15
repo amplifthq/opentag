@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfigFromEnv, parseDaemonConfig, readKeychainSecret, runnerDispatcherToken } from "../src/config.js";
-import { executorsFromConfig } from "../src/runtime.js";
+import { builtInAcpOptionsFromConfig, executorsFromConfig } from "../src/runtime.js";
 
 const baseRepository = {
   owner: "acme",
@@ -64,6 +64,13 @@ describe("parseDaemonConfig ACP agents", () => {
       }
     });
 
+    expect(builtInAcpOptionsFromConfig(config)).toMatchObject({
+      openclaw: {
+        command: "/opt/openclaw/bin/openclaw",
+        profile: "opentag",
+        gatewayUrl: "ws://127.0.0.1:19093"
+      }
+    });
     expect(executorsFromConfig(config).openclaw).toMatchObject({
       id: "openclaw",
       capability: { supportsProfile: true, supportsCancel: false }
@@ -88,7 +95,10 @@ describe("parseDaemonConfig ACP agents", () => {
     const executors = executorsFromConfig(config);
     expect(executors["hermes-acp"]).toMatchObject({ id: "hermes-acp", displayName: "Hermes ACP" });
     expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
-    expect(executors.reviewer?.capability).toMatchObject({ workspaceCwdConformance: "declared" });
+    expect(executors.reviewer?.capability).toMatchObject({
+      supportsCancel: false,
+      workspaceCwdConformance: "declared"
+    });
     expect(executors["hermes-acp"]?.capability).toMatchObject({ supportsProfile: true });
     expect(executors["best-effort-acp"]?.capability).toMatchObject({ supportsCancel: false });
     expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(

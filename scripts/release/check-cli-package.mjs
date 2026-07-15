@@ -109,15 +109,33 @@ function checkInstalledAcpLaunchDefinitions(installDir) {
       }
     });
     const expected = {
-      codex: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"],
-      "claude-code": ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"]
-    };
-    for (const [id, args] of Object.entries(expected)) {
-      const binding = manifests[id].bindings.agent;
-      if (binding.command !== "npx" || JSON.stringify(binding.args) !== JSON.stringify(args)) {
-        throw new Error(\`Installed \${id} ACP Registry launch is incorrect: \${JSON.stringify(binding)}\`);
+      codex: {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"],
+        registry: true
+      },
+      "claude-code": {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"],
+        registry: true
+      },
+      cursor: {
+        command: "cursor-agent",
+        args: ["acp"],
+        registry: false
+      },
+      opencode: {
+        command: "npx",
+        args: ["--yes", "opencode-ai@1.18.1", "acp"],
+        registry: true
       }
-      if (!definitions[id].registry?.id || !definitions[id].registry?.version) {
+    };
+    for (const [id, expectation] of Object.entries(expected)) {
+      const binding = manifests[id].bindings.agent;
+      if (binding.command !== expectation.command || JSON.stringify(binding.args) !== JSON.stringify(expectation.args)) {
+        throw new Error(\`Installed \${id} ACP launch is incorrect: \${JSON.stringify(binding)}\`);
+      }
+      if (expectation.registry && (!definitions[id].registry?.id || !definitions[id].registry?.version)) {
         throw new Error(\`Installed \${id} ACP definition has no Registry provenance.\`);
       }
     }

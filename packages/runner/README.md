@@ -15,7 +15,6 @@ pnpm add @opentag/runner
 - `ExecutorAdapter`: interface every executor implements.
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
 - `createAcpAgentExecutor`: generic stdio ACP host for an ACP launch definition.
-- `parseAcpRegistry` and `resolveAcpRegistryAgent`: provider-neutral ACP Registry parsing and launch-candidate resolution.
 - `createBuiltInAcpExecutors`: built-in launch profiles for pinned Codex, Claude, and OpenCode packages plus installed Cursor, Hermes, and OpenClaw ACP commands.
 - `builtInAcpAgentDefinitions`: the data-only built-in definitions and Registry provenance where a pinned Registry package is used.
 - `createAcpExecutor`: lower-level generic stdio ACP host for an internal integration manifest.

@@ -257,15 +257,19 @@ function isSensitiveEnvName(name: string): boolean {
   return SENSITIVE_ENV_PATTERNS.some((pattern) => pattern.test(upperName));
 }
 
+function comparableEnvName(name: string): string {
+  return process.platform === "win32" ? name.toUpperCase() : name;
+}
+
 function isExplicitlySafeEnvName(name: string, policy: RunnerSecurityPolicy | undefined): boolean {
-  const upperName = name.toUpperCase();
-  return policy?.extraSafeEnv?.some((envName) => envName.toUpperCase() === upperName) ?? false;
+  const comparableName = comparableEnvName(name);
+  return policy?.extraSafeEnv?.some((envName) => comparableEnvName(envName) === comparableName) ?? false;
 }
 
 function isSafeEnvName(name: string, policy: RunnerSecurityPolicy | undefined): boolean {
-  const upperName = name.toUpperCase();
-  const safeNames = new Set([...DEFAULT_SAFE_ENV_NAMES, ...(policy?.extraSafeEnv ?? [])].map((envName) => envName.toUpperCase()));
-  return safeNames.has(upperName) || SAFE_ENV_PREFIXES.some((prefix) => upperName.startsWith(prefix));
+  const comparableName = comparableEnvName(name);
+  const safeNames = new Set([...DEFAULT_SAFE_ENV_NAMES, ...(policy?.extraSafeEnv ?? [])].map(comparableEnvName));
+  return safeNames.has(comparableName) || SAFE_ENV_PREFIXES.some((prefix) => comparableName.startsWith(comparableEnvName(prefix)));
 }
 
 export function scrubEnvironment(env: CommandEnvironment = process.env, policy?: RunnerSecurityPolicy): CommandEnvironment {

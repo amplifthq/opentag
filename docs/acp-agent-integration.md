@@ -56,7 +56,9 @@ Connection or secret-reference resolver, not in reusable launch metadata.
 The map key is the executor selection name. Selecting `example-acp` causes the
 Generic ACP Host to launch that command. The removed full
 `opentag.integration.v1` configuration shape is intentionally not
-parse-compatible.
+parse-compatible. Custom agents default to `supportsCancel: false`; only set it
+to `true` after the real adapter and its local process tree pass the cancellation
+gate.
 
 `workspaceCwd: "required"` is the integration author's attestation
 that the agent's real file tools honor the absolute `cwd` supplied to ACP
@@ -66,22 +68,9 @@ launch without it during schema parsing, before constructing an executor.
 Declare it only after testing the real tools in both an isolated repository
 worktree and a scratch directory; it is not runtime proof or a sandbox claim.
 
-Registry membership alone never adds this attestation. `parseAcpRegistry`
-normalizes official Registry metadata into launch candidates; the batch gate
-must still prove OpenTag's workspace and cancellation cases. The user-facing
-result stays small: a target is ready, needs setup, or failed conformance, and a
-successful complete gate may be shown as OpenTag Verified.
-
-To run the same gate across every launchable `npx`/`uvx` entry in a Registry
-snapshot:
-
-```bash
-OPENTAG_ACP_CONFORMANCE_REGISTRY=/absolute/path/to/registry.json \
-pnpm smoke:acp-conformance
-```
-
-Binary entries and Registry `env` overlays are recorded as `needs_setup` until
-they can be materialized and admitted through an explicit security policy.
+Package or Registry provenance alone never adds this attestation. Every
+built-in must pass the live batch gate for OpenTag's workspace and declared
+cancellation cases before it may be shown as OpenTag Verified.
 
 ## OpenClaw support and hard-cancellation status
 

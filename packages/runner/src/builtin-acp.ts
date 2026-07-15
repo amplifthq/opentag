@@ -43,6 +43,7 @@ export function builtInAcpAgentDefinitions(
       workspaceCwd: "required",
       registry: { id: "codex-acp", version: "1.1.2" },
       readinessTimeoutMs: 30_000,
+      capabilities: { supportsCancel: true },
       launch: {
         command: "npx",
         args: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"]
@@ -54,6 +55,7 @@ export function builtInAcpAgentDefinitions(
       workspaceCwd: "required",
       registry: { id: "claude-acp", version: "0.59.0" },
       readinessTimeoutMs: 30_000,
+      capabilities: { supportsCancel: true },
       launch: {
         command: "npx",
         args: ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"]
@@ -65,6 +67,7 @@ export function builtInAcpAgentDefinitions(
       label: "Cursor ACP",
       workspaceCwd: "required",
       readinessTimeoutMs: 30_000,
+      capabilities: { supportsCancel: true },
       launch: {
         command: "cursor-agent",
         args: ["acp"]
@@ -76,6 +79,7 @@ export function builtInAcpAgentDefinitions(
       workspaceCwd: "required",
       registry: { id: "opencode", version: "1.18.1" },
       readinessTimeoutMs: 30_000,
+      capabilities: { supportsCancel: true },
       launchEnvironment: {
         OPENCODE_DISABLE_TERMINAL_TITLE: "true",
         OPENCODE_PURE: "true"
@@ -93,7 +97,7 @@ export function builtInAcpAgentDefinitions(
         command: hermesCommand,
         args: ["-p", hermesProfile, "acp"]
       },
-      capabilities: { supportsProfile: true }
+      capabilities: { supportsProfile: true, supportsCancel: true }
     },
     openclaw: {
       id: "openclaw",

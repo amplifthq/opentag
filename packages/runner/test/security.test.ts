@@ -115,4 +115,17 @@ describe("runner security", () => {
 
     expect(scrubbed).toEqual({ PATH: "/usr/bin", OPENAI_API_KEY: "sk-explicit" });
   });
+
+  it.skipIf(process.platform === "win32")("keeps POSIX environment allowlists case-sensitive", () => {
+    const scrubbed = scrubEnvironment(
+      {
+        PATH: "/usr/bin",
+        OPENAI_API_KEY: "sk-explicit",
+        openai_api_key: "sk-wrong-case"
+      },
+      { extraSafeEnv: ["OPENAI_API_KEY"] }
+    );
+
+    expect(scrubbed).toEqual({ PATH: "/usr/bin", OPENAI_API_KEY: "sk-explicit" });
+  });
 });

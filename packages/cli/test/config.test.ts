@@ -171,7 +171,8 @@ describe("OpenTag CLI config", () => {
       label: "Review Agent",
       command: "review-agent",
       args: ["acp"],
-      workspaceCwd: "required"
+      workspaceCwd: "required",
+      supportsCancel: false
     });
     expect(parsed.daemon.channelBindings).toEqual([
       {

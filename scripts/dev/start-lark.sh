@@ -185,21 +185,30 @@ detect_executor() {
 
 validate_executor() {
   case "$1" in
-    echo|codex|claude-code|hermes)
+    echo|codex|claude-code|cursor|opencode|hermes|openclaw)
       return
       ;;
     *)
-      fail "Executor must be echo, codex, claude-code, or hermes."
+      fail "Executor must be echo, codex, claude-code, cursor, opencode, hermes, or openclaw."
       ;;
   esac
 }
 
 assert_executor_available() {
   case "$1" in
-    codex|claude-code|echo)
+    echo)
+      ;;
+    codex|claude-code|opencode)
+      require_command npx
+      ;;
+    cursor)
+      require_command cursor-agent
       ;;
     hermes)
       require_command "${OPENTAG_HERMES_COMMAND:-hermes}"
+      ;;
+    openclaw)
+      require_command "${OPENTAG_OPENCLAW_COMMAND:-openclaw}"
       ;;
   esac
 }
@@ -369,7 +378,7 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 
 DETECTED_EXECUTOR="$(detect_executor)"
-EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, hermes, echo; Codex and Claude use pinned Registry ACP packages)" "$DETECTED_EXECUTOR")"
+EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, cursor, opencode, hermes, openclaw, echo)" "$DETECTED_EXECUTOR")"
 validate_executor "$EXECUTOR"
 assert_executor_available "$EXECUTOR"
 

@@ -3,7 +3,7 @@ import {
   classifyAcpConformanceFailure,
   cancellationConformanceApplies,
   propagatedConformanceStatus,
-  registryConformanceTargets
+  withDeadline
 } from "../../../scripts/test/builtin-acp-conformance.js";
 
 describe("built-in ACP conformance failure classification", () => {
@@ -25,7 +25,7 @@ describe("built-in ACP conformance failure classification", () => {
   it("keeps best-effort cancellation providers in the batch without claiming process-tree conformance", () => {
     expect(cancellationConformanceApplies({ capabilities: { supportsCancel: false } })).toBe(false);
     expect(cancellationConformanceApplies({ capabilities: { supportsCancel: true } })).toBe(true);
-    expect(cancellationConformanceApplies({})).toBe(true);
+    expect(cancellationConformanceApplies({})).toBe(false);
     expect(propagatedConformanceStatus(
       { capabilities: { supportsCancel: false } },
       "cancel-process-tree",
@@ -45,45 +45,9 @@ describe("built-in ACP conformance failure classification", () => {
     )).toBe("needs_setup");
   });
 
-  it("turns every launchable Registry entry into a data-driven batch target", () => {
-    const batch = registryConformanceTargets({
-      version: "1.0.0",
-      agents: [
-        {
-          id: "codex-acp",
-          name: "Codex",
-          version: "1.1.2",
-          description: "Codex ACP",
-          distribution: { npx: { package: "@agentclientprotocol/codex-acp@1.1.2" } }
-        },
-        {
-          id: "fast-agent",
-          name: "fast-agent",
-          version: "0.9.9",
-          description: "fast-agent ACP",
-          distribution: { uvx: { package: "fast-agent-acp==0.9.9", args: ["-x"] } }
-        },
-        {
-          id: "binary-agent",
-          name: "Binary Agent",
-          version: "2.0.0",
-          description: "Binary ACP",
-          distribution: {
-            binary: {
-              "darwin-aarch64": {
-                archive: "https://example.test/binary.tar.gz",
-                cmd: "./binary-agent"
-              }
-            }
-          }
-        }
-      ],
-      extensions: []
-    }, { aliases: { "codex-acp": "codex" }, platform: "darwin", arch: "arm64" });
-
-    expect(batch.targets.map((target) => target.id)).toEqual(["codex", "fast-agent"]);
-    expect(batch.needsSetup).toEqual([
-      expect.objectContaining({ registryId: "binary-agent", status: "needs_setup", distribution: "binary" })
-    ]);
+  it("rejects when an operation does not settle before its deadline", async () => {
+    await expect(withDeadline(new Promise<never>(() => undefined), 10, "test operation timed out")).rejects.toThrow(
+      "test operation timed out"
+    );
   });
 });

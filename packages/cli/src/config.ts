@@ -198,7 +198,7 @@ const AcpAgentSchema = z
     workspaceCwd: z.literal("required"),
     sessionModeId: z.string().trim().min(1).optional(),
     supportsProfile: z.boolean().default(false),
-    supportsCancel: z.boolean().default(true),
+    supportsCancel: z.boolean().default(false),
     readinessTimeoutMs: PositiveIntegerSchema.optional()
   })
   .strict();

@@ -30,21 +30,17 @@ describe("executor catalog", () => {
     expect(output).toContain("OpenClaw: not found (Could not find openclaw on PATH)");
     expect(output).toContain("Echo: dev/test only");
     expect(output).toContain("Executor capabilities:");
-    expect(output).toContain("Codex: invocation=spawn");
-    expect(output).toContain("profile=no");
-    expect(output).toContain("progress=audit");
-    expect(output).toContain("approval=opentag_policy");
-    expect(output).toContain("context=context_packet,context_pointers,workspace");
-    expect(output).toContain("prompt=opentag");
-    expect(output).toContain("write=workspace");
-    expect(output).toContain("conversation=request");
-    expect(output).toContain("prompt_mutation=none");
-    expect(output).toContain("raw_context=no");
-    expect(output).toContain("write_actions=propose");
-    expect(output).toContain("secrets=none");
-    expect(output).toContain("Hermes: invocation=spawn, profile=yes");
-    expect(output).toContain("OpenClaw: invocation=spawn, profile=yes, streaming=yes, cancel=no");
-    expect(output).toContain("completion=stream_event");
+    const capabilityLines = output.split("\n").filter((line) => line.includes("invocation=")).map((line) => line.trim());
+    const lineFor = (label: string) => capabilityLines.find((line) => line.startsWith(`${label}:`)) ?? "";
+    const codex = lineFor("Codex");
+    expect(codex).toContain("invocation=spawn, profile=no, streaming=yes, cancel=yes");
+    expect(codex).toContain("progress=audit, approval=opentag_policy");
+    expect(codex).toContain("context=context_packet,context_pointers,workspace");
+    expect(codex).toContain("prompt=opentag, write=workspace, conversation=request");
+    expect(codex).toContain("prompt_mutation=none, raw_context=no, write_actions=propose");
+    expect(codex).toContain("secrets=none, completion=stream_event");
+    expect(lineFor("Hermes")).toContain("profile=yes, streaming=yes, cancel=yes");
+    expect(lineFor("OpenClaw")).toContain("profile=yes, streaming=yes, cancel=no");
   });
 
   it("routes command output through the supplied logger", () => {

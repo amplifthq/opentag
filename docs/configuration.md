@@ -79,7 +79,9 @@ agent in this example; selecting `hermes-acp` starts `hermes acp`:
 transports the session `cwd`, but the agent's real file tools must be tested in
 repository worktrees and scratch directories before it is added. A configured
 agent without it is rejected while loading the config, before an executor can
-start. The old full `opentag.integration.v1` config shape is not accepted.
+start. Custom agents default to `supportsCancel: false`; set it to `true` only
+after the real adapter and its local tool process tree pass the cancellation
+gate. The old full `opentag.integration.v1` config shape is not accepted.
 
 ### ACP-first setup choices
 
@@ -233,8 +235,9 @@ cloud credentials) are dropped. If an adapter authenticates from
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, explicitly add that exact variable name
 to `security.extraSafeEnv`; login-based authentication needs no extra daemon
 configuration. For agents that declare `supportsCancel: true`, cancellation
-terminates the adapter process group, including shell and tool descendants on
-POSIX systems. OpenClaw currently declares `supportsCancel: false`: OpenTag
+must also observe termination of the adapter process tree, using process groups
+on POSIX and `taskkill /T /F` on Windows, before OpenTag reports it as confirmed.
+OpenClaw currently declares `supportsCancel: false`: OpenTag
 requests cancellation and terminates its local ACP bridge, but does not claim
 that Gateway-owned tool subprocesses have stopped.
 
@@ -302,16 +305,6 @@ To run the complete provider-backed Hermes ACP gate against an existing profile:
 ```bash
 OPENTAG_HERMES_PROFILE=<profile> \
 OPENTAG_BUILTIN_ACP_AGENTS=hermes \
-pnpm smoke:acp-conformance
-```
-
-To batch-test launchable `npx` and `uvx` entries from an ACP Registry snapshot,
-set `OPENTAG_ACP_CONFORMANCE_REGISTRY` to the JSON file. Entries that require an
-environment overlay or binary materialization are recorded as `needs_setup`
-instead of being launched implicitly:
-
-```bash
-OPENTAG_ACP_CONFORMANCE_REGISTRY=/absolute/path/to/registry.json \
 pnpm smoke:acp-conformance
 ```
 
