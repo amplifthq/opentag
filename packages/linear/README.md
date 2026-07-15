@@ -35,7 +35,10 @@ a snapshot.
 The read implementation exports `getLinearIssue`, `searchLinearIssues`, and
 `listLinearIssues`. All use read-only GraphQL queries and return the same
 normalized `LinearIssueSnapshot` shape. Search and list are currently
-team-scoped, cap individual pages at 50 issues and one logical result at 100
-issues, and report whether results were truncated. Project/current-cycle scope,
-relation loading, and backlog snapshot construction remain separate follow-up
-work.
+bounded by a required team and can be narrowed to a validated project and an
+explicit or dynamically resolved current cycle. They cap individual pages at
+50 issues and one logical result at 100 issues, and report whether results were
+truncated. Issue snapshots include canonical `blocks`, `blocked_by`, and
+`related` relations; reads fail rather than return a partial relation set when
+an issue exceeds the 100-relation safety limit. Backlog snapshot construction
+remains separate follow-up work.

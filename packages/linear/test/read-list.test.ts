@@ -35,6 +35,8 @@ function rawIssue(identifier: string, overrides: Record<string, unknown> = {}): 
     cycle: null,
     assignee: null,
     labels: { nodes: [] },
+    relations: { nodes: [], pageInfo: { hasNextPage: false } },
+    inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
     ...overrides
   };
 }
@@ -175,26 +177,6 @@ describe("listLinearIssues", () => {
     expect(result.items).toHaveLength(1);
     expect(result.truncated).toBe(true);
     expect(result.pageInfo).toEqual({ hasNextPage: true, endCursor: "cursor_next" });
-  });
-
-  it("rejects project or cycle scope until the follow-up scope read is implemented", async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return Response.json({ data: {} });
-    }) as typeof fetch;
-
-    await expect(
-      listLinearIssues({
-        token: "lin_api_test",
-        fetchImpl,
-        request: {
-          scope: { teamId: "team_amp", cycle: { kind: "current" } },
-          pagination: { first: 10, maxItems: 20 }
-        }
-      })
-    ).rejects.toThrow("Linear issue.list currently supports team scope only");
-    expect(called).toBe(false);
   });
 
   it("includes the list operation name in GraphQL errors", async () => {

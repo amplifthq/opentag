@@ -32,6 +32,8 @@ const rawIssue = (overrides: Record<string, unknown> = {}): Record<string, unkno
   },
   assignee: { id: "user_1", name: "chen", displayName: "Chen" },
   labels: { nodes: [{ id: "label_read", name: "Linear Read", color: "#5e6ad2" }] },
+  relations: { nodes: [], pageInfo: { hasNextPage: false } },
+  inverseRelations: { nodes: [], pageInfo: { hasNextPage: false } },
   ...overrides
 });
 
@@ -221,27 +223,6 @@ describe("searchLinearIssues", () => {
       returnedItems: 0
     });
     expect(result.truncated).toBe(false);
-  });
-
-  it("keeps project and cycle scope out of AMP-116 instead of silently broadening it", async () => {
-    let called = false;
-    const fetchImpl = (async () => {
-      called = true;
-      return Response.json({ data: {} });
-    }) as typeof fetch;
-
-    await expect(
-      searchLinearIssues({
-        token: "lin_api_test",
-        fetchImpl,
-        request: {
-          query: "backlog",
-          scope: { teamId: "team_amp", projectId: "project_opentag" },
-          pagination: { first: 10, maxItems: 20 }
-        }
-      })
-    ).rejects.toThrow("project and cycle scope are not implemented yet");
-    expect(called).toBe(false);
   });
 
   it("validates search bounds before calling Linear", async () => {

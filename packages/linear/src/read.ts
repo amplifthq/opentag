@@ -8,6 +8,8 @@ import {
   type LinearIssueListRequest,
   type LinearIssueListResult,
   type LinearIssueReadFilter,
+  type LinearIssueReference,
+  type LinearIssueRelationSnapshot,
   type LinearIssueSearchRequest,
   type LinearIssueSearchResult,
   type LinearIssueSnapshot,
@@ -25,6 +27,7 @@ export const LINEAR_ISSUE_SEARCH_MAX_PAGE_SIZE = 50;
 export const LINEAR_ISSUE_SEARCH_MAX_ITEMS = 100;
 export const LINEAR_ISSUE_LIST_MAX_PAGE_SIZE = 50;
 export const LINEAR_ISSUE_LIST_MAX_ITEMS = 100;
+export const LINEAR_ISSUE_RELATION_MAX_ITEMS = 100;
 
 const LINEAR_ISSUE_LABEL_PAGE_SIZE = 100;
 // Linear currently rate-limits searchIssues calls; leave headroom for callers.
@@ -51,6 +54,14 @@ const LINEAR_ISSUE_SELECTION = `
   cycle { id number name startsAt endsAt }
   assignee { id name displayName }
   labels(first: ${LINEAR_ISSUE_LABEL_PAGE_SIZE}) { nodes { id name color } }
+  relations(first: ${LINEAR_ISSUE_RELATION_MAX_ITEMS}) {
+    nodes { type relatedIssue { id identifier title url } }
+    pageInfo { hasNextPage }
+  }
+  inverseRelations(first: ${LINEAR_ISSUE_RELATION_MAX_ITEMS}) {
+    nodes { type issue { id identifier title url } }
+    pageInfo { hasNextPage }
+  }
 `;
 
 export type LinearIssueReadOptions = {
@@ -169,6 +180,43 @@ function normalizeLabels(value: unknown, context: string): LinearLabelReference[
   });
 }
 
+function normalizeIssueReference(value: unknown, context: string): LinearIssueReference {
+  const node = requiredRecord(value, context);
+  return {
+    id: requiredString(node.id, `${context}.id`),
+    identifier: requiredString(node.identifier, `${context}.identifier`),
+    title: requiredString(node.title, `${context}.title`),
+    url: requiredString(node.url, `${context}.url`)
+  };
+}
+
+function normalizeIssueRelations(value: unknown, direction: "outgoing" | "incoming", context: string): LinearIssueRelationSnapshot[] {
+  const connection = requiredRecord(value, context);
+  if (!Array.isArray(connection.nodes)) throw new Error(`Linear ${context}.nodes must be an array.`);
+  const pageInfo = requiredRecord(connection.pageInfo, `${context}.pageInfo`);
+  if (typeof pageInfo.hasNextPage !== "boolean") {
+    throw new Error(`Linear ${context}.pageInfo.hasNextPage must be a boolean.`);
+  }
+  if (pageInfo.hasNextPage) {
+    throw new Error(`Linear ${context} exceeded the ${LINEAR_ISSUE_RELATION_MAX_ITEMS}-relation safety limit.`);
+  }
+
+  const relations: LinearIssueRelationSnapshot[] = [];
+  for (const [index, value] of connection.nodes.entries()) {
+    const node = requiredRecord(value, `${context}.nodes[${index}]`);
+    const type = requiredString(node.type, `${context}.nodes[${index}].type`);
+    if (type !== "blocks" && type !== "related") continue;
+    relations.push({
+      kind: type === "blocks" ? (direction === "outgoing" ? "blocks" : "blocked_by") : "related",
+      issue: normalizeIssueReference(
+        direction === "outgoing" ? node.relatedIssue : node.issue,
+        `${context}.nodes[${index}].${direction === "outgoing" ? "relatedIssue" : "issue"}`
+      )
+    });
+  }
+  return relations;
+}
+
 /** Convert either an Issue or IssueSearchResult node into the same safe snapshot. */
 export function normalizeLinearIssueSnapshot(value: unknown, context = "issue"): LinearIssueSnapshot {
   const node = requiredRecord(value, context);
@@ -182,6 +230,11 @@ export function normalizeLinearIssueSnapshot(value: unknown, context = "issue"):
   const archivedAt = optionalString(node.archivedAt, `${context}.archivedAt`);
   const priorityValue = optionalNumber(node.priority, `${context}.priority`);
   const priorityLabel = optionalString(node.priorityLabel, `${context}.priorityLabel`);
+  const relations = normalizeIssueRelations(node.relations, "outgoing", `${context}.relations`);
+  const inverseRelations = normalizeIssueRelations(node.inverseRelations, "incoming", `${context}.inverseRelations`);
+  if (relations.length + inverseRelations.length > LINEAR_ISSUE_RELATION_MAX_ITEMS) {
+    throw new Error(`Linear ${context} exceeded the ${LINEAR_ISSUE_RELATION_MAX_ITEMS}-relation safety limit.`);
+  }
 
   return {
     id: requiredString(node.id, `${context}.id`),
@@ -198,9 +251,7 @@ export function normalizeLinearIssueSnapshot(value: unknown, context = "issue"):
     ...(cycleNode ? { cycle: normalizeCycle(cycleNode, `${context}.cycle`) } : {}),
     ...(assigneeNode ? { assignee: normalizeUser(assigneeNode, `${context}.assignee`) } : {}),
     labels: normalizeLabels(node.labels, `${context}.labels`),
-    // Relation loading is a separate follow-up. Keep the normalized array
-    // stable without leaking raw or partial GraphQL relation nodes.
-    relations: [],
+    relations: [...relations, ...inverseRelations],
     createdAt: requiredString(node.createdAt, `${context}.createdAt`),
     updatedAt: requiredString(node.updatedAt, `${context}.updatedAt`),
     ...(completedAt !== undefined ? { completedAt } : {}),
@@ -250,12 +301,15 @@ async function resolveLinearIssueReadScope(
     operation: "issue.search" | "issue.list";
   }
 ): Promise<LinearResolvedBacklogScope> {
-  if (input.scope.projectId !== undefined || input.scope.cycle !== undefined) {
-    throw new Error(
-      `Linear ${input.operation} currently supports team scope only; project and cycle scope are not implemented yet.`
-    );
-  }
   const teamId = requiredString(input.scope.teamId, "scope.teamId");
+  const projectId =
+    input.scope.projectId !== undefined ? requiredString(input.scope.projectId, "scope.projectId") : undefined;
+  const cycleSelector = input.scope.cycle;
+  if (cycleSelector !== undefined && cycleSelector.kind !== "id" && cycleSelector.kind !== "current") {
+    throw new Error("Linear scope.cycle.kind must be either id or current.");
+  }
+  const requestedCycleId =
+    cycleSelector?.kind === "id" ? requiredString(cycleSelector.id, "scope.cycle.id") : undefined;
   const data = await linearGraphql<{ team?: unknown }>({
     ...graphqlOptions(input),
     query: `query OpenTagLinearResolveIssueReadTeam($teamId: String!) {
@@ -263,8 +317,76 @@ async function resolveLinearIssueReadScope(
 }`,
     variables: { teamId }
   });
+  const team = normalizeTeam(data.team, "resolved scope team");
+  let project: LinearProjectReference | undefined;
+  let cycle: LinearCycleReference | undefined;
+
+  if (projectId !== undefined) {
+    const projectData = await linearGraphql<{ project?: unknown }>({
+      ...graphqlOptions(input),
+      query: `query OpenTagLinearResolveIssueReadProject($projectId: String!, $teamId: ID!) {
+  project(id: $projectId) {
+    id
+    name
+    url
+    teams(first: 1, filter: { id: { eq: $teamId } }) { nodes { id } }
+  }
+}`,
+      variables: { projectId, teamId: team.id }
+    });
+    const projectNode = requiredRecord(projectData.project, "resolved scope project");
+    const projectTeams = requiredRecord(projectNode.teams, "resolved scope project.teams");
+    if (!Array.isArray(projectTeams.nodes)) throw new Error("Linear resolved scope project.teams.nodes must be an array.");
+    if (projectTeams.nodes.length !== 1) {
+      throw new Error(`Linear ${input.operation} project ${projectId} is not associated with team ${team.id}.`);
+    }
+    project = normalizeProject(projectNode, "resolved scope project");
+  }
+
+  if (requestedCycleId !== undefined) {
+    const cycleData = await linearGraphql<{ cycle?: unknown }>({
+      ...graphqlOptions(input),
+      query: `query OpenTagLinearResolveIssueReadCycle($cycleId: String!) {
+  cycle(id: $cycleId) { id number name startsAt endsAt team { id } }
+}`,
+      variables: { cycleId: requestedCycleId }
+    });
+    const cycleNode = requiredRecord(cycleData.cycle, "resolved scope cycle");
+    const cycleTeam = requiredRecord(cycleNode.team, "resolved scope cycle.team");
+    if (requiredString(cycleTeam.id, "resolved scope cycle.team.id") !== team.id) {
+      throw new Error(`Linear ${input.operation} cycle ${requestedCycleId} does not belong to team ${team.id}.`);
+    }
+    cycle = normalizeCycle(cycleNode, "resolved scope cycle");
+  } else if (cycleSelector?.kind === "current") {
+    const cycleData = await linearGraphql<{ cycles?: unknown }>({
+      ...graphqlOptions(input),
+      query: `query OpenTagLinearResolveIssueReadCurrentCycle($teamId: ID!) {
+  cycles(first: 2, filter: { team: { id: { eq: $teamId } }, isActive: { eq: true } }) {
+    nodes { id number name startsAt endsAt team { id } }
+  }
+}`,
+      variables: { teamId: team.id }
+    });
+    const cycleConnection = requiredRecord(cycleData.cycles, "resolved current cycle");
+    if (!Array.isArray(cycleConnection.nodes)) throw new Error("Linear resolved current cycle.nodes must be an array.");
+    if (cycleConnection.nodes.length === 0) {
+      throw new Error(`Linear ${input.operation} could not resolve an active cycle for team ${team.id}.`);
+    }
+    if (cycleConnection.nodes.length > 1) {
+      throw new Error(`Linear ${input.operation} resolved more than one active cycle for team ${team.id}.`);
+    }
+    const cycleNode = requiredRecord(cycleConnection.nodes[0], "resolved current cycle.nodes[0]");
+    const cycleTeam = requiredRecord(cycleNode.team, "resolved current cycle.nodes[0].team");
+    if (requiredString(cycleTeam.id, "resolved current cycle.nodes[0].team.id") !== team.id) {
+      throw new Error(`Linear ${input.operation} current cycle does not belong to team ${team.id}.`);
+    }
+    cycle = normalizeCycle(cycleNode, "resolved current cycle.nodes[0]");
+  }
+
   return {
-    team: normalizeTeam(data.team, "resolved scope team")
+    team,
+    ...(project !== undefined ? { project } : {}),
+    ...(cycle !== undefined ? { cycle } : {})
   };
 }
 
@@ -276,6 +398,8 @@ function buildIssueFilter(filterInput: LinearIssueReadFilter | undefined, scope:
   const filter: Record<string, unknown> = {
     team: { id: { eq: scope.team.id } }
   };
+  if (scope.project) filter.project = { id: { eq: scope.project.id } };
+  if (scope.cycle) filter.cycle = { id: { eq: scope.cycle.id } };
   const stateIds = nonEmptyValues(filterInput?.stateIds);
   const state: Record<string, unknown> = {};
   if (stateIds) state.id = { in: stateIds };
