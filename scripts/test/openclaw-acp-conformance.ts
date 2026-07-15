@@ -61,7 +61,7 @@ function safeDiagnostic(error: unknown): string {
 }
 
 export function parseOpenClawVersion(output: string): string | undefined {
-  return /^OpenClaw\s+([^\s]+)/u.exec(output.trim())?.[1];
+  return /^OpenClaw\s+([^\s]+)/mu.exec(output.trim())?.[1];
 }
 
 export function newGatewaySessions(
@@ -73,6 +73,15 @@ export function newGatewaySessions(
 
 export function resolveConformanceReportPath(path: string): string {
   return resolve(repositoryRoot, path);
+}
+
+export function resolveDefaultWorkspacePath(workspace: string): string {
+  try {
+    return realpathSync(workspace);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolve(workspace);
+    throw error;
+  }
 }
 
 function run(command: string, args: string[], cwd?: string): string {
@@ -109,7 +118,7 @@ function discoverDefaultWorkspace(): string {
   const configured = process.env.OPENTAG_OPENCLAW_DEFAULT_WORKSPACE?.trim();
   const workspace = configured || run(openclawCommand, openClawArgs("config", "get", "agents.defaults.workspace"));
   assert(isAbsolute(workspace), `OpenClaw default workspace must be absolute, received '${workspace}'.`);
-  return realpathSync(workspace);
+  return resolveDefaultWorkspacePath(workspace);
 }
 
 function assertGatewayReady(): void {
@@ -320,14 +329,16 @@ async function main(): Promise<void> {
     cancelStartedMarkerName,
     cancelCompletedMarkerName
   ].map(defaultMarker);
-  let previousGatewaySessions = gatewaySessions();
-
-  initRepository(repository);
-  mkdirSync(scratch, { recursive: true });
-  mkdirSync(cancelScratch, { recursive: true });
-  for (const marker of defaultMarkers) assert(!existsSync(marker), `Refusing to overwrite pre-existing marker ${marker}.`);
-
   try {
+    let previousGatewaySessions = gatewaySessions();
+
+    initRepository(repository);
+    mkdirSync(scratch, { recursive: true });
+    mkdirSync(cancelScratch, { recursive: true });
+    for (const marker of defaultMarkers) {
+      assert(!existsSync(marker), `Refusing to overwrite pre-existing marker ${marker}.`);
+    }
+
     await runCase("worktree-cwd", async () => {
       const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 3_000 });
       const prompt = [
