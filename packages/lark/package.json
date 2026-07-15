@@ -1,6 +1,6 @@
 {
   "name": "@opentag/lark",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Lark/Feishu message normalization and callback helpers for OpenTag.",
   "type": "module",
   "engines": {
@@ -35,7 +35,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.68.0",
+    "@larksuiteoapi/node-sdk": "^1.71.1",
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*"
   },

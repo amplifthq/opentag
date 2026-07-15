@@ -4,6 +4,112 @@
 
 No changes yet.
 
+## v0.6.0 - 2026-07-16
+
+OpenTag 0.6.0 moves every built-in coding agent onto the Generic ACP host,
+adds Cursor, OpenCode, and OpenClaw as built-in executors, and hardens ACP
+workspace isolation, cancellation evidence, source-thread summaries, and the
+coordinated npm release gate. It is a coordinated release of all 15 public
+packages and contains breaking Runner, daemon-configuration, and Node.js
+support changes described below.
+
+### Added
+
+- Built-in Generic ACP definitions for Codex, Claude Code, Cursor, OpenCode,
+  Hermes, and OpenClaw. Registry-backed Codex, Claude Code, and OpenCode
+  launchers are pinned to `@agentclientprotocol/codex-acp@1.1.2`,
+  `@agentclientprotocol/claude-agent-acp@0.59.0`, and
+  `opencode-ai@1.18.1`, while installed Cursor, Hermes, and OpenClaw commands
+  reuse their existing local authentication and profiles.
+- Public `@opentag/runner` helpers for registry-driven ACP integrations:
+  `createAcpAgentExecutor`, `createAcpAgentManifest`,
+  `builtInAcpAgentDefinitions`, `builtInAcpAgentManifests`, and
+  `createBuiltInAcpExecutors`.
+- Compact custom ACP launch definitions under `daemon.agents`, including
+  command, arguments, relative working directory, session mode, readiness
+  timeout, profile capability, cancellation capability, and the required
+  workspace-cwd conformance declaration.
+- Streaming ACP progress and cancellation support for the built-in agents that
+  can prove cancellation, plus a shared conformance harness covering
+  repository worktrees, scratch workspaces, session cwd, completion, refusal,
+  and cancellation behavior.
+- A fail-closed OpenClaw ACP conformance gate. OpenClaw remains declared with
+  `supportsCancel: false` until its Gateway can prove that cancelling a Run
+  terminates the active tool process as well as the ACP session. Stock
+  OpenClaw 2026.7.1 passes worktree, scratch, and disposable-session checks but
+  can let a Gateway-owned shell subprocess finish after ACP cancellation, so
+  cancellation remains explicitly best effort.
+- Built-in CLI discovery and capability reporting for Cursor, OpenCode, and
+  OpenClaw alongside Codex, Claude Code, Hermes, and Echo.
+
+### Changed
+
+- Codex, Claude Code, and Hermes no longer use dedicated direct executor
+  adapters. The Local Runtime now launches all built-in coding agents through
+  the same Generic ACP executor and OpenTag-owned worktree or scratch
+  isolation.
+- Hermes now starts as `hermes -p <profile> acp`; the 0.5.x `hermes -z`
+  execution path is removed.
+- Daemon `agents` entries are compact ACP launch definitions instead of full
+  integration manifests. Built-in IDs cannot be overridden, and each custom
+  entry must explicitly require a workspace cwd.
+- The deprecated `daemon.claudeCode` configuration and `OPENTAG_CLAUDE_*`
+  environment overrides are rejected. Configure built-in launchers through
+  their supported local CLI authentication and the Generic ACP options.
+- `@opentag/cli`, `@opentag/local-runtime`, and `@opentag/runner` now require
+  Node.js 22 or newer.
+- Slack final summaries preserve multiline content, are escaped exactly once,
+  and are truncated on Unicode code-point boundaries after mrkdwn escaping to
+  stay inside a 2500-character platform-safe output budget. Plain-text
+  fallbacks no longer re-encode rich callback text.
+- The Lark adapter and runnable Lark events app now use
+  `@larksuiteoapi/node-sdk ^1.71.1`, whose relaxed Axios range allows patched
+  Axios 1.x releases. The workspace lock resolves Axios 1.18.1.
+
+### Security
+
+- ACP `cwd` transport is no longer accepted as proof of workspace isolation.
+  The formal ACP execution session that may invoke file tools starts in an
+  OpenTag-created worktree for repository Runs or an attempt-scoped scratch
+  directory for non-repository Runs. Readiness probes may start earlier in the
+  configured repository workspace but do not execute Run file tools.
+- Full ACP integration manifests must declare
+  `roles.agent.workspace.sessionCwd: "required"`; compact `daemon.agents`
+  definitions must declare `workspaceCwd: "required"`. Missing declarations
+  fail schema validation instead of becoming unverified runtime claims.
+- Built-in ACP children receive a scrubbed environment. Launch overrides reject
+  invalid names and credential-like fields or values unconditionally.
+  `security.extraSafeEnv` separately allows exact variables inherited from the
+  parent process after explicit administrator review.
+- OpenClaw cancellation capability fails closed when the runtime cannot prove
+  hard cancellation of descendant tool processes.
+- Slack source-thread fallbacks keep final summaries human-readable without
+  double encoding or bypassing the bounded presentation path.
+
+### Migration: Runner and daemon configuration
+
+- Replace imports of `createCodexExecutor`, `createClaudeCodeExecutor`, and
+  `createHermesExecutor` with `builtInAcpAgentDefinitions`,
+  `builtInAcpAgentManifests`, or `createBuiltInAcpExecutors` from
+  `@opentag/runner`.
+- Remove `daemon.claudeCode`. Codex and Claude Code use the pinned ACP launchers
+  and their existing local login state; Hermes uses the fixed configured
+  profile through `hermes -p <profile> acp`.
+- Remove `OPENTAG_CLAUDE_COMMAND`, `OPENTAG_CLAUDE_MODEL`,
+  `OPENTAG_CLAUDE_PERMISSION_MODE`, and
+  `OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS`; startup now rejects these
+  removed overrides instead of silently ignoring them.
+- Rewrite custom `daemon.agents` values as compact launch definitions with
+  `command`, optional `args`, and `workspaceCwd: "required"`. Custom agents
+  cannot replace the built-in `codex`, `claude-code`, `cursor`, `opencode`,
+  `hermes`, or `openclaw` IDs.
+- Consumers that call the lower-level `createAcpExecutor` with a complete
+  integration manifest must add
+  `roles.agent.workspace.sessionCwd: "required"` after verifying that the
+  integration's real file tools honor both worktree and scratch cwd.
+- Upgrade deployment and development environments to Node.js 22 before
+  installing the 0.6.x CLI, Local Runtime, or Runner packages.
+
 ## v0.5.0 - 2026-07-14
 
 OpenTag 0.5.0 adds Discord, Linear, and Microsoft Teams adapters and moves
