@@ -88,11 +88,11 @@ logs.
 
 ## Case Notes
 
-### Built-in Coding-Agent ACP
+### Batch Coding-Agent ACP
 
-`builtin-acp` wraps `corepack pnpm smoke:builtin-acp-conformance`. It runs the
-same provider-backed gate for bundled Codex ACP, bundled Claude Agent ACP, and
-Hermes ACP: initialize readiness, exact scratch `cwd`, isolated repository
+`builtin-acp` wraps `corepack pnpm smoke:acp-conformance`. It runs the same
+provider-backed gate for Registry-backed Codex ACP, Registry-backed Claude
+Agent ACP, and local Hermes ACP: initialize readiness, exact scratch `cwd`, isolated repository
 worktree plus commit, and cancellation of the real shell/tool process tree.
 The process-tree assertion currently targets POSIX hosts; Windows can exercise
 ACP cancellation, but descendant-process termination is not yet a claimed gate.
@@ -106,6 +106,11 @@ can pass. For example:
 OPENTAG_BUILTIN_ACP_AGENTS=codex,claude-code \
 corepack pnpm smoke:live -- --case builtin-acp
 ```
+
+Set `OPENTAG_ACP_CONFORMANCE_REGISTRY` to a Registry JSON snapshot to add every
+launchable `npx`/`uvx` entry to the same batch. Binary distributions and entries
+with environment overlays are reported as `needs_setup`; they are not launched
+implicitly.
 
 ### OpenClaw ACP
 
@@ -153,7 +158,8 @@ It requires:
 - `gh` authenticated as a user with admin or maintain access to
   `OPENTAG_GH_REPO`.
 - A working local Claude login when `OPENTAG_GH_LIVE_EXECUTOR` is
-  `claude-code`; the Claude ACP adapter itself is bundled.
+  `claude-code`; its exact ACP package is resolved through `npx` from Registry
+  launch data.
 - `ngrok` unless `OPENTAG_GH_PUBLIC_URL` points at an existing public tunnel.
 
 ### Slack UI

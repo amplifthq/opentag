@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   AdapterMutationMappingSchema,
-  OpenTagIntegrationManifestSchema,
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
@@ -182,12 +181,25 @@ const SecuritySchema = z
   })
   .strict();
 
+const AcpAgentSchema = z
+  .object({
+    label: z.string().trim().min(1).optional(),
+    command: z.string().trim().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().trim().min(1).optional(),
+    workspaceCwd: z.literal("required"),
+    sessionModeId: z.string().trim().min(1).optional(),
+    supportsProfile: z.boolean().default(false),
+    readinessTimeoutMs: PositiveIntegerSchema.optional()
+  })
+  .strict();
+
 const DaemonConfigSchema = z
   .object({
     runnerId: z.string().min(1),
     dispatcherUrl: z.string().url(),
     repositories: z.array(RepositoryBindingSchema).default([]),
-    agents: z.record(OpenTagIntegrationManifestSchema).optional(),
+    agents: z.record(AcpAgentSchema).optional(),
     scratchRoot: z.string().min(1).optional(),
     keepScratch: KeepWorktreeSchema.optional(),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),

@@ -1,6 +1,6 @@
 # @opentag/runner
 
-Executor contracts and built-in runner adapters for OpenTag.
+Executor contracts and the generic ACP host for OpenTag.
 
 Use this package when building a local daemon, hosted runner, or custom executor that consumes OpenTag runs.
 
@@ -14,9 +14,11 @@ pnpm add @opentag/runner
 
 - `ExecutorAdapter`: interface every executor implements.
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
-- `createBuiltInAcpExecutors`: bundled Codex ACP, Claude Agent ACP, and Hermes ACP adapters.
-- `builtInAcpAgentManifests`: the corresponding built-in ACP manifests.
-- `createAcpExecutor`: generic stdio ACP host for administrator-provided agent manifests.
+- `createAcpAgentExecutor`: generic stdio ACP host for an ACP launch definition.
+- `parseAcpRegistry` and `resolveAcpRegistryAgent`: provider-neutral ACP Registry parsing and launch-candidate resolution.
+- `createBuiltInAcpExecutors`: compatibility aliases for Registry-backed Codex and Claude plus the local Hermes ACP command.
+- `builtInAcpAgentDefinitions`: the data-only compatibility definitions and Registry provenance.
+- `createAcpExecutor`: lower-level generic stdio ACP host for an internal integration manifest.
 - Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
 - Command helpers such as `nodeCommandRunner` and `assertCommandSucceeded`.
 - Built-in and generic ACP executors expose an optional `capability` contract so setup, doctor, status, and service surfaces can report profile, cancellation, hook-completion, progress-event, approval-boundary, prompt/context trust gates, workspace isolation, ACP session-cwd conformance, secret, and completion-signal support honestly.
@@ -78,7 +80,9 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-Codex, Claude Code, and Hermes run through ACP adapters. The generic ACP host
+Codex, Claude Code, and Hermes run through the same generic ACP host. Codex and
+Claude use exact package versions from the ACP Registry through `npx`; Hermes
+uses its configured local command and profile. The generic ACP host
 passes the attempt workspace as the ACP session `cwd`, scrubs the child
 environment, and terminates the adapter process group when a run is cancelled.
 

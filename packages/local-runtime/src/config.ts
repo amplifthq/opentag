@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { OpenTagIntegrationManifestSchema, OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
+import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
 const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "hermes"] as const;
@@ -112,6 +112,19 @@ const RunnerSecurityPolicySchema = z.object({
   extraSafeEnv: z.array(z.string().min(1)).optional()
 });
 
+export const AcpAgentConfigSchema = z
+  .object({
+    label: z.string().trim().min(1).optional(),
+    command: z.string().trim().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().trim().min(1).optional(),
+    workspaceCwd: z.literal("required"),
+    sessionModeId: z.string().trim().min(1).optional(),
+    supportsProfile: z.boolean().default(false),
+    readinessTimeoutMs: PositiveIntegerSchema.optional()
+  })
+  .strict();
+
 export const RepositoryBindingConfigSchema = z.object({
   provider: z.string().min(1).default("github"),
   owner: z.string().min(1),
@@ -167,7 +180,7 @@ export const OpenTagDaemonConfigSchema = z
     runnerId: z.string().min(1).default("runner_local"),
     dispatcherUrl: z.string().url().default("http://localhost:3030"),
     repositories: z.array(RepositoryBindingConfigSchema).default([]),
-    agents: z.record(OpenTagIntegrationManifestSchema).default({}),
+    agents: z.record(AcpAgentConfigSchema).default({}),
     scratchRoot: AbsolutePathSchema.default(() => join(defaultLocalStateDirectory(), "scratch")),
     keepScratch: KeepWorktreeSchema.default("on_failure"),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).default("auto"),
@@ -192,19 +205,12 @@ export const OpenTagDaemonConfigSchema = z
     runTimeoutMs: PositiveIntegerSchema.optional()
   })
   .superRefine((config, ctx) => {
-    for (const [name, manifest] of Object.entries(config.agents)) {
-      if (BUILT_IN_EXECUTOR_IDS.some((executorId) => executorId === manifest.id)) {
+    for (const name of Object.keys(config.agents)) {
+      if (BUILT_IN_EXECUTOR_IDS.some((executorId) => executorId === name)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["agents", name, "id"],
-          message: `Configured ACP agent '${manifest.id}' cannot replace the built-in executor with the same id.`
-        });
-      }
-      if (manifest.id !== name) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["agents", name, "id"],
-          message: `Configured agent name '${name}' must match manifest id '${manifest.id}'.`
+          path: ["agents", name],
+          message: `Configured ACP agent '${name}' cannot replace the built-in executor with the same id.`
         });
       }
     }
@@ -215,6 +221,7 @@ export type ChannelBindingConfig = z.infer<typeof ChannelBindingConfigSchema>;
 export type SlackChannelBindingConfig = z.infer<typeof SlackChannelBindingConfigSchema>;
 export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSchema>;
 export type AgentSessionProfileConfig = z.infer<typeof AgentSessionProfileConfigSchema>;
+export type AcpAgentConfig = z.infer<typeof AcpAgentConfigSchema>;
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
 
 function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
@@ -371,7 +378,7 @@ function assertNoLegacyClaudeDirectEnvironment(): void {
   ].filter((name) => process.env[name] !== undefined);
   if (configured.length > 0) {
     throw new Error(
-      `${configured.join(", ")} configure the removed Claude direct adapter. Claude Code now uses the bundled ACP adapter; remove these variables.`
+      `${configured.join(", ")} configure the removed Claude direct adapter. Claude Code now uses the Registry-backed ACP launch; remove these variables.`
     );
   }
 }

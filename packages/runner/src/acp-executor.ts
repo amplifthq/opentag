@@ -278,6 +278,9 @@ export type AcpExecutorOptions = {
   cancelGraceMs?: number;
   readinessTimeoutMs?: number;
   sessionModeId?: string;
+  capabilityOverrides?: {
+    supportsProfile?: boolean;
+  };
   security?: RunnerSecurityPolicy;
 };
 
@@ -465,7 +468,12 @@ function processTreeExited(child: ChildProcessWithoutNullStreams): boolean {
     process.kill(-child.pid, 0);
     return false;
   } catch (error) {
-    return error instanceof Error && "code" in error && error.code === "ESRCH";
+    if (!(error instanceof Error && "code" in error)) return false;
+    if (error.code === "ESRCH") return true;
+    // Once our child has exited, EPERM means this process-group id now belongs
+    // to something OpenTag does not own. Treat it as gone instead of risking a
+    // signal to an unrelated group after rapid pid reuse.
+    return error.code === "EPERM" && (child.exitCode !== null || child.signalCode !== null);
   }
 }
 
@@ -507,7 +515,16 @@ async function probeAcpInitialization(input: {
   security?: RunnerSecurityPolicy;
 }): Promise<{ ready: true } | { ready: false; reason: string }> {
   const child = spawnAcpChild(input.manifest, input.cwd, input.security);
+  const stderrChunks: Buffer[] = [];
+  let stderrBytes = 0;
   let spawnErrorCode: string | undefined;
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    if (stderrBytes >= MAX_ACP_DIAGNOSTIC_BYTES) return;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const bounded = buffer.subarray(0, MAX_ACP_DIAGNOSTIC_BYTES - stderrBytes);
+    stderrChunks.push(bounded);
+    stderrBytes += bounded.length;
+  });
   child.once("error", (error: NodeJS.ErrnoException) => {
     spawnErrorCode = error.code ?? "spawn_error";
   });
@@ -531,10 +548,18 @@ async function probeAcpInitialization(input: {
     });
     await Promise.race([initialization, timeout]);
     return { ready: true };
-  } catch {
+  } catch (error) {
+    await waitForExit(child, 100);
+    const detail = safeDiagnosticFragment(error instanceof Error ? error.message : String(error));
+    const stderr = safeDiagnosticFragment(Buffer.concat(stderrChunks).toString("utf8"));
     return {
       ready: false,
-      reason: `OpenTag could not initialize the ACP adapter for ${input.manifest.id}${spawnErrorCode ? ` (${spawnErrorCode})` : ""}.`
+      reason: [
+        `OpenTag could not initialize the ACP adapter for ${input.manifest.id}.`,
+        ...(spawnErrorCode ? [`spawnCode=${spawnErrorCode}`] : []),
+        ...(detail ? [`detail=${detail}`] : []),
+        ...(stderr ? [`stderr=${stderr}`] : [])
+      ].join(" ")
     };
   } finally {
     if (timer) clearTimeout(timer);
@@ -635,7 +660,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
     capability: {
       id: manifest.id,
       invocation: "spawn",
-      supportsProfile: false,
+      supportsProfile: options.capabilityOverrides?.supportsProfile ?? false,
       supportsStreaming: true,
       supportsCancel: true,
       supportsHookCompletion: false,

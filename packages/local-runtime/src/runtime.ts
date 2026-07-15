@@ -1,6 +1,6 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
-  createAcpExecutor,
+  createAcpAgentExecutor,
   createBuiltInAcpExecutors,
   createEchoExecutor,
   DEFAULT_HERMES_PROFILE,
@@ -49,11 +49,26 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     "claude-code": builtInAcpExecutors["claude-code"],
     hermes: builtInAcpExecutors.hermes
   };
-  for (const manifest of Object.values(config.agents)) {
-    if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {
-      throw new Error(`Configured ACP agent '${manifest.id}' cannot replace built-in executor '${manifest.id}'.`);
+  for (const [id, agent] of Object.entries(config.agents)) {
+    if (Object.prototype.hasOwnProperty.call(executors, id)) {
+      throw new Error(`Configured ACP agent '${id}' cannot replace built-in executor '${id}'.`);
     }
-    executors[manifest.id] = createAcpExecutor({ manifest, ...(security ? { security } : {}) });
+    executors[id] = createAcpAgentExecutor(
+      {
+        id,
+        label: agent.label ?? id,
+        workspaceCwd: agent.workspaceCwd,
+        launch: {
+          command: agent.command,
+          args: agent.args,
+          ...(agent.cwd ? { cwd: agent.cwd } : {})
+        },
+        ...(agent.sessionModeId ? { sessionModeId: agent.sessionModeId } : {}),
+        capabilities: { supportsProfile: agent.supportsProfile },
+        ...(agent.readinessTimeoutMs ? { readinessTimeoutMs: agent.readinessTimeoutMs } : {})
+      },
+      security ? { security } : {}
+    );
   }
   return executors;
 }

@@ -95,23 +95,25 @@ function checkInstalledDoctorCommand(installDir) {
   }
 }
 
-function checkInstalledBuiltInAcpAdapters(installDir) {
+function checkInstalledAcpLaunchDefinitions(installDir) {
   const probe = `
-    import { existsSync } from "node:fs";
-    import { spawnSync } from "node:child_process";
-    import { builtInAcpAgentManifests } from "@opentag/runner";
+    import { builtInAcpAgentDefinitions, builtInAcpAgentManifests } from "@opentag/runner";
 
+    const definitions = builtInAcpAgentDefinitions();
     const manifests = builtInAcpAgentManifests({
       hermes: { command: "hermes-release-check", profile: "release-check" }
     });
-    for (const id of ["codex", "claude-code"]) {
+    const expected = {
+      codex: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"],
+      "claude-code": ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"]
+    };
+    for (const [id, args] of Object.entries(expected)) {
       const binding = manifests[id].bindings.agent;
-      if (binding.command !== process.execPath || !binding.args?.[0] || !existsSync(binding.args[0])) {
-        throw new Error(\`Installed \${id} ACP entrypoint is not resolvable: \${JSON.stringify(binding)}\`);
+      if (binding.command !== "npx" || JSON.stringify(binding.args) !== JSON.stringify(args)) {
+        throw new Error(\`Installed \${id} ACP Registry launch is incorrect: \${JSON.stringify(binding)}\`);
       }
-      const version = spawnSync(binding.command, [...binding.args, "--version"], { encoding: "utf8" });
-      if (version.status !== 0) {
-        throw new Error(\`Installed \${id} ACP entrypoint failed --version: \${version.stderr || version.stdout}\`);
+      if (!definitions[id].registry?.id || !definitions[id].registry?.version) {
+        throw new Error(\`Installed \${id} ACP definition has no Registry provenance.\`);
       }
     }
     const hermes = manifests.hermes.bindings.agent;
@@ -144,8 +146,8 @@ try {
   run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
   checkInstalledDoctorCommand(installDir);
 
-  console.log("Checking installed built-in ACP adapters...");
-  checkInstalledBuiltInAcpAdapters(installDir);
+  console.log("Checking installed ACP Registry launch definitions...");
+  checkInstalledAcpLaunchDefinitions(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

@@ -8,15 +8,15 @@ describe("executor catalog", () => {
     const hermes = detections.find((executor) => executor.id === "hermes");
 
     expect(hermes).toMatchObject({ available: true, reason: `Found ${process.execPath} on PATH` });
-    expect(defaultExecutorId({ detections })).toBe("codex");
+    expect(defaultExecutorId({ detections })).toBe("hermes");
   });
 
   it("formats executor runtime capabilities next to executor availability", () => {
     const output = formatExecutorsCommandOutput({ PATH: "" } as NodeJS.ProcessEnv);
 
     expect(output).toContain("Coding agents:");
-    expect(output).toContain("Codex: available (Bundled ACP adapter)");
-    expect(output).toContain("Claude Code: available (Bundled ACP adapter)");
+    expect(output).toContain("Codex: needs setup (Could not find npx on PATH; @agentclientprotocol/codex-acp@1.1.2 needs setup)");
+    expect(output).toContain("Claude Code: needs setup (Could not find npx on PATH; @agentclientprotocol/claude-agent-acp@0.59.0 needs setup)");
     expect(output).toContain("Echo: dev/test only");
     expect(output).toContain("Executor capabilities:");
     expect(output).toContain("Codex: invocation=spawn");

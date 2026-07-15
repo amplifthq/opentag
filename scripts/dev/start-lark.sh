@@ -369,7 +369,7 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 
 DETECTED_EXECUTOR="$(detect_executor)"
-EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, hermes, echo; choose codex for a bundled ACP agent)" "$DETECTED_EXECUTOR")"
+EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, hermes, echo; Codex and Claude use pinned Registry ACP packages)" "$DETECTED_EXECUTOR")"
 validate_executor "$EXECUTOR"
 assert_executor_available "$EXECUTOR"
 

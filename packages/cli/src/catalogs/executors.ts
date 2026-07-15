@@ -8,6 +8,7 @@ export type ExecutorDescriptor = {
   label: string;
   command?: string;
   commandEnv?: string;
+  registryPackage?: string;
   alwaysAvailable?: boolean;
   devOnly?: boolean;
 };
@@ -22,12 +23,14 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
   {
     id: "codex",
     label: "Codex",
-    alwaysAvailable: true
+    command: "npx",
+    registryPackage: "@agentclientprotocol/codex-acp@1.1.2"
   },
   {
     id: "claude-code",
     label: "Claude Code",
-    alwaysAvailable: true
+    command: "npx",
+    registryPackage: "@agentclientprotocol/claude-agent-acp@0.59.0"
   },
   {
     id: "hermes",
@@ -67,7 +70,7 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
       return {
         id: executor.id,
         available: true,
-        reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Bundled ACP adapter"
+        reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Built-in executor"
       };
     }
     const command = executorCommand(executor, env);
@@ -75,7 +78,13 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
     return {
       id: executor.id,
       available,
-      reason: available ? `Found ${command} on PATH` : `Could not find ${command} on PATH`
+      reason: available
+        ? executor.registryPackage
+          ? `Registry package ${executor.registryPackage} via ${command}`
+          : `Found ${command} on PATH`
+        : executor.registryPackage
+          ? `Could not find ${command} on PATH; ${executor.registryPackage} needs setup`
+          : `Could not find ${command} on PATH`
     };
   });
 }
@@ -108,7 +117,7 @@ function formatExecutorStatus(executor: ExecutorDescriptor, available: boolean):
   if (executor.devOnly) {
     return "dev/test only";
   }
-  return available ? "available" : "not found";
+  return available ? "ready" : executor.registryPackage ? "needs setup" : "not found";
 }
 
 export function formatExecutors(env: NodeJS.ProcessEnv = process.env): string {

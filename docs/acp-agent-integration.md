@@ -29,55 +29,59 @@ An agent must not post directly to the source Slack or Lark thread. It must not
 receive channel app credentials, dispatcher fencing tokens, or raw connector
 secrets.
 
-## Declare the Agent role
+## Declare an ACP launch
 
-Add a named `opentag.integration.v1` manifest under `agents`:
+Add a compact launch definition under `agents`:
 
 ```json
 {
   "agents": {
     "example-acp": {
-      "protocol": "opentag.integration.v1",
-      "id": "example-acp",
       "label": "Example ACP Agent",
-      "bindings": {
-        "agent": {
-          "kind": "stdio",
-          "command": "example-agent",
-          "args": ["acp"],
-          "cwd": "relative/subdirectory"
-        }
-      },
-      "roles": {
-        "agent": {
-          "protocol": "agent-client-protocol",
-          "protocolVersion": 1,
-          "binding": "agent",
-          "workspace": { "sessionCwd": "required" }
-        }
-      },
-      "resources": {}
+      "command": "example-agent",
+      "args": ["acp"],
+      "cwd": "relative/subdirectory",
+      "workspaceCwd": "required"
     }
   }
 }
 ```
 
-The command may be an executable name or an absolute path. Binding `cwd`, when
+The command may be an executable name or an absolute path. `cwd`, when
 present, must be relative to the explicit Attempt workspace and must resolve
-inside it. Stdio bindings reject literal `env` maps. The child receives a
+inside it. Launch definitions reject literal `env` maps. The child receives a
 scrubbed process environment; credentials belong in an administrator-controlled
-Connection or secret-reference resolver, not in a reusable manifest.
+Connection or secret-reference resolver, not in reusable launch metadata.
 
-The map key, manifest `id`, and executor selection name must match. Selecting
-`example-acp` causes the Generic ACP Host to launch the declared binding.
+The map key is the executor selection name. Selecting `example-acp` causes the
+Generic ACP Host to launch that command. The removed full
+`opentag.integration.v1` configuration shape is intentionally not
+parse-compatible.
 
-`workspace.sessionCwd: "required"` is the integration author's attestation
+`workspaceCwd: "required"` is the integration author's attestation
 that the agent's real file tools honor the absolute `cwd` supplied to ACP
 `session/new`. ACP transports that value but does not prove how an agent or an
 external gateway uses it. The field is required: OpenTag rejects an ACP Agent
-manifest without it during schema parsing, before constructing an executor.
+launch without it during schema parsing, before constructing an executor.
 Declare it only after testing the real tools in both an isolated repository
 worktree and a scratch directory; it is not runtime proof or a sandbox claim.
+
+Registry membership alone never adds this attestation. `parseAcpRegistry`
+normalizes official Registry metadata into launch candidates; the batch gate
+must still prove OpenTag's workspace and cancellation cases. The user-facing
+result stays small: a target is ready, needs setup, or failed conformance, and a
+successful complete gate may be shown as OpenTag Verified.
+
+To run the same gate across every launchable `npx`/`uvx` entry in a Registry
+snapshot:
+
+```bash
+OPENTAG_ACP_CONFORMANCE_REGISTRY=/absolute/path/to/registry.json \
+pnpm smoke:acp-conformance
+```
+
+Binary entries and Registry `env` overlays are recorded as `needs_setup` until
+they can be materialized and admitted through an explicit security policy.
 
 ## OpenClaw 2026.7.1 gate status
 
@@ -238,25 +242,11 @@ runtime identities:
 {
   "agents": {
     "hermes-acp": {
-      "protocol": "opentag.integration.v1",
-      "id": "hermes-acp",
       "label": "Hermes ACP",
-      "bindings": {
-        "agent": {
-          "kind": "stdio",
-          "command": "hermes",
-          "args": ["acp"]
-        }
-      },
-      "roles": {
-        "agent": {
-          "protocol": "agent-client-protocol",
-          "protocolVersion": 1,
-          "binding": "agent",
-          "workspace": { "sessionCwd": "required" }
-        }
-      },
-      "resources": {}
+      "command": "hermes",
+      "args": ["acp"],
+      "workspaceCwd": "required",
+      "supportsProfile": true
     }
   },
   "channelBindings": [

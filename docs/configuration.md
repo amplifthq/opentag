@@ -56,28 +56,18 @@ Minimal local config:
 }
 ```
 
-Named ACP agents use the same manifest-backed runtime path. Hermes is an
-ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
+Named ACP agents use one compact launch definition. Hermes is an ordinary ACP
+agent in this example; selecting `hermes-acp` starts `hermes acp`:
 
 ```json
 {
   "agents": {
     "hermes-acp": {
-      "protocol": "opentag.integration.v1",
-      "id": "hermes-acp",
       "label": "Hermes ACP",
-      "bindings": {
-        "agent": { "kind": "stdio", "command": "hermes", "args": ["acp"] }
-      },
-      "roles": {
-        "agent": {
-          "protocol": "agent-client-protocol",
-          "protocolVersion": 1,
-          "binding": "agent",
-          "workspace": { "sessionCwd": "required" }
-        }
-      },
-      "resources": {}
+      "command": "hermes",
+      "args": ["acp"],
+      "workspaceCwd": "required",
+      "supportsProfile": true
     }
   },
   "scratchRoot": "/absolute/path/to/opentag-state/scratch",
@@ -85,11 +75,11 @@ ordinary ACP agent in this example; selecting `hermes-acp` starts `hermes acp`:
 }
 ```
 
-The workspace declaration is a manifest attestation, not runtime proof. ACP
+`workspaceCwd` is an explicit conformance attestation, not runtime proof. ACP
 transports the session `cwd`, but the agent's real file tools must be tested in
-repository worktrees and scratch directories before the declaration is added.
-An ACP Agent manifest without it is invalid configuration and is rejected while
-loading the config, before an executor can start.
+repository worktrees and scratch directories before it is added. A configured
+agent without it is rejected while loading the config, before an executor can
+start. The old full `opentag.integration.v1` config shape is not accepted.
 
 ### ACP-first setup choices
 
@@ -208,8 +198,9 @@ Sync these generic bindings with:
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-channels
 ```
 
-The built-in `codex` and `claude-code` executors use the pinned, bundled
-`codex-acp` and `claude-agent-acp` adapters. They do not accept direct CLI
+The built-in `codex` and `claude-code` compatibility aliases use exact package
+versions from the official ACP Registry through `npx`. The adapters are no
+longer dependencies bundled inside `@opentag/runner`. They do not accept direct CLI
 command, model, or permission-mode configuration. Claude sessions are placed in
 the adapter's `default` mode so OpenTag remains the approval boundary. Complete
 the normal local Codex or Claude login before running `opentag doctor`.
@@ -227,7 +218,7 @@ Use daemon security settings to keep executor runs constrained:
 }
 ```
 
-Both bundled ACP adapters receive the attempt-scoped scratch directory or
+Both Registry-backed ACP launches receive the attempt-scoped scratch directory or
 isolated git worktree as their ACP session `cwd`. Their process environment is
 scrubbed before startup: variables that look like secrets (tokens, API keys,
 cloud credentials) are dropped. If an adapter authenticates from
@@ -247,7 +238,7 @@ shell and tool descendants on POSIX systems.
 | `runnerTokens` | none | Additional runner-scoped tokens accepted by the local dispatcher during a rotation window |
 | `revokedRunnerTokenFingerprints` | none | SHA-256 fingerprints of revoked runner tokens that must fail closed |
 | `repositories` | `[]` | Current compatibility array for Project Target bindings this daemon is allowed to claim |
-| `agents` | `{}` | Named `opentag.integration.v1` manifests whose ACP agent role is hosted by the generic ACP executor |
+| `agents` | `{}` | Named ACP launch definitions (`command`, `args`, optional runtime metadata, and explicit `workspaceCwd: "required"`) hosted by the generic ACP executor |
 | `scratchRoot` | local OpenTag state directory | Absolute root for attempt-scoped non-repository workspaces |
 | `keepScratch` | `on_failure` | Scratch retention: `always`, `on_failure`, or `never`; failed attempts retain evidence |
 | `approvalMode` | `auto` | Autonomy mode: `ask`, `auto`, or `autonomous`. Every mode remains inside administrator-defined hard boundaries. |
@@ -299,7 +290,17 @@ To run the complete provider-backed Hermes ACP gate against an existing profile:
 ```bash
 OPENTAG_HERMES_PROFILE=<profile> \
 OPENTAG_BUILTIN_ACP_AGENTS=hermes \
-pnpm smoke:builtin-acp-conformance
+pnpm smoke:acp-conformance
+```
+
+To batch-test launchable `npx` and `uvx` entries from an ACP Registry snapshot,
+set `OPENTAG_ACP_CONFORMANCE_REGISTRY` to the JSON file. Entries that require an
+environment overlay or binary materialization are recorded as `needs_setup`
+instead of being launched implicitly:
+
+```bash
+OPENTAG_ACP_CONFORMANCE_REGISTRY=/absolute/path/to/registry.json \
+pnpm smoke:acp-conformance
 ```
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the

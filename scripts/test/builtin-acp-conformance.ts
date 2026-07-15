@@ -16,9 +16,12 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  builtInAcpAgentManifests,
-  createAcpExecutor,
-  type BuiltInAcpAgentId,
+  type AcpAgentDefinition,
+  type AcpRegistryResolution,
+  builtInAcpAgentDefinitions,
+  createAcpAgentExecutor,
+  parseAcpRegistry,
+  resolveAcpRegistryAgent,
   type ExecutorEventSink,
   type ExecutorRunInput
 } from "../../packages/runner/src/index.js";
@@ -29,6 +32,8 @@ const hermesCommand = process.env.OPENTAG_HERMES_COMMAND?.trim() || "hermes";
 const hermesProfile = process.env.OPENTAG_HERMES_PROFILE?.trim() || "opentag";
 const reportPath = process.env.OPENTAG_BUILTIN_ACP_CONFORMANCE_REPORT?.trim();
 const keepFixtures = process.env.OPENTAG_BUILTIN_ACP_KEEP_FIXTURES === "true";
+const registryPath = process.env.OPENTAG_ACP_CONFORMANCE_REGISTRY?.trim();
+const quiet = process.env.OPENTAG_ACP_CONFORMANCE_QUIET === "true";
 const runTimeoutMs = Number(process.env.OPENTAG_BUILTIN_ACP_RUN_TIMEOUT_MS || 180_000);
 const cancelStartTimeoutMs = Number(process.env.OPENTAG_BUILTIN_ACP_CANCEL_START_TIMEOUT_MS || 120_000);
 const cancelSleepSeconds = 30;
@@ -36,11 +41,10 @@ const cancelSleepSeconds = 30;
 type CaseId = "readiness" | "scratch-cwd" | "worktree-cwd" | "cancel-process-tree";
 
 type CaseResult = {
-  agent: BuiltInAcpAgentId;
+  agent: string;
   case: CaseId;
-  status: "passed" | "failed" | "skipped";
+  status: AcpConformanceStatus;
   durationMs: number;
-  failureKind?: "provider_status" | "conformance";
   error?: string;
 };
 
@@ -49,10 +53,6 @@ type Marker = {
   pwd: string;
 };
 
-const allAgentIds: BuiltInAcpAgentId[] = ["codex", "claude-code", "hermes"];
-const selectedAgentIds = (process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",") ?? allAgentIds)
-  .map((value) => value.trim())
-  .filter(Boolean);
 const allCaseIds: CaseId[] = ["readiness", "scratch-cwd", "worktree-cwd", "cancel-process-tree"];
 const selectedCaseIds = (process.env.OPENTAG_BUILTIN_ACP_CASES?.split(",") ?? allCaseIds)
   .map((value) => value.trim())
@@ -65,13 +65,6 @@ function fail(message: string): never {
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) fail(message);
-}
-
-function selectedAgents(): BuiltInAcpAgentId[] {
-  for (const id of selectedAgentIds) {
-    assert(allAgentIds.includes(id as BuiltInAcpAgentId), `Unknown built-in ACP agent '${id}'.`);
-  }
-  return selectedAgentIds as BuiltInAcpAgentId[];
 }
 
 function selectedCases(): CaseId[] {
@@ -97,12 +90,100 @@ const providerStatusPatterns = [
   /billing/iu,
   /inference provider/iu,
   /error calling (?:the )?llm api/iu,
-  /model .*?(?:not found|unavailable|unsupported)/iu
+  /model .*?(?:not found|unavailable|unsupported)/iu,
+  /profile .*?(?:does not exist|not found|not ready)/iu
 ];
 
-export function classifyBuiltInAcpFailure(error: unknown): "provider_status" | "conformance" {
+export type AcpConformanceStatus = "passed" | "needs_setup" | "failed_conformance" | "not_applicable";
+
+export function classifyAcpConformanceFailure(error: unknown): Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance"> {
   const diagnostic = error instanceof Error ? error.message : String(error);
-  return providerStatusPatterns.some((pattern) => pattern.test(diagnostic)) ? "provider_status" : "conformance";
+  return providerStatusPatterns.some((pattern) => pattern.test(diagnostic)) ? "needs_setup" : "failed_conformance";
+}
+
+/** @deprecated Use classifyAcpConformanceFailure. */
+export function classifyBuiltInAcpFailure(error: unknown): "provider_status" | "conformance" {
+  return classifyAcpConformanceFailure(error) === "needs_setup" ? "provider_status" : "conformance";
+}
+
+export type RegistryConformanceBatch = {
+  targets: AcpAgentDefinition[];
+  needsSetup: Extract<AcpRegistryResolution, { status: "needs_setup" }>[];
+};
+
+const stableRegistryAliases: Record<string, string> = {
+  "codex-acp": "codex",
+  "claude-acp": "claude-code"
+};
+
+export function registryConformanceTargets(
+  value: unknown,
+  options: {
+    aliases?: Record<string, string>;
+    selectedRegistryIds?: readonly string[];
+    platform?: NodeJS.Platform;
+    arch?: string;
+  } = {}
+): RegistryConformanceBatch {
+  const registry = parseAcpRegistry(value);
+  const selected = options.selectedRegistryIds ? new Set(options.selectedRegistryIds) : undefined;
+  const aliases = { ...stableRegistryAliases, ...options.aliases };
+  const targets: AcpAgentDefinition[] = [];
+  const needsSetup: RegistryConformanceBatch["needsSetup"] = [];
+  for (const entry of registry.agents) {
+    if (selected && !selected.has(entry.id)) continue;
+    const resolution = resolveAcpRegistryAgent(registry, entry.id, {
+      ...(aliases[entry.id] ? { executorId: aliases[entry.id] } : {}),
+      ...(options.platform ? { platform: options.platform } : {}),
+      ...(options.arch ? { arch: options.arch } : {})
+    });
+    if (resolution.status === "needs_setup") {
+      needsSetup.push(resolution);
+      continue;
+    }
+    targets.push({
+      ...resolution.agent,
+      workspaceCwd: "required",
+      ...(entry.id === "claude-acp" ? { sessionModeId: "default" } : {})
+    });
+  }
+  return { targets, needsSetup };
+}
+
+type ConformanceTarget =
+  | { id: string; definition: AcpAgentDefinition }
+  | { id: string; setup: Extract<AcpRegistryResolution, { status: "needs_setup" }> };
+
+function allConformanceTargets(): ConformanceTarget[] {
+  const builtIns = Object.values(builtInAcpAgentDefinitions({
+    hermes: { command: hermesCommand, profile: hermesProfile }
+  })).map((definition) => ({
+    id: definition.id,
+    definition
+  }));
+  if (!registryPath) return builtIns;
+
+  const registryValue = JSON.parse(readFileSync(resolve(repositoryRoot, registryPath), "utf8")) as unknown;
+  const registryBatch = registryConformanceTargets(registryValue);
+  const combined = new Map<string, ConformanceTarget>(builtIns.map((target) => [target.id, target]));
+  for (const definition of registryBatch.targets) {
+    combined.set(definition.id, { id: definition.id, definition });
+  }
+  for (const setup of registryBatch.needsSetup) {
+    const id = stableRegistryAliases[setup.registryId] ?? setup.registryId;
+    if (!combined.has(id)) combined.set(id, { id, setup });
+  }
+  return [...combined.values()];
+}
+
+function selectedTargets(): ConformanceTarget[] {
+  const available = allConformanceTargets();
+  const byId = new Map(available.map((target) => [target.id, target]));
+  const requested = (process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",") ?? available.map((target) => target.id))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  for (const id of requested) assert(byId.has(id), `Unknown ACP conformance agent '${id}'.`);
+  return requested.map((id) => byId.get(id)!);
 }
 
 function git(cwd: string, args: string[]): string {
@@ -135,17 +216,18 @@ function runInput(runId: string, workspace: ExecutorRunInput["workspace"], rawTe
   };
 }
 
-function sink(agent: BuiltInAcpAgentId): ExecutorEventSink {
+function sink(agent: string): ExecutorEventSink {
   return {
     async emit(event) {
+      if (quiet && event.type === "executor.progress") return;
       process.stdout.write(`[${agent}] [${event.type}] ${event.message}\n`);
     }
   };
 }
 
 async function boundedRun(
-  agent: BuiltInAcpAgentId,
-  executor: ReturnType<typeof createAcpExecutor>,
+  agent: string,
+  executor: ReturnType<typeof createAcpAgentExecutor>,
   input: ExecutorRunInput
 ) {
   let timedOut = false;
@@ -201,7 +283,7 @@ function assertMarker(path: string, nonce: string, expectedCwd: string): void {
   assert(realpathSync(marker.pwd) === realpathSync(expectedCwd), `Tool ran in '${marker.pwd}', expected '${expectedCwd}'.`);
 }
 
-async function runCase(agent: BuiltInAcpAgentId, caseId: CaseId, test: () => Promise<void>): Promise<boolean> {
+async function runCase(agent: string, caseId: CaseId, test: () => Promise<void>): Promise<AcpConformanceStatus> {
   const startedAt = Date.now();
   process.stdout.write(`\n== ${agent}: ${caseId} ==\n`);
   try {
@@ -209,25 +291,25 @@ async function runCase(agent: BuiltInAcpAgentId, caseId: CaseId, test: () => Pro
     const result: CaseResult = { agent, case: caseId, status: "passed", durationMs: Date.now() - startedAt };
     results.push(result);
     process.stdout.write(`PASS ${agent}: ${caseId} (${result.durationMs}ms)\n`);
-    return true;
+    return "passed";
   } catch (error) {
+    const status = classifyAcpConformanceFailure(error);
     const result: CaseResult = {
       agent,
       case: caseId,
-      status: "failed",
+      status,
       durationMs: Date.now() - startedAt,
-      failureKind: classifyBuiltInAcpFailure(error),
       error: safeDiagnostic(error)
     };
     results.push(result);
-    process.stderr.write(`FAIL ${agent}: ${caseId} [${result.failureKind}]: ${result.error}\n`);
-    return false;
+    process.stderr.write(`FAIL ${agent}: ${caseId} [${result.status}]: ${result.error}\n`);
+    return status;
   }
 }
 
-function skipRemainingCases(agent: BuiltInAcpAgentId, reason: string): void {
+function recordRemainingCases(agent: string, status: Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance">, reason: string): void {
   for (const caseId of selectedCases().filter((id) => id !== "readiness")) {
-    results.push({ agent, case: caseId, status: "skipped", durationMs: 0, error: reason });
+    results.push({ agent, case: caseId, status, durationMs: 0, error: reason });
   }
 }
 
@@ -252,22 +334,20 @@ function writeReport(ok: boolean): void {
       hermesProfile,
       summary: {
         passed: results.filter((result) => result.status === "passed").length,
-        providerStatusFailures: results.filter((result) => result.failureKind === "provider_status").length,
-        conformanceFailures: results.filter((result) => result.failureKind === "conformance").length,
-        skipped: results.filter((result) => result.status === "skipped").length
+        needsSetup: results.filter((result) => result.status === "needs_setup").length,
+        conformanceFailures: results.filter((result) => result.status === "failed_conformance").length,
+        notApplicable: results.filter((result) => result.status === "not_applicable").length
       },
       results
     }, null, 2)}\n`
   );
 }
 
-async function testAgent(agent: BuiltInAcpAgentId, root: string): Promise<void> {
+async function testAgent(definition: AcpAgentDefinition, root: string): Promise<void> {
+  const agent = definition.id;
   const cases = selectedCases();
-  const manifests = builtInAcpAgentManifests({ hermes: { command: hermesCommand, profile: hermesProfile } });
-  const executor = () => createAcpExecutor({
-    manifest: manifests[agent],
+  const executor = () => createAcpAgentExecutor(definition, {
     cancelGraceMs: 3_000,
-    ...(agent === "claude-code" ? { sessionModeId: "default" } : {}),
     permissionResolver: async () => ({ decision: "allow_once" })
   });
   const scratch = join(root, agent, "scratch");
@@ -277,12 +357,12 @@ async function testAgent(agent: BuiltInAcpAgentId, root: string): Promise<void> 
     const readiness = await executor().canRun(runInput(`conformance-readiness-${agent}`, { kind: "scratch", path: scratch }, "readiness"));
     assert(readiness.ready, readiness.reason || `${agent} did not pass ACP readiness.`);
   });
-  if (!ready) {
-    skipRemainingCases(agent, "ACP readiness failed.");
+  if (ready !== "passed") {
+    recordRemainingCases(agent, ready, "ACP readiness failed.");
     return;
   }
 
-  const scratchPassed = !cases.includes("scratch-cwd") || await runCase(agent, "scratch-cwd", async () => {
+  const scratchStatus = !cases.includes("scratch-cwd") ? "passed" : await runCase(agent, "scratch-cwd", async () => {
     const nonce = `${agent}-${Date.now()}`;
     const markerName = `opentag-${agent}-scratch.json`;
     const sentinel = `OPENTAG_${agent.toUpperCase().replaceAll("-", "_")}_ACP_SCRATCH_OK`;
@@ -297,9 +377,9 @@ async function testAgent(agent: BuiltInAcpAgentId, root: string): Promise<void> 
     assert(result.summary.includes(sentinel), `${agent} scratch response omitted ${sentinel}.`);
     assertMarker(join(scratch, markerName), nonce, scratch);
   });
-  if (!scratchPassed) {
+  if (scratchStatus !== "passed") {
     for (const caseId of cases.filter((id) => id === "worktree-cwd" || id === "cancel-process-tree")) {
-      results.push({ agent, case: caseId, status: "skipped", durationMs: 0, error: "Scratch session failed." });
+      results.push({ agent, case: caseId, status: scratchStatus, durationMs: 0, error: "Scratch session failed." });
     }
     return;
   }
@@ -330,7 +410,15 @@ async function testAgent(agent: BuiltInAcpAgentId, root: string): Promise<void> 
     assert(git(repository, ["show", `opentag/${runId}:${markerName}`]).includes(nonce), `${agent} worktree change was not committed.`);
   });
 
-  if (cases.includes("cancel-process-tree")) await runCase(agent, "cancel-process-tree", async () => {
+  if (cases.includes("cancel-process-tree") && process.platform === "win32") {
+    results.push({
+      agent,
+      case: "cancel-process-tree",
+      status: "not_applicable",
+      durationMs: 0,
+      error: "The process-tree conformance case currently requires POSIX process groups."
+    });
+  } else if (cases.includes("cancel-process-tree")) await runCase(agent, "cancel-process-tree", async () => {
     const cancelScratch = join(root, agent, "cancel");
     mkdirSync(cancelScratch, { recursive: true });
     const shellPidName = "acp-shell.pid";
@@ -384,8 +472,15 @@ async function main(): Promise<void> {
   assert(Number.isFinite(cancelStartTimeoutMs) && cancelStartTimeoutMs > 0, "OPENTAG_BUILTIN_ACP_CANCEL_START_TIMEOUT_MS must be positive.");
   const root = mkdtempSync(join(tmpdir(), "opentag-builtin-acp-conformance-"));
   try {
-    for (const agent of selectedAgents()) await testAgent(agent, root);
-    const ok = results.length > 0 && results.every((result) => result.status === "passed");
+    for (const target of selectedTargets()) {
+      if ("setup" in target) {
+        results.push({ agent: target.id, case: "readiness", status: "needs_setup", durationMs: 0, error: target.setup.reason });
+        recordRemainingCases(target.id, "needs_setup", target.setup.reason);
+      } else {
+        await testAgent(target.definition, root);
+      }
+    }
+    const ok = results.length > 0 && results.every((result) => result.status === "passed" || result.status === "not_applicable");
     writeReport(ok);
     assert(ok, `Built-in ACP conformance failed (${results.filter((result) => result.status === "passed").length}/${results.length} cases passed).`);
     process.stdout.write(`\nBuilt-in ACP conformance passed ${results.length}/${results.length} cases.\n`);

@@ -181,6 +181,22 @@ describe("ACP executor", () => {
     expect(readiness.reason).toMatch(/could not initialize the ACP adapter/iu);
   });
 
+  it("preserves a bounded redacted readiness diagnostic for setup failures", async () => {
+    const scratch = tempDir("readiness-diagnostic");
+    const configured = manifest();
+    configured.bindings.agent.args = [
+      "--eval",
+      "console.error('Authentication required for token sk_test_abcdefghijk'); process.exit(1)"
+    ];
+    const executor = createAcpExecutor({ manifest: configured });
+
+    const readiness = await executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness_diagnostic"));
+
+    expect(readiness.ready).toBe(false);
+    expect(readiness.reason).toMatch(/Authentication required/iu);
+    expect(readiness.reason).not.toContain("sk_test_abcdefghijk");
+  });
+
   it("streams normalized plan, tool, and message updates and commits repository changes", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest() });
@@ -202,6 +218,39 @@ describe("ACP executor", () => {
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
+  }, 15_000);
+
+  it.skipIf(process.platform === "win32")("does not signal a foreign process group after the ACP child exits", async () => {
+    const scratch = tempDir("foreign-process-group");
+    const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
+    const originalKill = process.kill.bind(process);
+    const foreignGroups = new Set<number>();
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid < 0 && foreignGroups.has(pid)) {
+        const error = new Error("kill EPERM") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      try {
+        return originalKill(pid, signal);
+      } catch (error) {
+        if (pid < 0 && error instanceof Error && "code" in error && error.code === "ESRCH") {
+          foreignGroups.add(pid);
+          const denied = new Error("kill EPERM") as NodeJS.ErrnoException;
+          denied.code = "EPERM";
+          throw denied;
+        }
+        throw error;
+      }
+    }) as typeof process.kill);
+
+    try {
+      await expect(
+        executor.run(input({ kind: "scratch", path: scratch }, "run_foreign_process_group"), { emit: async () => undefined })
+      ).resolves.toMatchObject({ conclusion: "success" });
+    } finally {
+      killSpy.mockRestore();
+    }
   }, 15_000);
 
   it("reassembles ACP message chunks without inserting characters", async () => {

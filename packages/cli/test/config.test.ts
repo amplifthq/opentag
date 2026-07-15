@@ -113,21 +113,10 @@ describe("OpenTag CLI config", () => {
         repositories: [],
         agents: {
           reviewer: {
-            protocol: "opentag.integration.v1",
-            id: "reviewer",
             label: "Review Agent",
-            bindings: {
-              agent: { kind: "stdio", command: "review-agent", args: ["acp"] }
-            },
-            roles: {
-              agent: {
-                protocol: "agent-client-protocol",
-                protocolVersion: 1,
-                binding: "agent",
-                workspace: { sessionCwd: "required" }
-              }
-            },
-            resources: {}
+            command: "review-agent",
+            args: ["acp"],
+            workspaceCwd: "required"
           }
         },
         channelBindings: [
@@ -157,7 +146,12 @@ describe("OpenTag CLI config", () => {
     });
 
     expect(parsed.daemon.repositories).toEqual([]);
-    expect(parsed.daemon.agents.reviewer?.roles.agent?.protocol).toBe("agent-client-protocol");
+    expect(parsed.daemon.agents.reviewer).toMatchObject({
+      label: "Review Agent",
+      command: "review-agent",
+      args: ["acp"],
+      workspaceCwd: "required"
+    });
     expect(parsed.daemon.channelBindings).toEqual([
       {
         provider: "slack",

@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { createBuiltInAcpExecutors } from "../src/builtin-acp.js";
+import { createAcpAgentExecutor } from "../src/acp-agent.js";
 import { createEchoExecutor } from "../src/echo.js";
+
+function acpExecutor(id: string, supportsProfile = false) {
+  return createAcpAgentExecutor({
+    id,
+    label: id,
+    workspaceCwd: "required",
+    launch: { command: id, args: ["acp"] },
+    capabilities: { supportsProfile }
+  });
+}
 
 describe("executor capability contracts", () => {
   it("exposes runtime capabilities for built-in executors", () => {
-    const builtIns = createBuiltInAcpExecutors();
-    const executors = [builtIns.codex, builtIns["claude-code"], builtIns.hermes, createEchoExecutor()];
+    const codex = acpExecutor("codex");
+    const claudeCode = acpExecutor("claude-code");
+    const hermes = acpExecutor("hermes", true);
+    const executors = [codex, claudeCode, hermes, createEchoExecutor()];
 
     for (const executor of executors) {
       expect(executor.capability).toMatchObject({
@@ -29,9 +41,9 @@ describe("executor capability contracts", () => {
       expect(executor.capability?.requiredSecrets).toEqual(expect.any(Array));
     }
 
-    expect(builtIns.codex.capability?.workspaceIsolation).toBe("worktree");
-    expect(builtIns["claude-code"].capability?.workspaceIsolation).toBe("worktree");
-    expect(builtIns.hermes.capability).toMatchObject({
+    expect(codex.capability?.workspaceIsolation).toBe("worktree");
+    expect(claudeCode.capability?.workspaceIsolation).toBe("worktree");
+    expect(hermes.capability).toMatchObject({
       supportsProfile: true,
       workspaceIsolation: "worktree"
     });
@@ -39,7 +51,7 @@ describe("executor capability contracts", () => {
   });
 
   it("requires explicit trust-boundary fields instead of runtime unknown fallbacks", () => {
-    const capability = createBuiltInAcpExecutors().codex.capability;
+    const capability = acpExecutor("codex").capability;
 
     expect(capability).toMatchObject({
       progressEvents: "audit",

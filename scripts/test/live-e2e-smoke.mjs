@@ -66,7 +66,7 @@ const cases = [
     optionalCommands: ["ngrok"],
     notes: [
       "Requires gh auth with ADMIN or MAINTAIN access to OPENTAG_GH_REPO.",
-      "Requires working local authentication for the selected bundled ACP adapter.",
+      "Requires npx plus working local authentication for the selected Registry-backed ACP launch.",
       "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true."
     ]
   },

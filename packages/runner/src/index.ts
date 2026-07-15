@@ -1,4 +1,6 @@
 export * from "./acp-executor.js";
+export * from "./acp-agent.js";
+export * from "./acp-registry.js";
 export * from "./builtin-acp.js";
 export * from "./command.js";
 export * from "./echo.js";

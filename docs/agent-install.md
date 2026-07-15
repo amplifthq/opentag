@@ -135,7 +135,8 @@ Common Teams troubleshooting shortcuts:
   `platforms.teams.appId`, the tenant is correct, and OpenTag is running the
   current Teams adapter.
 - If the Claude executor is not ready, run `opentag doctor` and complete the
-  normal local Claude login. The Claude ACP adapter is bundled; there is no
+  normal local Claude login. The Claude ACP adapter uses a pinned Registry
+  package through `npx`; there is no
   `daemon.claudeCode.command` path to configure.
 - If the action receipt says direct apply is not configured, check whether the
   channel binding points at a GitHub/GitLab repository and whether apply tokens

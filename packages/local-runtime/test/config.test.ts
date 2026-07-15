@@ -11,23 +11,14 @@ const baseRepository = {
   checkoutPath: "/tmp/acme-widgets"
 };
 
-function acpManifest(input: { id: string; label: string; command: string; args?: string[] }) {
+function acpAgent(input: { label: string; command: string; args?: string[]; sessionModeId?: string; supportsProfile?: boolean }) {
   return {
-    protocol: "opentag.integration.v1" as const,
-    id: input.id,
     label: input.label,
-    bindings: {
-      agent: { kind: "stdio" as const, command: input.command, args: input.args ?? [] }
-    },
-    roles: {
-      agent: {
-        protocol: "agent-client-protocol" as const,
-        protocolVersion: 1 as const,
-        binding: "agent",
-        workspace: { sessionCwd: "required" as const }
-      }
-    },
-    resources: {}
+    command: input.command,
+    args: input.args ?? [],
+    workspaceCwd: "required" as const,
+    ...(input.sessionModeId ? { sessionModeId: input.sessionModeId } : {}),
+    ...(input.supportsProfile !== undefined ? { supportsProfile: input.supportsProfile } : {})
   };
 }
 
@@ -58,45 +49,41 @@ describe("parseDaemonConfig ACP agents", () => {
   it("creates differently named agents through the generic ACP executor path", () => {
     const config = parseDaemonConfig({
       agents: {
-        "hermes-acp": acpManifest({ id: "hermes-acp", label: "Hermes ACP", command: "hermes", args: ["acp"] }),
-        reviewer: acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" })
+        "hermes-acp": acpAgent({ label: "Hermes ACP", command: "hermes", args: ["acp"], supportsProfile: true }),
+        reviewer: acpAgent({ label: "Review Agent", command: "review-agent", sessionModeId: "review" })
       }
     });
 
-    expect(config.agents?.["hermes-acp"]?.bindings.agent).toMatchObject({ command: "hermes", args: ["acp"] });
+    expect(config.agents?.["hermes-acp"]).toMatchObject({ command: "hermes", args: ["acp"] });
     const executors = executorsFromConfig(config);
     expect(executors["hermes-acp"]).toMatchObject({ id: "hermes-acp", displayName: "Hermes ACP" });
     expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
     expect(executors.reviewer?.capability).toMatchObject({ workspaceCwdConformance: "declared" });
+    expect(executors["hermes-acp"]?.capability).toMatchObject({ supportsProfile: true });
     expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(
       executors.reviewer?.capability?.completionSignals
     );
   });
 
-  it("requires the configured name to match the manifest id", () => {
-    expect(() =>
-      parseDaemonConfig({
-        agents: {
-          reviewer: acpManifest({ id: "different-id", label: "Review Agent", command: "review-agent" })
+  it("rejects the removed full ACP manifest shape", () => {
+    expect(() => parseDaemonConfig({
+      agents: {
+        reviewer: {
+          protocol: "opentag.integration.v1",
+          id: "reviewer",
+          label: "Review Agent",
+          command: "review-agent"
         }
-      })
-    ).toThrow(/reviewer|different-id/u);
+      }
+    })).toThrow(/unrecognized|protocol|id/iu);
   });
 
-  it("rejects an ACP agent manifest without the required session cwd conformance", () => {
-    const manifest = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
-    const { workspace: _workspace, ...agentWithoutWorkspace } = manifest.roles.agent;
-
-    expect(() =>
-      parseDaemonConfig({
-        agents: {
-          reviewer: {
-            ...manifest,
-            roles: { agent: agentWithoutWorkspace }
-          }
-        }
-      })
-    ).toThrow(/workspace/u);
+  it("requires an explicit workspace cwd conformance attestation", () => {
+    expect(() => parseDaemonConfig({
+      agents: {
+        reviewer: { label: "Review Agent", command: "review-agent" }
+      }
+    })).toThrow(/workspaceCwd|received undefined/iu);
   });
 
   it.each(["echo", "codex", "claude-code", "hermes"])(
@@ -105,7 +92,7 @@ describe("parseDaemonConfig ACP agents", () => {
       expect(() =>
         parseDaemonConfig({
           agents: {
-            [executorId]: acpManifest({ id: executorId, label: "Collision", command: "custom-agent" })
+            [executorId]: acpAgent({ label: "Collision", command: "custom-agent" })
           }
         })
       ).toThrow(/built-in executor/iu);
@@ -117,7 +104,7 @@ describe("parseDaemonConfig ACP agents", () => {
     const bypassed = {
       ...config,
       agents: {
-        echo: acpManifest({ id: "echo", label: "Replacement Echo", command: "custom-echo" })
+        echo: acpAgent({ label: "Replacement Echo", command: "custom-echo" })
       }
     } as unknown as Parameters<typeof executorsFromConfig>[0];
 
@@ -125,12 +112,12 @@ describe("parseDaemonConfig ACP agents", () => {
   });
 
   it("rejects literal environment values in ACP bindings", () => {
-    const configured = acpManifest({ id: "reviewer", label: "Review Agent", command: "review-agent" });
+    const configured = acpAgent({ label: "Review Agent", command: "review-agent" });
     expect(() => parseDaemonConfig({
       agents: {
         reviewer: {
           ...configured,
-          bindings: { agent: { ...configured.bindings.agent, env: { TOKEN: "literal" } } }
+          env: { TOKEN: "literal" }
         }
       }
     })).toThrow(/env|unrecognized/iu);

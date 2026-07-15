@@ -173,7 +173,8 @@ OpenTag prints the local Teams webhook and reminds you to configure the public t
 If `opentag service` runs under macOS LaunchAgent, its `PATH` may not include your interactive shell's `~/.local/bin`. If a run fails with:
 
 If the Claude executor is not ready, complete the normal local Claude login and
-restart the service. The Claude ACP adapter is bundled, so there is no CLI path
+restart the service. The Claude ACP adapter uses a pinned Registry package
+through `npx`, so there is no direct Claude CLI path
 setting:
 
 ```bash

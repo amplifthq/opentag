@@ -35,11 +35,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@agentclientprotocol/claude-agent-acp": "0.59.0",
-    "@agentclientprotocol/codex-acp": "1.1.2",
     "@agentclientprotocol/sdk": "^1.2.1",
-    "@opentag/core": "workspace:*",
-    "zod": "4.4.3"
+    "@opentag/core": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.3.5",

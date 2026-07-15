@@ -1,6 +1,9 @@
-import { createRequire } from "node:module";
 import type { OpenTagIntegrationManifest } from "@opentag/core";
-import { createAcpExecutor } from "./acp-executor.js";
+import {
+  createAcpAgentExecutor,
+  createAcpAgentManifest,
+  type AcpAgentDefinition
+} from "./acp-agent.js";
 import type { ExecutorAdapter } from "./executor.js";
 import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
 import type { RunnerSecurityPolicy } from "./security.js";
@@ -15,80 +18,66 @@ export type BuiltInAcpAgentOptions = {
   };
 };
 
-const require = createRequire(import.meta.url);
+export type BuiltInAcpAgentDefinition = AcpAgentDefinition & { id: BuiltInAcpAgentId };
 
-function agentManifest(input: {
-  id: BuiltInAcpAgentId;
-  label: string;
-  command: string;
-  args: string[];
-}): OpenTagIntegrationManifest {
-  return {
-    protocol: "opentag.integration.v1",
-    id: input.id,
-    label: input.label,
-    bindings: {
-      agent: {
-        kind: "stdio",
-        command: input.command,
-        args: input.args
-      }
-    },
-    roles: {
-      agent: {
-        protocol: "agent-client-protocol",
-        protocolVersion: 1,
-        binding: "agent",
-        workspace: { sessionCwd: "required" }
-      }
-    },
-    resources: {}
-  };
-}
-
-export function builtInAcpAgentManifests(options: BuiltInAcpAgentOptions = {}): Record<BuiltInAcpAgentId, OpenTagIntegrationManifest> {
+export function builtInAcpAgentDefinitions(
+  options: BuiltInAcpAgentOptions = {}
+): Record<BuiltInAcpAgentId, BuiltInAcpAgentDefinition> {
   const hermesCommand = options.hermes?.command ?? "hermes";
   const hermesProfile = options.hermes?.profile ?? DEFAULT_HERMES_PROFILE;
 
   return {
-    codex: agentManifest({
+    codex: {
       id: "codex",
       label: "Codex ACP",
-      command: process.execPath,
-      args: [require.resolve("@agentclientprotocol/codex-acp")]
-    }),
-    "claude-code": agentManifest({
+      workspaceCwd: "required",
+      registry: { id: "codex-acp", version: "1.1.2" },
+      readinessTimeoutMs: 30_000,
+      launch: {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"]
+      }
+    },
+    "claude-code": {
       id: "claude-code",
       label: "Claude Agent ACP",
-      command: process.execPath,
-      args: [require.resolve("@agentclientprotocol/claude-agent-acp/dist/index.js")]
-    }),
-    hermes: agentManifest({
+      workspaceCwd: "required",
+      registry: { id: "claude-acp", version: "0.59.0" },
+      readinessTimeoutMs: 30_000,
+      launch: {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"]
+      },
+      sessionModeId: "default"
+    },
+    hermes: {
       id: "hermes",
       label: "Hermes ACP",
-      command: hermesCommand,
-      args: ["-p", hermesProfile, "acp"]
-    })
+      workspaceCwd: "required",
+      launch: {
+        command: hermesCommand,
+        args: ["-p", hermesProfile, "acp"]
+      },
+      capabilities: { supportsProfile: true }
+    }
+  };
+}
+
+export function builtInAcpAgentManifests(options: BuiltInAcpAgentOptions = {}): Record<BuiltInAcpAgentId, OpenTagIntegrationManifest> {
+  const definitions = builtInAcpAgentDefinitions(options);
+  return {
+    codex: createAcpAgentManifest(definitions.codex),
+    "claude-code": createAcpAgentManifest(definitions["claude-code"]),
+    hermes: createAcpAgentManifest(definitions.hermes)
   };
 }
 
 export function createBuiltInAcpExecutors(options: BuiltInAcpAgentOptions = {}): Record<BuiltInAcpAgentId, ExecutorAdapter> {
-  const manifests = builtInAcpAgentManifests(options);
+  const definitions = builtInAcpAgentDefinitions(options);
   const shared = options.security ? { security: options.security } : {};
-  const codex = createAcpExecutor({ manifest: manifests.codex, ...shared });
-  const claudeCode = createAcpExecutor({ manifest: manifests["claude-code"], sessionModeId: "default", ...shared });
-  const hermes = createAcpExecutor({ manifest: manifests.hermes, ...shared });
-  if (!hermes.capability) throw new Error("The built-in Hermes ACP executor must declare its capability contract.");
-
   return {
-    codex,
-    "claude-code": claudeCode,
-    hermes: {
-      ...hermes,
-      capability: {
-        ...hermes.capability,
-        supportsProfile: true
-      }
-    }
+    codex: createAcpAgentExecutor(definitions.codex, shared),
+    "claude-code": createAcpAgentExecutor(definitions["claude-code"], shared),
+    hermes: createAcpAgentExecutor(definitions.hermes, shared)
   };
 }

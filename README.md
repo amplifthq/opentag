@@ -172,8 +172,8 @@ OpenTag's CLI path is local-first.
 
 | Coding agent | Status | Notes |
 | --- | --- | --- |
-| Codex | Ready | Bundled `codex-acp`; uses your existing Codex login |
-| Claude Code | Ready | Bundled `claude-agent-acp`; uses your existing Claude login |
+| Codex | Ready when `npx` and login are available | Pinned Registry package `@agentclientprotocol/codex-acp@1.1.2` |
+| Claude Code | Ready when `npx` and login are available | Pinned Registry package `@agentclientprotocol/claude-agent-acp@0.59.0` |
 | Hermes | Ready when installed | Uses `hermes -p <profile> acp` with a configured local provider |
 | Echo | Dev/test only | Does not run a real coding agent |
 
