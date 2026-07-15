@@ -15,7 +15,7 @@ created pull request.
 
 Required:
   gh CLI authenticated as a user with admin access to the target repository.
-  claude CLI installed and logged in, unless OPENTAG_GH_LIVE_EXECUTOR is changed.
+  The selected built-in ACP agent command is installed and authenticated; Claude Code uses npx by default.
   ngrok installed when OPENTAG_GH_LIVE_START_NGROK=true.
 
 Helpful env:
@@ -45,8 +45,6 @@ fi
 : "${OPENTAG_DISPATCHER_PORT:=3033}"
 : "${OPENTAG_GITHUB_PORT:=3050}"
 : "${OPENTAG_RUNNER_ID:=runner_github_webhook_live}"
-: "${OPENTAG_CLAUDE_COMMAND:=claude}"
-: "${OPENTAG_CLAUDE_PERMISSION_MODE:=acceptEdits}"
 : "${OPENTAG_GH_REPO:=amplifthq/opentag-test}"
 : "${OPENTAG_GH_LIVE_START_NGROK:=true}"
 : "${OPENTAG_GH_LIVE_APPLY:=true}"
@@ -134,9 +132,6 @@ require_cmd lsof
 require_cmd node
 require_cmd python3
 require_cmd sqlite3
-if [[ "$OPENTAG_GH_LIVE_EXECUTOR" == "claude-code" ]]; then
-  require_cmd "$OPENTAG_CLAUDE_COMMAND"
-fi
 if bool_true "$OPENTAG_GH_LIVE_START_NGROK"; then
   require_cmd ngrok
 fi
@@ -175,7 +170,7 @@ BASE_BRANCH="${OPENTAG_BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 export CHECKOUT_PATH WORKTREE_ROOT STATE_DIR CONFIG_PATH DATABASE_PATH WEBHOOK_SECRET BASE_BRANCH PUSH_REMOTE
 export OPENTAG_PAIRING_TOKEN OPENTAG_DISPATCHER_PORT OPENTAG_GITHUB_PORT OPENTAG_RUNNER_ID
-export OPENTAG_CLAUDE_COMMAND OPENTAG_CLAUDE_PERMISSION_MODE OPENTAG_GH_LIVE_EXECUTOR
+export OPENTAG_GH_LIVE_EXECUTOR
 
 ensure_port_free() {
   local port="$1"
@@ -369,10 +364,6 @@ config = {
                 "keepWorktree": "on_failure",
             }
         ],
-        "claudeCode": {
-            "command": os.environ["OPENTAG_CLAUDE_COMMAND"],
-            "permissionMode": os.environ["OPENTAG_CLAUDE_PERMISSION_MODE"],
-        },
         "githubToken": os.environ["GITHUB_TOKEN"],
         **(
             {"githubApplyToken": None}

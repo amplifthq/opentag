@@ -28,7 +28,7 @@ const KNOWN_FLAGS = new Set([
 ]);
 const SINGLE_VALUE_FLAGS = new Set(["approval", "executor", "line", "network", "range", "runner", "timeout"]);
 const APPROVAL_VALUES = new Set<NonNullable<NonNullable<OpenTagCommand["parsed"]>["approval"]>>(["auto", "required", "never"]);
-const EXECUTOR_HINTS = new Set<AgentTarget["executorHint"]>(["claude-code", "codex", "hermes", "openclaw", "custom"]);
+const EXECUTOR_HINTS = new Set<AgentTarget["executorHint"]>(["claude-code", "codex", "cursor", "opencode", "hermes", "openclaw", "custom"]);
 const PERMISSION_SCOPES = new Set<PermissionGrant["scope"]>([
   "repo:read",
   "repo:write",

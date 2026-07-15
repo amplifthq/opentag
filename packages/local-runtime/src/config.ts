@@ -2,10 +2,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { OpenTagIntegrationManifestSchema, OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
+import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
-const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "hermes"] as const;
+const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"] as const;
 
 // Accept any trimmed non-empty executor id. Custom executors registered by a
 // standalone runner are valid, but daemon ACP agents cannot replace built-ins.
@@ -94,17 +94,16 @@ const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transfo
   return typeof value === "string" ? value : resolveSecretRef(value);
 });
 
-const ClaudeCodeExecutorConfigSchema = z.object({
-  command: z.string().min(1).optional(),
-  model: z.string().min(1).optional(),
-  permissionMode: z.enum(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]).optional(),
-  dangerouslySkipPermissions: z.boolean().optional()
-});
-
-const HermesExecutorConfigSchema = z.object({
+const HermesAcpConfigSchema = z.object({
   command: z.string().trim().min(1).optional(),
   profile: z.string().trim().min(1).optional(),
   profileTemplate: z.string().trim().min(1).optional()
+});
+
+const OpenClawAcpConfigSchema = z.object({
+  command: z.string().trim().min(1).optional(),
+  profile: z.string().trim().min(1).optional(),
+  gatewayUrl: z.string().url().optional()
 });
 
 const AgentSessionProfileConfigSchema = z.object({
@@ -118,6 +117,20 @@ const RunnerSecurityPolicySchema = z.object({
   allowUnsafePrompts: z.boolean().optional(),
   extraSafeEnv: z.array(z.string().min(1)).optional()
 });
+
+export const AcpAgentConfigSchema = z
+  .object({
+    label: z.string().trim().min(1).optional(),
+    command: z.string().trim().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().trim().min(1).optional(),
+    workspaceCwd: z.literal("required"),
+    sessionModeId: z.string().trim().min(1).optional(),
+    supportsProfile: z.boolean().default(false),
+    supportsCancel: z.boolean().default(false),
+    readinessTimeoutMs: PositiveIntegerSchema.optional()
+  })
+  .strict();
 
 export const RepositoryBindingConfigSchema = z.object({
   provider: z.string().min(1).default("github"),
@@ -174,15 +187,17 @@ export const OpenTagDaemonConfigSchema = z
     runnerId: z.string().min(1).default("runner_local"),
     dispatcherUrl: z.string().url().default("http://localhost:3030"),
     repositories: z.array(RepositoryBindingConfigSchema).default([]),
-    agents: z.record(OpenTagIntegrationManifestSchema).default({}),
+    agents: z.record(AcpAgentConfigSchema).default({}),
     scratchRoot: AbsolutePathSchema.default(() => join(defaultLocalStateDirectory(), "scratch")),
     keepScratch: KeepWorktreeSchema.default("on_failure"),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).default("auto"),
     channelBindings: z.array(ChannelBindingConfigSchema).optional(),
     slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
     larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
-    claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
-    hermes: HermesExecutorConfigSchema.optional(),
+    // Reject removed direct-adapter config instead of silently stripping it from the non-strict daemon schema.
+    claudeCode: z.never().optional(),
+    hermes: HermesAcpConfigSchema.optional(),
+    openclaw: OpenClawAcpConfigSchema.optional(),
     agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
     security: RunnerSecurityPolicySchema.optional(),
     githubToken: SecretStringSchema.optional(),
@@ -198,19 +213,12 @@ export const OpenTagDaemonConfigSchema = z
     runTimeoutMs: PositiveIntegerSchema.optional()
   })
   .superRefine((config, ctx) => {
-    for (const [name, manifest] of Object.entries(config.agents)) {
-      if (BUILT_IN_EXECUTOR_IDS.some((executorId) => executorId === manifest.id)) {
+    for (const name of Object.keys(config.agents)) {
+      if (BUILT_IN_EXECUTOR_IDS.some((executorId) => executorId === name)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["agents", name, "id"],
-          message: `Configured ACP agent '${manifest.id}' cannot replace the built-in executor with the same id.`
-        });
-      }
-      if (manifest.id !== name) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["agents", name, "id"],
-          message: `Configured agent name '${name}' must match manifest id '${manifest.id}'.`
+          path: ["agents", name],
+          message: `Configured ACP agent '${name}' cannot replace the built-in executor with the same id.`
         });
       }
     }
@@ -221,6 +229,7 @@ export type ChannelBindingConfig = z.infer<typeof ChannelBindingConfigSchema>;
 export type SlackChannelBindingConfig = z.infer<typeof SlackChannelBindingConfigSchema>;
 export type LarkChannelBindingConfig = z.infer<typeof LarkChannelBindingConfigSchema>;
 export type AgentSessionProfileConfig = z.infer<typeof AgentSessionProfileConfigSchema>;
+export type AcpAgentConfig = z.infer<typeof AcpAgentConfigSchema>;
 export type OpenTagDaemonConfig = z.infer<typeof OpenTagDaemonConfigSchema>;
 
 function channelBindingIdentity(binding: Pick<ChannelBindingConfig, "provider" | "accountId" | "conversationId">): string {
@@ -368,13 +377,18 @@ export function createInitialConfig(input: InitConfigInput): OpenTagDaemonConfig
   });
 }
 
-function claudePermissionModeFromEnv(value: string | undefined) {
-  if (!value) return undefined;
-  const parsed = ClaudeCodeExecutorConfigSchema.shape.permissionMode.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(`Invalid OPENTAG_CLAUDE_PERMISSION_MODE: ${value}`);
+function assertNoLegacyClaudeDirectEnvironment(): void {
+  const configured = [
+    "OPENTAG_CLAUDE_COMMAND",
+    "OPENTAG_CLAUDE_MODEL",
+    "OPENTAG_CLAUDE_PERMISSION_MODE",
+    "OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS"
+  ].filter((name) => process.env[name] !== undefined);
+  if (configured.length > 0) {
+    throw new Error(
+      `${configured.join(", ")} configure the removed Claude direct adapter. Claude Code now uses the Registry-backed ACP launch; remove these variables.`
+    );
   }
-  return parsed.data;
 }
 
 function extraSafeEnvFromEnv(value: string | undefined): string[] | undefined {
@@ -387,6 +401,7 @@ function extraSafeEnvFromEnv(value: string | undefined): string[] | undefined {
 }
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
+  assertNoLegacyClaudeDirectEnvironment();
   const configPath = process.env.OPENTAG_CONFIG_PATH;
   if (configPath) {
     return parseDaemonConfig(JSON.parse(readFileSync(configPath, "utf8")));
@@ -396,7 +411,6 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
   const repo = process.env.OPENTAG_REPO_NAME;
   const checkoutPath = process.env.OPENTAG_WORKSPACE_PATH;
   const repositoryProvider = process.env.OPENTAG_REPO_PROVIDER ?? process.env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
-  const claudePermissionMode = claudePermissionModeFromEnv(process.env.OPENTAG_CLAUDE_PERMISSION_MODE);
   const runnerTokens = stringListFromJsonEnv("OPENTAG_RUNNER_TOKENS_JSON");
   const revokedRunnerTokenFingerprints = stringListFromJsonEnv("OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON");
   const repositories =
@@ -446,27 +460,21 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
           ]
         }
       : {}),
-    ...(process.env.OPENTAG_CLAUDE_COMMAND ||
-    process.env.OPENTAG_CLAUDE_MODEL ||
-    process.env.OPENTAG_CLAUDE_PERMISSION_MODE ||
-    process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS
-      ? {
-          claudeCode: {
-            ...(process.env.OPENTAG_CLAUDE_COMMAND ? { command: process.env.OPENTAG_CLAUDE_COMMAND } : {}),
-            ...(process.env.OPENTAG_CLAUDE_MODEL ? { model: process.env.OPENTAG_CLAUDE_MODEL } : {}),
-            ...(claudePermissionMode ? { permissionMode: claudePermissionMode } : {}),
-            ...(process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS
-              ? { dangerouslySkipPermissions: process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true" }
-              : {})
-          }
-        }
-      : {}),
     ...(process.env.OPENTAG_HERMES_COMMAND || process.env.OPENTAG_HERMES_PROFILE || process.env.OPENTAG_HERMES_PROFILE_TEMPLATE
       ? {
           hermes: {
             ...(process.env.OPENTAG_HERMES_COMMAND ? { command: process.env.OPENTAG_HERMES_COMMAND } : {}),
             ...(process.env.OPENTAG_HERMES_PROFILE ? { profile: process.env.OPENTAG_HERMES_PROFILE } : {}),
             ...(process.env.OPENTAG_HERMES_PROFILE_TEMPLATE ? { profileTemplate: process.env.OPENTAG_HERMES_PROFILE_TEMPLATE } : {})
+          }
+        }
+      : {}),
+    ...(process.env.OPENTAG_OPENCLAW_COMMAND || process.env.OPENTAG_OPENCLAW_PROFILE || process.env.OPENTAG_OPENCLAW_GATEWAY_URL
+      ? {
+          openclaw: {
+            ...(process.env.OPENTAG_OPENCLAW_COMMAND ? { command: process.env.OPENTAG_OPENCLAW_COMMAND } : {}),
+            ...(process.env.OPENTAG_OPENCLAW_PROFILE ? { profile: process.env.OPENTAG_OPENCLAW_PROFILE } : {}),
+            ...(process.env.OPENTAG_OPENCLAW_GATEWAY_URL ? { gatewayUrl: process.env.OPENTAG_OPENCLAW_GATEWAY_URL } : {})
           }
         }
       : {}),

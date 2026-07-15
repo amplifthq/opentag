@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAcpExecutor, type AcpPermissionResolver } from "../src/acp-executor.js";
+import type { CommandRunner } from "../src/command.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/acp-agent.mjs", import.meta.url));
 const tempRoots: string[] = [];
@@ -118,6 +119,23 @@ function input(workspace: { kind: "repository" | "scratch"; path: string }, runI
   };
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessExit(pid: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (processIsAlive(pid)) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for process ${pid} to exit`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 async function waitForFile(path: string): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!existsSync(path)) {
@@ -145,6 +163,41 @@ describe("ACP executor", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("proves ACP protocol initialization before reporting scratch readiness", async () => {
+    const scratch = tempDir("readiness");
+    const executor = createAcpExecutor({ manifest: manifest() });
+
+    await expect(executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness"))).resolves.toEqual({ ready: true });
+  });
+
+  it("reports an unavailable ACP adapter as not ready", async () => {
+    const scratch = tempDir("readiness-missing");
+    const configured = manifest();
+    configured.bindings.agent.command = "definitely-missing-opentag-acp-readiness-executable";
+    const executor = createAcpExecutor({ manifest: configured });
+
+    const readiness = await executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness_missing"));
+
+    expect(readiness.ready).toBe(false);
+    expect(readiness.reason).toMatch(/could not initialize the ACP adapter/iu);
+  });
+
+  it("preserves a bounded redacted readiness diagnostic for setup failures", async () => {
+    const scratch = tempDir("readiness-diagnostic");
+    const configured = manifest();
+    configured.bindings.agent.args = [
+      "--eval",
+      "console.error('Authentication required for token sk_test_abcdefghijk'); process.exit(1)"
+    ];
+    const executor = createAcpExecutor({ manifest: configured });
+
+    const readiness = await executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness_diagnostic"));
+
+    expect(readiness.ready).toBe(false);
+    expect(readiness.reason).toMatch(/Authentication required/iu);
+    expect(readiness.reason).not.toContain("sk_test_abcdefghijk");
+  });
+
   it("streams normalized plan, tool, and message updates and commits repository changes", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest() });
@@ -166,6 +219,63 @@ describe("ACP executor", () => {
     expect(prompt.text).toContain("Do not inspect .env files");
     expect(prompt.text).toContain("github.repository.read");
     expect(prompt.text).not.toContain("Read the selected repository");
+  }, 15_000);
+
+  it.skipIf(process.platform === "win32")("does not signal a foreign process group after the ACP child exits", async () => {
+    const scratch = tempDir("foreign-process-group");
+    const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
+    const originalKill = process.kill.bind(process);
+    const foreignGroups = new Set<number>();
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid < 0 && foreignGroups.has(pid)) {
+        const error = new Error("kill EPERM") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      }
+      try {
+        return originalKill(pid, signal);
+      } catch (error) {
+        if (pid < 0 && error instanceof Error && "code" in error && error.code === "ESRCH") {
+          foreignGroups.add(pid);
+          const denied = new Error("kill EPERM") as NodeJS.ErrnoException;
+          denied.code = "EPERM";
+          throw denied;
+        }
+        throw error;
+      }
+    }) as typeof process.kill);
+
+    try {
+      await expect(
+        executor.run(input({ kind: "scratch", path: scratch }, "run_foreign_process_group"), { emit: async () => undefined })
+      ).resolves.toMatchObject({ conclusion: "success" });
+    } finally {
+      killSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it("reassembles ACP message chunks without inserting characters", async () => {
+    const scratch = tempDir("chunked-output");
+    const executor = createAcpExecutor({ manifest: manifest("chunked-output") });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_chunked_output"), {
+      emit: async () => undefined
+    });
+
+    expect(result.summary).toContain("OPENTAG_CHUNK_OK");
+    expect(result.summary).not.toContain("OPENTAG_\nCHUNK_OK");
+  }, 15_000);
+
+  it("selects a required ACP session mode before prompting", async () => {
+    const scratch = tempDir("session-mode");
+    const executor = createAcpExecutor({ manifest: manifest("session-mode"), sessionModeId: "default" });
+
+    const result = await executor.run(input({ kind: "scratch", path: scratch }, "run_session_mode"), {
+      emit: async () => undefined
+    });
+
+    expect(result.conclusion).toBe("success");
+    expect(JSON.parse(readFileSync(join(scratch, "acp-session-mode.json"), "utf8"))).toEqual({ modeId: "default" });
   }, 15_000);
 
   it("maps allow-once approval to the matching ACP option", async () => {
@@ -491,6 +601,28 @@ describe("ACP executor", () => {
     expect(existsSync(join(scratch, "acp-cancelled.json"))).toBe(true);
   }, 15_000);
 
+  it("does not claim provider process termination for best-effort cancellation", async () => {
+    const scratch = tempDir("best-effort-cancel");
+    const executor = createAcpExecutor({
+      manifest: manifest("cancel"),
+      cancelGraceMs: 500,
+      capabilityOverrides: { supportsCancel: false }
+    });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_best_effort_cancel"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(scratch, "acp-waiting.json"));
+
+    await executor.cancel("run_best_effort_cancel");
+    const result = await running;
+
+    expect(result).toMatchObject({
+      conclusion: "cancelled",
+      summary: expect.stringContaining("provider-owned tool subprocess termination is not confirmed"),
+      nextAction: "Inspect provider-owned processes before starting another Attempt."
+    });
+  }, 15_000);
+
   it("returns cancelled without spawning when cancellation wins the startup race", async () => {
     const scratch = tempDir("immediate-cancel");
     const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
@@ -501,9 +633,82 @@ describe("ACP executor", () => {
     await executor.cancel("run_immediate_cancel");
     const result = await running;
 
-    expect(result.conclusion).toBe("cancelled");
+    expect(result).toMatchObject({
+      conclusion: "cancelled",
+      summary: "Fixture ACP Agent cancelled the ACP attempt."
+    });
     expect(existsSync(join(scratch, "acp-session.json"))).toBe(false);
     expect(existsSync(join(scratch, "acp-prompt.json"))).toBe(false);
+  }, 15_000);
+
+  it("uses Windows taskkill tree termination as observed cancellation evidence", async () => {
+    const scratch = tempDir("windows-tree-cancel");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const runner: CommandRunner = {
+      run: vi.fn(async (command, args) => {
+        expect(command).toBe("taskkill");
+        expect(args.slice(0, 1)).toEqual(["/PID"]);
+        expect(args.slice(2)).toEqual(["/T", "/F"]);
+        process.kill(Number(args[1]), "SIGKILL");
+        return { exitCode: 0, stdout: "", stderr: "" };
+      })
+    };
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    try {
+      const executor = createAcpExecutor({
+        manifest: manifest("cancel"),
+        cancelGraceMs: 100,
+        capabilityOverrides: { supportsCancel: true },
+        runner
+      });
+      const running = executor.run(input({ kind: "scratch", path: scratch }, "run_windows_tree_cancel"), {
+        emit: async () => undefined
+      });
+      await waitForFile(join(scratch, "acp-waiting.json"));
+
+      await executor.cancel("run_windows_tree_cancel");
+      const result = await running;
+
+      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        conclusion: "cancelled",
+        summary: "Fixture ACP Agent cancelled the ACP attempt."
+      });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  }, 15_000);
+
+  it("does not claim Windows process-tree termination when taskkill fails", async () => {
+    const scratch = tempDir("windows-tree-cancel-failure");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const runner: CommandRunner = {
+      run: vi.fn(async () => ({ exitCode: 1, stdout: "", stderr: "taskkill failed" }))
+    };
+    Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+    try {
+      const executor = createAcpExecutor({
+        manifest: manifest("cancel"),
+        cancelGraceMs: 100,
+        capabilityOverrides: { supportsCancel: true },
+        runner
+      });
+      const running = executor.run(input({ kind: "scratch", path: scratch }, "run_windows_tree_cancel_failure"), {
+        emit: async () => undefined
+      });
+      await waitForFile(join(scratch, "acp-waiting.json"));
+
+      await executor.cancel("run_windows_tree_cancel_failure");
+      const result = await running;
+
+      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        conclusion: "cancelled",
+        summary: expect.stringContaining("provider-owned tool subprocess termination is not confirmed")
+      });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   }, 15_000);
 
   it("cancels a delayed session/new without ever submitting a prompt", async () => {
@@ -535,6 +740,28 @@ describe("ACP executor", () => {
 
     expect(result.conclusion).toBe("cancelled");
     expect(() => process.kill(pid, 0)).toThrow();
+  }, 15_000);
+
+  it.skipIf(process.platform === "win32")("terminates ACP adapter descendants when a run is cancelled", async () => {
+    const scratch = tempDir("cancel-process-tree");
+    const executor = createAcpExecutor({ manifest: manifest("cancel-process-tree"), cancelGraceMs: 100 });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_cancel_process_tree"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(scratch, "acp-descendant.json"));
+    const { pid } = JSON.parse(readFileSync(join(scratch, "acp-descendant.json"), "utf8")) as { pid: number };
+
+    try {
+      expect(processIsAlive(pid)).toBe(true);
+      await executor.cancel("run_cancel_process_tree");
+      const result = await running;
+      await waitForProcessExit(pid);
+
+      expect(result.conclusion).toBe("cancelled");
+      expect(processIsAlive(pid)).toBe(false);
+    } finally {
+      if (processIsAlive(pid)) process.kill(pid, "SIGKILL");
+    }
   }, 15_000);
 
   it("strictly rejects malformed NDJSON and kills a child that stays alive", async () => {
@@ -692,6 +919,23 @@ describe("ACP executor", () => {
       if (previous === undefined) delete process.env.OPENTAG_ACP_HOST_SECRET;
       else process.env.OPENTAG_ACP_HOST_SECRET = previous;
     }
+  }, 15_000);
+
+  it("passes credential-free fixed launch environment while rejecting credential fields", async () => {
+    const scratch = tempDir("fixed-environment");
+    const executor = createAcpExecutor({
+      manifest: manifest(),
+      launchEnvironment: { OPENTAG_ACP_EXPLICIT: "configured-value" }
+    });
+
+    await executor.run(input({ kind: "scratch", path: scratch }, "run_fixed_env"), { emit: async () => undefined });
+
+    const session = JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"));
+    expect(session.explicitValue).toBe("configured-value");
+    expect(() => createAcpExecutor({
+      manifest: manifest(),
+      launchEnvironment: { OPENAI_API_KEY: "must-not-reach-agent" }
+    })).toThrow(/launch environment/iu);
   }, 15_000);
 
   it("does not commit or discard repository changes when an ACP attempt refuses", async () => {

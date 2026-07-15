@@ -95,6 +95,65 @@ function checkInstalledDoctorCommand(installDir) {
   }
 }
 
+function checkInstalledAcpLaunchDefinitions(installDir) {
+  const probe = `
+    import { builtInAcpAgentDefinitions, builtInAcpAgentManifests } from "@opentag/runner";
+
+    const definitions = builtInAcpAgentDefinitions();
+    const manifests = builtInAcpAgentManifests({
+      hermes: { command: "hermes-release-check", profile: "release-check" },
+      openclaw: {
+        command: "openclaw-release-check",
+        profile: "release-check",
+        gatewayUrl: "ws://127.0.0.1:19093"
+      }
+    });
+    const expected = {
+      codex: {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"],
+        registry: true
+      },
+      "claude-code": {
+        command: "npx",
+        args: ["--yes", "@agentclientprotocol/claude-agent-acp@0.59.0"],
+        registry: true
+      },
+      cursor: {
+        command: "cursor-agent",
+        args: ["acp"],
+        registry: false
+      },
+      opencode: {
+        command: "npx",
+        args: ["--yes", "opencode-ai@1.18.1", "acp"],
+        registry: true
+      }
+    };
+    for (const [id, expectation] of Object.entries(expected)) {
+      const binding = manifests[id].bindings.agent;
+      if (binding.command !== expectation.command || JSON.stringify(binding.args) !== JSON.stringify(expectation.args)) {
+        throw new Error(\`Installed \${id} ACP launch is incorrect: \${JSON.stringify(binding)}\`);
+      }
+      if (expectation.registry && (!definitions[id].registry?.id || !definitions[id].registry?.version)) {
+        throw new Error(\`Installed \${id} ACP definition has no Registry provenance.\`);
+      }
+    }
+    const hermes = manifests.hermes.bindings.agent;
+    if (hermes.command !== "hermes-release-check" || JSON.stringify(hermes.args) !== JSON.stringify(["-p", "release-check", "acp"])) {
+      throw new Error(\`Installed Hermes ACP manifest is incorrect: \${JSON.stringify(hermes)}\`);
+    }
+    const openclaw = manifests.openclaw.bindings.agent;
+    if (openclaw.command !== "openclaw-release-check" || JSON.stringify(openclaw.args) !== JSON.stringify(["--profile", "release-check", "acp", "--url", "ws://127.0.0.1:19093"])) {
+      throw new Error(\`Installed OpenClaw ACP manifest is incorrect: \${JSON.stringify(openclaw)}\`);
+    }
+    if (definitions.openclaw.capabilities?.supportsCancel !== false) {
+      throw new Error("Installed OpenClaw ACP definition must declare best-effort cancellation.");
+    }
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -116,6 +175,9 @@ try {
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });
   run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
   checkInstalledDoctorCommand(installDir);
+
+  console.log("Checking installed ACP Registry launch definitions...");
+  checkInstalledAcpLaunchDefinitions(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

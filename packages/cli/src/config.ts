@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   AdapterMutationMappingSchema,
-  OpenTagIntegrationManifestSchema,
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
 import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
@@ -15,7 +14,7 @@ import type { PlatformId } from "./catalogs/platforms.js";
 
 // Executor ids (repository bindings and the last-used preference) accept any
 // trimmed non-empty string so custom executors registered by a standalone runner
-// validate; echo, codex, claude-code, and hermes remain the documented built-ins.
+// validate; echo, codex, claude-code, cursor, opencode, hermes, and openclaw remain the documented built-ins.
 // Mirrors the daemon config and the open runtime dispatch.
 const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
@@ -158,20 +157,19 @@ const ChannelBindingSchema = z
     }
   });
 
-const ClaudeCodeSchema = z
-  .object({
-    command: z.string().min(1).optional(),
-    model: z.string().min(1).optional(),
-    permissionMode: z.enum(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]).optional(),
-    dangerouslySkipPermissions: z.boolean().optional()
-  })
-  .strict();
-
 const HermesSchema = z
   .object({
     command: z.string().trim().min(1).optional(),
     profile: z.string().trim().min(1).optional(),
     profileTemplate: z.string().trim().min(1).optional()
+  })
+  .strict();
+
+const OpenClawSchema = z
+  .object({
+    command: z.string().trim().min(1).optional(),
+    profile: z.string().trim().min(1).optional(),
+    gatewayUrl: z.string().url().optional()
   })
   .strict();
 
@@ -191,18 +189,32 @@ const SecuritySchema = z
   })
   .strict();
 
+const AcpAgentSchema = z
+  .object({
+    label: z.string().trim().min(1).optional(),
+    command: z.string().trim().min(1),
+    args: z.array(z.string()).default([]),
+    cwd: z.string().trim().min(1).optional(),
+    workspaceCwd: z.literal("required"),
+    sessionModeId: z.string().trim().min(1).optional(),
+    supportsProfile: z.boolean().default(false),
+    supportsCancel: z.boolean().default(false),
+    readinessTimeoutMs: PositiveIntegerSchema.optional()
+  })
+  .strict();
+
 const DaemonConfigSchema = z
   .object({
     runnerId: z.string().min(1),
     dispatcherUrl: z.string().url(),
     repositories: z.array(RepositoryBindingSchema).default([]),
-    agents: z.record(OpenTagIntegrationManifestSchema).optional(),
+    agents: z.record(AcpAgentSchema).optional(),
     scratchRoot: z.string().min(1).optional(),
     keepScratch: KeepWorktreeSchema.optional(),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
     channelBindings: z.array(ChannelBindingSchema).optional(),
-    claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),
+    openclaw: OpenClawSchema.optional(),
     agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: SecretStringSchema.optional(),

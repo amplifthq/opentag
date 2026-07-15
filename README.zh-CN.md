@@ -25,7 +25,7 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#许可证)
 
-OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agent。它会把这个源线程变成一个有边界、可审计的 run：OpenTag 组装 context packet，检查权限和 executor capability，在你的电脑上运行 Codex 或 Claude Code，记录 agent work ledger，然后把简洁的产物和安全下一步回复回同一个 thread。
+OpenTag 让团队可以在已经使用的协作软件里提及一个 coding agent。它会把这个源线程变成一个有边界、可审计的 run：OpenTag 组装 context packet，检查权限和 executor capability，在你的电脑上运行 ACP coding agent，记录 agent work ledger，然后把简洁的产物和安全下一步回复回同一个 thread。
 
 具体 setup 仍然会把 Slack、GitHub、GitLab、Linear、Lark / 飞书、Telegram、Discord 或 Microsoft Teams 连接到本地 coding agent。但 OpenTag 不只是 connector：它保持 source-thread-native、local-first、executor-neutral，让工作留在已有上下文里，同时让 agent 看到了什么、被允许做什么、产出了什么、回调到了哪里都可以复盘。
 
@@ -163,15 +163,19 @@ OpenTag 的 CLI 路径是本地优先的。
 
 - 本地 CLI 流程里没有 OpenTag cloud service。
 - 平台凭据保存在你的电脑上，并使用私有文件权限。
-- Codex 和 Claude Code 会在你的本地 checkout 上运行。
+- Codex、Claude Code、Cursor、OpenCode、Hermes 和 OpenClaw 会通过 ACP 在你的本地 checkout 上运行；OpenClaw 的取消当前是 best effort。
 - 平台 API 只会收到 OpenTag 用来确认、回复和执行已审批 action 所需的消息。
 
 ## 支持的 Coding Agent
 
 | Coding agent | 状态 | 说明 |
 | --- | --- | --- |
-| Codex | 已支持 | 使用本机的 `codex` 命令 |
-| Claude Code | 已支持 | 使用本机的 `claude` 命令 |
+| Codex | 已支持 | 内置 `codex-acp`，复用现有 Codex 登录 |
+| Claude Code | 已支持 | 内置 `claude-agent-acp`，复用现有 Claude 登录 |
+| Cursor | 安装并登录后支持 | 使用本机 `cursor-agent acp` 命令 |
+| OpenCode | `npx` 可用且 provider 已配置后支持 | 使用固定版本官方包 `opencode-ai@1.18.1`；ACP 启动时使用 pure mode，避免外部插件向 stdout 写入非协议数据 |
+| Hermes | 安装后支持 | 使用 `hermes -p <profile> acp` 和已配置的本地 provider |
+| OpenClaw | 安装并配置 Gateway 后支持 | 使用本机 `openclaw acp`；当前取消是 best effort，不保证 Gateway 已终止正在运行的 tool 子进程 |
 | Echo | 仅开发/测试 | 不运行真实 coding agent |
 
 ## 常用命令
@@ -223,7 +227,7 @@ flowchart LR
     A["Slack、GitHub、GitLab、Linear、Lark / 飞书、Telegram、Discord 或 Microsoft Teams"] --> B["OpenTag listener"]
     B --> C["本地 dispatcher"]
     C --> D["本地 runner"]
-    D --> E["Codex、Claude Code 或自定义 executor"]
+    D --> E["内置或自定义 ACP executor"]
     E --> F["回复回对应平台"]
 ```
 
@@ -277,7 +281,7 @@ opentag-dev setup
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook 规范化、bot 回复和 source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions 和频道回复 |
 | [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework 入口、频道回复和 action apply |
-| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor 契约，以及 Echo、Claude Code、Codex 适配器 |
+| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor 契约、通用 ACP host 和内置 launch profile |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite 持久化 |
 | [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | 可嵌入 dispatcher 和 callback sink |
 

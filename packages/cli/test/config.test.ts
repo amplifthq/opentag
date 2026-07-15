@@ -54,6 +54,35 @@ describe("OpenTag CLI config", () => {
     expect(() => parseCliConfig({})).toThrow("schemaVersion");
   });
 
+  it("rejects removed Claude direct-adapter configuration", () => {
+    const source = config();
+    expect(() => parseCliConfig({
+      ...source,
+      daemon: { ...source.daemon, claudeCode: { command: "claude" } }
+    })).toThrow(/unrecognized/iu);
+  });
+
+  it("accepts OpenClaw ACP launch configuration", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      daemon: {
+        ...source.daemon,
+        openclaw: {
+          command: "/opt/openclaw/bin/openclaw",
+          profile: "opentag",
+          gatewayUrl: "ws://127.0.0.1:19093"
+        }
+      }
+    });
+
+    expect(parsed.daemon.openclaw).toEqual({
+      command: "/opt/openclaw/bin/openclaw",
+      profile: "opentag",
+      gatewayUrl: "ws://127.0.0.1:19093"
+    });
+  });
+
   it("writes config atomically with private file permissions", () => {
     const path = join(tempDir(), "config.json");
     const expected = config();
@@ -105,21 +134,10 @@ describe("OpenTag CLI config", () => {
         repositories: [],
         agents: {
           reviewer: {
-            protocol: "opentag.integration.v1",
-            id: "reviewer",
             label: "Review Agent",
-            bindings: {
-              agent: { kind: "stdio", command: "review-agent", args: ["acp"] }
-            },
-            roles: {
-              agent: {
-                protocol: "agent-client-protocol",
-                protocolVersion: 1,
-                binding: "agent",
-                workspace: { sessionCwd: "required" }
-              }
-            },
-            resources: {}
+            command: "review-agent",
+            args: ["acp"],
+            workspaceCwd: "required"
           }
         },
         channelBindings: [
@@ -149,7 +167,13 @@ describe("OpenTag CLI config", () => {
     });
 
     expect(parsed.daemon.repositories).toEqual([]);
-    expect(parsed.daemon.agents.reviewer?.roles.agent?.protocol).toBe("agent-client-protocol");
+    expect(parsed.daemon.agents.reviewer).toMatchObject({
+      label: "Review Agent",
+      command: "review-agent",
+      args: ["acp"],
+      workspaceCwd: "required",
+      supportsCancel: false
+    });
     expect(parsed.daemon.channelBindings).toEqual([
       {
         provider: "slack",

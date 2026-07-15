@@ -172,23 +172,10 @@ OpenTag prints the local Teams webhook and reminds you to configure the public t
 
 If `opentag service` runs under macOS LaunchAgent, its `PATH` may not include your interactive shell's `~/.local/bin`. If a run fails with:
 
-```text
-Claude Code CLI is not available: spawn claude ENOENT
-```
-
-configure Claude Code with an absolute path:
-
-```json
-{
-  "daemon": {
-    "claudeCode": {
-      "command": "/Users/<you>/.local/bin/claude"
-    }
-  }
-}
-```
-
-Then restart the service:
+If the Claude executor is not ready, complete the normal local Claude login and
+restart the service. The Claude ACP adapter uses a pinned Registry package
+through `npx`, so there is no direct Claude CLI path
+setting:
 
 ```bash
 opentag service restart
@@ -296,7 +283,7 @@ If the receipt says direct apply is not configured, check that the channel bindi
 | No request reaches OpenTag | Azure Messaging endpoint is wrong, the Teams app is not installed, or the bot was not mentioned | Check the endpoint URL, install the app into the team, and mention the bot by name |
 | Tunnel URL redirects to sign-in | `devtunnel` was started without anonymous access | Restart with `devtunnel host -p 3030 --allow-anonymous` |
 | Public tunnel works but Teams returns 401 | App ID / tenant / secret mismatch, or an outdated Teams adapter build | Confirm Azure Bot App ID matches `platforms.teams.appId`, then restart OpenTag |
-| `spawn claude ENOENT` | Background service cannot find `claude` on `PATH` | Set `daemon.claudeCode.command` to the absolute Claude path and restart |
+| Claude executor is not ready | Local Claude authentication is missing or invalid | Complete the local Claude login, restart OpenTag, and run `opentag doctor` |
 | Claude returns only a plan | The command did not request write permission | Use `@OpenTag fix ...` or `@OpenTag run ...` |
 | Receipt says direct apply is not configured | Repo binding is local-only or apply token is missing | Bind the channel to a GitHub/GitLab repo and configure apply credentials |
 | `apply 1` cannot find or authorize an action | The command is outside the proposal thread, the service is outdated, or the channel was unbound/rebound after the proposal | Reply in the same thread, confirm the current channel binding still targets the proposal repository, and update OpenTag |

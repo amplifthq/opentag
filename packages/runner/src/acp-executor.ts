@@ -33,9 +33,10 @@ import {
   removeRunWorktree
 } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
-import { scrubEnvironment } from "./security.js";
+import { scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
+const DEFAULT_READINESS_TIMEOUT_MS = 3_000;
 const CHILD_EXIT_GRACE_MS = 500;
 const MAX_ACP_DIAGNOSTIC_BYTES = 16 * 1024;
 const MAX_ACP_FRAME_BYTES = 1024 * 1024;
@@ -272,9 +273,17 @@ export type AcpPermissionResolver = (request: AcpPermissionRequest) => Promise<A
 
 export type AcpExecutorOptions = {
   manifest: OpenTagIntegrationManifestInput;
+  launchEnvironment?: Readonly<Record<string, string>>;
   permissionResolver?: AcpPermissionResolver;
   runner?: CommandRunner;
   cancelGraceMs?: number;
+  readinessTimeoutMs?: number;
+  sessionModeId?: string;
+  capabilityOverrides?: {
+    supportsProfile?: boolean;
+    supportsCancel?: boolean;
+  };
+  security?: RunnerSecurityPolicy;
 };
 
 type NormalizedAcpManifest = {
@@ -290,6 +299,8 @@ type ActiveRun = {
   client?: acp.ClientContext;
   sessionId?: string;
   cancelRequested: boolean;
+  terminationPromise?: Promise<boolean>;
+  terminationConfirmed?: boolean;
 };
 
 function activeRunKey(runId: string, attemptId?: string): string {
@@ -307,6 +318,23 @@ function normalizeManifest(input: OpenTagIntegrationManifestInput): NormalizedAc
     label: manifest.label,
     binding
   };
+}
+
+function normalizeLaunchEnvironment(
+  input: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> {
+  if (!input) return {};
+  const environment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || isCredentialFieldName(name)) {
+      throw new Error(`ACP launch environment contains an invalid or credential-like field '${name}'.`);
+    }
+    if (typeof value !== "string" || containsCredentialLikeData(value)) {
+      throw new Error(`ACP launch environment field '${name}' contains credential-like data.`);
+    }
+    environment[name] = value;
+  }
+  return environment;
 }
 
 function assertExplicitWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
@@ -440,14 +468,163 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
   });
 }
 
-async function terminateChild(child: ChildProcessWithoutNullStreams, graceMs = CHILD_EXIT_GRACE_MS): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  child.stdin.end();
-  if (await waitForExit(child, graceMs)) return;
-  child.kill("SIGTERM");
-  if (await waitForExit(child, graceMs)) return;
-  child.kill("SIGKILL");
-  await waitForExit(child, graceMs);
+function spawnAcpChild(
+  manifest: NormalizedAcpManifest,
+  cwd: string,
+  security: RunnerSecurityPolicy | undefined,
+  launchEnvironment: Readonly<Record<string, string>>
+): ChildProcessWithoutNullStreams {
+  return spawn(manifest.binding.command, manifest.binding.args, {
+    cwd,
+    detached: process.platform !== "win32",
+    env: { ...scrubEnvironment(process.env, security), ...launchEnvironment },
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+}
+
+function processTreeExited(child: ChildProcessWithoutNullStreams): boolean {
+  if (process.platform === "win32" || child.pid === undefined) {
+    return child.exitCode !== null || child.signalCode !== null;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return false;
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error)) return false;
+    if (error.code === "ESRCH") return true;
+    // Once our child has exited, EPERM means this process-group id now belongs
+    // to something OpenTag does not own. Treat it as gone instead of risking a
+    // signal to an unrelated group after rapid pid reuse.
+    return error.code === "EPERM" && (child.exitCode !== null || child.signalCode !== null);
+  }
+}
+
+async function waitForProcessTreeExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
+  if (process.platform === "win32") return waitForExit(child, timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  while (!processTreeExited(child)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  return true;
+}
+
+function signalPosixProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+    }
+  }
+  if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+}
+
+async function terminateWindowsProcessTree(
+  child: ChildProcessWithoutNullStreams,
+  graceMs: number,
+  runner: CommandRunner
+): Promise<boolean> {
+  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return false;
+  let taskkillSucceeded = false;
+  try {
+    const result = await runner.run("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
+    taskkillSucceeded = result.exitCode === 0;
+  } catch {
+    // Fall through to root-process cleanup without claiming tree termination.
+  }
+  if (!taskkillSucceeded && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  const rootExited = await waitForExit(child, graceMs);
+  return taskkillSucceeded && rootExited;
+}
+
+async function terminateChild(
+  child: ChildProcessWithoutNullStreams,
+  graceMs = CHILD_EXIT_GRACE_MS,
+  runner: CommandRunner = nodeCommandRunner
+): Promise<boolean> {
+  if (!child.stdin.destroyed) child.stdin.end();
+  if (process.platform === "win32") return terminateWindowsProcessTree(child, graceMs, runner);
+  if (await waitForProcessTreeExit(child, graceMs)) return true;
+  signalPosixProcessTree(child, "SIGTERM");
+  if (await waitForProcessTreeExit(child, graceMs)) return true;
+  signalPosixProcessTree(child, "SIGKILL");
+  return waitForProcessTreeExit(child, graceMs);
+}
+
+async function waitForSettled(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise.catch(() => undefined),
+      new Promise<void>((resolveWait) => {
+        timer = setTimeout(resolveWait, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function probeAcpInitialization(input: {
+  manifest: NormalizedAcpManifest;
+  cwd: string;
+  timeoutMs: number;
+  launchEnvironment: Readonly<Record<string, string>>;
+  security?: RunnerSecurityPolicy;
+}): Promise<{ ready: true } | { ready: false; reason: string }> {
+  const child = spawnAcpChild(input.manifest, input.cwd, input.security, input.launchEnvironment);
+  const stderrChunks: Buffer[] = [];
+  let stderrBytes = 0;
+  let spawnErrorCode: string | undefined;
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    if (stderrBytes >= MAX_ACP_DIAGNOSTIC_BYTES) return;
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const bounded = buffer.subarray(0, MAX_ACP_DIAGNOSTIC_BYTES - stderrBytes);
+    stderrChunks.push(bounded);
+    stderrBytes += bounded.length;
+  });
+  child.once("error", (error: NodeJS.ErrnoException) => {
+    spawnErrorCode = error.code ?? "spawn_error";
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const stream = acp.ndJsonStream(
+      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+      strictAcpOutput(Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>)
+    );
+    const initialization = acp.client({ name: "opentag-readiness" }).connectWith(stream, async (client) => {
+      const initialized = await client.request(acp.methods.agent.initialize, {
+        protocolVersion: acp.PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+      if (initialized.protocolVersion !== acp.PROTOCOL_VERSION) {
+        throw new Error(`Agent negotiated unsupported ACP protocol version ${initialized.protocolVersion}.`);
+      }
+    });
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("ACP initialization timed out.")), input.timeoutMs);
+    });
+    await Promise.race([initialization, timeout]);
+    return { ready: true };
+  } catch (error) {
+    await waitForExit(child, 100);
+    const detail = safeDiagnosticFragment(error instanceof Error ? error.message : String(error));
+    const stderr = safeDiagnosticFragment(Buffer.concat(stderrChunks).toString("utf8"));
+    return {
+      ready: false,
+      reason: [
+        `OpenTag could not initialize the ACP adapter for ${input.manifest.id}.`,
+        ...(spawnErrorCode ? [`spawnCode=${spawnErrorCode}`] : []),
+        ...(detail ? [`detail=${detail}`] : []),
+        ...(stderr ? [`stderr=${stderr}`] : [])
+      ].join(" ")
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+    await terminateChild(child);
+  }
 }
 
 async function emitSessionUpdate(
@@ -495,6 +672,7 @@ function stopResult(input: {
   baseBranch: string;
   output: string;
   files: string[];
+  cancelTerminationConfirmed: boolean;
 }) {
   if (input.stopReason === "end_turn") {
     return createExecutorRunResult({
@@ -507,6 +685,14 @@ function stopResult(input: {
     });
   }
   if (input.stopReason === "cancelled") {
+    if (!input.cancelTerminationConfirmed) {
+      return {
+        conclusion: "cancelled" as const,
+        summary: `${input.manifest.label} accepted the ACP cancellation request; provider-owned tool subprocess termination is not confirmed.`,
+        changedFiles: input.files,
+        nextAction: "Inspect provider-owned processes before starting another Attempt."
+      };
+    }
     return {
       conclusion: "cancelled" as const,
       summary: `${input.manifest.label} cancelled the ACP attempt.`,
@@ -532,9 +718,21 @@ function stopResult(input: {
 
 export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter {
   const manifest = normalizeManifest(options.manifest);
+  const launchEnvironment = normalizeLaunchEnvironment(options.launchEnvironment);
   const runner = options.runner ?? nodeCommandRunner;
   const activeRuns = new Map<string, ActiveRun>();
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
+  const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const supportsCancel = options.capabilityOverrides?.supportsCancel ?? false;
+  const terminateActiveChild = (active: ActiveRun, child: ChildProcessWithoutNullStreams): Promise<boolean> => {
+    if (!active.terminationPromise) {
+      active.terminationPromise = terminateChild(child, cancelGraceMs, runner).then((confirmed) => {
+        if (confirmed) active.terminationConfirmed = true;
+        return active.terminationConfirmed === true;
+      });
+    }
+    return active.terminationPromise;
+  };
 
   return {
     id: manifest.id,
@@ -542,9 +740,9 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
     capability: {
       id: manifest.id,
       invocation: "spawn",
-      supportsProfile: false,
+      supportsProfile: options.capabilityOverrides?.supportsProfile ?? false,
       supportsStreaming: true,
-      supportsCancel: true,
+      supportsCancel,
       supportsHookCompletion: false,
       progressEvents: "audit",
       approvalMode: "opentag_policy",
@@ -568,14 +766,28 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       } catch (error) {
         return { ready: false, reason: error instanceof Error ? error.message : String(error) };
       }
-      if (workspace.kind === "scratch") return { ready: true };
-      const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: workspace.path });
-      if (gitRepo.exitCode !== 0) return { ready: false, reason: `Workspace is not a git checkout: ${gitRepo.stderr || gitRepo.stdout}` };
-      const baseBranch = input.baseBranch ?? "main";
-      const baseRef = await runner.run("git", ["rev-parse", "--verify", `${baseBranch}^{commit}`], { cwd: workspace.path });
-      return baseRef.exitCode === 0
-        ? { ready: true }
-        : { ready: false, reason: `Base branch '${baseBranch}' is not available: ${baseRef.stderr || baseRef.stdout}` };
+      if (workspace.kind === "repository") {
+        const gitRepo = await runner.run("git", ["rev-parse", "--show-toplevel"], { cwd: workspace.path });
+        if (gitRepo.exitCode !== 0) return { ready: false, reason: `Workspace is not a git checkout: ${gitRepo.stderr || gitRepo.stdout}` };
+        const baseBranch = input.baseBranch ?? "main";
+        const baseRef = await runner.run("git", ["rev-parse", "--verify", `${baseBranch}^{commit}`], { cwd: workspace.path });
+        if (baseRef.exitCode !== 0) {
+          return { ready: false, reason: `Base branch '${baseBranch}' is not available: ${baseRef.stderr || baseRef.stdout}` };
+        }
+      }
+      let childCwd: string;
+      try {
+        childCwd = await safeAcpCwd(workspace.path, manifest.binding.cwd);
+      } catch (error) {
+        return { ready: false, reason: error instanceof Error ? error.message : String(error) };
+      }
+      return probeAcpInitialization({
+        manifest,
+        cwd: childCwd,
+        timeoutMs: readinessTimeoutMs,
+        launchEnvironment,
+        ...(options.security ? { security: options.security } : {})
+      });
     },
     async run(input, sink) {
       const workspace = assertExplicitWorkspace(input);
@@ -604,7 +816,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             at: new Date().toISOString()
           });
           if (active.cancelRequested) {
-            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
           }
           await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
           worktreeCreated = true;
@@ -617,17 +829,13 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
         }
         const childCwd = await safeAcpCwd(executionPath, manifest.binding.cwd);
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
         }
-        const child = spawn(manifest.binding.command, manifest.binding.args, {
-          cwd: childCwd,
-          env: scrubEnvironment(),
-          stdio: ["pipe", "pipe", "pipe"]
-        });
+        const child = spawnAcpChild(manifest, childCwd, options.security, launchEnvironment);
         active.child = child;
         const stderrChunks: Buffer[] = [];
         let stderrBytes = 0;
@@ -643,8 +851,17 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           spawnErrorCode = error.code ?? "spawn_error";
         });
         if (active.cancelRequested) {
-          await terminateChild(child, cancelGraceMs);
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          const terminationObserved = await terminateActiveChild(active, child);
+          return stopResult({
+            stopReason: "cancelled",
+            manifest,
+            run: input,
+            branchName,
+            baseBranch,
+            output: "",
+            files: [],
+            cancelTerminationConfirmed: supportsCancel && terminationObserved
+          });
         }
 
         const output: string[] = [];
@@ -720,6 +937,16 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
               }
               return client.buildSession({ cwd: childCwd, mcpServers: [] }).withSession(async (session) => {
                 active.sessionId = session.sessionId;
+                if (options.sessionModeId) {
+                  const available = session.modes?.availableModes.some((mode) => mode.id === options.sessionModeId) ?? false;
+                  if (!available) {
+                    throw new Error(`ACP agent does not offer required session mode '${options.sessionModeId}'.`);
+                  }
+                  await client.request(acp.methods.agent.session.setMode, {
+                    sessionId: session.sessionId,
+                    modeId: options.sessionModeId
+                  });
+                }
                 if (active.cancelRequested) {
                   try {
                     await client.notify(acp.methods.agent.session.cancel, { sessionId: session.sessionId });
@@ -788,7 +1015,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           }
         }
 
-        await terminateChild(child);
+        const terminationObserved = await terminateActiveChild(active, child);
         for (const [toolCallId, governed] of governedActions) {
           if (governed.reported) continue;
           governed.reported = true;
@@ -824,8 +1051,9 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           run: input,
           branchName,
           baseBranch,
-          output: output.join("\n").trim(),
-          files
+          output: output.join("").trim(),
+          files,
+          cancelTerminationConfirmed: supportsCancel && terminationObserved
         });
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",
@@ -844,7 +1072,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         throw error;
       } finally {
         activeRuns.delete(activeKey);
-        if (active.child) await terminateChild(active.child);
+        if (active.child) await terminateActiveChild(active, active.child);
         if (workspace.kind === "repository" && worktreeCreated) {
           const keepWorktree = input.keepWorktree ?? "on_failure";
           const shouldRemove = repositoryCompleted && keepWorktree !== "always";
@@ -875,14 +1103,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       if (!child) return;
       try {
         if (active.client && active.sessionId) {
-          await active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId });
+          await waitForSettled(
+            active.client.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId }),
+            cancelGraceMs
+          );
         }
       } catch {
         // A broken ACP connection must not prevent forced child termination.
       } finally {
-        if (!(await waitForExit(child, cancelGraceMs))) {
-          await terminateChild(child, cancelGraceMs);
-        }
+        await terminateActiveChild(active, child);
       }
     }
   };

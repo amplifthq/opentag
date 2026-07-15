@@ -138,7 +138,7 @@ notebook artifacts.
 | No request reaches local OpenTag | Teams app/bot not installed, bot not @mentioned, tunnel URL wrong, or dev tunnel requires auth | ngrok `http://127.0.0.1:4040`, devtunnel `--allow-anonymous`, Azure Bot Messaging endpoint |
 | Channel binding not found | Binding used full `conversation.id` with `;messageid=...` or wrong tenant/channel | Compare `tenantId`, `channelData.channel.id`, base conversation id, and OpenTag config |
 | `apply 1` says action could not be processed | Action routed with reply activity id instead of proposal/root activity id, or apply credentials are missing | `webhook-app.ts` thread key derivation, dispatcher source-thread receipt, GitHub/GitLab apply config |
-| `spawn claude ENOENT` | Service environment cannot find the Claude CLI | Configure the executor command with an absolute path or restart the service with the right PATH |
+| Claude executor is not ready | Local Claude authentication is missing or invalid | Complete the local Claude login, restart OpenTag, and run `opentag doctor` |
 
 ## Configuration surface
 

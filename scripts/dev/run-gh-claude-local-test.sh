@@ -6,17 +6,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${OPENTAG_PAIRING_TOKEN:=dev_pairing_token}"
 : "${OPENTAG_DISPATCHER_PORT:=3032}"
 : "${OPENTAG_RUNNER_ID:=runner_claude_local}"
-: "${OPENTAG_CLAUDE_PERMISSION_MODE:=acceptEdits}"
 
 DISPATCHER_PORT="${OPENTAG_DISPATCHER_PORT}"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "gh CLI not found. Install and authenticate GitHub CLI first." >&2
-  exit 1
-fi
-
-if ! command -v claude >/dev/null 2>&1; then
-  echo "Claude Code CLI not found. Install/login to Claude Code first." >&2
   exit 1
 fi
 
@@ -85,10 +79,6 @@ cat > "$CONFIG_PATH" <<JSON
   "githubToken": "${GITHUB_TOKEN}",
 ${PR_CONFIG_FIELDS}  "pollIntervalMs": 1000,
   "heartbeatIntervalMs": 15000,
-  "claudeCode": {
-    "command": "${OPENTAG_CLAUDE_COMMAND:-claude}",
-    "permissionMode": "${OPENTAG_CLAUDE_PERMISSION_MODE}"
-  },
   "repositories": [
     {
       "provider": "github",

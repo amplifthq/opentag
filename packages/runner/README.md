@@ -1,6 +1,6 @@
 # @opentag/runner
 
-Executor contracts and built-in runner adapters for OpenTag.
+Executor contracts and the generic ACP host for OpenTag.
 
 Use this package when building a local daemon, hosted runner, or custom executor that consumes OpenTag runs.
 
@@ -14,7 +14,10 @@ pnpm add @opentag/runner
 
 - `ExecutorAdapter`: interface every executor implements.
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
-- `createCodexExecutor`: executor that runs `codex exec` in a mapped local checkout.
+- `createAcpAgentExecutor`: generic stdio ACP host for an ACP launch definition.
+- `createBuiltInAcpExecutors`: built-in launch profiles for pinned Codex, Claude, and OpenCode packages plus installed Cursor, Hermes, and OpenClaw ACP commands.
+- `builtInAcpAgentDefinitions`: the data-only built-in definitions and Registry provenance where a pinned Registry package is used.
+- `createAcpExecutor`: lower-level generic stdio ACP host for an internal integration manifest.
 - Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
 - Command helpers such as `nodeCommandRunner` and `assertCommandSucceeded`.
 - Built-in and generic ACP executors expose an optional `capability` contract so setup, doctor, status, and service surfaces can report profile, cancellation, hook-completion, progress-event, approval-boundary, prompt/context trust gates, workspace isolation, ACP session-cwd conformance, secret, and completion-signal support honestly.
@@ -76,7 +79,17 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-`createCodexExecutor` refuses to run when the target checkout has uncommitted changes. It creates an isolated `opentag/<runId>` branch before running Codex.
+Codex, Claude Code, Cursor, OpenCode, Hermes, and OpenClaw run through the same
+generic ACP host. Codex, Claude, and OpenCode use exact package versions through
+`npx`; Cursor uses its installed native ACP command; Hermes uses its configured
+local command and profile; OpenClaw uses its installed Gateway ACP bridge.
+OpenCode launches in pure mode so external plugins cannot pollute the strict ACP
+stdout stream. The generic ACP host
+passes the attempt workspace as the ACP session `cwd`, scrubs the child
+environment, and terminates the adapter process group when a run is cancelled.
+OpenClaw declares `supportsCancel: false`: OpenTag requests cancellation and
+stops its local bridge, but does not attest termination of Gateway-owned tool
+subprocesses.
 
 ## Stability
 

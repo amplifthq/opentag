@@ -7,7 +7,7 @@ describe("teams render", () => {
   });
 
   it("summarizes progress without leaking internal agent chatter", () => {
-    expect(renderTeamsProgress("starting codex")).toBe("Thinking...");
+    expect(renderTeamsProgress("Starting ACP agent codex in scratch workspace")).toBe("Thinking...");
     expect(renderTeamsProgress("uploading artifact")).toBe("Working...");
   });
 

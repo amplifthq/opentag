@@ -7,7 +7,7 @@ export function renderTeamsAcknowledgement(runId: string): string {
 }
 
 export function renderTeamsProgress(message: string): string {
-  if (/starting codex|starting claude --print|thinking/i.test(message)) {
+  if (/starting acp agent|thinking/i.test(message)) {
     return "Thinking...";
   }
   return "Working...";

@@ -58,6 +58,14 @@ describe("parseOpenTagMention", () => {
     });
   });
 
+  it.each(["cursor", "opencode"])("accepts the %s built-in executor hint", (executor) => {
+    expect(parseOpenTagMention(`@opentag run this --executor ${executor}`)).toMatchObject({
+      matched: true,
+      parsed: { executorHint: executor },
+      args: { executor }
+    });
+  });
+
   it("preserves blank lines in explicit continuations", () => {
     const parsed = parseOpenTagMention("@opentag fix auth \\\n\n--file src/auth.ts");
     expect(parsed).toMatchObject({

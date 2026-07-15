@@ -9,7 +9,7 @@ export function renderDiscordAcknowledgement(runId: string): string {
 }
 
 export function renderDiscordProgress(message: string): string {
-  if (/starting codex|starting claude --print|thinking/i.test(message)) {
+  if (/starting acp agent|thinking/i.test(message)) {
     return "Thinking...";
   }
 

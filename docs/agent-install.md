@@ -29,7 +29,7 @@ semantics, audit visibility, and runner-scoped authentication.
 
 ## Fast Path
 
-1. Confirm Node.js 20 or newer is available:
+1. Confirm Node.js 22 or newer is available:
 
 ```bash
 node --version
@@ -68,7 +68,7 @@ opentag setup
 Help the user choose:
 
 - Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
-- Coding agent: Codex, Claude Code, or Echo.
+- Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw, or Echo. OpenClaw currently exposes best-effort cancellation (`cancel=no`).
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
 
@@ -134,9 +134,10 @@ Common Teams troubleshooting shortcuts:
 - If Teams requests return 401, check that the Azure Bot Microsoft App ID matches
   `platforms.teams.appId`, the tenant is correct, and OpenTag is running the
   current Teams adapter.
-- If service mode reports `spawn claude ENOENT`, set
-  `daemon.claudeCode.command` to the absolute Claude CLI path and restart the
-  service.
+- If the Claude executor is not ready, run `opentag doctor` and complete the
+  normal local Claude login. The Claude ACP adapter uses a pinned Registry
+  package through `npx`; there is no
+  `daemon.claudeCode.command` path to configure.
 - If the action receipt says direct apply is not configured, check whether the
   channel binding points at a GitHub/GitLab repository and whether apply tokens
   are configured.

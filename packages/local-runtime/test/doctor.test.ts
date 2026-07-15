@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAcpExecutor, createHermesExecutor, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
+import { createAcpExecutor, createBuiltInAcpExecutors, type CommandRunner, type ExecutorAdapter } from "@opentag/runner";
 import type { OpenTagDaemonConfig } from "../src/config.js";
 import { doctorHasFailures, formatDoctorChecks, runDoctor } from "../src/doctor.js";
 
@@ -17,34 +17,7 @@ const commandRunner: CommandRunner = {
 };
 
 const codexExecutor: ExecutorAdapter = {
-  id: "codex",
-  displayName: "Codex Executor",
-  capability: {
-    id: "codex",
-    invocation: "spawn",
-    supportsProfile: false,
-    supportsStreaming: false,
-    supportsCancel: false,
-    supportsHookCompletion: false,
-    progressEvents: "audit",
-    approvalMode: "opentag_policy",
-    contextAccess: ["context_packet", "context_pointers", "workspace"],
-    promptAssembly: "executor_adapter",
-    writeAccess: "workspace",
-    conversationAccess: "request",
-    promptMutation: "none",
-    rawContextAccess: false,
-    writeActionAccess: "none",
-    workspaceIsolation: "worktree",
-    requiredSecrets: [],
-    completionSignals: [
-      {
-        type: "process_exit",
-        required: true,
-        description: "Codex exits after producing a result."
-      }
-    ]
-  },
+  ...createBuiltInAcpExecutors().codex,
   async canRun() {
     return { ready: true };
   },
@@ -153,9 +126,9 @@ describe("local-runtime doctor", () => {
     expect(formatDoctorChecks(checks)).toContain("OK   codex capability: invocation=spawn, profile=no");
     expect(formatDoctorChecks(checks)).toContain("progress=audit, approval=opentag_policy");
     expect(formatDoctorChecks(checks)).toContain("context=context_packet,context_pointers,workspace");
-    expect(formatDoctorChecks(checks)).toContain("prompt=executor_adapter, write=workspace");
-    expect(formatDoctorChecks(checks)).toContain("conversation=request, prompt_mutation=none, raw_context=no, write_actions=none");
-    expect(formatDoctorChecks(checks)).toContain("isolation=worktree, cwd_conformance=not_applicable");
+    expect(formatDoctorChecks(checks)).toContain("prompt=opentag, write=workspace");
+    expect(formatDoctorChecks(checks)).toContain("conversation=request, prompt_mutation=none, raw_context=no, write_actions=propose");
+    expect(formatDoctorChecks(checks)).toContain("isolation=worktree, cwd_conformance=declared");
     expect(formatDoctorChecks(checks)).toContain("OK   github:acme/demo checkout: Workspace path configured (hasWorkspacePath=yes).");
     expect(formatDoctorChecks(checks)).not.toContain("opentag-local-runtime-doctor-");
   });
@@ -327,17 +300,14 @@ describe("local-runtime doctor", () => {
     const checkoutPath = join(root, "demo");
     mkdirSync(checkoutPath, { recursive: true });
     writeFileSync(join(checkoutPath, ".git"), "gitdir: /tmp/fake-git\n");
-    const calls: { command: string; args: string[] }[] = [];
-    const hermesRunner: CommandRunner = {
-      async run(command, args) {
-        calls.push({ command, args });
-        if (command === "hermes") {
-          return { exitCode: 1, stdout: "", stderr: "Profile 'opentag-fixed' does not exist" };
-        }
-        if (command === "git" && args.join(" ") === "status --porcelain") {
-          return { exitCode: 0, stdout: "", stderr: "" };
-        }
-        return { exitCode: 1, stdout: "", stderr: `unexpected ${command} ${args.join(" ")}` };
+    const hermesExecutor = createBuiltInAcpExecutors({ hermes: { profile: "opentag-fixed" } }).hermes;
+    const unavailableHermesExecutor: ExecutorAdapter = {
+      ...hermesExecutor,
+      async canRun() {
+        return {
+          ready: false,
+          reason: "Hermes profile 'opentag-fixed' is not ready: Profile 'opentag-fixed' does not exist"
+        };
       }
     };
 
@@ -362,7 +332,7 @@ describe("local-runtime doctor", () => {
           pollIntervalMs: 5000,
           heartbeatIntervalMs: 15000
         },
-        executors: { hermes: createHermesExecutor({ runner: hermesRunner, profile: "opentag-fixed" }) },
+        executors: { hermes: unavailableHermesExecutor },
         commandRunner,
         fetchImpl: async (url) => {
           const stringUrl = String(url);
@@ -390,7 +360,6 @@ describe("local-runtime doctor", () => {
       expect(formatDoctorChecks(checks)).toContain(
         "FAIL hermes executor: Hermes profile 'opentag-fixed' is not ready: Profile 'opentag-fixed' does not exist"
       );
-      expect(calls).toEqual([{ command: "hermes", args: ["-p", "opentag-fixed", "--version"] }]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

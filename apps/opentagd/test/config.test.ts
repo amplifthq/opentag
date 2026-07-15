@@ -15,14 +15,14 @@ afterEach(() => {
 });
 
 describe("opentagd config", () => {
-  it("rejects invalid Claude Code permission modes", () => {
+  it("rejects environment variables for the removed Claude direct adapter", () => {
     delete process.env.OPENTAG_CONFIG_PATH;
     process.env.OPENTAG_REPO_OWNER = "acme";
     process.env.OPENTAG_REPO_NAME = "demo";
     process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
-    process.env.OPENTAG_CLAUDE_PERMISSION_MODE = "typo";
+    process.env.OPENTAG_CLAUDE_PERMISSION_MODE = "default";
 
-    expect(() => loadConfigFromEnv()).toThrow("Invalid OPENTAG_CLAUDE_PERMISSION_MODE: typo");
+    expect(() => loadConfigFromEnv()).toThrow("configure the removed Claude direct adapter");
   });
 
   it("builds an initial daemon config with worktree defaults", () => {
@@ -80,7 +80,7 @@ describe("opentagd config", () => {
     expect(parsed.preparePullRequestBranch).toBe(true);
   });
 
-  it("parses Hermes executor config", () => {
+  it("parses Hermes ACP config", () => {
     const parsed = parseDaemonConfig({
       runnerId: "runner_test",
       dispatcherUrl: "http://localhost:3030",
@@ -115,6 +115,26 @@ describe("opentagd config", () => {
       command: "hermes-dev",
       profile: "opentag-shared",
       profileTemplate: "opentag-{provider}-{accountId}-{conversationId}"
+    });
+  });
+
+  it("loads OpenClaw ACP settings from env", () => {
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
+    process.env.OPENTAG_DEFAULT_EXECUTOR = "openclaw";
+    process.env.OPENTAG_OPENCLAW_COMMAND = "openclaw-dev";
+    process.env.OPENTAG_OPENCLAW_PROFILE = "opentag";
+    process.env.OPENTAG_OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:19093";
+
+    const config = loadConfigFromEnv();
+
+    expect(config.repositories[0]).toMatchObject({ defaultExecutor: "openclaw" });
+    expect(config.openclaw).toEqual({
+      command: "openclaw-dev",
+      profile: "opentag",
+      gatewayUrl: "ws://127.0.0.1:19093"
     });
   });
 

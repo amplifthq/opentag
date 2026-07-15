@@ -4,7 +4,7 @@
   "description": "Executor contracts and built-in runner adapters for OpenTag.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

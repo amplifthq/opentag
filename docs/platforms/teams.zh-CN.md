@@ -170,23 +170,8 @@ OpenTag 会打印本地 Teams webhook，并提醒你在 Azure 中配置公网 tu
 
 如果 `opentag service` 由 macOS LaunchAgent 运行，它的 `PATH` 可能不包含交互式 shell 里的 `~/.local/bin`。如果 run 失败并显示：
 
-```text
-Claude Code CLI is not available: spawn claude ENOENT
-```
-
-请把 Claude Code 配成绝对路径：
-
-```json
-{
-  "daemon": {
-    "claudeCode": {
-      "command": "/Users/<you>/.local/bin/claude"
-    }
-  }
-}
-```
-
-然后重启服务：
+如果 Claude executor 未就绪，请先完成本机 Claude 登录，然后重启服务。
+Claude ACP adapter 已随 OpenTag 提供，不再需要配置 CLI 路径：
 
 ```bash
 opentag service restart
@@ -294,7 +279,7 @@ repo: <github-repo>
 | OpenTag 没收到请求 | Azure Messaging endpoint 错误、Teams app 未安装、或没有真正 mention bot | 检查 endpoint URL、安装 app、并用 bot 名称 mention |
 | tunnel URL 跳登录页 | `devtunnel` 没有允许匿名访问 | 用 `devtunnel host -p 3030 --allow-anonymous` 重启 |
 | 公网 tunnel 可访问但 Teams 返回 401 | App ID / tenant / secret 不匹配，或 Teams adapter build 太旧 | 确认 Azure Bot App ID 等于 `platforms.teams.appId`，然后重启 OpenTag |
-| `spawn claude ENOENT` | 后台服务的 `PATH` 找不到 `claude` | 设置 `daemon.claudeCode.command` 为 Claude 绝对路径并重启 |
+| Claude executor 未就绪 | 本机 Claude 认证缺失或失效 | 完成本机 Claude 登录，重启 OpenTag，再运行 `opentag doctor` |
 | Claude 只返回计划 | 命令没有请求写权限 | 使用 `@OpenTag fix ...` 或 `@OpenTag run ...` |
 | receipt 显示 direct apply 未配置 | repo binding 只是 local，或缺少 apply token | 绑定到 GitHub/GitLab repo 并配置 apply credentials |
 | `apply 1` 找不到 action | 命令没有发在同一个 Teams thread，或服务版本太旧 | 在同一个 thread 回复，并更新到能把 Teams action 映射到 root message id 的版本 |

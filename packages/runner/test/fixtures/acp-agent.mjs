@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -72,7 +73,26 @@ const app = acp
       inheritedSecret: process.env.OPENTAG_ACP_HOST_SECRET ?? null,
       explicitValue: process.env.OPENTAG_ACP_EXPLICIT ?? null
     });
-    return { sessionId };
+    return {
+      sessionId,
+      ...(mode === "session-mode"
+        ? {
+            modes: {
+              currentModeId: "auto",
+              availableModes: [
+                { id: "auto", name: "Auto" },
+                { id: "default", name: "Default" }
+              ]
+            }
+          }
+        : {})
+    };
+  })
+  .onRequest(acp.methods.agent.session.setMode, async (ctx) => {
+    const session = sessions.get(ctx.params.sessionId);
+    if (!session) throw new Error("unknown test session");
+    await record(session.cwd, "acp-session-mode.json", { modeId: ctx.params.modeId });
+    return {};
   })
   .onRequest(acp.methods.agent.session.prompt, async (ctx) => {
     const session = sessions.get(ctx.params.sessionId);
@@ -148,6 +168,14 @@ const app = acp
       return { stopReason: "cancelled" };
     }
 
+    if (mode === "cancel-process-tree") {
+      const descendant = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1_000)"], {
+        stdio: "ignore"
+      });
+      await record(session.cwd, "acp-descendant.json", { pid: descendant.pid });
+      await new Promise(() => undefined);
+    }
+
     await writeFile(join(session.cwd, "acp-output.txt"), "created by the ACP fixture\n");
     await ctx.client.notify(acp.methods.client.session.update, {
       sessionId: ctx.params.sessionId,
@@ -157,16 +185,18 @@ const app = acp
         status: "completed"
       }
     });
-    await ctx.client.notify(acp.methods.client.session.update, {
-      sessionId: ctx.params.sessionId,
-      update: {
-        sessionUpdate: "agent_message_chunk",
-        content: {
-          type: "text",
-          text: fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."
+    const messageChunks = mode === "chunked-output"
+      ? ["OPENTAG_", "CHUNK_OK"]
+      : [fixtureConfig.OPENTAG_ACP_TEST_OUTPUT ?? "ACP fixture completed the requested work."];
+    for (const text of messageChunks) {
+      await ctx.client.notify(acp.methods.client.session.update, {
+        sessionId: ctx.params.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text }
         }
-      }
-    });
+      });
+    }
     return { stopReason: mode === "refusal" ? "refusal" : "end_turn" };
   })
   .onNotification(acp.methods.agent.session.cancel, async (ctx) => {

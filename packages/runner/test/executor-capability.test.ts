@@ -1,33 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { createClaudeCodeExecutor } from "../src/claude-code.js";
-import { createCodexExecutor } from "../src/codex.js";
+import { createAcpAgentExecutor } from "../src/acp-agent.js";
 import { createEchoExecutor } from "../src/echo.js";
-import { createHermesExecutor } from "../src/hermes.js";
+
+function acpExecutor(id: string, supportsProfile = false, supportsCancel = true) {
+  return createAcpAgentExecutor({
+    id,
+    label: id,
+    workspaceCwd: "required",
+    launch: { command: id, args: ["acp"] },
+    capabilities: { supportsProfile, supportsCancel }
+  });
+}
 
 describe("executor capability contracts", () => {
   it("exposes runtime capabilities for built-in executors", () => {
-    const executors = [
-      createCodexExecutor(),
-      createClaudeCodeExecutor(),
-      createHermesExecutor(),
-      createEchoExecutor()
-    ];
+    const codex = acpExecutor("codex");
+    const claudeCode = acpExecutor("claude-code");
+    const hermes = acpExecutor("hermes", true);
+    const openclaw = acpExecutor("openclaw", true, false);
+    const executors = [codex, claudeCode, hermes, openclaw, createEchoExecutor()];
 
     for (const executor of executors) {
       expect(executor.capability).toMatchObject({
         id: executor.id,
         invocation: "spawn",
-        supportsStreaming: false,
-        supportsCancel: false,
+        supportsStreaming: executor.id !== "echo",
+        supportsCancel: executor.id !== "echo" && executor.id !== "openclaw",
         supportsHookCompletion: false,
         progressEvents: "audit",
         approvalMode: "opentag_policy",
-        promptAssembly: executor.id === "echo" ? "opentag" : "executor_adapter",
+        promptAssembly: "opentag",
         writeAccess: executor.id === "echo" ? "none" : "workspace",
         conversationAccess: "request",
         promptMutation: "none",
         rawContextAccess: false,
-        writeActionAccess: "none"
+        writeActionAccess: executor.id === "echo" ? "none" : "propose"
       });
       expect(executor.capability?.contextAccess).toContain("context_packet");
       expect(executor.capability?.contextAccess).toContain("context_pointers");
@@ -35,28 +42,33 @@ describe("executor capability contracts", () => {
       expect(executor.capability?.requiredSecrets).toEqual(expect.any(Array));
     }
 
-    expect(createCodexExecutor().capability?.workspaceIsolation).toBe("worktree");
-    expect(createClaudeCodeExecutor().capability?.workspaceIsolation).toBe("worktree");
-    expect(createHermesExecutor().capability).toMatchObject({
+    expect(codex.capability?.workspaceIsolation).toBe("worktree");
+    expect(claudeCode.capability?.workspaceIsolation).toBe("worktree");
+    expect(hermes.capability).toMatchObject({
       supportsProfile: true,
-      workspaceIsolation: "branch"
+      workspaceIsolation: "worktree"
+    });
+    expect(openclaw.capability).toMatchObject({
+      supportsProfile: true,
+      supportsCancel: false,
+      workspaceIsolation: "worktree"
     });
     expect(createEchoExecutor().capability?.workspaceIsolation).toBe("none");
   });
 
   it("requires explicit trust-boundary fields instead of runtime unknown fallbacks", () => {
-    const capability = createCodexExecutor().capability;
+    const capability = acpExecutor("codex").capability;
 
     expect(capability).toMatchObject({
       progressEvents: "audit",
       approvalMode: "opentag_policy",
       contextAccess: ["context_packet", "context_pointers", "workspace"],
-      promptAssembly: "executor_adapter",
+      promptAssembly: "opentag",
       writeAccess: "workspace",
       conversationAccess: "request",
       promptMutation: "none",
       rawContextAccess: false,
-      writeActionAccess: "none"
+      writeActionAccess: "propose"
     });
   });
 });

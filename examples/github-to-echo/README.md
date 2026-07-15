@@ -119,7 +119,7 @@ curl http://localhost:3030/v1/runs/run_demo_1/events
 
 ## Codex And PR Path
 
-Switch the config to `"defaultExecutor": "codex"` to run a real Codex CLI execution in the mapped checkout. To let OpenTag create pull requests, add a GitHub token:
+Switch the config to `"defaultExecutor": "codex"` to run Codex through the bundled ACP adapter in the mapped checkout. To let OpenTag create pull requests, add a GitHub token:
 
 ```json
 {

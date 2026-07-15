@@ -407,7 +407,7 @@ describe("default callback presentation", () => {
   it("renders Telegram progress as concise conversational states", () => {
     const presentation = createDefaultCallbackPresentation();
 
-    expect(presentation.progress({ provider: "telegram", runId: "run_1", message: "Starting claude --print" })).toBe(
+    expect(presentation.progress({ provider: "telegram", runId: "run_1", message: "Starting ACP agent claude-code in scratch workspace" })).toBe(
       ["<b>OpenTag is thinking</b>", "Run: <code>run_1</code>", "Status: <b>running</b>"].join("\n")
     );
     expect(

@@ -57,7 +57,7 @@ program
   .option("--config <path>", "Config file path")
   .option("--project <path>", "Project checkout path")
   .option("--language <language>", "Setup language: en or zh-CN")
-  .option("--executor <executor>", "Default executor: echo, codex, claude-code, or hermes")
+  .option("--executor <executor>", "Default executor: echo, codex, claude-code, cursor, opencode, hermes, or openclaw")
   .option("--hermes-command <command>", "Hermes CLI command")
   .option("--hermes-profile <profile>", "Fixed, pre-existing Hermes profile (default: opentag)")
   .option("--agent-profile <profile>", "Executor-neutral agent session profile")

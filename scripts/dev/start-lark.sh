@@ -178,35 +178,37 @@ wait_for_stack_exit() {
 detect_executor() {
   if [[ -n "${OPENTAG_LARK_EXECUTOR:-}" ]]; then
     printf '%s' "$OPENTAG_LARK_EXECUTOR"
-  elif command -v codex >/dev/null 2>&1; then
-    printf 'codex'
-  elif command -v claude >/dev/null 2>&1; then
-    printf 'claude-code'
   else
-    printf 'echo'
+    printf 'codex'
   fi
 }
 
 validate_executor() {
   case "$1" in
-    echo|codex|claude-code)
+    echo|codex|claude-code|cursor|opencode|hermes|openclaw)
       return
       ;;
     *)
-      fail "Executor must be echo, codex, or claude-code."
+      fail "Executor must be echo, codex, claude-code, cursor, opencode, hermes, or openclaw."
       ;;
   esac
 }
 
 assert_executor_available() {
   case "$1" in
-    codex)
-      require_command codex
-      ;;
-    claude-code)
-      require_command "${OPENTAG_CLAUDE_COMMAND:-claude}"
-      ;;
     echo)
+      ;;
+    codex|claude-code|opencode)
+      require_command npx
+      ;;
+    cursor)
+      require_command cursor-agent
+      ;;
+    hermes)
+      require_command "${OPENTAG_HERMES_COMMAND:-hermes}"
+      ;;
+    openclaw)
+      require_command "${OPENTAG_OPENCLAW_COMMAND:-openclaw}"
       ;;
   esac
 }
@@ -318,13 +320,6 @@ const config = {
   ]
 };
 
-if (process.env.EXECUTOR === "claude-code") {
-  config.claudeCode = {
-    command: process.env.OPENTAG_CLAUDE_COMMAND || "claude",
-    permissionMode: process.env.OPENTAG_CLAUDE_PERMISSION_MODE || "acceptEdits"
-  };
-}
-
 closeSync(openSync(process.env.CONFIG_PATH, "a", 0o600));
 chmodSync(process.env.CONFIG_PATH, 0o600);
 writeFileSync(process.env.CONFIG_PATH, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
@@ -383,7 +378,7 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 
 DETECTED_EXECUTOR="$(detect_executor)"
-EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, echo; choose codex for a real local agent)" "$DETECTED_EXECUTOR")"
+EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, cursor, opencode, hermes, openclaw, echo)" "$DETECTED_EXECUTOR")"
 validate_executor "$EXECUTOR"
 assert_executor_available "$EXECUTOR"
 

@@ -15,11 +15,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${OPENTAG_GITHUB_PORT:=3000}"
 : "${OPENTAG_SLACK_PORT:=3040}"
 
-if ! command -v claude >/dev/null 2>&1; then
-  echo "Claude Code CLI not found. Install/login to Claude Code before running this smoke test." >&2
-  exit 1
-fi
-
 cd "$ROOT_DIR"
 
 echo "Starting dispatcher on :$OPENTAG_DISPATCHER_PORT"

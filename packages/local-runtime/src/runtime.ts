@@ -1,11 +1,10 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
-  createAcpExecutor,
-  createClaudeCodeExecutor,
-  createCodexExecutor,
+  createAcpAgentExecutor,
+  createBuiltInAcpExecutors,
   createEchoExecutor,
-  createHermesExecutor,
   DEFAULT_HERMES_PROFILE,
+  type BuiltInAcpAgentOptions,
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
@@ -35,33 +34,55 @@ export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): 
   );
 }
 
+export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltInAcpAgentOptions {
+  const security = securityFromConfig(config);
+  return {
+    ...(security ? { security } : {}),
+    hermes: {
+      ...(config.hermes?.command ? { command: config.hermes.command } : {}),
+      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
+    },
+    openclaw: {
+      ...(config.openclaw?.command ? { command: config.openclaw.command } : {}),
+      ...(config.openclaw?.profile ? { profile: config.openclaw.profile } : {}),
+      ...(config.openclaw?.gatewayUrl ? { gatewayUrl: config.openclaw.gatewayUrl } : {})
+    }
+  };
+}
+
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
   const security = securityFromConfig(config);
+  const builtInAcpExecutors = createBuiltInAcpExecutors(builtInAcpOptionsFromConfig(config));
 
   const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),
-    codex: createCodexExecutor({
-      ...(security ? { security } : {})
-    }),
-    "claude-code": createClaudeCodeExecutor({
-      ...(config.claudeCode?.command ? { claudeCommand: config.claudeCode.command } : {}),
-      ...(config.claudeCode?.model ? { model: config.claudeCode.model } : {}),
-      ...(config.claudeCode?.permissionMode ? { permissionMode: config.claudeCode.permissionMode } : {}),
-      ...(config.claudeCode?.dangerouslySkipPermissions !== undefined
-        ? { dangerouslySkipPermissions: config.claudeCode.dangerouslySkipPermissions }
-        : {}),
-      ...(security ? { security } : {})
-    }),
-    hermes: createHermesExecutor({
-      ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
-      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
-    })
+    codex: builtInAcpExecutors.codex,
+    "claude-code": builtInAcpExecutors["claude-code"],
+    cursor: builtInAcpExecutors.cursor,
+    opencode: builtInAcpExecutors.opencode,
+    hermes: builtInAcpExecutors.hermes,
+    openclaw: builtInAcpExecutors.openclaw
   };
-  for (const manifest of Object.values(config.agents)) {
-    if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {
-      throw new Error(`Configured ACP agent '${manifest.id}' cannot replace built-in executor '${manifest.id}'.`);
+  for (const [id, agent] of Object.entries(config.agents)) {
+    if (Object.prototype.hasOwnProperty.call(executors, id)) {
+      throw new Error(`Configured ACP agent '${id}' cannot replace built-in executor '${id}'.`);
     }
-    executors[manifest.id] = createAcpExecutor({ manifest });
+    executors[id] = createAcpAgentExecutor(
+      {
+        id,
+        label: agent.label ?? id,
+        workspaceCwd: agent.workspaceCwd,
+        launch: {
+          command: agent.command,
+          args: agent.args,
+          ...(agent.cwd ? { cwd: agent.cwd } : {})
+        },
+        ...(agent.sessionModeId ? { sessionModeId: agent.sessionModeId } : {}),
+        capabilities: { supportsProfile: agent.supportsProfile, supportsCancel: agent.supportsCancel },
+        ...(agent.readinessTimeoutMs ? { readinessTimeoutMs: agent.readinessTimeoutMs } : {})
+      },
+      security ? { security } : {}
+    );
   }
   return executors;
 }

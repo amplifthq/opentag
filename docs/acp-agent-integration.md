@@ -29,63 +29,56 @@ An agent must not post directly to the source Slack or Lark thread. It must not
 receive channel app credentials, dispatcher fencing tokens, or raw connector
 secrets.
 
-## Declare the Agent role
+## Declare an ACP launch
 
-Add a named `opentag.integration.v1` manifest under `agents`:
+Add a compact launch definition under `agents`:
 
 ```json
 {
   "agents": {
     "example-acp": {
-      "protocol": "opentag.integration.v1",
-      "id": "example-acp",
       "label": "Example ACP Agent",
-      "bindings": {
-        "agent": {
-          "kind": "stdio",
-          "command": "example-agent",
-          "args": ["acp"],
-          "cwd": "relative/subdirectory"
-        }
-      },
-      "roles": {
-        "agent": {
-          "protocol": "agent-client-protocol",
-          "protocolVersion": 1,
-          "binding": "agent",
-          "workspace": { "sessionCwd": "required" }
-        }
-      },
-      "resources": {}
+      "command": "example-agent",
+      "args": ["acp"],
+      "cwd": "relative/subdirectory",
+      "workspaceCwd": "required"
     }
   }
 }
 ```
 
-The command may be an executable name or an absolute path. Binding `cwd`, when
+The command may be an executable name or an absolute path. `cwd`, when
 present, must be relative to the explicit Attempt workspace and must resolve
-inside it. Stdio bindings reject literal `env` maps. The child receives a
+inside it. Launch definitions reject literal `env` maps. The child receives a
 scrubbed process environment; credentials belong in an administrator-controlled
-Connection or secret-reference resolver, not in a reusable manifest.
+Connection or secret-reference resolver, not in reusable launch metadata.
 
-The map key, manifest `id`, and executor selection name must match. Selecting
-`example-acp` causes the Generic ACP Host to launch the declared binding.
+The map key is the executor selection name. Selecting `example-acp` causes the
+Generic ACP Host to launch that command. The removed full
+`opentag.integration.v1` configuration shape is intentionally not
+parse-compatible. Custom agents default to `supportsCancel: false`; only set it
+to `true` after the real adapter and its local process tree pass the cancellation
+gate.
 
-`workspace.sessionCwd: "required"` is the integration author's attestation
+`workspaceCwd: "required"` is the integration author's attestation
 that the agent's real file tools honor the absolute `cwd` supplied to ACP
 `session/new`. ACP transports that value but does not prove how an agent or an
 external gateway uses it. The field is required: OpenTag rejects an ACP Agent
-manifest without it during schema parsing, before constructing an executor.
+launch without it during schema parsing, before constructing an executor.
 Declare it only after testing the real tools in both an isolated repository
 worktree and a scratch directory; it is not runtime proof or a sandbox claim.
 
-## OpenClaw 2026.7.1 gate status
+Package or Registry provenance alone never adds this attestation. Every
+built-in must pass the live batch gate for OpenTag's workspace and declared
+cancellation cases before it may be shown as OpenTag Verified.
+
+## OpenClaw support and hard-cancellation status
 
 OpenClaw `2026.7.1` can initialize through its official
 [Gateway ACP bridge](https://docs.openclaw.ai/cli/acp) and the same Generic ACP
-Host. Its worktree cwd, scratch cwd, and disposable Gateway session checks pass.
-It is not ready to declare as an OpenTag agent, however, because the live cancel
-case currently fails closed.
+Host. OpenTag ships `openclaw` as a built-in Generic ACP agent. Its worktree cwd,
+scratch cwd, and disposable Gateway session checks pass; no dedicated OpenClaw
+executor is involved.
 
 OpenClaw's stock bridge records the absolute ACP session cwd and, by default,
 prefixes that cwd when it forwards the request to the Gateway. Do not add
@@ -99,14 +92,19 @@ corepack pnpm smoke:openclaw-acp-conformance
 ```
 
 The gate checks exact worktree and scratch writes plus distinct disposable
-Gateway session keys. For cancellation, it waits until a real long-running
+Gateway session keys. For hard cancellation, it waits until a real long-running
 shell command writes its start marker, cancels the ACP session, then waits beyond
-the original completion time and rejects a late completion marker. With the
-stock 2026.7.1 Codex harness, the Gateway session becomes `killed` but the shell
-still writes that completion marker. Therefore the gate exits non-zero, OpenTag
-does not ship an OpenClaw manifest example, and integrators must not attest
-`workspace.sessionCwd: "required"`. Do not compensate with a dedicated
-executor or weaken the cancellation assertion.
+the original completion time and rejects a late completion marker. With stock
+OpenClaw 2026.7.1, the Gateway session becomes `killed` but the shell still
+writes that completion marker. OpenTag therefore declares
+`supportsCancel: false`: cancellation is best effort, retained work must be
+inspected, and another Attempt must not assume provider-owned tool processes
+have exited. This limitation does not invalidate the separately observed ACP
+session cwd behavior or block normal OpenClaw execution.
+
+The OpenClaw-specific hard-cancellation probe remains intentionally strict and
+may exit non-zero while the upstream process-termination issue remains open. Do
+not weaken that assertion or reinterpret it as a provider-admission gate.
 
 This OpenClaw-specific gate complements rather than replaces the generic ACP
 executor, governance, and privacy suites required by the checklist below.
@@ -238,25 +236,11 @@ runtime identities:
 {
   "agents": {
     "hermes-acp": {
-      "protocol": "opentag.integration.v1",
-      "id": "hermes-acp",
       "label": "Hermes ACP",
-      "bindings": {
-        "agent": {
-          "kind": "stdio",
-          "command": "hermes",
-          "args": ["acp"]
-        }
-      },
-      "roles": {
-        "agent": {
-          "protocol": "agent-client-protocol",
-          "protocolVersion": 1,
-          "binding": "agent",
-          "workspace": { "sessionCwd": "required" }
-        }
-      },
-      "resources": {}
+      "command": "hermes",
+      "args": ["acp"],
+      "workspaceCwd": "required",
+      "supportsProfile": true
     }
   },
   "channelBindings": [

@@ -445,10 +445,9 @@ async function main(): Promise<void> {
           ),
           running.then((result) => ({ kind: "completed", result }) as const)
         ]);
-        assert(
-          observation.kind === "started",
-          `OpenClaw cancellation run concluded '${observation.result.conclusion}' before its shell start marker appeared.`
-        );
+        if (observation.kind === "completed") {
+          fail(`OpenClaw cancellation run concluded '${observation.result.conclusion}' before its shell start marker appeared.`);
+        }
         await executor.cancel(runId);
         const result = await running;
         runSettled = true;
