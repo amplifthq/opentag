@@ -83,13 +83,13 @@ pnpm smoke:acp-conformance
 Binary entries and Registry `env` overlays are recorded as `needs_setup` until
 they can be materialized and admitted through an explicit security policy.
 
-## OpenClaw 2026.7.1 gate status
+## OpenClaw support and hard-cancellation status
 
 OpenClaw `2026.7.1` can initialize through its official
 [Gateway ACP bridge](https://docs.openclaw.ai/cli/acp) and the same Generic ACP
-Host. Its worktree cwd, scratch cwd, and disposable Gateway session checks pass.
-It is not ready to declare as an OpenTag agent, however, because the live cancel
-case currently fails closed.
+Host. OpenTag ships `openclaw` as a built-in Generic ACP agent. Its worktree cwd,
+scratch cwd, and disposable Gateway session checks pass; no dedicated OpenClaw
+executor is involved.
 
 OpenClaw's stock bridge records the absolute ACP session cwd and, by default,
 prefixes that cwd when it forwards the request to the Gateway. Do not add
@@ -103,14 +103,19 @@ corepack pnpm smoke:openclaw-acp-conformance
 ```
 
 The gate checks exact worktree and scratch writes plus distinct disposable
-Gateway session keys. For cancellation, it waits until a real long-running
+Gateway session keys. For hard cancellation, it waits until a real long-running
 shell command writes its start marker, cancels the ACP session, then waits beyond
-the original completion time and rejects a late completion marker. With the
-stock 2026.7.1 Codex harness, the Gateway session becomes `killed` but the shell
-still writes that completion marker. Therefore the gate exits non-zero, OpenTag
-does not ship an OpenClaw manifest example, and integrators must not attest
-`workspace.sessionCwd: "required"`. Do not compensate with a dedicated
-executor or weaken the cancellation assertion.
+the original completion time and rejects a late completion marker. With stock
+OpenClaw 2026.7.1, the Gateway session becomes `killed` but the shell still
+writes that completion marker. OpenTag therefore declares
+`supportsCancel: false`: cancellation is best effort, retained work must be
+inspected, and another Attempt must not assume provider-owned tool processes
+have exited. This limitation does not invalidate the separately observed ACP
+session cwd behavior or block normal OpenClaw execution.
+
+The OpenClaw-specific hard-cancellation probe remains intentionally strict and
+may exit non-zero while the upstream process-termination issue remains open. Do
+not weaken that assertion or reinterpret it as a provider-admission gate.
 
 This OpenClaw-specific gate complements rather than replaces the generic ACP
 executor, governance, and privacy suites required by the checklist below.

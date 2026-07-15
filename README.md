@@ -165,7 +165,7 @@ OpenTag's CLI path is local-first.
 
 - There is no OpenTag cloud service in the local CLI flow.
 - Platform credentials are stored on your computer with private file permissions.
-- Codex, Claude Code, Cursor, OpenCode, and Hermes run through ACP against your local checkout.
+- Codex, Claude Code, Cursor, OpenCode, Hermes, and OpenClaw run through ACP against your local checkout. OpenClaw cancellation is currently best effort.
 - Platform APIs receive only the messages needed to acknowledge, reply, and apply actions you approve.
 
 ## Supported Coding Agents

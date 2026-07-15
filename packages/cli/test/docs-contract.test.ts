@@ -48,7 +48,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("do not continue with CLI defaults");
     expect(skill).toContain("Never request secrets through askhuman");
     expect(skill).toContain("Do not ask setup users to invoke an agent directly");
-    expect(skill).toContain("bundles the Codex and Claude ACP adapters");
+    expect(skill).toContain("built-in Generic ACP launches for Codex, Claude Code, Cursor, OpenCode, Hermes, and OpenClaw");
     expect(skill).toContain("built-in ACP conformance gate");
     expect(skill).toContain("Npm Registry And Network Failures");
     expect(skill).toContain("ENOTFOUND");
@@ -73,7 +73,7 @@ describe("platform setup docs contract", () => {
     expect(skill).toContain("`npx --offline` or `npm pack --offline`");
     expect(skill).toContain("do not claim the CLI is available offline");
     expect(skill).toContain("Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, or Discord");
-    expect(skill).toContain("Coding agent: Codex, Claude Code, Hermes, or Echo");
+    expect(skill).toContain("Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw, or Echo");
     expect(skill).toContain("Local project: the current working directory");
     expect(skill).toContain("Slack Socket Mode vs Events API");
     expect(skill).toContain("Lark / Feishu tenant for manual app setup");

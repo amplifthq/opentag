@@ -206,8 +206,9 @@ without a checksum. OpenCode runs with `OPENCODE_PURE=true` and
 `OPENCODE_DISABLE_TERMINAL_TITLE=true`; this preserves its core and built-in
 authentication while preventing external plugins or terminal-title output from
 corrupting the strict ACP stdout stream. No
-provider-specific adapter is bundled inside `@opentag/runner`; all five built-in
-agents use the same generic ACP host. Claude sessions are placed in the
+provider-specific adapter is bundled inside `@opentag/runner`; all six built-in
+agents use the same generic ACP host. OpenClaw uses the installed `openclaw acp`
+Gateway bridge. Claude sessions are placed in the
 adapter's `default` mode so OpenTag remains the approval boundary. Complete the
 selected agent's normal local login or provider configuration before running
 `opentag doctor`.
@@ -231,8 +232,11 @@ scrubbed before startup: variables that look like secrets (tokens, API keys,
 cloud credentials) are dropped. If an adapter authenticates from
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, explicitly add that exact variable name
 to `security.extraSafeEnv`; login-based authentication needs no extra daemon
-configuration. Cancellation terminates the adapter process group, including
-shell and tool descendants on POSIX systems.
+configuration. For agents that declare `supportsCancel: true`, cancellation
+terminates the adapter process group, including shell and tool descendants on
+POSIX systems. OpenClaw currently declares `supportsCancel: false`: OpenTag
+requests cancellation and terminates its local ACP bridge, but does not claim
+that Gateway-owned tool subprocesses have stopped.
 
 ## Daemon Config Fields
 
@@ -253,6 +257,7 @@ shell and tool descendants on POSIX systems.
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
 | `hermes` | fixed profile `opentag` when Hermes is selected during setup | Hermes command and one dedicated, pre-existing profile. Every readiness probe and invocation passes `hermes -p <profile>`; legacy `profileTemplate` values are parsed but ignored. |
+| `openclaw` | installed `openclaw` command, default profile and Gateway | Optional OpenClaw command, profile, and Gateway WebSocket URL. The built-in launch is `openclaw [--profile <profile>] acp [--url <gatewayUrl>]`; cancellation is best effort. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
 | `githubToken` | none | GitHub token for callback comments, dispatcher GitHub apply helpers, and optional legacy PR creation |
@@ -309,6 +314,30 @@ instead of being launched implicitly:
 OPENTAG_ACP_CONFORMANCE_REGISTRY=/absolute/path/to/registry.json \
 pnpm smoke:acp-conformance
 ```
+
+### OpenClaw execution profile
+
+The built-in `openclaw` executor uses the installed Gateway ACP bridge. With no
+extra daemon configuration it starts `openclaw acp`, which uses OpenClaw's
+normal profile and Gateway resolution. Pin an explicit profile or Gateway when
+the OpenTag runtime should not depend on that ambient selection:
+
+```json
+{
+  "openclaw": {
+    "command": "openclaw",
+    "profile": "opentag",
+    "gatewayUrl": "ws://127.0.0.1:19093"
+  }
+}
+```
+
+OpenClaw is available for normal ACP runs and retains failed or cancelled
+workspaces for inspection. Its current capability is `supportsCancel: false`:
+after cancellation, inspect provider-owned processes before starting another
+Attempt that could conflict with the same external work. The strict
+`smoke:openclaw-acp-conformance` case continues to track the upstream
+hard-cancellation gap independently from provider support.
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the
 runner has marked the run as running, the command prefers the run-specific
@@ -517,7 +546,7 @@ Project Target binding fields:
 | `owner` | required | Repository owner for GitHub targets, or the stable canonical-path identity for local-only targets |
 | `repo` | required | Repository name or readable local Project Target name |
 | `checkoutPath` | required | Absolute local path attached to this Project Target |
-| `defaultExecutor` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, or a configured custom agent id |
+| `defaultExecutor` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, `openclaw`, or a configured custom agent id |
 | `baseBranch` | `main` | PR target branch |
 | `pushRemote` | `origin` | Remote used for PR branches |
 | `worktreeRoot` | none | Optional root for executor-created worktrees |
@@ -537,7 +566,7 @@ for repeatable setups.
 | `OPENTAG_REPO_OWNER` | none | Required for env-derived Project Target binding |
 | `OPENTAG_REPO_NAME` | none | Required for env-derived Project Target binding |
 | `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived Project Target binding |
-| `OPENTAG_DEFAULT_EXECUTOR` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, or a configured custom agent id |
+| `OPENTAG_DEFAULT_EXECUTOR` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, `openclaw`, or a configured custom agent id |
 | `OPENTAG_BASE_BRANCH` | `main` | PR target branch |
 | `OPENTAG_PUSH_REMOTE` | `origin` | Git remote for run branches |
 | `OPENTAG_WORKTREE_ROOT` | none | Optional worktree root |
@@ -547,6 +576,9 @@ for repeatable setups.
 | `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Legacy Project Target provider fallback used by the env-derived Slack channel binding |
 | `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
+| `OPENTAG_OPENCLAW_COMMAND` | `openclaw` | OpenClaw CLI command used by the built-in ACP launch and CLI detection |
+| `OPENTAG_OPENCLAW_PROFILE` | OpenClaw default | Optional profile passed before the `acp` subcommand |
+| `OPENTAG_OPENCLAW_GATEWAY_URL` | OpenClaw default | Optional Gateway WebSocket URL passed as `acp --url <url>` |
 | `OPENTAG_AGENT_PROFILE` | none | Fixed executor-neutral agent session identity |
 | `OPENTAG_AGENT_PROFILE_TEMPLATE` | derived per run | Executor-neutral profile template; supports tokens such as `{provider}`, `{projectTarget}`, `{accountId}`, `{conversationId}`, `{owner}`, `{repo}`, `{actorId}`, and `{runId}` |
 | `OPENTAG_SECURITY_MODE` | none | `enforce`, `audit`, or `off` |

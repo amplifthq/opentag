@@ -163,7 +163,7 @@ OpenTag 的 CLI 路径是本地优先的。
 
 - 本地 CLI 流程里没有 OpenTag cloud service。
 - 平台凭据保存在你的电脑上，并使用私有文件权限。
-- Codex、Claude Code、Cursor、OpenCode 和 Hermes 会通过 ACP 在你的本地 checkout 上运行。
+- Codex、Claude Code、Cursor、OpenCode、Hermes 和 OpenClaw 会通过 ACP 在你的本地 checkout 上运行；OpenClaw 的取消当前是 best effort。
 - 平台 API 只会收到 OpenTag 用来确认、回复和执行已审批 action 所需的消息。
 
 ## 支持的 Coding Agent
@@ -175,6 +175,7 @@ OpenTag 的 CLI 路径是本地优先的。
 | Cursor | 安装并登录后支持 | 使用本机 `cursor-agent acp` 命令 |
 | OpenCode | `npx` 可用且 provider 已配置后支持 | 使用固定版本官方包 `opencode-ai@1.18.1`；ACP 启动时使用 pure mode，避免外部插件向 stdout 写入非协议数据 |
 | Hermes | 安装后支持 | 使用 `hermes -p <profile> acp` 和已配置的本地 provider |
+| OpenClaw | 安装并配置 Gateway 后支持 | 使用本机 `openclaw acp`；当前取消是 best effort，不保证 Gateway 已终止正在运行的 tool 子进程 |
 | Echo | 仅开发/测试 | 不运行真实 coding agent |
 
 ## 常用命令

@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
-const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes"] as const;
+const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"] as const;
 
 // Accept any trimmed non-empty executor id. Custom executors registered by a
 // standalone runner are valid, but daemon ACP agents cannot replace built-ins.
@@ -100,6 +100,12 @@ const HermesAcpConfigSchema = z.object({
   profileTemplate: z.string().trim().min(1).optional()
 });
 
+const OpenClawAcpConfigSchema = z.object({
+  command: z.string().trim().min(1).optional(),
+  profile: z.string().trim().min(1).optional(),
+  gatewayUrl: z.string().url().optional()
+});
+
 const AgentSessionProfileConfigSchema = z.object({
   profile: z.string().trim().min(1).optional(),
   profileTemplate: z.string().trim().min(1).optional()
@@ -121,6 +127,7 @@ export const AcpAgentConfigSchema = z
     workspaceCwd: z.literal("required"),
     sessionModeId: z.string().trim().min(1).optional(),
     supportsProfile: z.boolean().default(false),
+    supportsCancel: z.boolean().default(true),
     readinessTimeoutMs: PositiveIntegerSchema.optional()
   })
   .strict();
@@ -190,6 +197,7 @@ export const OpenTagDaemonConfigSchema = z
     // Reject removed direct-adapter config instead of silently stripping it from the non-strict daemon schema.
     claudeCode: z.never().optional(),
     hermes: HermesAcpConfigSchema.optional(),
+    openclaw: OpenClawAcpConfigSchema.optional(),
     agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
     security: RunnerSecurityPolicySchema.optional(),
     githubToken: SecretStringSchema.optional(),
@@ -458,6 +466,15 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
             ...(process.env.OPENTAG_HERMES_COMMAND ? { command: process.env.OPENTAG_HERMES_COMMAND } : {}),
             ...(process.env.OPENTAG_HERMES_PROFILE ? { profile: process.env.OPENTAG_HERMES_PROFILE } : {}),
             ...(process.env.OPENTAG_HERMES_PROFILE_TEMPLATE ? { profileTemplate: process.env.OPENTAG_HERMES_PROFILE_TEMPLATE } : {})
+          }
+        }
+      : {}),
+    ...(process.env.OPENTAG_OPENCLAW_COMMAND || process.env.OPENTAG_OPENCLAW_PROFILE || process.env.OPENTAG_OPENCLAW_GATEWAY_URL
+      ? {
+          openclaw: {
+            ...(process.env.OPENTAG_OPENCLAW_COMMAND ? { command: process.env.OPENTAG_OPENCLAW_COMMAND } : {}),
+            ...(process.env.OPENTAG_OPENCLAW_PROFILE ? { profile: process.env.OPENTAG_OPENCLAW_PROFILE } : {}),
+            ...(process.env.OPENTAG_OPENCLAW_GATEWAY_URL ? { gatewayUrl: process.env.OPENTAG_OPENCLAW_GATEWAY_URL } : {})
           }
         }
       : {}),

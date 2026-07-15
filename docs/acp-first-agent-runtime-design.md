@@ -728,8 +728,9 @@ The first coherent vertical slice contains:
 - Hermes Channel Adapter implementing `opentag.channel.v1` for one provider;
 - Generic ACP Host over stdio;
 - Hermes ACP conformance smoke test;
-- an OpenClaw 2026.7.1 candidate gate for the second real ACP Agent, currently
-  blocked because Gateway cancellation does not stop the in-flight shell tool;
+- an OpenClaw 2026.7.1 Generic ACP launch with `supportsCancel: false`, plus a
+  separate strict probe tracking that Gateway cancellation does not yet stop
+  the in-flight shell tool;
 - Ask and Auto autonomy modes;
 - Balanced Run Card presentation;
 - local or co-located Control Plane and Worker with the process boundary preserved;

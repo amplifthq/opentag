@@ -118,6 +118,26 @@ describe("opentagd config", () => {
     });
   });
 
+  it("loads OpenClaw ACP settings from env", () => {
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_REPO_OWNER = "acme";
+    process.env.OPENTAG_REPO_NAME = "demo";
+    process.env.OPENTAG_WORKSPACE_PATH = "/tmp/demo";
+    process.env.OPENTAG_DEFAULT_EXECUTOR = "openclaw";
+    process.env.OPENTAG_OPENCLAW_COMMAND = "openclaw-dev";
+    process.env.OPENTAG_OPENCLAW_PROFILE = "opentag";
+    process.env.OPENTAG_OPENCLAW_GATEWAY_URL = "ws://127.0.0.1:19093";
+
+    const config = loadConfigFromEnv();
+
+    expect(config.repositories[0]).toMatchObject({ defaultExecutor: "openclaw" });
+    expect(config.openclaw).toEqual({
+      command: "openclaw-dev",
+      profile: "opentag",
+      gatewayUrl: "ws://127.0.0.1:19093"
+    });
+  });
+
   it("loads generic agent session profile settings from env", () => {
     delete process.env.OPENTAG_CONFIG_PATH;
     process.env.OPENTAG_REPO_OWNER = "acme";

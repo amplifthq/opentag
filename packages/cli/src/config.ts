@@ -14,7 +14,7 @@ import type { PlatformId } from "./catalogs/platforms.js";
 
 // Executor ids (repository bindings and the last-used preference) accept any
 // trimmed non-empty string so custom executors registered by a standalone runner
-// validate; echo, codex, claude-code, cursor, opencode, and hermes remain the documented built-ins.
+// validate; echo, codex, claude-code, cursor, opencode, hermes, and openclaw remain the documented built-ins.
 // Mirrors the daemon config and the open runtime dispatch.
 const ExecutorIdSchema = z.string().trim().min(1);
 const KeepWorktreeSchema = z.enum(["always", "on_failure", "never"]);
@@ -165,6 +165,14 @@ const HermesSchema = z
   })
   .strict();
 
+const OpenClawSchema = z
+  .object({
+    command: z.string().trim().min(1).optional(),
+    profile: z.string().trim().min(1).optional(),
+    gatewayUrl: z.string().url().optional()
+  })
+  .strict();
+
 const AgentSessionProfileSchema = z
   .object({
     profile: z.string().trim().min(1).optional(),
@@ -190,6 +198,7 @@ const AcpAgentSchema = z
     workspaceCwd: z.literal("required"),
     sessionModeId: z.string().trim().min(1).optional(),
     supportsProfile: z.boolean().default(false),
+    supportsCancel: z.boolean().default(true),
     readinessTimeoutMs: PositiveIntegerSchema.optional()
   })
   .strict();
@@ -205,6 +214,7 @@ const DaemonConfigSchema = z
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
     channelBindings: z.array(ChannelBindingSchema).optional(),
     hermes: HermesSchema.optional(),
+    openclaw: OpenClawSchema.optional(),
     agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),
     githubToken: SecretStringSchema.optional(),

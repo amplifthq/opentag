@@ -11,6 +11,14 @@ describe("executor catalog", () => {
     expect(defaultExecutorId({ detections })).toBe("hermes");
   });
 
+  it("uses OPENTAG_OPENCLAW_COMMAND for OpenClaw detection", () => {
+    const detections = detectExecutors({ PATH: "", OPENTAG_OPENCLAW_COMMAND: process.execPath } as NodeJS.ProcessEnv);
+    const openclaw = detections.find((executor) => executor.id === "openclaw");
+
+    expect(openclaw).toMatchObject({ available: true, reason: `Found ${process.execPath} on PATH` });
+    expect(defaultExecutorId({ detections })).toBe("openclaw");
+  });
+
   it("formats executor runtime capabilities next to executor availability", () => {
     const output = formatExecutorsCommandOutput({ PATH: "" } as NodeJS.ProcessEnv);
 
@@ -19,6 +27,7 @@ describe("executor catalog", () => {
     expect(output).toContain("Claude Code: needs setup (Could not find npx on PATH; pinned package @agentclientprotocol/claude-agent-acp@0.59.0 needs setup)");
     expect(output).toContain("Cursor: not found (Could not find cursor-agent on PATH)");
     expect(output).toContain("OpenCode: needs setup (Could not find npx on PATH; pinned package opencode-ai@1.18.1 needs setup)");
+    expect(output).toContain("OpenClaw: not found (Could not find openclaw on PATH)");
     expect(output).toContain("Echo: dev/test only");
     expect(output).toContain("Executor capabilities:");
     expect(output).toContain("Codex: invocation=spawn");
@@ -34,6 +43,7 @@ describe("executor catalog", () => {
     expect(output).toContain("write_actions=propose");
     expect(output).toContain("secrets=none");
     expect(output).toContain("Hermes: invocation=spawn, profile=yes");
+    expect(output).toContain("OpenClaw: invocation=spawn, profile=yes, streaming=yes, cancel=no");
     expect(output).toContain("completion=stream_event");
   });
 

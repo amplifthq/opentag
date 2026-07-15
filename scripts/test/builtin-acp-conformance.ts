@@ -30,6 +30,9 @@ const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = resolve(dirname(scriptPath), "../..");
 const hermesCommand = process.env.OPENTAG_HERMES_COMMAND?.trim() || "hermes";
 const hermesProfile = process.env.OPENTAG_HERMES_PROFILE?.trim() || "opentag";
+const openclawCommand = process.env.OPENTAG_OPENCLAW_COMMAND?.trim() || "openclaw";
+const openclawProfile = process.env.OPENTAG_OPENCLAW_PROFILE?.trim();
+const openclawGatewayUrl = process.env.OPENTAG_OPENCLAW_GATEWAY_URL?.trim();
 const reportPath = process.env.OPENTAG_BUILTIN_ACP_CONFORMANCE_REPORT?.trim();
 const keepFixtures = process.env.OPENTAG_BUILTIN_ACP_KEEP_FIXTURES === "true";
 const registryPath = process.env.OPENTAG_ACP_CONFORMANCE_REGISTRY?.trim();
@@ -96,6 +99,12 @@ const providerStatusPatterns = [
 
 export type AcpConformanceStatus = "passed" | "needs_setup" | "failed_conformance" | "not_applicable";
 
+export function cancellationConformanceApplies(definition: {
+  capabilities?: { supportsCancel?: boolean };
+}): boolean {
+  return definition.capabilities?.supportsCancel !== false;
+}
+
 export function classifyAcpConformanceFailure(
   error: unknown,
   executorDiagnostics: readonly string[] = []
@@ -159,7 +168,12 @@ type ConformanceTarget =
 
 function allConformanceTargets(): ConformanceTarget[] {
   const builtIns = Object.values(builtInAcpAgentDefinitions({
-    hermes: { command: hermesCommand, profile: hermesProfile }
+    hermes: { command: hermesCommand, profile: hermesProfile },
+    openclaw: {
+      command: openclawCommand,
+      ...(openclawProfile ? { profile: openclawProfile } : {}),
+      ...(openclawGatewayUrl ? { gatewayUrl: openclawGatewayUrl } : {})
+    }
   })).map((definition) => ({
     id: definition.id,
     definition
@@ -437,6 +451,14 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       status: "not_applicable",
       durationMs: 0,
       error: "The process-tree conformance case currently requires POSIX process groups."
+    });
+  } else if (cases.includes("cancel-process-tree") && !cancellationConformanceApplies(definition)) {
+    results.push({
+      agent,
+      case: "cancel-process-tree",
+      status: "not_applicable",
+      durationMs: 0,
+      error: "Agent declares best-effort cancellation; process-tree termination is not claimed."
     });
   } else if (cases.includes("cancel-process-tree")) await runCase(agent, "cancel-process-tree", async (failureDiagnostics) => {
     const cancelScratch = join(root, agent, "cancel");

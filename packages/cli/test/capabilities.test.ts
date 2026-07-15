@@ -11,6 +11,7 @@ describe("CLI capability catalog", () => {
       builtIns.cursor,
       builtIns.opencode,
       builtIns.hermes,
+      builtIns.openclaw,
       createEchoExecutor()
     ];
 

@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { createAcpAgentExecutor } from "../src/acp-agent.js";
 import { createEchoExecutor } from "../src/echo.js";
 
-function acpExecutor(id: string, supportsProfile = false) {
+function acpExecutor(id: string, supportsProfile = false, supportsCancel = true) {
   return createAcpAgentExecutor({
     id,
     label: id,
     workspaceCwd: "required",
     launch: { command: id, args: ["acp"] },
-    capabilities: { supportsProfile }
+    capabilities: { supportsProfile, supportsCancel }
   });
 }
 
@@ -17,14 +17,15 @@ describe("executor capability contracts", () => {
     const codex = acpExecutor("codex");
     const claudeCode = acpExecutor("claude-code");
     const hermes = acpExecutor("hermes", true);
-    const executors = [codex, claudeCode, hermes, createEchoExecutor()];
+    const openclaw = acpExecutor("openclaw", true, false);
+    const executors = [codex, claudeCode, hermes, openclaw, createEchoExecutor()];
 
     for (const executor of executors) {
       expect(executor.capability).toMatchObject({
         id: executor.id,
         invocation: "spawn",
         supportsStreaming: executor.id !== "echo",
-        supportsCancel: executor.id !== "echo",
+        supportsCancel: executor.id !== "echo" && executor.id !== "openclaw",
         supportsHookCompletion: false,
         progressEvents: "audit",
         approvalMode: "opentag_policy",
@@ -45,6 +46,11 @@ describe("executor capability contracts", () => {
     expect(claudeCode.capability?.workspaceIsolation).toBe("worktree");
     expect(hermes.capability).toMatchObject({
       supportsProfile: true,
+      workspaceIsolation: "worktree"
+    });
+    expect(openclaw.capability).toMatchObject({
+      supportsProfile: true,
+      supportsCancel: false,
       workspaceIsolation: "worktree"
     });
     expect(createEchoExecutor().capability?.workspaceIsolation).toBe("none");

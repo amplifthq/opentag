@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const openclawCommand = process.env.OPENTAG_OPENCLAW_COMMAND || "openclaw";
 const hermesCommand = process.env.OPENTAG_HERMES_COMMAND || "hermes";
-const builtInAcpAgents = process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",").map((value) => value.trim()) ?? ["codex", "claude-code", "hermes"];
+const builtInAcpAgents = process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",").map((value) => value.trim()) ?? ["codex", "claude-code", "hermes", "openclaw"];
 const githubWebhookExecutor = process.env.OPENTAG_GH_LIVE_EXECUTOR || "claude-code";
 
 const cases = [
@@ -30,10 +30,16 @@ const cases = [
     label: "Live built-in coding-agent ACP conformance",
     live: true,
     command: "corepack pnpm smoke:builtin-acp-conformance",
-    requiredCommands: ["corepack", "git", ...(builtInAcpAgents.includes("hermes") ? [hermesCommand] : [])],
+    requiredCommands: [
+      "corepack",
+      "git",
+      ...(builtInAcpAgents.includes("hermes") ? [hermesCommand] : []),
+      ...(builtInAcpAgents.includes("openclaw") ? [openclawCommand] : [])
+    ],
     notes: [
-      "Runs real readiness, scratch cwd, isolated worktree, and process-tree cancellation cases.",
-      "Set OPENTAG_BUILTIN_ACP_AGENTS to a comma-separated subset of codex,claude-code,hermes.",
+      "Runs real readiness, scratch cwd, isolated worktree, and declared process-tree cancellation cases.",
+      "Set OPENTAG_BUILTIN_ACP_AGENTS to a comma-separated subset of codex,claude-code,cursor,opencode,hermes,openclaw.",
+      "OpenClaw declares best-effort cancellation, so its process-tree case is not applicable; use openclaw-acp for the strict upstream probe.",
       "Codex and Claude require working local authentication; Hermes requires a usable OPENTAG_HERMES_PROFILE provider."
     ]
   },
@@ -46,7 +52,7 @@ const cases = [
     notes: [
       "Requires OpenClaw 2026.7.1 and a running Gateway for OPENTAG_OPENCLAW_PROFILE (default: opentag-conformance).",
       "Uses real model and file tools in temporary worktree and scratch fixtures, then exercises live cancellation.",
-      "Stock 2026.7.1 currently fails closed because its cancelled shell can still reach the completion marker.",
+      "Stock 2026.7.1 currently fails the strict hard-cancellation probe because its cancelled shell can still reach the completion marker; built-in support remains available with cancel=no.",
       "The profile owns Gateway authentication; never put its token in the integration manifest."
     ]
   },

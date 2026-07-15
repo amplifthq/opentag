@@ -68,7 +68,7 @@ opentag setup
 Help the user choose:
 
 - Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
-- Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, or Echo.
+- Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, OpenClaw, or Echo. OpenClaw currently exposes best-effort cancellation (`cancel=no`).
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
 

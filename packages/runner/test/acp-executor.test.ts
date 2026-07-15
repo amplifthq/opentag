@@ -600,6 +600,28 @@ describe("ACP executor", () => {
     expect(existsSync(join(scratch, "acp-cancelled.json"))).toBe(true);
   }, 15_000);
 
+  it("does not claim provider process termination for best-effort cancellation", async () => {
+    const scratch = tempDir("best-effort-cancel");
+    const executor = createAcpExecutor({
+      manifest: manifest("cancel"),
+      cancelGraceMs: 500,
+      capabilityOverrides: { supportsCancel: false }
+    });
+    const running = executor.run(input({ kind: "scratch", path: scratch }, "run_best_effort_cancel"), {
+      emit: async () => undefined
+    });
+    await waitForFile(join(scratch, "acp-waiting.json"));
+
+    await executor.cancel("run_best_effort_cancel");
+    const result = await running;
+
+    expect(result).toMatchObject({
+      conclusion: "cancelled",
+      summary: expect.stringContaining("provider-owned tool subprocess termination is not confirmed"),
+      nextAction: "Inspect provider-owned processes before starting another Attempt."
+    });
+  }, 15_000);
+
   it("returns cancelled without spawning when cancellation wins the startup race", async () => {
     const scratch = tempDir("immediate-cancel");
     const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });

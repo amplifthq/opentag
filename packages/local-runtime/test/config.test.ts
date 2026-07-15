@@ -11,14 +11,22 @@ const baseRepository = {
   checkoutPath: "/tmp/acme-widgets"
 };
 
-function acpAgent(input: { label: string; command: string; args?: string[]; sessionModeId?: string; supportsProfile?: boolean }) {
+function acpAgent(input: {
+  label: string;
+  command: string;
+  args?: string[];
+  sessionModeId?: string;
+  supportsProfile?: boolean;
+  supportsCancel?: boolean;
+}) {
   return {
     label: input.label,
     command: input.command,
     args: input.args ?? [],
     workspaceCwd: "required" as const,
     ...(input.sessionModeId ? { sessionModeId: input.sessionModeId } : {}),
-    ...(input.supportsProfile !== undefined ? { supportsProfile: input.supportsProfile } : {})
+    ...(input.supportsProfile !== undefined ? { supportsProfile: input.supportsProfile } : {}),
+    ...(input.supportsCancel !== undefined ? { supportsCancel: input.supportsCancel } : {})
   };
 }
 
@@ -30,13 +38,13 @@ describe("parseDaemonConfig ACP agents", () => {
   it("runs built-in coding agents through the generic ACP capability contract", () => {
     const executors = executorsFromConfig(parseDaemonConfig({}));
 
-    for (const executorId of ["codex", "claude-code", "cursor", "opencode", "hermes"] as const) {
+    for (const executorId of ["codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"] as const) {
       expect(executors[executorId]).toMatchObject({
         id: executorId,
         capability: {
-          supportsProfile: executorId === "hermes",
+          supportsProfile: executorId === "hermes" || executorId === "openclaw",
           supportsStreaming: true,
-          supportsCancel: true,
+          supportsCancel: executorId !== "openclaw",
           promptAssembly: "opentag",
           writeActionAccess: "propose",
           workspaceIsolation: "worktree",
@@ -46,10 +54,32 @@ describe("parseDaemonConfig ACP agents", () => {
     }
   });
 
+  it("maps OpenClaw profile and Gateway configuration into the built-in ACP launch", () => {
+    const config = parseDaemonConfig({
+      repositories: [{ ...baseRepository, defaultExecutor: "openclaw" }],
+      openclaw: {
+        command: "/opt/openclaw/bin/openclaw",
+        profile: "opentag",
+        gatewayUrl: "ws://127.0.0.1:19093"
+      }
+    });
+
+    expect(executorsFromConfig(config).openclaw).toMatchObject({
+      id: "openclaw",
+      capability: { supportsProfile: true, supportsCancel: false }
+    });
+  });
+
   it("creates differently named agents through the generic ACP executor path", () => {
     const config = parseDaemonConfig({
       agents: {
         "hermes-acp": acpAgent({ label: "Hermes ACP", command: "hermes", args: ["acp"], supportsProfile: true }),
+        "best-effort-acp": acpAgent({
+          label: "Best-effort ACP",
+          command: "best-effort-agent",
+          args: ["acp"],
+          supportsCancel: false
+        }),
         reviewer: acpAgent({ label: "Review Agent", command: "review-agent", sessionModeId: "review" })
       }
     });
@@ -60,6 +90,7 @@ describe("parseDaemonConfig ACP agents", () => {
     expect(executors.reviewer).toMatchObject({ id: "reviewer", displayName: "Review Agent" });
     expect(executors.reviewer?.capability).toMatchObject({ workspaceCwdConformance: "declared" });
     expect(executors["hermes-acp"]?.capability).toMatchObject({ supportsProfile: true });
+    expect(executors["best-effort-acp"]?.capability).toMatchObject({ supportsCancel: false });
     expect(executors["hermes-acp"]?.capability?.completionSignals).toEqual(
       executors.reviewer?.capability?.completionSignals
     );
@@ -86,7 +117,7 @@ describe("parseDaemonConfig ACP agents", () => {
     })).toThrow(/workspaceCwd|received undefined/iu);
   });
 
-  it.each(["echo", "codex", "claude-code", "cursor", "opencode", "hermes"])(
+  it.each(["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"])(
     "rejects a configured ACP agent that collides with built-in executor %s",
     (executorId) => {
       expect(() =>
@@ -201,7 +232,7 @@ describe("parseDaemonConfig scratchRoot", () => {
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
-    for (const executor of ["echo", "codex", "claude-code", "cursor", "opencode", "hermes"]) {
+    for (const executor of ["echo", "codex", "claude-code", "cursor", "opencode", "hermes", "openclaw"]) {
       const config = parseDaemonConfig({
         repositories: [{ ...baseRepository, defaultExecutor: executor }]
       });

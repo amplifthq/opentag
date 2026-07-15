@@ -101,7 +101,12 @@ function checkInstalledAcpLaunchDefinitions(installDir) {
 
     const definitions = builtInAcpAgentDefinitions();
     const manifests = builtInAcpAgentManifests({
-      hermes: { command: "hermes-release-check", profile: "release-check" }
+      hermes: { command: "hermes-release-check", profile: "release-check" },
+      openclaw: {
+        command: "openclaw-release-check",
+        profile: "release-check",
+        gatewayUrl: "ws://127.0.0.1:19093"
+      }
     });
     const expected = {
       codex: ["--yes", "@agentclientprotocol/codex-acp@1.1.2"],
@@ -119,6 +124,13 @@ function checkInstalledAcpLaunchDefinitions(installDir) {
     const hermes = manifests.hermes.bindings.agent;
     if (hermes.command !== "hermes-release-check" || JSON.stringify(hermes.args) !== JSON.stringify(["-p", "release-check", "acp"])) {
       throw new Error(\`Installed Hermes ACP manifest is incorrect: \${JSON.stringify(hermes)}\`);
+    }
+    const openclaw = manifests.openclaw.bindings.agent;
+    if (openclaw.command !== "openclaw-release-check" || JSON.stringify(openclaw.args) !== JSON.stringify(["--profile", "release-check", "acp", "--url", "ws://127.0.0.1:19093"])) {
+      throw new Error(\`Installed OpenClaw ACP manifest is incorrect: \${JSON.stringify(openclaw)}\`);
+    }
+    if (definitions.openclaw.capabilities?.supportsCancel !== false) {
+      throw new Error("Installed OpenClaw ACP definition must declare best-effort cancellation.");
     }
   `;
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });

@@ -58,7 +58,7 @@ program
   .option("--dispatcher-url <url>", "Dispatcher URL", "http://localhost:3030")
   .option("--pairing-token <token>", "Dispatcher pairing token")
   .option("--runner-token <token>", "Runner-scoped dispatcher token for claim/progress/completion")
-  .option("--executor <executor>", "Default executor: echo, codex, claude-code, cursor, opencode, or hermes", "echo")
+  .option("--executor <executor>", "Default executor: echo, codex, claude-code, cursor, opencode, hermes, or openclaw", "echo")
   .option("--base-branch <branch>", "Base branch for PR creation", "main")
   .option("--push-remote <remote>", "Git remote for PR branches", "origin")
   .option("--worktree-root <path>", "Directory for Codex run worktrees")
@@ -72,7 +72,7 @@ program
     dispatcherUrl: string;
     pairingToken?: string;
     runnerToken?: string;
-    executor: "echo" | "codex" | "claude-code" | "cursor" | "opencode" | "hermes";
+    executor: "echo" | "codex" | "claude-code" | "cursor" | "opencode" | "hermes" | "openclaw";
     baseBranch: string;
     pushRemote: string;
     worktreeRoot?: string;

@@ -19,6 +19,7 @@ export type AcpAgentCandidate = {
   sessionModeId?: string;
   capabilities?: {
     supportsProfile?: boolean;
+    supportsCancel?: boolean;
   };
   launchEnvironment?: Readonly<Record<string, string>>;
   readinessTimeoutMs?: number;

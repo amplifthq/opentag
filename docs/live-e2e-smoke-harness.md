@@ -21,7 +21,7 @@ Current cases:
 | --- | --- | --- |
 | `protocol-runtime` | No | In-memory GitHub-shaped protocol smoke using dispatcher/client/store paths |
 | `slack-protocol` | No | In-memory Slack-shaped protocol smoke with quiet progress and Block Kit final callback |
-| `openclaw-acp` | Yes | Fail-closed OpenClaw 2026.7.1 candidate gate for worktree cwd, scratch cwd, fresh sessions, and cancellation through the generic ACP host |
+| `openclaw-acp` | Yes | Strict OpenClaw hard-cancellation probe plus worktree cwd, scratch cwd, and fresh-session checks through the generic ACP host |
 | `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, final action receipt, optional `apply 1` PR flow |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
@@ -92,17 +92,22 @@ logs.
 
 `builtin-acp` wraps `corepack pnpm smoke:acp-conformance`. It runs the same
 provider-backed gate for pinned Codex, Claude, and OpenCode ACP packages plus
-the installed Cursor and Hermes ACP commands: initialize readiness,
-exact scratch `cwd`, isolated repository worktree plus commit, and cancellation
-of the real shell/tool process tree.
+the installed Cursor, Hermes, and OpenClaw ACP commands: initialize readiness,
+exact scratch `cwd`, isolated repository worktree plus commit, and, where the
+agent declares `supportsCancel: true`, cancellation of the real shell/tool
+process tree. OpenClaw remains in the batch, but its cancellation case is
+reported as `not_applicable` because its capability is explicitly best effort.
 The process-tree assertion currently targets POSIX hosts; Windows can exercise
 ACP cancellation, but descendant-process termination is not yet a claimed gate.
 
 Use `OPENTAG_BUILTIN_ACP_AGENTS` or `OPENTAG_BUILTIN_ACP_CASES` for a
 comma-separated subset. Hermes uses `OPENTAG_HERMES_PROFILE` (default:
 `opentag`) and must have a working inference provider before its execution cases
-can pass. Cursor must be logged in through Cursor CLI, and OpenCode must have an
-authenticated provider. OpenCode's built-in launch uses pure mode during ACP
+can pass. OpenClaw accepts `OPENTAG_OPENCLAW_COMMAND`,
+`OPENTAG_OPENCLAW_PROFILE`, and `OPENTAG_OPENCLAW_GATEWAY_URL`; its Gateway must
+be ready before execution cases can pass. Cursor must be logged in through
+Cursor CLI, and OpenCode must have an authenticated provider. OpenCode's
+built-in launch uses pure mode during ACP
 sessions, so user-installed external OpenCode plugins are intentionally not
 loaded into this transport. For example:
 
@@ -137,8 +142,10 @@ so do not add `--no-prefix-cwd` to the integration binding.
 The current stock 2026.7.1 result is intentionally non-zero. Worktree, scratch,
 and distinct Gateway session checks pass, but after ACP cancellation marks the
 Gateway session `killed`, the in-flight shell still reaches its completion
-marker. Until that external effect stops, this gate does not authorize an
-OpenClaw manifest and OpenTag does not ship one.
+marker. This result tracks the missing hard-cancellation guarantee; it does not
+block the built-in OpenClaw ACP agent. OpenTag exposes that limitation as
+`supportsCancel: false` and does not claim that provider-owned tool subprocesses
+have stopped.
 
 The test Gateway may use no authentication only when it is isolated and bound
 to loopback. A reusable or remote profile must own its Gateway authentication;

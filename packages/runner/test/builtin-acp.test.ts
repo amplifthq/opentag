@@ -4,7 +4,12 @@ import { builtInAcpAgentDefinitions, builtInAcpAgentManifests } from "../src/bui
 describe("built-in ACP coding agents", () => {
   it("uses Registry or installed CLI launch data and maps the Hermes profile into ACP startup", () => {
     const manifests = builtInAcpAgentManifests({
-      hermes: { command: "/opt/hermes/bin/hermes", profile: "opentag-review" }
+      hermes: { command: "/opt/hermes/bin/hermes", profile: "opentag-review" },
+      openclaw: {
+        command: "/opt/openclaw/bin/openclaw",
+        profile: "opentag-review",
+        gatewayUrl: "ws://127.0.0.1:19093"
+      }
     });
 
     expect(manifests.codex.bindings.agent).toEqual({
@@ -36,6 +41,12 @@ describe("built-in ACP coding agents", () => {
       command: "/opt/hermes/bin/hermes",
       args: ["-p", "opentag-review", "acp"]
     });
+
+    expect(manifests.openclaw.bindings.agent).toEqual({
+      kind: "stdio",
+      command: "/opt/openclaw/bin/openclaw",
+      args: ["--profile", "opentag-review", "acp", "--url", "ws://127.0.0.1:19093"]
+    });
   });
 
   it("keeps compatibility aliases as data-only definitions", () => {
@@ -62,5 +73,10 @@ describe("built-in ACP coding agents", () => {
     expect(definitions.cursor.readinessTimeoutMs).toBe(30_000);
     expect(definitions.opencode.readinessTimeoutMs).toBe(30_000);
     expect(definitions.hermes).toMatchObject({ id: "hermes", capabilities: { supportsProfile: true } });
+    expect(definitions.openclaw).toMatchObject({
+      id: "openclaw",
+      launch: { command: "openclaw", args: ["acp"] },
+      capabilities: { supportsProfile: true, supportsCancel: false }
+    });
   });
 });

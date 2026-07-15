@@ -8,13 +8,18 @@ import type { ExecutorAdapter } from "./executor.js";
 import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
 import type { RunnerSecurityPolicy } from "./security.js";
 
-export type BuiltInAcpAgentId = "codex" | "claude-code" | "cursor" | "opencode" | "hermes";
+export type BuiltInAcpAgentId = "codex" | "claude-code" | "cursor" | "opencode" | "hermes" | "openclaw";
 
 export type BuiltInAcpAgentOptions = {
   security?: RunnerSecurityPolicy;
   hermes?: {
     command?: string;
     profile?: string;
+  };
+  openclaw?: {
+    command?: string;
+    profile?: string;
+    gatewayUrl?: string;
   };
 };
 
@@ -25,6 +30,11 @@ export function builtInAcpAgentDefinitions(
 ): Record<BuiltInAcpAgentId, BuiltInAcpAgentDefinition> {
   const hermesCommand = options.hermes?.command ?? "hermes";
   const hermesProfile = options.hermes?.profile ?? DEFAULT_HERMES_PROFILE;
+  const openclawArgs = [
+    ...(options.openclaw?.profile ? ["--profile", options.openclaw.profile] : []),
+    "acp",
+    ...(options.openclaw?.gatewayUrl ? ["--url", options.openclaw.gatewayUrl] : [])
+  ];
 
   return {
     codex: {
@@ -84,6 +94,17 @@ export function builtInAcpAgentDefinitions(
         args: ["-p", hermesProfile, "acp"]
       },
       capabilities: { supportsProfile: true }
+    },
+    openclaw: {
+      id: "openclaw",
+      label: "OpenClaw ACP",
+      workspaceCwd: "required",
+      readinessTimeoutMs: 30_000,
+      launch: {
+        command: options.openclaw?.command ?? "openclaw",
+        args: openclawArgs
+      },
+      capabilities: { supportsProfile: true, supportsCancel: false }
     }
   };
 }
@@ -95,7 +116,8 @@ export function builtInAcpAgentManifests(options: BuiltInAcpAgentOptions = {}): 
     "claude-code": createAcpAgentManifest(definitions["claude-code"]),
     cursor: createAcpAgentManifest(definitions.cursor),
     opencode: createAcpAgentManifest(definitions.opencode),
-    hermes: createAcpAgentManifest(definitions.hermes)
+    hermes: createAcpAgentManifest(definitions.hermes),
+    openclaw: createAcpAgentManifest(definitions.openclaw)
   };
 }
 
@@ -107,6 +129,7 @@ export function createBuiltInAcpExecutors(options: BuiltInAcpAgentOptions = {}):
     "claude-code": createAcpAgentExecutor(definitions["claude-code"], shared),
     cursor: createAcpAgentExecutor(definitions.cursor, shared),
     opencode: createAcpAgentExecutor(definitions.opencode, shared),
-    hermes: createAcpAgentExecutor(definitions.hermes, shared)
+    hermes: createAcpAgentExecutor(definitions.hermes, shared),
+    openclaw: createAcpAgentExecutor(definitions.openclaw, shared)
   };
 }

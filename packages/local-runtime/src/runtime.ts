@@ -40,6 +40,11 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     hermes: {
       ...(config.hermes?.command ? { command: config.hermes.command } : {}),
       ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
+    },
+    openclaw: {
+      ...(config.openclaw?.command ? { command: config.openclaw.command } : {}),
+      ...(config.openclaw?.profile ? { profile: config.openclaw.profile } : {}),
+      ...(config.openclaw?.gatewayUrl ? { gatewayUrl: config.openclaw.gatewayUrl } : {})
     }
   });
 
@@ -49,7 +54,8 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     "claude-code": builtInAcpExecutors["claude-code"],
     cursor: builtInAcpExecutors.cursor,
     opencode: builtInAcpExecutors.opencode,
-    hermes: builtInAcpExecutors.hermes
+    hermes: builtInAcpExecutors.hermes,
+    openclaw: builtInAcpExecutors.openclaw
   };
   for (const [id, agent] of Object.entries(config.agents)) {
     if (Object.prototype.hasOwnProperty.call(executors, id)) {
@@ -66,7 +72,7 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
           ...(agent.cwd ? { cwd: agent.cwd } : {})
         },
         ...(agent.sessionModeId ? { sessionModeId: agent.sessionModeId } : {}),
-        capabilities: { supportsProfile: agent.supportsProfile },
+        capabilities: { supportsProfile: agent.supportsProfile, supportsCancel: agent.supportsCancel },
         ...(agent.readinessTimeoutMs ? { readinessTimeoutMs: agent.readinessTimeoutMs } : {})
       },
       security ? { security } : {}

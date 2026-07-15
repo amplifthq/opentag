@@ -62,6 +62,27 @@ describe("OpenTag CLI config", () => {
     })).toThrow(/unrecognized/iu);
   });
 
+  it("accepts OpenClaw ACP launch configuration", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      daemon: {
+        ...source.daemon,
+        openclaw: {
+          command: "/opt/openclaw/bin/openclaw",
+          profile: "opentag",
+          gatewayUrl: "ws://127.0.0.1:19093"
+        }
+      }
+    });
+
+    expect(parsed.daemon.openclaw).toEqual({
+      command: "/opt/openclaw/bin/openclaw",
+      profile: "opentag",
+      gatewayUrl: "ws://127.0.0.1:19093"
+    });
+  });
+
   it("writes config atomically with private file permissions", () => {
     const path = join(tempDir(), "config.json");
     const expected = config();

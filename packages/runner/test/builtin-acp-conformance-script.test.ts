@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyAcpConformanceFailure,
+  cancellationConformanceApplies,
   registryConformanceTargets
 } from "../../../scripts/test/builtin-acp-conformance.js";
 
@@ -17,6 +18,12 @@ describe("built-in ACP conformance failure classification", () => {
 
   it("classifies protocol and process-tree failures as conformance failures", () => {
     expect(classifyAcpConformanceFailure(new Error("Cancelled tool process 42 is still alive."))).toBe("failed_conformance");
+  });
+
+  it("keeps best-effort cancellation providers in the batch without claiming process-tree conformance", () => {
+    expect(cancellationConformanceApplies({ capabilities: { supportsCancel: false } })).toBe(false);
+    expect(cancellationConformanceApplies({ capabilities: { supportsCancel: true } })).toBe(true);
+    expect(cancellationConformanceApplies({})).toBe(true);
   });
 
   it("uses sanitized executor failure events to preserve provider-state classification", () => {

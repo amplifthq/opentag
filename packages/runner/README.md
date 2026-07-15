@@ -16,7 +16,7 @@ pnpm add @opentag/runner
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
 - `createAcpAgentExecutor`: generic stdio ACP host for an ACP launch definition.
 - `parseAcpRegistry` and `resolveAcpRegistryAgent`: provider-neutral ACP Registry parsing and launch-candidate resolution.
-- `createBuiltInAcpExecutors`: built-in launch profiles for pinned Codex, Claude, and OpenCode packages plus installed Cursor and Hermes ACP commands.
+- `createBuiltInAcpExecutors`: built-in launch profiles for pinned Codex, Claude, and OpenCode packages plus installed Cursor, Hermes, and OpenClaw ACP commands.
 - `builtInAcpAgentDefinitions`: the data-only built-in definitions and Registry provenance where a pinned Registry package is used.
 - `createAcpExecutor`: lower-level generic stdio ACP host for an internal integration manifest.
 - Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
@@ -80,13 +80,17 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-Codex, Claude Code, Cursor, OpenCode, and Hermes run through the same generic ACP
-host. Codex, Claude, and OpenCode use exact package versions through `npx`;
-Cursor uses its installed native ACP command; Hermes uses its configured local
-command and profile. OpenCode launches in pure mode so external plugins cannot
-pollute the strict ACP stdout stream. The generic ACP host
+Codex, Claude Code, Cursor, OpenCode, Hermes, and OpenClaw run through the same
+generic ACP host. Codex, Claude, and OpenCode use exact package versions through
+`npx`; Cursor uses its installed native ACP command; Hermes uses its configured
+local command and profile; OpenClaw uses its installed Gateway ACP bridge.
+OpenCode launches in pure mode so external plugins cannot pollute the strict ACP
+stdout stream. The generic ACP host
 passes the attempt workspace as the ACP session `cwd`, scrubs the child
 environment, and terminates the adapter process group when a run is cancelled.
+OpenClaw declares `supportsCancel: false`: OpenTag requests cancellation and
+stops its local bridge, but does not attest termination of Gateway-owned tool
+subprocesses.
 
 ## Stability
 

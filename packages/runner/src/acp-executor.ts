@@ -281,6 +281,7 @@ export type AcpExecutorOptions = {
   sessionModeId?: string;
   capabilityOverrides?: {
     supportsProfile?: boolean;
+    supportsCancel?: boolean;
   };
   security?: RunnerSecurityPolicy;
 };
@@ -632,6 +633,7 @@ function stopResult(input: {
   baseBranch: string;
   output: string;
   files: string[];
+  cancelTerminationConfirmed: boolean;
 }) {
   if (input.stopReason === "end_turn") {
     return createExecutorRunResult({
@@ -644,6 +646,14 @@ function stopResult(input: {
     });
   }
   if (input.stopReason === "cancelled") {
+    if (!input.cancelTerminationConfirmed) {
+      return {
+        conclusion: "cancelled" as const,
+        summary: `${input.manifest.label} accepted the ACP cancellation request; provider-owned tool subprocess termination is not confirmed.`,
+        changedFiles: input.files,
+        nextAction: "Inspect provider-owned processes before starting another Attempt."
+      };
+    }
     return {
       conclusion: "cancelled" as const,
       summary: `${input.manifest.label} cancelled the ACP attempt.`,
@@ -674,6 +684,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
   const activeRuns = new Map<string, ActiveRun>();
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+  const supportsCancel = options.capabilityOverrides?.supportsCancel ?? true;
 
   return {
     id: manifest.id,
@@ -683,7 +694,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       invocation: "spawn",
       supportsProfile: options.capabilityOverrides?.supportsProfile ?? false,
       supportsStreaming: true,
-      supportsCancel: true,
+      supportsCancel,
       supportsHookCompletion: false,
       progressEvents: "audit",
       approvalMode: "opentag_policy",
@@ -757,7 +768,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             at: new Date().toISOString()
           });
           if (active.cancelRequested) {
-            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+            return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
           }
           await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
           worktreeCreated = true;
@@ -770,11 +781,11 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         }
 
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
         }
         const childCwd = await safeAcpCwd(executionPath, manifest.binding.cwd);
         if (active.cancelRequested) {
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
         }
         const child = spawnAcpChild(manifest, childCwd, options.security, launchEnvironment);
         active.child = child;
@@ -793,7 +804,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         });
         if (active.cancelRequested) {
           await terminateChild(child, cancelGraceMs);
-          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
+          return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: supportsCancel });
         }
 
         const output: string[] = [];
@@ -984,7 +995,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           branchName,
           baseBranch,
           output: output.join("").trim(),
-          files
+          files,
+          cancelTerminationConfirmed: supportsCancel
         });
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",
