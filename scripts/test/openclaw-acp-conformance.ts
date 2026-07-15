@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
   existsSync,
+  fchmodSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -22,6 +25,7 @@ const reportPath = process.env.OPENTAG_OPENCLAW_CONFORMANCE_REPORT?.trim();
 const keepFixtures = process.env.OPENTAG_OPENCLAW_KEEP_FIXTURES === "true";
 const runTimeoutMs = Number(process.env.OPENTAG_OPENCLAW_RUN_TIMEOUT_MS || 180_000);
 const cancelToolTimeoutMs = Number(process.env.OPENTAG_OPENCLAW_CANCEL_TOOL_TIMEOUT_MS || 120_000);
+const commandTimeoutMs = 15_000;
 const cancelSleepSeconds = 15;
 const scriptPath = fileURLToPath(import.meta.url);
 const repositoryRoot = resolve(dirname(scriptPath), "../..");
@@ -84,12 +88,18 @@ export function resolveDefaultWorkspacePath(workspace: string): string {
   }
 }
 
-function run(command: string, args: string[], cwd?: string): string {
+export function runBoundedCommand(command: string, args: string[], timeoutMs: number, cwd?: string): string {
   return execFileSync(command, args, {
     ...(cwd ? { cwd } : {}),
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutMs,
+    killSignal: "SIGKILL"
   }).trim();
+}
+
+function run(command: string, args: string[], cwd?: string): string {
+  return runBoundedCommand(command, args, commandTimeoutMs, cwd);
 }
 
 function git(cwd: string, args: string[]): string {
@@ -227,6 +237,13 @@ function parseMarker(path: string): Marker {
   return parsed as Marker;
 }
 
+export function defaultMarkersSafeToClean(markers: string[]): Set<string> {
+  for (const marker of markers) {
+    assert(!existsSync(marker), `Refusing to overwrite pre-existing marker ${marker}.`);
+  }
+  return new Set(markers);
+}
+
 function assertMarker(marker: Marker, expectedNonce: string, expectedCwd: string): void {
   assert(marker.nonce === expectedNonce, `Marker nonce mismatch: expected '${expectedNonce}', received '${marker.nonce}'.`);
   assert(realpathSync(marker.pwd) === realpathSync(expectedCwd), `Agent tool used '${marker.pwd}' instead of '${expectedCwd}'.`);
@@ -274,11 +291,21 @@ async function runCase<T extends CaseResult["id"]>(id: T, test: () => Promise<vo
   }
 }
 
+export function writePrivateReport(path: string, content: string): void {
+  const descriptor = openSync(path, "w", 0o600);
+  try {
+    fchmodSync(descriptor, 0o600);
+    writeFileSync(descriptor, content);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function writeReport(ok: boolean, error?: string): void {
   if (!reportPath) return;
   const absolute = resolveConformanceReportPath(reportPath);
   mkdirSync(dirname(absolute), { recursive: true });
-  writeFileSync(
+  writePrivateReport(
     absolute,
     `${JSON.stringify(
       {
@@ -291,8 +318,7 @@ function writeReport(ok: boolean, error?: string): void {
       },
       null,
       2
-    )}\n`,
-    { mode: 0o600 }
+    )}\n`
   );
 }
 
@@ -329,15 +355,14 @@ async function main(): Promise<void> {
     cancelStartedMarkerName,
     cancelCompletedMarkerName
   ].map(defaultMarker);
+  let defaultMarkersToClean = new Set<string>();
   try {
     let previousGatewaySessions = gatewaySessions();
 
     initRepository(repository);
     mkdirSync(scratch, { recursive: true });
     mkdirSync(cancelScratch, { recursive: true });
-    for (const marker of defaultMarkers) {
-      assert(!existsSync(marker), `Refusing to overwrite pre-existing marker ${marker}.`);
-    }
+    defaultMarkersToClean = defaultMarkersSafeToClean(defaultMarkers);
 
     await runCase("worktree-cwd", async () => {
       const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 3_000 });
@@ -412,37 +437,55 @@ async function main(): Promise<void> {
       ].join(" ");
       const runId = `openclaw-cancel-${nonce}`;
       const running = executor.run(input(runId, { kind: "scratch", path: cancelScratch }, prompt), progressSink());
-      await waitForPath(join(cancelScratch, cancelStartedMarkerName), cancelToolTimeoutMs);
-      await executor.cancel(runId);
-      const result = await running;
+      let runSettled = false;
+      try {
+        const observation = await Promise.race([
+          waitForPath(join(cancelScratch, cancelStartedMarkerName), cancelToolTimeoutMs).then(
+            () => ({ kind: "started" }) as const
+          ),
+          running.then((result) => ({ kind: "completed", result }) as const)
+        ]);
+        assert(
+          observation.kind === "started",
+          `OpenClaw cancellation run concluded '${observation.result.conclusion}' before its shell start marker appeared.`
+        );
+        await executor.cancel(runId);
+        const result = await running;
+        runSettled = true;
 
-      assert(result.conclusion === "cancelled", `Cancelled run concluded '${result.conclusion}'.`);
-      const observed = await waitForNewGatewaySession(previousGatewaySessions, "cancel");
-      assert(
-        observed.session.status === "killed",
-        `Cancelled Gateway session stopped with '${observed.session.status || "unknown"}'.`
-      );
-      assert(observed.session.abortedLastRun === true, "Cancelled Gateway session did not record an aborted run.");
-      previousGatewaySessions = observed.current;
-      await delay((cancelSleepSeconds + 2) * 1_000);
-      assert(
-        !existsSync(join(cancelScratch, cancelCompletedMarkerName)),
-        "Cancelled OpenClaw tool continued through its completion marker."
-      );
-      assert(
-        !existsSync(defaultMarker(cancelStartedMarkerName)),
-        "Cancelled OpenClaw run started in its configured default workspace."
-      );
-      assert(
-        !existsSync(defaultMarker(cancelCompletedMarkerName)),
-        "Cancelled OpenClaw run completed in its configured default workspace."
-      );
+        assert(result.conclusion === "cancelled", `Cancelled run concluded '${result.conclusion}'.`);
+        const observed = await waitForNewGatewaySession(previousGatewaySessions, "cancel");
+        assert(
+          observed.session.status === "killed",
+          `Cancelled Gateway session stopped with '${observed.session.status || "unknown"}'.`
+        );
+        assert(observed.session.abortedLastRun === true, "Cancelled Gateway session did not record an aborted run.");
+        previousGatewaySessions = observed.current;
+        await delay((cancelSleepSeconds + 2) * 1_000);
+        assert(
+          !existsSync(join(cancelScratch, cancelCompletedMarkerName)),
+          "Cancelled OpenClaw tool continued through its completion marker."
+        );
+        assert(
+          !existsSync(defaultMarker(cancelStartedMarkerName)),
+          "Cancelled OpenClaw run started in its configured default workspace."
+        );
+        assert(
+          !existsSync(defaultMarker(cancelCompletedMarkerName)),
+          "Cancelled OpenClaw run completed in its configured default workspace."
+        );
+      } finally {
+        if (!runSettled) {
+          await executor.cancel(runId).catch(() => undefined);
+          await running.catch(() => undefined);
+        }
+      }
     });
 
     writeReport(true);
     process.stdout.write(`\nOpenClaw ACP conformance passed ${results.length}/${results.length} cases.\n`);
   } finally {
-    for (const marker of defaultMarkers) rmSync(marker, { force: true });
+    for (const marker of defaultMarkersToClean) rmSync(marker, { force: true });
     if (!keepFixtures) {
       if (existsSync(worktree)) {
         try {

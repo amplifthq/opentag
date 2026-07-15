@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  defaultMarkersSafeToClean,
   newGatewaySessions,
   parseOpenClawVersion,
+  runBoundedCommand,
   resolveConformanceReportPath,
   resolveDefaultWorkspacePath,
+  writePrivateReport,
   type GatewaySession
 } from "../../../scripts/test/openclaw-acp-conformance.js";
 
@@ -40,5 +44,37 @@ describe("OpenClaw ACP conformance harness", () => {
   it("keeps a normalized absolute default workspace path when the directory does not exist yet", () => {
     const missing = join(tmpdir(), `opentag-openclaw-missing-workspace-${process.pid}`);
     expect(resolveDefaultWorkspacePath(missing)).toBe(resolve(missing));
+  });
+
+  it("bounds external commands that do not exit", () => {
+    expect(() =>
+      runBoundedCommand(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], 50)
+    ).toThrow();
+  });
+
+  it("does not authorize cleanup when a default-workspace marker already exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "opentag-openclaw-marker-"));
+    const marker = join(root, "pre-existing");
+    try {
+      writeFileSync(marker, "owned by another run\n");
+      expect(() => defaultMarkersSafeToClean([marker])).toThrow(/Refusing to overwrite pre-existing marker/u);
+      expect(existsSync(marker)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces mode 0600 when overwriting an existing evidence report", () => {
+    const root = mkdtempSync(join(tmpdir(), "opentag-openclaw-report-"));
+    const report = join(root, "report.json");
+    try {
+      writeFileSync(report, "old\n", { mode: 0o644 });
+      chmodSync(report, 0o644);
+      writePrivateReport(report, "new\n");
+      expect(statSync(report).mode & 0o777).toBe(0o600);
+      expect(readFileSync(report, "utf8")).toBe("new\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
