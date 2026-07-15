@@ -17,7 +17,8 @@ function run(command, args, options = {}) {
     env: {
       ...process.env,
       npm_config_audit: "false",
-      npm_config_fund: "false"
+      npm_config_fund: "false",
+      ...options.env
     },
     encoding: options.stdio === "pipe" ? "utf8" : undefined
   });
@@ -170,6 +171,12 @@ try {
   mkdirSync(installDir, { recursive: true });
   writeFileSync(path.join(installDir, "package.json"), "{\"private\":true,\"type\":\"module\"}\n");
   run("npm", ["install", "--no-audit", "--no-fund", ...tarballs], { cwd: installDir });
+
+  console.log("Auditing installed production dependencies...");
+  run("npm", ["audit", "--omit=dev", "--audit-level=high"], {
+    cwd: installDir,
+    env: { npm_config_audit: "true" }
+  });
 
   console.log("Checking the installed opentag command...");
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });

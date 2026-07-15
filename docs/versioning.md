@@ -31,7 +31,7 @@ Private runnable apps are not published:
 
 ## Pre-1.0 Policy
 
-The current public release is `0.5.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
+The current public release is `0.6.0`. The public API is still settling, so all releases remain in the `0.x` line until the package contracts are stable enough for `1.0.0`.
 
 The first npm release was published as the coordinated `0.1.0` package family.
 The `0.2.0` release added the published CLI, local runtime package, and Lark and Telegram packages.
@@ -40,6 +40,7 @@ The `0.3.4` release improves service startup reliability, Lark status updates, f
 The `0.3.5` release adds Linux user-service support and keeps unsupported platforms on terminal startup by default.
 The `0.4.0` release adds GitLab source-thread ingestion, note callbacks, and merge request action application.
 The `0.5.0` release adds Discord, Linear, and Microsoft Teams adapters, ACP-first agent execution, durable Attempt leases and fencing, governed material-action receipts and reconciliation, and the corresponding Client/Runner migration.
+The `0.6.0` release moves all built-in coding agents onto Generic ACP, adds Cursor, OpenCode, and OpenClaw executor profiles, requires Node.js 22 for the CLI/Local Runtime/Runner, and hardens ACP isolation, cancellation conformance, Slack summaries, and the coordinated release gate.
 
 For each npm release:
 
@@ -106,7 +107,7 @@ After `1.0.0`, follow SemVer:
     ingest-to-receipt smoke from that registry installation.
 12. Promote the same package versions to `latest` by changing dist-tags only.
 13. Confirm `latest` and `next` for the complete package family.
-14. Create and push the matching annotated git tag, for example `v0.5.0`, from
+14. Create and push the matching annotated git tag, for example `v0.6.0`, from
     the exact publication commit.
 15. Create the matching GitHub Release with the changelog notes and verify its
     tag target.

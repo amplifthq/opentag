@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.68.0",
+    "@larksuiteoapi/node-sdk": "^1.71.1",
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
     "@opentag/lark": "workspace:*",
