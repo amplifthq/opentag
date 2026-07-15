@@ -91,6 +91,8 @@ const providerStatusPatterns = [
   /insufficient (?:credits|quota)/iu,
   /rate.?limit/iu,
   /billing/iu,
+  /\bECONNREFUSED\b/u,
+  /gateway .*?(?:not ready|unavailable|connection failed)/iu,
   /inference provider/iu,
   /error calling (?:the )?llm api/iu,
   /model .*?(?:not found|unavailable|unsupported)/iu,
@@ -103,6 +105,17 @@ export function cancellationConformanceApplies(definition: {
   capabilities?: { supportsCancel?: boolean };
 }): boolean {
   return definition.capabilities?.supportsCancel !== false;
+}
+
+export function propagatedConformanceStatus(
+  definition: { capabilities?: { supportsCancel?: boolean } },
+  caseId: CaseId,
+  status: Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance">
+): AcpConformanceStatus {
+  if (caseId === "cancel-process-tree" && !cancellationConformanceApplies(definition)) {
+    return "not_applicable";
+  }
+  return status;
 }
 
 export function classifyAcpConformanceFailure(
@@ -331,9 +344,23 @@ async function runCase(
   }
 }
 
-function recordRemainingCases(agent: string, status: Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance">, reason: string): void {
+function recordRemainingCases(
+  agent: string,
+  status: Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance">,
+  reason: string,
+  definition?: AcpAgentDefinition
+): void {
   for (const caseId of selectedCases().filter((id) => id !== "readiness")) {
-    results.push({ agent, case: caseId, status, durationMs: 0, error: reason });
+    const propagatedStatus = definition ? propagatedConformanceStatus(definition, caseId, status) : status;
+    results.push({
+      agent,
+      case: caseId,
+      status: propagatedStatus,
+      durationMs: 0,
+      error: propagatedStatus === "not_applicable"
+        ? "Agent declares best-effort cancellation; process-tree termination is not claimed."
+        : reason
+    });
   }
 }
 
@@ -382,7 +409,7 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
     assert(readiness.ready, readiness.reason || `${agent} did not pass ACP readiness.`);
   });
   if (ready !== "passed") {
-    recordRemainingCases(agent, ready, "ACP readiness failed.");
+    recordRemainingCases(agent, ready, "ACP readiness failed.", definition);
     return;
   }
 
@@ -408,7 +435,16 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
   });
   if (scratchStatus !== "passed") {
     for (const caseId of cases.filter((id) => id === "worktree-cwd" || id === "cancel-process-tree")) {
-      results.push({ agent, case: caseId, status: scratchStatus, durationMs: 0, error: "Scratch session failed." });
+      const propagatedStatus = propagatedConformanceStatus(definition, caseId, scratchStatus);
+      results.push({
+        agent,
+        case: caseId,
+        status: propagatedStatus,
+        durationMs: 0,
+        error: propagatedStatus === "not_applicable"
+          ? "Agent declares best-effort cancellation; process-tree termination is not claimed."
+          : "Scratch session failed."
+      });
     }
     return;
   }

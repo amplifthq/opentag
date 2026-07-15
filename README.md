@@ -177,6 +177,7 @@ OpenTag's CLI path is local-first.
 | Cursor | Ready when Cursor CLI is installed and logged in | Uses the installed `cursor-agent acp` command |
 | OpenCode | Ready when `npx` and provider configuration are available | Pinned official package `opencode-ai@1.18.1`; ACP launches in pure mode so external plugins cannot write non-protocol data to stdout |
 | Hermes | Ready when installed | Uses `hermes -p <profile> acp` with a configured local provider |
+| OpenClaw | Ready when installed and its Gateway is configured | Uses the local `openclaw acp` bridge; cancellation is currently best effort and does not claim termination of Gateway-owned tool subprocesses |
 | Echo | Dev/test only | Does not run a real coding agent |
 
 ## Commands

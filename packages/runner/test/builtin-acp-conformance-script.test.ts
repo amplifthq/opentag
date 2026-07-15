@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyAcpConformanceFailure,
   cancellationConformanceApplies,
+  propagatedConformanceStatus,
   registryConformanceTargets
 } from "../../../scripts/test/builtin-acp-conformance.js";
 
@@ -11,7 +12,8 @@ describe("built-in ACP conformance failure classification", () => {
     "Hermes inference provider is unavailable",
     "Error calling LLM API: insufficient quota",
     "Model configured-model not found",
-    "Hermes profile 'opentag' is not ready: Profile 'opentag' does not exist"
+    "Hermes profile 'opentag' is not ready: Profile 'opentag' does not exist",
+    "ACP bridge failed: connect ECONNREFUSED 127.0.0.1:18789"
   ])("records provider state without treating it as an implementation diagnosis: %s", (message) => {
     expect(classifyAcpConformanceFailure(new Error(message))).toBe("needs_setup");
   });
@@ -24,6 +26,16 @@ describe("built-in ACP conformance failure classification", () => {
     expect(cancellationConformanceApplies({ capabilities: { supportsCancel: false } })).toBe(false);
     expect(cancellationConformanceApplies({ capabilities: { supportsCancel: true } })).toBe(true);
     expect(cancellationConformanceApplies({})).toBe(true);
+    expect(propagatedConformanceStatus(
+      { capabilities: { supportsCancel: false } },
+      "cancel-process-tree",
+      "needs_setup"
+    )).toBe("not_applicable");
+    expect(propagatedConformanceStatus(
+      { capabilities: { supportsCancel: false } },
+      "cancel-process-tree",
+      "failed_conformance"
+    )).toBe("not_applicable");
   });
 
   it("uses sanitized executor failure events to preserve provider-state classification", () => {
