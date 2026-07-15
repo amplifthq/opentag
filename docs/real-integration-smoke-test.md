@@ -186,24 +186,11 @@ For Claude Code, set the repository binding to:
 "defaultExecutor": "claude-code"
 ```
 
-Optional daemon-level Claude Code settings can be added to the same config:
-
-```json
-"claudeCode": {
-  "command": "claude",
-  "permissionMode": "acceptEdits"
-}
-```
-
-You can also configure these through environment variables:
-
-```bash
-OPENTAG_CLAUDE_COMMAND=claude
-OPENTAG_CLAUDE_MODEL=sonnet
-OPENTAG_CLAUDE_PERMISSION_MODE=acceptEdits
-```
-
-`OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS=true` is supported for explicitly sandboxed environments, but it is not enabled by default.
+The Claude ACP adapter is bundled. Complete the normal local Claude login before
+starting the daemon. Direct Claude command, model, and permission-mode settings
+have been removed. If authentication intentionally comes from
+`ANTHROPIC_API_KEY`, add `ANTHROPIC_API_KEY` to `security.extraSafeEnv` so the
+ACP child receives it after environment scrubbing.
 
 ## GitHub Smoke Test
 

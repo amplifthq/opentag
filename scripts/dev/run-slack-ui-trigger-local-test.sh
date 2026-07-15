@@ -62,8 +62,6 @@ fi
 : "${OPENTAG_DISPATCHER_PORT:=3031}"
 : "${OPENTAG_SLACK_PORT:=3040}"
 : "${OPENTAG_RUNNER_ID:=runner_slack_ui_manual}"
-: "${OPENTAG_CLAUDE_COMMAND:=claude}"
-: "${OPENTAG_CLAUDE_PERMISSION_MODE:=acceptEdits}"
 : "${OPENTAG_UI_TRIGGER_START_NGROK:=true}"
 : "${OPENTAG_UI_TRIGGER_RECORD:=true}"
 : "${OPENTAG_UI_TRIGGER_WAIT_FOR_ACTION:=true}"
@@ -199,7 +197,6 @@ require_cmd python3
 require_cmd sqlite3
 require_cmd node
 require_cmd lsof
-require_cmd "$OPENTAG_CLAUDE_COMMAND"
 echo "Required local commands are available."
 
 if [[ "$SLACK_MODE" == "events_api" ]] && bool_true "$OPENTAG_UI_TRIGGER_START_NGROK"; then
@@ -557,7 +554,6 @@ if [[ -n "$GITHUB_TOKEN" && "$PREPARE_PR_BRANCH" == "true" ]]; then
 fi
 export CHECKOUT_PATH CONFIG_PATH DATABASE_PATH PREPARE_PR_BRANCH GITHUB_TOKEN EFFECTIVE_GITHUB_APPLY
 export OPENTAG_RUNNER_ID OPENTAG_DISPATCHER_PORT OPENTAG_PAIRING_TOKEN
-export OPENTAG_CLAUDE_COMMAND OPENTAG_CLAUDE_PERMISSION_MODE
 
 python3 - <<'PY'
 import json
@@ -570,10 +566,6 @@ config = {
     "preparePullRequestBranch": os.environ.get("PREPARE_PR_BRANCH", "false").lower() == "true",
     "pollIntervalMs": 1000,
     "heartbeatIntervalMs": 15000,
-    "claudeCode": {
-        "command": os.environ["OPENTAG_CLAUDE_COMMAND"],
-        "permissionMode": os.environ["OPENTAG_CLAUDE_PERMISSION_MODE"],
-    },
     "repositories": [
         {
             "provider": os.environ["REPO_PROVIDER"],

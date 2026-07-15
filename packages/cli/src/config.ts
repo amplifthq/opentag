@@ -158,15 +158,6 @@ const ChannelBindingSchema = z
     }
   });
 
-const ClaudeCodeSchema = z
-  .object({
-    command: z.string().min(1).optional(),
-    model: z.string().min(1).optional(),
-    permissionMode: z.enum(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]).optional(),
-    dangerouslySkipPermissions: z.boolean().optional()
-  })
-  .strict();
-
 const HermesSchema = z
   .object({
     command: z.string().trim().min(1).optional(),
@@ -201,7 +192,6 @@ const DaemonConfigSchema = z
     keepScratch: KeepWorktreeSchema.optional(),
     approvalMode: z.enum(["ask", "auto", "autonomous"]).optional(),
     channelBindings: z.array(ChannelBindingSchema).optional(),
-    claudeCode: ClaudeCodeSchema.optional(),
     hermes: HermesSchema.optional(),
     agentSessionProfile: AgentSessionProfileSchema.optional(),
     security: SecuritySchema.optional(),

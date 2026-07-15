@@ -208,22 +208,11 @@ Sync these generic bindings with:
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-channels
 ```
 
-Add Claude Code settings when using the built-in `claude-code` executor:
-
-```json
-{
-  "claudeCode": {
-    "command": "claude",
-    "model": "sonnet",
-    "permissionMode": "acceptEdits"
-  }
-}
-```
-
-If `permissionMode` is omitted, OpenTag derives it from the granted run scopes:
-read-only runs use `plan`, while runs granted `repo:write` use `acceptEdits`.
-A configured write-capable mode is ignored for runs that were not granted
-`repo:write`.
+The built-in `codex` and `claude-code` executors use the pinned, bundled
+`codex-acp` and `claude-agent-acp` adapters. They do not accept direct CLI
+command, model, or permission-mode configuration. Claude sessions are placed in
+the adapter's `default` mode so OpenTag remains the approval boundary. Complete
+the normal local Codex or Claude login before running `opentag doctor`.
 
 Use daemon security settings to keep executor runs constrained:
 
@@ -238,16 +227,14 @@ Use daemon security settings to keep executor runs constrained:
 }
 ```
 
-Both built-in coding executors (Codex and Claude Code) run in an isolated git
-worktree with a scrubbed environment: variables that look like secrets
-(tokens, API keys, cloud credentials) are dropped before the executor process
-starts. If your Codex or Claude Code CLI authenticates from an environment
-variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`), add it to
-`security.extraSafeEnv`; login-based CLI authentication works without extra
-configuration. Codex runs without a write scope use the read-only sandbox
-(`--sandbox read-only`); write-capable runs use `--full-auto`, which keeps the
-Codex OS sandbox in workspace-write mode. Claude Code runs without `repo:write`
-use `--permission-mode plan`.
+Both bundled ACP adapters receive the attempt-scoped scratch directory or
+isolated git worktree as their ACP session `cwd`. Their process environment is
+scrubbed before startup: variables that look like secrets (tokens, API keys,
+cloud credentials) are dropped. If an adapter authenticates from
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, explicitly add that exact variable name
+to `security.extraSafeEnv`; login-based authentication needs no extra daemon
+configuration. Cancellation terminates the adapter process group, including
+shell and tool descendants on POSIX systems.
 
 ## Daemon Config Fields
 
@@ -267,7 +254,6 @@ use `--permission-mode plan`.
 | `channelBindings` | none | Generic channel bindings such as Telegram `botId/chatId -> Project Target` |
 | `slackChannels` | none | Slack compatibility bindings that map `teamId/channelId` into the generic channel binding table |
 | `larkChannels` | none | Lark bindings that map `tenantKey/chatId` into the generic channel binding table |
-| `claudeCode` | none | Claude Code executor settings |
 | `hermes` | fixed profile `opentag` when Hermes is selected during setup | Hermes command and one dedicated, pre-existing profile. Every readiness probe and invocation passes `hermes -p <profile>`; legacy `profileTemplate` values are parsed but ignored. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
@@ -552,10 +538,6 @@ for repeatable setups.
 | `OPENTAG_SLACK_REPO_PROVIDER` | `github` | Legacy Project Target provider fallback used by the env-derived Slack channel binding |
 | `OPENTAG_LARK_TENANT_KEY` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
 | `OPENTAG_LARK_CHAT_ID` | none | Creates one env-derived Lark channel binding when paired with Project Target env |
-| `OPENTAG_CLAUDE_COMMAND` | `claude` in executor default | Claude Code CLI command |
-| `OPENTAG_CLAUDE_MODEL` | none | Optional Claude model |
-| `OPENTAG_CLAUDE_PERMISSION_MODE` | derived per run | `acceptEdits`, `auto`, `bypassPermissions`, `default`, or `plan`; write-capable modes are ignored on runs without `repo:write` |
-| `OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS` | `false` | Auto-approves every Claude Code tool call. Only for explicitly sandboxed environments; each run emits an audit warning while this is on |
 | `OPENTAG_AGENT_PROFILE` | none | Fixed executor-neutral agent session identity |
 | `OPENTAG_AGENT_PROFILE_TEMPLATE` | derived per run | Executor-neutral profile template; supports tokens such as `{provider}`, `{projectTarget}`, `{accountId}`, `{conversationId}`, `{owner}`, `{repo}`, `{actorId}`, and `{runId}` |
 | `OPENTAG_SECURITY_MODE` | none | `enforce`, `audit`, or `off` |

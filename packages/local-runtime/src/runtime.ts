@@ -1,8 +1,7 @@
 import { createDispatcherClient } from "@opentag/client";
 import {
   createAcpExecutor,
-  createClaudeCodeExecutor,
-  createCodexExecutor,
+  createBuiltInAcpExecutors,
   createEchoExecutor,
   createHermesExecutor,
   DEFAULT_HERMES_PROFILE,
@@ -37,21 +36,18 @@ export function hermesProfileConfigurationWarning(config: OpenTagDaemonConfig): 
 
 export function executorsFromConfig(config: OpenTagDaemonConfig) {
   const security = securityFromConfig(config);
+  const builtInAcpExecutors = createBuiltInAcpExecutors({
+    ...(security ? { security } : {}),
+    hermes: {
+      ...(config.hermes?.command ? { command: config.hermes.command } : {}),
+      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
+    }
+  });
 
   const executors: Record<string, ExecutorAdapter> = {
     echo: createEchoExecutor(),
-    codex: createCodexExecutor({
-      ...(security ? { security } : {})
-    }),
-    "claude-code": createClaudeCodeExecutor({
-      ...(config.claudeCode?.command ? { claudeCommand: config.claudeCode.command } : {}),
-      ...(config.claudeCode?.model ? { model: config.claudeCode.model } : {}),
-      ...(config.claudeCode?.permissionMode ? { permissionMode: config.claudeCode.permissionMode } : {}),
-      ...(config.claudeCode?.dangerouslySkipPermissions !== undefined
-        ? { dangerouslySkipPermissions: config.claudeCode.dangerouslySkipPermissions }
-        : {}),
-      ...(security ? { security } : {})
-    }),
+    codex: builtInAcpExecutors.codex,
+    "claude-code": builtInAcpExecutors["claude-code"],
     hermes: createHermesExecutor({
       ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
       ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
@@ -61,7 +57,7 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {
       throw new Error(`Configured ACP agent '${manifest.id}' cannot replace built-in executor '${manifest.id}'.`);
     }
-    executors[manifest.id] = createAcpExecutor({ manifest });
+    executors[manifest.id] = createAcpExecutor({ manifest, ...(security ? { security } : {}) });
   }
   return executors;
 }

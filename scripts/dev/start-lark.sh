@@ -200,13 +200,7 @@ validate_executor() {
 
 assert_executor_available() {
   case "$1" in
-    codex)
-      require_command codex
-      ;;
-    claude-code)
-      require_command "${OPENTAG_CLAUDE_COMMAND:-claude}"
-      ;;
-    echo)
+    codex|claude-code|echo)
       ;;
   esac
 }
@@ -317,13 +311,6 @@ const config = {
     }
   ]
 };
-
-if (process.env.EXECUTOR === "claude-code") {
-  config.claudeCode = {
-    command: process.env.OPENTAG_CLAUDE_COMMAND || "claude",
-    permissionMode: process.env.OPENTAG_CLAUDE_PERMISSION_MODE || "acceptEdits"
-  };
-}
 
 closeSync(openSync(process.env.CONFIG_PATH, "a", 0o600));
 chmodSync(process.env.CONFIG_PATH, 0o600);

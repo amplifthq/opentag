@@ -8,14 +8,15 @@ describe("executor catalog", () => {
     const hermes = detections.find((executor) => executor.id === "hermes");
 
     expect(hermes).toMatchObject({ available: true, reason: `Found ${process.execPath} on PATH` });
-    expect(defaultExecutorId({ detections })).toBe("hermes");
+    expect(defaultExecutorId({ detections })).toBe("codex");
   });
 
   it("formats executor runtime capabilities next to executor availability", () => {
     const output = formatExecutorsCommandOutput({ PATH: "" } as NodeJS.ProcessEnv);
 
     expect(output).toContain("Coding agents:");
-    expect(output).toContain("Codex: not found");
+    expect(output).toContain("Codex: available (Bundled ACP adapter)");
+    expect(output).toContain("Claude Code: available (Bundled ACP adapter)");
     expect(output).toContain("Echo: dev/test only");
     expect(output).toContain("Executor capabilities:");
     expect(output).toContain("Codex: invocation=spawn");
@@ -23,15 +24,15 @@ describe("executor catalog", () => {
     expect(output).toContain("progress=audit");
     expect(output).toContain("approval=opentag_policy");
     expect(output).toContain("context=context_packet,context_pointers,workspace");
-    expect(output).toContain("prompt=executor_adapter");
+    expect(output).toContain("prompt=opentag");
     expect(output).toContain("write=workspace");
     expect(output).toContain("conversation=request");
     expect(output).toContain("prompt_mutation=none");
     expect(output).toContain("raw_context=no");
-    expect(output).toContain("write_actions=none");
-    expect(output).toContain("secrets=openai_api_key");
+    expect(output).toContain("write_actions=propose");
+    expect(output).toContain("secrets=none");
     expect(output).toContain("Hermes: invocation=spawn, profile=yes");
-    expect(output).toContain("completion=process_exit");
+    expect(output).toContain("completion=stream_event");
   });
 
   it("routes command output through the supplied logger", () => {

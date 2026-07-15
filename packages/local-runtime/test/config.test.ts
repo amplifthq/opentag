@@ -32,6 +32,37 @@ function acpManifest(input: { id: string; label: string; command: string; args?:
 }
 
 describe("parseDaemonConfig ACP agents", () => {
+  it("rejects removed Claude direct-adapter configuration", () => {
+    expect(() => parseDaemonConfig({ claudeCode: { command: "claude" } })).toThrow(/never/iu);
+  });
+
+  it("runs Codex and Claude Code through the generic ACP capability contract while Hermes remains direct", () => {
+    const executors = executorsFromConfig(parseDaemonConfig({}));
+
+    for (const executorId of ["codex", "claude-code"] as const) {
+      expect(executors[executorId]).toMatchObject({
+        id: executorId,
+        capability: {
+          supportsStreaming: true,
+          supportsCancel: true,
+          promptAssembly: "opentag",
+          writeActionAccess: "propose",
+          workspaceIsolation: "worktree",
+          workspaceCwdConformance: "declared"
+        }
+      });
+    }
+    expect(executors.hermes).toMatchObject({
+      id: "hermes",
+      capability: {
+        supportsStreaming: false,
+        supportsCancel: false,
+        promptAssembly: "executor_adapter",
+        workspaceIsolation: "branch"
+      }
+    });
+  });
+
   it("creates differently named agents through the generic ACP executor path", () => {
     const config = parseDaemonConfig({
       agents: {

@@ -76,7 +76,7 @@ The setup wizard links to the matching guide for each platform:
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 22 or newer.
 - A local coding agent if you choose Codex or Claude Code.
 - Platform credentials for the platform you connect.
 

@@ -29,7 +29,7 @@ semantics, audit visibility, and runner-scoped authentication.
 
 ## Fast Path
 
-1. Confirm Node.js 20 or newer is available:
+1. Confirm Node.js 22 or newer is available:
 
 ```bash
 node --version
@@ -134,9 +134,9 @@ Common Teams troubleshooting shortcuts:
 - If Teams requests return 401, check that the Azure Bot Microsoft App ID matches
   `platforms.teams.appId`, the tenant is correct, and OpenTag is running the
   current Teams adapter.
-- If service mode reports `spawn claude ENOENT`, set
-  `daemon.claudeCode.command` to the absolute Claude CLI path and restart the
-  service.
+- If the Claude executor is not ready, run `opentag doctor` and complete the
+  normal local Claude login. The Claude ACP adapter is bundled; there is no
+  `daemon.claudeCode.command` path to configure.
 - If the action receipt says direct apply is not configured, check whether the
   channel binding points at a GitHub/GitLab repository and whether apply tokens
   are configured.

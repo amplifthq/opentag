@@ -54,6 +54,14 @@ describe("OpenTag CLI config", () => {
     expect(() => parseCliConfig({})).toThrow("schemaVersion");
   });
 
+  it("rejects removed Claude direct-adapter configuration", () => {
+    const source = config();
+    expect(() => parseCliConfig({
+      ...source,
+      daemon: { ...source.daemon, claudeCode: { command: "claude" } }
+    })).toThrow(/unrecognized/iu);
+  });
+
   it("writes config atomically with private file permissions", () => {
     const path = join(tempDir(), "config.json");
     const expected = config();

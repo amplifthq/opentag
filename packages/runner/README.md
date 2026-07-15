@@ -14,7 +14,9 @@ pnpm add @opentag/runner
 
 - `ExecutorAdapter`: interface every executor implements.
 - `createEchoExecutor`: smoke-test executor that echoes the normalized command.
-- `createCodexExecutor`: executor that runs `codex exec` in a mapped local checkout.
+- `createBuiltInAcpExecutors`: bundled Codex ACP, Claude Agent ACP, and Hermes ACP adapters.
+- `builtInAcpAgentManifests`: the corresponding built-in ACP manifests.
+- `createAcpExecutor`: generic stdio ACP host for administrator-provided agent manifests.
 - Git helpers such as `createRunBranch`, `changedFiles`, and `branchNameForRun`.
 - Command helpers such as `nodeCommandRunner` and `assertCommandSucceeded`.
 - Built-in and generic ACP executors expose an optional `capability` contract so setup, doctor, status, and service surfaces can report profile, cancellation, hook-completion, progress-event, approval-boundary, prompt/context trust gates, workspace isolation, ACP session-cwd conformance, secret, and completion-signal support honestly.
@@ -76,7 +78,14 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-`createCodexExecutor` refuses to run when the target checkout has uncommitted changes. It creates an isolated `opentag/<runId>` branch before running Codex.
+Codex and Claude Code run through their bundled ACP adapters. The generic ACP
+host passes the attempt workspace as the ACP session `cwd`, scrubs the child
+environment, and terminates the adapter process group when a run is cancelled.
+
+Hermes ACP is exposed for provider-backed conformance testing. OpenTag's local
+runtime still uses the Hermes direct executor until the complete Hermes ACP
+scratch, worktree, and cancellation gate passes with a usable inference
+provider.
 
 ## Stability
 

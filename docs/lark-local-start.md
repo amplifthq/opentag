@@ -132,7 +132,7 @@ Lark without exposing local paths or secrets:
   creation page opened by Lark/Feishu after scanning.
 - Group chat triggers require the bot open id. The script tries to detect it
   automatically; if detection fails, direct chat still works.
-- Code tasks still need a local git checkout because the Codex executor creates
-  isolated worktrees for runs.
+- Code tasks still need a local git checkout because the Codex ACP executor runs
+  them in isolated worktrees.
 - The future package CLI should replace this repo-local script with
   `npx opentag lark`.

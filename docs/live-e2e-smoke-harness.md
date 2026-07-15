@@ -88,6 +88,23 @@ logs.
 
 ## Case Notes
 
+### Built-in Coding-Agent ACP
+
+`builtin-acp` wraps `corepack pnpm smoke:builtin-acp-conformance`. It runs the
+same provider-backed gate for bundled Codex ACP, bundled Claude Agent ACP, and
+Hermes ACP: initialize readiness, exact scratch `cwd`, isolated repository
+worktree plus commit, and cancellation of the real shell/tool process tree.
+
+Use `OPENTAG_BUILTIN_ACP_AGENTS` or `OPENTAG_BUILTIN_ACP_CASES` for a
+comma-separated subset. Hermes uses `OPENTAG_HERMES_PROFILE` (default:
+`opentag`) and must have a working inference provider before its execution cases
+can pass. For example:
+
+```bash
+OPENTAG_BUILTIN_ACP_AGENTS=codex,claude-code \
+corepack pnpm smoke:live -- --case builtin-acp
+```
+
 ### OpenClaw ACP
 
 `openclaw-acp` wraps `corepack pnpm smoke:openclaw-acp-conformance`. It expects
@@ -133,8 +150,8 @@ It requires:
 
 - `gh` authenticated as a user with admin or maintain access to
   `OPENTAG_GH_REPO`.
-- `claude` or `OPENTAG_CLAUDE_COMMAND` when `OPENTAG_GH_LIVE_EXECUTOR` is
-  `claude-code`.
+- A working local Claude login when `OPENTAG_GH_LIVE_EXECUTOR` is
+  `claude-code`; the Claude ACP adapter itself is bundled.
 - `ngrok` unless `OPENTAG_GH_PUBLIC_URL` points at an existing public tunnel.
 
 ### Slack UI

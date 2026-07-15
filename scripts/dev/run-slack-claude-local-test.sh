@@ -7,7 +7,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 : "${OPENTAG_PAIRING_TOKEN:=dev_pairing_token}"
 : "${OPENTAG_DISPATCHER_PORT:=3033}"
 : "${OPENTAG_RUNNER_ID:=runner_slack_claude_real}"
-: "${OPENTAG_CLAUDE_PERMISSION_MODE:=acceptEdits}"
 : "${OPENTAG_SLACK_APPLY_PR_ACTION:=false}"
 
 if [[ -f "$OPENTAG_ENV_FILE" ]]; then
@@ -19,16 +18,10 @@ fi
 
 : "${OPENTAG_SLACK_BOT_TOKEN:?Set OPENTAG_SLACK_BOT_TOKEN or OPENTAG_ENV_FILE}"
 : "${OPENTAG_CONFIG_PATH:?Set OPENTAG_CONFIG_PATH or OPENTAG_ENV_FILE}"
-: "${OPENTAG_CLAUDE_COMMAND:=claude}"
 PREPARE_PR_BRANCH="${OPENTAG_SLACK_PREPARE_PR_BRANCH:-${OPENTAG_PREPARE_PR_BRANCH:-false}}"
 GITHUB_TOKEN="${OPENTAG_GITHUB_TOKEN:-}"
 if [[ "$OPENTAG_SLACK_APPLY_PR_ACTION" == "true" && "$PREPARE_PR_BRANCH" != "true" ]]; then
   PREPARE_PR_BRANCH=true
-fi
-
-if ! command -v "$OPENTAG_CLAUDE_COMMAND" >/dev/null 2>&1; then
-  echo "Claude Code CLI not found at '$OPENTAG_CLAUDE_COMMAND'. Install/login to Claude Code first." >&2
-  exit 1
 fi
 
 if [[ "$PREPARE_PR_BRANCH" == "true" || "$OPENTAG_SLACK_APPLY_PR_ACTION" == "true" ]]; then
@@ -89,10 +82,6 @@ cat > "$CONFIG_PATH" <<JSON
 ${GITHUB_TOKEN_CONFIG}  "preparePullRequestBranch": ${PREPARE_PR_BRANCH},
   "pollIntervalMs": 1000,
   "heartbeatIntervalMs": 15000,
-  "claudeCode": {
-    "command": "${OPENTAG_CLAUDE_COMMAND}",
-    "permissionMode": "${OPENTAG_CLAUDE_PERMISSION_MODE}"
-  },
   "repositories": [
     {
       "provider": "github",

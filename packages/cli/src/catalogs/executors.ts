@@ -22,13 +22,12 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
   {
     id: "codex",
     label: "Codex",
-    command: "codex"
+    alwaysAvailable: true
   },
   {
     id: "claude-code",
     label: "Claude Code",
-    command: "claude",
-    commandEnv: "OPENTAG_CLAUDE_COMMAND"
+    alwaysAvailable: true
   },
   {
     id: "hermes",
@@ -68,7 +67,7 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
       return {
         id: executor.id,
         available: true,
-        reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Built in"
+        reason: executor.devOnly ? "Dev/test only; does not run a real coding agent" : "Bundled ACP adapter"
       };
     }
     const command = executorCommand(executor, env);

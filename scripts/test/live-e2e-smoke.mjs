@@ -5,8 +5,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const claudeCommand = process.env.OPENTAG_CLAUDE_COMMAND || "claude";
 const openclawCommand = process.env.OPENTAG_OPENCLAW_COMMAND || "openclaw";
+const hermesCommand = process.env.OPENTAG_HERMES_COMMAND || "hermes";
+const builtInAcpAgents = process.env.OPENTAG_BUILTIN_ACP_AGENTS?.split(",").map((value) => value.trim()) ?? ["codex", "claude-code", "hermes"];
 const githubWebhookExecutor = process.env.OPENTAG_GH_LIVE_EXECUTOR || "claude-code";
 
 const cases = [
@@ -23,6 +24,18 @@ const cases = [
     live: false,
     command: "corepack pnpm smoke:slack-protocol",
     requiredCommands: ["corepack"]
+  },
+  {
+    id: "builtin-acp",
+    label: "Live built-in coding-agent ACP conformance",
+    live: true,
+    command: "corepack pnpm smoke:builtin-acp-conformance",
+    requiredCommands: ["corepack", "git", ...(builtInAcpAgents.includes("hermes") ? [hermesCommand] : [])],
+    notes: [
+      "Runs real readiness, scratch cwd, isolated worktree, and process-tree cancellation cases.",
+      "Set OPENTAG_BUILTIN_ACP_AGENTS to a comma-separated subset of codex,claude-code,hermes.",
+      "Codex and Claude require working local authentication; Hermes requires a usable OPENTAG_HERMES_PROFILE provider."
+    ]
   },
   {
     id: "openclaw-acp",
@@ -48,13 +61,12 @@ const cases = [
       "lsof",
       "node",
       "python3",
-      "sqlite3",
-      ...(githubWebhookExecutor === "claude-code" ? [claudeCommand] : [])
+      "sqlite3"
     ],
     optionalCommands: ["ngrok"],
     notes: [
       "Requires gh auth with ADMIN or MAINTAIN access to OPENTAG_GH_REPO.",
-      "Requires the configured executor CLI, Claude Code by default.",
+      "Requires working local authentication for the selected bundled ACP adapter.",
       "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true."
     ]
   },
@@ -63,7 +75,7 @@ const cases = [
     label: "Live GitHub dispatcher-assisted local executor smoke",
     live: true,
     command: "scripts/dev/run-gh-claude-local-test.sh",
-    requiredCommands: ["gh", "node", claudeCommand],
+    requiredCommands: ["gh", "node"],
     requiredOneOfEnv: [["OPENTAG_GH_TEST_ISSUE", "OPENTAG_GH_CREATE_ISSUE=true"]],
     notes: [
       "Uses gh auth to create or reuse a real GitHub issue thread.",
@@ -75,7 +87,7 @@ const cases = [
     label: "Live Slack dispatcher-assisted local executor smoke",
     live: true,
     command: "scripts/dev/run-slack-claude-local-test.sh",
-    requiredCommands: ["node", "python3", claudeCommand],
+    requiredCommands: ["node", "python3"],
     optionalCommands: ["gh"],
     requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
     notes: [
@@ -88,7 +100,7 @@ const cases = [
     label: "Live Slack UI-triggered source-thread smoke",
     live: true,
     command: "scripts/dev/run-slack-ui-trigger-local-test.sh",
-    requiredCommands: ["curl", "node", "python3", "sqlite3", "lsof", claudeCommand],
+    requiredCommands: ["curl", "node", "python3", "sqlite3", "lsof"],
     optionalCommands: ["ngrok"],
     requiredEnv: ["OPENTAG_CONFIG_PATH", "OPENTAG_SLACK_BOT_TOKEN"],
     requiredOneOfEnv: [["OPENTAG_SLACK_APP_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNING_SECRET"]],

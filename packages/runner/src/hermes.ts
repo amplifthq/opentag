@@ -5,7 +5,7 @@ import { executorWorkspacePath, renderContextPacketForPrompt, type ExecutorAdapt
 import { branchNameForRun, changedFiles, cleanupInternalArtifacts, createRunBranch } from "./git.js";
 import { createExecutorRunResult } from "./result.js";
 
-export const DEFAULT_HERMES_PROFILE = "opentag";
+const DEFAULT_HERMES_PROFILE = "opentag";
 
 export type HermesExecutorOptions = {
   runner?: CommandRunner;

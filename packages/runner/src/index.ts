@@ -1,6 +1,5 @@
-export * from "./claude-code.js";
 export * from "./acp-executor.js";
-export * from "./codex.js";
+export * from "./builtin-acp.js";
 export * from "./command.js";
 export * from "./echo.js";
 export * from "./executor.js";

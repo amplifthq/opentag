@@ -94,13 +94,6 @@ const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transfo
   return typeof value === "string" ? value : resolveSecretRef(value);
 });
 
-const ClaudeCodeExecutorConfigSchema = z.object({
-  command: z.string().min(1).optional(),
-  model: z.string().min(1).optional(),
-  permissionMode: z.enum(["acceptEdits", "auto", "bypassPermissions", "default", "plan"]).optional(),
-  dangerouslySkipPermissions: z.boolean().optional()
-});
-
 const HermesExecutorConfigSchema = z.object({
   command: z.string().trim().min(1).optional(),
   profile: z.string().trim().min(1).optional(),
@@ -181,7 +174,8 @@ export const OpenTagDaemonConfigSchema = z
     channelBindings: z.array(ChannelBindingConfigSchema).optional(),
     slackChannels: z.array(SlackChannelBindingConfigSchema).optional(),
     larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
-    claudeCode: ClaudeCodeExecutorConfigSchema.optional(),
+    // Reject removed direct-adapter config instead of silently stripping it from the non-strict daemon schema.
+    claudeCode: z.never().optional(),
     hermes: HermesExecutorConfigSchema.optional(),
     agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
     security: RunnerSecurityPolicySchema.optional(),
@@ -368,13 +362,18 @@ export function createInitialConfig(input: InitConfigInput): OpenTagDaemonConfig
   });
 }
 
-function claudePermissionModeFromEnv(value: string | undefined) {
-  if (!value) return undefined;
-  const parsed = ClaudeCodeExecutorConfigSchema.shape.permissionMode.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(`Invalid OPENTAG_CLAUDE_PERMISSION_MODE: ${value}`);
+function assertNoLegacyClaudeDirectEnvironment(): void {
+  const configured = [
+    "OPENTAG_CLAUDE_COMMAND",
+    "OPENTAG_CLAUDE_MODEL",
+    "OPENTAG_CLAUDE_PERMISSION_MODE",
+    "OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS"
+  ].filter((name) => process.env[name] !== undefined);
+  if (configured.length > 0) {
+    throw new Error(
+      `${configured.join(", ")} configure the removed Claude direct adapter. Claude Code now uses the bundled ACP adapter; remove these variables.`
+    );
   }
-  return parsed.data;
 }
 
 function extraSafeEnvFromEnv(value: string | undefined): string[] | undefined {
@@ -387,6 +386,7 @@ function extraSafeEnvFromEnv(value: string | undefined): string[] | undefined {
 }
 
 export function loadConfigFromEnv(): OpenTagDaemonConfig {
+  assertNoLegacyClaudeDirectEnvironment();
   const configPath = process.env.OPENTAG_CONFIG_PATH;
   if (configPath) {
     return parseDaemonConfig(JSON.parse(readFileSync(configPath, "utf8")));
@@ -396,7 +396,6 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
   const repo = process.env.OPENTAG_REPO_NAME;
   const checkoutPath = process.env.OPENTAG_WORKSPACE_PATH;
   const repositoryProvider = process.env.OPENTAG_REPO_PROVIDER ?? process.env.OPENTAG_SLACK_REPO_PROVIDER ?? "github";
-  const claudePermissionMode = claudePermissionModeFromEnv(process.env.OPENTAG_CLAUDE_PERMISSION_MODE);
   const runnerTokens = stringListFromJsonEnv("OPENTAG_RUNNER_TOKENS_JSON");
   const revokedRunnerTokenFingerprints = stringListFromJsonEnv("OPENTAG_REVOKED_RUNNER_TOKEN_FINGERPRINTS_JSON");
   const repositories =
@@ -444,21 +443,6 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
               repo
             }
           ]
-        }
-      : {}),
-    ...(process.env.OPENTAG_CLAUDE_COMMAND ||
-    process.env.OPENTAG_CLAUDE_MODEL ||
-    process.env.OPENTAG_CLAUDE_PERMISSION_MODE ||
-    process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS
-      ? {
-          claudeCode: {
-            ...(process.env.OPENTAG_CLAUDE_COMMAND ? { command: process.env.OPENTAG_CLAUDE_COMMAND } : {}),
-            ...(process.env.OPENTAG_CLAUDE_MODEL ? { model: process.env.OPENTAG_CLAUDE_MODEL } : {}),
-            ...(claudePermissionMode ? { permissionMode: claudePermissionMode } : {}),
-            ...(process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS
-              ? { dangerouslySkipPermissions: process.env.OPENTAG_CLAUDE_DANGEROUSLY_SKIP_PERMISSIONS === "true" }
-              : {})
-          }
         }
       : {}),
     ...(process.env.OPENTAG_HERMES_COMMAND || process.env.OPENTAG_HERMES_PROFILE || process.env.OPENTAG_HERMES_PROFILE_TEMPLATE

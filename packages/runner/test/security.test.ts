@@ -102,4 +102,17 @@ describe("runner security", () => {
       OPENTAG_DEBUG: "keep-me"
     });
   });
+
+  it("passes a sensitive environment variable only when an administrator explicitly allows its exact name", () => {
+    const scrubbed = scrubEnvironment(
+      {
+        PATH: "/usr/bin",
+        OPENAI_API_KEY: "sk-explicit",
+        ANTHROPIC_API_KEY: "sk-still-blocked"
+      },
+      { extraSafeEnv: ["OPENAI_API_KEY"] }
+    );
+
+    expect(scrubbed).toEqual({ PATH: "/usr/bin", OPENAI_API_KEY: "sk-explicit" });
+  });
 });

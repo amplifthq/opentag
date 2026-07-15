@@ -4,7 +4,7 @@
   "description": "Executor contracts and built-in runner adapters for OpenTag.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -35,8 +35,11 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.59.0",
+    "@agentclientprotocol/codex-acp": "1.1.2",
     "@agentclientprotocol/sdk": "^1.2.1",
-    "@opentag/core": "workspace:*"
+    "@opentag/core": "workspace:*",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "tsup": "^8.3.5",

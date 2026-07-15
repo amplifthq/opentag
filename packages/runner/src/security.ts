@@ -257,6 +257,11 @@ function isSensitiveEnvName(name: string): boolean {
   return SENSITIVE_ENV_PATTERNS.some((pattern) => pattern.test(upperName));
 }
 
+function isExplicitlySafeEnvName(name: string, policy: RunnerSecurityPolicy | undefined): boolean {
+  const upperName = name.toUpperCase();
+  return policy?.extraSafeEnv?.some((envName) => envName.toUpperCase() === upperName) ?? false;
+}
+
 function isSafeEnvName(name: string, policy: RunnerSecurityPolicy | undefined): boolean {
   const upperName = name.toUpperCase();
   const safeNames = new Set([...DEFAULT_SAFE_ENV_NAMES, ...(policy?.extraSafeEnv ?? [])].map((envName) => envName.toUpperCase()));
@@ -269,7 +274,7 @@ export function scrubEnvironment(env: CommandEnvironment = process.env, policy?:
   const scrubbed: CommandEnvironment = {};
   for (const [name, value] of Object.entries(env)) {
     if (typeof value !== "string") continue;
-    if (isSensitiveEnvName(name)) continue;
+    if (isSensitiveEnvName(name) && !isExplicitlySafeEnvName(name, policy)) continue;
     if (!isSafeEnvName(name, policy)) continue;
     scrubbed[name] = value;
   }
