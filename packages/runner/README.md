@@ -78,14 +78,9 @@ export const executor: ExecutorAdapter = {
 
 ## Safety Notes
 
-Codex and Claude Code run through their bundled ACP adapters. The generic ACP
-host passes the attempt workspace as the ACP session `cwd`, scrubs the child
+Codex, Claude Code, and Hermes run through ACP adapters. The generic ACP host
+passes the attempt workspace as the ACP session `cwd`, scrubs the child
 environment, and terminates the adapter process group when a run is cancelled.
-
-Hermes ACP is exposed for provider-backed conformance testing. OpenTag's local
-runtime still uses the Hermes direct executor until the complete Hermes ACP
-scratch, worktree, and cancellation gate passes with a usable inference
-provider.
 
 ## Stability
 

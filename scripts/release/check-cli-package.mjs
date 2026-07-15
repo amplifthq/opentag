@@ -95,6 +95,33 @@ function checkInstalledDoctorCommand(installDir) {
   }
 }
 
+function checkInstalledBuiltInAcpAdapters(installDir) {
+  const probe = `
+    import { existsSync } from "node:fs";
+    import { spawnSync } from "node:child_process";
+    import { builtInAcpAgentManifests } from "@opentag/runner";
+
+    const manifests = builtInAcpAgentManifests({
+      hermes: { command: "hermes-release-check", profile: "release-check" }
+    });
+    for (const id of ["codex", "claude-code"]) {
+      const binding = manifests[id].bindings.agent;
+      if (binding.command !== process.execPath || !binding.args?.[0] || !existsSync(binding.args[0])) {
+        throw new Error(\`Installed \${id} ACP entrypoint is not resolvable: \${JSON.stringify(binding)}\`);
+      }
+      const version = spawnSync(binding.command, [...binding.args, "--version"], { encoding: "utf8" });
+      if (version.status !== 0) {
+        throw new Error(\`Installed \${id} ACP entrypoint failed --version: \${version.stderr || version.stdout}\`);
+      }
+    }
+    const hermes = manifests.hermes.bindings.agent;
+    if (hermes.command !== "hermes-release-check" || JSON.stringify(hermes.args) !== JSON.stringify(["-p", "release-check", "acp"])) {
+      throw new Error(\`Installed Hermes ACP manifest is incorrect: \${JSON.stringify(hermes)}\`);
+    }
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -116,6 +143,9 @@ try {
   run(commandPath(installDir, "opentag"), ["--help"], { cwd: installDir });
   run("npx", ["--no-install", "opentag", "--help"], { cwd: installDir });
   checkInstalledDoctorCommand(installDir);
+
+  console.log("Checking installed built-in ACP adapters...");
+  checkInstalledBuiltInAcpAdapters(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

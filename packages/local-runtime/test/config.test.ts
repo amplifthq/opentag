@@ -36,13 +36,14 @@ describe("parseDaemonConfig ACP agents", () => {
     expect(() => parseDaemonConfig({ claudeCode: { command: "claude" } })).toThrow(/never/iu);
   });
 
-  it("runs Codex and Claude Code through the generic ACP capability contract while Hermes remains direct", () => {
+  it("runs Codex, Claude Code, and Hermes through the generic ACP capability contract", () => {
     const executors = executorsFromConfig(parseDaemonConfig({}));
 
-    for (const executorId of ["codex", "claude-code"] as const) {
+    for (const executorId of ["codex", "claude-code", "hermes"] as const) {
       expect(executors[executorId]).toMatchObject({
         id: executorId,
         capability: {
+          supportsProfile: executorId === "hermes",
           supportsStreaming: true,
           supportsCancel: true,
           promptAssembly: "opentag",
@@ -52,15 +53,6 @@ describe("parseDaemonConfig ACP agents", () => {
         }
       });
     }
-    expect(executors.hermes).toMatchObject({
-      id: "hermes",
-      capability: {
-        supportsStreaming: false,
-        supportsCancel: false,
-        promptAssembly: "executor_adapter",
-        workspaceIsolation: "branch"
-      }
-    });
   });
 
   it("creates differently named agents through the generic ACP executor path", () => {

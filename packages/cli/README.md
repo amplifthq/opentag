@@ -77,7 +77,7 @@ The setup wizard links to the matching guide for each platform:
 ## Requirements
 
 - Node.js 22 or newer.
-- A local coding agent if you choose Codex or Claude Code.
+- An existing local login for Codex or Claude Code, or an installed Hermes ACP profile with a configured provider.
 - Platform credentials for the platform you connect.
 
 ## No Install

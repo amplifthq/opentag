@@ -94,6 +94,8 @@ logs.
 same provider-backed gate for bundled Codex ACP, bundled Claude Agent ACP, and
 Hermes ACP: initialize readiness, exact scratch `cwd`, isolated repository
 worktree plus commit, and cancellation of the real shell/tool process tree.
+The process-tree assertion currently targets POSIX hosts; Windows can exercise
+ACP cancellation, but descendant-process termination is not yet a claimed gate.
 
 Use `OPENTAG_BUILTIN_ACP_AGENTS` or `OPENTAG_BUILTIN_ACP_CASES` for a
 comma-separated subset. Hermes uses `OPENTAG_HERMES_PROFILE` (default:

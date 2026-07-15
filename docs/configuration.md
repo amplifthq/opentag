@@ -282,10 +282,10 @@ hermes profile create opentag
 ```
 
 You may instead configure another dedicated, pre-existing profile with
-`opentag setup --executor hermes --hermes-profile <profile>`. OpenTag passes the
-selected profile on every execution as `hermes -p <profile> -z <prompt>`. If the
-profile probe fails, setup, doctor, and runtime readiness fail closed rather than
-falling back to Hermes' mutable sticky/global profile.
+`opentag setup --executor hermes --hermes-profile <profile>`. OpenTag starts the
+ACP adapter as `hermes -p <profile> acp` for every execution. If the profile or
+ACP initialize probe fails, setup, doctor, and runtime readiness fail closed
+rather than falling back to Hermes' mutable sticky/global profile.
 
 Older configs may still contain `daemon.hermes.profileTemplate` or
 `OPENTAG_HERMES_PROFILE_TEMPLATE`. These values remain parse-compatible for
@@ -294,11 +294,12 @@ profiles. Startup and doctor warn when a legacy template is present. Automatic
 profile creation, cloning, locking, retention, and cleanup require a separate
 lifecycle design and are intentionally deferred.
 
-To run the opt-in Hermes v0.18.2 CLI contract smoke test against an existing
-profile without creating or changing it:
+To run the complete provider-backed Hermes ACP gate against an existing profile:
 
 ```bash
-OPENTAG_HERMES_SMOKE_PROFILE=<profile> pnpm smoke:hermes-profile-contract
+OPENTAG_HERMES_PROFILE=<profile> \
+OPENTAG_BUILTIN_ACP_AGENTS=hermes \
+pnpm smoke:builtin-acp-conformance
 ```
 
 `opentag status --run <run_id>` shows the timeout policy for that run. Once the

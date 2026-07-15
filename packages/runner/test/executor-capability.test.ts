@@ -1,28 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { createBuiltInAcpExecutors } from "../src/builtin-acp.js";
 import { createEchoExecutor } from "../src/echo.js";
-import { createHermesExecutor } from "../src/hermes.js";
 
 describe("executor capability contracts", () => {
   it("exposes runtime capabilities for built-in executors", () => {
     const builtIns = createBuiltInAcpExecutors();
-    const executors = [builtIns.codex, builtIns["claude-code"], createHermesExecutor(), createEchoExecutor()];
+    const executors = [builtIns.codex, builtIns["claude-code"], builtIns.hermes, createEchoExecutor()];
 
     for (const executor of executors) {
       expect(executor.capability).toMatchObject({
         id: executor.id,
         invocation: "spawn",
-        supportsStreaming: executor.id === "codex" || executor.id === "claude-code",
-        supportsCancel: executor.id === "codex" || executor.id === "claude-code",
+        supportsStreaming: executor.id !== "echo",
+        supportsCancel: executor.id !== "echo",
         supportsHookCompletion: false,
         progressEvents: "audit",
         approvalMode: "opentag_policy",
-        promptAssembly: executor.id === "hermes" ? "executor_adapter" : "opentag",
+        promptAssembly: "opentag",
         writeAccess: executor.id === "echo" ? "none" : "workspace",
         conversationAccess: "request",
         promptMutation: "none",
         rawContextAccess: false,
-        writeActionAccess: executor.id === "codex" || executor.id === "claude-code" ? "propose" : "none"
+        writeActionAccess: executor.id === "echo" ? "none" : "propose"
       });
       expect(executor.capability?.contextAccess).toContain("context_packet");
       expect(executor.capability?.contextAccess).toContain("context_pointers");
@@ -32,9 +31,9 @@ describe("executor capability contracts", () => {
 
     expect(builtIns.codex.capability?.workspaceIsolation).toBe("worktree");
     expect(builtIns["claude-code"].capability?.workspaceIsolation).toBe("worktree");
-    expect(createHermesExecutor().capability).toMatchObject({
+    expect(builtIns.hermes.capability).toMatchObject({
       supportsProfile: true,
-      workspaceIsolation: "branch"
+      workspaceIsolation: "worktree"
     });
     expect(createEchoExecutor().capability?.workspaceIsolation).toBe("none");
   });

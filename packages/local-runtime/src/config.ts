@@ -94,7 +94,7 @@ const SecretStringSchema = z.union([z.string().min(1), SecretRefSchema]).transfo
   return typeof value === "string" ? value : resolveSecretRef(value);
 });
 
-const HermesExecutorConfigSchema = z.object({
+const HermesAcpConfigSchema = z.object({
   command: z.string().trim().min(1).optional(),
   profile: z.string().trim().min(1).optional(),
   profileTemplate: z.string().trim().min(1).optional()
@@ -176,7 +176,7 @@ export const OpenTagDaemonConfigSchema = z
     larkChannels: z.array(LarkChannelBindingConfigSchema).optional(),
     // Reject removed direct-adapter config instead of silently stripping it from the non-strict daemon schema.
     claudeCode: z.never().optional(),
-    hermes: HermesExecutorConfigSchema.optional(),
+    hermes: HermesAcpConfigSchema.optional(),
     agentSessionProfile: AgentSessionProfileConfigSchema.optional(),
     security: RunnerSecurityPolicySchema.optional(),
     githubToken: SecretStringSchema.optional(),

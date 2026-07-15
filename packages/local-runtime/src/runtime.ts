@@ -3,7 +3,6 @@ import {
   createAcpExecutor,
   createBuiltInAcpExecutors,
   createEchoExecutor,
-  createHermesExecutor,
   DEFAULT_HERMES_PROFILE,
   type ExecutorAdapter,
   type RunnerSecurityPolicy
@@ -48,10 +47,7 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     echo: createEchoExecutor(),
     codex: builtInAcpExecutors.codex,
     "claude-code": builtInAcpExecutors["claude-code"],
-    hermes: createHermesExecutor({
-      ...(config.hermes?.command ? { hermesCommand: config.hermes.command } : {}),
-      ...(config.hermes?.profile ? { profile: config.hermes.profile } : {})
-    })
+    hermes: builtInAcpExecutors.hermes
   };
   for (const manifest of Object.values(config.agents)) {
     if (Object.prototype.hasOwnProperty.call(executors, manifest.id)) {

@@ -1,11 +1,11 @@
-import { createBuiltInAcpExecutors, createEchoExecutor, createHermesExecutor } from "@opentag/runner";
+import { createBuiltInAcpExecutors, createEchoExecutor } from "@opentag/runner";
 import { describe, expect, it } from "vitest";
 import { EXECUTOR_CAPABILITIES } from "../src/catalogs/capabilities.js";
 
 describe("CLI capability catalog", () => {
   it("matches the built-in runner executor capability contracts", () => {
     const builtIns = createBuiltInAcpExecutors();
-    const executors = [builtIns.codex, builtIns["claude-code"], createHermesExecutor(), createEchoExecutor()];
+    const executors = [builtIns.codex, builtIns["claude-code"], builtIns.hermes, createEchoExecutor()];
 
     for (const executor of executors) {
       const capability = executor.capability;

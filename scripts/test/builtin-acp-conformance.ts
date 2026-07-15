@@ -40,6 +40,7 @@ type CaseResult = {
   case: CaseId;
   status: "passed" | "failed" | "skipped";
   durationMs: number;
+  failureKind?: "provider_status" | "conformance";
   error?: string;
 };
 
@@ -84,6 +85,24 @@ function safeDiagnostic(error: unknown): string {
   return (error instanceof Error ? error.message : String(error))
     .replaceAll(homedir(), "~")
     .replace(/\/var\/folders\/[^\s'"]+/gu, "<temp-path>");
+}
+
+const providerStatusPatterns = [
+  /auth(?:entication|orization)? (?:is )?required/iu,
+  /not (?:authenticated|logged in)/iu,
+  /api[_ -]?key/iu,
+  /credential/iu,
+  /insufficient (?:credits|quota)/iu,
+  /rate.?limit/iu,
+  /billing/iu,
+  /inference provider/iu,
+  /error calling (?:the )?llm api/iu,
+  /model .*?(?:not found|unavailable|unsupported)/iu
+];
+
+export function classifyBuiltInAcpFailure(error: unknown): "provider_status" | "conformance" {
+  const diagnostic = error instanceof Error ? error.message : String(error);
+  return providerStatusPatterns.some((pattern) => pattern.test(diagnostic)) ? "provider_status" : "conformance";
 }
 
 function git(cwd: string, args: string[]): string {
@@ -197,10 +216,11 @@ async function runCase(agent: BuiltInAcpAgentId, caseId: CaseId, test: () => Pro
       case: caseId,
       status: "failed",
       durationMs: Date.now() - startedAt,
+      failureKind: classifyBuiltInAcpFailure(error),
       error: safeDiagnostic(error)
     };
     results.push(result);
-    process.stderr.write(`FAIL ${agent}: ${caseId}: ${result.error}\n`);
+    process.stderr.write(`FAIL ${agent}: ${caseId} [${result.failureKind}]: ${result.error}\n`);
     return false;
   }
 }
@@ -227,7 +247,17 @@ function writeReport(ok: boolean): void {
   mkdirSync(dirname(absolute), { recursive: true });
   writePrivateReport(
     absolute,
-    `${JSON.stringify({ ok, hermesProfile, results }, null, 2)}\n`
+    `${JSON.stringify({
+      ok,
+      hermesProfile,
+      summary: {
+        passed: results.filter((result) => result.status === "passed").length,
+        providerStatusFailures: results.filter((result) => result.failureKind === "provider_status").length,
+        conformanceFailures: results.filter((result) => result.failureKind === "conformance").length,
+        skipped: results.filter((result) => result.status === "skipped").length
+      },
+      results
+    }, null, 2)}\n`
   );
 }
 

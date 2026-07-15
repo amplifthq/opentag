@@ -80,7 +80,7 @@ describe("opentagd config", () => {
     expect(parsed.preparePullRequestBranch).toBe(true);
   });
 
-  it("parses Hermes executor config", () => {
+  it("parses Hermes ACP config", () => {
     const parsed = parseDaemonConfig({
       runnerId: "runner_test",
       dispatcherUrl: "http://localhost:3030",

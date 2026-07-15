@@ -16,7 +16,7 @@ the dispatcher, daemon, and Lark ingress in separate terminals.
 - Git
 - A Lark or Feishu account
 - A local git checkout for the project the agent should run in
-- Codex CLI for a real local agent run
+- An existing Codex or Claude login, or an installed Hermes profile with a configured provider
 
 The `echo` executor is still available for plumbing checks, but the real demo
 path should choose `codex`.
@@ -32,7 +32,7 @@ From the OpenTag repository:
 The script prompts for:
 
 - Project Target path, which is the local codebase this agent should work on
-- executor: `codex`, `claude-code`, or `echo`
+- executor: `codex`, `claude-code`, `hermes`, or `echo`
 - Lark app setup: `scan` or `manual`, only when no saved app exists
 - a QR scan when using `scan` for the first time; the link may start on the Feishu bootstrap page, and OpenTag saves the real tenant returned by Lark / Feishu
 - Lark / Feishu tenant: `feishu` or `lark`, only when using `manual`; pass `--tenant lark` for an existing Lark global app

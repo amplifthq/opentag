@@ -163,15 +163,16 @@ OpenTag 的 CLI 路径是本地优先的。
 
 - 本地 CLI 流程里没有 OpenTag cloud service。
 - 平台凭据保存在你的电脑上，并使用私有文件权限。
-- Codex 和 Claude Code 会在你的本地 checkout 上运行。
+- Codex、Claude Code 和 Hermes 会通过 ACP 在你的本地 checkout 上运行。
 - 平台 API 只会收到 OpenTag 用来确认、回复和执行已审批 action 所需的消息。
 
 ## 支持的 Coding Agent
 
 | Coding agent | 状态 | 说明 |
 | --- | --- | --- |
-| Codex | 已支持 | 使用本机的 `codex` 命令 |
-| Claude Code | 已支持 | 使用本机的 `claude` 命令 |
+| Codex | 已支持 | 内置 `codex-acp`，复用现有 Codex 登录 |
+| Claude Code | 已支持 | 内置 `claude-agent-acp`，复用现有 Claude 登录 |
+| Hermes | 安装后支持 | 使用 `hermes -p <profile> acp` 和已配置的本地 provider |
 | Echo | 仅开发/测试 | 不运行真实 coding agent |
 
 ## 常用命令

@@ -165,15 +165,16 @@ OpenTag's CLI path is local-first.
 
 - There is no OpenTag cloud service in the local CLI flow.
 - Platform credentials are stored on your computer with private file permissions.
-- Codex and Claude Code run against your local checkout.
+- Codex, Claude Code, and Hermes run through ACP against your local checkout.
 - Platform APIs receive only the messages needed to acknowledge, reply, and apply actions you approve.
 
 ## Supported Coding Agents
 
 | Coding agent | Status | Notes |
 | --- | --- | --- |
-| Codex | Ready | Uses the local `codex` command |
-| Claude Code | Ready | Uses the local `claude` command |
+| Codex | Ready | Bundled `codex-acp`; uses your existing Codex login |
+| Claude Code | Ready | Bundled `claude-agent-acp`; uses your existing Claude login |
+| Hermes | Ready when installed | Uses `hermes -p <profile> acp` with a configured local provider |
 | Echo | Dev/test only | Does not run a real coding agent |
 
 ## Commands

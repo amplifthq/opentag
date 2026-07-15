@@ -2,9 +2,8 @@ import { createRequire } from "node:module";
 import type { OpenTagIntegrationManifest } from "@opentag/core";
 import { createAcpExecutor } from "./acp-executor.js";
 import type { ExecutorAdapter } from "./executor.js";
+import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
 import type { RunnerSecurityPolicy } from "./security.js";
-
-export const DEFAULT_HERMES_PROFILE = "opentag";
 
 export type BuiltInAcpAgentId = "codex" | "claude-code" | "hermes";
 

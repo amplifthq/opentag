@@ -3932,7 +3932,7 @@ describe("dispatcher API", () => {
 
     expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
       type: "executor.progress",
-      message: "Starting codex exec"
+      message: "Starting ACP agent codex in scratch workspace"
     }))).status).toBe(200);
     expect((await app.request("/v1/runners/runner_1/runs/run_lark_progress_status_card/progress", jsonRequest({
       type: "executor.progress",

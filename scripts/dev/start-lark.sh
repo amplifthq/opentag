@@ -178,22 +178,18 @@ wait_for_stack_exit() {
 detect_executor() {
   if [[ -n "${OPENTAG_LARK_EXECUTOR:-}" ]]; then
     printf '%s' "$OPENTAG_LARK_EXECUTOR"
-  elif command -v codex >/dev/null 2>&1; then
-    printf 'codex'
-  elif command -v claude >/dev/null 2>&1; then
-    printf 'claude-code'
   else
-    printf 'echo'
+    printf 'codex'
   fi
 }
 
 validate_executor() {
   case "$1" in
-    echo|codex|claude-code)
+    echo|codex|claude-code|hermes)
       return
       ;;
     *)
-      fail "Executor must be echo, codex, or claude-code."
+      fail "Executor must be echo, codex, claude-code, or hermes."
       ;;
   esac
 }
@@ -201,6 +197,9 @@ validate_executor() {
 assert_executor_available() {
   case "$1" in
     codex|claude-code|echo)
+      ;;
+    hermes)
+      require_command "${OPENTAG_HERMES_COMMAND:-hermes}"
       ;;
   esac
 }
@@ -370,7 +369,7 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 
 DETECTED_EXECUTOR="$(detect_executor)"
-EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, echo; choose codex for a real local agent)" "$DETECTED_EXECUTOR")"
+EXECUTOR="$(read_with_default "Executor for local runs (codex, claude-code, hermes, echo; choose codex for a bundled ACP agent)" "$DETECTED_EXECUTOR")"
 validate_executor "$EXECUTOR"
 assert_executor_available "$EXECUTOR"
 

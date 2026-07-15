@@ -155,9 +155,9 @@ export function renderTelegramAcknowledgement(runId: string): string {
 }
 
 export function renderTelegramProgress(message: string, options: { runId?: string } = {}): string {
-  const heading = /starting codex|starting claude --print|thinking/i.test(message) ? "OpenTag is thinking" : "OpenTag is working";
+  const heading = /starting acp agent|thinking/i.test(message) ? "OpenTag is thinking" : "OpenTag is working";
   const lines = [bold(heading), ...(options.runId ? [`Run: ${code(compactIdentifier(options.runId))}`] : []), `Status: ${bold("running")}`];
-  if (/starting codex|starting claude --print|thinking/i.test(message)) {
+  if (/starting acp agent|thinking/i.test(message)) {
     return lines.join("\n");
   }
 
