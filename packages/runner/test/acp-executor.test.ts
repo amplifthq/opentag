@@ -825,6 +825,23 @@ describe("ACP executor", () => {
     }
   }, 15_000);
 
+  it("passes credential-free fixed launch environment while rejecting credential fields", async () => {
+    const scratch = tempDir("fixed-environment");
+    const executor = createAcpExecutor({
+      manifest: manifest(),
+      launchEnvironment: { OPENTAG_ACP_EXPLICIT: "configured-value" }
+    });
+
+    await executor.run(input({ kind: "scratch", path: scratch }, "run_fixed_env"), { emit: async () => undefined });
+
+    const session = JSON.parse(readFileSync(join(scratch, "acp-session.json"), "utf8"));
+    expect(session.explicitValue).toBe("configured-value");
+    expect(() => createAcpExecutor({
+      manifest: manifest(),
+      launchEnvironment: { OPENAI_API_KEY: "must-not-reach-agent" }
+    })).toThrow(/launch environment/iu);
+  }, 15_000);
+
   it("does not commit or discard repository changes when an ACP attempt refuses", async () => {
     const repo = initRepo();
     const executor = createAcpExecutor({ manifest: manifest("refusal") });

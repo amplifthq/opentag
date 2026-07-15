@@ -47,6 +47,8 @@ export function executorsFromConfig(config: OpenTagDaemonConfig) {
     echo: createEchoExecutor(),
     codex: builtInAcpExecutors.codex,
     "claude-code": builtInAcpExecutors["claude-code"],
+    cursor: builtInAcpExecutors.cursor,
+    opencode: builtInAcpExecutors.opencode,
     hermes: builtInAcpExecutors.hermes
   };
   for (const [id, agent] of Object.entries(config.agents)) {

@@ -1,14 +1,14 @@
 import { existsSync } from "node:fs";
 import { delimiter, extname, join } from "node:path";
 
-export type ExecutorId = "echo" | "codex" | "claude-code" | "hermes";
+export type ExecutorId = "echo" | "codex" | "claude-code" | "cursor" | "opencode" | "hermes";
 
 export type ExecutorDescriptor = {
   id: ExecutorId;
   label: string;
   command?: string;
   commandEnv?: string;
-  registryPackage?: string;
+  pinnedPackage?: string;
   alwaysAvailable?: boolean;
   devOnly?: boolean;
 };
@@ -24,13 +24,24 @@ export const EXECUTOR_CATALOG: ExecutorDescriptor[] = [
     id: "codex",
     label: "Codex",
     command: "npx",
-    registryPackage: "@agentclientprotocol/codex-acp@1.1.2"
+    pinnedPackage: "@agentclientprotocol/codex-acp@1.1.2"
   },
   {
     id: "claude-code",
     label: "Claude Code",
     command: "npx",
-    registryPackage: "@agentclientprotocol/claude-agent-acp@0.59.0"
+    pinnedPackage: "@agentclientprotocol/claude-agent-acp@0.59.0"
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    command: "cursor-agent"
+  },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    command: "npx",
+    pinnedPackage: "opencode-ai@1.18.1"
   },
   {
     id: "hermes",
@@ -61,7 +72,7 @@ function executorCommand(executor: ExecutorDescriptor, env: NodeJS.ProcessEnv): 
 }
 
 export function isExecutorId(value: string): value is ExecutorId {
-  return value === "echo" || value === "codex" || value === "claude-code" || value === "hermes";
+  return value === "echo" || value === "codex" || value === "claude-code" || value === "cursor" || value === "opencode" || value === "hermes";
 }
 
 export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorDetection[] {
@@ -79,11 +90,11 @@ export function detectExecutors(env: NodeJS.ProcessEnv = process.env): ExecutorD
       id: executor.id,
       available,
       reason: available
-        ? executor.registryPackage
-          ? `Registry package ${executor.registryPackage} via ${command}`
+        ? executor.pinnedPackage
+          ? `Pinned package ${executor.pinnedPackage} via ${command}`
           : `Found ${command} on PATH`
-        : executor.registryPackage
-          ? `Could not find ${command} on PATH; ${executor.registryPackage} needs setup`
+        : executor.pinnedPackage
+          ? `Could not find ${command} on PATH; pinned package ${executor.pinnedPackage} needs setup`
           : `Could not find ${command} on PATH`
     };
   });
@@ -103,6 +114,12 @@ export function defaultExecutorId(input: {
   if (detections.find((executor) => executor.id === "claude-code")?.available) {
     return "claude-code";
   }
+  if (detections.find((executor) => executor.id === "cursor")?.available) {
+    return "cursor";
+  }
+  if (detections.find((executor) => executor.id === "opencode")?.available) {
+    return "opencode";
+  }
   if (detections.find((executor) => executor.id === "hermes")?.available) {
     return "hermes";
   }
@@ -117,7 +134,7 @@ function formatExecutorStatus(executor: ExecutorDescriptor, available: boolean):
   if (executor.devOnly) {
     return "dev/test only";
   }
-  return available ? "ready" : executor.registryPackage ? "needs setup" : "not found";
+  return available ? "ready" : executor.pinnedPackage ? "needs setup" : "not found";
 }
 
 export function formatExecutors(env: NodeJS.ProcessEnv = process.env): string {

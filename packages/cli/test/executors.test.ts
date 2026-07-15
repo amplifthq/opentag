@@ -15,8 +15,10 @@ describe("executor catalog", () => {
     const output = formatExecutorsCommandOutput({ PATH: "" } as NodeJS.ProcessEnv);
 
     expect(output).toContain("Coding agents:");
-    expect(output).toContain("Codex: needs setup (Could not find npx on PATH; @agentclientprotocol/codex-acp@1.1.2 needs setup)");
-    expect(output).toContain("Claude Code: needs setup (Could not find npx on PATH; @agentclientprotocol/claude-agent-acp@0.59.0 needs setup)");
+    expect(output).toContain("Codex: needs setup (Could not find npx on PATH; pinned package @agentclientprotocol/codex-acp@1.1.2 needs setup)");
+    expect(output).toContain("Claude Code: needs setup (Could not find npx on PATH; pinned package @agentclientprotocol/claude-agent-acp@0.59.0 needs setup)");
+    expect(output).toContain("Cursor: not found (Could not find cursor-agent on PATH)");
+    expect(output).toContain("OpenCode: needs setup (Could not find npx on PATH; pinned package opencode-ai@1.18.1 needs setup)");
     expect(output).toContain("Echo: dev/test only");
     expect(output).toContain("Executor capabilities:");
     expect(output).toContain("Codex: invocation=spawn");

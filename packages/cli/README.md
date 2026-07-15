@@ -22,7 +22,7 @@ opentag doctor
 
 - Choose a language.
 - Choose a platform: Lark / Feishu, Slack, GitHub, GitLab, Linear, Telegram, or Discord.
-- Choose a coding agent: Codex, Claude Code, or Echo for local testing, including its executor capability boundary.
+- Choose a coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, or Echo for local testing, including its executor capability boundary.
 - Configure platform credentials.
 - Bind the selected project.
 - Choose how OpenTag should run.
@@ -77,7 +77,7 @@ The setup wizard links to the matching guide for each platform:
 ## Requirements
 
 - Node.js 22 or newer.
-- An existing local login for Codex or Claude Code, or an installed Hermes ACP profile with a configured provider.
+- An existing local login or provider configuration for the selected Codex, Claude Code, Cursor, OpenCode, or Hermes ACP agent.
 - Platform credentials for the platform you connect.
 
 ## No Install

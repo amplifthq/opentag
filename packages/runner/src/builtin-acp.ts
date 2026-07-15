@@ -8,7 +8,7 @@ import type { ExecutorAdapter } from "./executor.js";
 import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
 import type { RunnerSecurityPolicy } from "./security.js";
 
-export type BuiltInAcpAgentId = "codex" | "claude-code" | "hermes";
+export type BuiltInAcpAgentId = "codex" | "claude-code" | "cursor" | "opencode" | "hermes";
 
 export type BuiltInAcpAgentOptions = {
   security?: RunnerSecurityPolicy;
@@ -50,6 +50,31 @@ export function builtInAcpAgentDefinitions(
       },
       sessionModeId: "default"
     },
+    cursor: {
+      id: "cursor",
+      label: "Cursor ACP",
+      workspaceCwd: "required",
+      readinessTimeoutMs: 30_000,
+      launch: {
+        command: "cursor-agent",
+        args: ["acp"]
+      }
+    },
+    opencode: {
+      id: "opencode",
+      label: "OpenCode ACP",
+      workspaceCwd: "required",
+      registry: { id: "opencode", version: "1.18.1" },
+      readinessTimeoutMs: 30_000,
+      launchEnvironment: {
+        OPENCODE_DISABLE_TERMINAL_TITLE: "true",
+        OPENCODE_PURE: "true"
+      },
+      launch: {
+        command: "npx",
+        args: ["--yes", "opencode-ai@1.18.1", "acp"]
+      }
+    },
     hermes: {
       id: "hermes",
       label: "Hermes ACP",
@@ -68,6 +93,8 @@ export function builtInAcpAgentManifests(options: BuiltInAcpAgentOptions = {}): 
   return {
     codex: createAcpAgentManifest(definitions.codex),
     "claude-code": createAcpAgentManifest(definitions["claude-code"]),
+    cursor: createAcpAgentManifest(definitions.cursor),
+    opencode: createAcpAgentManifest(definitions.opencode),
     hermes: createAcpAgentManifest(definitions.hermes)
   };
 }
@@ -78,6 +105,8 @@ export function createBuiltInAcpExecutors(options: BuiltInAcpAgentOptions = {}):
   return {
     codex: createAcpAgentExecutor(definitions.codex, shared),
     "claude-code": createAcpAgentExecutor(definitions["claude-code"], shared),
+    cursor: createAcpAgentExecutor(definitions.cursor, shared),
+    opencode: createAcpAgentExecutor(definitions.opencode, shared),
     hermes: createAcpAgentExecutor(definitions.hermes, shared)
   };
 }

@@ -273,6 +273,7 @@ export type AcpPermissionResolver = (request: AcpPermissionRequest) => Promise<A
 
 export type AcpExecutorOptions = {
   manifest: OpenTagIntegrationManifestInput;
+  launchEnvironment?: Readonly<Record<string, string>>;
   permissionResolver?: AcpPermissionResolver;
   runner?: CommandRunner;
   cancelGraceMs?: number;
@@ -314,6 +315,23 @@ function normalizeManifest(input: OpenTagIntegrationManifestInput): NormalizedAc
     label: manifest.label,
     binding
   };
+}
+
+function normalizeLaunchEnvironment(
+  input: Readonly<Record<string, string>> | undefined
+): Readonly<Record<string, string>> {
+  if (!input) return {};
+  const environment: Record<string, string> = {};
+  for (const [name, value] of Object.entries(input)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || isCredentialFieldName(name)) {
+      throw new Error(`ACP launch environment contains an invalid or credential-like field '${name}'.`);
+    }
+    if (typeof value !== "string" || containsCredentialLikeData(value)) {
+      throw new Error(`ACP launch environment field '${name}' contains credential-like data.`);
+    }
+    environment[name] = value;
+  }
+  return environment;
 }
 
 function assertExplicitWorkspace(input: ExecutorRunInput): ExecutorWorkspace {
@@ -450,12 +468,13 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
 function spawnAcpChild(
   manifest: NormalizedAcpManifest,
   cwd: string,
-  security?: RunnerSecurityPolicy
+  security: RunnerSecurityPolicy | undefined,
+  launchEnvironment: Readonly<Record<string, string>>
 ): ChildProcessWithoutNullStreams {
   return spawn(manifest.binding.command, manifest.binding.args, {
     cwd,
     detached: process.platform !== "win32",
-    env: scrubEnvironment(process.env, security),
+    env: { ...scrubEnvironment(process.env, security), ...launchEnvironment },
     stdio: ["pipe", "pipe", "pipe"]
   });
 }
@@ -512,9 +531,10 @@ async function probeAcpInitialization(input: {
   manifest: NormalizedAcpManifest;
   cwd: string;
   timeoutMs: number;
+  launchEnvironment: Readonly<Record<string, string>>;
   security?: RunnerSecurityPolicy;
 }): Promise<{ ready: true } | { ready: false; reason: string }> {
-  const child = spawnAcpChild(input.manifest, input.cwd, input.security);
+  const child = spawnAcpChild(input.manifest, input.cwd, input.security, input.launchEnvironment);
   const stderrChunks: Buffer[] = [];
   let stderrBytes = 0;
   let spawnErrorCode: string | undefined;
@@ -649,6 +669,7 @@ function stopResult(input: {
 
 export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter {
   const manifest = normalizeManifest(options.manifest);
+  const launchEnvironment = normalizeLaunchEnvironment(options.launchEnvironment);
   const runner = options.runner ?? nodeCommandRunner;
   const activeRuns = new Map<string, ActiveRun>();
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
@@ -705,6 +726,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         manifest,
         cwd: childCwd,
         timeoutMs: readinessTimeoutMs,
+        launchEnvironment,
         ...(options.security ? { security: options.security } : {})
       });
     },
@@ -754,7 +776,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         if (active.cancelRequested) {
           return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [] });
         }
-        const child = spawnAcpChild(manifest, childCwd, options.security);
+        const child = spawnAcpChild(manifest, childCwd, options.security, launchEnvironment);
         active.child = child;
         const stderrChunks: Buffer[] = [];
         let stderrBytes = 0;

@@ -198,12 +198,19 @@ Sync these generic bindings with:
 OPENTAG_CONFIG_PATH=opentag.local.json pnpm --filter @opentag/opentagd dev -- bind-channels
 ```
 
-The built-in `codex` and `claude-code` compatibility aliases use exact package
-versions from the official ACP Registry through `npx`. The adapters are no
-longer dependencies bundled inside `@opentag/runner`. They do not accept direct CLI
-command, model, or permission-mode configuration. Claude sessions are placed in
-the adapter's `default` mode so OpenTag remains the approval boundary. Complete
-the normal local Codex or Claude login before running `opentag doctor`.
+The built-in `codex` and `claude-code` aliases use exact package versions from
+the official ACP Registry through `npx`. The built-in `opencode` alias similarly
+uses the exact official `opencode-ai@1.18.1` package, while `cursor` uses the
+installed `cursor-agent acp` command rather than downloading a Registry archive
+without a checksum. OpenCode runs with `OPENCODE_PURE=true` and
+`OPENCODE_DISABLE_TERMINAL_TITLE=true`; this preserves its core and built-in
+authentication while preventing external plugins or terminal-title output from
+corrupting the strict ACP stdout stream. No
+provider-specific adapter is bundled inside `@opentag/runner`; all five built-in
+agents use the same generic ACP host. Claude sessions are placed in the
+adapter's `default` mode so OpenTag remains the approval boundary. Complete the
+selected agent's normal local login or provider configuration before running
+`opentag doctor`.
 
 Use daemon security settings to keep executor runs constrained:
 
@@ -218,8 +225,8 @@ Use daemon security settings to keep executor runs constrained:
 }
 ```
 
-Both Registry-backed ACP launches receive the attempt-scoped scratch directory or
-isolated git worktree as their ACP session `cwd`. Their process environment is
+Every built-in ACP launch receives the attempt-scoped scratch directory or
+isolated git worktree as its ACP session `cwd`. Its process environment is
 scrubbed before startup: variables that look like secrets (tokens, API keys,
 cloud credentials) are dropped. If an adapter authenticates from
 `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`, explicitly add that exact variable name
@@ -510,7 +517,7 @@ Project Target binding fields:
 | `owner` | required | Repository owner for GitHub targets, or the stable canonical-path identity for local-only targets |
 | `repo` | required | Repository name or readable local Project Target name |
 | `checkoutPath` | required | Absolute local path attached to this Project Target |
-| `defaultExecutor` | `echo` | `echo`, `codex`, or `claude-code` |
+| `defaultExecutor` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, or a configured custom agent id |
 | `baseBranch` | `main` | PR target branch |
 | `pushRemote` | `origin` | Remote used for PR branches |
 | `worktreeRoot` | none | Optional root for executor-created worktrees |
@@ -530,7 +537,7 @@ for repeatable setups.
 | `OPENTAG_REPO_OWNER` | none | Required for env-derived Project Target binding |
 | `OPENTAG_REPO_NAME` | none | Required for env-derived Project Target binding |
 | `OPENTAG_WORKSPACE_PATH` | none | Required for env-derived Project Target binding |
-| `OPENTAG_DEFAULT_EXECUTOR` | `echo` | `echo`, `codex`, or `claude-code` |
+| `OPENTAG_DEFAULT_EXECUTOR` | `echo` | `echo`, `codex`, `claude-code`, `cursor`, `opencode`, `hermes`, or a configured custom agent id |
 | `OPENTAG_BASE_BRANCH` | `main` | PR target branch |
 | `OPENTAG_PUSH_REMOTE` | `origin` | Git remote for run branches |
 | `OPENTAG_WORKTREE_ROOT` | none | Optional worktree root |

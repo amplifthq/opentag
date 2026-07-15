@@ -6,7 +6,7 @@ export const SourceSchema = ProviderSchema;
 export const ContextPointerKindSchema = z.string().min(1).refine((kind) => !kind.includes("."), {
   message: "Context pointer kind must not include a provider prefix; use the provider field instead."
 });
-export const ExecutorHintSchema = z.enum(["claude-code", "codex", "hermes", "openclaw", "custom"]);
+export const ExecutorHintSchema = z.enum(["claude-code", "codex", "cursor", "opencode", "hermes", "openclaw", "custom"]);
 export const PermissionScopeSchema = z.string().min(1);
 export const CommandArgValueSchema = z.union([z.string(), z.boolean(), z.number()]);
 export const CommandFlagValueSchema = z.union([CommandArgValueSchema, z.array(CommandArgValueSchema)]);

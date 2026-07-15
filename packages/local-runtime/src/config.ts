@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { OpenTagManagedChannelBindingOwnershipSchema } from "@opentag/core";
 import { z } from "zod";
 
-const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "hermes"] as const;
+const BUILT_IN_EXECUTOR_IDS = ["echo", "codex", "claude-code", "cursor", "opencode", "hermes"] as const;
 
 // Accept any trimmed non-empty executor id. Custom executors registered by a
 // standalone runner are valid, but daemon ACP agents cannot replace built-ins.

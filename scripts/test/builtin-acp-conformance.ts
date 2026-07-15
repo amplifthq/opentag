@@ -96,8 +96,11 @@ const providerStatusPatterns = [
 
 export type AcpConformanceStatus = "passed" | "needs_setup" | "failed_conformance" | "not_applicable";
 
-export function classifyAcpConformanceFailure(error: unknown): Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance"> {
-  const diagnostic = error instanceof Error ? error.message : String(error);
+export function classifyAcpConformanceFailure(
+  error: unknown,
+  executorDiagnostics: readonly string[] = []
+): Extract<AcpConformanceStatus, "needs_setup" | "failed_conformance"> {
+  const diagnostic = [error instanceof Error ? error.message : String(error), ...executorDiagnostics].join("\n");
   return providerStatusPatterns.some((pattern) => pattern.test(diagnostic)) ? "needs_setup" : "failed_conformance";
 }
 
@@ -216,9 +219,10 @@ function runInput(runId: string, workspace: ExecutorRunInput["workspace"], rawTe
   };
 }
 
-function sink(agent: string): ExecutorEventSink {
+function sink(agent: string, failureDiagnostics: string[] = []): ExecutorEventSink {
   return {
     async emit(event) {
+      if (event.type === "executor.failed") failureDiagnostics.push(event.message);
       if (quiet && event.type === "executor.progress") return;
       process.stdout.write(`[${agent}] [${event.type}] ${event.message}\n`);
     }
@@ -228,7 +232,8 @@ function sink(agent: string): ExecutorEventSink {
 async function boundedRun(
   agent: string,
   executor: ReturnType<typeof createAcpAgentExecutor>,
-  input: ExecutorRunInput
+  input: ExecutorRunInput,
+  failureDiagnostics: string[]
 ) {
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -236,7 +241,7 @@ async function boundedRun(
     void executor.cancel(input.runId, input.attemptId).catch(() => undefined);
   }, runTimeoutMs);
   try {
-    const result = await executor.run(input, sink(agent));
+    const result = await executor.run(input, sink(agent, failureDiagnostics));
     assert(!timedOut, `${agent} run '${input.runId}' exceeded ${runTimeoutMs}ms.`);
     return result;
   } finally {
@@ -283,17 +288,22 @@ function assertMarker(path: string, nonce: string, expectedCwd: string): void {
   assert(realpathSync(marker.pwd) === realpathSync(expectedCwd), `Tool ran in '${marker.pwd}', expected '${expectedCwd}'.`);
 }
 
-async function runCase(agent: string, caseId: CaseId, test: () => Promise<void>): Promise<AcpConformanceStatus> {
+async function runCase(
+  agent: string,
+  caseId: CaseId,
+  test: (failureDiagnostics: string[]) => Promise<void>
+): Promise<AcpConformanceStatus> {
   const startedAt = Date.now();
+  const failureDiagnostics: string[] = [];
   process.stdout.write(`\n== ${agent}: ${caseId} ==\n`);
   try {
-    await test();
+    await test(failureDiagnostics);
     const result: CaseResult = { agent, case: caseId, status: "passed", durationMs: Date.now() - startedAt };
     results.push(result);
     process.stdout.write(`PASS ${agent}: ${caseId} (${result.durationMs}ms)\n`);
     return "passed";
   } catch (error) {
-    const status = classifyAcpConformanceFailure(error);
+    const status = classifyAcpConformanceFailure(error, failureDiagnostics);
     const result: CaseResult = {
       agent,
       case: caseId,
@@ -362,7 +372,7 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
     return;
   }
 
-  const scratchStatus = !cases.includes("scratch-cwd") ? "passed" : await runCase(agent, "scratch-cwd", async () => {
+  const scratchStatus = !cases.includes("scratch-cwd") ? "passed" : await runCase(agent, "scratch-cwd", async (failureDiagnostics) => {
     const nonce = `${agent}-${Date.now()}`;
     const markerName = `opentag-${agent}-scratch.json`;
     const sentinel = `OPENTAG_${agent.toUpperCase().replaceAll("-", "_")}_ACP_SCRATCH_OK`;
@@ -372,7 +382,12 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       "Do not change directories and do not use an absolute destination path.",
       `Verify the file, then include exactly ${sentinel} in the final response.`
     ].join(" ");
-    const result = await boundedRun(agent, executor(), runInput(`conformance-${agent}-scratch`, { kind: "scratch", path: scratch }, prompt));
+    const result = await boundedRun(
+      agent,
+      executor(),
+      runInput(`conformance-${agent}-scratch`, { kind: "scratch", path: scratch }, prompt),
+      failureDiagnostics
+    );
     assert(result.conclusion === "success", `${agent} scratch run concluded '${result.conclusion}'.`);
     assert(result.summary.includes(sentinel), `${agent} scratch response omitted ${sentinel}.`);
     assertMarker(join(scratch, markerName), nonce, scratch);
@@ -384,7 +399,7 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
     return;
   }
 
-  if (cases.includes("worktree-cwd")) await runCase(agent, "worktree-cwd", async () => {
+  if (cases.includes("worktree-cwd")) await runCase(agent, "worktree-cwd", async (failureDiagnostics) => {
     const repository = join(root, agent, "repository");
     const worktreeRoot = join(root, agent, "worktrees");
     const runId = `conformance-${agent}-worktree`;
@@ -398,11 +413,16 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       "Do not change directories and do not use an absolute destination path.",
       "Verify the file before completing."
     ].join(" ");
-    const result = await boundedRun(agent, executor(), {
-      ...runInput(runId, { kind: "repository", path: repository }, prompt),
-      worktreeRoot,
-      keepWorktree: "always"
-    });
+    const result = await boundedRun(
+      agent,
+      executor(),
+      {
+        ...runInput(runId, { kind: "repository", path: repository }, prompt),
+        worktreeRoot,
+        keepWorktree: "always"
+      },
+      failureDiagnostics
+    );
     assert(result.conclusion === "success", `${agent} worktree run concluded '${result.conclusion}'.`);
     assertMarker(join(worktree, markerName), nonce, worktree);
     assert(!existsSync(join(repository, markerName)), `${agent} wrote the marker into the source checkout.`);
@@ -418,7 +438,7 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       durationMs: 0,
       error: "The process-tree conformance case currently requires POSIX process groups."
     });
-  } else if (cases.includes("cancel-process-tree")) await runCase(agent, "cancel-process-tree", async () => {
+  } else if (cases.includes("cancel-process-tree")) await runCase(agent, "cancel-process-tree", async (failureDiagnostics) => {
     const cancelScratch = join(root, agent, "cancel");
     mkdirSync(cancelScratch, { recursive: true });
     const shellPidName = "acp-shell.pid";
@@ -433,7 +453,10 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
     ].join(" ");
     const runId = `conformance-${agent}-cancel`;
     const runningExecutor = executor();
-    const running = runningExecutor.run(runInput(runId, { kind: "scratch", path: cancelScratch }, prompt), sink(agent));
+    const running = runningExecutor.run(
+      runInput(runId, { kind: "scratch", path: cancelScratch }, prompt),
+      sink(agent, failureDiagnostics)
+    );
     let settled = false;
     const safetyTimer = setTimeout(() => void runningExecutor.cancel(runId).catch(() => undefined), runTimeoutMs);
     try {

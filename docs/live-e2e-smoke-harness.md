@@ -91,19 +91,23 @@ logs.
 ### Batch Coding-Agent ACP
 
 `builtin-acp` wraps `corepack pnpm smoke:acp-conformance`. It runs the same
-provider-backed gate for Registry-backed Codex ACP, Registry-backed Claude
-Agent ACP, and local Hermes ACP: initialize readiness, exact scratch `cwd`, isolated repository
-worktree plus commit, and cancellation of the real shell/tool process tree.
+provider-backed gate for pinned Codex, Claude, and OpenCode ACP packages plus
+the installed Cursor and Hermes ACP commands: initialize readiness,
+exact scratch `cwd`, isolated repository worktree plus commit, and cancellation
+of the real shell/tool process tree.
 The process-tree assertion currently targets POSIX hosts; Windows can exercise
 ACP cancellation, but descendant-process termination is not yet a claimed gate.
 
 Use `OPENTAG_BUILTIN_ACP_AGENTS` or `OPENTAG_BUILTIN_ACP_CASES` for a
 comma-separated subset. Hermes uses `OPENTAG_HERMES_PROFILE` (default:
 `opentag`) and must have a working inference provider before its execution cases
-can pass. For example:
+can pass. Cursor must be logged in through Cursor CLI, and OpenCode must have an
+authenticated provider. OpenCode's built-in launch uses pure mode during ACP
+sessions, so user-installed external OpenCode plugins are intentionally not
+loaded into this transport. For example:
 
 ```bash
-OPENTAG_BUILTIN_ACP_AGENTS=codex,claude-code \
+OPENTAG_BUILTIN_ACP_AGENTS=cursor,opencode \
 corepack pnpm smoke:live -- --case builtin-acp
 ```
 

@@ -236,7 +236,7 @@ describe("OpenTagEventSchema", () => {
   });
 
   it("accepts the current public executor hints", () => {
-    for (const executorHint of ["claude-code", "codex", "hermes", "openclaw", "custom"]) {
+    for (const executorHint of ["claude-code", "codex", "cursor", "opencode", "hermes", "openclaw", "custom"]) {
       expect(
         OpenTagEventSchema.parse({
           id: `evt_${executorHint}`,

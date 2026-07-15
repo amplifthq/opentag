@@ -19,6 +19,13 @@ describe("built-in ACP conformance failure classification", () => {
     expect(classifyAcpConformanceFailure(new Error("Cancelled tool process 42 is still alive."))).toBe("failed_conformance");
   });
 
+  it("uses sanitized executor failure events to preserve provider-state classification", () => {
+    expect(classifyAcpConformanceFailure(
+      new Error("ACP agent cursor protocol or exit failure."),
+      ["ACP diagnostic (transport); command=cursor-agent; detail=Authentication required"]
+    )).toBe("needs_setup");
+  });
+
   it("turns every launchable Registry entry into a data-driven batch target", () => {
     const batch = registryConformanceTargets({
       version: "1.0.0",

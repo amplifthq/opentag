@@ -20,6 +20,7 @@ export type AcpAgentCandidate = {
   capabilities?: {
     supportsProfile?: boolean;
   };
+  launchEnvironment?: Readonly<Record<string, string>>;
   readinessTimeoutMs?: number;
 };
 
@@ -29,7 +30,7 @@ export type AcpAgentDefinition = AcpAgentCandidate & {
 
 export type AcpAgentExecutorOptions = Omit<
   AcpExecutorOptions,
-  "manifest" | "sessionModeId" | "capabilityOverrides"
+  "manifest" | "sessionModeId" | "capabilityOverrides" | "launchEnvironment"
 >;
 
 export function createAcpAgentManifest(definition: AcpAgentDefinition): OpenTagIntegrationManifest {
@@ -67,6 +68,7 @@ export function createAcpAgentExecutor(
     ...(options.readinessTimeoutMs === undefined && definition.readinessTimeoutMs !== undefined
       ? { readinessTimeoutMs: definition.readinessTimeoutMs }
       : {}),
+    ...(definition.launchEnvironment ? { launchEnvironment: definition.launchEnvironment } : {}),
     ...(definition.sessionModeId ? { sessionModeId: definition.sessionModeId } : {}),
     ...(definition.capabilities ? { capabilityOverrides: definition.capabilities } : {})
   });

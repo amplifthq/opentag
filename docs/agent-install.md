@@ -68,7 +68,7 @@ opentag setup
 Help the user choose:
 
 - Platform: Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams.
-- Coding agent: Codex, Claude Code, or Echo.
+- Coding agent: Codex, Claude Code, Cursor, OpenCode, Hermes, or Echo.
 - Local project: the intended local checkout.
 - Runtime mode: background service when supported, terminal mode otherwise.
 

@@ -25,7 +25,7 @@
 [![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs Codex or Claude Code locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
+OpenTag lets your team mention a coding agent from the collaboration platforms they already use. It turns that source thread into a bounded, auditable run: OpenTag curates the context packet, checks permissions and executor capability, runs an ACP coding agent locally, records an agent work ledger, and returns concise artifacts and safe next actions to the same thread.
 
 The concrete setup still connects Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams to a local coding agent. The product boundary is broader than a connector: OpenTag is source-thread-native, local-first, and executor-neutral, so work stays where it already has context while the agent's inputs, authority, outputs, and callbacks remain reviewable.
 
@@ -165,7 +165,7 @@ OpenTag's CLI path is local-first.
 
 - There is no OpenTag cloud service in the local CLI flow.
 - Platform credentials are stored on your computer with private file permissions.
-- Codex, Claude Code, and Hermes run through ACP against your local checkout.
+- Codex, Claude Code, Cursor, OpenCode, and Hermes run through ACP against your local checkout.
 - Platform APIs receive only the messages needed to acknowledge, reply, and apply actions you approve.
 
 ## Supported Coding Agents
@@ -174,6 +174,8 @@ OpenTag's CLI path is local-first.
 | --- | --- | --- |
 | Codex | Ready when `npx` and login are available | Pinned Registry package `@agentclientprotocol/codex-acp@1.1.2` |
 | Claude Code | Ready when `npx` and login are available | Pinned Registry package `@agentclientprotocol/claude-agent-acp@0.59.0` |
+| Cursor | Ready when Cursor CLI is installed and logged in | Uses the installed `cursor-agent acp` command |
+| OpenCode | Ready when `npx` and provider configuration are available | Pinned official package `opencode-ai@1.18.1`; ACP launches in pure mode so external plugins cannot write non-protocol data to stdout |
 | Hermes | Ready when installed | Uses `hermes -p <profile> acp` with a configured local provider |
 | Echo | Dev/test only | Does not run a real coding agent |
 
@@ -226,7 +228,7 @@ flowchart LR
     A["Slack, GitHub, GitLab, Linear, Lark / Feishu, Telegram, Discord, or Microsoft Teams"] --> B["OpenTag listener"]
     B --> C["Local dispatcher"]
     C --> D["Local runner"]
-    D --> E["Codex, Claude Code, or custom executor"]
+    D --> E["Built-in or custom ACP executor"]
     E --> F["Reply back to the platform"]
 ```
 
@@ -283,7 +285,7 @@ Current public release: `v0.5.0`. The npm package family is published under the 
 | [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook normalization, bot replies, and source-thread controls |
 | [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions and channel replies |
 | [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework ingest, channel replies, and action apply |
-| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus Echo, Claude Code, and Codex adapters |
+| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor contracts plus the generic ACP host and built-in launch profiles |
 | [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite persistence |
 | [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | Embeddable dispatcher and callback sinks |
 

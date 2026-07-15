@@ -5,7 +5,14 @@ import { EXECUTOR_CAPABILITIES } from "../src/catalogs/capabilities.js";
 describe("CLI capability catalog", () => {
   it("matches the built-in runner executor capability contracts", () => {
     const builtIns = createBuiltInAcpExecutors();
-    const executors = [builtIns.codex, builtIns["claude-code"], builtIns.hermes, createEchoExecutor()];
+    const executors = [
+      builtIns.codex,
+      builtIns["claude-code"],
+      builtIns.cursor,
+      builtIns.opencode,
+      builtIns.hermes,
+      createEchoExecutor()
+    ];
 
     for (const executor of executors) {
       const capability = executor.capability;

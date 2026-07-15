@@ -27,10 +27,10 @@ describe("parseDaemonConfig ACP agents", () => {
     expect(() => parseDaemonConfig({ claudeCode: { command: "claude" } })).toThrow(/never/iu);
   });
 
-  it("runs Codex, Claude Code, and Hermes through the generic ACP capability contract", () => {
+  it("runs built-in coding agents through the generic ACP capability contract", () => {
     const executors = executorsFromConfig(parseDaemonConfig({}));
 
-    for (const executorId of ["codex", "claude-code", "hermes"] as const) {
+    for (const executorId of ["codex", "claude-code", "cursor", "opencode", "hermes"] as const) {
       expect(executors[executorId]).toMatchObject({
         id: executorId,
         capability: {
@@ -86,7 +86,7 @@ describe("parseDaemonConfig ACP agents", () => {
     })).toThrow(/workspaceCwd|received undefined/iu);
   });
 
-  it.each(["echo", "codex", "claude-code", "hermes"])(
+  it.each(["echo", "codex", "claude-code", "cursor", "opencode", "hermes"])(
     "rejects a configured ACP agent that collides with built-in executor %s",
     (executorId) => {
       expect(() =>
@@ -201,7 +201,7 @@ describe("parseDaemonConfig scratchRoot", () => {
 
 describe("parseDaemonConfig defaultExecutor", () => {
   it("accepts the built-in executors", () => {
-    for (const executor of ["echo", "codex", "claude-code", "hermes"]) {
+    for (const executor of ["echo", "codex", "claude-code", "cursor", "opencode", "hermes"]) {
       const config = parseDaemonConfig({
         repositories: [{ ...baseRepository, defaultExecutor: executor }]
       });
