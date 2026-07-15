@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const claudeCommand = process.env.OPENTAG_CLAUDE_COMMAND || "claude";
+const openclawCommand = process.env.OPENTAG_OPENCLAW_COMMAND || "openclaw";
 const githubWebhookExecutor = process.env.OPENTAG_GH_LIVE_EXECUTOR || "claude-code";
 
 const cases = [
@@ -22,6 +23,19 @@ const cases = [
     live: false,
     command: "corepack pnpm smoke:slack-protocol",
     requiredCommands: ["corepack"]
+  },
+  {
+    id: "openclaw-acp",
+    label: "Live OpenClaw Gateway ACP conformance",
+    live: true,
+    command: "corepack pnpm smoke:openclaw-acp-conformance",
+    requiredCommands: ["corepack", "git", openclawCommand],
+    notes: [
+      "Requires OpenClaw 2026.7.1 and a running Gateway for OPENTAG_OPENCLAW_PROFILE (default: opentag-conformance).",
+      "Uses real model and file tools in temporary worktree and scratch fixtures, then exercises live cancellation.",
+      "Stock 2026.7.1 currently fails closed because its cancelled shell can still reach the completion marker.",
+      "The profile owns Gateway authentication; never put its token in the integration manifest."
+    ]
   },
   {
     id: "github-webhook-live",

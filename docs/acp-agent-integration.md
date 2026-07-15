@@ -79,6 +79,38 @@ manifest without it during schema parsing, before constructing an executor.
 Declare it only after testing the real tools in both an isolated repository
 worktree and a scratch directory; it is not runtime proof or a sandbox claim.
 
+## OpenClaw 2026.7.1 gate status
+
+OpenClaw `2026.7.1` can initialize through its official
+[Gateway ACP bridge](https://docs.openclaw.ai/cli/acp) and the same Generic ACP
+Host. Its worktree cwd, scratch cwd, and disposable Gateway session checks pass.
+It is not ready to declare as an OpenTag agent, however, because the live cancel
+case currently fails closed.
+
+OpenClaw's stock bridge records the absolute ACP session cwd and, by default,
+prefixes that cwd when it forwards the request to the Gateway. Do not add
+`--no-prefix-cwd`: the strict declaration is justified by the observed real-tool
+result, not merely by successful ACP initialization. Re-run the live gate for
+every OpenClaw version that will be trusted:
+
+```bash
+OPENTAG_OPENCLAW_PROFILE=opentag-conformance \
+corepack pnpm smoke:openclaw-acp-conformance
+```
+
+The gate checks exact worktree and scratch writes plus distinct disposable
+Gateway session keys. For cancellation, it waits until a real long-running
+shell command writes its start marker, cancels the ACP session, then waits beyond
+the original completion time and rejects a late completion marker. With the
+stock 2026.7.1 Codex harness, the Gateway session becomes `killed` but the shell
+still writes that completion marker. Therefore the gate exits non-zero, OpenTag
+does not ship an OpenClaw manifest example, and integrators must not attest
+`workspace.sessionCwd: "required"`. Do not compensate with a dedicated
+executor or weaken the cancellation assertion.
+
+This OpenClaw-specific gate complements rather than replaces the generic ACP
+executor, governance, and privacy suites required by the checklist below.
+
 ## ACP session lifecycle
 
 For each Attempt, the host:
