@@ -5,24 +5,31 @@ import {
   type LinearCycleReference,
   type LinearIssueGetRequest,
   type LinearIssueGetResult,
+  type LinearIssueListRequest,
+  type LinearIssueListResult,
+  type LinearIssueReadFilter,
   type LinearIssueSearchRequest,
   type LinearIssueSearchResult,
   type LinearIssueSnapshot,
   type LinearLabelReference,
   type LinearProjectReference,
+  type LinearReadPagination,
   type LinearResolvedBacklogScope,
   type LinearTeamReference,
   type LinearUserReference,
   type LinearWorkflowStateReference
 } from "./read-types.js";
 
-/** Conservative Phase 1 bounds for a single Linear search page and result. */
+/** Conservative Phase 1 bounds for Linear issue connections. */
 export const LINEAR_ISSUE_SEARCH_MAX_PAGE_SIZE = 50;
 export const LINEAR_ISSUE_SEARCH_MAX_ITEMS = 100;
+export const LINEAR_ISSUE_LIST_MAX_PAGE_SIZE = 50;
+export const LINEAR_ISSUE_LIST_MAX_ITEMS = 100;
 
 const LINEAR_ISSUE_LABEL_PAGE_SIZE = 100;
 // Linear currently rate-limits searchIssues calls; leave headroom for callers.
 const LINEAR_ISSUE_SEARCH_MAX_PAGES = 25;
+const LINEAR_ISSUE_LIST_MAX_PAGES = 100;
 
 const LINEAR_ISSUE_SELECTION = `
   id
@@ -86,6 +93,11 @@ function optionalNumber(value: unknown, context: string): number | undefined {
 
 function requirePositiveInteger(value: number, context: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${context} must be a positive integer.`);
+}
+
+function validateReadPagination(pagination: LinearReadPagination, context: "issue search" | "issue list"): void {
+  requirePositiveInteger(pagination.first, `Linear ${context} pagination.first`);
+  requirePositiveInteger(pagination.maxItems, `Linear ${context} pagination.maxItems`);
 }
 
 function normalizeTeam(value: unknown, context: string): LinearTeamReference {
@@ -232,18 +244,21 @@ export async function getLinearIssue(input: LinearIssueReadOptions & { request: 
   };
 }
 
-async function resolveLinearSearchScope(
-  input: LinearIssueReadOptions & { scope: LinearBacklogReadScope }
+async function resolveLinearIssueReadScope(
+  input: LinearIssueReadOptions & {
+    scope: LinearBacklogReadScope;
+    operation: "issue.search" | "issue.list";
+  }
 ): Promise<LinearResolvedBacklogScope> {
   if (input.scope.projectId !== undefined || input.scope.cycle !== undefined) {
     throw new Error(
-      "Linear issue.search currently supports team scope only; project and cycle scope are not implemented yet."
+      `Linear ${input.operation} currently supports team scope only; project and cycle scope are not implemented yet.`
     );
   }
   const teamId = requiredString(input.scope.teamId, "scope.teamId");
   const data = await linearGraphql<{ team?: unknown }>({
     ...graphqlOptions(input),
-    query: `query OpenTagLinearResolveSearchTeam($teamId: String!) {
+    query: `query OpenTagLinearResolveIssueReadTeam($teamId: String!) {
   team(id: $teamId) { id key name }
 }`,
     variables: { teamId }
@@ -257,43 +272,104 @@ function nonEmptyValues<T>(values: T[] | undefined): T[] | undefined {
   return values && values.length > 0 ? values : undefined;
 }
 
-function buildIssueFilter(request: LinearIssueSearchRequest, scope: LinearResolvedBacklogScope): Record<string, unknown> {
+function buildIssueFilter(filterInput: LinearIssueReadFilter | undefined, scope: LinearResolvedBacklogScope): Record<string, unknown> {
   const filter: Record<string, unknown> = {
     team: { id: { eq: scope.team.id } }
   };
-  const stateIds = nonEmptyValues(request.filter?.stateIds);
+  const stateIds = nonEmptyValues(filterInput?.stateIds);
   const state: Record<string, unknown> = {};
   if (stateIds) state.id = { in: stateIds };
-  if (request.filter?.completion === "unfinished") state.type = { nin: ["completed", "canceled"] };
-  if (request.filter?.completion === "completed") state.type = { eq: "completed" };
+  if (filterInput?.completion === "unfinished") state.type = { nin: ["completed", "canceled"] };
+  if (filterInput?.completion === "completed") state.type = { eq: "completed" };
   if (Object.keys(state).length > 0) filter.state = state;
 
-  const assigneeIds = nonEmptyValues(request.filter?.assigneeIds);
+  const assigneeIds = nonEmptyValues(filterInput?.assigneeIds);
   if (assigneeIds) filter.assignee = { id: { in: assigneeIds } };
-  const labelIds = nonEmptyValues(request.filter?.labelIds);
+  const labelIds = nonEmptyValues(filterInput?.labelIds);
   if (labelIds) filter.labels = { id: { in: labelIds } };
-  const priorities = nonEmptyValues(request.filter?.priorities);
+  const priorities = nonEmptyValues(filterInput?.priorities);
   if (priorities) filter.priority = { in: priorities };
   return filter;
 }
 
-function normalizePageInfo(value: unknown): { hasNextPage: boolean; endCursor?: string } {
-  const pageInfo = requiredRecord(value, "issue search pageInfo");
-  if (typeof pageInfo.hasNextPage !== "boolean") throw new Error("Linear issue search pageInfo.hasNextPage must be a boolean.");
-  const endCursor = optionalString(pageInfo.endCursor, "issue search pageInfo.endCursor");
-  if (pageInfo.hasNextPage && !endCursor) throw new Error("Linear issue search pageInfo did not include endCursor.");
+type LinearIssuePageInfo = {
+  hasNextPage: boolean;
+  endCursor?: string;
+};
+
+type LinearBoundedIssueRead = {
+  items: LinearIssueSnapshot[];
+  pageInfo: LinearIssuePageInfo;
+  limits: {
+    requestedMaxItems: number;
+    appliedMaxItems: number;
+    returnedItems: number;
+  };
+  truncated: boolean;
+};
+
+function normalizePageInfo(value: unknown, context: string): LinearIssuePageInfo {
+  const pageInfo = requiredRecord(value, `${context} pageInfo`);
+  if (typeof pageInfo.hasNextPage !== "boolean") {
+    throw new Error(`Linear ${context} pageInfo.hasNextPage must be a boolean.`);
+  }
+  const endCursor = optionalString(pageInfo.endCursor, `${context} pageInfo.endCursor`);
+  if (pageInfo.hasNextPage && !endCursor) throw new Error(`Linear ${context} pageInfo did not include endCursor.`);
   return {
     hasNextPage: pageInfo.hasNextPage,
     ...(endCursor !== undefined ? { endCursor } : {})
   };
 }
 
-function normalizeSearchPage(value: unknown): { nodes: unknown[]; pageInfo: { hasNextPage: boolean; endCursor?: string } } {
-  const connection = requiredRecord(value, "issue search result");
-  if (!Array.isArray(connection.nodes)) throw new Error("Linear issue search result.nodes must be an array.");
+function normalizeIssuePage(value: unknown, context: string): { nodes: unknown[]; pageInfo: LinearIssuePageInfo } {
+  const connection = requiredRecord(value, `${context} result`);
+  if (!Array.isArray(connection.nodes)) throw new Error(`Linear ${context} result.nodes must be an array.`);
   return {
     nodes: connection.nodes,
-    pageInfo: normalizePageInfo(connection.pageInfo)
+    pageInfo: normalizePageInfo(connection.pageInfo, context)
+  };
+}
+
+async function readBoundedLinearIssuePages(input: {
+  pagination: LinearReadPagination;
+  maxPageSize: number;
+  maxItems: number;
+  maxPages: number;
+  context: "issue search" | "issue list";
+  readPage: (first: number, after: string | undefined) => Promise<unknown>;
+}): Promise<LinearBoundedIssueRead> {
+  const appliedPageSize = Math.min(input.pagination.first, input.maxPageSize);
+  const appliedMaxItems = Math.min(input.pagination.maxItems, input.maxItems, input.maxPages * appliedPageSize);
+  const items: LinearIssueSnapshot[] = [];
+  let after = input.pagination.after;
+  let pageInfo: LinearIssuePageInfo = { hasNextPage: false };
+  let droppedItems = false;
+
+  for (let page = 0; page < input.maxPages; page += 1) {
+    const remaining = appliedMaxItems - items.length;
+    if (remaining <= 0) break;
+    const first = Math.min(appliedPageSize, remaining);
+    const issuePage = normalizeIssuePage(await input.readPage(first, after), input.context);
+    droppedItems ||= issuePage.nodes.length > remaining;
+    items.push(
+      ...issuePage.nodes
+        .slice(0, remaining)
+        .map((node, index) => normalizeLinearIssueSnapshot(node, `${input.context} nodes[${items.length + index}]`))
+    );
+    pageInfo = issuePage.pageInfo;
+    if (!pageInfo.hasNextPage || items.length >= appliedMaxItems) break;
+    after = pageInfo.endCursor;
+  }
+
+  return {
+    items,
+    pageInfo,
+    limits: {
+      requestedMaxItems: input.pagination.maxItems,
+      appliedMaxItems,
+      returnedItems: items.length
+    },
+    truncated: pageInfo.hasNextPage || droppedItems
   };
 }
 
@@ -301,23 +377,23 @@ export async function searchLinearIssues(
   input: LinearIssueReadOptions & { request: LinearIssueSearchRequest }
 ): Promise<LinearIssueSearchResult> {
   const queryTerm = requiredString(input.request.query.trim(), "issue search query");
-  requirePositiveInteger(input.request.pagination.first, "Linear issue search pagination.first");
-  requirePositiveInteger(input.request.pagination.maxItems, "Linear issue search pagination.maxItems");
-
-  const resolvedScope = await resolveLinearSearchScope({ ...input, scope: input.request.scope });
-  const appliedMaxItems = Math.min(input.request.pagination.maxItems, LINEAR_ISSUE_SEARCH_MAX_ITEMS);
-  const filter = buildIssueFilter(input.request, resolvedScope);
-  const items: LinearIssueSnapshot[] = [];
-  let after = input.request.pagination.after;
-  let pageInfo: { hasNextPage: boolean; endCursor?: string } = { hasNextPage: false };
-
-  for (let page = 0; page < LINEAR_ISSUE_SEARCH_MAX_PAGES; page += 1) {
-    const remaining = appliedMaxItems - items.length;
-    if (remaining <= 0) break;
-    const first = Math.min(input.request.pagination.first, LINEAR_ISSUE_SEARCH_MAX_PAGE_SIZE, remaining);
-    const data = await linearGraphql<{ searchIssues?: unknown }>({
-      ...graphqlOptions(input),
-      query: `query OpenTagLinearIssueSearch(
+  validateReadPagination(input.request.pagination, "issue search");
+  const resolvedScope = await resolveLinearIssueReadScope({
+    ...input,
+    scope: input.request.scope,
+    operation: "issue.search"
+  });
+  const filter = buildIssueFilter(input.request.filter, resolvedScope);
+  const bounded = await readBoundedLinearIssuePages({
+    pagination: input.request.pagination,
+    maxPageSize: LINEAR_ISSUE_SEARCH_MAX_PAGE_SIZE,
+    maxItems: LINEAR_ISSUE_SEARCH_MAX_ITEMS,
+    maxPages: LINEAR_ISSUE_SEARCH_MAX_PAGES,
+    context: "issue search",
+    readPage: async (first, after) => {
+      const data = await linearGraphql<{ searchIssues?: unknown }>({
+        ...graphqlOptions(input),
+        query: `query OpenTagLinearIssueSearch(
   $term: String!
   $teamId: String!
   $filter: IssueFilter!
@@ -338,43 +414,87 @@ export async function searchLinearIssues(
     pageInfo { hasNextPage endCursor }
   }
 }`,
-      variables: {
-        term: queryTerm,
-        teamId: resolvedScope.team.id,
-        filter,
-        first,
-        after: after ?? null,
-        includeArchived: input.request.filter?.includeArchived ?? false
-      }
-    });
-    const searchPage = normalizeSearchPage(data.searchIssues);
-    items.push(
-      ...searchPage.nodes
-        .slice(0, remaining)
-        .map((node, index) => normalizeLinearIssueSnapshot(node, `issue search nodes[${items.length + index}]`))
-    );
-    pageInfo = searchPage.pageInfo;
-    if (!pageInfo.hasNextPage || items.length >= appliedMaxItems) break;
-    after = pageInfo.endCursor;
-  }
+        variables: {
+          term: queryTerm,
+          teamId: resolvedScope.team.id,
+          filter,
+          first,
+          after: after ?? null,
+          includeArchived: input.request.filter?.includeArchived ?? false
+        }
+      });
+      return data.searchIssues;
+    }
+  });
 
-  const truncated = pageInfo.hasNextPage;
   return {
     contractVersion: LINEAR_BACKLOG_READ_CONTRACT_VERSION,
     capturedAt: new Date().toISOString(),
     request: input.request,
     resolvedScope,
-    items,
-    pageInfo,
-    limits: {
-      requestedMaxItems: input.request.pagination.maxItems,
-      appliedMaxItems,
-      returnedItems: items.length
-    },
-    truncated,
+    ...bounded,
     provenance: {
       provider: "linear",
       operation: "issue.search"
+    }
+  };
+}
+
+export async function listLinearIssues(
+  input: LinearIssueReadOptions & { request: LinearIssueListRequest }
+): Promise<LinearIssueListResult> {
+  validateReadPagination(input.request.pagination, "issue list");
+  const resolvedScope = await resolveLinearIssueReadScope({
+    ...input,
+    scope: input.request.scope,
+    operation: "issue.list"
+  });
+  const filter = buildIssueFilter(input.request.filter, resolvedScope);
+  const bounded = await readBoundedLinearIssuePages({
+    pagination: input.request.pagination,
+    maxPageSize: LINEAR_ISSUE_LIST_MAX_PAGE_SIZE,
+    maxItems: LINEAR_ISSUE_LIST_MAX_ITEMS,
+    maxPages: LINEAR_ISSUE_LIST_MAX_PAGES,
+    context: "issue list",
+    readPage: async (first, after) => {
+      const data = await linearGraphql<{ issues?: unknown }>({
+        ...graphqlOptions(input),
+        query: `query OpenTagLinearIssueList(
+  $filter: IssueFilter!
+  $first: Int!
+  $after: String
+  $includeArchived: Boolean!
+) {
+  issues(
+    filter: $filter
+    first: $first
+    after: $after
+    includeArchived: $includeArchived
+  ) {
+    nodes {${LINEAR_ISSUE_SELECTION}}
+    pageInfo { hasNextPage endCursor }
+  }
+}`,
+        variables: {
+          filter,
+          first,
+          after: after ?? null,
+          includeArchived: input.request.filter?.includeArchived ?? false
+        }
+      });
+      return data.issues;
+    }
+  });
+
+  return {
+    contractVersion: LINEAR_BACKLOG_READ_CONTRACT_VERSION,
+    capturedAt: new Date().toISOString(),
+    request: input.request,
+    resolvedScope,
+    ...bounded,
+    provenance: {
+      provider: "linear",
+      operation: "issue.list"
     }
   };
 }

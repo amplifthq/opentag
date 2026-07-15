@@ -107,7 +107,7 @@ describe("searchLinearIssues", () => {
     const fetchImpl = (async (_url, init) => {
       const body = bodyFrom(init);
       bodies.push(body);
-      if (body.query.includes("OpenTagLinearResolveSearchTeam")) {
+      if (body.query.includes("OpenTagLinearResolveIssueReadTeam")) {
         return Response.json({
           data: { team: { id: "team_amp", key: "AMP", name: "OpenTag" } }
         });
@@ -156,7 +156,7 @@ describe("searchLinearIssues", () => {
 
     expect(bodies).toHaveLength(3);
     const scopeBody = bodies[0];
-    expect(scopeBody?.query).toContain("query OpenTagLinearResolveSearchTeam");
+    expect(scopeBody?.query).toContain("query OpenTagLinearResolveIssueReadTeam");
     expect(scopeBody?.variables).toEqual({ teamId: "team_amp" });
 
     const firstSearch = bodies[1];
@@ -196,7 +196,7 @@ describe("searchLinearIssues", () => {
     const fetchImpl = (async (_url, init) => {
       const body = bodyFrom(init);
       bodies.push(body);
-      if (body.query.includes("OpenTagLinearResolveSearchTeam")) {
+      if (body.query.includes("OpenTagLinearResolveIssueReadTeam")) {
         return Response.json({ data: { team: { id: "team_amp", key: "AMP", name: "OpenTag" } } });
       }
       return Response.json({

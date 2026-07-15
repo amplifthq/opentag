@@ -32,9 +32,10 @@ A `LinearBacklogSnapshot` is a point-in-time observation. Consumers must inspect
 Tokens, authorization headers, and connection secrets must never be included in
 a snapshot.
 
-The first read implementation exports `getLinearIssue` and
-`searchLinearIssues`. Both use read-only GraphQL queries and return the same
-normalized `LinearIssueSnapshot` shape. Search is currently team-scoped, caps
-individual pages at 50 issues and one logical result at 100 issues, and reports
-whether results were truncated. Project/current-cycle scope, relation loading, issue listing, and
-backlog snapshot construction remain separate follow-up work.
+The read implementation exports `getLinearIssue`, `searchLinearIssues`, and
+`listLinearIssues`. All use read-only GraphQL queries and return the same
+normalized `LinearIssueSnapshot` shape. Search and list are currently
+team-scoped, cap individual pages at 50 issues and one logical result at 100
+issues, and report whether results were truncated. Project/current-cycle scope,
+relation loading, and backlog snapshot construction remain separate follow-up
+work.
