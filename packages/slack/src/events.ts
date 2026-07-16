@@ -123,6 +123,7 @@ export type SlackEventProcessorInput = {
   reply?(input: { channelId: string; threadTs: string; text: string; blocks?: SlackBlock[] }): Promise<void>;
   status?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   doctor?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
+  linear?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   stopRun?(input: { teamId: string; channelId: string; runId?: string; requestedBy: string }): Promise<SlackStopRunResult>;
   canManageBinding?(input: SlackBindingManagementContext): Promise<boolean> | boolean;
   now(): string;
@@ -155,6 +156,7 @@ const HELP_TEXT = [
   "- @mention the app with `/bind <owner>/<repo>` or `/bind <provider>:<owner>/<repo>` to connect this Slack channel to a Project Target.",
   "- @mention the app with `/status` to see the Project Target, active run, queued follow-ups, and next safe action.",
   "- @mention the app with `/doctor` to see a redacted readiness summary for this Slack channel.",
+  "- @mention the app with `/linear` to list unfinished Linear issues for the configured Linear project (read-only).",
   "- @mention the app with `/stop [run_id]` to request cancellation for the active channel run or a specific run; OpenTag will not treat stop as successful completion.",
   "- @mention the app with `/unbind confirm` to disconnect this Slack channel from its Project Target; this does not delete local checkout config.",
   "- Reply in a source thread with `apply 1`, `approve 1`, `reject 1`, or `continue 1` when OpenTag posts source-thread actions.",
@@ -170,6 +172,10 @@ const STOP_UNAVAILABLE_TEXT = [
   "Run cancellation from this Slack ingress is not configured.",
   "OpenTag will not treat a stop request as a successful completion. Use `opentag status --run <run_id>` for audit detail, or `opentag service stop` if you need to stop the local background service."
 ].join("\n");
+const LINEAR_UNAVAILABLE_TEXT =
+  "Linear backlog is not available on this OpenTag runtime. Start OpenTag with `opentag start` after configuring platforms.linear, or update the ingress deployment.";
+const LINEAR_USAGE =
+  "Usage: @mention the app with `/linear` to list unfinished Linear issues for the configured Linear project (read-only).";
 const BINDING_AUTH_DENIED_TEXT =
   "Only an authorized Slack binding manager can change this channel's Project Target. Ask an admin to run the command or update local OpenTag channel bindings.";
 
@@ -183,6 +189,16 @@ function parseSelfServiceCommand(command: string | null): "help" | "status" | "d
   if (/^\/help(\s|$)/.test(trimmed)) return "help";
   if (/^\/status(\s|$)/.test(trimmed)) return "status";
   if (/^\/doctor(\s|$)/.test(trimmed)) return "doctor";
+  return null;
+}
+
+function parseLinearCommand(command: string | null): { ok: true } | { ok: false } | null {
+  const trimmed = command?.trim();
+  if (!trimmed) return null;
+  if (/^\/?linear$/iu.test(trimmed)) return { ok: true };
+  // A slash prefix is an unambiguous command attempt; extra arguments get usage help.
+  if (/^\/linear(\s|$)/iu.test(trimmed)) return { ok: false };
+  // Bare "linear <more words>" stays a normal coding-run mention.
   return null;
 }
 
@@ -555,6 +571,38 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           });
         }
         return json({ ok: true, selfService: "stop", outcome: result.outcome, ...(result.runId ? { runId: result.runId } : {}) });
+      }
+      const linearRequest = payload.event.type === "app_mention" ? parseLinearCommand(rawThreadActionText) : null;
+      if (linearRequest) {
+        const threadTs = payload.event.thread_ts ?? payload.event.ts;
+        if (!input.reply) {
+          return json({ ok: true, ignored: "self_service_reply_unavailable", command: "linear" });
+        }
+        if (!linearRequest.ok) {
+          await input.reply({ channelId: payload.event.channel, threadTs, text: LINEAR_USAGE });
+          return json({ ok: true, selfService: "linear", usage: true });
+        }
+        if (!input.linear) {
+          await input.reply({ channelId: payload.event.channel, threadTs, text: LINEAR_UNAVAILABLE_TEXT });
+          return json({ ok: true, selfService: "linear", unavailable: true });
+        }
+        // The Linear project is configured globally; no Project Target binding is required.
+        const reply = normalizeSelfServiceReply(
+          await input.linear({
+            teamId: payload.team_id,
+            channelId: payload.event.channel,
+            threadTs,
+            userId: payload.event.user,
+            binding: null
+          })
+        );
+        await input.reply({
+          channelId: payload.event.channel,
+          threadTs,
+          text: reply.text,
+          ...(reply.blocks?.length ? { blocks: reply.blocks } : {})
+        });
+        return json({ ok: true, selfService: "linear" });
       }
       const selfServiceCommand = payload.event.type === "app_mention" ? parseSelfServiceCommand(rawThreadActionText) : null;
       if (selfServiceCommand) {
