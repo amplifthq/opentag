@@ -8,23 +8,37 @@ import {
 
 const CONTEXT = { teamId: "T123", channelId: "C123", threadTs: "1.0", userId: "U1", binding: null };
 
-function issue(n: number, stateName = "Todo", stateType = "unstarted") {
-  return { identifier: `AMP-${n}`, title: `Task ${n}`, url: `https://linear.app/a/issue/AMP-${n}`, stateName, stateType };
+function issue(n: number, overrides: Partial<{ stateName: string; stateType: string; priority: number; title: string }> = {}) {
+  const stateName = overrides.stateName ?? "Todo";
+  const stateType = overrides.stateType ?? "unstarted";
+  return {
+    identifier: `AMP-${n}`,
+    title: overrides.title ?? `Task ${n}`,
+    url: `https://linear.app/a/issue/AMP-${n}`,
+    stateName,
+    stateType,
+    priority: overrides.priority ?? 0
+  };
 }
 
-function backlogFetch(nodes: ReturnType<typeof issue>[], hasNextPage = false): typeof fetch {
+function backlogFetch(
+  nodes: ReturnType<typeof issue>[],
+  options: { hasNextPage?: boolean; projectName?: string | null } = {}
+): typeof fetch {
   return (async () =>
     new Response(
       JSON.stringify({
         data: {
+          project: options.projectName === undefined ? { name: "opentag" } : options.projectName ? { name: options.projectName } : null,
           issues: {
             nodes: nodes.map((entry) => ({
               identifier: entry.identifier,
               title: entry.title,
               url: entry.url,
+              priority: entry.priority,
               state: { name: entry.stateName, type: entry.stateType }
             })),
-            pageInfo: { hasNextPage }
+            pageInfo: { hasNextPage: options.hasNextPage ?? false }
           }
         }
       }),
@@ -63,66 +77,119 @@ describe("resolveSlackLinearBacklogSettings", () => {
 });
 
 describe("renderSlackLinearBacklogReply", () => {
-  it("renders header with count, source, query time, and one line per issue", () => {
+  it("renders the header with project name and total, grouped headings, and issue lines", () => {
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues: [issue(131, "In Progress", "started"), issue(153)], fetched: 2, hasMore: false },
+      backlog: {
+        issues: [
+          issue(140, { stateName: "In Progress", stateType: "started", priority: 1, title: "显示生成失败重试机制" }),
+          issue(131, { stateName: "In Progress", stateType: "started", title: "这个ocr把他主人的名字都搞错了；代办 ocr 优化" }),
+          issue(153, { priority: 2, title: "Slack：通过 @opentag linear 查询未完成的 Linear 任务" }),
+          issue(132, { title: "显示生成失败，the provider returned an empty draft" })
+        ],
+        fetched: 4,
+        hasMore: false,
+        projectName: "opentag"
+      },
       limit: SLACK_LINEAR_BACKLOG_LIMIT,
-      queriedAt: "2026-07-16T21:30:45.123Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
-    expect(text).toContain("OpenTag project backlog — 2 open issues (source: Linear, queried 2026-07-16T21:30Z):");
-    expect(text).toContain("• <https://linear.app/a/issue/AMP-131|AMP-131> — Task 131  [In Progress]");
-    expect(text).toContain("• <https://linear.app/a/issue/AMP-153|AMP-153> — Task 153  [Todo]");
-    expect(text).not.toContain("Showing");
+
+    const lines = text.split("\n");
+    expect(lines).toEqual([
+      "*opentag · 4 open*",
+      "",
+      "🔵 *In Progress (2)*",
+      "• <https://linear.app/a/issue/AMP-140|AMP-140> [urgent] 显示生成失败重试机制",
+      "• <https://linear.app/a/issue/AMP-131|AMP-131> 这个ocr把他主人的名字都搞错了；代办 ocr 优化",
+      "",
+      "⚪ *Todo (2)*",
+      "• <https://linear.app/a/issue/AMP-153|AMP-153> [high] Slack：通过 @opentag linear 查询未完成的 Linear 任务",
+      "• <https://linear.app/a/issue/AMP-132|AMP-132> 显示生成失败，the provider returned an empty draft",
+      "",
+      "_Linear · queried 22:48 UTC_"
+    ]);
   });
 
-  it("truncates at the limit and reports shown/total", () => {
-    const issues = Array.from({ length: 25 }, (_, index) => issue(index + 1));
+  it("falls back to 'Backlog' as the header name when no project name is available", () => {
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues, fetched: 25, hasMore: false },
-      limit: 20,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      backlog: { issues: [issue(1)], fetched: 1, hasMore: false, projectName: null },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
-    expect(text).toContain("25 open issues");
-    expect(text.match(/^• /gmu)).toHaveLength(20);
-    expect(text).toContain("Showing 20 of 25 open issues.");
+    expect(text).toContain("*Backlog · 1 open*");
   });
 
-  it("marks totals as N+ when the Linear page reports more results", () => {
+  it("uses no priority marker and a single space before the title when priority has no urgent/high marker", () => {
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [issue(1, { priority: 3 })], fetched: 1, hasMore: false, projectName: "opentag" },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T22:48:00.000Z"
+    });
+    expect(text).toContain("• <https://linear.app/a/issue/AMP-1|AMP-1> Task 1");
+  });
+
+  it("truncates at the limit, marks a partially-shown group heading, and reports the hidden count in the footer", () => {
+    const inProgress = Array.from({ length: 2 }, (_, index) => issue(index + 1, { stateName: "In Progress", stateType: "started" }));
+    const todo = Array.from({ length: 30 }, (_, index) => issue(1000 + index));
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [...inProgress, ...todo], fetched: 32, hasMore: false, projectName: "opentag" },
+      limit: 20,
+      queriedAt: "2026-07-16T22:48:00.000Z"
+    });
+
+    expect(text).toContain("*opentag · 32 open* · showing 20");
+    expect(text).toContain("🔵 *In Progress (2)*");
+    expect(text).toContain("⚪ *Todo (18 of 30)*");
+    expect(text.match(/^• /gmu)).toHaveLength(20);
+    expect(text).toContain("_Linear · queried 22:48 UTC · 12 more not shown_");
+  });
+
+  it("renders N+ totals and hidden counts when Linear reports more pages via hasMore", () => {
     const issues = Array.from({ length: 100 }, (_, index) => issue(index + 1));
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues, fetched: 100, hasMore: true },
+      backlog: { issues, fetched: 100, hasMore: true, projectName: "opentag" },
       limit: 20,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
-    expect(text).toContain("100+ open issues");
-    expect(text).toContain("Showing 20 of 100+ open issues.");
+
+    expect(text).toContain("*opentag · 100+ open* · showing 20");
+    expect(text).toContain("_Linear · queried 22:48 UTC · 80+ more not shown_");
   });
 
-  it("renders an explicit empty-backlog line", () => {
+  it("renders the empty-backlog layout", () => {
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues: [], fetched: 0, hasMore: false },
+      backlog: { issues: [], fetched: 0, hasMore: false, projectName: "opentag" },
       limit: 20,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
-    expect(text).toContain("0 open issues");
-    expect(text).toContain("No unfinished issues in the configured Linear project.");
+
+    expect(text.split("\n")).toEqual([
+      "*opentag · 0 open* 🎉",
+      "No unfinished issues in this Linear project.",
+      "",
+      "_Linear · queried 22:48 UTC_"
+    ]);
   });
 
-  it("escapes Linear-controlled title and state text so hostile content cannot inject Slack mrkdwn links", () => {
+  it("escapes Linear-controlled title, state, and project name so hostile content cannot inject Slack mrkdwn", () => {
     const hostileIssue = {
       identifier: "AMP-999",
       title: "<https://evil.example|click here> & more",
       url: "https://linear.app/a/issue/AMP-999",
       stateName: "<b>Weird</b> & State",
-      stateType: "started"
+      stateType: "started",
+      priority: 0
     };
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues: [hostileIssue], fetched: 1, hasMore: false },
+      backlog: { issues: [hostileIssue], fetched: 1, hasMore: false, projectName: "<script>evil</script>" },
       limit: SLACK_LINEAR_BACKLOG_LIMIT,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
+
+    expect(text).toContain("*&lt;script&gt;evil&lt;/script&gt; · 1 open*");
+    expect(text).toContain("🔵 *&lt;b&gt;Weird&lt;/b&gt; &amp; State (1)*");
     expect(text).toContain(
-      "• <https://linear.app/a/issue/AMP-999|AMP-999> — &lt;https://evil.example|click here&gt; &amp; more  [&lt;b&gt;Weird&lt;/b&gt; &amp; State]"
+      "• <https://linear.app/a/issue/AMP-999|AMP-999> &lt;https://evil.example|click here&gt; &amp; more"
     );
     // The identifier link itself must stay unescaped so Slack still renders it as a clickable link.
     expect(text).toContain("<https://linear.app/a/issue/AMP-999|AMP-999>");
@@ -134,23 +201,24 @@ describe("renderSlackLinearBacklogReply", () => {
       title: "Task",
       url: "https://linear.app/amplift/issue/AMP-153/slack通过-opentag-linear-查询未完成的-linear-任务",
       stateName: "Todo",
-      stateType: "unstarted"
+      stateType: "unstarted",
+      priority: 0
     };
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues: [nonAsciiIssue], fetched: 1, hasMore: false },
+      backlog: { issues: [nonAsciiIssue], fetched: 1, hasMore: false, projectName: "opentag" },
       limit: SLACK_LINEAR_BACKLOG_LIMIT,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
     expect(text).toContain(
-      "• <https://linear.app/amplift/issue/AMP-153/slack%E9%80%9A%E8%BF%87-opentag-linear-%E6%9F%A5%E8%AF%A2%E6%9C%AA%E5%AE%8C%E6%88%90%E7%9A%84-linear-%E4%BB%BB%E5%8A%A1|AMP-153>"
+      "<https://linear.app/amplift/issue/AMP-153/slack%E9%80%9A%E8%BF%87-opentag-linear-%E6%9F%A5%E8%AF%A2%E6%9C%AA%E5%AE%8C%E6%88%90%E7%9A%84-linear-%E4%BB%BB%E5%8A%A1|AMP-153>"
     );
   });
 
   it("leaves an already-ASCII issue URL byte-identical", () => {
     const text = renderSlackLinearBacklogReply({
-      backlog: { issues: [issue(153)], fetched: 1, hasMore: false },
+      backlog: { issues: [issue(153)], fetched: 1, hasMore: false, projectName: "opentag" },
       limit: SLACK_LINEAR_BACKLOG_LIMIT,
-      queriedAt: "2026-07-16T21:30:00.000Z"
+      queriedAt: "2026-07-16T22:48:00.000Z"
     });
     expect(text).toContain("• <https://linear.app/a/issue/AMP-153|AMP-153>");
   });
@@ -168,13 +236,13 @@ describe("createSlackLinearBacklogHandler", () => {
       linear: { token: "lin_api_test", projectId: "proj_1" } as never,
       env: {},
       fetchImpl: backlogFetch([issue(153)]),
-      now: () => "2026-07-16T21:30:00.000Z"
+      now: () => "2026-07-16T22:48:00.000Z"
     });
     const reply = await handler(CONTEXT);
     expect(reply).toEqual(
       expect.objectContaining({
         textFormat: "mrkdwn",
-        text: expect.stringContaining("1 open issue")
+        text: expect.stringContaining("opentag · 1 open")
       })
     );
     expect(typeof reply === "string" ? reply : reply.text).toContain("AMP-153");
