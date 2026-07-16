@@ -9,15 +9,18 @@ export type LinearBacklogIssue = {
   url: string;
   stateName: string;
   stateType: string;
+  priority: number;
 };
 
 export type LinearProjectBacklog = {
   issues: LinearBacklogIssue[];
   fetched: number;
   hasMore: boolean;
+  projectName: string | null;
 };
 
 const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $first: Int!) {
+  project(id: $projectId) { name }
   issues(
     filter: {
       project: { id: { eq: $projectId } }
@@ -25,7 +28,7 @@ const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $first: Int!
     }
     first: $first
   ) {
-    nodes { identifier title url state { name type } }
+    nodes { identifier title url priority state { name type } }
     pageInfo { hasNextPage }
   }
 }`;
@@ -37,6 +40,13 @@ function issueNumber(identifier: string): number {
   return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
 }
 
+// Linear priority semantics: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
+// Rank "none" after every set priority so unprioritized issues sort last
+// within their state type.
+function priorityRank(priority: number): number {
+  return priority === 0 ? 5 : priority;
+}
+
 export async function fetchLinearProjectBacklog(input: {
   token: string;
   projectId: string;
@@ -45,8 +55,15 @@ export async function fetchLinearProjectBacklog(input: {
   timeoutMs?: number;
 }): Promise<LinearProjectBacklog> {
   const data = await linearGraphql<{
+    project: { name: string } | null;
     issues: {
-      nodes: Array<{ identifier: string; title: string; url: string; state: { name: string; type: string } }>;
+      nodes: Array<{
+        identifier: string;
+        title: string;
+        url: string;
+        priority: number | null;
+        state: { name: string; type: string };
+      }>;
       pageInfo: { hasNextPage: boolean };
     };
   }>({
@@ -63,12 +80,19 @@ export async function fetchLinearProjectBacklog(input: {
       title: node.title,
       url: node.url,
       stateName: node.state.name,
-      stateType: node.state.type
+      stateType: node.state.type,
+      priority: node.priority ?? 0
     }))
     .sort(
       (a, b) =>
         (STATE_TYPE_ORDER[a.stateType] ?? 9) - (STATE_TYPE_ORDER[b.stateType] ?? 9) ||
+        priorityRank(a.priority) - priorityRank(b.priority) ||
         issueNumber(a.identifier) - issueNumber(b.identifier)
     );
-  return { issues, fetched: issues.length, hasMore: data.issues.pageInfo.hasNextPage };
+  return {
+    issues,
+    fetched: issues.length,
+    hasMore: data.issues.pageInfo.hasNextPage,
+    projectName: data.project?.name ?? null
+  };
 }
