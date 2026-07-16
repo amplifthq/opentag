@@ -33,6 +33,7 @@ export type SlackEventsApiIngressConfig = {
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   maxRequestBodyBytes?: number;
+  linear?: SlackEventProcessorInput["linear"];
 } & SlackChannelPrincipalConfig;
 
 export type SlackIngressConfig = SlackEventsApiIngressConfig;

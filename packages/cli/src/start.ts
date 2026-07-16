@@ -511,7 +511,7 @@ function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "even
 export function slackIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
   input: { env?: NodeJS.ProcessEnv } = {}
-): SlackEventsApiIngressConfig & { linear: ReturnType<typeof createSlackLinearBacklogHandler> } {
+): SlackEventsApiIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.signingSecret) {
     throw new Error("Slack Events API mode requires platforms.slack.signingSecret.");
