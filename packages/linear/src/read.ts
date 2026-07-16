@@ -1,6 +1,7 @@
 import { linearGraphql, type FetchLike } from "./graphql.js";
 import {
   LINEAR_BACKLOG_READ_CONTRACT_VERSION,
+  type LinearBacklogSnapshot,
   type LinearBacklogReadScope,
   type LinearCycleReference,
   type LinearIssueGetRequest,
@@ -69,6 +70,12 @@ export type LinearIssueReadOptions = {
   graphqlUrl?: string;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+};
+
+export type LinearBacklogSnapshotOptions = LinearIssueReadOptions & {
+  request: LinearIssueListRequest;
+  /** Optional safe workspace identifier for provenance; never pass a token or secret. */
+  workspaceId?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -619,6 +626,29 @@ export async function listLinearIssues(
     provenance: {
       provider: "linear",
       operation: "issue.list"
+    }
+  };
+}
+
+/** Build the bounded, point-in-time Linear backlog view consumed by project planning. */
+export async function buildLinearBacklogSnapshot(input: LinearBacklogSnapshotOptions): Promise<LinearBacklogSnapshot> {
+  const workspaceId =
+    input.workspaceId !== undefined ? requiredString(input.workspaceId, "backlog snapshot workspaceId") : undefined;
+  const result = await listLinearIssues(input);
+
+  return {
+    contractVersion: result.contractVersion,
+    capturedAt: result.capturedAt,
+    request: result.request,
+    resolvedScope: result.resolvedScope,
+    issues: result.items,
+    pageInfo: result.pageInfo,
+    limits: result.limits,
+    truncated: result.truncated,
+    provenance: {
+      provider: "linear",
+      operation: "backlog.snapshot",
+      ...(workspaceId !== undefined ? { workspaceId } : {})
     }
   };
 }

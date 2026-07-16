@@ -32,13 +32,15 @@ A `LinearBacklogSnapshot` is a point-in-time observation. Consumers must inspect
 Tokens, authorization headers, and connection secrets must never be included in
 a snapshot.
 
-The read implementation exports `getLinearIssue`, `searchLinearIssues`, and
-`listLinearIssues`. All use read-only GraphQL queries and return the same
-normalized `LinearIssueSnapshot` shape. Search and list are currently
-bounded by a required team and can be narrowed to a validated project and an
-explicit or dynamically resolved current cycle. They cap individual pages at
-50 issues and one logical result at 100 issues, and report whether results were
-truncated. Issue snapshots include canonical `blocks`, `blocked_by`, and
-`related` relations; reads fail rather than return a partial relation set when
-an issue exceeds the 100-relation safety limit. Backlog snapshot construction
-remains separate follow-up work.
+The read implementation exports `getLinearIssue`, `searchLinearIssues`,
+`listLinearIssues`, and `buildLinearBacklogSnapshot`. All use read-only GraphQL
+queries and return the same normalized `LinearIssueSnapshot` shape. Search and
+list are currently bounded by a required team and can be narrowed to a
+validated project and an explicit or dynamically resolved current cycle. They
+cap individual pages at 50 issues and one logical result at 100 issues, and
+report whether results were truncated. Issue snapshots include canonical
+`blocks`, `blocked_by`, and `related` relations; reads fail rather than return a
+partial relation set when an issue exceeds the 100-relation safety limit. The
+snapshot builder composes the resolved scope, normalized issues, pagination
+state, limits, capture time, and safe provenance into the planner-facing
+`LinearBacklogSnapshot` contract.
