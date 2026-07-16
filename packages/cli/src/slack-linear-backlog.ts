@@ -40,7 +40,7 @@ export function renderSlackLinearBacklogReply(input: {
     lines.push("No unfinished issues in the configured Linear project.");
   }
   for (const issue of shown) {
-    lines.push(`• <${issue.url}|${issue.identifier}> — ${escapeSlackText(issue.title)}  [${escapeSlackText(issue.stateName)}]`);
+    lines.push(`• <${encodeURI(issue.url)}|${issue.identifier}> — ${escapeSlackText(issue.title)}  [${escapeSlackText(issue.stateName)}]`);
   }
   if (input.backlog.issues.length > shown.length || input.backlog.hasMore) {
     lines.push(`Showing ${shown.length} of ${totalLabel} open issues.`);

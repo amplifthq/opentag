@@ -127,6 +127,33 @@ describe("renderSlackLinearBacklogReply", () => {
     // The identifier link itself must stay unescaped so Slack still renders it as a clickable link.
     expect(text).toContain("<https://linear.app/a/issue/AMP-999|AMP-999>");
   });
+
+  it("percent-encodes non-ASCII characters in the Linear issue URL so Slack renders a valid link", () => {
+    const nonAsciiIssue = {
+      identifier: "AMP-153",
+      title: "Task",
+      url: "https://linear.app/amplift/issue/AMP-153/slack通过-opentag-linear-查询未完成的-linear-任务",
+      stateName: "Todo",
+      stateType: "unstarted"
+    };
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [nonAsciiIssue], fetched: 1, hasMore: false },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T21:30:00.000Z"
+    });
+    expect(text).toContain(
+      "• <https://linear.app/amplift/issue/AMP-153/slack%E9%80%9A%E8%BF%87-opentag-linear-%E6%9F%A5%E8%AF%A2%E6%9C%AA%E5%AE%8C%E6%88%90%E7%9A%84-linear-%E4%BB%BB%E5%8A%A1|AMP-153>"
+    );
+  });
+
+  it("leaves an already-ASCII issue URL byte-identical", () => {
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [issue(153)], fetched: 1, hasMore: false },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T21:30:00.000Z"
+    });
+    expect(text).toContain("• <https://linear.app/a/issue/AMP-153|AMP-153>");
+  });
 });
 
 describe("createSlackLinearBacklogHandler", () => {
