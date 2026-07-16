@@ -107,6 +107,26 @@ describe("renderSlackLinearBacklogReply", () => {
     expect(text).toContain("0 open issues");
     expect(text).toContain("No unfinished issues in the configured Linear project.");
   });
+
+  it("escapes Linear-controlled title and state text so hostile content cannot inject Slack mrkdwn links", () => {
+    const hostileIssue = {
+      identifier: "AMP-999",
+      title: "<https://evil.example|click here> & more",
+      url: "https://linear.app/a/issue/AMP-999",
+      stateName: "<b>Weird</b> & State",
+      stateType: "started"
+    };
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [hostileIssue], fetched: 1, hasMore: false },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T21:30:00.000Z"
+    });
+    expect(text).toContain(
+      "• <https://linear.app/a/issue/AMP-999|AMP-999> — &lt;https://evil.example|click here&gt; &amp; more  [&lt;b&gt;Weird&lt;/b&gt; &amp; State]"
+    );
+    // The identifier link itself must stay unescaped so Slack still renders it as a clickable link.
+    expect(text).toContain("<https://linear.app/a/issue/AMP-999|AMP-999>");
+  });
 });
 
 describe("createSlackLinearBacklogHandler", () => {

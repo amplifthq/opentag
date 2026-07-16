@@ -1,5 +1,5 @@
 import { fetchLinearProjectBacklog, type LinearProjectBacklog } from "@opentag/linear";
-import type { SlackEventProcessorInput } from "@opentag/slack";
+import { escapeSlackText, type SlackEventProcessorInput } from "@opentag/slack";
 import type { OpenTagCliConfig } from "./config.js";
 
 export const SLACK_LINEAR_BACKLOG_LIMIT = 20;
@@ -40,7 +40,7 @@ export function renderSlackLinearBacklogReply(input: {
     lines.push("No unfinished issues in the configured Linear project.");
   }
   for (const issue of shown) {
-    lines.push(`• <${issue.url}|${issue.identifier}> — ${issue.title}  [${issue.stateName}]`);
+    lines.push(`• <${issue.url}|${issue.identifier}> — ${escapeSlackText(issue.title)}  [${escapeSlackText(issue.stateName)}]`);
   }
   if (input.backlog.issues.length > shown.length || input.backlog.hasMore) {
     lines.push(`Showing ${shown.length} of ${totalLabel} open issues.`);
