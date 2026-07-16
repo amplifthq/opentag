@@ -10,7 +10,7 @@ const NOT_CONFIGURED_TEXT =
 const UNAVAILABLE_TEXT = "Linear API is unavailable right now; try again later.";
 
 export function resolveSlackLinearBacklogSettings(input: {
-  linear?: { token?: string; projectId?: string; graphqlUrl?: string } | undefined;
+  linear?: { token?: string | undefined; projectId?: string | undefined; graphqlUrl?: string | undefined } | undefined;
   env?: NodeJS.ProcessEnv;
 }): { token: string; projectId: string; graphqlUrl?: string } | null {
   const env = input.env ?? {};
