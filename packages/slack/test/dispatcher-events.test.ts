@@ -387,3 +387,16 @@ describe("Slack dispatcher-backed self-service", () => {
     ]);
   });
 });
+
+describe("linear handler passthrough", () => {
+  it("copies the configured linear handler into the processor input", () => {
+    const linear = async () => "backlog";
+    const input = createSlackDispatcherEventProcessorInput({ dispatcherUrl: "http://localhost:3030", linear });
+    expect(input.linear).toBe(linear);
+  });
+
+  it("leaves linear undefined when not configured", () => {
+    const input = createSlackDispatcherEventProcessorInput({ dispatcherUrl: "http://localhost:3030" });
+    expect(input.linear).toBeUndefined();
+  });
+});
