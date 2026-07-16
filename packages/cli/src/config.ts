@@ -330,6 +330,7 @@ const LinearPlatformSchema = z
     webhookSecret: SecretStringSchema.optional(),
     teamId: z.string().min(1).optional(),
     teamKey: z.string().min(1).optional(),
+    projectId: z.string().min(1).optional(),
     graphqlUrl: z.string().url().optional(),
     webhookPath: z.string().min(1).optional(),
     port: OptionalPortSchema,
@@ -353,11 +354,12 @@ const LinearPlatformSchema = z
         message: "Linear token is required unless auth.method is hosted_oauth_app."
       });
     }
-    if (!value.webhookSecret) {
+    if (!value.webhookSecret && !value.projectId) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["webhookSecret"],
-        message: "Linear webhookSecret is required unless auth.method is hosted_oauth_app."
+        message:
+          "Linear webhookSecret is required unless auth.method is hosted_oauth_app or the config is query-only (projectId set)."
       });
     }
   });

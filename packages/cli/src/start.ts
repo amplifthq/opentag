@@ -168,6 +168,15 @@ function requireLinearConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
   return linear;
 }
 
+// A query-only Linear config (token + projectId, no webhookSecret) powers the
+// read-only Slack /linear backlog command and must not mount webhook ingress.
+function linearIngressEnabled(
+  linear: OpenTagCliConfig["platforms"]["linear"]
+): linear is NonNullable<OpenTagCliConfig["platforms"]["linear"]> {
+  if (!linear) return false;
+  return Boolean(linear.webhookSecret) || linear.auth?.method === "hosted_oauth_app";
+}
+
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
   return Boolean(
     config.platforms.lark ||
@@ -239,7 +248,7 @@ function localStartPortChecks(config: OpenTagCliConfig): LocalPortCheck[] {
     });
   }
   const linear = config.platforms.linear;
-  if (linear) {
+  if (linearIngressEnabled(linear)) {
     checks.push({
       label: "Linear local webhook",
       port: linear.port ?? DEFAULT_LINEAR_WEBHOOK_PORT,
@@ -1007,7 +1016,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
       const handle = dependencies.startGitLabIngress(gitlabIngressConfigFromCliConfig(config));
       ingresses.push({ platform: "gitlab", url: handle.url, webhookPath: handle.webhookPath, handle });
     }
-    if (config.platforms.linear) {
+    if (linearIngressEnabled(config.platforms.linear)) {
       const linearIngressConfig = linearIngressConfigFromCliConfig(config);
       if (linearTokenProvider) {
         linearIngressConfig.getLinearToken = linearTokenProvider;

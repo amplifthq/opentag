@@ -634,3 +634,25 @@ describe("OpenTag CLI config", () => {
     });
   });
 });
+
+describe("query-only Linear platform config (AMP-153)", () => {
+  it("accepts token + projectId without webhookSecret", () => {
+    const source = config();
+    source.platforms.linear = { token: "lin_api_secret", projectId: "proj_123" } as never;
+    const parsed = parseCliConfig(JSON.parse(JSON.stringify(source)));
+    expect(parsed.platforms.linear?.projectId).toBe("proj_123");
+    expect(parsed.platforms.linear?.webhookSecret).toBeUndefined();
+  });
+
+  it("still rejects a Linear config with neither webhookSecret nor projectId", () => {
+    const source = config();
+    source.platforms.linear = { token: "lin_api_secret" } as never;
+    expect(() => parseCliConfig(JSON.parse(JSON.stringify(source)))).toThrow(/webhookSecret/);
+  });
+
+  it("still rejects a Linear config without a token", () => {
+    const source = config();
+    source.platforms.linear = { projectId: "proj_123" } as never;
+    expect(() => parseCliConfig(JSON.parse(JSON.stringify(source)))).toThrow(/token/);
+  });
+});
