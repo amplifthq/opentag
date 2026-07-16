@@ -654,6 +654,7 @@ webhook path for hosted Linear OAuth App installs.
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `OPENTAG_LINEAR_API_KEY` / `OPENTAG_LINEAR_TOKEN` | none | Linear OAuth access token or raw `lin_api_...` API key used for callbacks and direct issue apply; OAuth tokens may include or omit the `Bearer ` prefix |
+| `OPENTAG_LINEAR_PROJECT_ID` | none | Linear project id used by the read-only Slack `/linear` backlog command; prefer `platforms.linear.projectId` in the OpenTag config |
 | `OPENTAG_LINEAR_GRAPHQL_URL` | `https://api.linear.app/graphql` | Optional Linear GraphQL endpoint override |
 | `OPENTAG_LINEAR_WEBHOOK_SECRET` | none | Enables dispatcher-mounted Linear webhook ingress and verifies `Linear-Signature` |
 | `OPENTAG_LINEAR_WEBHOOK_PATH` | `/linear/webhooks` | Public Linear webhook path |
@@ -836,6 +837,16 @@ before the daemon can claim and execute runs for it. Binding changes require
 the sender's Slack user id to be listed in
 `OPENTAG_SLACK_BINDING_ADMIN_USER_IDS`, or the channel binding must be updated
 from local config or the dispatcher API.
+
+Slack source-thread queries can also list the configured Linear project's
+unfinished issues with `/linear` (or the bare mention `@OpenTag linear`). The
+command is deterministic and read-only: it does not create an Agent Run, does
+not modify Linear, and replies in the original thread with issue identifiers,
+titles, states, the query timestamp, and an explicit truncation notice above
+20 results. Configure `platforms.linear.token` and `platforms.linear.projectId`
+(or the `OPENTAG_LINEAR_API_KEY` / `OPENTAG_LINEAR_PROJECT_ID` environment
+fallback). A query-only Linear config needs no `webhookSecret`; the Linear
+webhook ingress is only mounted when `webhookSecret` is present.
 
 ## Lark Ingress Environment
 
