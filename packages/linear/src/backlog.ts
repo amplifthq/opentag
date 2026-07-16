@@ -19,8 +19,8 @@ export type LinearProjectBacklog = {
   projectName: string | null;
 };
 
-const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $first: Int!) {
-  project(id: $projectId) { name }
+const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $projectKey: String!, $first: Int!) {
+  project(id: $projectKey) { name }
   issues(
     filter: {
       project: { id: { eq: $projectId } }
@@ -70,7 +70,7 @@ export async function fetchLinearProjectBacklog(input: {
     token: input.token,
     ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
     query: BACKLOG_QUERY,
-    variables: { projectId: input.projectId, first: LINEAR_BACKLOG_PAGE_SIZE },
+    variables: { projectId: input.projectId, projectKey: input.projectId, first: LINEAR_BACKLOG_PAGE_SIZE },
     fetchImpl: input.fetchImpl,
     timeoutMs: input.timeoutMs ?? DEFAULT_LINEAR_BACKLOG_TIMEOUT_MS
   });

@@ -63,10 +63,10 @@ describe("fetchLinearProjectBacklog", () => {
     expect(calls).toHaveLength(1);
     const query = String(calls[0]!.body.query);
     expect(query).toContain('nin: ["completed", "canceled"]');
-    expect(query).toContain("project(id: $projectId)");
+    expect(query).toContain("project(id: $projectKey)");
     expect(query).toContain("priority");
     expect(query).not.toContain("mutation");
-    expect(calls[0]!.body.variables).toEqual({ projectId: "proj_1", first: 100 });
+    expect(calls[0]!.body.variables).toEqual({ projectId: "proj_1", projectKey: "proj_1", first: 100 });
   });
 
   it("sorts by state type (started, unstarted, backlog) then priority then issue number", async () => {
