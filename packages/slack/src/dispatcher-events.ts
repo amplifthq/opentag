@@ -289,6 +289,7 @@ export function createSlackDispatcherEventProcessorInput(config: SlackDispatcher
             channelId: input.channelId,
             threadTs: input.threadTs,
             text: input.text,
+            ...(input.textFormat ? { textFormat: input.textFormat } : {}),
             ...(input.blocks?.length ? { blocks: input.blocks } : {})
           })
         )

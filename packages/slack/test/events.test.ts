@@ -76,13 +76,13 @@ describe("Slack thread action metadata", () => {
 });
 
 describe("Slack /linear self-service command", () => {
-  type Reply = { channelId: string; threadTs: string; text: string };
+  type Reply = { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn" };
 
   function linearProcessor(input: {
     replies: Reply[];
     runs: string[];
     linearCalls?: number[];
-    linearReply?: string;
+    linearReply?: string | { text: string; textFormat?: "mrkdwn" };
     withLinearHandler?: boolean;
   }) {
     return createSlackEventProcessor({
@@ -94,7 +94,12 @@ describe("Slack /linear self-service command", () => {
         return { runId: "run_1" };
       },
       async reply(reply) {
-        input.replies.push({ channelId: reply.channelId, threadTs: reply.threadTs, text: reply.text });
+        input.replies.push({
+          channelId: reply.channelId,
+          threadTs: reply.threadTs,
+          text: reply.text,
+          ...(reply.textFormat ? { textFormat: reply.textFormat } : {})
+        });
       },
       ...(input.withLinearHandler === false
         ? {}
@@ -192,5 +197,19 @@ describe("Slack /linear self-service command", () => {
     await linearProcessor({ replies, runs: [] }).process(mentionEvent("<@UBOT> /help"), { agentId: "opentag" });
 
     expect(replies[0]!.text).toContain("/linear");
+  });
+
+  it("forwards textFormat: mrkdwn from a linear handler reply so links are not re-escaped", async () => {
+    const replies: Reply[] = [];
+    const runs: string[] = [];
+
+    await linearProcessor({
+      replies,
+      runs,
+      linearReply: { text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" }
+    }).process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ text: "• <https://x|AMP-1> — t", textFormat: "mrkdwn" });
   });
 });

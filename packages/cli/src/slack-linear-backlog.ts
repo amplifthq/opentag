@@ -71,7 +71,10 @@ export function createSlackLinearBacklogHandler(input: {
         fetchImpl: input.fetchImpl ?? fetch,
         timeoutMs: SLACK_LINEAR_BACKLOG_TIMEOUT_MS
       });
-      return renderSlackLinearBacklogReply({ backlog, limit: SLACK_LINEAR_BACKLOG_LIMIT, queriedAt: now() });
+      return {
+        text: renderSlackLinearBacklogReply({ backlog, limit: SLACK_LINEAR_BACKLOG_LIMIT, queriedAt: now() }),
+        textFormat: "mrkdwn" as const
+      };
     } catch (error) {
       // linearGraphql error messages contain the HTTP status and GraphQL error
       // text only — never the token — so the message is safe for local logs.

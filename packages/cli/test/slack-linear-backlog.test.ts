@@ -171,8 +171,13 @@ describe("createSlackLinearBacklogHandler", () => {
       now: () => "2026-07-16T21:30:00.000Z"
     });
     const reply = await handler(CONTEXT);
-    expect(reply).toContain("1 open issue");
-    expect(reply).toContain("AMP-153");
+    expect(reply).toEqual(
+      expect.objectContaining({
+        textFormat: "mrkdwn",
+        text: expect.stringContaining("1 open issue")
+      })
+    );
+    expect(typeof reply === "string" ? reply : reply.text).toContain("AMP-153");
   });
 
   it("replies a safe unavailable message on API failure and logs without the token", async () => {

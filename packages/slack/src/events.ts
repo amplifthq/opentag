@@ -88,6 +88,7 @@ export type SlackAppRuntimeConfig = {
 
 export type SlackSelfServiceReply = {
   text: string;
+  textFormat?: "mrkdwn";
   blocks?: SlackBlock[];
 };
 
@@ -120,7 +121,7 @@ export type SlackEventProcessorInput = {
   submitThreadAction?(action: SlackThreadActionInput): Promise<unknown>;
   bindChannel?(input: { teamId: string; channelId: string; repoProvider: string; owner: string; repo: string }): Promise<void>;
   unbindChannel?(input: { teamId: string; channelId: string }): Promise<void>;
-  reply?(input: { channelId: string; threadTs: string; text: string; blocks?: SlackBlock[] }): Promise<void>;
+  reply?(input: { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn"; blocks?: SlackBlock[] }): Promise<void>;
   status?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   doctor?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
   linear?(input: SlackSelfServiceContext): Promise<SlackSelfServiceReply | string>;
@@ -600,6 +601,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           channelId: payload.event.channel,
           threadTs,
           text: reply.text,
+          ...(reply.textFormat ? { textFormat: reply.textFormat } : {}),
           ...(reply.blocks?.length ? { blocks: reply.blocks } : {})
         });
         return json({ ok: true, selfService: "linear" });
