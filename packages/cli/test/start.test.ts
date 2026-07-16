@@ -1307,3 +1307,17 @@ describe("OpenTag CLI start wiring", () => {
     expect(shouldRethrowAbortReason({ shutdownRequested: false, reason: "stopped" })).toBe(false);
   });
 });
+
+describe("slack linear backlog wiring (AMP-153)", () => {
+  it("attaches a linear handler to the Socket Mode ingress config", () => {
+    const built = slackSocketModeConfig();
+    const ingressConfig = slackSocketModeIngressConfigFromCliConfig(built, { env: {} });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+
+  it("attaches a linear handler to the Events API ingress config", () => {
+    const built = slackConfig();
+    const ingressConfig = slackIngressConfigFromCliConfig(built, { env: {} });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+});

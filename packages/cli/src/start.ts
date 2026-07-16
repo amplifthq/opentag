@@ -55,6 +55,7 @@ import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEA
 import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "./platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
+import { createSlackLinearBacklogHandler } from "./slack-linear-backlog.js";
 
 export type StartCommandOptions = {
   config?: string;
@@ -510,7 +511,7 @@ function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "even
 export function slackIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
   input: { env?: NodeJS.ProcessEnv } = {}
-): SlackEventsApiIngressConfig {
+): SlackEventsApiIngressConfig & { linear: ReturnType<typeof createSlackLinearBacklogHandler> } {
   const slack = requireSlackConfig(config);
   if (!slack.signingSecret) {
     throw new Error("Slack Events API mode requires platforms.slack.signingSecret.");
@@ -533,11 +534,18 @@ export function slackIngressConfigFromCliConfig(
     ...(slack.appId ? { appId: slack.appId } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
-    ...(slack.port ? { port: slack.port } : {})
+    ...(slack.port ? { port: slack.port } : {}),
+    linear: createSlackLinearBacklogHandler({
+      ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
+      env: input.env ?? process.env
+    })
   };
 }
 
-export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackSocketModeIngressConfig {
+export function slackSocketModeIngressConfigFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv } = {}
+): SlackSocketModeIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.appToken) {
     throw new Error("Slack Socket Mode requires platforms.slack.appToken.");
@@ -557,7 +565,11 @@ export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConf
         }
       : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
-    ...(slack.appId ? { appId: slack.appId } : {})
+    ...(slack.appId ? { appId: slack.appId } : {}),
+    linear: createSlackLinearBacklogHandler({
+      ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
+      env: input.env ?? process.env
+    })
   };
 }
 
@@ -1000,7 +1012,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     }
     if (config.platforms.slack) {
       if (slackModeFromCliConfig(config) === "socket_mode") {
-        const handle = dependencies.startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config));
+        const handle = dependencies.startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config, { env }));
         ingresses.push({ platform: "slack", mode: "socket_mode", handle });
         abortOnSubsystemFailure(handle.startPromise, abortController);
       } else {
