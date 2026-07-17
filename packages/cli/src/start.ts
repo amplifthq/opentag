@@ -414,7 +414,7 @@ export function dispatcherRuntimeInputFromCliConfig(
         ? { githubApplyToken: config.daemon.githubToken }
         : {}),
     ...(gitlab ? { gitlabToken: gitlab.token, gitlabBaseUrl: gitlab.baseUrl } : {}),
-    ...(linear && linear.token
+    ...(linearIngressEnabled(linear) && linear.token
       ? {
           linearToken: linear.token,
           ...(linear.graphqlUrl ? { linearGraphqlUrl: linear.graphqlUrl } : {}),

@@ -407,6 +407,13 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("does not forward the Linear token to the dispatcher for a query-only Linear config", () => {
+    const built = linearConfig();
+    built.platforms.linear = { token: "lin_api_qo", projectId: "proj_qo" } as never;
+
+    expect(dispatcherRuntimeInputFromCliConfig(built)).not.toHaveProperty("linearToken");
+  });
+
   it("refreshes and persists Linear OAuth app tokens before they expire", async () => {
     const built = linearOAuthConfig();
     const configPath = join(tempDir(), "config.json");
