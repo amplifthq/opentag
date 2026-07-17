@@ -329,6 +329,19 @@ function doctorReply(input: SlackSelfServiceContext): SlackSelfServiceReply {
 }
 
 export function createSlackEventProcessor(input: SlackEventProcessorInput) {
+  const MAX_SEEN_EVENT_IDS = 1000;
+  const seenEventIds = new Set<string>();
+  function markEventSeen(eventId: string): "new" | "duplicate" {
+    if (seenEventIds.has(eventId)) return "duplicate";
+    seenEventIds.add(eventId);
+    // Bounded: evict oldest insertion when over cap (Set preserves insertion order).
+    if (seenEventIds.size > MAX_SEEN_EVENT_IDS) {
+      const oldest = seenEventIds.values().next().value;
+      if (oldest !== undefined) seenEventIds.delete(oldest);
+    }
+    return "new";
+  }
+
   async function processBlockActions(payload: SlackInteractivePayload, slackApp: SlackAppRuntimeConfig): Promise<SlackEventProcessorResult> {
     const action = payload.actions?.find((candidate) => {
       if (candidate.action_id?.startsWith("opentag:")) return true;
@@ -424,6 +437,9 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       }
       if (!payload.team_id || !payload.event.channel || !payload.event.user || !payload.event.text || !payload.event.ts || !payload.event_id) {
         return json({ error: "invalid_event_payload" }, 400);
+      }
+      if (markEventSeen(payload.event_id) === "duplicate") {
+        return json({ ok: true, ignored: "duplicate_event" });
       }
 
       const rawThreadActionText =

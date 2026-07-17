@@ -75,6 +75,63 @@ describe("Slack thread action metadata", () => {
   });
 });
 
+describe("Slack event_id dedup", () => {
+  function dedupProcessor(input: { runs: string[] }) {
+    return createSlackEventProcessor({
+      async resolveChannelBinding() {
+        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      async createRun() {
+        input.runs.push("run_created");
+        return { runId: "run_1" };
+      },
+      now: () => "2026-07-16T00:00:00.000Z"
+    });
+  }
+
+  function mentionPayload(eventId: string) {
+    return {
+      type: "event_callback" as const,
+      team_id: "T123",
+      event_id: eventId,
+      authorizations: [{ user_id: "UBOT" }],
+      event: {
+        type: "app_mention" as const,
+        channel: "C123",
+        user: "U456",
+        text: "<@UBOT> fix the bug",
+        ts: "1719187200.000100"
+      }
+    };
+  }
+
+  it("drops a duplicate delivery of the same event_id and runs the handler only once", async () => {
+    const runs: string[] = [];
+    const processor = dedupProcessor({ runs });
+
+    const first = await processor.process(mentionPayload("EvDup1"), { agentId: "opentag" });
+    const second = await processor.process(mentionPayload("EvDup1"), { agentId: "opentag" });
+
+    expect(first.body).toMatchObject({ ok: true });
+    expect(first.body).not.toHaveProperty("ignored", "duplicate_event");
+    expect(second.body).toEqual({ ok: true, ignored: "duplicate_event" });
+    expect(runs).toHaveLength(1);
+  });
+
+  it("processes two different event_ids independently (no false dedup)", async () => {
+    const runs: string[] = [];
+    const processor = dedupProcessor({ runs });
+
+    const first = await processor.process(mentionPayload("EvDup2"), { agentId: "opentag" });
+    const second = await processor.process(mentionPayload("EvDup3"), { agentId: "opentag" });
+
+    expect(first.body).toMatchObject({ ok: true });
+    expect(second.body).toMatchObject({ ok: true });
+    expect(second.body).not.toHaveProperty("ignored", "duplicate_event");
+    expect(runs).toHaveLength(2);
+  });
+});
+
 describe("Slack /linear self-service command", () => {
   type Reply = { channelId: string; threadTs: string; text: string; textFormat?: "mrkdwn" };
 

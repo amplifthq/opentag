@@ -1,6 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { computeSlackSignature, createSlackEventsApp, verifySlackTimestamp } from "../src/app.js";
 
+// The Events API ingress acks event_callback/block_actions requests with
+// {ok:true} immediately and processes them in a detached background task
+// (see packages/slack/src/ingress.ts). Tests that assert on side effects of
+// that processing (created runs, replies, etc.) need to let the background
+// task run before asserting.
+function flushAsyncEvents(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("Slack events app", () => {
   const now = "2024-06-24T00:00:00.000Z";
   const currentTimestamp = "1719187200";
@@ -141,7 +150,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "status" });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
       channelId: "C123",
@@ -205,7 +215,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind" });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(canManageBinding).toHaveBeenCalledWith({
       action: "bind",
@@ -277,7 +288,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unauthorized: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
@@ -334,7 +346,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", usage: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
@@ -389,7 +402,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unavailable: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
       channelId: "C123",
@@ -445,12 +459,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      ok: true,
-      selfService: "stop",
-      outcome: "cancelled",
-      runId: "run_active"
-    });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await flushAsyncEvents();
     expect(createRun).not.toHaveBeenCalled();
     expect(stopRun).toHaveBeenCalledWith({
       teamId: "T123",

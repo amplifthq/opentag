@@ -299,11 +299,23 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
       });
       return c.json({ error: resolvedSlackApp.error }, 401);
     }
-    const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
-    if (result.kind === "text") {
-      return c.text(result.body, result.status);
+    if (payload.type === "url_verification") {
+      const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+      if (result.kind === "text") {
+        return c.text(result.body, result.status);
+      }
+      return c.json(result.body, result.status);
     }
-    return c.json(result.body, result.status);
+    // ACK immediately; process asynchronously so a slow handler cannot miss
+    // Slack's 3s deadline. Duplicate retries are dropped by event_id dedup in
+    // the processor. Errors are logged, not surfaced (the reply, if any, is
+    // delivered out-of-band via chat.postMessage).
+    void Promise.resolve()
+      .then(() => processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true }))
+      .catch((error) => {
+        console.error("[slack] async event processing failed:", error);
+      });
+    return c.json({ ok: true }, 200);
   });
 
   return app;
