@@ -74,6 +74,9 @@ export async function fetchLinearProjectBacklog(input: {
     fetchImpl: input.fetchImpl,
     timeoutMs: input.timeoutMs ?? DEFAULT_LINEAR_BACKLOG_TIMEOUT_MS
   });
+  if (data.project == null) {
+    throw new Error("Linear project not found or inaccessible; check platforms.linear.projectId and the token's access.");
+  }
   const issues = data.issues.nodes
     .map((node) => ({
       identifier: node.identifier,
@@ -93,6 +96,6 @@ export async function fetchLinearProjectBacklog(input: {
     issues,
     fetched: issues.length,
     hasMore: data.issues.pageInfo.hasNextPage,
-    projectName: data.project?.name ?? null
+    projectName: data.project.name
   };
 }

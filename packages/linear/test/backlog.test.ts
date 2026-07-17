@@ -57,7 +57,7 @@ describe("fetchLinearProjectBacklog", () => {
     await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls, project: null, nodes: [] })
+      fetchImpl: fetchStub({ calls, project: { name: "opentag" }, nodes: [] })
     });
 
     expect(calls).toHaveLength(1);
@@ -73,7 +73,7 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: null, nodes: [AMP_9, AMP_153, AMP_131] })
+      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [AMP_9, AMP_153, AMP_131] })
     });
 
     expect(backlog.issues.map((issue) => issue.identifier)).toEqual(["AMP-131", "AMP-153", "AMP-9"]);
@@ -122,7 +122,7 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: null, nodes: [none, medium, urgent, high] })
+      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [none, medium, urgent, high] })
     });
 
     expect(backlog.issues.map((issue) => issue.identifier)).toEqual(["AMP-1", "AMP-2", "AMP-3", "AMP-4"]);
@@ -138,14 +138,14 @@ describe("fetchLinearProjectBacklog", () => {
     expect(backlog.projectName).toBe("opentag");
   });
 
-  it("maps a missing project to a null project name", async () => {
-    const backlog = await fetchLinearProjectBacklog({
+  it("rejects when the Linear project is missing or inaccessible instead of resolving an empty backlog", async () => {
+    const resultPromise = fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
       fetchImpl: fetchStub({ calls: [], project: null, nodes: [] })
     });
 
-    expect(backlog.projectName).toBeNull();
+    await expect(resultPromise).rejects.toThrow(/not found or inaccessible/i);
   });
 
   it("maps missing or null priority to 0", async () => {
@@ -166,7 +166,7 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: null, nodes: [missingPriorityField, nullPriority] })
+      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [missingPriorityField, nullPriority] })
     });
 
     expect(backlog.issues.every((issue) => issue.priority === 0)).toBe(true);
@@ -176,7 +176,7 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: null, nodes: [AMP_153], hasNextPage: true })
+      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [AMP_153], hasNextPage: true })
     });
 
     expect(backlog.hasMore).toBe(true);
