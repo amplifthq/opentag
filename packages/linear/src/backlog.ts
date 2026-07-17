@@ -19,6 +19,12 @@ export type LinearProjectBacklog = {
   projectName: string | null;
 };
 
+// Server-side priority ordering (Descending: Urgent -> High -> ... -> No priority
+// last) so the first $first rows returned are the globally highest-priority
+// issues, not just the $first most-recently-created ones. Without this, a
+// project with >100 unfinished issues could have higher-priority issues on
+// later pages silently dropped before the local sort below ever sees them,
+// making the "top 20 by priority" wrong. This keeps the request count at 1.
 const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $projectKey: String!, $first: Int!) {
   project(id: $projectKey) { name }
   issues(
@@ -26,6 +32,7 @@ const BACKLOG_QUERY = `query OpenTagProjectBacklog($projectId: ID!, $projectKey:
       project: { id: { eq: $projectId } }
       state: { type: { nin: ["completed", "canceled"] } }
     }
+    sort: [{ priority: { order: Descending } }]
     first: $first
   ) {
     nodes { identifier title url priority state { name type } }
