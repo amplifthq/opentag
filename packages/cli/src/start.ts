@@ -62,6 +62,8 @@ export type StartCommandOptions = {
   background?: boolean;
 };
 
+type LinearTokenProvider = NonNullable<LocalDispatcherRuntimeInput["linearTokenProvider"]>;
+
 type Logger = Pick<Console, "log">;
 
 export type StartRuntimeDependencies = {
@@ -510,7 +512,7 @@ function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "even
 
 export function slackIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
-  input: { env?: NodeJS.ProcessEnv } = {}
+  input: { env?: NodeJS.ProcessEnv; linearTokenProvider?: LinearTokenProvider } = {}
 ): SlackEventsApiIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.signingSecret) {
@@ -537,14 +539,15 @@ export function slackIngressConfigFromCliConfig(
     ...(slack.port ? { port: slack.port } : {}),
     linear: createSlackLinearBacklogHandler({
       ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
-      env: input.env ?? process.env
+      env: input.env ?? process.env,
+      ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {})
     })
   };
 }
 
 export function slackSocketModeIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
-  input: { env?: NodeJS.ProcessEnv } = {}
+  input: { env?: NodeJS.ProcessEnv; linearTokenProvider?: LinearTokenProvider } = {}
 ): SlackSocketModeIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.appToken) {
@@ -568,7 +571,8 @@ export function slackSocketModeIngressConfigFromCliConfig(
     ...(slack.appId ? { appId: slack.appId } : {}),
     linear: createSlackLinearBacklogHandler({
       ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
-      env: input.env ?? process.env
+      env: input.env ?? process.env,
+      ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {})
     })
   };
 }
@@ -1012,11 +1016,15 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     }
     if (config.platforms.slack) {
       if (slackModeFromCliConfig(config) === "socket_mode") {
-        const handle = dependencies.startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config, { env }));
+        const handle = dependencies.startSlackSocketModeIngress(
+          slackSocketModeIngressConfigFromCliConfig(config, { env, ...(linearTokenProvider ? { linearTokenProvider } : {}) })
+        );
         ingresses.push({ platform: "slack", mode: "socket_mode", handle });
         abortOnSubsystemFailure(handle.startPromise, abortController);
       } else {
-        const handle = dependencies.startSlackIngress(slackIngressConfigFromCliConfig(config, { env }));
+        const handle = dependencies.startSlackIngress(
+          slackIngressConfigFromCliConfig(config, { env, ...(linearTokenProvider ? { linearTokenProvider } : {}) })
+        );
         ingresses.push({ platform: "slack", mode: "events_api", url: handle.url, handle });
       }
     }

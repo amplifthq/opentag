@@ -263,4 +263,54 @@ describe("createSlackLinearBacklogHandler", () => {
     expect(logged.join("\n")).not.toContain("supersecret");
     expect(String(reply)).not.toContain("supersecret");
   });
+
+  it("uses the live token from getToken instead of the stale static config token", async () => {
+    let capturedAuthorization: string | undefined;
+    const capturingFetch = (async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      capturedAuthorization = headers?.authorization;
+      return new Response(
+        JSON.stringify({
+          data: {
+            project: { name: "opentag" },
+            issues: { nodes: [], pageInfo: { hasNextPage: false } }
+          }
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    const handler = createSlackLinearBacklogHandler({
+      linear: { token: "stale_token", projectId: "proj_1" } as never,
+      env: {},
+      fetchImpl: capturingFetch,
+      getToken: async () => "fresh_token"
+    });
+    await handler(CONTEXT);
+    expect(capturedAuthorization).toBe("Bearer fresh_token");
+  });
+
+  it("falls back to the static configured token when getToken resolves undefined", async () => {
+    let capturedAuthorization: string | undefined;
+    const capturingFetch = (async (_url: unknown, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      capturedAuthorization = headers?.authorization;
+      return new Response(
+        JSON.stringify({
+          data: {
+            project: { name: "opentag" },
+            issues: { nodes: [], pageInfo: { hasNextPage: false } }
+          }
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    const handler = createSlackLinearBacklogHandler({
+      linear: { token: "static_token", projectId: "proj_1" } as never,
+      env: {},
+      fetchImpl: capturingFetch,
+      getToken: async () => undefined
+    });
+    await handler(CONTEXT);
+    expect(capturedAuthorization).toBe("Bearer static_token");
+  });
 });

@@ -1327,4 +1327,22 @@ describe("slack linear backlog wiring (AMP-153)", () => {
     const ingressConfig = slackIngressConfigFromCliConfig(built, { env: {} });
     expect(typeof ingressConfig.linear).toBe("function");
   });
+
+  it("still attaches a linear handler when a linearTokenProvider is threaded through Socket Mode config", () => {
+    const built = slackSocketModeConfig();
+    const ingressConfig = slackSocketModeIngressConfigFromCliConfig(built, {
+      env: {},
+      linearTokenProvider: async () => "fresh_token"
+    });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
+
+  it("still attaches a linear handler when a linearTokenProvider is threaded through Events API config", () => {
+    const built = slackConfig();
+    const ingressConfig = slackIngressConfigFromCliConfig(built, {
+      env: {},
+      linearTokenProvider: async () => "fresh_token"
+    });
+    expect(typeof ingressConfig.linear).toBe("function");
+  });
 });

@@ -110,6 +110,7 @@ export function createSlackLinearBacklogHandler(input: {
   fetchImpl?: typeof fetch;
   now?: () => string;
   logError?: (message: string) => void;
+  getToken?: () => Promise<string | undefined> | string | undefined;
 }): NonNullable<SlackEventProcessorInput["linear"]> {
   const now = input.now ?? (() => new Date().toISOString());
   const logError = input.logError ?? ((message: string) => console.error(message));
@@ -119,9 +120,11 @@ export function createSlackLinearBacklogHandler(input: {
       env: input.env ?? process.env
     });
     if (!settings) return NOT_CONFIGURED_TEXT;
+    const freshToken = input.getToken ? await input.getToken() : undefined;
+    const token = freshToken?.trim() ? freshToken : settings.token;
     try {
       const backlog = await fetchLinearProjectBacklog({
-        token: settings.token,
+        token,
         projectId: settings.projectId,
         ...(settings.graphqlUrl ? { graphqlUrl: settings.graphqlUrl } : {}),
         fetchImpl: input.fetchImpl ?? fetch,
