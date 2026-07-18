@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   createSlackLinearBacklogHandler,
   renderSlackLinearBacklogReply,
-  resolveSlackLinearBacklogSettings,
   SLACK_LINEAR_BACKLOG_LIMIT
 } from "../src/slack-linear-backlog.js";
 
@@ -45,36 +44,6 @@ function backlogFetch(
       { status: 200 }
     )) as typeof fetch;
 }
-
-describe("resolveSlackLinearBacklogSettings", () => {
-  it("prefers platforms.linear over env fallback", () => {
-    const settings = resolveSlackLinearBacklogSettings({
-      linear: { token: "cfg_token", projectId: "cfg_proj" },
-      env: { OPENTAG_LINEAR_API_KEY: "env_token", OPENTAG_LINEAR_PROJECT_ID: "env_proj" }
-    });
-    expect(settings).toEqual({ token: "cfg_token", projectId: "cfg_proj" });
-  });
-
-  it("falls back to OPENTAG_LINEAR_API_KEY / OPENTAG_LINEAR_PROJECT_ID", () => {
-    const settings = resolveSlackLinearBacklogSettings({
-      env: { OPENTAG_LINEAR_API_KEY: "env_token", OPENTAG_LINEAR_PROJECT_ID: "env_proj" }
-    });
-    expect(settings).toEqual({ token: "env_token", projectId: "env_proj" });
-  });
-
-  it("accepts OPENTAG_LINEAR_TOKEN as the secondary token fallback", () => {
-    const settings = resolveSlackLinearBacklogSettings({
-      env: { OPENTAG_LINEAR_TOKEN: "env_token2", OPENTAG_LINEAR_PROJECT_ID: "env_proj" }
-    });
-    expect(settings?.token).toBe("env_token2");
-  });
-
-  it("returns null when token or projectId is missing", () => {
-    expect(resolveSlackLinearBacklogSettings({ env: { OPENTAG_LINEAR_API_KEY: "t" } })).toBeNull();
-    expect(resolveSlackLinearBacklogSettings({ env: { OPENTAG_LINEAR_PROJECT_ID: "p" } })).toBeNull();
-    expect(resolveSlackLinearBacklogSettings({})).toBeNull();
-  });
-});
 
 describe("renderSlackLinearBacklogReply", () => {
   it("renders the header with project name and total, grouped headings, and issue lines", () => {
@@ -222,6 +191,18 @@ describe("renderSlackLinearBacklogReply", () => {
     });
     expect(text).toContain("• <https://linear.app/a/issue/AMP-153|AMP-153>");
   });
+
+  it.each(["javascript:alert(1)", "not a url"])("renders an invalid or unsafe issue URL as plain text: %s", (url) => {
+    const unsafe = { ...issue(153), url };
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [unsafe], fetched: 1, hasMore: false, projectName: "opentag" },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T22:48:00.000Z"
+    });
+    expect(text).toContain("• AMP-153 Task 153");
+    expect(text).not.toContain(`<${url}|`);
+  });
+
 });
 
 describe("createSlackLinearBacklogHandler", () => {
@@ -231,9 +212,112 @@ describe("createSlackLinearBacklogHandler", () => {
     expect(reply).toContain("Linear backlog is not configured");
   });
 
+  it.each([null, { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" }])(
+    "allows an explicitly allowlisted channel regardless of Project Target binding (%j)",
+    async (binding) => {
+      const handler = createSlackLinearBacklogHandler({
+        linear: {
+          connections: { default: { token: "lin_query" } },
+          channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_allowed" }]
+        } as never,
+        env: {},
+        fetchImpl: backlogFetch([])
+      });
+      const reply = await handler({ ...CONTEXT, binding: binding as never });
+      expect(typeof reply === "string" ? reply : reply.text).toContain("0 open");
+    }
+  );
+
+  it("fails closed before reading credentials or calling Linear for an unauthorized channel", async () => {
+    let tokenCalls = 0;
+    let fetchCalls = 0;
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        connections: { default: { token: "lin_query" } },
+        channels: [{ teamId: "T123", channelId: "C_ALLOWED", projectId: "proj_allowed" }]
+      } as never,
+      env: {},
+      getToken: async () => {
+        tokenCalls += 1;
+        return "fresh";
+      },
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        throw new Error("must not run");
+      }) as typeof fetch
+    });
+
+    const reply = await handler(CONTEXT);
+    expect(reply).toContain("not authorized");
+    expect(reply).toContain("T123/C123");
+    expect(tokenCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("escapes unauthorized Slack identity text before replying", async () => {
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        token: "lin_query",
+        channels: [{ teamId: "T_ALLOWED", channelId: "C_ALLOWED", projectId: "proj_allowed" }]
+      } as never,
+      env: {}
+    });
+    const reply = await handler({ ...CONTEXT, teamId: "<T&bad>", channelId: "<https://evil|click>" });
+    expect(reply).toContain("&lt;T&amp;bad&gt;/&lt;https://evil|click&gt;");
+    expect(reply).not.toContain("<https://evil|click>");
+  });
+
+  it("routes different allowlisted channels to their own Linear project", async () => {
+    const projectIds: string[] = [];
+    const capturingFetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { variables: { projectId: string } };
+      projectIds.push(body.variables.projectId);
+      return backlogFetch([])(_url as RequestInfo, init);
+    }) as typeof fetch;
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        token: "lin_query",
+        projectId: "legacy_global_project",
+        channels: [
+          { teamId: "T123", channelId: "C123", projectId: "project_one" },
+          { teamId: "T123", channelId: "C456", projectId: "project_two" }
+        ]
+      } as never,
+      env: { OPENTAG_LINEAR_PROJECT_ID: "env_global_project" },
+      fetchImpl: capturingFetch
+    });
+
+    await handler(CONTEXT);
+    await handler({ ...CONTEXT, channelId: "C456" });
+    expect(projectIds).toEqual(["project_one", "project_two"]);
+  });
+
+  it("fails closed for a non-default connection without falling back to the default token", async () => {
+    let tokenCalls = 0;
+    let fetchCalls = 0;
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        connections: { default: { token: "lin_default" }, other: { token: "lin_other" } },
+        channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1", connection: "other" }]
+      } as never,
+      getToken: async () => {
+        tokenCalls += 1;
+        return "fresh";
+      },
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        throw new Error("must not run");
+      }) as typeof fetch
+    });
+    const reply = await handler(CONTEXT);
+    expect(reply).toContain("connection other is not supported");
+    expect(tokenCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
+  });
+
   it("queries Linear and renders the backlog reply", async () => {
     const handler = createSlackLinearBacklogHandler({
-      linear: { token: "lin_api_test", projectId: "proj_1" } as never,
+      linear: { token: "lin_api_test", channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }] } as never,
       env: {},
       fetchImpl: backlogFetch([issue(153)]),
       now: () => "2026-07-16T22:48:00.000Z"
@@ -252,7 +336,7 @@ describe("createSlackLinearBacklogHandler", () => {
     const logged: string[] = [];
     const failingFetch = (async () => new Response(JSON.stringify({ errors: [{ message: "boom" }] }), { status: 500 })) as typeof fetch;
     const handler = createSlackLinearBacklogHandler({
-      linear: { token: "lin_api_supersecret", projectId: "proj_1" } as never,
+      linear: { token: "lin_api_supersecret", channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }] } as never,
       env: {},
       fetchImpl: failingFetch,
       logError: (message) => logged.push(message)
@@ -280,7 +364,7 @@ describe("createSlackLinearBacklogHandler", () => {
       );
     }) as typeof fetch;
     const handler = createSlackLinearBacklogHandler({
-      linear: { token: "stale_token", projectId: "proj_1" } as never,
+      linear: { token: "stale_token", channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }] } as never,
       env: {},
       fetchImpl: capturingFetch,
       getToken: async () => "fresh_token"
@@ -305,7 +389,7 @@ describe("createSlackLinearBacklogHandler", () => {
       );
     }) as typeof fetch;
     const handler = createSlackLinearBacklogHandler({
-      linear: { token: "static_token", projectId: "proj_1" } as never,
+      linear: { token: "static_token", channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }] } as never,
       env: {},
       fetchImpl: capturingFetch,
       getToken: async () => undefined
@@ -313,4 +397,79 @@ describe("createSlackLinearBacklogHandler", () => {
     await handler(CONTEXT);
     expect(capturedAuthorization).toBe("Bearer static_token");
   });
+
+  it("falls back to the static token when the live provider returns only whitespace", async () => {
+    let authorization: string | undefined;
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        connections: { default: { token: "static_query_token" } },
+        channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }]
+      } as never,
+      env: {},
+      getToken: async () => "   ",
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        authorization = (init?.headers as Record<string, string>).authorization;
+        return backlogFetch([])(_url as RequestInfo, init);
+      }) as typeof fetch
+    });
+    await handler(CONTEXT);
+    expect(authorization).toBe("Bearer static_query_token");
+  });
+
+  it.each([
+    ["missing project", backlogFetch([], { projectName: null })],
+    ["missing GraphQL data", (async () => new Response(JSON.stringify({}), { status: 200 })) as typeof fetch]
+  ])("never renders a successful zero-open state for %s", async (_case, fetchImpl) => {
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        token: "lin_query",
+        channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }]
+      } as never,
+      env: {},
+      fetchImpl,
+      logError() {}
+    });
+    const reply = await handler(CONTEXT);
+    expect(reply).toContain("unavailable");
+    expect(reply).not.toContain("0 open");
+    expect(reply).not.toContain("🎉");
+  });
+
+  it("reads the asynchronous token provider for every authorized query", async () => {
+    const authorizations: string[] = [];
+    const tokens = ["fresh_one", "fresh_two"];
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        token: "stale",
+        channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }]
+      } as never,
+      env: {},
+      getToken: async () => tokens.shift(),
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        authorizations.push((init?.headers as Record<string, string>).authorization);
+        return backlogFetch([])(_url as RequestInfo, init);
+      }) as typeof fetch
+    });
+    await handler(CONTEXT);
+    await handler(CONTEXT);
+    expect(authorizations).toEqual(["Bearer fresh_one", "Bearer fresh_two"]);
+  });
+
+  it("returns a safe unavailable reply when the token provider fails", async () => {
+    const logged: string[] = [];
+    const handler = createSlackLinearBacklogHandler({
+      linear: {
+        token: "stale",
+        channels: [{ teamId: "T123", channelId: "C123", projectId: "proj_1" }]
+      } as never,
+      env: {},
+      getToken: async () => { throw new Error("refresh failed"); },
+      logError: (message) => logged.push(message)
+    });
+    const reply = await handler(CONTEXT);
+    expect(reply).toContain("unavailable");
+    expect(logged.join("\n")).toContain("refresh failed");
+    expect(logged.join("\n")).not.toContain("stale");
+  });
+
 });

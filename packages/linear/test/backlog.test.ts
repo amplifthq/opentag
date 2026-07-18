@@ -1,27 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { fetchLinearProjectBacklog } from "../src/backlog.js";
+import { fetchLinearProjectBacklog, LINEAR_BACKLOG_MAX_PAGES } from "../src/backlog.js";
 
-type FetchCall = { url: string; body: Record<string, unknown> };
+type BacklogNode = {
+  identifier: string;
+  title: string;
+  url: string;
+  priority?: number | null;
+  state: { name: string; type: string };
+};
 
-function fetchStub(input: {
-  calls: FetchCall[];
+type BacklogPage = {
   project?: { name: string } | null;
-  nodes: Array<{
-    identifier: string;
-    title: string;
-    url: string;
-    priority?: number | null;
-    state: { name: string; type: string };
-  }>;
+  nodes: BacklogNode[];
   hasNextPage?: boolean;
-}): typeof fetch {
+  endCursor?: string | null;
+};
+
+type FetchCall = { url: string; body: { query?: unknown; variables?: unknown } };
+
+function fetchStub(input: { calls: FetchCall[]; pages: BacklogPage[] }): typeof fetch {
+  let pageIndex = 0;
   return (async (url: RequestInfo | URL, init?: RequestInit) => {
-    input.calls.push({ url: String(url), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+    input.calls.push({ url: String(url), body: JSON.parse(String(init?.body)) as FetchCall["body"] });
+    const page = input.pages[pageIndex++];
+    if (!page) throw new Error(`Unexpected backlog page request ${pageIndex}.`);
     return new Response(
       JSON.stringify({
         data: {
-          project: input.project ?? null,
-          issues: { nodes: input.nodes, pageInfo: { hasNextPage: input.hasNextPage ?? false } }
+          project: page.project === undefined ? { name: "opentag" } : page.project,
+          issues: {
+            nodes: page.nodes,
+            pageInfo: { hasNextPage: page.hasNextPage ?? false, endCursor: page.endCursor ?? null }
+          }
         }
       }),
       { status: 200 }
@@ -52,29 +62,77 @@ const AMP_9 = {
 };
 
 describe("fetchLinearProjectBacklog", () => {
-  it("queries unfinished project issues, the project name, and excludes completed/canceled state types", async () => {
+  it("queries unfinished project issues with cursor pagination and no mutation", async () => {
     const calls: FetchCall[] = [];
     await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls, project: { name: "opentag" }, nodes: [] })
+      fetchImpl: fetchStub({ calls, pages: [{ project: { name: "opentag" }, nodes: [] }] })
     });
 
     expect(calls).toHaveLength(1);
     const query = String(calls[0]!.body.query);
     expect(query).toContain('nin: ["completed", "canceled"]');
+    expect(query).toContain("$projectId: ID!");
+    expect(query).toContain("$projectKey: String!");
+    expect(query).not.toContain("$projectKey: ID!");
+    expect(query).toContain("$after: String");
     expect(query).toContain("project(id: $projectKey)");
     expect(query).toContain("priority");
     expect(query).toContain("sort: [{ priority: { order: Descending } }]");
+    expect(query).toContain("after: $after");
+    expect(query).toContain("pageInfo { hasNextPage endCursor }");
     expect(query).not.toContain("mutation");
     expect(calls[0]!.body.variables).toEqual({ projectId: "proj_1", projectKey: "proj_1", first: 100 });
+  });
+
+  it("paginates every unfinished issue before applying the global display sort", async () => {
+    const calls: FetchCall[] = [];
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      identifier: `AMP-${index + 1}`,
+      title: `Unstarted ${index + 1}`,
+      url: `https://linear.app/a/issue/AMP-${index + 1}`,
+      priority: 1,
+      state: { name: "Todo", type: "unstarted" }
+    }));
+    const pageTwoStarted = {
+      identifier: "AMP-1001",
+      title: "Started issue from page two",
+      url: "https://linear.app/a/issue/AMP-1001",
+      priority: 0,
+      state: { name: "In Progress", type: "started" }
+    };
+
+    const backlog = await fetchLinearProjectBacklog({
+      token: "lin_api_test",
+      projectId: "proj_1",
+      fetchImpl: fetchStub({
+        calls,
+        pages: [
+          { nodes: firstPage, hasNextPage: true, endCursor: "cursor_1" },
+          { nodes: [pageTwoStarted], hasNextPage: false }
+        ]
+      })
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.body.variables).toEqual({ projectId: "proj_1", projectKey: "proj_1", first: 100 });
+    expect(calls[1]!.body.variables).toEqual({
+      projectId: "proj_1",
+      projectKey: "proj_1",
+      first: 100,
+      after: "cursor_1"
+    });
+    expect(backlog.issues[0]?.identifier).toBe("AMP-1001");
+    expect(backlog.fetched).toBe(101);
+    expect(backlog.hasMore).toBe(false);
   });
 
   it("sorts by state type (started, unstarted, backlog) then priority then issue number", async () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [AMP_9, AMP_153, AMP_131] })
+      fetchImpl: fetchStub({ calls: [], pages: [{ nodes: [AMP_9, AMP_153, AMP_131] }] })
     });
 
     expect(backlog.issues.map((issue) => issue.identifier)).toEqual(["AMP-131", "AMP-153", "AMP-9"]);
@@ -123,17 +181,31 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [none, medium, urgent, high] })
+      fetchImpl: fetchStub({ calls: [], pages: [{ nodes: [none, medium, urgent, high] }] })
     });
 
     expect(backlog.issues.map((issue) => issue.identifier)).toEqual(["AMP-1", "AMP-2", "AMP-3", "AMP-4"]);
+  });
+
+  it("uses the full identifier as a stable tie-breaker when issue numbers match", async () => {
+    const sameNumber = [
+      { ...AMP_153, identifier: "OTHER-5", priority: 2 },
+      { ...AMP_153, identifier: "AMP-5", priority: 2 }
+    ];
+    const backlog = await fetchLinearProjectBacklog({
+      token: "lin_api_test",
+      projectId: "proj_1",
+      fetchImpl: fetchStub({ calls: [], pages: [{ nodes: sameNumber }] })
+    });
+
+    expect(backlog.issues.map((issue) => issue.identifier)).toEqual(["AMP-5", "OTHER-5"]);
   });
 
   it("maps the project name from the GraphQL response", async () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [] })
+      fetchImpl: fetchStub({ calls: [], pages: [{ project: { name: "opentag" }, nodes: [] }] })
     });
 
     expect(backlog.projectName).toBe("opentag");
@@ -143,7 +215,7 @@ describe("fetchLinearProjectBacklog", () => {
     const resultPromise = fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: null, nodes: [] })
+      fetchImpl: fetchStub({ calls: [], pages: [{ project: null, nodes: [] }] })
     });
 
     await expect(resultPromise).rejects.toThrow(/not found or inaccessible/i);
@@ -167,20 +239,51 @@ describe("fetchLinearProjectBacklog", () => {
     const backlog = await fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [missingPriorityField, nullPriority] })
+      fetchImpl: fetchStub({ calls: [], pages: [{ nodes: [missingPriorityField, nullPriority] }] })
     });
 
     expect(backlog.issues.every((issue) => issue.priority === 0)).toBe(true);
   });
 
-  it("reports hasMore from pageInfo.hasNextPage", async () => {
-    const backlog = await fetchLinearProjectBacklog({
+  it("rejects hasNextPage without an endCursor rather than returning a partial backlog", async () => {
+    const resultPromise = fetchLinearProjectBacklog({
       token: "lin_api_test",
       projectId: "proj_1",
-      fetchImpl: fetchStub({ calls: [], project: { name: "opentag" }, nodes: [AMP_153], hasNextPage: true })
+      fetchImpl: fetchStub({ calls: [], pages: [{ nodes: [AMP_153], hasNextPage: true }] })
     });
 
-    expect(backlog.hasMore).toBe(true);
+    await expect(resultPromise).rejects.toThrow(/without an endCursor/i);
+  });
+
+  it("rejects repeated cursors rather than looping or returning a partial backlog", async () => {
+    const resultPromise = fetchLinearProjectBacklog({
+      token: "lin_api_test",
+      projectId: "proj_1",
+      fetchImpl: fetchStub({
+        calls: [],
+        pages: [
+          { nodes: [AMP_153], hasNextPage: true, endCursor: "cursor_1" },
+          { nodes: [AMP_131], hasNextPage: true, endCursor: "cursor_1" }
+        ]
+      })
+    });
+
+    await expect(resultPromise).rejects.toThrow(/repeated endCursor/i);
+  });
+
+  it("rejects pagination beyond the explicit page safety limit instead of rendering partial results", async () => {
+    const pages = Array.from({ length: LINEAR_BACKLOG_MAX_PAGES }, (_, index) => ({
+      nodes: [AMP_153],
+      hasNextPage: true,
+      endCursor: `cursor_${index + 1}`
+    }));
+    const resultPromise = fetchLinearProjectBacklog({
+      token: "lin_api_test",
+      projectId: "proj_1",
+      fetchImpl: fetchStub({ calls: [], pages })
+    });
+
+    await expect(resultPromise).rejects.toThrow(/page safety limit/i);
   });
 
   it("propagates GraphQL failures without embedding the token", async () => {

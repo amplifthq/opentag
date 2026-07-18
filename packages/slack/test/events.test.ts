@@ -130,6 +130,19 @@ describe("Slack event_id dedup", () => {
     expect(second.body).not.toHaveProperty("ignored", "duplicate_event");
     expect(runs).toHaveLength(2);
   });
+
+  it("evicts the oldest event_id after the 1000-entry bound", async () => {
+    const runs: string[] = [];
+    const processor = dedupProcessor({ runs });
+    await processor.process(mentionPayload("EvOldest"), { agentId: "opentag" });
+    for (let index = 0; index < 1000; index += 1) {
+      await processor.process(mentionPayload(`EvFill${index}`), { agentId: "opentag" });
+    }
+
+    const retriedOldest = await processor.process(mentionPayload("EvOldest"), { agentId: "opentag" });
+    expect(retriedOldest.body).not.toHaveProperty("ignored", "duplicate_event");
+    expect(runs).toHaveLength(1002);
+  });
 });
 
 describe("Slack /linear self-service command", () => {
@@ -203,6 +216,67 @@ describe("Slack /linear self-service command", () => {
       expect(replies[0]!.text).toContain("OpenTag project backlog");
     }
   );
+
+  it("deduplicates retried /linear deliveries before a second query or reply", async () => {
+    const replies: Reply[] = [];
+    const runs: string[] = [];
+    const linearCalls: number[] = [];
+    const processor = linearProcessor({ replies, runs, linearCalls });
+
+    const first = await processor.process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
+    const retry = await processor.process(mentionEvent("<@UBOT> /linear"), { agentId: "opentag" });
+
+    expect(first.body).toMatchObject({ ok: true, selfService: "linear" });
+    expect(retry.body).toEqual({ ok: true, ignored: "duplicate_event" });
+    expect(linearCalls).toHaveLength(1);
+    expect(replies).toHaveLength(1);
+    expect(runs).toHaveLength(0);
+  });
+
+  it("passes Slack identity context with binding:null and never resolves a Project Target binding", async () => {
+    const contexts: unknown[] = [];
+    const replies: Reply[] = [];
+    const runs: string[] = [];
+    let bindingCalls = 0;
+    const processor = createSlackEventProcessor({
+      async resolveChannelBinding() {
+        bindingCalls += 1;
+        return { teamId: "T123", channelId: "C123", repoProvider: "github", owner: "acme", repo: "demo" };
+      },
+      async createRun() {
+        runs.push("run_created");
+        return { runId: "run_1" };
+      },
+      async linear(context) {
+        contexts.push(context);
+        return { text: "• <https://x|AMP-1>", textFormat: "mrkdwn" };
+      },
+      async reply(reply) {
+        replies.push(reply);
+      },
+      now: () => "2026-07-16T00:00:00.000Z"
+    });
+    const payload = mentionEvent("<@UBOT> /linear");
+    payload.event.thread_ts = "1719187000.000050";
+
+    await processor.process(payload, { agentId: "opentag" });
+
+    expect(bindingCalls).toBe(0);
+    expect(runs).toHaveLength(0);
+    expect(contexts).toEqual([{
+      teamId: "T123",
+      channelId: "C123",
+      threadTs: "1719187000.000050",
+      userId: "U456",
+      binding: null
+    }]);
+    expect(replies[0]).toMatchObject({
+      channelId: "C123",
+      threadTs: "1719187000.000050",
+      text: "• <https://x|AMP-1>",
+      textFormat: "mrkdwn"
+    });
+  });
 
   it("replies usage for /linear with extra arguments and does not create a run", async () => {
     const replies: Reply[] = [];

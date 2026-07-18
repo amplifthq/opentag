@@ -1,16 +1,15 @@
 import { fetchLinearProjectBacklog, type LinearBacklogIssue, type LinearProjectBacklog } from "@opentag/linear";
 import { escapeSlackText, type SlackEventProcessorInput } from "@opentag/slack";
 import type { OpenTagCliConfig } from "./config.js";
+import { resolveDefaultLinearBacklogToken, resolveLinearBacklogChannel } from "./linear-backlog-config.js";
 
 export const SLACK_LINEAR_BACKLOG_LIMIT = 20;
 export const SLACK_LINEAR_BACKLOG_TIMEOUT_MS = 10_000;
 
 const NOT_CONFIGURED_TEXT =
-  "Linear backlog is not configured. Set platforms.linear.projectId and a Linear token in the OpenTag config, or export OPENTAG_LINEAR_API_KEY and OPENTAG_LINEAR_PROJECT_ID.";
+  "Linear backlog is not configured for Slack. Add an entry to platforms.linear.channels and configure a Linear query credential.";
 const UNAVAILABLE_TEXT = "Linear API is unavailable right now; try again later.";
 
-// Emoji shown before each state-type group heading; anything not in this map
-// (unknown/future Linear state types) falls back to a neutral marker.
 const STATE_TYPE_EMOJI: Record<string, string> = {
   started: "🔵",
   unstarted: "⚪",
@@ -18,33 +17,32 @@ const STATE_TYPE_EMOJI: Record<string, string> = {
   triage: "🟣"
 };
 
-export function resolveSlackLinearBacklogSettings(input: {
-  linear?: { token?: string | undefined; projectId?: string | undefined; graphqlUrl?: string | undefined } | undefined;
-  env?: NodeJS.ProcessEnv;
-}): { token: string; projectId: string; graphqlUrl?: string } | null {
-  const env = input.env ?? {};
-  const token = input.linear?.token ?? env.OPENTAG_LINEAR_API_KEY ?? env.OPENTAG_LINEAR_TOKEN;
-  const projectId = input.linear?.projectId ?? env.OPENTAG_LINEAR_PROJECT_ID;
-  if (!token?.trim() || !projectId?.trim()) return null;
-  const graphqlUrl = input.linear?.graphqlUrl ?? env.OPENTAG_LINEAR_GRAPHQL_URL;
-  return { token: token.trim(), projectId: projectId.trim(), ...(graphqlUrl ? { graphqlUrl } : {}) };
-}
-
 function priorityMarker(priority: number): string {
   if (priority === 1) return " [urgent]";
   if (priority === 2) return " [high]";
   return "";
 }
 
+function safeSlackLinkUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 function renderIssueLine(issue: LinearBacklogIssue): string {
   const marker = priorityMarker(issue.priority);
-  return `• <${encodeURI(issue.url)}|${escapeSlackText(issue.identifier)}>${marker} ${escapeSlackText(issue.title)}`;
+  const identifier = escapeSlackText(issue.identifier);
+  const url = safeSlackLinkUrl(issue.url);
+  const label = url ? `<${url}|${identifier}>` : identifier;
+  return `• ${label}${marker} ${escapeSlackText(issue.title)}`;
 }
 
 type IssueGroup = { stateName: string; stateType: string; issues: LinearBacklogIssue[] };
 
-// Groups the already-limited "shown" issues by stateName, preserving the
-// order in which each stateName is first encountered in the sorted list.
 function groupShownIssues(shown: LinearBacklogIssue[]): IssueGroup[] {
   const groups: IssueGroup[] = [];
   const byStateName = new Map<string, IssueGroup>();
@@ -87,9 +85,7 @@ export function renderSlackLinearBacklogReply(input: {
       const emoji = STATE_TYPE_EMOJI[group.stateType] ?? "▫️";
       lines.push("");
       lines.push(`${emoji} *${escapeSlackText(group.stateName)} (${countLabel})*`);
-      for (const issue of group.issues) {
-        lines.push(renderIssueLine(issue));
-      }
+      for (const issue of group.issues) lines.push(renderIssueLine(issue));
     }
   }
 
@@ -112,21 +108,36 @@ export function createSlackLinearBacklogHandler(input: {
   logError?: (message: string) => void;
   getToken?: () => Promise<string | undefined> | string | undefined;
 }): NonNullable<SlackEventProcessorInput["linear"]> {
+  const env = input.env ?? process.env;
   const now = input.now ?? (() => new Date().toISOString());
   const logError = input.logError ?? ((message: string) => console.error(message));
-  return async () => {
-    const settings = resolveSlackLinearBacklogSettings({
+
+  return async (context) => {
+    const resolution = resolveLinearBacklogChannel({
       ...(input.linear ? { linear: input.linear } : {}),
-      env: input.env ?? process.env
+      teamId: context.teamId,
+      channelId: context.channelId,
+      env
     });
-    if (!settings) return NOT_CONFIGURED_TEXT;
-    const freshToken = input.getToken ? await input.getToken() : undefined;
-    const token = freshToken?.trim() ? freshToken : settings.token;
+    if (resolution.kind === "not-configured") return NOT_CONFIGURED_TEXT;
+    if (resolution.kind === "unauthorized") {
+      return `Linear backlog access is not authorized for Slack channel ${escapeSlackText(context.teamId)}/${escapeSlackText(context.channelId)}.`;
+    }
+    if (resolution.kind === "unsupported-connection") {
+      return `Linear backlog is unavailable for this channel because connection ${escapeSlackText(resolution.connection)} is not supported.`;
+    }
+
     try {
+      const providedToken = input.getToken ? await input.getToken() : undefined;
+      const token =
+        providedToken?.trim() ||
+        resolveDefaultLinearBacklogToken({ ...(input.linear ? { linear: input.linear } : {}), env });
+      if (!token) return NOT_CONFIGURED_TEXT;
+
       const backlog = await fetchLinearProjectBacklog({
         token,
-        projectId: settings.projectId,
-        ...(settings.graphqlUrl ? { graphqlUrl: settings.graphqlUrl } : {}),
+        projectId: resolution.projectId,
+        ...(resolution.graphqlUrl ? { graphqlUrl: resolution.graphqlUrl } : {}),
         fetchImpl: input.fetchImpl ?? fetch,
         timeoutMs: SLACK_LINEAR_BACKLOG_TIMEOUT_MS
       });
@@ -135,8 +146,6 @@ export function createSlackLinearBacklogHandler(input: {
         textFormat: "mrkdwn" as const
       };
     } catch (error) {
-      // linearGraphql error messages contain the HTTP status and GraphQL error
-      // text only — never the token — so the message is safe for local logs.
       logError(`[slack] linear backlog query failed: ${error instanceof Error ? error.message : String(error)}`);
       return UNAVAILABLE_TEXT;
     }

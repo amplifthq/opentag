@@ -47,6 +47,7 @@ import {
   type OpenTagCliConfig
 } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
+import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
 import { discordLocalInteractionsUrl, discordPublicInteractionsUrlPlaceholder } from "./platforms/discord/display.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
@@ -993,7 +994,10 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     refreshLinearOAuthToken: dependencies.refreshLinearOAuthToken,
     writeConfig: dependencies.writeConfig
   });
-  if (linearTokenProvider) {
+  // OAuth refresh is also used by the read-only Slack /linear handler, but a
+  // token provider only grants dispatcher mutation capability when Linear
+  // webhook/apply ingress is explicitly enabled.
+  if (linearTokenProvider && linearIngressEnabled(config.platforms.linear)) {
     dispatcherInput.linearTokenProvider = linearTokenProvider;
   }
   const dispatcher = dependencies.startDispatcher(dispatcherInput);
@@ -1050,6 +1054,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     logger.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
     if (hermesWarning) logger.log(hermesWarning);
+    for (const diagnostic of linearBacklogConfigDiagnostics(config)) logger.log(`Warning: ${diagnostic.message}`);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
         const slack = config.platforms.slack!;
@@ -1178,6 +1183,7 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     logger.log(`Runner: ${config.daemon.runnerId}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
     if (hermesWarning) logger.log(hermesWarning);
+    for (const diagnostic of linearBacklogConfigDiagnostics(config)) logger.log(`Warning: ${diagnostic.message}`);
     if (config.platforms.github) {
       logger.log(`GitHub webhook URL: ${githubRelayWebhookUrl(config)}`);
       logger.log("GitHub webhook secret: the relay must verify the configured secret before creating runs.");

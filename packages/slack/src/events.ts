@@ -603,7 +603,7 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
           await input.reply({ channelId: payload.event.channel, threadTs, text: LINEAR_UNAVAILABLE_TEXT });
           return json({ ok: true, selfService: "linear", unavailable: true });
         }
-        // The Linear project is configured globally; no Project Target binding is required.
+        // /linear authorization and project routing are enforced by the injected handler before credentials or APIs are used; repository binding is intentionally not its authorization source.
         const reply = normalizeSelfServiceReply(
           await input.linear({
             teamId: payload.team_id,
