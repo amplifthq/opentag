@@ -45,17 +45,77 @@ type LinearBacklogNode = {
   identifier: string;
   title: string;
   url: string;
-  priority: number | null;
+  priority?: number | null;
   state: { name: string; type: string };
 };
 
 type LinearBacklogPage = {
-  project: { name: string } | null;
+  project: { name: string };
   issues: {
     nodes: LinearBacklogNode[];
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
   };
 };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function invalidBacklogResponse(detail: string): Error {
+  return new Error(`Linear API returned an invalid backlog response (${detail}).`);
+}
+
+function parseBacklogPage(value: unknown): LinearBacklogPage {
+  if (!isRecord(value)) throw invalidBacklogResponse("missing data object");
+  if (value.project == null) {
+    throw new Error("Linear project not found or inaccessible; check the channel-mapped project ID and the token's access.");
+  }
+  if (!isRecord(value.project) || typeof value.project.name !== "string") {
+    throw invalidBacklogResponse("missing project name");
+  }
+  if (!isRecord(value.issues)) throw invalidBacklogResponse("missing issues object");
+  if (!Array.isArray(value.issues.nodes)) throw invalidBacklogResponse("missing issue nodes");
+  if (!isRecord(value.issues.pageInfo) || typeof value.issues.pageInfo.hasNextPage !== "boolean") {
+    throw invalidBacklogResponse("missing pagination metadata");
+  }
+  const endCursor = value.issues.pageInfo.endCursor;
+  if (endCursor !== undefined && endCursor !== null && typeof endCursor !== "string") {
+    throw invalidBacklogResponse("invalid endCursor");
+  }
+
+  const nodes = value.issues.nodes.map((node, index): LinearBacklogNode => {
+    if (
+      !isRecord(node) ||
+      typeof node.identifier !== "string" ||
+      typeof node.title !== "string" ||
+      typeof node.url !== "string" ||
+      (node.priority !== undefined && node.priority !== null && typeof node.priority !== "number") ||
+      !isRecord(node.state) ||
+      typeof node.state.name !== "string" ||
+      typeof node.state.type !== "string"
+    ) {
+      throw invalidBacklogResponse(`invalid issue node at index ${index}`);
+    }
+    return {
+      identifier: node.identifier,
+      title: node.title,
+      url: node.url,
+      ...(node.priority !== undefined ? { priority: node.priority as number | null } : {}),
+      state: { name: node.state.name, type: node.state.type }
+    };
+  });
+
+  return {
+    project: { name: value.project.name },
+    issues: {
+      nodes,
+      pageInfo: {
+        hasNextPage: value.issues.pageInfo.hasNextPage,
+        endCursor: typeof endCursor === "string" ? endCursor : null
+      }
+    }
+  };
+}
 
 function issueNumber(identifier: string): number {
   const value = Number(identifier.split("-")[1]);
@@ -96,7 +156,7 @@ export async function fetchLinearProjectBacklog(input: {
   let projectName: string | null = null;
 
   for (let pageNumber = 1; pageNumber <= LINEAR_BACKLOG_MAX_PAGES; pageNumber += 1) {
-    const data = await linearGraphql<LinearBacklogPage>({
+    const rawData = await linearGraphql<unknown>({
       token: input.token,
       ...(input.graphqlUrl ? { graphqlUrl: input.graphqlUrl } : {}),
       query: BACKLOG_QUERY,
@@ -109,9 +169,7 @@ export async function fetchLinearProjectBacklog(input: {
       fetchImpl: input.fetchImpl,
       timeoutMs: remainingTimeoutMs(deadlineMs)
     });
-    if (data.project == null) {
-      throw new Error("Linear project not found or inaccessible; check the channel-mapped project ID and the token's access.");
-    }
+    const data = parseBacklogPage(rawData);
     projectName ??= data.project.name;
     nodes.push(...data.issues.nodes);
 

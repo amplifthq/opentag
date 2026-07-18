@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { computeSlackSignature, createSlackEventsApp } from "../src/ingress.js";
+import { computeSlackSignature, createSlackEventsApp, startSlackIngress } from "../src/ingress.js";
 
 describe("Slack Events API ack-then-async", () => {
   const now = "2024-06-24T00:00:00.000Z";
@@ -44,8 +44,12 @@ describe("Slack Events API ack-then-async", () => {
 
   it("acks an event_callback with {ok:true} before a slow handler finishes, then still runs it", async () => {
     const timeline: string[] = [];
+    let releaseCreateRun!: () => void;
+    const createRunGate = new Promise<void>((resolve) => {
+      releaseCreateRun = resolve;
+    });
     const createRun = vi.fn(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await createRunGate;
       timeline.push("createRun_finished");
       return { runId: "run_1" };
     });
@@ -73,7 +77,6 @@ describe("Slack Events API ack-then-async", () => {
       clock: currentClock
     });
 
-    const start = Date.now();
     const response = await app.request("/slack/events", {
       method: "POST",
       headers: {
@@ -83,16 +86,16 @@ describe("Slack Events API ack-then-async", () => {
       },
       body: rawBody
     });
-    const elapsedMs = Date.now() - start;
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
-    expect(elapsedMs).toBeLessThan(30);
     expect(timeline).toHaveLength(0);
 
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(timeline).toEqual(["createRun_finished"]);
-    expect(createRun).toHaveBeenCalledOnce();
+    releaseCreateRun();
+    await vi.waitFor(() => {
+      expect(timeline).toEqual(["createRun_finished"]);
+      expect(createRun).toHaveBeenCalledOnce();
+    });
   });
 
   it("logs and swallows an error from asynchronous event processing without changing the ack response", async () => {
@@ -138,9 +141,10 @@ describe("Slack Events API ack-then-async", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(createRun).toHaveBeenCalledOnce();
-    expect(consoleError).toHaveBeenCalledWith("[slack] async event processing failed:", failure);
+    await vi.waitFor(() => {
+      expect(createRun).toHaveBeenCalledOnce();
+      expect(consoleError).toHaveBeenCalledWith("[slack] async event processing failed:", failure);
+    });
   });
 
   it("acks a block_actions interactive payload with {ok:true} immediately", async () => {
@@ -187,8 +191,21 @@ describe("Slack Events API ack-then-async", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
 
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(submitThreadAction).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(submitThreadAction).toHaveBeenCalledOnce());
+  });
+
+  it.each([
+    ["maxAsyncConcurrency", { maxAsyncConcurrency: 0 }],
+    ["maxAsyncOutstanding", { maxAsyncOutstanding: 0 }]
+  ])("preserves a zero %s setting so startup validation rejects it", (name, limits) => {
+    expect(() =>
+      startSlackIngress({
+        signingSecret: "secret",
+        dispatcherUrl: "http://127.0.0.1:1",
+        port: -1,
+        ...limits
+      })
+    ).toThrow(`${name} must be a positive integer.`);
   });
 
   it("bounds active plus queued event processing and returns 503 without starting overflow work", async () => {

@@ -221,6 +221,36 @@ describe("fetchLinearProjectBacklog", () => {
     await expect(resultPromise).rejects.toThrow(/not found or inaccessible/i);
   });
 
+  it.each([
+    ["issues object", { project: { name: "opentag" }, issues: null }],
+    ["issue nodes", { project: { name: "opentag" }, issues: { nodes: null, pageInfo: { hasNextPage: false } } }],
+    ["pagination metadata", { project: { name: "opentag" }, issues: { nodes: [], pageInfo: null } }]
+  ])("rejects a malformed Linear backlog response with missing %s", async (_case, data) => {
+    const malformedFetch = (async () =>
+      new Response(JSON.stringify({ data }), { status: 200 })) as typeof fetch;
+
+    await expect(
+      fetchLinearProjectBacklog({ token: "lin_api_test", projectId: "proj_1", fetchImpl: malformedFetch })
+    ).rejects.toThrow(/invalid backlog response/i);
+  });
+
+  it("rejects malformed issue nodes with a safe structural error", async () => {
+    const malformedFetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: {
+            project: { name: "opentag" },
+            issues: { nodes: [{ identifier: "AMP-1" }], pageInfo: { hasNextPage: false, endCursor: null } }
+          }
+        }),
+        { status: 200 }
+      )) as typeof fetch;
+
+    await expect(
+      fetchLinearProjectBacklog({ token: "lin_api_test", projectId: "proj_1", fetchImpl: malformedFetch })
+    ).rejects.toThrow(/invalid issue node/i);
+  });
+
   it("maps missing or null priority to 0", async () => {
     const missingPriorityField = {
       identifier: "AMP-5",

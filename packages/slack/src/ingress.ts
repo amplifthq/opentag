@@ -436,9 +436,9 @@ export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIng
           ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
         }
       ],
-      ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
-      ...(config.maxAsyncConcurrency ? { maxAsyncConcurrency: config.maxAsyncConcurrency } : {}),
-      ...(config.maxAsyncOutstanding ? { maxAsyncOutstanding: config.maxAsyncOutstanding } : {}),
+      ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(config.maxAsyncConcurrency !== undefined ? { maxAsyncConcurrency: config.maxAsyncConcurrency } : {}),
+      ...(config.maxAsyncOutstanding !== undefined ? { maxAsyncOutstanding: config.maxAsyncOutstanding } : {}),
       async recordControlPlaneEvent(event) {
         await dispatcherClient.recordControlPlaneEvent(event);
       },

@@ -27,7 +27,9 @@ function safeSlackLinkUrl(value: string): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return url.href;
+    // Slack uses `|` as the separator in <url|label>; URL leaves literal
+    // pipes untouched, so encode them before embedding the href in mrkdwn.
+    return url.href.replaceAll("|", "%7C");
   } catch {
     return null;
   }
@@ -43,14 +45,19 @@ function renderIssueLine(issue: LinearBacklogIssue): string {
 
 type IssueGroup = { stateName: string; stateType: string; issues: LinearBacklogIssue[] };
 
+function stateGroupKey(input: Pick<LinearBacklogIssue, "stateName" | "stateType">): string {
+  return JSON.stringify([input.stateType, input.stateName]);
+}
+
 function groupShownIssues(shown: LinearBacklogIssue[]): IssueGroup[] {
   const groups: IssueGroup[] = [];
-  const byStateName = new Map<string, IssueGroup>();
+  const byState = new Map<string, IssueGroup>();
   for (const issue of shown) {
-    let group = byStateName.get(issue.stateName);
+    const key = stateGroupKey(issue);
+    let group = byState.get(key);
     if (!group) {
       group = { stateName: issue.stateName, stateType: issue.stateType, issues: [] };
-      byStateName.set(issue.stateName, group);
+      byState.set(key, group);
       groups.push(group);
     }
     group.issues.push(issue);
@@ -78,8 +85,13 @@ export function renderSlackLinearBacklogReply(input: {
     const showingSuffix = truncated ? ` · showing ${shown.length}` : "";
     lines.push(`*${name} · ${totalLabel} open*${showingSuffix}`);
 
+    const totalByState = new Map<string, number>();
+    for (const issue of backlog.issues) {
+      const key = stateGroupKey(issue);
+      totalByState.set(key, (totalByState.get(key) ?? 0) + 1);
+    }
     for (const group of groupShownIssues(shown)) {
-      const totalInGroup = backlog.issues.filter((issue) => issue.stateName === group.stateName).length;
+      const totalInGroup = totalByState.get(stateGroupKey(group)) ?? 0;
       const shownInGroup = group.issues.length;
       const countLabel = shownInGroup < totalInGroup ? `${shownInGroup} of ${totalInGroup}` : String(totalInGroup);
       const emoji = STATE_TYPE_EMOJI[group.stateType] ?? "▫️";

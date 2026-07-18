@@ -192,6 +192,34 @@ describe("renderSlackLinearBacklogReply", () => {
     expect(text).toContain("• <https://linear.app/a/issue/AMP-153|AMP-153>");
   });
 
+  it("percent-encodes literal pipes in issue URLs before embedding them in Slack link syntax", () => {
+    const piped = { ...issue(153), url: "https://linear.app/a/issue/AMP-153|spoofed" };
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues: [piped], fetched: 1, hasMore: false, projectName: "opentag" },
+      limit: SLACK_LINEAR_BACKLOG_LIMIT,
+      queriedAt: "2026-07-16T22:48:00.000Z"
+    });
+
+    expect(text).toContain("<https://linear.app/a/issue/AMP-153%7Cspoofed|AMP-153>");
+    expect(text).not.toContain("<https://linear.app/a/issue/AMP-153|spoofed|AMP-153>");
+  });
+
+  it("keeps same-named states with different types in separate groups and counts", () => {
+    const issues = [
+      issue(1, { stateName: "Ready", stateType: "started" }),
+      issue(2, { stateName: "Ready", stateType: "unstarted" }),
+      issue(3, { stateName: "Ready", stateType: "unstarted" })
+    ];
+    const text = renderSlackLinearBacklogReply({
+      backlog: { issues, fetched: 3, hasMore: false, projectName: "opentag" },
+      limit: 2,
+      queriedAt: "2026-07-16T22:48:00.000Z"
+    });
+
+    expect(text).toContain("🔵 *Ready (1)*");
+    expect(text).toContain("⚪ *Ready (1 of 2)*");
+  });
+
   it.each(["javascript:alert(1)", "not a url"])("renders an invalid or unsafe issue URL as plain text: %s", (url) => {
     const unsafe = { ...issue(153), url };
     const text = renderSlackLinearBacklogReply({
