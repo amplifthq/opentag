@@ -477,6 +477,45 @@ describe("@opentag/client", () => {
     });
   });
 
+  it("submits sanitized GitHub completion evidence through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ outcome: "recorded" }, 201);
+      }
+    });
+    const snapshot = {
+      provider: "github" as const,
+      deliveryId: "delivery-completion-1",
+      eventName: "pull_request" as const,
+      repository: { owner: "acme", repo: "demo" },
+      pullRequest: {
+        number: 7,
+        resourceRef: "github:acme/demo:pull_request:7",
+        headSha: "b".repeat(40),
+        baseSha: "c".repeat(40),
+        baseBranch: "main",
+        state: "merged" as const
+      },
+      checks: { build: "passed" as const },
+      observedAt: "2026-07-21T10:00:00.000Z",
+      payloadDigest: `sha256:${"d".repeat(64)}`
+    };
+
+    await client.ingestGitHubCompletionEvidence(snapshot);
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/completion-evidence/github");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(snapshot);
+  });
+
   it("prunes source delivery replay keys through the dispatcher API", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({

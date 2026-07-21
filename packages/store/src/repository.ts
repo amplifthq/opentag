@@ -117,6 +117,19 @@ export type StoredVerificationEvidence = {
   receivedAt: string;
 };
 
+export type RecordVerificationEvidenceInput = {
+  id?: string;
+  workThreadId?: string;
+  provider: string;
+  deliveryId: string;
+  subjectRef: string;
+  subjectVersion: string;
+  evidence: VerificationEvidence;
+  payloadDigest?: string;
+  observedAt?: string;
+  receivedAt?: string;
+};
+
 export type GovernanceAuditEvent = {
   id: number;
   workThreadId?: string;
@@ -1882,18 +1895,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? completionContractFromRow(row) : null;
     },
 
-    async recordVerificationEvidence(input: {
-      id?: string;
-      workThreadId?: string;
-      provider: string;
-      deliveryId: string;
-      subjectRef: string;
-      subjectVersion: string;
-      evidence: VerificationEvidence;
-      payloadDigest?: string;
-      observedAt?: string;
-      receivedAt?: string;
-    }): Promise<{ evidence: StoredVerificationEvidence; created: boolean }> {
+    async recordVerificationEvidence(input: RecordVerificationEvidenceInput): Promise<{ evidence: StoredVerificationEvidence; created: boolean }> {
       const evidence = VerificationEvidenceSchema.parse(input.evidence);
       const receivedAt = input.receivedAt ?? nowIso();
       const observedAt = input.observedAt ?? evidence.createdAt;
@@ -1954,11 +1956,143 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async recordVerificationEvidenceBatch(input: {
+      records: RecordVerificationEvidenceInput[];
+    }): Promise<{ evidence: StoredVerificationEvidence[]; created: number }> {
+      const records = input.records.map((record) => {
+        const evidence = VerificationEvidenceSchema.parse(record.evidence);
+        const receivedAt = record.receivedAt ?? nowIso();
+        const observedAt = record.observedAt ?? evidence.createdAt;
+        const payloadDigest = record.payloadDigest ?? sha256Json({
+          provider: record.provider,
+          deliveryId: record.deliveryId,
+          subjectRef: record.subjectRef,
+          subjectVersion: record.subjectVersion,
+          evidence
+        });
+        return { ...record, evidence, receivedAt, observedAt, payloadDigest };
+      });
+      const batchKeys = new Set<string>();
+      for (const record of records) {
+        const key = JSON.stringify([record.provider, record.deliveryId, record.subjectRef, record.subjectVersion, record.evidence.kind]);
+        if (batchKeys.has(key)) throw new Error("Verification evidence batch contains a duplicate delivery/subject/kind identity.");
+        batchKeys.add(key);
+      }
+      return db.transaction((tx) => {
+        const stored: StoredVerificationEvidence[] = [];
+        let created = 0;
+        for (const record of records) {
+          if (record.workThreadId) {
+            const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, record.workThreadId)).limit(1).get();
+            if (!thread) throw new Error(`WorkThread ${record.workThreadId} does not exist.`);
+          }
+          const existing = tx
+            .select()
+            .from(verificationEvidenceRecords)
+            .where(and(
+              eq(verificationEvidenceRecords.provider, record.provider),
+              eq(verificationEvidenceRecords.deliveryId, record.deliveryId),
+              eq(verificationEvidenceRecords.subjectRef, record.subjectRef),
+              eq(verificationEvidenceRecords.subjectVersion, record.subjectVersion),
+              eq(verificationEvidenceRecords.kind, record.evidence.kind)
+            ))
+            .limit(1)
+            .get();
+          if (existing) {
+            if (existing.payloadDigest !== record.payloadDigest || existing.evidenceJson !== JSON.stringify(record.evidence)) {
+              throw new Error(`Evidence delivery ${record.provider}/${record.deliveryId} conflicts with its durable payload.`);
+            }
+            stored.push(storedVerificationEvidenceFromRow(existing));
+            continue;
+          }
+          const id = record.id ?? record.evidence.id;
+          const row = {
+            id,
+            workThreadId: record.workThreadId ?? null,
+            provider: record.provider,
+            deliveryId: record.deliveryId,
+            subjectRef: record.subjectRef,
+            subjectVersion: record.subjectVersion,
+            kind: record.evidence.kind,
+            assurance: record.evidence.assurance,
+            evidenceJson: JSON.stringify(record.evidence),
+            payloadDigest: record.payloadDigest,
+            observedAt: record.observedAt,
+            receivedAt: record.receivedAt
+          };
+          tx.insert(verificationEvidenceRecords).values(row).run();
+          tx.insert(governanceEvents).values({
+            workThreadId: record.workThreadId ?? null,
+            type: "verification_evidence.recorded",
+            subjectId: id,
+            payloadJson: JSON.stringify({
+              provider: record.provider,
+              deliveryId: record.deliveryId,
+              subjectRef: record.subjectRef,
+              subjectVersion: record.subjectVersion,
+              kind: record.evidence.kind,
+              assurance: record.evidence.assurance,
+              payloadDigest: record.payloadDigest
+            }),
+            createdAt: record.receivedAt
+          }).run();
+          created += 1;
+          stored.push(storedVerificationEvidenceFromRow(row));
+        }
+        return { evidence: stored, created };
+      });
+    },
+
     async listVerificationEvidence(input: { workThreadId?: string }): Promise<StoredVerificationEvidence[]> {
       const rows = input.workThreadId
         ? await db.select().from(verificationEvidenceRecords).where(eq(verificationEvidenceRecords.workThreadId, input.workThreadId)).orderBy(asc(verificationEvidenceRecords.receivedAt), asc(verificationEvidenceRecords.id))
         : await db.select().from(verificationEvidenceRecords).orderBy(asc(verificationEvidenceRecords.receivedAt), asc(verificationEvidenceRecords.id));
       return rows.map(storedVerificationEvidenceFromRow);
+    },
+
+    async attachVerificationEvidenceDeliveryToWorkThread(input: {
+      provider: string;
+      deliveryId: string;
+      subjectRef: string;
+      workThreadId: string;
+      attachedAt?: string;
+    }): Promise<{ attached: number }> {
+      return db.transaction((tx) => {
+        const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
+        if (!thread) throw new Error(`WorkThread ${input.workThreadId} does not exist.`);
+        const records = tx.select().from(verificationEvidenceRecords).where(and(
+          eq(verificationEvidenceRecords.provider, input.provider),
+          eq(verificationEvidenceRecords.deliveryId, input.deliveryId),
+          eq(verificationEvidenceRecords.subjectRef, input.subjectRef)
+        )).all();
+        if (records.some((record) => record.workThreadId && record.workThreadId !== input.workThreadId)) {
+          throw new Error(`Evidence delivery ${input.provider}/${input.deliveryId} is already attached to a different WorkThread.`);
+        }
+        const attached = tx.update(verificationEvidenceRecords)
+          .set({ workThreadId: input.workThreadId })
+          .where(and(
+            eq(verificationEvidenceRecords.provider, input.provider),
+            eq(verificationEvidenceRecords.deliveryId, input.deliveryId),
+            eq(verificationEvidenceRecords.subjectRef, input.subjectRef),
+            isNull(verificationEvidenceRecords.workThreadId)
+          ))
+          .run().changes;
+        if (attached > 0) {
+          tx.insert(governanceEvents).values({
+            workThreadId: input.workThreadId,
+            type: "verification_evidence.attached",
+            subjectId: `${input.provider}:${input.deliveryId}:${input.subjectRef}`,
+            payloadJson: JSON.stringify({
+              provider: input.provider,
+              deliveryId: input.deliveryId,
+              subjectRef: input.subjectRef,
+              recordCount: attached
+            }),
+            createdAt: input.attachedAt ?? nowIso()
+          }).run();
+        }
+        return { attached };
+      });
     },
 
     async appendCompletionAssessment(input: {
@@ -4752,6 +4886,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .select()
         .from(runs)
         .where(eq(runs.workThreadId, input.workThreadId))
+        .orderBy(asc(runs.createdAt), asc(runs.id));
+      return rows.map((row) => ({
+        run: runFromRow(row),
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+      }));
+    },
+
+    async listRunsWithResults(): Promise<OpenTagRunWithEvent[]> {
+      const rows = await db
+        .select()
+        .from(runs)
+        .where(isNotNull(runs.resultJson))
         .orderBy(asc(runs.createdAt), asc(runs.id));
       return rows.map((row) => ({
         run: runFromRow(row),

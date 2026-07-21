@@ -8,6 +8,37 @@ const strictPolicy: GitHubCompletionPolicy = {
   requiredChecks: ["build", "test"]
 };
 
+const HEAD_OLD = "a".repeat(40);
+const HEAD_CURRENT = "b".repeat(40);
+const BASE_SHA = "c".repeat(40);
+
+function githubSnapshot(input: {
+  deliveryId: string;
+  headSha?: string;
+  state?: "open" | "closed" | "merged";
+  checks?: Record<string, "passed" | "failed" | "pending">;
+  observedAt?: string;
+  resourceRef?: string;
+}) {
+  return {
+    provider: "github",
+    deliveryId: input.deliveryId,
+    eventName: "pull_request",
+    repository: { owner: "acme", repo: "demo" },
+    pullRequest: {
+      number: 7,
+      resourceRef: input.resourceRef ?? "github:acme/demo:pull_request:7",
+      headSha: input.headSha ?? HEAD_CURRENT,
+      baseSha: BASE_SHA,
+      baseBranch: "main",
+      state: input.state ?? "merged"
+    },
+    checks: input.checks ?? { build: "passed", test: "passed" },
+    observedAt: input.observedAt ?? "2026-07-21T10:05:00.000Z",
+    payloadDigest: `sha256:${(input.deliveryId === "delivery-old" ? "d" : "e").repeat(64)}`
+  };
+}
+
 function githubIssueEvent(input: { id: string; sourceEventId: string }) {
   return {
     id: input.id,
@@ -210,5 +241,138 @@ describe("dispatcher completion governance", () => {
         run: { parentRunId: "run_active" }
       }
     });
+  });
+
+  it("becomes satisfied only after verified current-head checks and merge evidence", async () => {
+    const setup = await startRun({ runId: "run_verified", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_verified", conclusion: "success" });
+
+    const evidence = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({ deliveryId: "delivery-verified" }))
+    );
+    expect(evidence.status).toBe(201);
+    await expect(evidence.json()).resolves.toMatchObject({
+      outcome: "recorded",
+      completion: {
+        execution: "succeeded",
+        completion: "satisfied",
+        evidenceBacked: true,
+        targetBindings: [{ resourceRef: "github:acme/demo:pull_request:7", resourceVersion: HEAD_CURRENT }],
+        missingGateIds: [],
+        failedGateIds: [],
+        blockedGateIds: []
+      }
+    });
+  });
+
+  it("fails a configured base-branch gate when GitHub reports another base", async () => {
+    const setup = await startRun({
+      runId: "run_wrong_base",
+      completionPolicies: [{ ...strictPolicy, baseBranch: "release" }]
+    });
+    await completeRun({ setup, runId: "run_wrong_base", conclusion: "success" });
+    const evidence = await setup.app.request(
+      "/v1/completion-evidence/github",
+      jsonRequest(githubSnapshot({ deliveryId: "delivery-wrong-base" }))
+    );
+
+    await expect(evidence.json()).resolves.toMatchObject({
+      completion: {
+        completion: "unsatisfied",
+        failedGateIds: ["base_branch"]
+      }
+    });
+  });
+
+  it("deduplicates a GitHub delivery without appending another assessment", async () => {
+    const setup = await startRun({ runId: "run_delivery_replay", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_delivery_replay", conclusion: "success" });
+    const snapshot = githubSnapshot({ deliveryId: "delivery-replay" });
+    const first = await setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot));
+    const firstBody = await first.json() as { completion: { currentAssessment: { id: string } } };
+    const replay = await setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot));
+
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({
+      outcome: "duplicate",
+      completion: { currentAssessment: { id: firstBody.completion.currentAssessment.id } }
+    });
+  });
+
+  it("keeps old-head green evidence visible but fails it against the new PR head", async () => {
+    const setup = await startRun({ runId: "run_stale_head", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_stale_head", conclusion: "success" });
+    const oldEvidence = await setup.app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({
+      deliveryId: "delivery-old",
+      headSha: HEAD_OLD,
+      observedAt: "2026-07-21T10:05:00.000Z"
+    })));
+    expect((await oldEvidence.json() as { completion: { completion: string } }).completion.completion).toBe("satisfied");
+
+    const newEvidence = await setup.app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({
+      deliveryId: "delivery-new",
+      headSha: HEAD_CURRENT,
+      state: "open",
+      checks: { build: "passed", test: "pending" },
+      observedAt: "2026-07-21T10:10:00.000Z"
+    })));
+    await expect(newEvidence.json()).resolves.toMatchObject({
+      outcome: "recorded",
+      completion: {
+        completion: "unsatisfied",
+        targetBindings: [{ resourceVersion: HEAD_CURRENT }],
+        failedGateIds: ["required_checks", "merge"]
+      }
+    });
+  });
+
+  it("persists uncorrelated evidence and attaches it when the matching run result arrives later", async () => {
+    const delivered: CallbackMessage[] = [];
+    const app = createDispatcherApp({
+      databasePath: ":memory:",
+      completionPolicies: [strictPolicy],
+      callbackSink: { async deliver(message) { delivered.push(message); } }
+    });
+    const early = await app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({ deliveryId: "delivery-early" })));
+    expect(early.status).toBe(200);
+    await expect(early.json()).resolves.toEqual({ outcome: "uncorrelated" });
+
+    expect((await app.request("/v1/runners", jsonRequest({ runnerId: "runner_1", name: "Local Runner" }))).status).toBe(201);
+    expect((await app.request("/v1/repo-bindings", jsonRequest({
+      provider: "github", owner: "acme", repo: "demo", runnerId: "runner_1"
+    }))).status).toBe(201);
+    expect((await app.request("/v1/runs", jsonRequest({
+      runId: "run_evidence_first",
+      event: githubIssueEvent({ id: "event_evidence_first", sourceEventId: "comment_evidence_first" })
+    }))).status).toBe(201);
+    const claim = await (await app.request("/v1/runners/runner_1/claim", { method: "POST" })).json() as {
+      attemptId: string;
+      fencingToken: string;
+    };
+    const complete = await app.request("/v1/runners/runner_1/runs/run_evidence_first/complete", jsonRequest({
+      ...claim,
+      result: {
+        conclusion: "success",
+        summary: "created the PR",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+      }
+    }));
+    expect(complete.status).toBe(200);
+    await expect(complete.json()).resolves.toMatchObject({
+      completion: { execution: "succeeded", completion: "satisfied" }
+    });
+    expect(delivered.at(-1)?.body).toContain("created the PR");
+  });
+
+  it("rejects a spoofed resource identity instead of correlating it", async () => {
+    const setup = await startRun({ runId: "run_spoof", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_spoof", conclusion: "success" });
+    const response = await setup.app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({
+      deliveryId: "delivery-spoof",
+      resourceRef: "github:other/demo:pull_request:7"
+    })));
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "invalid_completion_evidence_identity" });
   });
 });

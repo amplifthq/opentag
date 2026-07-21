@@ -116,6 +116,24 @@ export type RecordControlPlaneEventInput = {
   createdAt?: string;
 };
 
+export type GitHubCompletionEvidenceInput = {
+  provider: "github";
+  deliveryId: string;
+  eventName: "pull_request" | "check_run" | "check_suite" | "status";
+  repository: { owner: string; repo: string };
+  pullRequest: {
+    number: number;
+    resourceRef: string;
+    headSha: string;
+    baseSha: string;
+    baseBranch: string;
+    state: "open" | "closed" | "merged";
+  };
+  checks: Record<string, "passed" | "failed" | "pending">;
+  observedAt: string;
+  payloadDigest: string;
+};
+
 export type PruneSourceDeliveriesInput = {
   olderThan: string;
   limit?: number;
@@ -339,6 +357,7 @@ export type OpenTagClient = {
   getRunner(input: { runnerId: string }): Promise<{ runner: RunnerRegistration }>;
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
   recordControlPlaneEvent(input: RecordControlPlaneEventInput): Promise<void>;
+  ingestGitHubCompletionEvidence(input: GitHubCompletionEvidenceInput): Promise<void>;
   pruneSourceDeliveries(input: PruneSourceDeliveriesInput): Promise<SourceDeliveryPruneResult>;
   bindRepository(input: RepoBindingInput): Promise<void>;
   getRepositoryBinding(input: { provider: string; owner: string; repo: string }): Promise<{ binding: RepoBindingInput }>;
@@ -533,6 +552,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify(input)
       });
       await assertOk(response, "recordControlPlaneEvent");
+    },
+
+    async ingestGitHubCompletionEvidence(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/completion-evidence/github`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(input)
+      });
+      await assertOk(response, "ingestGitHubCompletionEvidence");
     },
 
     async pruneSourceDeliveries(input) {

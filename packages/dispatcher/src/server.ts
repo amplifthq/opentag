@@ -629,6 +629,24 @@ const RecordControlPlaneEventSchema = z.object({
   createdAt: z.string().datetime().optional()
 });
 
+const GitHubCompletionEvidenceSchema = z.object({
+  provider: z.literal("github"),
+  deliveryId: z.string().min(1).max(256),
+  eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
+  repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
+  pullRequest: z.object({
+    number: z.number().int().positive(),
+    resourceRef: z.string().min(1),
+    headSha: z.string().regex(/^[a-f0-9]{40,64}$/iu),
+    baseSha: z.string().regex(/^[a-f0-9]{40,64}$/iu),
+    baseBranch: z.string().min(1),
+    state: z.enum(["open", "closed", "merged"])
+  }).strict(),
+  checks: z.record(z.string().min(1), z.enum(["passed", "failed", "pending"])),
+  observedAt: z.string().datetime(),
+  payloadDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u)
+}).strict();
+
 const PruneSourceDeliveriesSchema = z.object({
   olderThan: z.string().datetime(),
   limit: z.number().int().positive().max(100_000).optional()
@@ -3706,6 +3724,16 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, RecordControlPlaneEventSchema);
     await recordControlPlaneEvent(parsed);
     return c.json({ ok: true }, 201);
+  });
+
+  app.post("/v1/completion-evidence/github", async (c) => {
+    const snapshot = await parseDispatcherBody(c, GitHubCompletionEvidenceSchema);
+    const expectedRef = `github:${snapshot.repository.owner}/${snapshot.repository.repo}:pull_request:${snapshot.pullRequest.number}`;
+    if (snapshot.pullRequest.resourceRef !== expectedRef) {
+      return c.json({ error: "invalid_completion_evidence_identity" }, 400);
+    }
+    const result = await completionGovernance.ingestGitHubSnapshot(snapshot);
+    return c.json(result, result.outcome === "recorded" ? 201 : 200);
   });
 
   app.get("/v1/control-plane-alerts", async (c) => {

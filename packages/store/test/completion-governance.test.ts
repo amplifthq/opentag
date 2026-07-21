@@ -200,6 +200,46 @@ describe("completion governance persistence", () => {
     await expect(repo.listVerificationEvidence({ workThreadId: thread.id })).resolves.toHaveLength(1);
   });
 
+  it("records a reconciled evidence batch atomically and idempotently", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-batch" }) })).thread;
+    const records = ["source_control.pull_request", "source_control.required_checks"].map((kind, index) => ({
+      id: `evidence-batch-${index}`,
+      workThreadId: thread.id,
+      provider: "github",
+      deliveryId: "delivery-batch-1",
+      subjectRef: "github:acme/demo:pull_request:7",
+      subjectVersion: "abc123",
+      evidence: {
+        id: `evidence-batch-${index}`,
+        kind,
+        assurance: "verified" as const,
+        subjectRef: "github:acme/demo:pull_request:7@abc123",
+        summary: `${kind}=verified`,
+        createdAt: timestamp
+      },
+      payloadDigest: `sha256:${String(index + 1).repeat(64)}`,
+      observedAt: timestamp,
+      receivedAt: timestamp
+    }));
+
+    await expect(repo.recordVerificationEvidenceBatch({ records })).resolves.toMatchObject({ created: 2 });
+    await expect(repo.recordVerificationEvidenceBatch({ records })).resolves.toMatchObject({ created: 0 });
+    await expect(repo.listVerificationEvidence({ workThreadId: thread.id })).resolves.toHaveLength(2);
+
+    const { repo: rollbackRepo } = repository();
+    const rollbackThread = (await rollbackRepo.upsertWorkThread({ thread: workThread({ anchorId: "comment-rollback" }) })).thread;
+    const conflictingIds = records.map((record, index) => ({
+      ...record,
+      id: "same-primary-key",
+      workThreadId: rollbackThread.id,
+      deliveryId: "delivery-batch-rollback",
+      evidence: { ...record.evidence, id: "same-primary-key", kind: `kind-${index}` }
+    }));
+    await expect(rollbackRepo.recordVerificationEvidenceBatch({ records: conflictingIds })).rejects.toThrow();
+    await expect(rollbackRepo.listVerificationEvidence({ workThreadId: rollbackThread.id })).resolves.toHaveLength(0);
+  });
+
   it("appends one monotonic assessment lineage and rejects a stale head", async () => {
     const { repo } = repository();
     const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-1" }) })).thread;

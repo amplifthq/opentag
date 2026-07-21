@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CompletionContractSchema,
   type CompletionContract,
@@ -15,7 +16,12 @@ import {
   type GovernanceRepository,
   type WorkLoopView
 } from "@opentag/governance";
-import { createOpenTagRepository, type StoredVerificationEvidence } from "@opentag/store";
+import type { GitHubVerifiedPullRequestSnapshot } from "@opentag/github";
+import {
+  createOpenTagRepository,
+  type RecordVerificationEvidenceInput,
+  type StoredVerificationEvidence
+} from "@opentag/store";
 
 type OpenTagRepository = ReturnType<typeof createOpenTagRepository>;
 
@@ -85,6 +91,17 @@ function strictContract(input: {
         requiredOutcome: "passed",
         minimumAssurance: "verified"
       },
+      ...(input.policy.baseBranch
+        ? [{
+            id: "base_branch",
+            kind: "verification" as const,
+            targetKey: "primary_change",
+            evidenceKind: "source_control.pull_request",
+            requiredObservations: [`base:${input.policy.baseBranch}`],
+            requiredOutcome: "passed",
+            minimumAssurance: "verified" as const
+          }]
+        : []),
       ...(input.policy.requireMerge === false
         ? []
         : [{
@@ -139,7 +156,11 @@ function parseGitHubPullRequestUrl(
 
 function completionFactFromStoredEvidence(record: StoredVerificationEvidence): CompletionEvidenceFact | null {
   const metadata = record.evidence.metadata;
-  const value = metadata?.["completionFact"];
+  const direct = metadata?.["completionFact"];
+  const template = metadata?.["completionFactTemplate"];
+  const value = direct ?? (record.workThreadId && template && typeof template === "object" && !Array.isArray(template)
+    ? { ...template as Record<string, unknown>, workThreadId: record.workThreadId }
+    : null);
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const fact = value as Partial<CompletionEvidenceFact>;
   if (
@@ -163,6 +184,96 @@ function completionFactFromStoredEvidence(record: StoredVerificationEvidence): C
     || typeof fact.receivedAt !== "string"
   ) return null;
   return fact as CompletionEvidenceFact;
+}
+
+function factDigest(snapshotDigest: string, kind: string): string {
+  return `sha256:${createHash("sha256").update(`${snapshotDigest}:${kind}`).digest("hex")}`;
+}
+
+function githubFactTemplates(input: {
+  snapshot: GitHubVerifiedPullRequestSnapshot;
+  receivedAt: string;
+}): Array<Omit<CompletionEvidenceFact, "workThreadId">> {
+  const common = {
+    cycle: 1,
+    assurance: "verified" as const,
+    subject: {
+      provider: "github",
+      resourceRef: input.snapshot.pullRequest.resourceRef,
+      resourceVersion: input.snapshot.pullRequest.headSha
+    },
+    observedAt: input.snapshot.observedAt,
+    receivedAt: input.receivedAt
+  };
+  const provenance = (kind: string) => ({
+    adapter: "@opentag/github",
+    adapterVersion: "0.6.0",
+    payloadDigest: factDigest(input.snapshot.payloadDigest, kind),
+    providerDeliveryId: input.snapshot.deliveryId
+  });
+  const idPrefix = `github:${input.snapshot.deliveryId}:pr:${input.snapshot.pullRequest.number}:${input.snapshot.pullRequest.headSha}`;
+  return [
+    {
+      ...common,
+      id: `${idPrefix}:identity`,
+      kind: "source_control.pull_request",
+      claim: {
+        predicate: "existence",
+        outcome: "passed",
+        observations: {
+          [`base:${input.snapshot.pullRequest.baseBranch}`]: "passed",
+          base_branch: input.snapshot.pullRequest.baseBranch,
+          base_sha: input.snapshot.pullRequest.baseSha
+        }
+      },
+      provenance: provenance("source_control.pull_request")
+    },
+    {
+      ...common,
+      id: `${idPrefix}:checks`,
+      kind: "source_control.required_checks",
+      claim: { predicate: "checks", outcome: "passed", observations: input.snapshot.checks },
+      provenance: provenance("source_control.required_checks")
+    },
+    {
+      ...common,
+      id: `${idPrefix}:state`,
+      kind: "source_control.pull_request_state",
+      claim: { predicate: "state", outcome: input.snapshot.pullRequest.state },
+      provenance: provenance("source_control.pull_request_state")
+    }
+  ];
+}
+
+function githubEvidenceRecords(input: {
+  snapshot: GitHubVerifiedPullRequestSnapshot;
+  receivedAt: string;
+  workThreadId?: string;
+}): RecordVerificationEvidenceInput[] {
+  return githubFactTemplates(input).map((template) => {
+    const fact = input.workThreadId ? { ...template, workThreadId: input.workThreadId } : null;
+    return {
+      id: template.id,
+      ...(input.workThreadId ? { workThreadId: input.workThreadId } : {}),
+      provider: "github",
+      deliveryId: input.snapshot.deliveryId,
+      subjectRef: input.snapshot.pullRequest.resourceRef,
+      subjectVersion: input.snapshot.pullRequest.headSha,
+      evidence: {
+        id: template.id,
+        kind: template.kind,
+        assurance: "verified",
+        subjectRef: `${template.subject.resourceRef}@${template.subject.resourceVersion}`,
+        summary: `${template.claim.predicate}=${template.claim.outcome}`,
+        sourceRef: `github-api:${input.snapshot.eventName}`,
+        createdAt: input.snapshot.observedAt,
+        metadata: fact ? { completionFact: fact } : { completionFactTemplate: template }
+      },
+      payloadDigest: template.provenance.payloadDigest,
+      observedAt: input.snapshot.observedAt,
+      receivedAt: input.receivedAt
+    };
+  });
 }
 
 function artifactsFromRuns(input: {
@@ -216,6 +327,60 @@ function artifactsFromRuns(input: {
   return artifacts;
 }
 
+function githubPullRequestResourceRefs(stored: { run: OpenTagRun; event: OpenTagEvent }): Set<string> {
+  const repository = repositoryIdentity(stored.event);
+  if (!repository || repository.provider !== "github" || !stored.run.result) return new Set();
+  const result = stored.run.result;
+  const uris = [
+    ...(result.createdPullRequestUrl ? [result.createdPullRequestUrl] : []),
+    ...(result.artifacts ?? []).flatMap((artifact) =>
+      (artifact.kind ?? artifact.type) === "pull_request" ? [artifact.uri] : []
+    )
+  ];
+  return new Set(uris.flatMap((uri) => {
+    const parsed = parseGitHubPullRequestUrl(uri, repository);
+    return parsed ? [parsed.resourceRef] : [];
+  }));
+}
+
+async function matchingWorkThreadIds(input: {
+  repo: OpenTagRepository;
+  resourceRef: string;
+}): Promise<string[]> {
+  const runs = await input.repo.listRunsWithResults();
+  return [...new Set(runs.flatMap((stored) => {
+    const workThreadId = stored.run.thread?.id;
+    return workThreadId && githubPullRequestResourceRefs(stored).has(input.resourceRef) ? [workThreadId] : [];
+  }))].sort();
+}
+
+async function attachCorrelatableEvidence(input: {
+  repo: OpenTagRepository;
+  attachedAt: string;
+}): Promise<Set<string>> {
+  const uncorrelated = (await input.repo.listVerificationEvidence({})).filter((record) =>
+    record.provider === "github" && !record.workThreadId && record.evidence.metadata?.["completionFactTemplate"]
+  );
+  const attachedThreads = new Set<string>();
+  const identities = new Map<string, StoredVerificationEvidence>();
+  for (const record of uncorrelated) {
+    identities.set(JSON.stringify([record.provider, record.deliveryId, record.subjectRef]), record);
+  }
+  for (const record of identities.values()) {
+    const candidates = await matchingWorkThreadIds({ repo: input.repo, resourceRef: record.subjectRef });
+    if (candidates.length !== 1) continue;
+    await input.repo.attachVerificationEvidenceDeliveryToWorkThread({
+      provider: record.provider,
+      deliveryId: record.deliveryId,
+      subjectRef: record.subjectRef,
+      workThreadId: candidates[0]!,
+      attachedAt: input.attachedAt
+    });
+    attachedThreads.add(candidates[0]!);
+  }
+  return attachedThreads;
+}
+
 async function ensureContract(input: {
   repo: OpenTagRepository;
   run: OpenTagRun;
@@ -232,6 +397,12 @@ async function ensureContract(input: {
     : compatibilityContract({ workThreadId, createdAt: input.run.updatedAt });
   return (await input.repo.recordCompletionContract({ contract })).contract;
 }
+
+export type GitHubCompletionEvidenceIngestion = {
+  outcome: "recorded" | "duplicate" | "uncorrelated" | "ambiguous";
+  workThreadId?: string;
+  completion?: WorkLoopView;
+};
 
 export function createDispatcherCompletionGovernance(input: {
   repo: OpenTagRepository;
@@ -304,6 +475,7 @@ export function createDispatcherCompletionGovernance(input: {
       const stored = await input.repo.getRun({ runId });
       if (!stored?.run.thread?.id || !stored.run.result) return null;
       await ensureContract({ repo: input.repo, run: stored.run, event: stored.event, policies });
+      await attachCorrelatableEvidence({ repo: input.repo, attachedAt: input.now?.() ?? new Date().toISOString() });
       return governance.execute({
         type: "ingest_run_result",
         commandId: `run-result:${runId}:${stored.run.updatedAt}`,
@@ -314,6 +486,55 @@ export function createDispatcherCompletionGovernance(input: {
 
     async ingestEvidence(fact: CompletionEvidenceFact): Promise<GovernanceCommandResult> {
       return governance.execute({ type: "ingest_evidence", commandId: `evidence:${fact.id}`, evidence: fact });
+    },
+
+    async ingestGitHubSnapshot(snapshot: GitHubVerifiedPullRequestSnapshot): Promise<GitHubCompletionEvidenceIngestion> {
+      const expectedRef = `github:${snapshot.repository.owner}/${snapshot.repository.repo}:pull_request:${snapshot.pullRequest.number}`;
+      if (snapshot.pullRequest.resourceRef !== expectedRef) {
+        throw new Error("GitHub completion evidence resource identity does not match its repository and pull request number.");
+      }
+      const existing = (await input.repo.listVerificationEvidence({})).filter((record) =>
+        record.provider === "github"
+        && record.deliveryId === snapshot.deliveryId
+        && record.subjectRef === snapshot.pullRequest.resourceRef
+      );
+      if (existing.length > 0) {
+        const attached = [...new Set(existing.flatMap((record) => record.workThreadId ? [record.workThreadId] : []))];
+        if (attached.length === 1) {
+          const workThreadId = attached[0]!;
+          const completion = await governance.read({ type: "get_work_loop", workThreadId }) as WorkLoopView;
+          return { outcome: "duplicate", workThreadId, completion };
+        }
+        const newlyAttached = await attachCorrelatableEvidence({
+          repo: input.repo,
+          attachedAt: input.now?.() ?? new Date().toISOString()
+        });
+        if (newlyAttached.size === 1) {
+          const workThreadId = [...newlyAttached][0]!;
+          const result = await governance.execute({
+            type: "reassess_completion",
+            commandId: `github-evidence:${snapshot.deliveryId}:${snapshot.pullRequest.resourceRef}`,
+            workThreadId
+          });
+          return { outcome: "duplicate", workThreadId, completion: result.view };
+        }
+        return { outcome: "duplicate" };
+      }
+      const candidates = await matchingWorkThreadIds({ repo: input.repo, resourceRef: snapshot.pullRequest.resourceRef });
+      const workThreadId = candidates.length === 1 ? candidates[0] : undefined;
+      const receivedAt = input.now?.() ?? new Date().toISOString();
+      await input.repo.recordVerificationEvidenceBatch({
+        records: githubEvidenceRecords({ snapshot, receivedAt, ...(workThreadId ? { workThreadId } : {}) })
+      });
+      if (!workThreadId) {
+        return { outcome: candidates.length > 1 ? "ambiguous" : "uncorrelated" };
+      }
+      const result = await governance.execute({
+        type: "reassess_completion",
+        commandId: `github-evidence:${snapshot.deliveryId}:${snapshot.pullRequest.resourceRef}`,
+        workThreadId
+      });
+      return { outcome: "recorded", workThreadId, completion: result.view };
     },
 
     async getWorkLoop(workThreadId: string): Promise<WorkLoopView | null> {

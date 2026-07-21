@@ -1,6 +1,33 @@
 import { createServer, type Server } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { computeGitHubSignature, createGitHubWebhookApp, startGitHubIngress } from "../src/ingress.js";
+import type { GitHubCompletionApi } from "../src/completion-evidence.js";
+
+const COMPLETION_HEAD = "b".repeat(40);
+const COMPLETION_BASE = "c".repeat(40);
+
+function completionApi(): GitHubCompletionApi {
+  return {
+    async getPullRequest({ pullRequestNumber }) {
+      return {
+        number: pullRequestNumber,
+        state: "closed",
+        merged: true,
+        head: { sha: COMPLETION_HEAD },
+        base: { ref: "main", sha: COMPLETION_BASE, repo: { full_name: "acme/demo" } }
+      };
+    },
+    async listCheckRunsForRef() {
+      return [{ name: "build", status: "completed", conclusion: "success", head_sha: COMPLETION_HEAD }];
+    },
+    async getCombinedStatusForRef() {
+      return [{ context: "test", state: "success", sha: COMPLETION_HEAD }];
+    },
+    async listPullRequestsForCommit() {
+      return [{ number: 7 }];
+    }
+  };
+}
 
 async function listenOnRandomPort(): Promise<{ server: Server; port: number }> {
   const server = createServer();
@@ -39,6 +66,78 @@ function signedRequest(input: { body: string; secret: string; event: string; del
 }
 
 describe("GitHub webhook ingress", () => {
+  it("durably ingests reconciled completion evidence without creating a run", async () => {
+    const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
+    const ingestCompletionEvidence = vi.fn(async () => ({ outcome: "recorded" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun,
+      completionApi: completionApi(),
+      ingestCompletionEvidence,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "closed",
+      number: 7,
+      pull_request: { number: 7 },
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "pull_request", deliveryId: "delivery-completion-1" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, evidenceSnapshots: 1 });
+    expect(createRun).not.toHaveBeenCalled();
+    expect(ingestCompletionEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      deliveryId: "delivery-completion-1",
+      pullRequest: { headSha: COMPLETION_HEAD, state: "merged", number: 7, resourceRef: "github:acme/demo:pull_request:7", baseSha: COMPLETION_BASE, baseBranch: "main" }
+    }));
+  });
+
+  it("preserves compatibility by ignoring completion events when reconciliation is unconfigured", async () => {
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "synchronize",
+      number: 7,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "pull_request", deliveryId: "delivery-no-api" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, ignored: "completion_reconciliation_unconfigured" });
+  });
+
+  it("returns a retryable failure for an incomplete completion ingestion configuration", async () => {
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: completionApi(),
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "synchronize",
+      number: 7,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "pull_request", deliveryId: "delivery-incomplete" })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({ error: "completion_reconciliation_unavailable" });
+  });
+
   it("binds the local server to loopback by default", async () => {
     const { server, port } = await listenOnRandomPort();
     await new Promise<void>((resolve, reject) => {
