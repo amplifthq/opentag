@@ -1871,6 +1871,17 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       return row ? completionContractFromRow(row) : null;
     },
 
+    async getLatestCompletionContractForWorkThread(input: { workThreadId: string }): Promise<CompletionContract | null> {
+      const row = await db
+        .select()
+        .from(completionContracts)
+        .where(eq(completionContracts.workThreadId, input.workThreadId))
+        .orderBy(desc(completionContracts.cycle), desc(completionContracts.version), desc(completionContracts.createdAt))
+        .limit(1)
+        .get();
+      return row ? completionContractFromRow(row) : null;
+    },
+
     async recordVerificationEvidence(input: {
       id?: string;
       workThreadId?: string;
@@ -4734,6 +4745,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         run: runFromRow(row),
         event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
       };
+    },
+
+    async listRunsForWorkThread(input: { workThreadId: string }): Promise<OpenTagRunWithEvent[]> {
+      const rows = await db
+        .select()
+        .from(runs)
+        .where(eq(runs.workThreadId, input.workThreadId))
+        .orderBy(asc(runs.createdAt), asc(runs.id));
+      return rows.map((row) => ({
+        run: runFromRow(row),
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+      }));
     },
 
     async listRunEvents(input: { runId: string }): Promise<OpenTagAuditEvent[]> {

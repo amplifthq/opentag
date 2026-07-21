@@ -79,6 +79,37 @@ function managedChannelEvent(input: {
 }
 
 describe("local dispatcher runtime", () => {
+  it("parses explicit GitHub completion policies from env", () => {
+    expect(dispatcherRuntimeInputFromEnv({
+      OPENTAG_GITHUB_COMPLETION_POLICIES_JSON: JSON.stringify([{
+        provider: "github",
+        owner: " acme ",
+        repo: " demo ",
+        requiredChecks: [" build ", "test"],
+        baseBranch: " main ",
+        requireMerge: true
+      }])
+    }).completionPolicies).toEqual([{
+      provider: "github",
+      owner: "acme",
+      repo: "demo",
+      requiredChecks: ["build", "test"],
+      baseBranch: "main",
+      requireMerge: true
+    }]);
+  });
+
+  it("rejects incomplete GitHub completion policies", () => {
+    expect(() => dispatcherRuntimeInputFromEnv({
+      OPENTAG_GITHUB_COMPLETION_POLICIES_JSON: JSON.stringify([{
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        requiredChecks: []
+      }])
+    })).toThrow("requiredChecks must be a non-empty string array");
+  });
+
   it("registers matching standalone Slack and Lark channel principals from env", () => {
     expect(
       dispatcherRuntimeInputFromEnv({

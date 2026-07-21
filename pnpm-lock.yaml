@@ -343,6 +343,9 @@ importers:
       '@opentag/gitlab':
         specifier: workspace:*
         version: link:../gitlab
+      '@opentag/governance':
+        specifier: workspace:*
+        version: link:../governance
       '@opentag/lark':
         specifier: workspace:*
         version: link:../lark

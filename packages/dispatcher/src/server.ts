@@ -315,6 +315,7 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
+import { createDispatcherCompletionGovernance, type GitHubCompletionPolicy } from "./completion-governance.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
@@ -2728,10 +2729,15 @@ export function createDispatcherApp(input: {
   relayCapabilities?: {
     platforms?: RelayPlatformCapability[];
   };
+  completionPolicies?: GitHubCompletionPolicy[];
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
+  const completionGovernance = createDispatcherCompletionGovernance({
+    repo,
+    policies: input.completionPolicies ?? []
+  });
   const app = new Hono();
   const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
   const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
@@ -5186,10 +5192,17 @@ export function createDispatcherApp(input: {
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
-    if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
+    if (outcome === "duplicate") {
+      const replayedRun = await repo.getRun({ runId });
+      const completion = replayedRun?.run.thread?.id
+        ? await completionGovernance.getWorkLoop(replayedRun.run.thread.id)
+        : null;
+      return c.json({ ok: true, replayed: true, ...(completion ? { completion } : {}) });
+    }
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
+    const completionResult = await completionGovernance.ingestRunResult(runId);
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
@@ -5233,11 +5246,23 @@ export function createDispatcherApp(input: {
         }
       });
     }
-    const finalPresentation = presentation.finalPresentation({
-      result: completedResult,
-      runId,
-      receiptContext
-    });
+    const strictExecutionWaiting = completedResult.conclusion === "success"
+      && completionResult?.view.contract.mode === "governed"
+      && completionResult.assessment.state !== "satisfied"
+      && completionResult.assessment.state !== "waived";
+    const finalPresentation = strictExecutionWaiting
+      ? presentation.runStatusPresentation({
+          runId,
+          state: "running",
+          message: "Execution succeeded; work completion is waiting for verified repository evidence.",
+          nextAction: completionResult.view.nextAction,
+          detailVisibility: "source_thread"
+        })
+      : presentation.finalPresentation({
+          result: completedResult,
+          runId,
+          receiptContext
+        });
     const finalCallback = presentation.render({
       provider: stored.event.callback.provider,
       ...larkRenderLocaleRenderOption(stored.event),
@@ -5266,6 +5291,7 @@ export function createDispatcherApp(input: {
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,
+      ...(completionResult ? { completion: completionResult.view } : {}),
       ...(promotedFollowUp
         ? {
             promotedFollowUp: {
