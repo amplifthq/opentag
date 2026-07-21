@@ -14,6 +14,14 @@ describe("OpenTagJsonSchemas", () => {
     expect(OpenTagJsonSchemas.OpenTagRun).toHaveProperty("definitions.OpenTagRun");
     expect(OpenTagJsonSchemas.OpenTagRunResult).toHaveProperty("definitions.OpenTagRunResult");
     expect(OpenTagJsonSchemas.WorkThread).toHaveProperty("definitions.WorkThread");
+    expect(OpenTagJsonSchemas.CompletionGate).toHaveProperty("definitions.CompletionGate");
+    expect(OpenTagJsonSchemas.CompletionTargetSelector).toHaveProperty("definitions.CompletionTargetSelector");
+    expect(OpenTagJsonSchemas.ResolvedCompletionTarget).toHaveProperty("definitions.ResolvedCompletionTarget");
+    expect(OpenTagJsonSchemas.CompletionContract).toHaveProperty("definitions.CompletionContract");
+    expect(OpenTagJsonSchemas.CompletionGateResult).toHaveProperty("definitions.CompletionGateResult");
+    expect(OpenTagJsonSchemas.CompletionWaiver).toHaveProperty("definitions.CompletionWaiver");
+    expect(OpenTagJsonSchemas.CompletionAssessment).toHaveProperty("definitions.CompletionAssessment");
+    expect(OpenTagJsonSchemas.HumanEscalation).toHaveProperty("definitions.HumanEscalation");
     expect(OpenTagJsonSchemas.ContextPacket).toHaveProperty("definitions.ContextPacket");
     expect(OpenTagJsonSchemas.RunAdmissionDecision).toHaveProperty("definitions.RunAdmissionDecision");
     expect(OpenTagJsonSchemas.RunEvent).toHaveProperty("definitions.RunEvent");

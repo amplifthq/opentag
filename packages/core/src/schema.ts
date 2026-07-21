@@ -519,6 +519,344 @@ export const NextActionSchema = z.union([
   })
 ]);
 
+export const CompletionStateSchema = z.enum(["pending", "satisfied", "unsatisfied", "blocked", "waived"]);
+
+export const CompletionGateKindSchema = z.enum([
+  "artifact",
+  "verification",
+  "external_state",
+  "material_action",
+  "human_acceptance"
+]);
+
+export const CompletionEvidenceAssuranceSchema = VerificationEvidenceSchema.shape.assurance.exclude(["unverifiable"]);
+
+const CompletionGateIdSchema = z.string().min(1);
+const CompletionTargetKeySchema = z.string().min(1);
+
+export const CompletionTargetSelectorSchema = z
+  .object({
+    key: CompletionTargetKeySchema,
+    kind: z.literal("change_request"),
+    lineage: z.literal("current_cycle"),
+    cardinality: z.literal("exactly_one")
+  })
+  .strict();
+
+export const ResolvedCompletionTargetSchema = z
+  .object({
+    key: CompletionTargetKeySchema,
+    provider: ProviderSchema,
+    resourceRef: z.string().min(1),
+    resourceVersion: z.string().min(1),
+    artifactId: z.string().min(1)
+  })
+  .strict();
+
+export const CompletionGateSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      id: CompletionGateIdSchema,
+      kind: z.literal("artifact"),
+      targetKey: CompletionTargetKeySchema,
+      artifactKind: ArtifactKindSchema,
+      minimum: z.number().int().positive()
+    })
+    .strict(),
+  z
+    .object({
+      id: CompletionGateIdSchema,
+      kind: z.literal("verification"),
+      targetKey: CompletionTargetKeySchema,
+      evidenceKind: z.string().min(1),
+      requiredOutcome: z.literal("passed"),
+      minimumAssurance: CompletionEvidenceAssuranceSchema
+    })
+    .strict(),
+  z
+    .object({
+      id: CompletionGateIdSchema,
+      kind: z.literal("external_state"),
+      targetKey: CompletionTargetKeySchema,
+      provider: ProviderSchema,
+      requiredState: z.string().min(1),
+      minimumAssurance: CompletionEvidenceAssuranceSchema
+    })
+    .strict(),
+  z
+    .object({
+      id: CompletionGateIdSchema,
+      kind: z.literal("material_action"),
+      targetKey: CompletionTargetKeySchema.optional(),
+      actionFamily: z.string().min(1),
+      requiredOutcome: z.literal("succeeded")
+    })
+    .strict(),
+  z
+    .object({
+      id: CompletionGateIdSchema,
+      kind: z.literal("human_acceptance"),
+      targetKey: CompletionTargetKeySchema.optional(),
+      requiredRole: z.string().min(1)
+    })
+    .strict()
+]);
+
+export const CompletionContractSchema = z
+  .object({
+    id: z.string().min(1),
+    version: z.number().int().positive(),
+    workThreadId: z.string().min(1),
+    cycle: z.number().int().positive(),
+    mode: z.enum(["execution_compat", "governed"]),
+    targetSelectors: z.array(CompletionTargetSelectorSchema),
+    resolvedFrom: z.array(
+      z
+        .object({
+          scope: PolicyScopeSchema,
+          ref: z.string().min(1),
+          version: z.string().min(1).optional()
+        })
+        .strict()
+    ),
+    gates: z.array(CompletionGateSchema).min(1),
+    maxAutomaticRetries: z.number().int().nonnegative(),
+    onSatisfied: z.enum(["report_only", "propose_work_item_transition", "apply_transition_by_policy"]),
+    createdAt: z.string().datetime()
+  })
+  .strict()
+  .superRefine((contract, ctx) => {
+    const seen = new Set<string>();
+    const targetKeys = new Set<string>();
+    contract.targetSelectors.forEach((selector, index) => {
+      if (targetKeys.has(selector.key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Completion target selector key must be unique: ${selector.key}`,
+          path: ["targetSelectors", index, "key"]
+        });
+      }
+      targetKeys.add(selector.key);
+    });
+    contract.gates.forEach((gate, index) => {
+      if (seen.has(gate.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Completion gate id must be unique: ${gate.id}`,
+          path: ["gates", index, "id"]
+        });
+      }
+      seen.add(gate.id);
+      if (gate.targetKey && !targetKeys.has(gate.targetKey)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Completion gate targetKey must reference a target selector: ${gate.targetKey}`,
+          path: ["gates", index, "targetKey"]
+        });
+      }
+    });
+    if (contract.mode === "execution_compat" && contract.targetSelectors.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "An execution compatibility contract cannot declare provider delivery targets.",
+        path: ["targetSelectors"]
+      });
+    }
+  });
+
+export const CompletionGateResultStateSchema = z.enum(["passed", "failed", "missing", "unknown", "waived"]);
+
+export const CompletionReasonCodeSchema = z.enum([
+  "artifact_requirement_satisfied",
+  "artifact_missing",
+  "verification_passed",
+  "verification_failed",
+  "verification_missing",
+  "verification_assurance_insufficient",
+  "external_state_satisfied",
+  "external_state_mismatch",
+  "external_state_missing",
+  "external_state_assurance_insufficient",
+  "material_action_succeeded",
+  "material_action_failed",
+  "material_action_unknown",
+  "material_action_missing",
+  "human_acceptance_recorded",
+  "human_acceptance_missing",
+  "gate_waived",
+  "execution_succeeded",
+  "execution_incomplete"
+]);
+
+export const CompletionGateResultSchema = z
+  .object({
+    gateId: CompletionGateIdSchema,
+    targetKey: CompletionTargetKeySchema.optional(),
+    state: CompletionGateResultStateSchema,
+    evidenceIds: z.array(z.string().min(1)),
+    reasonCode: CompletionReasonCodeSchema,
+    reason: z.string().min(1),
+    evaluatedAt: z.string().datetime()
+  })
+  .strict();
+
+export const CompletionWaiverSchema = z
+  .object({
+    id: z.string().min(1),
+    runId: z.string().min(1).optional(),
+    contractId: z.string().min(1),
+    contractVersion: z.number().int().positive(),
+    cycle: z.number().int().positive(),
+    actor: ActorIdentitySchema,
+    reason: z.string().min(1),
+    scope: z.literal("selected_gates"),
+    policyScope: PolicyScopeSchema,
+    gateIds: z.array(CompletionGateIdSchema).min(1),
+    waivedAt: z.string().datetime(),
+    expiresAt: z.string().datetime().optional()
+  })
+  .strict()
+  .superRefine((waiver, ctx) => {
+    const seen = new Set<string>();
+    waiver.gateIds.forEach((gateId, index) => {
+      if (seen.has(gateId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Waived gate id must be unique: ${gateId}`,
+          path: ["gateIds", index]
+        });
+      }
+      seen.add(gateId);
+    });
+  });
+
+export const CompletionAssessmentSchema = z
+  .object({
+    id: z.string().min(1),
+    workThreadId: z.string().min(1),
+    triggeredByRunId: z.string().min(1).optional(),
+    contractId: z.string().min(1),
+    contractVersion: z.number().int().positive(),
+    cycle: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+    inputDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    targetBindings: z.array(ResolvedCompletionTargetSchema),
+    state: CompletionStateSchema,
+    evidenceBacked: z.boolean(),
+    gateResults: z.array(CompletionGateResultSchema).min(1),
+    assessedAt: z.string().datetime(),
+    assessedBy: z.enum(["opentag", "human"]),
+    supersedesAssessmentId: z.string().min(1).optional(),
+    acceptedAt: z.string().datetime().optional(),
+    waiver: CompletionWaiverSchema.optional()
+  })
+  .strict()
+  .superRefine((assessment, ctx) => {
+    const seen = new Set<string>();
+    const targetKeys = new Set<string>();
+    assessment.targetBindings.forEach((target, index) => {
+      if (targetKeys.has(target.key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Resolved completion target key must be unique: ${target.key}`,
+          path: ["targetBindings", index, "key"]
+        });
+      }
+      targetKeys.add(target.key);
+    });
+    assessment.gateResults.forEach((result, index) => {
+      if (seen.has(result.gateId)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `Completion gate result must be unique: ${result.gateId}`,
+          path: ["gateResults", index, "gateId"]
+        });
+      }
+      seen.add(result.gateId);
+    });
+    if (assessment.state === "waived" && !assessment.waiver) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A waived completion assessment requires waiver attribution.",
+        path: ["waiver"]
+      });
+    }
+    if (assessment.waiver && assessment.assessedBy !== "human") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion waiver must be assessed by a human.",
+        path: ["assessedBy"]
+      });
+    }
+    if (assessment.waiver && (
+      assessment.waiver.contractId !== assessment.contractId
+      || assessment.waiver.contractVersion !== assessment.contractVersion
+      || assessment.waiver.cycle !== assessment.cycle
+    )) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A completion waiver must target the assessed contract version and cycle.",
+        path: ["waiver"]
+      });
+    }
+  });
+
+export const HumanEscalationSchema = z
+  .object({
+    id: z.string().min(1),
+    workThreadId: z.string().min(1),
+    runId: z.string().min(1).optional(),
+    attemptId: z.string().min(1).optional(),
+    class: z.enum(["approval", "missing_input", "configuration", "verification", "reconciliation", "security"]),
+    audience: z.enum(["requester", "work_item_owner", "repo_owner", "operator", "security"]),
+    subjectRef: z.string().min(1),
+    state: z.enum(["open", "acknowledged", "resolved", "expired", "superseded"]),
+    blocking: z.boolean(),
+    summary: z.string().min(1),
+    reason: z.string().min(1),
+    options: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            label: z.string().min(1),
+            consequence: z.string().min(1)
+          })
+          .strict()
+      )
+      .optional(),
+    nextAction: ActionHintSchema.optional(),
+    dedupeKey: z.string().min(1).optional(),
+    openedAt: z.string().datetime(),
+    expiresAt: z.string().datetime().optional(),
+    resolution: z
+      .object({
+        optionId: z.string().min(1).optional(),
+        actor: ActorIdentitySchema,
+        reason: z.string().min(1).optional(),
+        resolvedAt: z.string().datetime()
+      })
+      .strict()
+      .optional()
+  })
+  .strict()
+  .superRefine((escalation, ctx) => {
+    if (escalation.state === "resolved" && !escalation.resolution) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A resolved human escalation requires resolution attribution.",
+        path: ["resolution"]
+      });
+    }
+    if (escalation.resolution && escalation.state !== "resolved") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Human escalation resolution is only valid for the resolved state.",
+        path: ["state"]
+      });
+    }
+  });
+
 export const CanonicalMutationDomainSchema = z.enum([
   "status",
   "assignee",
@@ -718,6 +1056,19 @@ export type ArtifactKind = z.infer<typeof ArtifactKindSchema>;
 export type RunArtifactType = z.infer<typeof RunArtifactTypeSchema>;
 export type ActionHint = z.infer<typeof ActionHintSchema>;
 export type NextAction = z.infer<typeof NextActionSchema>;
+export type CompletionState = z.infer<typeof CompletionStateSchema>;
+export type CompletionGateKind = z.infer<typeof CompletionGateKindSchema>;
+export type CompletionEvidenceAssurance = z.infer<typeof CompletionEvidenceAssuranceSchema>;
+export type CompletionTargetSelector = z.infer<typeof CompletionTargetSelectorSchema>;
+export type ResolvedCompletionTarget = z.infer<typeof ResolvedCompletionTargetSchema>;
+export type CompletionGate = z.infer<typeof CompletionGateSchema>;
+export type CompletionContract = z.infer<typeof CompletionContractSchema>;
+export type CompletionGateResultState = z.infer<typeof CompletionGateResultStateSchema>;
+export type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;
+export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
+export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
+export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
+export type HumanEscalation = z.infer<typeof HumanEscalationSchema>;
 export type CanonicalMutationDomain = z.infer<typeof CanonicalMutationDomainSchema>;
 export type MutationIntent = z.infer<typeof MutationIntentSchema>;
 export type SuggestedChangesSnapshot = z.infer<typeof SuggestedChangesSnapshotSchema>;
