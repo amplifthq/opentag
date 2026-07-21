@@ -11,6 +11,8 @@ import {
   AttemptSchema,
   ActionHintSchema,
   AdapterMutationMappingSchema,
+  CompletionAssessmentSchema,
+  CompletionContractSchema,
   ContextPacketSchema,
   conversationKeyFromEvent,
   defaultRunEventMetadata,
@@ -34,7 +36,9 @@ import {
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   SuggestedChangesSnapshotSchema,
+  HumanEscalationSchema,
   VerificationEvidenceSchema,
+  WorkThreadSchema,
   type ApprovalDecision,
   type Action,
   type ActionPermissionRequest,
@@ -45,6 +49,9 @@ import {
   type ApplyPlan,
   type ActionHint,
   type AdapterMutationMapping,
+  type CompletionAssessment,
+  type CompletionContract,
+  type HumanEscalation,
   type MutationIntentActionability,
   type OpenTagEvent,
   type OpenTagManagedChannelBindingOwnership,
@@ -56,7 +63,9 @@ import {
   type RunAdmissionDecision,
   type RunEventImportance,
   type RunEventVisibility,
-  type SuggestedChangesSnapshot
+  type SuggestedChangesSnapshot,
+  type VerificationEvidence,
+  type WorkThread
 } from "@opentag/core";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -67,7 +76,11 @@ import {
   grants,
   materialActions,
   channelBindings,
+  completionAssessments,
+  completionContracts,
   controlPlaneEvents,
+  governanceEvents,
+  humanEscalations,
   linearOAuthInstallStates,
   linearRelayInstallations,
   repoBindings,
@@ -79,12 +92,38 @@ import {
   sourceDeliveries,
   runners,
   runs,
-  suggestedChanges
+  suggestedChanges,
+  verificationEvidenceRecords,
+  workThreads
 } from "./schema.js";
 
 export type OpenTagRunWithEvent = {
   run: OpenTagRun;
   event: OpenTagEvent;
+};
+
+export type DurableWorkThread = WorkThread & { id: string };
+
+export type StoredVerificationEvidence = {
+  id: string;
+  workThreadId?: string;
+  provider: string;
+  deliveryId: string;
+  subjectRef: string;
+  subjectVersion: string;
+  evidence: VerificationEvidence;
+  payloadDigest: string;
+  observedAt: string;
+  receivedAt: string;
+};
+
+export type GovernanceAuditEvent = {
+  id: number;
+  workThreadId?: string;
+  type: string;
+  subjectId?: string;
+  payload: unknown;
+  createdAt: string;
 };
 
 export class ChannelBindingCorruptionError extends Error {
@@ -391,6 +430,90 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function sha256Json(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+}
+
+function workThreadCanonicalKey(thread: WorkThread): string {
+  const workItem = thread.workItemReference;
+  return JSON.stringify([
+    workItem.provider,
+    workItem.ownerContainer?.provider ?? "",
+    workItem.ownerContainer?.id ?? "",
+    workItem.kind,
+    workItem.externalId
+  ]);
+}
+
+function conversationAnchorKey(anchor: WorkThread["primaryAnchor"]): string {
+  return JSON.stringify([anchor.provider, anchor.kind, anchor.externalId, anchor.threadKey ?? ""]);
+}
+
+function mergeWorkThreadAnchors(current: DurableWorkThread, incoming: WorkThread): DurableWorkThread {
+  const known = new Set([
+    conversationAnchorKey(current.primaryAnchor),
+    ...(current.secondaryAnchors ?? []).map(conversationAnchorKey)
+  ]);
+  const additions = [incoming.primaryAnchor, ...(incoming.secondaryAnchors ?? [])].filter((anchor) => {
+    const key = conversationAnchorKey(anchor);
+    if (known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+  return WorkThreadSchema.parse({
+    ...current,
+    id: current.id,
+    workItemReference: incoming.workItemReference,
+    primaryAnchor: current.primaryAnchor,
+    secondaryAnchors: [...(current.secondaryAnchors ?? []), ...additions]
+  }) as DurableWorkThread;
+}
+
+function workThreadFromRow(row: typeof workThreads.$inferSelect): DurableWorkThread {
+  const thread = WorkThreadSchema.parse(JSON.parse(row.threadJson));
+  return { ...thread, id: row.id };
+}
+
+function completionContractFromRow(row: typeof completionContracts.$inferSelect): CompletionContract {
+  return CompletionContractSchema.parse(JSON.parse(row.contractJson));
+}
+
+function completionAssessmentFromRow(row: typeof completionAssessments.$inferSelect): CompletionAssessment {
+  return CompletionAssessmentSchema.parse(JSON.parse(row.assessmentJson));
+}
+
+function storedVerificationEvidenceFromRow(
+  row: typeof verificationEvidenceRecords.$inferSelect
+): StoredVerificationEvidence {
+  return {
+    id: row.id,
+    ...(row.workThreadId ? { workThreadId: row.workThreadId } : {}),
+    provider: row.provider,
+    deliveryId: row.deliveryId,
+    subjectRef: row.subjectRef,
+    subjectVersion: row.subjectVersion,
+    evidence: VerificationEvidenceSchema.parse(JSON.parse(row.evidenceJson)),
+    payloadDigest: row.payloadDigest,
+    observedAt: row.observedAt,
+    receivedAt: row.receivedAt
+  };
+}
+
+function humanEscalationFromRow(row: typeof humanEscalations.$inferSelect): HumanEscalation {
+  return HumanEscalationSchema.parse(JSON.parse(row.escalationJson));
+}
+
+function governanceEventFromRow(row: typeof governanceEvents.$inferSelect): GovernanceAuditEvent {
+  return {
+    id: row.id,
+    ...(row.workThreadId ? { workThreadId: row.workThreadId } : {}),
+    type: row.type,
+    ...(row.subjectId ? { subjectId: row.subjectId } : {}),
+    payload: JSON.parse(row.payloadJson) as unknown,
+    createdAt: row.createdAt
+  };
+}
+
 function isIsoExpired(iso: string | null, now: Date): boolean {
   if (!iso) return false;
   return new Date(iso).getTime() <= now.getTime();
@@ -554,6 +677,9 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
   const triggeredByAction = row.triggeredByActionJson ? ActionHintSchema.parse(JSON.parse(row.triggeredByActionJson)) : undefined;
   const protocolFields = protocolRunFieldsFromEvent(event, row.createdAt);
+  const durableThread = protocolFields.thread && row.workThreadId
+    ? { ...protocolFields.thread, id: row.workThreadId }
+    : protocolFields.thread;
   const contextPacket = row.contextPacketJson
     ? ContextPacketSchema.parse(JSON.parse(row.contextPacketJson))
     : protocolFields.contextPacket;
@@ -561,7 +687,7 @@ function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
     id: row.id,
     eventId: row.eventId,
     status: row.status as OpenTagRun["status"],
-    ...(protocolFields.thread ? { thread: protocolFields.thread } : {}),
+    ...(durableThread ? { thread: durableThread } : {}),
     contextPacket,
     ...(row.parentRunId ? { parentRunId: row.parentRunId } : {}),
     ...(triggeredByAction ? { triggeredByAction } : {}),
@@ -1609,8 +1735,406 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
     await db.insert(runEvents).values(applyPlanCreatedEventRow(input));
   }
 
+  async function upsertWorkThreadRecord(input: {
+    thread: WorkThread;
+    scopeId?: string;
+    recordedAt?: string;
+  }): Promise<{ thread: DurableWorkThread; created: boolean }> {
+    const parsed = WorkThreadSchema.parse(input.thread);
+    const scopeId = input.scopeId ?? "local";
+    const canonicalKey = workThreadCanonicalKey(parsed);
+    const recordedAt = input.recordedAt ?? nowIso();
+    return db.transaction((tx) => {
+      const existing = tx
+        .select()
+        .from(workThreads)
+        .where(and(eq(workThreads.scopeId, scopeId), eq(workThreads.canonicalKey, canonicalKey)))
+        .limit(1)
+        .get();
+      if (existing) {
+        const merged = mergeWorkThreadAnchors(workThreadFromRow(existing), parsed);
+        const mergedJson = JSON.stringify(merged);
+        if (mergedJson !== existing.threadJson) {
+          tx.update(workThreads)
+            .set({ threadJson: mergedJson, updatedAt: recordedAt })
+            .where(eq(workThreads.id, existing.id))
+            .run();
+          tx.insert(governanceEvents).values({
+            workThreadId: existing.id,
+            type: "work_thread.updated",
+            subjectId: existing.id,
+            payloadJson: JSON.stringify({ anchorCount: 1 + (merged.secondaryAnchors?.length ?? 0) }),
+            createdAt: recordedAt
+          }).run();
+        }
+        return { thread: merged, created: false };
+      }
+      const id = parsed.id ?? `thread_${randomUUID()}`;
+      const durable = WorkThreadSchema.parse({ ...parsed, id }) as DurableWorkThread;
+      const conflictingId = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, id)).limit(1).get();
+      if (conflictingId) throw new Error(`WorkThread id ${id} already identifies another external work item.`);
+      tx.insert(workThreads).values({
+        id,
+        scopeId,
+        canonicalKey,
+        provider: parsed.workItemReference.provider,
+        ownerContainerId: parsed.workItemReference.ownerContainer?.id ?? "",
+        workItemKind: parsed.workItemReference.kind,
+        externalId: parsed.workItemReference.externalId,
+        threadJson: JSON.stringify(durable),
+        currentAssessmentId: null,
+        createdAt: recordedAt,
+        updatedAt: recordedAt
+      }).run();
+      tx.insert(governanceEvents).values({
+        workThreadId: id,
+        type: "work_thread.created",
+        subjectId: id,
+        payloadJson: JSON.stringify({ canonicalKey, scopeId }),
+        createdAt: recordedAt
+      }).run();
+      return { thread: durable, created: true };
+    });
+  }
+
   return {
     appendRunEvent,
+
+    upsertWorkThread: upsertWorkThreadRecord,
+
+    async getWorkThread(input: { workThreadId: string }): Promise<DurableWorkThread | null> {
+      const row = await db.select().from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
+      return row ? workThreadFromRow(row) : null;
+    },
+
+    async attachRunToWorkThread(input: { runId: string; workThreadId: string }): Promise<boolean> {
+      return db.transaction((tx) => {
+        const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
+        const run = tx.select({ id: runs.id }).from(runs).where(eq(runs.id, input.runId)).limit(1).get();
+        if (!thread || !run) return false;
+        tx.update(runs).set({ workThreadId: input.workThreadId, updatedAt: nowIso() }).where(eq(runs.id, input.runId)).run();
+        return true;
+      });
+    },
+
+    async recordCompletionContract(input: {
+      contract: CompletionContract;
+    }): Promise<{ contract: CompletionContract; created: boolean }> {
+      const contract = CompletionContractSchema.parse(input.contract);
+      const contractJson = JSON.stringify(contract);
+      const contentDigest = sha256Json(contract);
+      return db.transaction((tx) => {
+        const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, contract.workThreadId)).limit(1).get();
+        if (!thread) throw new Error(`WorkThread ${contract.workThreadId} does not exist.`);
+        const existing = tx
+          .select()
+          .from(completionContracts)
+          .where(and(eq(completionContracts.id, contract.id), eq(completionContracts.version, contract.version)))
+          .limit(1)
+          .get();
+        if (existing) {
+          if (existing.contentDigest !== contentDigest || existing.contractJson !== contractJson) {
+            throw new Error(`CompletionContract ${contract.id}@${contract.version} is immutable.`);
+          }
+          return { contract: completionContractFromRow(existing), created: false };
+        }
+        tx.insert(completionContracts).values({
+          id: contract.id,
+          version: contract.version,
+          workThreadId: contract.workThreadId,
+          cycle: contract.cycle,
+          contractJson,
+          contentDigest,
+          createdAt: contract.createdAt
+        }).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: contract.workThreadId,
+          type: "completion_contract.recorded",
+          subjectId: `${contract.id}@${contract.version}`,
+          payloadJson: JSON.stringify({ contractId: contract.id, version: contract.version, cycle: contract.cycle, contentDigest }),
+          createdAt: contract.createdAt
+        }).run();
+        return { contract, created: true };
+      });
+    },
+
+    async getCompletionContract(input: { contractId: string; version?: number }): Promise<CompletionContract | null> {
+      const conditions = [eq(completionContracts.id, input.contractId)];
+      if (input.version !== undefined) conditions.push(eq(completionContracts.version, input.version));
+      const row = await db
+        .select()
+        .from(completionContracts)
+        .where(and(...conditions))
+        .orderBy(desc(completionContracts.version))
+        .limit(1)
+        .get();
+      return row ? completionContractFromRow(row) : null;
+    },
+
+    async recordVerificationEvidence(input: {
+      id?: string;
+      workThreadId?: string;
+      provider: string;
+      deliveryId: string;
+      subjectRef: string;
+      subjectVersion: string;
+      evidence: VerificationEvidence;
+      payloadDigest?: string;
+      observedAt?: string;
+      receivedAt?: string;
+    }): Promise<{ evidence: StoredVerificationEvidence; created: boolean }> {
+      const evidence = VerificationEvidenceSchema.parse(input.evidence);
+      const receivedAt = input.receivedAt ?? nowIso();
+      const observedAt = input.observedAt ?? evidence.createdAt;
+      const payloadDigest = input.payloadDigest ?? sha256Json({
+        provider: input.provider,
+        deliveryId: input.deliveryId,
+        subjectRef: input.subjectRef,
+        subjectVersion: input.subjectVersion,
+        evidence
+      });
+      return db.transaction((tx) => {
+        if (input.workThreadId) {
+          const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
+          if (!thread) throw new Error(`WorkThread ${input.workThreadId} does not exist.`);
+        }
+        const existing = tx
+          .select()
+          .from(verificationEvidenceRecords)
+          .where(and(
+            eq(verificationEvidenceRecords.provider, input.provider),
+            eq(verificationEvidenceRecords.deliveryId, input.deliveryId),
+            eq(verificationEvidenceRecords.subjectRef, input.subjectRef),
+            eq(verificationEvidenceRecords.subjectVersion, input.subjectVersion),
+            eq(verificationEvidenceRecords.kind, evidence.kind)
+          ))
+          .limit(1)
+          .get();
+        if (existing) {
+          if (existing.payloadDigest !== payloadDigest || existing.evidenceJson !== JSON.stringify(evidence)) {
+            throw new Error(`Evidence delivery ${input.provider}/${input.deliveryId} conflicts with its durable payload.`);
+          }
+          return { evidence: storedVerificationEvidenceFromRow(existing), created: false };
+        }
+        const id = input.id ?? evidence.id;
+        const row = {
+          id,
+          workThreadId: input.workThreadId ?? null,
+          provider: input.provider,
+          deliveryId: input.deliveryId,
+          subjectRef: input.subjectRef,
+          subjectVersion: input.subjectVersion,
+          kind: evidence.kind,
+          assurance: evidence.assurance,
+          evidenceJson: JSON.stringify(evidence),
+          payloadDigest,
+          observedAt,
+          receivedAt
+        };
+        tx.insert(verificationEvidenceRecords).values(row).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: input.workThreadId ?? null,
+          type: "verification_evidence.recorded",
+          subjectId: id,
+          payloadJson: JSON.stringify({ provider: input.provider, deliveryId: input.deliveryId, subjectRef: input.subjectRef, subjectVersion: input.subjectVersion, kind: evidence.kind, assurance: evidence.assurance, payloadDigest }),
+          createdAt: receivedAt
+        }).run();
+        return { evidence: storedVerificationEvidenceFromRow(row), created: true };
+      });
+    },
+
+    async listVerificationEvidence(input: { workThreadId?: string }): Promise<StoredVerificationEvidence[]> {
+      const rows = input.workThreadId
+        ? await db.select().from(verificationEvidenceRecords).where(eq(verificationEvidenceRecords.workThreadId, input.workThreadId)).orderBy(asc(verificationEvidenceRecords.receivedAt), asc(verificationEvidenceRecords.id))
+        : await db.select().from(verificationEvidenceRecords).orderBy(asc(verificationEvidenceRecords.receivedAt), asc(verificationEvidenceRecords.id));
+      return rows.map(storedVerificationEvidenceFromRow);
+    },
+
+    async appendCompletionAssessment(input: {
+      assessment: CompletionAssessment;
+      expectedCurrentAssessmentId: string | null;
+    }): Promise<
+      | { outcome: "recorded" | "duplicate"; assessment: CompletionAssessment }
+      | { outcome: "conflict"; currentAssessment: CompletionAssessment | null }
+    > {
+      const assessment = CompletionAssessmentSchema.parse(input.assessment);
+      const assessmentJson = JSON.stringify(assessment);
+      return db.transaction((tx) => {
+        const duplicateById = tx.select().from(completionAssessments).where(eq(completionAssessments.id, assessment.id)).limit(1).get();
+        if (duplicateById) {
+          if (duplicateById.assessmentJson !== assessmentJson) {
+            throw new Error(`CompletionAssessment ${assessment.id} is immutable.`);
+          }
+          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateById) };
+        }
+        const duplicateByInput = tx.select().from(completionAssessments).where(and(
+          eq(completionAssessments.workThreadId, assessment.workThreadId),
+          eq(completionAssessments.cycle, assessment.cycle),
+          eq(completionAssessments.inputDigest, assessment.inputDigest)
+        )).limit(1).get();
+        if (duplicateByInput) {
+          if (duplicateByInput.assessmentJson !== assessmentJson) {
+            throw new Error(`CompletionAssessment input digest ${assessment.inputDigest} is immutable.`);
+          }
+          return { outcome: "duplicate" as const, assessment: completionAssessmentFromRow(duplicateByInput) };
+        }
+        const thread = tx.select().from(workThreads).where(eq(workThreads.id, assessment.workThreadId)).limit(1).get();
+        if (!thread) throw new Error(`WorkThread ${assessment.workThreadId} does not exist.`);
+        if (thread.currentAssessmentId !== input.expectedCurrentAssessmentId) {
+          const current = thread.currentAssessmentId
+            ? tx.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get()
+            : undefined;
+          return { outcome: "conflict" as const, currentAssessment: current ? completionAssessmentFromRow(current) : null };
+        }
+        if ((assessment.supersedesAssessmentId ?? null) !== input.expectedCurrentAssessmentId) {
+          throw new Error("CompletionAssessment supersession must match the expected WorkThread assessment head.");
+        }
+        const previousInCycle = tx.select().from(completionAssessments).where(and(
+          eq(completionAssessments.workThreadId, assessment.workThreadId),
+          eq(completionAssessments.cycle, assessment.cycle)
+        )).orderBy(desc(completionAssessments.sequence)).limit(1).get();
+        const expectedSequence = (previousInCycle?.sequence ?? 0) + 1;
+        if (assessment.sequence !== expectedSequence) {
+          throw new Error(`CompletionAssessment sequence must be ${expectedSequence} for cycle ${assessment.cycle}.`);
+        }
+        tx.insert(completionAssessments).values({
+          id: assessment.id,
+          workThreadId: assessment.workThreadId,
+          contractId: assessment.contractId,
+          contractVersion: assessment.contractVersion,
+          cycle: assessment.cycle,
+          sequence: assessment.sequence,
+          supersedesAssessmentId: assessment.supersedesAssessmentId ?? null,
+          inputDigest: assessment.inputDigest,
+          state: assessment.state,
+          assessmentJson,
+          createdAt: assessment.assessedAt
+        }).run();
+        const updateCondition = input.expectedCurrentAssessmentId === null
+          ? and(eq(workThreads.id, assessment.workThreadId), isNull(workThreads.currentAssessmentId))
+          : and(eq(workThreads.id, assessment.workThreadId), eq(workThreads.currentAssessmentId, input.expectedCurrentAssessmentId));
+        const updated = tx.update(workThreads).set({ currentAssessmentId: assessment.id, updatedAt: assessment.assessedAt }).where(updateCondition).run();
+        if (updated.changes !== 1) throw new Error("CompletionAssessment head compare-and-swap failed.");
+        tx.insert(governanceEvents).values({
+          workThreadId: assessment.workThreadId,
+          type: "completion_assessment.appended",
+          subjectId: assessment.id,
+          payloadJson: JSON.stringify({ contractId: assessment.contractId, contractVersion: assessment.contractVersion, cycle: assessment.cycle, sequence: assessment.sequence, state: assessment.state, inputDigest: assessment.inputDigest, supersedesAssessmentId: assessment.supersedesAssessmentId ?? null }),
+          createdAt: assessment.assessedAt
+        }).run();
+        return { outcome: "recorded" as const, assessment };
+      });
+    },
+
+    async listCompletionAssessments(input: { workThreadId: string }): Promise<CompletionAssessment[]> {
+      const rows = await db.select().from(completionAssessments).where(eq(completionAssessments.workThreadId, input.workThreadId)).orderBy(asc(completionAssessments.cycle), asc(completionAssessments.sequence));
+      return rows.map(completionAssessmentFromRow);
+    },
+
+    async getCurrentCompletionAssessment(input: { workThreadId: string }): Promise<CompletionAssessment | null> {
+      const thread = await db.select({ currentAssessmentId: workThreads.currentAssessmentId }).from(workThreads).where(eq(workThreads.id, input.workThreadId)).limit(1).get();
+      if (!thread?.currentAssessmentId) return null;
+      const row = await db.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get();
+      return row ? completionAssessmentFromRow(row) : null;
+    },
+
+    async openHumanEscalation(input: { escalation: HumanEscalation }): Promise<{ escalation: HumanEscalation; created: boolean }> {
+      const escalation = HumanEscalationSchema.parse(input.escalation);
+      if (escalation.state !== "open" && escalation.state !== "acknowledged") {
+        throw new Error("A new HumanEscalation must be open or acknowledged.");
+      }
+      const createdAt = escalation.openedAt;
+      return db.transaction((tx) => {
+        const thread = tx.select({ id: workThreads.id }).from(workThreads).where(eq(workThreads.id, escalation.workThreadId)).limit(1).get();
+        if (!thread) throw new Error(`WorkThread ${escalation.workThreadId} does not exist.`);
+        if (escalation.dedupeKey) {
+          const existing = tx.select().from(humanEscalations).where(and(
+            eq(humanEscalations.workThreadId, escalation.workThreadId),
+            isNotNull(humanEscalations.activeDedupeKey)
+          )).all().find((row) => {
+            const active = humanEscalationFromRow(row);
+            return active.dedupeKey === escalation.dedupeKey
+              && active.runId === escalation.runId;
+          });
+          if (existing) return { escalation: humanEscalationFromRow(existing), created: false };
+        }
+        const activeDedupeKey = escalation.dedupeKey
+          ? `${escalation.runId ?? "thread"}:${escalation.dedupeKey}`
+          : null;
+        tx.insert(humanEscalations).values({
+          id: escalation.id,
+          workThreadId: escalation.workThreadId,
+          class: escalation.class,
+          state: escalation.state,
+          dedupeKey: escalation.dedupeKey ?? null,
+          activeDedupeKey,
+          escalationJson: JSON.stringify(escalation),
+          createdAt,
+          updatedAt: createdAt
+        }).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: escalation.workThreadId,
+          type: "human_escalation.opened",
+          subjectId: escalation.id,
+          payloadJson: JSON.stringify({ class: escalation.class, blocking: escalation.blocking, dedupeKey: escalation.dedupeKey ?? null }),
+          createdAt
+        }).run();
+        return { escalation, created: true };
+      });
+    },
+
+    async resolveHumanEscalation(input: { escalation: HumanEscalation }): Promise<{ escalation: HumanEscalation; resolved: boolean }> {
+      const escalation = HumanEscalationSchema.parse(input.escalation);
+      if (escalation.state !== "resolved" || !escalation.resolution) {
+        throw new Error("A resolved HumanEscalation with attributed resolution is required.");
+      }
+      const resolution = escalation.resolution;
+      return db.transaction((tx) => {
+        const existing = tx.select().from(humanEscalations).where(eq(humanEscalations.id, escalation.id)).limit(1).get();
+        if (!existing) throw new Error(`HumanEscalation ${escalation.id} does not exist.`);
+        const current = humanEscalationFromRow(existing);
+        if (current.state === "resolved") {
+          if (existing.escalationJson !== JSON.stringify(escalation)) {
+            throw new Error(`HumanEscalation ${escalation.id} already has a different resolution.`);
+          }
+          return { escalation: current, resolved: false };
+        }
+        if (
+          current.workThreadId !== escalation.workThreadId
+          || current.class !== escalation.class
+          || current.openedAt !== escalation.openedAt
+          || current.dedupeKey !== escalation.dedupeKey
+        ) {
+          throw new Error(`HumanEscalation ${escalation.id} resolution cannot change its immutable identity.`);
+        }
+        tx.update(humanEscalations).set({
+          state: "resolved",
+          activeDedupeKey: null,
+          escalationJson: JSON.stringify(escalation),
+          updatedAt: resolution.resolvedAt
+        }).where(eq(humanEscalations.id, escalation.id)).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: escalation.workThreadId,
+          type: "human_escalation.resolved",
+          subjectId: escalation.id,
+          payloadJson: JSON.stringify({ class: escalation.class, actor: resolution.actor, reason: resolution.reason ?? null }),
+          createdAt: resolution.resolvedAt
+        }).run();
+        return { escalation, resolved: true };
+      });
+    },
+
+    async listHumanEscalations(input: { workThreadId: string }): Promise<HumanEscalation[]> {
+      const rows = await db.select().from(humanEscalations).where(eq(humanEscalations.workThreadId, input.workThreadId)).orderBy(asc(humanEscalations.createdAt), asc(humanEscalations.id));
+      return rows.map(humanEscalationFromRow);
+    },
+
+    async listGovernanceEvents(input: { workThreadId?: string }): Promise<GovernanceAuditEvent[]> {
+      const rows = input.workThreadId
+        ? await db.select().from(governanceEvents).where(eq(governanceEvents.workThreadId, input.workThreadId)).orderBy(asc(governanceEvents.id))
+        : await db.select().from(governanceEvents).orderBy(asc(governanceEvents.id));
+      return rows.map(governanceEventFromRow);
+    },
 
     async getRunByEventId(input: { eventId: string }): Promise<{ run: OpenTagRun; event: OpenTagEvent } | null> {
       const row = await db.select().from(runs).where(eq(runs.eventId, input.eventId)).limit(1).get();
@@ -2337,6 +2861,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       const triggeredByAction = input.triggeredByAction ? ActionHintSchema.parse(input.triggeredByAction) : undefined;
       const createdAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, createdAt);
+      const durableThread = protocolFields.thread
+        ? (await upsertWorkThreadRecord({ thread: protocolFields.thread, recordedAt: createdAt })).thread
+        : undefined;
       const repoKey = projectTargetRefFromEvent(event);
       const expectedRunnerId = await repoBindingRunnerId(repoKey);
       const sourceDeliveryId = sourceDeliveryIdFromEvent(event);
@@ -2378,7 +2905,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         repoProvider: repoKey?.provider ?? null,
         repoOwner: repoKey?.owner ?? null,
         repoName: repoKey?.repo ?? null,
-        workThreadId: protocolFields.thread?.id ?? null,
+        workThreadId: durableThread?.id ?? null,
         conversationKey: conversationKeyFromEvent(event),
         createdAt,
         updatedAt: createdAt
@@ -2449,7 +2976,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         type: "context_packet.generated",
         payload: {
           contextPacket: protocolFields.contextPacket,
-          ...(protocolFields.thread ? { thread: protocolFields.thread } : {})
+          ...(durableThread ? { thread: durableThread } : {})
         },
         visibility: "audit",
         importance: "normal",
@@ -2477,7 +3004,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           id: input.id,
           eventId: event.id,
           status: "queued",
-          ...protocolFields,
+          ...(durableThread ? { thread: durableThread } : {}),
           ...(input.parentRunId ? { parentRunId: input.parentRunId } : {}),
           ...(triggeredByAction ? { triggeredByAction } : {}),
           ...(input.sourceProposalId ? { sourceProposalId: input.sourceProposalId } : {}),

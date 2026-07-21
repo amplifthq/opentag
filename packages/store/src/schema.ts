@@ -346,6 +346,255 @@ export const callbackDeliveries = sqliteTable(
   })
 );
 
+export const workThreads = sqliteTable(
+  "work_threads",
+  {
+    id: text("id").primaryKey(),
+    scopeId: text("scope_id").notNull(),
+    canonicalKey: text("canonical_key").notNull(),
+    provider: text("provider").notNull(),
+    ownerContainerId: text("owner_container_id").notNull(),
+    workItemKind: text("work_item_kind").notNull(),
+    externalId: text("external_id").notNull(),
+    threadJson: text("thread_json").notNull(),
+    currentAssessmentId: text("current_assessment_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    canonicalKeyIdx: uniqueIndex("work_threads_scope_canonical_key_idx").on(table.scopeId, table.canonicalKey),
+    currentAssessmentIdx: index("work_threads_current_assessment_idx").on(table.currentAssessmentId)
+  })
+);
+
+export const completionContracts = sqliteTable(
+  "completion_contracts",
+  {
+    id: text("id").notNull(),
+    version: integer("version").notNull(),
+    workThreadId: text("work_thread_id").notNull(),
+    cycle: integer("cycle").notNull(),
+    contractJson: text("contract_json").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.id, table.version] }),
+    threadCycleIdx: index("completion_contracts_thread_cycle_idx").on(table.workThreadId, table.cycle, table.version)
+  })
+);
+
+export const verificationEvidenceRecords = sqliteTable(
+  "verification_evidence",
+  {
+    id: text("id").primaryKey(),
+    workThreadId: text("work_thread_id"),
+    provider: text("provider").notNull(),
+    deliveryId: text("delivery_id").notNull(),
+    subjectRef: text("subject_ref").notNull(),
+    subjectVersion: text("subject_version").notNull(),
+    kind: text("kind").notNull(),
+    assurance: text("assurance").notNull(),
+    evidenceJson: text("evidence_json").notNull(),
+    payloadDigest: text("payload_digest").notNull(),
+    observedAt: text("observed_at").notNull(),
+    receivedAt: text("received_at").notNull()
+  },
+  (table) => ({
+    deliverySubjectIdx: uniqueIndex("verification_evidence_delivery_subject_idx").on(
+      table.provider,
+      table.deliveryId,
+      table.subjectRef,
+      table.subjectVersion,
+      table.kind
+    ),
+    threadIdx: index("verification_evidence_thread_idx").on(table.workThreadId, table.receivedAt)
+  })
+);
+
+export const completionAssessments = sqliteTable(
+  "completion_assessments",
+  {
+    id: text("id").primaryKey(),
+    workThreadId: text("work_thread_id").notNull(),
+    contractId: text("contract_id").notNull(),
+    contractVersion: integer("contract_version").notNull(),
+    cycle: integer("cycle").notNull(),
+    sequence: integer("sequence").notNull(),
+    supersedesAssessmentId: text("supersedes_assessment_id"),
+    inputDigest: text("input_digest").notNull(),
+    state: text("state").notNull(),
+    assessmentJson: text("assessment_json").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    threadSequenceIdx: uniqueIndex("completion_assessments_thread_cycle_sequence_idx").on(
+      table.workThreadId,
+      table.cycle,
+      table.sequence
+    ),
+    supersedesIdx: uniqueIndex("completion_assessments_supersedes_idx").on(table.supersedesAssessmentId),
+    inputDigestIdx: uniqueIndex("completion_assessments_thread_cycle_input_idx").on(
+      table.workThreadId,
+      table.cycle,
+      table.inputDigest
+    )
+  })
+);
+
+export const humanEscalations = sqliteTable(
+  "human_escalations",
+  {
+    id: text("id").primaryKey(),
+    workThreadId: text("work_thread_id").notNull(),
+    class: text("class").notNull(),
+    state: text("state").notNull(),
+    dedupeKey: text("dedupe_key"),
+    activeDedupeKey: text("active_dedupe_key"),
+    escalationJson: text("escalation_json").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => ({
+    activeDedupeIdx: uniqueIndex("human_escalations_active_dedupe_idx").on(table.workThreadId, table.activeDedupeKey),
+    threadIdx: index("human_escalations_thread_idx").on(table.workThreadId, table.createdAt)
+  })
+);
+
+export const governanceEvents = sqliteTable(
+  "governance_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    workThreadId: text("work_thread_id"),
+    type: text("type").notNull(),
+    subjectId: text("subject_id"),
+    payloadJson: text("payload_json").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    threadIdx: index("governance_events_thread_idx").on(table.workThreadId, table.id),
+    typeIdx: index("governance_events_type_idx").on(table.type)
+  })
+);
+
+function migrateCompletionGovernanceSchema(sqlite: Database.Database): void {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS opentag_schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+  `);
+  const migrationId = "2026-07-21-completion-governance-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS work_threads (
+        id TEXT PRIMARY KEY,
+        scope_id TEXT NOT NULL,
+        canonical_key TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        owner_container_id TEXT NOT NULL,
+        work_item_kind TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        thread_json TEXT NOT NULL,
+        current_assessment_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS work_threads_scope_canonical_key_idx
+        ON work_threads(scope_id, canonical_key);
+      CREATE INDEX IF NOT EXISTS work_threads_current_assessment_idx
+        ON work_threads(current_assessment_id);
+
+      CREATE TABLE IF NOT EXISTS completion_contracts (
+        id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        work_thread_id TEXT NOT NULL,
+        cycle INTEGER NOT NULL,
+        contract_json TEXT NOT NULL,
+        content_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (id, version)
+      );
+      CREATE INDEX IF NOT EXISTS completion_contracts_thread_cycle_idx
+        ON completion_contracts(work_thread_id, cycle, version);
+
+      CREATE TABLE IF NOT EXISTS verification_evidence (
+        id TEXT PRIMARY KEY,
+        work_thread_id TEXT,
+        provider TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        subject_ref TEXT NOT NULL,
+        subject_version TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        assurance TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        received_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS verification_evidence_delivery_subject_idx
+        ON verification_evidence(provider, delivery_id, subject_ref, subject_version, kind);
+      CREATE INDEX IF NOT EXISTS verification_evidence_thread_idx
+        ON verification_evidence(work_thread_id, received_at);
+
+      CREATE TABLE IF NOT EXISTS completion_assessments (
+        id TEXT PRIMARY KEY,
+        work_thread_id TEXT NOT NULL,
+        contract_id TEXT NOT NULL,
+        contract_version INTEGER NOT NULL,
+        cycle INTEGER NOT NULL,
+        sequence INTEGER NOT NULL,
+        supersedes_assessment_id TEXT,
+        input_digest TEXT NOT NULL,
+        state TEXT NOT NULL,
+        assessment_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS completion_assessments_thread_cycle_sequence_idx
+        ON completion_assessments(work_thread_id, cycle, sequence);
+      CREATE UNIQUE INDEX IF NOT EXISTS completion_assessments_supersedes_idx
+        ON completion_assessments(supersedes_assessment_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS completion_assessments_thread_cycle_input_idx
+        ON completion_assessments(work_thread_id, cycle, input_digest);
+
+      CREATE TABLE IF NOT EXISTS human_escalations (
+        id TEXT PRIMARY KEY,
+        work_thread_id TEXT NOT NULL,
+        class TEXT NOT NULL,
+        state TEXT NOT NULL,
+        dedupe_key TEXT,
+        active_dedupe_key TEXT,
+        escalation_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS human_escalations_active_dedupe_idx
+        ON human_escalations(work_thread_id, active_dedupe_key);
+      CREATE INDEX IF NOT EXISTS human_escalations_thread_idx
+        ON human_escalations(work_thread_id, created_at);
+
+      CREATE TABLE IF NOT EXISTS governance_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        work_thread_id TEXT,
+        type TEXT NOT NULL,
+        subject_id TEXT,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS governance_events_thread_idx
+        ON governance_events(work_thread_id, id);
+      CREATE INDEX IF NOT EXISTS governance_events_type_idx
+        ON governance_events(type);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -853,4 +1102,5 @@ export function migrateSchema(sqlite: Database.Database): void {
       FROM slack_channel_bindings;
     `);
   }
+  migrateCompletionGovernanceSchema(sqlite);
 }
