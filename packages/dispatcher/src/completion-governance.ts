@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   CompletionContractSchema,
@@ -17,6 +18,7 @@ import {
   type WorkLoopView
 } from "@opentag/governance";
 import type { GitHubVerifiedPullRequestSnapshot } from "@opentag/github";
+import type { GitHubCompletionReconciliationEscalationRequest } from "@opentag/github";
 import {
   createOpenTagRepository,
   type RecordVerificationEvidenceInput,
@@ -190,10 +192,35 @@ function factDigest(snapshotDigest: string, kind: string): string {
   return `sha256:${createHash("sha256").update(`${snapshotDigest}:${kind}`).digest("hex")}`;
 }
 
+function canonicalizeGitHubCompletionValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeGitHubCompletionValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalizeGitHubCompletionValue(child)])
+    );
+  }
+  return value;
+}
+
+function githubCompletionSemanticDigest(snapshot: GitHubVerifiedPullRequestSnapshot): string {
+  const semanticSnapshot = {
+    provider: snapshot.provider,
+    repository: snapshot.repository,
+    pullRequest: snapshot.pullRequest,
+    checks: snapshot.checks
+  };
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalizeGitHubCompletionValue(semanticSnapshot)))
+    .digest("hex")}`;
+}
+
 function githubFactTemplates(input: {
   snapshot: GitHubVerifiedPullRequestSnapshot;
   receivedAt: string;
 }): Array<Omit<CompletionEvidenceFact, "workThreadId">> {
+  const semanticDigest = githubCompletionSemanticDigest(input.snapshot);
   const common = {
     cycle: 1,
     assurance: "verified" as const,
@@ -208,7 +235,7 @@ function githubFactTemplates(input: {
   const provenance = (kind: string) => ({
     adapter: "@opentag/github",
     adapterVersion: "0.6.0",
-    payloadDigest: factDigest(input.snapshot.payloadDigest, kind),
+    payloadDigest: factDigest(semanticDigest, kind),
     providerDeliveryId: input.snapshot.deliveryId
   });
   const idPrefix = `github:${input.snapshot.deliveryId}:pr:${input.snapshot.pullRequest.number}:${input.snapshot.pullRequest.headSha}`;
@@ -276,6 +303,59 @@ function githubEvidenceRecords(input: {
   });
 }
 
+function githubSnapshotSetRecords(input: {
+  snapshots: GitHubVerifiedPullRequestSnapshot[];
+  receivedAt: string;
+}): { records: RecordVerificationEvidenceInput[]; manifestDigest: string } {
+  const first = input.snapshots[0]!;
+  const subjects = input.snapshots.map((snapshot) => ({
+    subjectRef: snapshot.pullRequest.resourceRef,
+    subjectVersion: snapshot.pullRequest.headSha,
+    semanticDigest: githubCompletionSemanticDigest(snapshot)
+  })).sort((left, right) => left.subjectRef.localeCompare(right.subjectRef));
+  const manifest = {
+    provider: "github" as const,
+    deliveryId: first.deliveryId,
+    eventName: first.eventName,
+    repository: first.repository,
+    subjects
+  };
+  const manifestDigest = `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalizeGitHubCompletionValue(manifest)))
+    .digest("hex")}`;
+  const manifestRef = `github:${first.repository.owner}/${first.repository.repo}:completion_delivery:${first.deliveryId}`;
+  const observedAt = input.snapshots.map((snapshot) => snapshot.observedAt).sort().at(-1)!;
+  return {
+    manifestDigest,
+    records: [
+      ...input.snapshots.flatMap((snapshot) => githubEvidenceRecords({
+        snapshot,
+        receivedAt: input.receivedAt
+      })),
+      {
+        id: `github:${first.deliveryId}:snapshot-set`,
+        provider: "github",
+        deliveryId: first.deliveryId,
+        subjectRef: manifestRef,
+        subjectVersion: "snapshot-set-v1",
+        evidence: {
+          id: `github:${first.deliveryId}:snapshot-set`,
+          kind: "github.completion_snapshot_set",
+          assurance: "verified",
+          subjectRef: manifestRef,
+          summary: `GitHub completion delivery contains ${subjects.length} pull request snapshot(s).`,
+          sourceRef: `github-api:${first.eventName}`,
+          createdAt: observedAt,
+          metadata: { snapshotSetManifest: manifest }
+        },
+        payloadDigest: manifestDigest,
+        observedAt,
+        receivedAt: input.receivedAt
+      }
+    ]
+  };
+}
+
 function artifactsFromRuns(input: {
   runs: Array<{ run: OpenTagRun; event: OpenTagEvent }>;
   evidence: CompletionEvidenceFact[];
@@ -327,6 +407,24 @@ function artifactsFromRuns(input: {
   return artifacts;
 }
 
+export function currentWorkThreadRun<T extends { run: Pick<OpenTagRun, "id" | "createdAt"> }>(runs: readonly T[]): T | undefined {
+  return [...runs].sort((left, right) =>
+    sqliteBinaryTextCompare(left.run.createdAt, right.run.createdAt)
+      || sqliteBinaryTextCompare(left.run.id, right.run.id)
+  ).at(-1);
+}
+
+function sqliteBinaryTextCompare(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function currentDeliveryCycleRuns(
+  runs: Array<{ run: OpenTagRun; event: OpenTagEvent }>
+): Array<{ run: OpenTagRun; event: OpenTagEvent }> {
+  const latest = currentWorkThreadRun(runs);
+  return latest ? [latest] : [];
+}
+
 function githubPullRequestResourceRefs(stored: { run: OpenTagRun; event: OpenTagEvent }): Set<string> {
   const repository = repositoryIdentity(stored.event);
   if (!repository || repository.provider !== "github" || !stored.run.result) return new Set();
@@ -343,20 +441,45 @@ function githubPullRequestResourceRefs(stored: { run: OpenTagRun; event: OpenTag
   }));
 }
 
-async function matchingWorkThreadIds(input: {
+type CurrentWorkThreadCorrelationIndex = {
+  currentRunsByWorkThreadId: Map<string, { run: OpenTagRun; event: OpenTagEvent }>;
+  workThreadIdsByResourceRef: Map<string, string[]>;
+};
+
+async function loadCurrentWorkThreadCorrelationIndex(input: {
   repo: OpenTagRepository;
-  resourceRef: string;
-}): Promise<string[]> {
-  const runs = await input.repo.listRunsWithResults();
-  return [...new Set(runs.flatMap((stored) => {
+}): Promise<CurrentWorkThreadCorrelationIndex> {
+  const currentRunsByWorkThreadId = new Map<string, { run: OpenTagRun; event: OpenTagEvent }>();
+  const workThreadIdSetsByResourceRef = new Map<string, Set<string>>();
+  for (const stored of await input.repo.listCurrentWorkThreadRunsWithResults()) {
     const workThreadId = stored.run.thread?.id;
-    return workThreadId && githubPullRequestResourceRefs(stored).has(input.resourceRef) ? [workThreadId] : [];
-  }))].sort();
+    if (!workThreadId) continue;
+    currentRunsByWorkThreadId.set(workThreadId, stored);
+    for (const resourceRef of githubPullRequestResourceRefs(stored)) {
+      const workThreadIds = workThreadIdSetsByResourceRef.get(resourceRef) ?? new Set<string>();
+      workThreadIds.add(workThreadId);
+      workThreadIdSetsByResourceRef.set(resourceRef, workThreadIds);
+    }
+  }
+  return {
+    currentRunsByWorkThreadId,
+    workThreadIdsByResourceRef: new Map([...workThreadIdSetsByResourceRef].map(([resourceRef, workThreadIds]) =>
+      [resourceRef, [...workThreadIds].sort()]
+    ))
+  };
+}
+
+function matchingWorkThreadIds(input: {
+  correlationIndex: CurrentWorkThreadCorrelationIndex;
+  resourceRef: string;
+}): string[] {
+  return input.correlationIndex.workThreadIdsByResourceRef.get(input.resourceRef) ?? [];
 }
 
 async function attachCorrelatableEvidence(input: {
   repo: OpenTagRepository;
   attachedAt: string;
+  correlationIndex: CurrentWorkThreadCorrelationIndex;
 }): Promise<Set<string>> {
   const uncorrelated = (await input.repo.listVerificationEvidence({})).filter((record) =>
     record.provider === "github" && !record.workThreadId && record.evidence.metadata?.["completionFactTemplate"]
@@ -367,7 +490,7 @@ async function attachCorrelatableEvidence(input: {
     identities.set(JSON.stringify([record.provider, record.deliveryId, record.subjectRef]), record);
   }
   for (const record of identities.values()) {
-    const candidates = await matchingWorkThreadIds({ repo: input.repo, resourceRef: record.subjectRef });
+    const candidates = matchingWorkThreadIds({ correlationIndex: input.correlationIndex, resourceRef: record.subjectRef });
     if (candidates.length !== 1) continue;
     await input.repo.attachVerificationEvidenceDeliveryToWorkThread({
       provider: record.provider,
@@ -393,8 +516,8 @@ async function ensureContract(input: {
   if (existing) return existing;
   const policy = matchingPolicy(input.event, input.policies);
   const contract = policy
-    ? strictContract({ workThreadId, policy, createdAt: input.run.updatedAt })
-    : compatibilityContract({ workThreadId, createdAt: input.run.updatedAt });
+    ? strictContract({ workThreadId, policy, createdAt: input.run.createdAt })
+    : compatibilityContract({ workThreadId, createdAt: input.run.createdAt });
   return (await input.repo.recordCompletionContract({ contract })).contract;
 }
 
@@ -402,6 +525,26 @@ export type GitHubCompletionEvidenceIngestion = {
   outcome: "recorded" | "duplicate" | "uncorrelated" | "ambiguous";
   workThreadId?: string;
   completion?: WorkLoopView;
+};
+
+export type GitHubCompletionEvidenceBatchIngestion = {
+  outcome: "recorded" | "duplicate";
+  manifestDigest: string;
+  workThreadIds: string[];
+};
+
+export type CompletionExplanation = WorkLoopView & {
+  contractSnapshot: CompletionContract;
+  assessmentHistory: CompletionAssessment[];
+  evidence: CompletionEvidenceFact[];
+  openHumanEscalations: HumanEscalation[];
+};
+
+export type CompletionSourceThreadTransition = {
+  runId: string;
+  event: OpenTagEvent;
+  completion: WorkLoopView;
+  transitionKey: string;
 };
 
 export function createDispatcherCompletionGovernance(input: {
@@ -414,8 +557,16 @@ export function createDispatcherCompletionGovernance(input: {
     async loadEvaluationSnapshot(workThreadId): Promise<CompletionEvaluationSnapshot> {
       const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
       if (!contract) throw new Error(`WorkThread ${workThreadId} has no completion contract.`);
-      const runs = await input.repo.listRunsForWorkThread({ workThreadId });
-      const storedEvidence = await input.repo.listVerificationEvidence({ workThreadId });
+      const runs = currentDeliveryCycleRuns(await input.repo.listRunsForWorkThread({ workThreadId }));
+      const currentRun = runs[0]?.run;
+      const currentAssessment = await input.repo.getCurrentCompletionAssessment({ workThreadId });
+      const blockingEscalations = (await input.repo.listHumanEscalations({ workThreadId })).filter((escalation) =>
+        escalation.blocking
+        && Boolean(currentRun)
+        && escalation.runId === currentRun!.id
+      );
+      const storedEvidence = (await input.repo.listVerificationEvidence({ workThreadId }))
+        .filter((record) => !currentRun || record.receivedAt >= currentRun.createdAt);
       const evidence = storedEvidence.map(completionFactFromStoredEvidence).filter((fact): fact is CompletionEvidenceFact => Boolean(fact));
       const assessments = await input.repo.listCompletionAssessments({ workThreadId });
       return {
@@ -423,9 +574,15 @@ export function createDispatcherCompletionGovernance(input: {
         runResults: runs.flatMap(({ run }) => run.result ? [{ runId: run.id, result: run.result, recordedAt: run.updatedAt }] : []),
         artifacts: artifactsFromRuns({ runs, evidence, contract }),
         evidence,
-        materialActionReceipts: [],
-        waivers: assessments.flatMap((assessment) => assessment.waiver ? [assessment.waiver] : []),
-        currentAssessment: await input.repo.getCurrentCompletionAssessment({ workThreadId })
+        materialActionReceipts: currentRun
+          ? await input.repo.listMaterialActionReceiptsForRun({ runId: currentRun.id })
+          : [],
+        waivers: currentRun
+          ? (await input.repo.listCompletionWaivers({ workThreadId }))
+            .filter((waiver) => waiver.runId === currentRun.id)
+          : [],
+        blockingEscalations,
+        currentAssessment
       };
     },
     async recordEvidence(fact) {
@@ -469,78 +626,371 @@ export function createDispatcherCompletionGovernance(input: {
     repository: governanceRepository,
     clock: { now: input.now ?? (() => new Date().toISOString()) }
   });
+  const reassessmentTails = new Map<string, Promise<GovernanceCommandResult>>();
+
+  async function syncHumanEscalation(result: GovernanceCommandResult): Promise<void> {
+    const assessment = result.assessment;
+    const dedupeKey = `completion:${assessment.contractId}:${assessment.contractVersion}:${assessment.cycle}:blocked`;
+    const active = (await input.repo.listHumanEscalations({ workThreadId: assessment.workThreadId }))
+      .filter((escalation) => escalation.state === "open" || escalation.state === "acknowledged");
+    if (assessment.state === "blocked") {
+      if (active.some((escalation) => escalation.blocking && escalation.class === "reconciliation")) return;
+      const semantic = `${assessment.workThreadId}:${dedupeKey}`;
+      await input.repo.openHumanEscalation({
+        escalation: {
+          id: `escalation_${createHash("sha256").update(semantic).digest("hex").slice(0, 24)}`,
+          workThreadId: assessment.workThreadId,
+          ...(assessment.triggeredByRunId ? { runId: assessment.triggeredByRunId } : {}),
+          class: "verification",
+          audience: "repo_owner",
+          subjectRef: `${assessment.contractId}@${assessment.contractVersion}`,
+          state: "open",
+          blocking: true,
+          summary: "Completion verification needs human attention.",
+          reason: result.view.nextAction,
+          nextAction: { kind: "request_human_decision", targetId: assessment.workThreadId },
+          dedupeKey,
+          openedAt: assessment.assessedAt
+        }
+      });
+      return;
+    }
+    for (const escalation of active.filter((candidate) => candidate.dedupeKey?.startsWith("completion:"))) {
+      await input.repo.resolveHumanEscalation({
+        escalation: {
+          ...escalation,
+          state: "resolved",
+          resolution: {
+            actor: { provider: "opentag", providerUserId: "completion-governance", handle: "opentag" },
+            reason: `Completion assessment advanced to ${assessment.state}.`,
+            resolvedAt: assessment.assessedAt
+          }
+        }
+      });
+    }
+  }
+
+  async function reassess(workThreadId: string, commandId: string): Promise<GovernanceCommandResult> {
+    const previous = reassessmentTails.get(workThreadId);
+    const task = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(async () => {
+      const result = await governance.execute({ type: "reassess_completion", commandId, workThreadId });
+      await syncHumanEscalation(result);
+      return result;
+    });
+    reassessmentTails.set(workThreadId, task);
+    try {
+      return await task;
+    } finally {
+      if (reassessmentTails.get(workThreadId) === task) reassessmentTails.delete(workThreadId);
+    }
+  }
+
+  async function ingestGitHubSnapshotSetWithCorrelationIndex(
+    snapshots: GitHubVerifiedPullRequestSnapshot[],
+    correlationIndex: CurrentWorkThreadCorrelationIndex
+  ): Promise<GitHubCompletionEvidenceBatchIngestion> {
+    if (snapshots.length === 0) throw new Error("GitHub completion evidence snapshot set cannot be empty.");
+    const ordered = [...snapshots].sort((left, right) =>
+      left.pullRequest.resourceRef.localeCompare(right.pullRequest.resourceRef)
+    );
+    const first = ordered[0]!;
+    const subjectRefs = new Set<string>();
+    for (const snapshot of ordered) {
+      const expectedRef = `github:${snapshot.repository.owner}/${snapshot.repository.repo}:pull_request:${snapshot.pullRequest.number}`;
+      if (snapshot.pullRequest.resourceRef !== expectedRef) {
+        throw new Error("GitHub completion evidence resource identity does not match its repository and pull request number.");
+      }
+      if (snapshot.deliveryId !== first.deliveryId
+        || snapshot.eventName !== first.eventName
+        || snapshot.repository.owner !== first.repository.owner
+        || snapshot.repository.repo !== first.repository.repo) {
+        throw new Error("GitHub completion evidence snapshot set must share one delivery, event, and repository.");
+      }
+      if (subjectRefs.has(snapshot.pullRequest.resourceRef)) {
+        throw new Error("GitHub completion evidence snapshot set contains a duplicate pull request subject.");
+      }
+      subjectRefs.add(snapshot.pullRequest.resourceRef);
+    }
+    const receivedAt = input.now?.() ?? new Date().toISOString();
+    const snapshotSet = githubSnapshotSetRecords({ snapshots: ordered, receivedAt });
+    const existingDelivery = (await input.repo.listVerificationEvidence({})).filter((record) =>
+      record.provider === "github"
+      && record.deliveryId === first.deliveryId
+    );
+    if (existingDelivery.length > 0) {
+      const existingIdentity = [...new Set(existingDelivery.map((record) => JSON.stringify([
+        record.subjectRef,
+        record.subjectVersion,
+        record.evidence.kind,
+        record.payloadDigest
+      ])))].sort();
+      const replayIdentity = [...new Set(snapshotSet.records.map((record) => JSON.stringify([
+        record.subjectRef,
+        record.subjectVersion,
+        record.evidence.kind,
+        record.payloadDigest
+      ])))].sort();
+      if (JSON.stringify(existingIdentity) !== JSON.stringify(replayIdentity)) {
+        throw new Error("GitHub completion evidence delivery payload conflicts with its durable record.");
+      }
+    } else {
+      await input.repo.recordVerificationEvidenceBatch({ records: snapshotSet.records });
+    }
+    await attachCorrelatableEvidence({ repo: input.repo, attachedAt: receivedAt, correlationIndex });
+    const attachedWorkThreadIds = [...new Set((await input.repo.listVerificationEvidence({})).flatMap((record) =>
+      record.provider === "github" && record.deliveryId === first.deliveryId && record.workThreadId
+        ? [record.workThreadId]
+        : []
+    ))].sort();
+    for (const workThreadId of attachedWorkThreadIds) {
+      await reassess(workThreadId, `github-evidence-set:${first.deliveryId}:${snapshotSet.manifestDigest}`);
+    }
+    return {
+      outcome: existingDelivery.length > 0 ? "duplicate" : "recorded",
+      manifestDigest: snapshotSet.manifestDigest,
+      workThreadIds: attachedWorkThreadIds
+    };
+  }
 
   return {
     async ingestRunResult(runId: string): Promise<GovernanceCommandResult | null> {
       const stored = await input.repo.getRun({ runId });
       if (!stored?.run.thread?.id || !stored.run.result) return null;
       await ensureContract({ repo: input.repo, run: stored.run, event: stored.event, policies });
-      await attachCorrelatableEvidence({ repo: input.repo, attachedAt: input.now?.() ?? new Date().toISOString() });
-      return governance.execute({
+      const correlationIndex = await loadCurrentWorkThreadCorrelationIndex({ repo: input.repo });
+      await attachCorrelatableEvidence({
+        repo: input.repo,
+        attachedAt: input.now?.() ?? new Date().toISOString(),
+        correlationIndex
+      });
+      const result = await governance.execute({
         type: "ingest_run_result",
         commandId: `run-result:${runId}:${stored.run.updatedAt}`,
         workThreadId: stored.run.thread.id,
         runId
       });
+      await syncHumanEscalation(result);
+      return result;
     },
 
     async ingestEvidence(fact: CompletionEvidenceFact): Promise<GovernanceCommandResult> {
-      return governance.execute({ type: "ingest_evidence", commandId: `evidence:${fact.id}`, evidence: fact });
+      const result = await governance.execute({ type: "ingest_evidence", commandId: `evidence:${fact.id}`, evidence: fact });
+      await syncHumanEscalation(result);
+      return result;
+    },
+
+    async reassessRun(runId: string): Promise<GovernanceCommandResult | null> {
+      const stored = await input.repo.getRun({ runId });
+      const workThreadId = stored?.run.thread?.id;
+      if (!workThreadId) return null;
+      const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+      if (!contract) return null;
+      return reassess(workThreadId, `reassess-run:${runId}`);
+    },
+
+    async applyWaiverForRun(runId: string, waiverInput: BoundedCompletionWaiverInput): Promise<GovernanceCommandResult | null> {
+      const stored = await input.repo.getRun({ runId });
+      const workThreadId = stored?.run.thread?.id;
+      if (!workThreadId) return null;
+      const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+      if (!contract) return null;
+      if (contract.mode !== "governed") throw new Error("Execution-compatibility contracts cannot be waived.");
+      const gateIds = [...new Set(waiverInput.gateIds)].sort();
+      if (gateIds.some((gateId) => !contract.gates.some((gate) => gate.id === gateId))) {
+        throw new Error("A completion waiver may target only gates in the current contract snapshot.");
+      }
+      if (!contract.resolvedFrom.some((source) => source.scope === waiverInput.policyScope)) {
+        throw new Error("A completion waiver policy scope must match the current contract authority.");
+      }
+      if (waiverInput.expiresAt && waiverInput.expiresAt <= waiverInput.waivedAt) {
+        throw new Error("A completion waiver expiresAt must be later than waivedAt.");
+      }
+      const semantic = JSON.stringify({
+        workThreadId,
+        runId,
+        contractId: contract.id,
+        contractVersion: contract.version,
+        cycle: contract.cycle,
+        actor: waiverInput.actor,
+        reason: waiverInput.reason,
+        scope: waiverInput.scope,
+        policyScope: waiverInput.policyScope,
+        gateIds,
+        waivedAt: waiverInput.waivedAt,
+        expiresAt: waiverInput.expiresAt ?? null
+      });
+      const id = `waiver_${createHash("sha256").update(semantic).digest("hex").slice(0, 24)}`;
+      const waiver: CompletionWaiver = {
+        id,
+        runId,
+        contractId: contract.id,
+        contractVersion: contract.version,
+        cycle: contract.cycle,
+        actor: waiverInput.actor,
+        reason: waiverInput.reason,
+        scope: waiverInput.scope,
+        policyScope: waiverInput.policyScope,
+        gateIds,
+        waivedAt: waiverInput.waivedAt,
+        ...(waiverInput.expiresAt ? { expiresAt: waiverInput.expiresAt } : {})
+      };
+      const result = await governance.execute({
+        type: "apply_completion_waiver",
+        commandId: `completion-waiver:${id}`,
+        workThreadId,
+        waiver
+      });
+      await syncHumanEscalation(result);
+      return result;
+    },
+
+    async ingestGitHubSnapshotSet(
+      snapshots: GitHubVerifiedPullRequestSnapshot[]
+    ): Promise<GitHubCompletionEvidenceBatchIngestion> {
+      const correlationIndex = await loadCurrentWorkThreadCorrelationIndex({ repo: input.repo });
+      return ingestGitHubSnapshotSetWithCorrelationIndex(snapshots, correlationIndex);
     },
 
     async ingestGitHubSnapshot(snapshot: GitHubVerifiedPullRequestSnapshot): Promise<GitHubCompletionEvidenceIngestion> {
-      const expectedRef = `github:${snapshot.repository.owner}/${snapshot.repository.repo}:pull_request:${snapshot.pullRequest.number}`;
-      if (snapshot.pullRequest.resourceRef !== expectedRef) {
-        throw new Error("GitHub completion evidence resource identity does not match its repository and pull request number.");
-      }
-      const existing = (await input.repo.listVerificationEvidence({})).filter((record) =>
-        record.provider === "github"
-        && record.deliveryId === snapshot.deliveryId
-        && record.subjectRef === snapshot.pullRequest.resourceRef
+      const correlationIndex = await loadCurrentWorkThreadCorrelationIndex({ repo: input.repo });
+      const candidates = matchingWorkThreadIds({ correlationIndex, resourceRef: snapshot.pullRequest.resourceRef });
+      const batch = await ingestGitHubSnapshotSetWithCorrelationIndex([snapshot], correlationIndex);
+      const workThreadId = batch.workThreadIds.length === 1 ? batch.workThreadIds[0] : undefined;
+      if (!workThreadId) return { outcome: candidates.length > 1 ? "ambiguous" : "uncorrelated" };
+      const completion = await this.getWorkLoop(workThreadId);
+      return { outcome: batch.outcome, workThreadId, ...(completion ? { completion } : {}) };
+    },
+
+    async handleGitHubReconciliationEscalation(
+      request: GitHubCompletionReconciliationEscalationRequest
+    ): Promise<{ outcome: "opened" | "duplicate" | "resolved" | "already_resolved" | "uncorrelated" | "ambiguous"; workThreadId?: string }> {
+      const resourceRefs = request.correlation.pullRequestNumbers.map((number) =>
+        `github:${request.correlation.repository.owner}/${request.correlation.repository.repo}:pull_request:${number}`
       );
-      if (existing.length > 0) {
-        const attached = [...new Set(existing.flatMap((record) => record.workThreadId ? [record.workThreadId] : []))];
-        if (attached.length === 1) {
-          const workThreadId = attached[0]!;
-          const completion = await governance.read({ type: "get_work_loop", workThreadId }) as WorkLoopView;
-          return { outcome: "duplicate", workThreadId, completion };
+      const correlationIndex = await loadCurrentWorkThreadCorrelationIndex({ repo: input.repo });
+      const resourceCandidates = [...new Set(resourceRefs.flatMap((resourceRef) =>
+        matchingWorkThreadIds({ correlationIndex, resourceRef })
+      ))].sort();
+      const matchingHeadRecords = request.correlation.headSha
+        ? (await input.repo.listVerificationEvidence({})).filter((record) =>
+          record.provider === "github"
+          && record.workThreadId
+          && record.subjectVersion === request.correlation.headSha
+          && record.subjectRef.startsWith(`github:${request.correlation.repository.owner}/${request.correlation.repository.repo}:pull_request:`)
+        )
+        : [];
+      const headCandidates: string[] = [];
+      for (const candidate of [...new Set(matchingHeadRecords.flatMap((record) => record.workThreadId ? [record.workThreadId] : []))].sort()) {
+        const latestCandidateRun = correlationIndex.currentRunsByWorkThreadId.get(candidate);
+        if (latestCandidateRun) {
+          const currentResourceRefs = githubPullRequestResourceRefs(latestCandidateRun);
+          if (matchingHeadRecords.some((record) =>
+            record.workThreadId === candidate
+            && record.receivedAt >= latestCandidateRun.run.createdAt
+            && currentResourceRefs.has(record.subjectRef)
+          )) headCandidates.push(candidate);
         }
-        const newlyAttached = await attachCorrelatableEvidence({
-          repo: input.repo,
-          attachedAt: input.now?.() ?? new Date().toISOString()
+      }
+      const candidates = resourceCandidates.length > 0 ? resourceCandidates : headCandidates;
+      if (candidates.length !== 1) return { outcome: candidates.length === 0 ? "uncorrelated" : "ambiguous" };
+      const workThreadId = candidates[0]!;
+      const latest = correlationIndex.currentRunsByWorkThreadId.get(workThreadId);
+      if (!latest) return { outcome: "uncorrelated" };
+      const active = (await input.repo.listHumanEscalations({ workThreadId }))
+        .find((escalation) =>
+          (escalation.state === "open" || escalation.state === "acknowledged")
+          && escalation.dedupeKey === request.escalation.dedupeKey
+          && escalation.runId === latest.run.id
+        );
+      if (request.operation === "resolve") {
+        if (!active) return { outcome: "already_resolved", workThreadId };
+        const resolvedAt = input.now?.() ?? new Date().toISOString();
+        const result = await input.repo.resolveHumanEscalation({
+          escalation: {
+            ...active,
+            state: "resolved",
+            resolution: {
+              actor: { provider: "github", providerUserId: "completion-reconciliation", handle: "opentag" },
+              reason: request.escalation.reason,
+              resolvedAt
+            }
+          }
         });
-        if (newlyAttached.size === 1) {
-          const workThreadId = [...newlyAttached][0]!;
-          const result = await governance.execute({
-            type: "reassess_completion",
-            commandId: `github-evidence:${snapshot.deliveryId}:${snapshot.pullRequest.resourceRef}`,
-            workThreadId
-          });
-          return { outcome: "duplicate", workThreadId, completion: result.view };
+        await reassess(workThreadId, `github-reconciliation-resolve:${request.escalation.dedupeKey}`);
+        return { outcome: result.resolved ? "resolved" : "already_resolved", workThreadId };
+      }
+      const openedAt = input.now?.() ?? new Date().toISOString();
+      const generations = (await input.repo.listHumanEscalations({ workThreadId }))
+        .filter((escalation) => escalation.dedupeKey === request.escalation.dedupeKey)
+        .length;
+      const semantic = `${workThreadId}:${request.escalation.dedupeKey}:generation:${generations + 1}`;
+      const result = await input.repo.openHumanEscalation({
+        escalation: {
+          id: `escalation_${createHash("sha256").update(semantic).digest("hex").slice(0, 24)}`,
+          workThreadId,
+          runId: latest.run.id,
+          class: request.escalation.class,
+          audience: request.escalation.audience,
+          subjectRef: request.escalation.subjectRef,
+          state: "open",
+          blocking: true,
+          summary: request.escalation.summary,
+          reason: request.escalation.reason,
+          nextAction: { kind: "request_human_decision", targetId: request.escalation.subjectRef },
+          dedupeKey: request.escalation.dedupeKey,
+          openedAt
         }
-        return { outcome: "duplicate" };
-      }
-      const candidates = await matchingWorkThreadIds({ repo: input.repo, resourceRef: snapshot.pullRequest.resourceRef });
-      const workThreadId = candidates.length === 1 ? candidates[0] : undefined;
-      const receivedAt = input.now?.() ?? new Date().toISOString();
-      await input.repo.recordVerificationEvidenceBatch({
-        records: githubEvidenceRecords({ snapshot, receivedAt, ...(workThreadId ? { workThreadId } : {}) })
       });
-      if (!workThreadId) {
-        return { outcome: candidates.length > 1 ? "ambiguous" : "uncorrelated" };
-      }
-      const result = await governance.execute({
-        type: "reassess_completion",
-        commandId: `github-evidence:${snapshot.deliveryId}:${snapshot.pullRequest.resourceRef}`,
-        workThreadId
-      });
-      return { outcome: "recorded", workThreadId, completion: result.view };
+      await reassess(workThreadId, `github-reconciliation-open:${request.escalation.dedupeKey}`);
+      return { outcome: result.created ? "opened" : "duplicate", workThreadId };
     },
 
     async getWorkLoop(workThreadId: string): Promise<WorkLoopView | null> {
       const contract = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
       if (!contract) return null;
-      return governance.read({ type: "get_work_loop", workThreadId }) as Promise<WorkLoopView>;
+      return (await reassess(workThreadId, `read-work-loop:${workThreadId}`)).view;
+    },
+
+    async explainRun(runId: string): Promise<CompletionExplanation | null> {
+      const stored = await input.repo.getRun({ runId });
+      const workThreadId = stored?.run.thread?.id;
+      if (!workThreadId) return null;
+      const contractSnapshot = await input.repo.getLatestCompletionContractForWorkThread({ workThreadId });
+      if (!contractSnapshot) return null;
+      await reassess(workThreadId, `explain-run:${runId}`);
+      const [completion, assessmentHistory, storedEvidence, escalations] = await Promise.all([
+        governance.read({ type: "get_work_loop", workThreadId }) as Promise<WorkLoopView>,
+        input.repo.listCompletionAssessments({ workThreadId }),
+        input.repo.listVerificationEvidence({ workThreadId }),
+        input.repo.listHumanEscalations({ workThreadId })
+      ]);
+      return {
+        ...completion,
+        contractSnapshot,
+        assessmentHistory,
+        evidence: storedEvidence
+          .map(completionFactFromStoredEvidence)
+          .filter((fact): fact is CompletionEvidenceFact => Boolean(fact)),
+        openHumanEscalations: escalations.filter((escalation) =>
+          escalation.state === "open" || escalation.state === "acknowledged"
+        )
+      };
+    },
+
+    async getSourceThreadTransition(workThreadId: string): Promise<CompletionSourceThreadTransition | null> {
+      const assessments = await input.repo.listCompletionAssessments({ workThreadId });
+      const current = assessments.at(-1);
+      const previous = assessments.at(-2);
+      if (!current || !previous || current.state === previous.state) return null;
+      const latest = currentWorkThreadRun(await input.repo.listRunsForWorkThread({ workThreadId }));
+      if (!latest?.run.result) return null;
+      const completion = await governance.read({ type: "get_work_loop", workThreadId }) as WorkLoopView;
+      return {
+        runId: latest.run.id,
+        event: latest.event,
+        completion,
+        transitionKey: `completion-transition:${current.id}:${current.state}`
+      };
     }
   };
 }

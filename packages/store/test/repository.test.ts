@@ -56,6 +56,60 @@ function larkEvent(input: { id: string; sourceEventId: string; owner?: string; r
 }
 
 describe("OpenTag repository", () => {
+  it("returns only a completed canonical latest run for each WorkThread", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const eventFor = (suffix: string) => ({
+      id: `evt_current_work_thread_${suffix}`,
+      source: "github" as const,
+      sourceEventId: `comment_current_work_thread_${suffix}`,
+      receivedAt: `2026-07-21T10:00:0${suffix === "old" ? "0" : "1"}.000Z`,
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: githubIssueContext(99),
+      workItem: githubIssueWorkItem(99),
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/99/comments" },
+      metadata: { owner: "acme", repo: "demo", issueNumber: 99 }
+    });
+
+    await repo.createRun({ id: "run_current_work_thread_B", event: eventFor("old") });
+    await repo.completeRun({
+      runId: "run_current_work_thread_B",
+      result: {
+        conclusion: "success",
+        summary: "old delivery completed",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+      }
+    });
+    await repo.createRun({ id: "run_current_work_thread_a", event: eventFor("new") });
+    sqlite.prepare("UPDATE runs SET created_at = ? WHERE id = ?")
+      .run("2026-07-21T10:00:00.000Z", "run_current_work_thread_B");
+    sqlite.prepare("UPDATE runs SET created_at = ? WHERE id = ?")
+      .run("2026-07-21T10:00:00.000Z", "run_current_work_thread_a");
+
+    await expect(repo.listCurrentWorkThreadRunsWithResults()).resolves.toEqual([]);
+
+    await repo.completeRun({
+      runId: "run_current_work_thread_a",
+      result: {
+        conclusion: "success",
+        summary: "new delivery completed",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/8"
+      }
+    });
+
+    await expect(repo.listCurrentWorkThreadRunsWithResults()).resolves.toMatchObject([
+      { run: { id: "run_current_work_thread_a", result: { createdPullRequestUrl: "https://github.com/acme/demo/pull/8" } } }
+    ]);
+    expect(sqlite.prepare("PRAGMA index_list(runs)").all()).toContainEqual(expect.objectContaining({
+      name: "runs_work_thread_authority_idx"
+    }));
+  });
+
   it("migrates legacy callback deliveries before creating the idempotency index", () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`

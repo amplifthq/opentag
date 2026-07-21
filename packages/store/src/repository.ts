@@ -67,8 +67,9 @@ import {
   type VerificationEvidence,
   type WorkThread
 } from "@opentag/core";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt, notExists, sql } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import { alias } from "drizzle-orm/sqlite-core";
 import {
   applyPlans,
   attempts,
@@ -2142,6 +2143,9 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (assessment.sequence !== expectedSequence) {
           throw new Error(`CompletionAssessment sequence must be ${expectedSequence} for cycle ${assessment.cycle}.`);
         }
+        const previousCurrent = thread.currentAssessmentId
+          ? tx.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get()
+          : undefined;
         tx.insert(completionAssessments).values({
           id: assessment.id,
           workThreadId: assessment.workThreadId,
@@ -2167,6 +2171,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payloadJson: JSON.stringify({ contractId: assessment.contractId, contractVersion: assessment.contractVersion, cycle: assessment.cycle, sequence: assessment.sequence, state: assessment.state, inputDigest: assessment.inputDigest, supersedesAssessmentId: assessment.supersedesAssessmentId ?? null }),
           createdAt: assessment.assessedAt
         }).run();
+        const accepted = assessment.state === "satisfied" || assessment.state === "waived";
+        const wasAccepted = previousCurrent?.state === "satisfied" || previousCurrent?.state === "waived";
+        if (accepted && !wasAccepted && assessment.acceptedAt) {
+          const elapsedMs = Math.max(0, Date.parse(assessment.acceptedAt) - Date.parse(thread.createdAt));
+          tx.insert(governanceEvents).values({
+            workThreadId: assessment.workThreadId,
+            type: "success_metric.observed",
+            subjectId: assessment.id,
+            payloadJson: JSON.stringify({
+              metric: "time_to_verified_completion_ms",
+              value: Number.isFinite(elapsedMs) ? elapsedMs : 0,
+              acceptedAt: assessment.acceptedAt,
+              contractId: assessment.contractId,
+              contractVersion: assessment.contractVersion,
+              cycle: assessment.cycle,
+              state: assessment.state,
+              evidenceBacked: assessment.evidenceBacked
+            }),
+            createdAt: assessment.acceptedAt
+          }).run();
+        }
         return { outcome: "recorded" as const, assessment };
       });
     },
@@ -2181,6 +2206,39 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!thread?.currentAssessmentId) return null;
       const row = await db.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get();
       return row ? completionAssessmentFromRow(row) : null;
+    },
+
+    async listMaterialActionReceiptsForWorkThread(input: { workThreadId: string }): Promise<MaterialActionReceipt[]> {
+      const rows = await db
+        .select({ actionFamily: materialActions.actionFamily, receiptJson: materialActions.receiptJson })
+        .from(materialActions)
+        .innerJoin(runs, eq(materialActions.runId, runs.id))
+        .where(and(eq(runs.workThreadId, input.workThreadId), isNotNull(materialActions.receiptJson)))
+        .orderBy(asc(materialActions.createdAt), asc(materialActions.id));
+      return rows.flatMap((row) => {
+        if (!row.receiptJson) return [];
+        const receipt = MaterialActionReceiptSchema.parse(JSON.parse(row.receiptJson));
+        return [{
+          ...receipt,
+          metadata: { ...(receipt.metadata ?? {}), actionFamily: row.actionFamily }
+        }];
+      });
+    },
+
+    async listMaterialActionReceiptsForRun(input: { runId: string }): Promise<MaterialActionReceipt[]> {
+      const rows = await db
+        .select({ actionFamily: materialActions.actionFamily, receiptJson: materialActions.receiptJson })
+        .from(materialActions)
+        .where(and(eq(materialActions.runId, input.runId), isNotNull(materialActions.receiptJson)))
+        .orderBy(asc(materialActions.createdAt), asc(materialActions.id));
+      return rows.flatMap((row) => {
+        if (!row.receiptJson) return [];
+        const receipt = MaterialActionReceiptSchema.parse(JSON.parse(row.receiptJson));
+        return [{
+          ...receipt,
+          metadata: { ...(receipt.metadata ?? {}), actionFamily: row.actionFamily }
+        }];
+      });
     },
 
     async openHumanEscalation(input: { escalation: HumanEscalation }): Promise<{ escalation: HumanEscalation; created: boolean }> {
@@ -4898,6 +4956,31 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         .select()
         .from(runs)
         .where(isNotNull(runs.resultJson))
+        .orderBy(asc(runs.createdAt), asc(runs.id));
+      return rows.map((row) => ({
+        run: runFromRow(row),
+        event: OpenTagEventSchema.parse(JSON.parse(row.eventJson))
+      }));
+    },
+
+    async listCurrentWorkThreadRunsWithResults(): Promise<OpenTagRunWithEvent[]> {
+      const newerRuns = alias(runs, "newer_runs");
+      const rows = await db
+        .select()
+        .from(runs)
+        .where(and(
+          isNotNull(runs.workThreadId),
+          isNotNull(runs.resultJson),
+          notExists(
+            db
+              .select({ id: newerRuns.id })
+              .from(newerRuns)
+              .where(and(
+                eq(newerRuns.workThreadId, runs.workThreadId),
+                sql`(${newerRuns.createdAt}, ${newerRuns.id}) > (${runs.createdAt}, ${runs.id})`
+              ))
+          )
+        ))
         .orderBy(asc(runs.createdAt), asc(runs.id));
       return rows.map((row) => ({
         run: runFromRow(row),

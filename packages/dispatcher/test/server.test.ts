@@ -5260,7 +5260,18 @@ describe("dispatcher API", () => {
     }));
     expect(first.status).toBe(200);
     expect(replay.status).toBe(200);
-    await expect(replay.json()).resolves.toEqual({ ok: true, replayed: true });
+    const firstBody = await first.json() as {
+      completion: { currentAssessment: { id: string }; completion: string };
+    };
+    expect(firstBody.completion).toMatchObject({ completion: "satisfied" });
+    await expect(replay.json()).resolves.toMatchObject({
+      ok: true,
+      replayed: true,
+      completion: {
+        completion: "satisfied",
+        currentAssessment: { id: firstBody.completion.currentAssessment.id }
+      }
+    });
 
     expect(delivered).toEqual([
       { kind: "acknowledgement", body: "OpenTag picked this up. Run: `run_complete_replay`" },

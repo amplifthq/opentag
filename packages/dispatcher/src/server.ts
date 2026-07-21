@@ -52,6 +52,7 @@ import {
   type FetchLike as GitHubFetchLike
 } from "@opentag/github";
 import type { GitHubIssueMutationOperation } from "@opentag/github";
+import type { GitHubCompletionReconciliationEscalationRequest } from "@opentag/github";
 import {
   applyGitLabMutationOperation,
   createGitLabMutationCompiler,
@@ -315,7 +316,11 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
-import { createDispatcherCompletionGovernance, type GitHubCompletionPolicy } from "./completion-governance.js";
+import {
+  createDispatcherCompletionGovernance,
+  currentWorkThreadRun,
+  type GitHubCompletionPolicy
+} from "./completion-governance.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
@@ -645,6 +650,20 @@ const GitHubCompletionEvidenceSchema = z.object({
   checks: z.record(z.string().min(1), z.enum(["passed", "failed", "pending"])),
   observedAt: z.string().datetime(),
   payloadDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u)
+}).strict();
+
+const GitHubCompletionEvidenceBatchSchema = z.object({
+  snapshots: z.array(GitHubCompletionEvidenceSchema).min(1).max(100)
+}).strict();
+
+const CompletionWaiverInputSchema = z.object({
+  actor: ActorIdentitySchema,
+  reason: z.string().min(1).max(2_000),
+  scope: z.literal("selected_gates"),
+  policyScope: PolicyScopeSchema,
+  gateIds: z.array(z.string().min(1)).min(1).max(50),
+  waivedAt: z.string().datetime(),
+  expiresAt: z.string().datetime().optional()
 }).strict();
 
 const PruneSourceDeliveriesSchema = z.object({
@@ -2748,13 +2767,15 @@ export function createDispatcherApp(input: {
     platforms?: RelayPlatformCapability[];
   };
   completionPolicies?: GitHubCompletionPolicy[];
+  completionNow?: () => string;
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
   const completionGovernance = createDispatcherCompletionGovernance({
     repo,
-    policies: input.completionPolicies ?? []
+    policies: input.completionPolicies ?? [],
+    ...(input.completionNow ? { now: input.completionNow } : {})
   });
   const app = new Hono();
   const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
@@ -3067,6 +3088,32 @@ export function createDispatcherApp(input: {
     deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
     deliverDirectMessage: (message) => callbackSink.deliver(message),
     recordControlPlaneEvent
+  });
+  queueMicrotask(() => {
+    void (async () => {
+      const completedRuns = await repo.listRunsWithResults();
+      const workThreadIds = [...new Set(completedRuns.flatMap((stored) =>
+        stored.run.thread?.id ? [stored.run.thread.id] : []
+      ))].sort();
+      for (const workThreadId of workThreadIds) {
+        const latest = currentWorkThreadRun(await repo.listRunsForWorkThread({ workThreadId }));
+        if (!latest?.run.result) continue;
+        await completionGovernance.ingestRunResult(latest.run.id);
+        await deliverCompletionTransition(workThreadId);
+      }
+    })().catch(async (error) => {
+      try {
+        await recordControlPlaneEvent({
+          type: "completion_governance.recovery_failed",
+          severity: "error",
+          payload: { error: error instanceof Error ? error.message : String(error) }
+        });
+      } catch {
+        // The owning process may already be shutting down and its SQLite file
+        // may have been removed. Recovery failure reporting must not create an
+        // unhandled rejection during teardown.
+      }
+    });
   });
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
@@ -3732,8 +3779,64 @@ export function createDispatcherApp(input: {
     if (snapshot.pullRequest.resourceRef !== expectedRef) {
       return c.json({ error: "invalid_completion_evidence_identity" }, 400);
     }
-    const result = await completionGovernance.ingestGitHubSnapshot(snapshot);
+    let result;
+    try {
+      result = await completionGovernance.ingestGitHubSnapshot(snapshot);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("delivery payload conflicts")) {
+        return c.json({ error: "completion_evidence_delivery_conflict", message: error.message }, 409);
+      }
+      throw error;
+    }
+    if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
     return c.json(result, result.outcome === "recorded" ? 201 : 200);
+  });
+
+  app.post("/v1/completion-evidence/github/batch", async (c) => {
+    const { snapshots } = await parseDispatcherBody(c, GitHubCompletionEvidenceBatchSchema);
+    let result;
+    try {
+      result = await completionGovernance.ingestGitHubSnapshotSet(snapshots);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("delivery payload conflicts")) {
+        return c.json({ error: "completion_evidence_delivery_conflict", message: error.message }, 409);
+      }
+      throw error;
+    }
+    for (const workThreadId of result.workThreadIds) await deliverCompletionTransition(workThreadId);
+    return c.json(result, result.outcome === "recorded" ? 201 : 200);
+  });
+
+  app.post("/v1/completion-escalations/github", async (c) => {
+    const request = await parseDispatcherBody(c, z.object({
+      operation: z.enum(["open", "resolve"]),
+      escalation: z.object({
+        class: z.literal("reconciliation"),
+        audience: z.literal("repo_owner"),
+        subjectRef: z.string().min(1),
+        state: z.enum(["open", "resolved"]),
+        blocking: z.literal(true),
+        summary: z.string().min(1),
+        reason: z.string().min(1),
+        dedupeKey: z.string().min(1)
+      }).strict(),
+      correlation: z.object({
+        provider: z.literal("github"),
+        deliveryId: z.string().min(1),
+        eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
+        repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
+        pullRequestNumbers: z.array(z.number().int().positive()),
+        headSha: z.string().min(1).optional()
+      }).strict().superRefine((correlation, ctx) => {
+        if (correlation.pullRequestNumbers.length === 0 && !correlation.headSha) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A pull request number or head SHA is required." });
+        }
+      })
+    }).strict()) as GitHubCompletionReconciliationEscalationRequest;
+    const result = await completionGovernance.handleGitHubReconciliationEscalation(request);
+    if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
+    const status = result.outcome === "opened" ? 201 : result.outcome === "uncorrelated" ? 404 : result.outcome === "ambiguous" ? 409 : 200;
+    return c.json(result, status);
   });
 
   app.get("/v1/control-plane-alerts", async (c) => {
@@ -4977,7 +5080,8 @@ export function createDispatcherApp(input: {
     });
     if (!resolution) return c.json({ error: "action_not_found" }, 404);
     if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
-    return c.json({ resolution }, 200);
+    const completion = await completionGovernance.reassessRun(c.req.param("runId"));
+    return c.json({ resolution, ...(completion ? { completion: completion.view } : {}) }, 200);
   });
 
   app.post("/v1/material-actions/:actionId/reconcile", async (c) => {
@@ -4994,6 +5098,7 @@ export function createDispatcherApp(input: {
     if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
     if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
     if (result.outcome === "reconciled" && result.action) {
+      await completionGovernance.reassessRun(result.action.runId);
       const stored = await repo.getRun({ runId: result.action.runId });
       if (stored) {
         const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
@@ -5223,7 +5328,7 @@ export function createDispatcherApp(input: {
     if (outcome === "duplicate") {
       const replayedRun = await repo.getRun({ runId });
       const completion = replayedRun?.run.thread?.id
-        ? await completionGovernance.getWorkLoop(replayedRun.run.thread.id)
+        ? (await completionGovernance.ingestRunResult(runId))?.view ?? await completionGovernance.getWorkLoop(replayedRun.run.thread.id)
         : null;
       return c.json({ ok: true, replayed: true, ...(completion ? { completion } : {}) });
     }
@@ -5605,6 +5710,35 @@ export function createDispatcherApp(input: {
     const stored = await repo.getRun({ runId: c.req.param("runId") });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     return c.json(stored);
+  });
+
+  app.get("/v1/runs/:runId/completion", async (c) => {
+    const stored = await repo.getRun({ runId: c.req.param("runId") });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const completion = await completionGovernance.explainRun(stored.run.id);
+    if (!completion) return c.json({ error: "completion_not_available" }, 404);
+    if (stored.run.thread?.id) await deliverCompletionTransition(stored.run.thread.id);
+    return c.json({ completion });
+  });
+
+  app.post("/v1/runs/:runId/completion/waivers", async (c) => {
+    const runId = c.req.param("runId");
+    const stored = await repo.getRun({ runId });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const input = CompletionWaiverInputSchema.parse(sanitizeCredentialLikeValue(
+      await parseDispatcherBody(c, CompletionWaiverInputSchema)
+    ));
+    try {
+      const result = await completionGovernance.applyWaiverForRun(runId, input);
+      if (!result) return c.json({ error: "completion_not_available" }, 404);
+      await deliverCompletionTransition(result.assessment.workThreadId);
+      const completion = await completionGovernance.explainRun(runId);
+      if (!completion || !result.assessment.waiver) return c.json({ error: "completion_not_available" }, 404);
+      return c.json({ outcome: result.outcome, completion, waiver: result.assessment.waiver }, result.outcome === "recorded" ? 201 : 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid completion waiver.";
+      return c.json({ error: "invalid_completion_waiver", message }, 400);
+    }
   });
 
   app.post("/v1/runs/:runId/cancel", async (c) => {

@@ -334,4 +334,118 @@ describe("OpenTagGovernance command/query interface", () => {
       missingGateIds: ["merge"]
     });
   });
+
+  it("serializes concurrent evidence reassessments without regressing the assessment head", async () => {
+    let snapshot: CompletionEvaluationSnapshot = { ...baseInput(), currentAssessment: null };
+    const assessments: ReturnType<typeof evaluateCompletion>[] = [];
+    const repository: GovernanceRepository = {
+      async loadEvaluationSnapshot() {
+        await Promise.resolve();
+        return snapshot;
+      },
+      async recordEvidence(item) {
+        if (snapshot.evidence.some((existing) => existing.id === item.id)) return { created: false };
+        snapshot = { ...snapshot, evidence: [...snapshot.evidence, item] };
+        return { created: true };
+      },
+      async recordWaiver() {
+        return { created: false };
+      },
+      async resolveHumanEscalation() {
+        return { resolved: false };
+      },
+      async appendAssessment({ assessment, expectedCurrentAssessmentId }) {
+        await Promise.resolve();
+        const duplicate = assessments.find((item) => item.inputDigest === assessment.inputDigest);
+        if (duplicate) return { outcome: "duplicate" as const, assessment: duplicate };
+        if ((snapshot.currentAssessment?.id ?? null) !== expectedCurrentAssessmentId) {
+          return { outcome: "conflict" as const, currentAssessment: snapshot.currentAssessment };
+        }
+        assessments.push(assessment);
+        snapshot = { ...snapshot, currentAssessment: assessment };
+        return { outcome: "recorded" as const, assessment };
+      },
+      async listHumanEscalations() {
+        return [];
+      }
+    };
+    const governance = createOpenTagGovernance({ repository, clock: { now: () => t3 } });
+    const checks = evidence({
+      id: "checks-concurrent",
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { build: "passed", test: "passed" }
+    });
+    const merge = evidence({
+      id: "merge-concurrent",
+      kind: "source_control.pull_request_state",
+      predicate: "state",
+      outcome: "merged"
+    });
+
+    await Promise.all([
+      governance.execute({ type: "ingest_evidence", commandId: "checks", evidence: checks }),
+      governance.execute({ type: "ingest_evidence", commandId: "merge", evidence: merge })
+    ]);
+
+    expect(snapshot.currentAssessment).toMatchObject({ state: "satisfied", sequence: assessments.length });
+    expect(assessments.map((item) => item.sequence)).toEqual(assessments.map((_, index) => index + 1));
+    expect(assessments.at(-1)?.inputDigest).toBe(completionInputDigest({ ...baseInput(), evidence: [checks, merge] }));
+  });
+
+  it("replays durable inputs without a new assessment and preserves first acceptance time", async () => {
+    const checks = evidence({
+      id: "checks-accepted",
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { build: "passed", test: "passed" }
+    });
+    const merge = evidence({
+      id: "merge-accepted",
+      kind: "source_control.pull_request_state",
+      predicate: "state",
+      outcome: "merged"
+    });
+    let snapshot: CompletionEvaluationSnapshot = { ...baseInput(), evidence: [checks, merge], currentAssessment: null };
+    const assessments: ReturnType<typeof evaluateCompletion>[] = [];
+    const repository: GovernanceRepository = {
+      async loadEvaluationSnapshot() { return snapshot; },
+      async recordEvidence(item) {
+        if (snapshot.evidence.some((existing) => existing.id === item.id)) return { created: false };
+        snapshot = { ...snapshot, evidence: [...snapshot.evidence, item] };
+        return { created: true };
+      },
+      async recordWaiver() { return { created: false }; },
+      async resolveHumanEscalation() { return { resolved: false }; },
+      async appendAssessment({ assessment, expectedCurrentAssessmentId }) {
+        if ((snapshot.currentAssessment?.id ?? null) !== expectedCurrentAssessmentId) {
+          return { outcome: "conflict" as const, currentAssessment: snapshot.currentAssessment };
+        }
+        assessments.push(assessment);
+        snapshot = { ...snapshot, currentAssessment: assessment };
+        return { outcome: "recorded" as const, assessment };
+      },
+      async listHumanEscalations() { return []; }
+    };
+    let now = t3;
+    const governance = createOpenTagGovernance({ repository, clock: { now: () => now } });
+    const accepted = await governance.execute({ type: "reassess_completion", commandId: "first", workThreadId: "thread-1" });
+    now = "2026-07-21T10:10:00.000Z";
+    const replay = await governance.execute({ type: "reassess_completion", commandId: "replay", workThreadId: "thread-1" });
+    const unrelated = evidence({
+      id: "unrelated-accepted",
+      kind: "source_control.review",
+      predicate: "review",
+      outcome: "approved",
+      observedAt: now
+    });
+    const reassessed = await governance.execute({ type: "ingest_evidence", commandId: "unrelated", evidence: unrelated });
+
+    expect(accepted.assessment).toMatchObject({ state: "satisfied", acceptedAt: t3, sequence: 1 });
+    expect(replay).toMatchObject({ outcome: "duplicate", assessment: { id: accepted.assessment.id, sequence: 1 } });
+    expect(reassessed.assessment).toMatchObject({ state: "satisfied", acceptedAt: t3, sequence: 2 });
+    expect(assessments).toHaveLength(2);
+  });
 });

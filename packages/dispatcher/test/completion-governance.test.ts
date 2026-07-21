@@ -300,6 +300,59 @@ describe("dispatcher completion governance", () => {
     });
   });
 
+  it("converges when two evidence deliveries race and never leaves a stale assessment head", async () => {
+    const setup = await startRun({ runId: "run_concurrent_evidence", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_concurrent_evidence", conclusion: "success" });
+    const pending = githubSnapshot({
+      deliveryId: "delivery-concurrent-pending",
+      state: "open",
+      checks: { build: "passed", test: "pending" },
+      observedAt: "2026-07-21T10:04:00.000Z"
+    });
+    const accepted = githubSnapshot({
+      deliveryId: "delivery-concurrent-accepted",
+      observedAt: "2026-07-21T10:05:00.000Z"
+    });
+
+    const responses = await Promise.all([
+      setup.app.request("/v1/completion-evidence/github", jsonRequest(pending)),
+      setup.app.request("/v1/completion-evidence/github", jsonRequest(accepted))
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([201, 201]);
+    const replay = await setup.app.request("/v1/completion-evidence/github", jsonRequest(accepted));
+
+    await expect(replay.json()).resolves.toMatchObject({
+      outcome: "duplicate",
+      completion: {
+        completion: "satisfied",
+        missingGateIds: [],
+        failedGateIds: [],
+        blockedGateIds: []
+      }
+    });
+  });
+
+  it("converges when executor result and matching evidence arrive concurrently", async () => {
+    const setup = await startRun({ runId: "run_result_evidence_race", completionPolicies: [strictPolicy] });
+    const snapshot = githubSnapshot({ deliveryId: "delivery-result-evidence-race" });
+
+    const responses = await Promise.all([
+      completeRun({ setup, runId: "run_result_evidence_race", conclusion: "success" }),
+      setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot))
+    ]);
+    expect(responses.every((response) => response.status >= 200 && response.status < 300)).toBe(true);
+    const replay = await setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot));
+
+    await expect(replay.json()).resolves.toMatchObject({
+      outcome: "duplicate",
+      completion: {
+        execution: "succeeded",
+        completion: "satisfied",
+        targetBindings: [{ resourceVersion: HEAD_CURRENT }]
+      }
+    });
+  });
+
   it("keeps old-head green evidence visible but fails it against the new PR head", async () => {
     const setup = await startRun({ runId: "run_stale_head", completionPolicies: [strictPolicy] });
     await completeRun({ setup, runId: "run_stale_head", conclusion: "success" });

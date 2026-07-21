@@ -81,6 +81,7 @@ function assessment(input: {
   digestChar: string;
   supersedesAssessmentId?: string;
   state?: CompletionAssessment["state"];
+  acceptedAt?: string;
 }): CompletionAssessment {
   return {
     id: input.id,
@@ -110,6 +111,7 @@ function assessment(input: {
     }],
     assessedAt: timestamp,
     assessedBy: "opentag",
+    ...(input.acceptedAt ? { acceptedAt: input.acceptedAt } : {}),
     ...(input.supersedesAssessmentId ? { supersedesAssessmentId: input.supersedesAssessmentId } : {})
   };
 }
@@ -259,6 +261,90 @@ describe("completion governance persistence", () => {
 
     await expect(repo.listCompletionAssessments({ workThreadId: thread.id })).resolves.toEqual([first, second]);
     await expect(repo.getCurrentCompletionAssessment({ workThreadId: thread.id })).resolves.toEqual(second);
+  });
+
+  it("records the completion metric exactly once at the first accepted transition", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-metric" }) })).thread;
+    await repo.recordCompletionContract({ contract: strictContract(thread.id) });
+    const pending = assessment({ id: "assessment-metric-pending", workThreadId: thread.id, sequence: 1, digestChar: "d" });
+    const acceptedAt = "2026-07-21T10:05:00.000Z";
+    const accepted = assessment({
+      id: "assessment-metric-accepted",
+      workThreadId: thread.id,
+      sequence: 2,
+      digestChar: "e",
+      supersedesAssessmentId: pending.id,
+      state: "satisfied",
+      acceptedAt
+    });
+    const stillAccepted = assessment({
+      id: "assessment-metric-still-accepted",
+      workThreadId: thread.id,
+      sequence: 3,
+      digestChar: "f",
+      supersedesAssessmentId: accepted.id,
+      state: "satisfied",
+      acceptedAt
+    });
+
+    await repo.appendCompletionAssessment({ assessment: pending, expectedCurrentAssessmentId: null });
+    await repo.appendCompletionAssessment({ assessment: accepted, expectedCurrentAssessmentId: pending.id });
+    await repo.appendCompletionAssessment({ assessment: stillAccepted, expectedCurrentAssessmentId: accepted.id });
+
+    const metrics = (await repo.listGovernanceEvents({ workThreadId: thread.id }))
+      .filter((event) => event.type === "success_metric.observed");
+    expect(metrics).toHaveLength(1);
+    expect(metrics[0]).toMatchObject({
+      subjectId: accepted.id,
+      createdAt: acceptedAt,
+      payload: {
+        metric: "time_to_verified_completion_ms",
+        acceptedAt,
+        state: "satisfied",
+        evidenceBacked: true
+      }
+    });
+  });
+
+  it("loads durable material receipts for a WorkThread with their governed action family", async () => {
+    const { sqlite, repo } = repository();
+    const created = await repo.createRun({ id: "run-receipt", event: githubEvent("event-receipt", "delivery-receipt") });
+    const workThreadId = created.run.thread!.id;
+    const receipt = {
+      id: "receipt-release-1",
+      actionId: "action-release-1",
+      provider: "github",
+      receiptRef: "github:release:1",
+      outcome: "succeeded",
+      observedAt: timestamp
+    };
+    sqlite.prepare(`
+      INSERT INTO material_actions (
+        id, run_id, attempt_id, action_family, capability, scope_json, target_json,
+        risk_tier, status, idempotency_key, attempt_fence_digest, receipt_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      receipt.actionId,
+      created.run.id,
+      "attempt-receipt",
+      "release",
+      "release:publish",
+      "{}",
+      "{}",
+      "high",
+      "succeeded",
+      "release-once",
+      `sha256:${"a".repeat(64)}`,
+      JSON.stringify(receipt),
+      timestamp,
+      timestamp
+    );
+
+    await expect(repo.listMaterialActionReceiptsForWorkThread({ workThreadId })).resolves.toEqual([{
+      ...receipt,
+      metadata: { actionFamily: "release" }
+    }]);
   });
 
   it("deduplicates active human escalations and retains attributed resolution", async () => {

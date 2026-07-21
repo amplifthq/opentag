@@ -33,6 +33,7 @@ export const runs = sqliteTable(
     runnerIdx: index("runs_runner_idx").on(table.assignedRunnerId),
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
+    workThreadAuthorityIdx: index("runs_work_thread_authority_idx").on(table.workThreadId, table.createdAt, table.id),
     conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
   })
 );
@@ -937,6 +938,7 @@ export function migrateSchema(sqlite: Database.Database): void {
   }
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_repo_idx ON runs(repo_provider, repo_owner, repo_name)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_idx ON runs(work_thread_id)");
+  sqlite.exec("CREATE INDEX IF NOT EXISTS runs_work_thread_authority_idx ON runs(work_thread_id, created_at, id)");
   sqlite.exec("CREATE INDEX IF NOT EXISTS runs_conversation_idx ON runs(conversation_key)");
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS attempts (

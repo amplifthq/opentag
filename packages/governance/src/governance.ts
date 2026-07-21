@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 
 function assessmentForSnapshot(snapshot: CompletionEvaluationSnapshot, evaluatedAt?: string): CompletionAssessment {
-  return evaluateCompletion({
+  const assessment = evaluateCompletion({
     contract: snapshot.contract,
     runResults: snapshot.runResults,
     artifacts: snapshot.artifacts,
@@ -27,6 +27,16 @@ function assessmentForSnapshot(snapshot: CompletionEvaluationSnapshot, evaluated
       ...(snapshot.currentAssessment ? { supersedesAssessmentId: snapshot.currentAssessment.id } : {})
     }
   });
+  const current = snapshot.currentAssessment;
+  if (
+    assessment.acceptedAt
+    && current?.acceptedAt
+    && (current.state === "satisfied" || current.state === "waived")
+    && (assessment.state === "satisfied" || assessment.state === "waived")
+  ) {
+    return { ...assessment, acceptedAt: current.acceptedAt };
+  }
+  return assessment;
 }
 
 export function createOpenTagGovernance(input: {
@@ -40,9 +50,20 @@ export function createOpenTagGovernance(input: {
   };
 
   async function reassess(workThreadId: string): Promise<GovernanceCommandResult> {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
       const snapshot = await input.repository.loadEvaluationSnapshot(workThreadId);
       const evaluated = assessmentForSnapshot(snapshot, clock.now());
+      if (snapshot.currentAssessment?.inputDigest === evaluated.inputDigest) {
+        return {
+          outcome: "duplicate",
+          assessment: snapshot.currentAssessment,
+          view: deriveWorkLoopView({
+            contract: snapshot.contract,
+            runResults: snapshot.runResults,
+            assessment: snapshot.currentAssessment
+          })
+        };
+      }
       const assessment = {
         ...evaluated,
         id: ids.assessmentId(evaluated.inputDigest, evaluated.sequence),
