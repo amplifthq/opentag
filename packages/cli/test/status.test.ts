@@ -263,6 +263,57 @@ function completionExplanationFixture(): CompletionExplanation {
   };
 }
 
+function completionStatusFetch(input: {
+  completionResponse: () => Response;
+  authorizations?: Array<{ url: string; authorization: string | null }>;
+}): typeof fetch {
+  return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const href = String(url);
+    input.authorizations?.push({
+      url: href,
+      authorization: new Headers(init?.headers).get("authorization")
+    });
+    if (href.endsWith("/v1/runs/run_completion_auth")) {
+      return Response.json({
+        run: {
+          id: "run_completion_auth",
+          eventId: runEvent.id,
+          status: "succeeded",
+          createdAt: "2026-07-21T10:00:00.000Z",
+          updatedAt: "2026-07-21T10:05:00.000Z",
+          result: { conclusion: "success", summary: "Executor finished." }
+        },
+        event: runEvent
+      });
+    }
+    if (href.endsWith("/v1/runs/run_completion_auth/events")) return Response.json({ events: [] });
+    if (href.endsWith("/v1/runs/run_completion_auth/metrics")) {
+      return Response.json({
+        metrics: {
+          runId: "run_completion_auth",
+          totalEventCount: 0,
+          humanEventCount: 0,
+          auditEventCount: 0,
+          debugEventCount: 0,
+          humanCallbackCount: 0,
+          threadNoiseRatio: 0,
+          suggestedChangesCount: 0,
+          approvalDecisionCount: 0,
+          applyPlanCount: 0,
+          childRunCount: 0,
+          applyOutcomeCounts: { applied: 0, skipped: 0, failed: 0, stale: 0, unsupported: 0 },
+          staleIntentCount: 0
+        }
+      });
+    }
+    if (href.endsWith("/v1/runs/run_completion_auth/ledger")) {
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }
+    if (href.endsWith("/v1/runs/run_completion_auth/completion")) return input.completionResponse();
+    return Response.json({ error: "unexpected_url" }, { status: 500 });
+  }) as unknown as typeof fetch;
+}
+
 describe("OpenTag CLI status", () => {
   it("explains completion independently from executor success", () => {
     const formatted = formatCompletionExplanation(completionExplanationFixture()).join("\n");
@@ -276,6 +327,118 @@ describe("OpenTag CLI status", () => {
     expect(formatted).toContain("Blocked requirements: required_checks");
     expect(formatted).toContain("escalation-cli-1: verification/open");
     expect(formatted).toContain("Next action: Ask the repository owner to restore verified check evidence.");
+  });
+
+  it("uses the runner credential for ordinary reads and the pairing credential for completion governance reads", async () => {
+    const configured = config();
+    configured.daemon.runnerToken = "runner_mutation_token";
+    configured.daemon.pairingToken = "pairing_admin_token";
+    const authorizations: Array<{ url: string; authorization: string | null }> = [];
+
+    const summary = await runStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ completion: completionExplanationFixture() }),
+        authorizations
+      })
+    });
+
+    expect(summary.completion?.completion).toBe("blocked");
+    expect(authorizations.find((request) => request.url.endsWith("/completion"))?.authorization).toBe("Bearer pairing_admin_token");
+    expect(
+      authorizations
+        .filter((request) => !request.url.endsWith("/completion"))
+        .every((request) => request.authorization === "Bearer runner_mutation_token")
+    ).toBe(true);
+  });
+
+  it("keeps ordinary status reads available when only a runner credential is configured", async () => {
+    const configured = config();
+    configured.daemon.runnerToken = "runner_mutation_token";
+    delete configured.daemon.pairingToken;
+    const authorizations: Array<{ url: string; authorization: string | null }> = [];
+
+    const summary = await runStatusFromConfig({
+      config: configured,
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ completion: completionExplanationFixture() }),
+        authorizations
+      })
+    });
+
+    expect(summary.completion).toBeUndefined();
+    expect(authorizations).not.toHaveLength(0);
+    expect(authorizations.some((request) => request.url.endsWith("/completion"))).toBe(false);
+    expect(authorizations.every((request) => request.authorization === "Bearer runner_mutation_token")).toBe(true);
+  });
+
+  it("suppresses only an explicit completion_not_available compatibility 404", async () => {
+    const summary = await runStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ error: "completion_not_available" }, { status: 404 })
+      })
+    });
+
+    expect(summary.completion).toBeUndefined();
+  });
+
+  it("surfaces unrelated completion 404 failures", async () => {
+    await expect(runStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ error: "run_not_found" }, { status: 404 })
+      })
+    })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each([401, 403, 500])("surfaces completion HTTP %s failures", async (status) => {
+    await expect(runStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ error: "completion_unavailable" }, { status })
+      })
+    })).rejects.toThrow(`getCompletion failed: ${status}`);
+  });
+
+  it("surfaces malformed completion JSON", async () => {
+    await expect(runStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } })
+      })
+    })).rejects.toThrow();
+  });
+
+  it("surfaces completion schema failures", async () => {
+    const invalidCompletion = completionExplanationFixture() as CompletionExplanation & {
+      currentAssessment: { state: string };
+    };
+    invalidCompletion.currentAssessment = {
+      ...invalidCompletion.currentAssessment,
+      state: "not_a_completion_state"
+    };
+
+    await expect(runStatusFromConfig({
+      config: config(),
+      configPath: "/tmp/opentag/config.json",
+      runId: "run_completion_auth",
+      fetchImpl: completionStatusFetch({
+        completionResponse: () => Response.json({ completion: invalidCompletion })
+      })
+    })).rejects.toThrow();
   });
 
   it("reports offline dispatcher without failing the config summary", async () => {
@@ -687,6 +850,9 @@ describe("OpenTag CLI status", () => {
           }
         });
       }
+      if (href.endsWith("/v1/runs/run_status_1/completion")) {
+        return Response.json({ error: "completion_not_available" }, { status: 404 });
+      }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
 
@@ -812,6 +978,9 @@ describe("OpenTag CLI status", () => {
             staleIntentCount: 0
           }
         });
+      }
+      if (href.endsWith("/v1/runs/run_callback_failed/completion")) {
+        return Response.json({ error: "completion_not_available" }, { status: 404 });
       }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
@@ -1086,6 +1255,9 @@ describe("OpenTag CLI status", () => {
           }
         });
       }
+      if (href.endsWith("/v1/runs/run_lark_quiet/completion")) {
+        return Response.json({ error: "completion_not_available" }, { status: 404 });
+      }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;
 
@@ -1180,6 +1352,9 @@ describe("OpenTag CLI status", () => {
             staleIntentCount: 0
           }
         });
+      }
+      if (href.endsWith("/v1/runs/run_slack_receipt/completion")) {
+        return Response.json({ error: "completion_not_available" }, { status: 404 });
       }
       return Response.json({ error: "unexpected_url" }, { status: 500 });
     }) as unknown as typeof fetch;

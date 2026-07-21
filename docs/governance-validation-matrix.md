@@ -3,7 +3,7 @@
 Use this matrix when you need to prove OpenTag's governed source-thread loop is
 not only a happy-path demo. It groups repeatable tests around failure
 boundaries, source-thread controls, recovery behavior, artifact quality, replay
-parity, and privacy redaction.
+parity, completion governance, and privacy redaction.
 
 Run every local matrix case:
 
@@ -27,6 +27,7 @@ corepack pnpm smoke:governance -- --list
 | `artifact-ledger-quality` | `opentag status --run <run_id>` remains useful after live-shaped runs: artifacts, Agent Work Ledger, callback delivery, liveness, and apply outcome metrics are visible while source-thread receipts stay concise. |
 | `apply-failure-ux` | PR/MR apply cleanup and failure paths are explicit: missing branches disable apply before writes, create failures fall back to child runs, repeated replies do not duplicate external writes, and provider tokens/headers stay out of callbacks. |
 | `replay-parity` | GitHub, Slack, GitLab, and Lark live-shaped fixtures replay in memory with the same receipt, artifact, ledger, callback, and executor-capability strategy. |
+| `completion-governance` | One sanitized GitHub fixture proves admission, Context Packet generation, durable WorkThread identity, fencing, executor success pending verification, current-head checks, merge, superseding assessment lineage, concise source-thread projection, CLI explanation, restart recovery, and the end-to-end completion metric. |
 | `privacy-redaction` | Replay fixtures plus existing `.omx/live-e2e` and `.omx/governance-matrix` reports are scanned for token-like values, private keys, webhook secrets, Slack bot tokens, GitHub/GitLab tokens, full Lark message IDs, and local absolute paths. |
 
 Run the privacy scan directly when reviewing live artifacts:
@@ -56,11 +57,26 @@ These fixtures should preserve the live run shape, not the raw provider payload:
   bodies, local checkout paths, or full Lark/Slack message identifiers into the
   fixture.
 
+`completion-governance` adds a stricter GitHub golden loop in
+`packages/dispatcher/test/fixtures/replay/github-completion-governance.json`.
+It deliberately keeps the executor result separate from authoritative GitHub
+evidence: process success first produces a pending assessment, then a sanitized
+current-head snapshot for required checks and merge produces a new satisfied
+assessment. Replaying that same delivery must not append another assessment or
+source-thread callback.
+
 ## Boundary
 
 This harness is intentionally local and repeatable. It does not hit live
 GitHub, Slack, Lark, or GitLab APIs. Use `smoke:live` plus the provider-specific
 live scripts when you need fresh external-provider evidence.
+
+The completion fixture is live-shaped, not live provider proof. Release or PR
+readiness that claims a real GitHub completion loop still requires a configured
+test repository, signed webhook delivery, GitHub API reconciliation of the
+current PR head, required checks, and merge. When those credentials and that
+external fixture are unavailable, keep the PR draft and name the missing live
+proof explicitly.
 
 The matrix is still valuable before a live pass because it exercises the exact
 dispatcher, adapter, store, and daemon contracts that live provider callbacks

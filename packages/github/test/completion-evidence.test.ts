@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createGitHubCompletionApi,
   reconcileGitHubCompletionEvidence,
+  type GitHubCheckState,
   type GitHubCompletionApi
 } from "../src/completion-evidence.js";
 
@@ -48,7 +49,7 @@ describe("GitHub completion evidence", () => {
         repository: { name: "demo", owner: { login: "acme" } }
       },
       api,
-      observedAt: "2026-07-21T10:00:00.000Z"
+      now: () => "2026-07-21T10:00:00.000Z"
     });
 
     expect(snapshot).toEqual([expect.objectContaining({
@@ -78,7 +79,7 @@ describe("GitHub completion evidence", () => {
         repository: { name: "demo", owner: { login: "acme" } }
       },
       api: completionApi({ listPullRequestsForCommit }),
-      observedAt: "2026-07-21T10:00:00.000Z"
+      now: () => "2026-07-21T10:00:00.000Z"
     });
 
     expect(listPullRequestsForCommit).toHaveBeenCalledWith({ owner: "acme", repo: "demo", ref: HEAD_CURRENT });
@@ -103,8 +104,74 @@ describe("GitHub completion evidence", () => {
           };
         }
       }),
-      observedAt: "2026-07-21T10:00:00.000Z"
+      now: () => "2026-07-21T10:00:00.000Z"
     })).rejects.toThrow("mismatched target repository");
+  });
+
+  it("excludes observation time from the semantic payload digest", async () => {
+    const input = {
+      eventName: "pull_request" as const,
+      deliveryId: "delivery-semantic-replay",
+      payload: {
+        number: 7,
+        repository: { name: "demo", owner: { login: "acme" } }
+      },
+      api: completionApi()
+    };
+    const [earlier] = await reconcileGitHubCompletionEvidence({
+      ...input,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const [later] = await reconcileGitHubCompletionEvidence({
+      ...input,
+      now: () => "2026-07-21T10:05:00.000Z"
+    });
+
+    expect(earlier?.observedAt).not.toBe(later?.observedAt);
+    expect(earlier?.payloadDigest).toBe(later?.payloadDigest);
+  });
+
+  it("stamps observations only after authoritative API reads complete", async () => {
+    let releaseEarlier!: () => void;
+    let releaseLater!: () => void;
+    const earlierRead = new Promise<void>((resolve) => { releaseEarlier = resolve; });
+    const laterRead = new Promise<void>((resolve) => { releaseLater = resolve; });
+    const clockValues = ["2026-07-21T10:00:00.000Z", "2026-07-21T10:01:00.000Z"];
+    const now = vi.fn(() => clockValues.shift()!);
+    const reconcile = (deliveryId: string, barrier: Promise<void>, checks: GitHubCheckState) =>
+      reconcileGitHubCompletionEvidence({
+        eventName: "pull_request",
+        deliveryId,
+        payload: {
+          number: 7,
+          repository: { name: "demo", owner: { login: "acme" } }
+        },
+        api: completionApi({
+          async listCheckRunsForRef() {
+            await barrier;
+            return [{
+              name: "build",
+              status: "completed",
+              conclusion: checks === "passed" ? "success" : "failure",
+              head_sha: HEAD_CURRENT
+            }];
+          }
+        }),
+        now
+      });
+
+    const earlierStarted = reconcile("delivery-started-earlier", earlierRead, "failed");
+    const laterStarted = reconcile("delivery-started-later", laterRead, "passed");
+    expect(now).not.toHaveBeenCalled();
+    releaseLater();
+    const [laterFinished] = await laterStarted;
+    releaseEarlier();
+    const [earlierFinished] = await earlierStarted;
+
+    expect(laterFinished?.observedAt).toBe("2026-07-21T10:00:00.000Z");
+    expect(earlierFinished?.observedAt).toBe("2026-07-21T10:01:00.000Z");
+    expect(laterFinished?.checks.build).toBe("passed");
+    expect(earlierFinished?.checks.build).toBe("failed");
   });
 
   it("never includes the API token in reconciliation failures", async () => {

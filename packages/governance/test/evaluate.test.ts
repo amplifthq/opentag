@@ -248,6 +248,129 @@ describe("evaluateCompletion", () => {
     expect(unknown.gateResults[0]).toMatchObject({ state: "unknown", reasonCode: "material_action_unknown" });
   });
 
+  it("uses only the latest coherent authoritative observation and fails closed on ties", () => {
+    const passed = evidence({
+      id: "checks-old-pass",
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { build: "passed", test: "passed" },
+      observedAt: t2
+    });
+    const failed = evidence({
+      id: "checks-new-failure",
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "failed",
+      observations: { build: "passed", test: "failed" },
+      observedAt: t3
+    });
+    for (const facts of [[passed, failed], [failed, passed]]) {
+      const assessment = evaluateCompletion({ ...baseInput(), evidence: facts, evaluatedAt: t3 });
+      expect(assessment.gateResults.find((gate) => gate.gateId === "checks")).toMatchObject({
+        state: "failed",
+        evidenceIds: [failed.id],
+        reasonCode: "verification_failed"
+      });
+    }
+
+    const retargetedBase = evidence({
+      id: "base-retargeted",
+      kind: "source_control.pull_request",
+      predicate: "existence",
+      outcome: "passed",
+      observations: { "base:main": "failed", base_branch: "release" },
+      observedAt: t3
+    });
+    const baseContract: CompletionContract = {
+      ...strictContract(),
+      gates: [{
+        id: "base",
+        kind: "verification",
+        targetKey: "primary_change",
+        evidenceKind: "source_control.pull_request",
+        requiredObservations: ["base:main"],
+        requiredOutcome: "passed",
+        minimumAssurance: "verified"
+      }]
+    };
+    const oldBase = evidence({
+      id: "base-old-main",
+      kind: "source_control.pull_request",
+      predicate: "existence",
+      outcome: "passed",
+      observations: { "base:main": "passed", base_branch: "main" },
+      observedAt: t2
+    });
+    expect(evaluateCompletion({ ...baseInput(), contract: baseContract, evidence: [retargetedBase, oldBase], evaluatedAt: t3 }).gateResults[0]).toMatchObject({ state: "failed" });
+
+    const oldMerged = evidence({
+      id: "merge-old-success",
+      kind: "source_control.pull_request_state",
+      predicate: "state",
+      outcome: "merged",
+      observedAt: t2
+    });
+    const reopened = evidence({
+      id: "merge-new-open",
+      kind: "source_control.pull_request_state",
+      predicate: "state",
+      outcome: "open",
+      observedAt: t3
+    });
+    expect(evaluateCompletion({ ...baseInput(), evidence: [oldMerged, reopened], evaluatedAt: t3 }).gateResults.find((gate) => gate.gateId === "merge")).toMatchObject({
+      state: "failed",
+      evidenceIds: [reopened.id],
+      reasonCode: "external_state_mismatch"
+    });
+
+    const tiedPass = { ...passed, id: "checks-tied-pass", observedAt: t3, receivedAt: t3 };
+    const tied = evaluateCompletion({ ...baseInput(), evidence: [failed, tiedPass], evaluatedAt: t3 });
+    expect(tied).toMatchObject({ state: "blocked" });
+    expect(tied.gateResults.find((gate) => gate.gateId === "checks")).toMatchObject({
+      state: "unknown",
+      evidenceIds: [failed.id, tiedPass.id].sort(),
+      reasonCode: "verification_assurance_insufficient"
+    });
+  });
+
+  it("canonicalizes target bindings and material action authority across input permutations", () => {
+    const duplicateTargetArtifact = prArtifact({ id: "artifact-pr-6" });
+    const explicitTime = "2026-07-21T10:04:00.000Z";
+    const left = evaluateCompletion({ ...baseInput(), artifacts: [prArtifact(), duplicateTargetArtifact], evaluatedAt: explicitTime });
+    const right = evaluateCompletion({ ...baseInput(), artifacts: [duplicateTargetArtifact, prArtifact()], evaluatedAt: explicitTime });
+    expect(right).toEqual(left);
+    expect(left.targetBindings[0]?.artifactId).toBe("artifact-pr-6");
+
+    const contract: CompletionContract = {
+      ...strictContract(),
+      gates: [{ id: "publish", kind: "material_action", actionFamily: "release", requiredOutcome: "succeeded" }],
+      targetSelectors: []
+    };
+    const succeeded = {
+      id: "receipt-old-success",
+      actionId: "action-release",
+      provider: "github" as const,
+      receiptRef: "receipt:old",
+      outcome: "succeeded" as const,
+      observedAt: t2,
+      metadata: { actionFamily: "release" }
+    };
+    const unknown = { ...succeeded, id: "receipt-new-unknown", receiptRef: "receipt:new", outcome: "unknown" as const, observedAt: t3 };
+    for (const receipts of [[succeeded, unknown], [unknown, succeeded]]) {
+      const assessment = evaluateCompletion({ ...baseInput(), contract, artifacts: [], materialActionReceipts: receipts, evaluatedAt: t3 });
+      expect(assessment.gateResults[0]).toMatchObject({ state: "unknown", evidenceIds: [unknown.id], reasonCode: "material_action_unknown" });
+    }
+
+    const failedTie = { ...unknown, id: "receipt-new-failed", receiptRef: "receipt:failed", outcome: "failed" as const };
+    const conflicted = evaluateCompletion({ ...baseInput(), contract, artifacts: [], materialActionReceipts: [failedTie, unknown], evaluatedAt: t3 });
+    expect(conflicted.gateResults[0]).toMatchObject({
+      state: "unknown",
+      evidenceIds: [failedTie.id, unknown.id].sort(),
+      reasonCode: "material_action_unknown"
+    });
+  });
+
   it("applies only bounded, current-contract waivers", () => {
     const waiver: CompletionWaiver = {
       id: "waiver-1",
@@ -473,9 +596,61 @@ describe("OpenTagGovernance command/query interface", () => {
     });
     const reassessed = await governance.execute({ type: "ingest_evidence", commandId: "unrelated", evidence: unrelated });
 
-    expect(accepted.assessment).toMatchObject({ state: "satisfied", acceptedAt: t3, sequence: 1 });
+    expect(accepted.assessment).toMatchObject({ state: "satisfied", acceptedAt: t2, sequence: 1 });
     expect(replay).toMatchObject({ outcome: "duplicate", assessment: { id: accepted.assessment.id, sequence: 1 } });
-    expect(reassessed.assessment).toMatchObject({ state: "satisfied", acceptedAt: t3, sequence: 2 });
+    expect(reassessed.assessment).toMatchObject({ state: "satisfied", acceptedAt: t2, sequence: 2 });
+    expect(assessments).toHaveLength(2);
+  });
+
+  it("CAS-safely supersedes a stored waived assessment when the waiver expires on reassess or read", async () => {
+    const waiver: CompletionWaiver = {
+      id: "waiver-expiring",
+      contractId: "contract-github-1",
+      contractVersion: 1,
+      cycle: 1,
+      actor: { provider: "github", providerUserId: "owner-1" },
+      reason: "Bounded temporary exception.",
+      scope: "selected_gates",
+      policyScope: "work_context_owner_container",
+      gateIds: ["checks", "merge"],
+      waivedAt: t2,
+      expiresAt: "2026-07-21T10:05:00.000Z"
+    };
+    let snapshot: CompletionEvaluationSnapshot = { ...baseInput(), waivers: [waiver], currentAssessment: null };
+    const assessments: ReturnType<typeof evaluateCompletion>[] = [];
+    const repository: GovernanceRepository = {
+      async loadEvaluationSnapshot() { return snapshot; },
+      async recordEvidence() { return { created: false }; },
+      async recordWaiver() { return { created: false }; },
+      async resolveHumanEscalation() { return { resolved: false }; },
+      async appendAssessment({ assessment, expectedCurrentAssessmentId }) {
+        const duplicate = assessments.find((item) => item.inputDigest === assessment.inputDigest);
+        if (duplicate) return { outcome: "duplicate" as const, assessment: duplicate };
+        if ((snapshot.currentAssessment?.id ?? null) !== expectedCurrentAssessmentId) {
+          return { outcome: "conflict" as const, currentAssessment: snapshot.currentAssessment };
+        }
+        assessments.push(assessment);
+        snapshot = { ...snapshot, currentAssessment: assessment };
+        return { outcome: "recorded" as const, assessment };
+      },
+      async listHumanEscalations() { return []; }
+    };
+    let now = t3;
+    const governance = createOpenTagGovernance({ repository, clock: { now: () => now } });
+    const initial = await governance.execute({ type: "reassess_completion", commandId: "initial", workThreadId: "thread-1" });
+    expect(initial.assessment).toMatchObject({ state: "waived", sequence: 1 });
+
+    now = "2026-07-21T10:06:00.000Z";
+    const [read, reassessed] = await Promise.all([
+      governance.read({ type: "explain_completion", workThreadId: "thread-1" }),
+      governance.execute({ type: "reassess_completion", commandId: "expired", workThreadId: "thread-1" })
+    ]);
+    expect(read).toMatchObject({ state: "pending", sequence: 2, supersedesAssessmentId: initial.assessment.id });
+    expect(reassessed.assessment).toMatchObject({ state: "pending", sequence: 2, supersedesAssessmentId: initial.assessment.id });
+    expect(snapshot.currentAssessment).toMatchObject({ state: "pending", sequence: 2 });
+    expect(assessments).toHaveLength(2);
+
+    await expect(governance.read({ type: "get_work_loop", workThreadId: "thread-1" })).resolves.toMatchObject({ completion: "pending" });
     expect(assessments).toHaveLength(2);
   });
 });

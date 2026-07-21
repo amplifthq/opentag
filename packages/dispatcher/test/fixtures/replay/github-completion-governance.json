@@ -1,0 +1,147 @@
+{
+  "name": "github completion governance loop",
+  "runId": "run_replay_github_completion",
+  "event": {
+    "id": "evt_replay_github_completion",
+    "source": "github",
+    "sourceEventId": "comment_replay_github_completion",
+    "receivedAt": "2026-07-21T10:00:00.000Z",
+    "actor": {
+      "provider": "github",
+      "providerUserId": "user_42",
+      "handle": "octocat",
+      "writeAccess": true
+    },
+    "target": { "mention": "@opentag", "agentId": "opentag" },
+    "command": {
+      "rawText": "implement the requested change and open a pull request",
+      "intent": "fix",
+      "args": {}
+    },
+    "context": [
+      {
+        "provider": "github",
+        "kind": "issue",
+        "uri": "https://github.com/acme/phase1-demo/issues/41",
+        "visibility": "public"
+      }
+    ],
+    "workItem": {
+      "provider": "github",
+      "kind": "issue",
+      "externalId": "acme/phase1-demo#41",
+      "uri": "https://github.com/acme/phase1-demo/issues/41",
+      "ownerContainer": {
+        "provider": "github",
+        "id": "acme/phase1-demo",
+        "uri": "https://github.com/acme/phase1-demo"
+      }
+    },
+    "permissions": [
+      { "scope": "issue:comment", "reason": "report progress to the source thread" },
+      { "scope": "repo:write", "reason": "prepare the requested change in an isolated branch" },
+      { "scope": "pr:create", "reason": "open the requested pull request" }
+    ],
+    "callback": {
+      "provider": "github",
+      "uri": "https://api.github.com/repos/acme/phase1-demo/issues/41/comments",
+      "threadKey": "acme/phase1-demo#41"
+    },
+    "metadata": {
+      "repoProvider": "github",
+      "owner": "acme",
+      "repo": "phase1-demo",
+      "issueNumber": 41
+    }
+  },
+  "executorCapability": {
+    "id": "echo",
+    "invocation": "spawn",
+    "supportsProfile": false,
+    "supportsStreaming": false,
+    "supportsCancel": false,
+    "supportsHookCompletion": false,
+    "progressEvents": "audit",
+    "approvalMode": "opentag_policy",
+    "contextAccess": ["context_packet", "context_pointers"],
+    "promptAssembly": "opentag",
+    "writeAccess": "workspace",
+    "conversationAccess": "request",
+    "promptMutation": "none",
+    "rawContextAccess": false,
+    "writeActionAccess": "none",
+    "workspaceIsolation": "worktree",
+    "requiredSecrets": [],
+    "completionSignals": [
+      {
+        "type": "process_exit",
+        "required": true,
+        "description": "The replay executor exits after returning its structured result."
+      }
+    ]
+  },
+  "result": {
+    "conclusion": "success",
+    "summary": "Implemented the requested change and opened a pull request.",
+    "changedFiles": ["src/change.ts", "test/change.test.ts"],
+    "createdPullRequestUrl": "https://github.com/acme/phase1-demo/pull/17",
+    "artifacts": [
+      {
+        "id": "run_replay_github_completion:pull-request",
+        "type": "pull_request",
+        "kind": "pull_request",
+        "title": "Pull request 17",
+        "uri": "https://github.com/acme/phase1-demo/pull/17",
+        "summary": "Reviewable change request produced by the fenced local attempt."
+      },
+      {
+        "id": "run_replay_github_completion:verification",
+        "type": "verification_summary",
+        "kind": "verification_summary",
+        "title": "Local verification",
+        "uri": "opentag://run/run_replay_github_completion/verification",
+        "summary": "The local unit suite passed before the pull request was opened."
+      }
+    ],
+    "verification": [
+      { "command": "pnpm test", "outcome": "passed", "excerpt": "42 tests passed" }
+    ],
+    "nextAction": "Wait for provider-verified current-head checks and merge evidence."
+  },
+  "completionPolicy": {
+    "provider": "github",
+    "owner": "acme",
+    "repo": "phase1-demo",
+    "requiredChecks": ["build", "test"],
+    "baseBranch": "main",
+    "requireMerge": true
+  },
+  "verifiedSnapshot": {
+    "provider": "github",
+    "deliveryId": "delivery_phase1_completion_merged",
+    "eventName": "pull_request",
+    "repository": { "owner": "acme", "repo": "phase1-demo" },
+    "pullRequest": {
+      "number": 17,
+      "resourceRef": "github:acme/phase1-demo:pull_request:17",
+      "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "baseSha": "cccccccccccccccccccccccccccccccccccccccc",
+      "baseBranch": "main",
+      "state": "merged"
+    },
+    "checks": { "build": "passed", "test": "passed" },
+    "observedAt": "2026-07-21T10:05:00.000Z",
+    "payloadDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "expected": {
+    "workItemExternalId": "acme/phase1-demo#41",
+    "primaryAnchorExternalId": "acme/phase1-demo#41",
+    "pullRequestResourceRef": "github:acme/phase1-demo:pull_request:17",
+    "requiredEvidenceKinds": [
+      "source_control.pull_request",
+      "source_control.required_checks",
+      "source_control.pull_request_state"
+    ],
+    "finalBodyContains": "Complete: provider-verified completion requirements are satisfied."
+  }
+}

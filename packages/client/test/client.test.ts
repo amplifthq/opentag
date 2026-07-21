@@ -636,6 +636,49 @@ describe("@opentag/client", () => {
     expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(snapshot);
   });
 
+  it("submits GitHub completion reconciliation escalation intents with pairing authorization", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_admin_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ outcome: "recorded" }, 202);
+      }
+    });
+    const request = {
+      operation: "open" as const,
+      escalation: {
+        class: "reconciliation" as const,
+        audience: "repo_owner" as const,
+        subjectRef: "github:acme/demo:pull_request:7",
+        state: "open" as const,
+        blocking: true as const,
+        summary: "GitHub completion reconciliation needs repository-owner attention.",
+        reason: "The authoritative pull request snapshot could not be loaded.",
+        dedupeKey: "github:completion-reconciliation:acme/demo:7"
+      },
+      correlation: {
+        provider: "github" as const,
+        deliveryId: "delivery-reconcile-1",
+        eventName: "check_run" as const,
+        repository: { owner: "acme", repo: "demo" },
+        pullRequestNumbers: [7],
+        headSha: "b".repeat(40)
+      }
+    };
+
+    await client.requestGitHubCompletionReconciliationEscalation(request);
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/completion-escalations/github");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pairing_admin_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(request);
+  });
+
   it("prunes source delivery replay keys through the dispatcher API", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const client = createOpenTagClient({

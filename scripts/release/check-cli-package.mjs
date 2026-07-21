@@ -155,6 +155,45 @@ function checkInstalledAcpLaunchDefinitions(installDir) {
   run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
 }
 
+function checkInstalledCompletionGovernance(installDir) {
+  const probe = `
+    import { evaluateCompletion } from "@opentag/governance";
+
+    const assessedAt = "2026-07-21T10:00:00.000Z";
+    const contract = {
+      id: "release-check-compat",
+      version: 1,
+      workThreadId: "release-check-thread",
+      cycle: 1,
+      mode: "execution_compat",
+      targetSelectors: [],
+      resolvedFrom: [{ scope: "organization_default", ref: "release-check", version: "1" }],
+      gates: [{ id: "execution", kind: "material_action", actionFamily: "executor_run", requiredOutcome: "succeeded" }],
+      maxAutomaticRetries: 0,
+      onSatisfied: "report_only",
+      createdAt: assessedAt
+    };
+    const assessment = evaluateCompletion({
+      contract,
+      runResults: [{
+        runId: "release-check-run",
+        result: { conclusion: "success", summary: "Packed package probe succeeded." },
+        recordedAt: assessedAt
+      }],
+      artifacts: [],
+      evidence: [],
+      materialActionReceipts: [],
+      waivers: [],
+      evaluatedAt: assessedAt
+    });
+    if (assessment.state !== "satisfied" || assessment.evidenceBacked !== false) {
+      throw new Error(\`Installed governance evaluation is incorrect: \${JSON.stringify(assessment)}\`);
+    }
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+  run(commandPath(installDir, "opentag"), ["completion", "waive", "--help"], { cwd: installDir });
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -185,6 +224,9 @@ try {
 
   console.log("Checking installed ACP Registry launch definitions...");
   checkInstalledAcpLaunchDefinitions(installDir);
+
+  console.log("Checking installed completion governance...");
+  checkInstalledCompletionGovernance(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

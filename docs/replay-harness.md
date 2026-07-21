@@ -10,7 +10,9 @@ Use replay fixtures for source-thread behavior that should stay stable:
 - artifact-first final results;
 - source-thread action receipt shape;
 - callback delivery without internal process noise;
-- agent work ledger categories.
+- agent work ledger categories;
+- completion governance from executor success through provider-verified
+  current-head checks and merge.
 
 ## Fixture Location
 
@@ -28,6 +30,11 @@ Each fixture is JSON so it can be reviewed independently from test code. A fixtu
 - `result`: an `OpenTagRunResult` with artifacts and optional suggested actions.
 - `expected`: compact assertions for artifact types, ledger categories, and final callback text.
 
+The strict GitHub completion fixture also carries a sanitized
+`completionPolicy` and `verifiedSnapshot`. These are test inputs for the local
+governance boundary, not raw webhook payloads or a claim that the test contacted
+GitHub.
+
 ## Add A Replay Case
 
 1. Add a new JSON file in `packages/dispatcher/test/fixtures/replay/`.
@@ -40,14 +47,25 @@ Each fixture is JSON so it can be reviewed independently from test code. A fixtu
    checkout paths, executor stdout/stderr, full Lark message IDs, or Slack bot
    tokens into the fixture.
 6. Include at least one machine-addressable artifact with `id`, `type`, `title`, `uri`, and `summary`.
-7. Add the fixture name to `packages/dispatcher/test/replay-harness.test.ts`.
+7. Add ordinary source-thread fixtures to
+   `packages/dispatcher/test/replay-harness.test.ts`. Add strict completion
+   fixtures to a dedicated test that keeps executor output and provider evidence
+   as separate lifecycle steps.
 8. Run:
 
 ```bash
 corepack pnpm vitest run packages/dispatcher/test/replay-harness.test.ts
+corepack pnpm vitest run packages/dispatcher/test/completion-governance-replay.test.ts
 ```
 
 Replay tests should not call live provider APIs. They exercise the dispatcher app in memory and prove that OpenTag still produces a bounded context packet, an executor capability snapshot, artifacts, callbacks, and a ledger view for the source thread.
+
+The strict completion replay additionally proves a durable WorkThread,
+attempt-fencing rejection, pending completion after process success,
+provider-verified evidence on one current PR head, superseding assessment
+lineage, a single end-to-end completion metric, restart recovery, and concise
+CLI/source-thread explanations. A real provider proof remains a separate live
+gate with configured credentials, signed ingress, and API reconciliation.
 
 ## Product Boundary
 

@@ -24,6 +24,8 @@ function configPath(): string {
       port: 3050
     }
   });
+  config.daemon.pairingToken = "pairing_admin_token";
+  config.daemon.runnerToken = "runner_mutation_token";
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return path;
 }
@@ -132,6 +134,7 @@ describe("completion waiver command", () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url).toBe("http://localhost:3030/v1/runs/run_cli_command/completion/waivers");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe("Bearer pairing_admin_token");
     expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
       actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
       reason: "Bounded exception for this governed cycle.",

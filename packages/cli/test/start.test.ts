@@ -359,8 +359,51 @@ describe("OpenTag CLI start wiring", () => {
       webhookSecret: "github_webhook_secret",
       dispatcherUrl: "http://localhost:3030",
       dispatcherToken: built.daemon.pairingToken,
+      requestCompletionReconciliationEscalation: expect.any(Function),
       webhookPath: "/github/webhooks"
     });
+  });
+
+  it("wires GitHub reconciliation escalation intents to the pairing-authenticated dispatcher client", async () => {
+    const built = githubConfig();
+    built.daemon.pairingToken = "pairing_admin_token";
+    built.daemon.runnerToken = "runner_mutation_token";
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const ingress = githubIngressConfigFromCliConfig(built, {
+      dispatcherFetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return Response.json({ outcome: "recorded" }, { status: 202 });
+      }
+    });
+    const request = {
+      operation: "resolve" as const,
+      escalation: {
+        class: "reconciliation" as const,
+        audience: "repo_owner" as const,
+        subjectRef: "github:acme/demo:pull_request:7",
+        state: "resolved" as const,
+        blocking: true as const,
+        summary: "GitHub completion reconciliation recovered.",
+        reason: "The authoritative pull request snapshot is available again.",
+        dedupeKey: "github:completion-reconciliation:acme/demo:7"
+      },
+      correlation: {
+        provider: "github" as const,
+        deliveryId: "delivery-reconcile-resolved-1",
+        eventName: "pull_request" as const,
+        repository: { owner: "acme", repo: "demo" },
+        pullRequestNumbers: [7],
+        headSha: "b".repeat(40)
+      }
+    };
+
+    await ingress.requestCompletionReconciliationEscalation?.(request);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe("http://localhost:3030/v1/completion-escalations/github");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe("Bearer pairing_admin_token");
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).not.toBe("Bearer runner_mutation_token");
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(request);
   });
 
   it("derives dispatcher and ingress input for GitLab without Lark", () => {

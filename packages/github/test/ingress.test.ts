@@ -66,14 +66,76 @@ function signedRequest(input: { body: string; secret: string; event: string; del
 }
 
 describe("GitHub webhook ingress", () => {
+  it("submits a multi-PR completion delivery as one snapshot-set ingestion", async () => {
+    const api = completionApi();
+    api.listPullRequestsForCommit = async () => [{ number: 8 }, { number: 7 }];
+    const ingestCompletionEvidenceBatch = vi.fn(async () => ({ outcome: "recorded" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: api,
+      ingestCompletionEvidenceBatch,
+      requestCompletionReconciliationEscalation: vi.fn(async () => undefined),
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      sha: COMPLETION_HEAD,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "status", deliveryId: "delivery-multi-pr" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, evidenceSnapshots: 2 });
+    expect(ingestCompletionEvidenceBatch).toHaveBeenCalledTimes(1);
+    expect(ingestCompletionEvidenceBatch).toHaveBeenCalledWith([
+      expect.objectContaining({ deliveryId: "delivery-multi-pr", pullRequest: expect.objectContaining({ number: 7 }) }),
+      expect.objectContaining({ deliveryId: "delivery-multi-pr", pullRequest: expect.objectContaining({ number: 8 }) })
+    ]);
+  });
+
+  it("fails a multi-PR delivery before any single-snapshot fallback write when batch ingestion is unavailable", async () => {
+    const api = completionApi();
+    api.listPullRequestsForCommit = async () => [{ number: 7 }, { number: 8 }];
+    const ingestCompletionEvidence = vi.fn(async () => ({ outcome: "recorded" }));
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: api,
+      ingestCompletionEvidence,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      sha: COMPLETION_HEAD,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "status", deliveryId: "delivery-no-batch" })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "completion_snapshot_batch_ingestion_required",
+      retryable: true
+    });
+    expect(ingestCompletionEvidence).not.toHaveBeenCalled();
+  });
+
   it("durably ingests reconciled completion evidence without creating a run", async () => {
     const createRun = vi.fn(async () => ({ runId: "run_should_not_exist" }));
     const ingestCompletionEvidence = vi.fn(async () => ({ outcome: "recorded" }));
+    const requestCompletionReconciliationEscalation = vi.fn(async () => undefined);
     const app = createGitHubWebhookApp({
       webhookSecret: "secret",
       createRun,
       completionApi: completionApi(),
       ingestCompletionEvidence,
+      requestCompletionReconciliationEscalation,
       now: () => "2026-07-21T10:00:00.000Z"
     });
     const body = JSON.stringify({
@@ -95,6 +157,155 @@ describe("GitHub webhook ingress", () => {
       deliveryId: "delivery-completion-1",
       pullRequest: { headSha: COMPLETION_HEAD, state: "merged", number: 7, resourceRef: "github:acme/demo:pull_request:7", baseSha: COMPLETION_BASE, baseBranch: "main" }
     }));
+    expect(requestCompletionReconciliationEscalation).toHaveBeenCalledWith({
+      operation: "resolve",
+      escalation: {
+        class: "reconciliation",
+        audience: "repo_owner",
+        subjectRef: "github:acme/demo:pull_request:7",
+        state: "resolved",
+        blocking: true,
+        summary: "GitHub completion evidence reconciliation recovered.",
+        reason: "Authoritative GitHub completion evidence was reconciled and ingested successfully.",
+        dedupeKey: "github:completion-reconciliation:github:acme/demo:pull_request:7"
+      },
+      correlation: {
+        provider: "github",
+        deliveryId: "delivery-completion-1",
+        eventName: "pull_request",
+        repository: { owner: "acme", repo: "demo" },
+        pullRequestNumbers: [7]
+      }
+    });
+  });
+
+  it("requests one typed idempotent reconciliation escalation when GitHub reconciliation fails", async () => {
+    const requestCompletionReconciliationEscalation = vi.fn(async () => undefined);
+    const failingApi = completionApi();
+    failingApi.getPullRequest = vi.fn(async () => {
+      throw new Error("GitHub API unavailable");
+    });
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: failingApi,
+      ingestCompletionEvidence: vi.fn(async () => ({ outcome: "recorded" })),
+      requestCompletionReconciliationEscalation,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      action: "synchronize",
+      number: 7,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    for (const deliveryId of ["delivery-failure-1", "delivery-failure-retry"]) {
+      const response = await app.request(
+        "/github/webhooks",
+        signedRequest({ body, secret: "secret", event: "pull_request", deliveryId })
+      );
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({ error: "completion_reconciliation_failed" });
+    }
+
+    expect(requestCompletionReconciliationEscalation).toHaveBeenCalledTimes(2);
+    expect(requestCompletionReconciliationEscalation.mock.calls.map(([request]) => request)).toEqual([
+      expect.objectContaining({
+        operation: "open",
+        escalation: expect.objectContaining({
+          class: "reconciliation",
+          state: "open",
+          subjectRef: "github:acme/demo:pull_request:7",
+          dedupeKey: "github:completion-reconciliation:github:acme/demo:pull_request:7"
+        }),
+        correlation: expect.objectContaining({ deliveryId: "delivery-failure-1" })
+      }),
+      expect.objectContaining({
+        operation: "open",
+        escalation: expect.objectContaining({
+          dedupeKey: "github:completion-reconciliation:github:acme/demo:pull_request:7"
+        }),
+        correlation: expect.objectContaining({ deliveryId: "delivery-failure-retry" })
+      })
+    ]);
+  });
+
+  it("resolves a head-correlated status escalation using pull requests returned by GitHub", async () => {
+    const requestCompletionReconciliationEscalation = vi.fn(async () => undefined);
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: completionApi(),
+      ingestCompletionEvidence: vi.fn(async () => ({ outcome: "recorded" })),
+      requestCompletionReconciliationEscalation,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      sha: COMPLETION_HEAD,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "status", deliveryId: "delivery-head-success" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true, evidenceSnapshots: 1 });
+    expect(requestCompletionReconciliationEscalation).toHaveBeenCalledWith(expect.objectContaining({
+      operation: "resolve",
+      escalation: expect.objectContaining({
+        subjectRef: `github:acme/demo:commit:${COMPLETION_HEAD}`,
+        dedupeKey: `github:completion-reconciliation:github:acme/demo:commit:${COMPLETION_HEAD}`
+      }),
+      correlation: {
+        provider: "github",
+        deliveryId: "delivery-head-success",
+        eventName: "status",
+        repository: { owner: "acme", repo: "demo" },
+        pullRequestNumbers: [7],
+        headSha: COMPLETION_HEAD
+      }
+    }));
+  });
+
+  it("opens a stable head-correlated escalation when commit-to-PR reconciliation fails", async () => {
+    const requestCompletionReconciliationEscalation = vi.fn(async () => undefined);
+    const api = completionApi();
+    api.listPullRequestsForCommit = vi.fn(async () => {
+      throw new Error("GitHub commit correlation unavailable");
+    });
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: api,
+      ingestCompletionEvidence: vi.fn(async () => ({ outcome: "recorded" })),
+      requestCompletionReconciliationEscalation,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      sha: COMPLETION_HEAD,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    for (const deliveryId of ["delivery-head-failure", "delivery-head-failure-retry"]) {
+      const response = await app.request(
+        "/github/webhooks",
+        signedRequest({ body, secret: "secret", event: "status", deliveryId })
+      );
+      expect(response.status).toBe(503);
+    }
+
+    expect(requestCompletionReconciliationEscalation).toHaveBeenCalledTimes(2);
+    const requests = requestCompletionReconciliationEscalation.mock.calls.map(([request]) => request);
+    expect(requests.map((request) => request.escalation.dedupeKey)).toEqual([
+      `github:completion-reconciliation:github:acme/demo:commit:${COMPLETION_HEAD}`,
+      `github:completion-reconciliation:github:acme/demo:commit:${COMPLETION_HEAD}`
+    ]);
+    expect(requests[0]?.correlation).toMatchObject({
+      pullRequestNumbers: [],
+      headSha: COMPLETION_HEAD
+    });
   });
 
   it("preserves compatibility by ignoring completion events when reconciliation is unconfigured", async () => {

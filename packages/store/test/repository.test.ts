@@ -1,4 +1,5 @@
 import { projectTargetRefFromLocalPath } from "@opentag/core";
+import type { CompletionAssessment, WorkThread } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
@@ -27,6 +28,57 @@ function githubIssueWorkItem(issueNumber: number) {
       id: "acme/demo",
       uri: "https://github.com/acme/demo"
     }
+  };
+}
+
+const completionTimestamp = "2026-07-21T10:00:00.000Z";
+
+function completionWorkThread(): WorkThread {
+  return {
+    workItemReference: githubIssueWorkItem(42),
+    primaryAnchor: {
+      provider: "github",
+      kind: "issue_comment",
+      externalId: "comment-assessment-immutability",
+      uri: "https://github.com/acme/demo/issues/42#comment-assessment-immutability",
+      threadKey: "acme/demo#42"
+    }
+  };
+}
+
+function completionAssessment(input: {
+  id: string;
+  workThreadId: string;
+  assessedBy?: string;
+}): CompletionAssessment {
+  return {
+    id: input.id,
+    workThreadId: input.workThreadId,
+    contractId: "contract-assessment-immutability",
+    contractVersion: 1,
+    cycle: 1,
+    sequence: 1,
+    inputDigest: `sha256:${"a".repeat(64)}`,
+    targetBindings: [{
+      key: "primary_change",
+      provider: "github",
+      resourceRef: "github:acme/demo:pull_request:7",
+      resourceVersion: "abc123",
+      artifactId: "artifact-pr-7"
+    }],
+    state: "pending",
+    evidenceBacked: true,
+    gateResults: [{
+      gateId: "checks",
+      targetKey: "primary_change",
+      state: "missing",
+      evidenceIds: [],
+      reasonCode: "verification_missing",
+      reason: "Required check evidence has not arrived.",
+      evaluatedAt: completionTimestamp
+    }],
+    assessedAt: completionTimestamp,
+    assessedBy: input.assessedBy ?? "opentag"
   };
 }
 
@@ -108,6 +160,51 @@ describe("OpenTag repository", () => {
     expect(sqlite.prepare("PRAGMA index_list(runs)").all()).toContainEqual(expect.objectContaining({
       name: "runs_work_thread_authority_idx"
     }));
+  });
+
+  it("accepts completion assessment replay only when the canonical assessment is identical", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const thread = (await repo.upsertWorkThread({ thread: completionWorkThread() })).thread;
+    await repo.recordCompletionContract({
+      contract: {
+        id: "contract-assessment-immutability",
+        version: 1,
+        workThreadId: thread.id,
+        cycle: 1,
+        mode: "governed",
+        targetSelectors: [{ key: "primary_change", kind: "change_request", lineage: "current_cycle", cardinality: "exactly_one" }],
+        resolvedFrom: [{ scope: "work_context_owner_container", ref: "github:acme/demo", version: "1" }],
+        gates: [{ id: "checks", kind: "verification", targetKey: "primary_change", evidenceKind: "source_control.required_checks", requiredOutcome: "passed", minimumAssurance: "verified" }],
+        maxAutomaticRetries: 1,
+        onSatisfied: "report_only",
+        createdAt: completionTimestamp
+      }
+    });
+    const original = completionAssessment({ id: "assessment-immutable", workThreadId: thread.id });
+
+    await expect(repo.appendCompletionAssessment({ assessment: original, expectedCurrentAssessmentId: null }))
+      .resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.appendCompletionAssessment({ assessment: original, expectedCurrentAssessmentId: null }))
+      .resolves.toMatchObject({ outcome: "duplicate", assessment: original });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: { ...original, assessedBy: "human" },
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow(/CompletionAssessment assessment-immutable is immutable/u);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: completionAssessment({
+        id: "assessment-same-input-digest",
+        workThreadId: thread.id,
+        assessedBy: "human"
+      }),
+      expectedCurrentAssessmentId: original.id
+    })).rejects.toThrow(/CompletionAssessment input digest .* is immutable/u);
+
+    await expect(repo.listCompletionAssessments({ workThreadId: thread.id })).resolves.toEqual([original]);
   });
 
   it("migrates legacy callback deliveries before creating the idempotency index", () => {
