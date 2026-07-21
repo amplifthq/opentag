@@ -1,6 +1,7 @@
 import type {
   CompletionAssessment,
   CompletionContract,
+  CompletionWaiver,
   HumanEscalation,
   OpenTagEvent,
   WorkThread
@@ -128,6 +129,8 @@ describe("completion governance persistence", () => {
     migrateSchema(sqlite);
     sqlite.exec(`
       DELETE FROM opentag_schema_migrations WHERE id = '2026-07-21-completion-governance-v1';
+      DELETE FROM opentag_schema_migrations WHERE id = '2026-07-21-completion-waivers-v1';
+      DROP TABLE completion_waivers;
       DROP TABLE governance_events;
       DROP TABLE human_escalations;
       DROP TABLE completion_assessments;
@@ -145,11 +148,14 @@ describe("completion governance persistence", () => {
       "completion_contracts",
       "verification_evidence",
       "completion_assessments",
+      "completion_waivers",
       "human_escalations",
       "governance_events"
     ]));
     const migration = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get("2026-07-21-completion-governance-v1");
     expect(migration).toBeTruthy();
+    const waiverMigration = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get("2026-07-21-completion-waivers-v1");
+    expect(waiverMigration).toBeTruthy();
   });
 
   it("reuses one durable WorkThread across anchors and attaches created runs", async () => {
@@ -345,6 +351,69 @@ describe("completion governance persistence", () => {
       ...receipt,
       metadata: { actionFamily: "release" }
     }]);
+  });
+
+  it("persists an attributed current-contract waiver idempotently and audits it", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-waiver" }) })).thread;
+    await repo.recordCompletionContract({ contract: strictContract(thread.id) });
+    const waiver: CompletionWaiver = {
+      id: "waiver-current-contract",
+      contractId: "contract-1",
+      contractVersion: 1,
+      cycle: 1,
+      actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+      reason: "The merge gate is intentionally deferred for this bounded cycle.",
+      scope: "selected_gates",
+      policyScope: "work_context_owner_container",
+      gateIds: ["merge"],
+      waivedAt: timestamp,
+      expiresAt: "2026-07-22T10:00:00.000Z"
+    };
+
+    await expect(repo.recordCompletionWaiver({ waiver })).resolves.toMatchObject({ created: true, waiver });
+    await expect(repo.recordCompletionWaiver({ waiver })).resolves.toMatchObject({ created: false, waiver });
+    await expect(repo.listCompletionWaivers({ workThreadId: thread.id })).resolves.toEqual([waiver]);
+    await expect(repo.recordCompletionWaiver({ waiver: { ...waiver, reason: "Different reason." } })).rejects.toThrow(/immutable/u);
+
+    const events = await repo.listGovernanceEvents({ workThreadId: thread.id });
+    expect(events.filter((event) => event.type === "completion_waiver.recorded")).toEqual([
+      expect.objectContaining({
+        subjectId: waiver.id,
+        payload: expect.objectContaining({
+          actor: waiver.actor,
+          reason: waiver.reason,
+          gateIds: waiver.gateIds,
+          policyScope: waiver.policyScope
+        })
+      })
+    ]);
+  });
+
+  it("redacts credential-like waiver text at the durable storage boundary", async () => {
+    const { repo } = repository();
+    const thread = (await repo.upsertWorkThread({ thread: workThread({ anchorId: "comment-waiver-secret" }) })).thread;
+    await repo.recordCompletionContract({ contract: strictContract(thread.id) });
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+    const result = await repo.recordCompletionWaiver({
+      waiver: {
+        id: "waiver-redacted",
+        contractId: "contract-1",
+        contractVersion: 1,
+        cycle: 1,
+        actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+        reason: `Emergency exception requested with token ${secret}`,
+        scope: "selected_gates",
+        policyScope: "work_context_owner_container",
+        gateIds: ["merge"],
+        waivedAt: timestamp
+      }
+    });
+
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(result.waiver.reason).toContain("[redacted]");
+    expect(JSON.stringify(await repo.listCompletionWaivers({ workThreadId: thread.id }))).not.toContain(secret);
+    expect(JSON.stringify(await repo.listGovernanceEvents({ workThreadId: thread.id }))).not.toContain(secret);
   });
 
   it("deduplicates active human escalations and retains attributed resolution", async () => {

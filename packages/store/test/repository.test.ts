@@ -1389,6 +1389,8 @@ describe("OpenTag repository", () => {
     });
 
     expect(second.id).toBe(first.id);
+    expect(first.enqueueOutcome).toBe("queued");
+    expect(second.enqueueOutcome).toBe("duplicate");
     expect(first.idempotencyKey).toBe(second.idempotencyKey);
     const pending = await repo.claimPendingCallbackDeliveries({ limit: 10 });
     expect(pending).toHaveLength(1);

@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   CompletionContractSchema,
+  type CompletionAssessment,
   type CompletionContract,
   type CompletionWaiver,
   type HumanEscalation,
@@ -35,6 +36,11 @@ export type GitHubCompletionPolicy = {
   baseBranch?: string;
   requireMerge?: boolean;
 };
+
+export type BoundedCompletionWaiverInput = Pick<
+  CompletionWaiver,
+  "actor" | "reason" | "scope" | "policyScope" | "gateIds" | "waivedAt" | "expiresAt"
+>;
 
 function repositoryIdentity(event: OpenTagEvent): { provider: string; owner: string; repo: string } | null {
   const provider = event.metadata["repoProvider"];
@@ -568,7 +574,6 @@ export function createDispatcherCompletionGovernance(input: {
       const storedEvidence = (await input.repo.listVerificationEvidence({ workThreadId }))
         .filter((record) => !currentRun || record.receivedAt >= currentRun.createdAt);
       const evidence = storedEvidence.map(completionFactFromStoredEvidence).filter((fact): fact is CompletionEvidenceFact => Boolean(fact));
-      const assessments = await input.repo.listCompletionAssessments({ workThreadId });
       return {
         contract,
         runResults: runs.flatMap(({ run }) => run.result ? [{ runId: run.id, result: run.result, recordedAt: run.updatedAt }] : []),
@@ -609,8 +614,9 @@ export function createDispatcherCompletionGovernance(input: {
       });
       return { created: recorded.created };
     },
-    async recordWaiver(_waiver: CompletionWaiver) {
-      throw new Error("Completion waiver persistence is not enabled until the bounded waiver slice.");
+    async recordWaiver(waiver: CompletionWaiver) {
+      const recorded = await input.repo.recordCompletionWaiver({ waiver });
+      return { created: recorded.created };
     },
     async resolveHumanEscalation(escalation: HumanEscalation) {
       return input.repo.resolveHumanEscalation({ escalation });

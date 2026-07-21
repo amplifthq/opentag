@@ -443,6 +443,28 @@ export const completionAssessments = sqliteTable(
   })
 );
 
+export const completionWaivers = sqliteTable(
+  "completion_waivers",
+  {
+    id: text("id").primaryKey(),
+    workThreadId: text("work_thread_id").notNull(),
+    contractId: text("contract_id").notNull(),
+    contractVersion: integer("contract_version").notNull(),
+    cycle: integer("cycle").notNull(),
+    contentDigest: text("content_digest").notNull(),
+    waiverJson: text("waiver_json").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => ({
+    contentIdx: uniqueIndex("completion_waivers_thread_cycle_content_idx").on(
+      table.workThreadId,
+      table.cycle,
+      table.contentDigest
+    ),
+    threadIdx: index("completion_waivers_thread_idx").on(table.workThreadId, table.createdAt)
+  })
+);
+
 export const humanEscalations = sqliteTable(
   "human_escalations",
   {
@@ -588,6 +610,34 @@ function migrateCompletionGovernanceSchema(sqlite: Database.Database): void {
         ON governance_events(work_thread_id, id);
       CREATE INDEX IF NOT EXISTS governance_events_type_idx
         ON governance_events(type);
+    `);
+    sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
+      migrationId,
+      new Date().toISOString()
+    );
+  })();
+}
+
+function migrateCompletionWaiverSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-07-21-completion-waivers-v1";
+  const applied = sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId);
+  if (applied) return;
+  sqlite.transaction(() => {
+    sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS completion_waivers (
+        id TEXT PRIMARY KEY,
+        work_thread_id TEXT NOT NULL,
+        contract_id TEXT NOT NULL,
+        contract_version INTEGER NOT NULL,
+        cycle INTEGER NOT NULL,
+        content_digest TEXT NOT NULL,
+        waiver_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS completion_waivers_thread_cycle_content_idx
+        ON completion_waivers(work_thread_id, cycle, content_digest);
+      CREATE INDEX IF NOT EXISTS completion_waivers_thread_idx
+        ON completion_waivers(work_thread_id, created_at);
     `);
     sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)").run(
       migrationId,
@@ -1105,4 +1155,5 @@ export function migrateSchema(sqlite: Database.Database): void {
     `);
   }
   migrateCompletionGovernanceSchema(sqlite);
+  migrateCompletionWaiverSchema(sqlite);
 }

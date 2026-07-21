@@ -221,6 +221,7 @@ describe("dispatcher completion governance", () => {
       expect(body.completion.execution).toBe(conclusion === "failure" ? "failed" : conclusion);
       expect(body.completion.completion).not.toBe("satisfied");
       expect(body.completion.completion).not.toBe("waived");
+      expect(setup.delivered.at(-1)?.body).toContain(`Execution ${conclusion}; work is not complete.`);
     }
   );
 
@@ -264,6 +265,27 @@ describe("dispatcher completion governance", () => {
         blockedGateIds: []
       }
     });
+    expect(setup.delivered.at(-1)?.body).toContain("provider-verified completion requirements are satisfied");
+    const explanation = await setup.app.request("/v1/runs/run_verified/completion");
+    expect(explanation.status).toBe(200);
+    const explanationBody = await explanation.json() as {
+      completion: { evidence: Array<{ kind: string; assurance: string; subject: { resourceVersion: string } }> };
+    };
+    expect(explanationBody).toMatchObject({
+      completion: {
+        execution: "succeeded",
+        completion: "satisfied",
+        contractSnapshot: { mode: "governed", version: 1, cycle: 1 },
+        currentAssessment: { state: "satisfied", sequence: 2 },
+        assessmentHistory: [{ state: "pending" }, { state: "satisfied" }],
+        openHumanEscalations: []
+      }
+    });
+    expect(explanationBody.completion.evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "source_control.pull_request", assurance: "verified", subject: expect.objectContaining({ resourceVersion: HEAD_CURRENT }) }),
+      expect.objectContaining({ kind: "source_control.required_checks", assurance: "verified", subject: expect.objectContaining({ resourceVersion: HEAD_CURRENT }) }),
+      expect.objectContaining({ kind: "source_control.pull_request_state", assurance: "verified", subject: expect.objectContaining({ resourceVersion: HEAD_CURRENT }) })
+    ]));
   });
 
   it("fails a configured base-branch gate when GitHub reports another base", async () => {
@@ -291,6 +313,7 @@ describe("dispatcher completion governance", () => {
     const snapshot = githubSnapshot({ deliveryId: "delivery-replay" });
     const first = await setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot));
     const firstBody = await first.json() as { completion: { currentAssessment: { id: string } } };
+    const callbacksAfterFirst = setup.delivered.length;
     const replay = await setup.app.request("/v1/completion-evidence/github", jsonRequest(snapshot));
 
     expect(replay.status).toBe(200);
@@ -298,6 +321,96 @@ describe("dispatcher completion governance", () => {
       outcome: "duplicate",
       completion: { currentAssessment: { id: firstBody.completion.currentAssessment.id } }
     });
+    expect(setup.delivered).toHaveLength(callbacksAfterFirst);
+  });
+
+  it("keeps the source thread quiet for same-state check updates", async () => {
+    const setup = await startRun({ runId: "run_quiet_checks", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_quiet_checks", conclusion: "success" });
+    const callbacksAfterExecution = setup.delivered.length;
+
+    await setup.app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({
+      deliveryId: "delivery-quiet-1",
+      state: "open",
+      checks: { build: "passed", test: "pending" },
+      observedAt: "2026-07-21T10:05:00.000Z"
+    })));
+    const callbacksAfterStateChange = setup.delivered.length;
+    expect(callbacksAfterStateChange).toBe(callbacksAfterExecution + 1);
+    await setup.app.request("/v1/completion-evidence/github", jsonRequest(githubSnapshot({
+      deliveryId: "delivery-quiet-2",
+      state: "open",
+      checks: { build: "passed", test: "passed" },
+      observedAt: "2026-07-21T10:06:00.000Z"
+    })));
+
+    expect(setup.delivered).toHaveLength(callbacksAfterStateChange);
+  });
+
+  it("applies and replays a bounded current-contract waiver with one semantic callback", async () => {
+    const setup = await startRun({ runId: "run_waived", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_waived", conclusion: "success" });
+    const body = {
+      actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+      reason: "Merge and checks are intentionally deferred for this bounded delivery cycle.",
+      scope: "selected_gates",
+      policyScope: "work_context_owner_container",
+      gateIds: ["required_checks", "merge"],
+      waivedAt: "2026-07-21T10:10:00.000Z",
+      expiresAt: "2026-07-22T10:10:00.000Z"
+    };
+    const first = await setup.app.request("/v1/runs/run_waived/completion/waivers", jsonRequest(body));
+    expect(first.status).toBe(201);
+    await expect(first.json()).resolves.toMatchObject({
+      outcome: "recorded",
+      completion: {
+        completion: "waived",
+        currentAssessment: {
+          state: "waived",
+          assessedBy: "human",
+          waiver: { actor: body.actor, reason: body.reason, gateIds: ["merge", "required_checks"] }
+        }
+      },
+      waiver: { actor: body.actor, reason: body.reason, gateIds: ["merge", "required_checks"] }
+    });
+    expect(setup.delivered.at(-1)?.body).toContain("attributed bounded waiver");
+    const callbacksAfterFirst = setup.delivered.length;
+
+    const replay = await setup.app.request("/v1/runs/run_waived/completion/waivers", jsonRequest(body));
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toMatchObject({ outcome: "duplicate", completion: { completion: "waived" } });
+    expect(setup.delivered).toHaveLength(callbacksAfterFirst);
+
+    const invalid = await setup.app.request("/v1/runs/run_waived/completion/waivers", jsonRequest({
+      ...body,
+      gateIds: ["not-a-current-gate"],
+      waivedAt: "2026-07-21T10:11:00.000Z"
+    }));
+    expect(invalid.status).toBe(400);
+    await expect(invalid.json()).resolves.toMatchObject({ error: "invalid_completion_waiver" });
+  });
+
+  it("redacts credential-like waiver text before persistence, audit, and callback rendering", async () => {
+    const setup = await startRun({ runId: "run_waiver_privacy", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_waiver_privacy", conclusion: "success" });
+    const secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890";
+    const response = await setup.app.request("/v1/runs/run_waiver_privacy/completion/waivers", jsonRequest({
+      actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+      reason: `Emergency exception requested with token ${secret}`,
+      scope: "selected_gates",
+      policyScope: "work_context_owner_container",
+      gateIds: ["required_checks", "merge"],
+      waivedAt: "2026-07-21T10:10:00.000Z"
+    }));
+
+    expect(response.status).toBe(201);
+    const body = JSON.stringify(await response.json());
+    expect(body).not.toContain(secret);
+    expect(body).toContain("[redacted]");
+    expect(JSON.stringify(setup.delivered)).not.toContain(secret);
+
+    const explanation = await setup.app.request("/v1/runs/run_waiver_privacy/completion");
+    expect(JSON.stringify(await explanation.json())).not.toContain(secret);
   });
 
   it("converges when two evidence deliveries race and never leaves a stale assessment head", async () => {

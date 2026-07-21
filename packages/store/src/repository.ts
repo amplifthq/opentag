@@ -13,6 +13,7 @@ import {
   AdapterMutationMappingSchema,
   CompletionAssessmentSchema,
   CompletionContractSchema,
+  CompletionWaiverSchema,
   ContextPacketSchema,
   conversationKeyFromEvent,
   defaultRunEventMetadata,
@@ -51,6 +52,7 @@ import {
   type AdapterMutationMapping,
   type CompletionAssessment,
   type CompletionContract,
+  type CompletionWaiver,
   type HumanEscalation,
   type MutationIntentActionability,
   type OpenTagEvent,
@@ -79,6 +81,7 @@ import {
   channelBindings,
   completionAssessments,
   completionContracts,
+  completionWaivers,
   controlPlaneEvents,
   governanceEvents,
   humanEscalations,
@@ -212,6 +215,10 @@ export type CallbackDelivery = {
   nextAttemptAt?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type EnqueuedCallbackDelivery = CallbackDelivery & {
+  enqueueOutcome: "queued" | "duplicate";
 };
 
 export type RepoBinding = {
@@ -494,6 +501,10 @@ function completionContractFromRow(row: typeof completionContracts.$inferSelect)
 
 function completionAssessmentFromRow(row: typeof completionAssessments.$inferSelect): CompletionAssessment {
   return CompletionAssessmentSchema.parse(JSON.parse(row.assessmentJson));
+}
+
+function completionWaiverFromRow(row: typeof completionWaivers.$inferSelect): CompletionWaiver {
+  return CompletionWaiverSchema.parse(JSON.parse(row.waiverJson));
 }
 
 function storedVerificationEvidenceFromRow(
@@ -810,7 +821,11 @@ function callbackIdempotencyKey(input: {
   statusMessageKey?: string;
   blocks?: unknown[];
   rich?: unknown;
+  idempotencyKey?: string;
 }): string {
+  if (input.idempotencyKey) {
+    return `explicit:${createHash("sha256").update("opentag.callback-idempotency.v1\0").update(input.idempotencyKey).digest("hex")}`;
+  }
   return [
     input.runId,
     input.provider,
@@ -2206,6 +2221,70 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       if (!thread?.currentAssessmentId) return null;
       const row = await db.select().from(completionAssessments).where(eq(completionAssessments.id, thread.currentAssessmentId)).limit(1).get();
       return row ? completionAssessmentFromRow(row) : null;
+    },
+
+    async recordCompletionWaiver(input: { waiver: CompletionWaiver }): Promise<{ waiver: CompletionWaiver; created: boolean }> {
+      const waiver = CompletionWaiverSchema.parse(sanitizeCredentialLikeValue(input.waiver));
+      const waiverJson = JSON.stringify(waiver);
+      const { id: _id, ...semanticWaiver } = waiver;
+      const contentDigest = `sha256:${sha256(stableActionJson(semanticWaiver))}`;
+      return db.transaction((tx) => {
+        const existingById = tx.select().from(completionWaivers).where(eq(completionWaivers.id, waiver.id)).limit(1).get();
+        if (existingById) {
+          if (existingById.waiverJson !== waiverJson) throw new Error(`CompletionWaiver ${waiver.id} is immutable.`);
+          return { waiver: completionWaiverFromRow(existingById), created: false };
+        }
+        const contract = tx.select().from(completionContracts).where(and(
+          eq(completionContracts.id, waiver.contractId),
+          eq(completionContracts.version, waiver.contractVersion),
+          eq(completionContracts.cycle, waiver.cycle)
+        )).limit(1).get();
+        if (!contract) throw new Error(`CompletionWaiver ${waiver.id} targets an unknown completion contract snapshot.`);
+        const existingByContent = tx.select().from(completionWaivers).where(and(
+          eq(completionWaivers.workThreadId, contract.workThreadId),
+          eq(completionWaivers.cycle, waiver.cycle),
+          eq(completionWaivers.contentDigest, contentDigest)
+        )).limit(1).get();
+        if (existingByContent) return { waiver: completionWaiverFromRow(existingByContent), created: false };
+        tx.insert(completionWaivers).values({
+          id: waiver.id,
+          workThreadId: contract.workThreadId,
+          contractId: waiver.contractId,
+          contractVersion: waiver.contractVersion,
+          cycle: waiver.cycle,
+          contentDigest,
+          waiverJson,
+          createdAt: waiver.waivedAt
+        }).run();
+        tx.insert(governanceEvents).values({
+          workThreadId: contract.workThreadId,
+          type: "completion_waiver.recorded",
+          subjectId: waiver.id,
+          payloadJson: JSON.stringify({
+            runId: waiver.runId ?? null,
+            contractId: waiver.contractId,
+            contractVersion: waiver.contractVersion,
+            cycle: waiver.cycle,
+            actor: waiver.actor,
+            reason: waiver.reason,
+            scope: waiver.scope,
+            policyScope: waiver.policyScope,
+            gateIds: waiver.gateIds,
+            waivedAt: waiver.waivedAt,
+            expiresAt: waiver.expiresAt ?? null,
+            contentDigest
+          }),
+          createdAt: waiver.waivedAt
+        }).run();
+        return { waiver, created: true };
+      });
+    },
+
+    async listCompletionWaivers(input: { workThreadId: string }): Promise<CompletionWaiver[]> {
+      const rows = await db.select().from(completionWaivers)
+        .where(eq(completionWaivers.workThreadId, input.workThreadId))
+        .orderBy(asc(completionWaivers.createdAt), asc(completionWaivers.id));
+      return rows.map(completionWaiverFromRow);
     },
 
     async listMaterialActionReceiptsForWorkThread(input: { workThreadId: string }): Promise<MaterialActionReceipt[]> {
@@ -5164,7 +5243,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       statusMessageKey?: string;
       blocks?: unknown[];
       rich?: unknown;
-    }): Promise<CallbackDelivery> {
+      idempotencyKey?: string;
+    }): Promise<EnqueuedCallbackDelivery> {
       const safeDelivery = sanitizeCredentialLikeValue({
         uri: input.uri,
         body: input.body,
@@ -5211,7 +5291,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           message: "Duplicate callback delivery suppressed.",
           createdAt
         });
-        return callbackDeliveryFromRow(existing);
+        return { ...callbackDeliveryFromRow(existing), enqueueOutcome: "duplicate" as const };
       }
       await appendRunEvent({
         runId: input.runId,
@@ -5221,7 +5301,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         importance: "normal",
         createdAt
       });
-      return callbackDeliveryFromRow(row);
+      return { ...callbackDeliveryFromRow(row), enqueueOutcome: "queued" as const };
     },
 
     async markCallbackDelivered(input: { deliveryId: number; externalMessageId?: string }): Promise<void> {

@@ -8,6 +8,7 @@ import {
 import { runExecutorsCommand } from "./commands/executors.js";
 import { runPlatformsCommand } from "./commands/platforms.js";
 import { runCancelCommand } from "./cancel.js";
+import { runCompletionWaiveCommand } from "./completion.js";
 import { runDoctorCommand } from "./doctor.js";
 import { runIngestCommand, runIngestTemplateCommand } from "./ingest.js";
 import { runMaintenancePruneSourceDeliveriesCommand } from "./maintenance.js";
@@ -163,6 +164,24 @@ program
   .option("--reason <reason>", "Audit reason for cancellation")
   .option("--requested-by <actor>", "Audit actor requesting cancellation")
   .action(runCliAction(runCancelCommand));
+
+const completionCommand = program.command("completion").description("Inspect or govern completion state");
+
+completionCommand
+  .command("waive")
+  .description("Apply an attributed waiver to selected gates on the current completion contract")
+  .option("--config <path>", "Config file path")
+  .requiredOption("--run <runId>", "Run whose WorkThread owns the current completion contract")
+  .requiredOption("--gate <gateIds...>", "One or more current completion gate ids")
+  .requiredOption("--reason <reason>", "Auditable reason for the waiver")
+  .requiredOption("--actor-provider <provider>", "Provider identifying the human actor")
+  .requiredOption("--actor-id <id>", "Stable provider user id for the human actor")
+  .option("--actor-handle <handle>", "Human-readable actor handle")
+  .requiredOption("--scope <scope>", "Waiver scope; Phase 1 requires selected_gates")
+  .requiredOption("--policy-scope <scope>", "Contract authority scope for this waiver")
+  .option("--waived-at <iso>", "Attributed waiver timestamp; defaults to now")
+  .option("--expires-at <iso>", "Optional waiver expiry timestamp")
+  .action(runCliAction(runCompletionWaiveCommand));
 
 program
   .command("doctor")

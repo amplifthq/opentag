@@ -2,6 +2,10 @@ import {
   FollowUpRequestSchema,
   ActionSchema,
   ActionPermissionResolutionSchema,
+  CompletionAssessmentSchema,
+  CompletionContractSchema,
+  CompletionWaiverSchema,
+  HumanEscalationSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
@@ -11,6 +15,10 @@ import {
   type ActionPermissionRequest,
   type ActionPermissionResolution,
   type MaterialActionReceipt,
+  type CompletionAssessment,
+  type CompletionContract,
+  type CompletionWaiver,
+  type HumanEscalation,
   type ActionHint,
   type AdapterMutationMapping,
   type ApprovalDecision,
@@ -37,6 +45,39 @@ export type ClaimedOpenTagRun = {
 };
 
 export type OpenTagRunRecord = Pick<ClaimedOpenTagRun, "run" | "event">;
+
+export type CompletionEvidenceSummary = {
+  id: string;
+  kind: string;
+  assurance: "verified" | "reported" | "unverifiable";
+  subject: { provider: string; resourceRef: string; resourceVersion: string };
+  claim: { predicate: string; outcome: string; observations?: Record<string, string> };
+  observedAt: string;
+  receivedAt: string;
+};
+
+export type CompletionExplanation = {
+  workThreadId: string;
+  execution: "idle" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out" | "needs_human";
+  completion: CompletionAssessment["state"];
+  evidenceBacked: boolean;
+  contract: { id: string; version: number; cycle: number; mode: CompletionContract["mode"] };
+  currentAssessment: CompletionAssessment;
+  targetBindings: CompletionAssessment["targetBindings"];
+  missingGateIds: string[];
+  failedGateIds: string[];
+  blockedGateIds: string[];
+  nextAction: string;
+  contractSnapshot: CompletionContract;
+  assessmentHistory: CompletionAssessment[];
+  evidence: CompletionEvidenceSummary[];
+  openHumanEscalations: HumanEscalation[];
+};
+
+export type BoundedCompletionWaiverInput = Pick<
+  CompletionWaiver,
+  "actor" | "reason" | "scope" | "policyScope" | "gateIds" | "waivedAt" | "expiresAt"
+>;
 
 export type AttemptLease = Pick<ClaimedOpenTagRun, "attemptId" | "fencingToken">;
 
@@ -132,6 +173,25 @@ export type GitHubCompletionEvidenceInput = {
   checks: Record<string, "passed" | "failed" | "pending">;
   observedAt: string;
   payloadDigest: string;
+};
+
+export type GitHubCompletionReconciliationEscalationInput = {
+  operation: "open" | "resolve";
+  escalation: Pick<HumanEscalation, "audience" | "subjectRef" | "summary" | "reason"> & {
+    class: "reconciliation";
+    audience: "repo_owner";
+    state: "open" | "resolved";
+    blocking: true;
+    dedupeKey: string;
+  };
+  correlation: {
+    provider: "github";
+    deliveryId: string;
+    eventName: "pull_request" | "check_run" | "check_suite" | "status";
+    repository: { owner: string; repo: string };
+    pullRequestNumbers: number[];
+    headSha?: string;
+  };
 };
 
 export type PruneSourceDeliveriesInput = {
@@ -358,6 +418,7 @@ export type OpenTagClient = {
   listControlPlaneAlerts(input?: { limit?: number; since?: string }): Promise<{ alerts: ControlPlaneAlert[] }>;
   recordControlPlaneEvent(input: RecordControlPlaneEventInput): Promise<void>;
   ingestGitHubCompletionEvidence(input: GitHubCompletionEvidenceInput): Promise<void>;
+  requestGitHubCompletionReconciliationEscalation(input: GitHubCompletionReconciliationEscalationInput): Promise<void>;
   pruneSourceDeliveries(input: PruneSourceDeliveriesInput): Promise<SourceDeliveryPruneResult>;
   bindRepository(input: RepoBindingInput): Promise<void>;
   getRepositoryBinding(input: { provider: string; owner: string; repo: string }): Promise<{ binding: RepoBindingInput }>;
@@ -408,6 +469,12 @@ export type OpenTagClient = {
     requestedBy?: string;
   }): Promise<CancelRunResult>;
   getRun(input: { runId: string }): Promise<OpenTagRunRecord>;
+  getCompletion(input: { runId: string }): Promise<{ completion: CompletionExplanation }>;
+  waiveCompletion(input: { runId: string; waiver: BoundedCompletionWaiverInput }): Promise<{
+    outcome: "recorded" | "duplicate" | "conflict";
+    completion: CompletionExplanation;
+    waiver: CompletionWaiver;
+  }>;
   listRunEvents(input: { runId: string }): Promise<{ events: unknown[] }>;
   getRunLedger(input: { runId: string }): Promise<{ ledger: { runId: string; entries: unknown[] } }>;
   getRunMetrics(input: { runId: string }): Promise<{ metrics: RunMetrics }>;
@@ -440,6 +507,18 @@ export type DispatcherRunnerClient = {
   complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
 };
 
+export class OpenTagClientHttpError extends Error {
+  readonly status: number;
+  readonly responseBody: string;
+
+  constructor(action: string, status: number, responseBody: string) {
+    super(`${action} failed: ${status}${responseBody ? ` ${responseBody}` : ""}`);
+    this.name = "OpenTagClientHttpError";
+    this.status = status;
+    this.responseBody = responseBody;
+  }
+}
+
 function baseUrlFrom(dispatcherUrl: string): string {
   return dispatcherUrl.replace(/\/$/, "");
 }
@@ -459,10 +538,21 @@ function parseRunTimeoutPolicy(value: unknown): RunTimeoutPolicy {
   return typeof hardTimeoutMs === "number" && Number.isInteger(hardTimeoutMs) && hardTimeoutMs > 0 ? { hardTimeoutMs } : {};
 }
 
+function parseCompletionExplanation(value: unknown): CompletionExplanation {
+  const completion = value as CompletionExplanation;
+  return {
+    ...completion,
+    contractSnapshot: CompletionContractSchema.parse(completion.contractSnapshot),
+    currentAssessment: CompletionAssessmentSchema.parse(completion.currentAssessment),
+    assessmentHistory: completion.assessmentHistory.map((assessment) => CompletionAssessmentSchema.parse(assessment)),
+    openHumanEscalations: completion.openHumanEscalations.map((escalation) => HumanEscalationSchema.parse(escalation))
+  };
+}
+
 async function assertOk(response: Response, action: string): Promise<void> {
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`${action} failed: ${response.status}${text ? ` ${text}` : ""}`);
+    throw new OpenTagClientHttpError(action, response.status, text);
   }
 }
 
@@ -561,6 +651,15 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         body: JSON.stringify(input)
       });
       await assertOk(response, "ingestGitHubCompletionEvidence");
+    },
+
+    async requestGitHubCompletionReconciliationEscalation(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/completion-escalations/github`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(input)
+      });
+      await assertOk(response, "requestGitHubCompletionReconciliationEscalation");
     },
 
     async pruneSourceDeliveries(input) {
@@ -944,6 +1043,34 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       return {
         run: OpenTagRunSchema.parse(body.run),
         event: OpenTagEventSchema.parse(body.event)
+      };
+    },
+
+    async getCompletion(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/completion`, {
+        headers: authHeaders(options.pairingToken)
+      });
+      await assertOk(response, "getCompletion");
+      const body = (await response.json()) as { completion: CompletionExplanation };
+      return { completion: parseCompletionExplanation(body.completion) };
+    },
+
+    async waiveCompletion(input) {
+      const response = await fetchImpl(`${baseUrl}/v1/runs/${input.runId}/completion/waivers`, {
+        method: "POST",
+        headers: jsonHeaders(options.pairingToken),
+        body: JSON.stringify(input.waiver)
+      });
+      await assertOk(response, "waiveCompletion");
+      const body = (await response.json()) as {
+        outcome: "recorded" | "duplicate" | "conflict";
+        completion: CompletionExplanation;
+        waiver: unknown;
+      };
+      return {
+        outcome: body.outcome,
+        completion: parseCompletionExplanation(body.completion),
+        waiver: CompletionWaiverSchema.parse(body.waiver)
       };
     },
 

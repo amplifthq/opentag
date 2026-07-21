@@ -94,6 +94,10 @@ export function createOpenTagGovernance(input: {
       await input.repository.recordEvidence(command.evidence);
       return reassess(command.evidence.workThreadId);
     }
+    if (command.type === "apply_completion_waiver") {
+      await input.repository.recordWaiver(command.waiver);
+      return reassess(command.workThreadId);
+    }
     if (command.type === "resolve_human_escalation") {
       await input.repository.resolveHumanEscalation(command.escalation);
       if (command.waiver) await input.repository.recordWaiver(command.waiver);

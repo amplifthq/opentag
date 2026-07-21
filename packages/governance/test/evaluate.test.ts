@@ -333,6 +333,36 @@ describe("OpenTagGovernance command/query interface", () => {
       completion: "pending",
       missingGateIds: ["merge"]
     });
+
+    const waiver: CompletionWaiver = {
+      id: "waiver-command-1",
+      contractId: "contract-github-1",
+      contractVersion: 1,
+      cycle: 1,
+      actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+      reason: "Merge is intentionally deferred for this bounded cycle.",
+      scope: "selected_gates",
+      policyScope: "work_context_owner_container",
+      gateIds: ["merge"],
+      waivedAt: t2,
+      expiresAt: "2026-07-21T11:00:00.000Z"
+    };
+    const waived = await governance.execute({
+      type: "apply_completion_waiver",
+      commandId: "waiver-command-1",
+      workThreadId: "thread-1",
+      waiver
+    });
+    const waiverReplay = await governance.execute({
+      type: "apply_completion_waiver",
+      commandId: "waiver-command-1",
+      workThreadId: "thread-1",
+      waiver
+    });
+
+    expect(waived).toMatchObject({ outcome: "recorded", assessment: { state: "waived", waiver: { id: waiver.id } } });
+    expect(waiverReplay).toMatchObject({ outcome: "duplicate", assessment: { id: waived.assessment.id } });
+    expect(assessments).toHaveLength(2);
   });
 
   it("serializes concurrent evidence reassessments without regressing the assessment head", async () => {

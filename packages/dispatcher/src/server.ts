@@ -38,6 +38,7 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   PolicyRuleSchema,
+  PolicyScopeSchema,
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -2590,6 +2591,7 @@ async function deliverAndAudit(input: {
     ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
     ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
   });
+  if (delivery.enqueueOutcome === "duplicate") return delivery.status === "delivered";
   return deliverCallbackDelivery({
     repo: input.repo,
     sink: input.sink,
@@ -2790,6 +2792,56 @@ export function createDispatcherApp(input: {
   const setLarkStatusCardTimeout = larkStatusCardOptions.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
+
+  async function deliverCompletionTransition(workThreadId: string): Promise<void> {
+    const transition = await completionGovernance.getSourceThreadTransition(workThreadId);
+    if (!transition) return;
+    const state = transition.completion.completion;
+    const projection = state === "satisfied"
+      ? { state: "completed" as const, message: "Complete: provider-verified completion requirements are satisfied." }
+      : state === "waived"
+        ? { state: "completed" as const, message: "Complete: the remaining gates were covered by an attributed bounded waiver." }
+        : state === "blocked"
+          ? { state: "failed" as const, message: "Work completion is blocked and needs human attention." }
+          : state === "unsatisfied"
+            ? { state: "failed" as const, message: "Execution finished, but the completion requirements are not satisfied." }
+            : { state: "running" as const, message: "Execution succeeded; work completion is waiting for verified evidence." };
+    if (!presentation.shouldDeliverStatusUpdate(transition.event.callback.provider)) return;
+    const semantic = presentation.runStatusPresentation({
+      runId: transition.runId,
+      state: projection.state,
+      message: projection.message,
+      nextAction: transition.completion.nextAction,
+      detailVisibility: "source_thread"
+    });
+    const rendered = presentation.render({
+      provider: transition.event.callback.provider,
+      ...larkRenderLocaleRenderOption(transition.event),
+      presentation: semantic
+    });
+    const statusMessageKey = lifecycleStatusMessageKey({
+      provider: transition.event.callback.provider,
+      runId: transition.runId
+    });
+    await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: {
+        runId: transition.runId,
+        kind: projection.state === "completed" ? "final" : "progress",
+        provider: transition.event.callback.provider,
+        uri: transition.event.callback.uri,
+        body: rendered.body,
+        ...(transition.event.target.agentId ? { agentId: transition.event.target.agentId } : {}),
+        ...(transition.event.callback.threadKey ? { threadKey: transition.event.callback.threadKey } : {}),
+        ...(statusMessageKey ? { statusMessageKey } : {}),
+        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+        ...(rendered.rich ? { rich: rendered.rich } : {}),
+        idempotencyKey: transition.transitionKey
+      }
+    });
+  }
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
   const runnerTokens = configuredRunnerTokens(input);
@@ -5081,6 +5133,7 @@ export function createDispatcherApp(input: {
     if (!resolution) return c.json({ error: "action_not_found" }, 404);
     if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
     const completion = await completionGovernance.reassessRun(c.req.param("runId"));
+    if (completion) await deliverCompletionTransition(completion.assessment.workThreadId);
     return c.json({ resolution, ...(completion ? { completion: completion.view } : {}) }, 200);
   });
 
@@ -5098,7 +5151,8 @@ export function createDispatcherApp(input: {
     if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
     if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
     if (result.outcome === "reconciled" && result.action) {
-      await completionGovernance.reassessRun(result.action.runId);
+      const completion = await completionGovernance.reassessRun(result.action.runId);
+      if (completion) await deliverCompletionTransition(completion.assessment.workThreadId);
       const stored = await repo.getRun({ runId: result.action.runId });
       if (stored) {
         const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
@@ -5383,6 +5437,13 @@ export function createDispatcherApp(input: {
       && completionResult?.view.contract.mode === "governed"
       && completionResult.assessment.state !== "satisfied"
       && completionResult.assessment.state !== "waived";
+    const strictExecutionNotComplete = completionResult?.view.contract.mode === "governed"
+      && (
+        completedResult.conclusion === "failure"
+        || completedResult.conclusion === "cancelled"
+        || completedResult.conclusion === "interrupted"
+        || completedResult.conclusion === "timed_out"
+      );
     const finalPresentation = strictExecutionWaiting
       ? presentation.runStatusPresentation({
           runId,
@@ -5391,6 +5452,20 @@ export function createDispatcherApp(input: {
           nextAction: completionResult.view.nextAction,
           detailVisibility: "source_thread"
         })
+      : strictExecutionNotComplete
+        ? presentation.runStatusPresentation({
+            runId,
+            state: completedResult.conclusion === "failure"
+              ? "failed"
+              : completedResult.conclusion === "cancelled"
+                ? "cancelled"
+                : completedResult.conclusion === "interrupted"
+                  ? "interrupted"
+                  : "timed_out",
+            message: `Execution ${completedResult.conclusion}; work is not complete.`,
+            nextAction: completionResult.view.nextAction,
+            detailVisibility: "source_thread"
+          })
       : presentation.finalPresentation({
           result: completedResult,
           runId,

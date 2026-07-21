@@ -116,10 +116,18 @@ export type ResolveHumanEscalationCommand = {
   waiver?: CompletionWaiver;
 };
 
+export type ApplyCompletionWaiverCommand = {
+  type: "apply_completion_waiver";
+  commandId: string;
+  workThreadId: string;
+  waiver: CompletionWaiver;
+};
+
 export type GovernanceCommand =
   | IngestRunResultCommand
   | IngestEvidenceCommand
   | ReassessCompletionCommand
+  | ApplyCompletionWaiverCommand
   | ResolveHumanEscalationCommand;
 
 export type GetWorkLoopQuery = { type: "get_work_loop"; workThreadId: string };
