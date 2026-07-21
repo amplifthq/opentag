@@ -569,6 +569,7 @@ export const CompletionGateSchema = z.discriminatedUnion("kind", [
       kind: z.literal("verification"),
       targetKey: CompletionTargetKeySchema,
       evidenceKind: z.string().min(1),
+      requiredObservations: z.array(z.string().min(1)).optional(),
       requiredOutcome: z.literal("passed"),
       minimumAssurance: CompletionEvidenceAssuranceSchema
     })
@@ -669,14 +670,19 @@ export const CompletionGateResultStateSchema = z.enum(["passed", "failed", "miss
 export const CompletionReasonCodeSchema = z.enum([
   "artifact_requirement_satisfied",
   "artifact_missing",
+  "artifact_ambiguous",
   "verification_passed",
   "verification_failed",
   "verification_missing",
   "verification_assurance_insufficient",
+  "verification_subject_mismatch",
+  "verification_stale",
   "external_state_satisfied",
   "external_state_mismatch",
   "external_state_missing",
   "external_state_assurance_insufficient",
+  "external_state_subject_mismatch",
+  "external_state_stale",
   "material_action_succeeded",
   "material_action_failed",
   "material_action_unknown",
@@ -684,8 +690,10 @@ export const CompletionReasonCodeSchema = z.enum([
   "human_acceptance_recorded",
   "human_acceptance_missing",
   "gate_waived",
+  "waiver_invalid",
   "execution_succeeded",
-  "execution_incomplete"
+  "execution_incomplete",
+  "execution_not_succeeded"
 ]);
 
 export const CompletionGateResultSchema = z
