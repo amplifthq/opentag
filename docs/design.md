@@ -8,6 +8,10 @@ This document captures the original OpenTag system shape and package
 boundaries. For the current runtime-alignment work that matches the codebase,
 see [Thread Runtime Alignment](./thread-runtime-design.md).
 
+For the proposed next product and architecture direction—OpenTag as the open
+control plane for governed software factories—see the repository-level
+[Product Design](../DESIGN.md) and [Software Factory Control Plane](./software-factory-control-plane.md).
+
 ## One-Liner
 
 OpenTag turns an existing work thread into a governed agent work loop: tag any approved agent from a workspace surface, route the request through bounded context, scoped permissions, executor capability checks, an append-only work ledger, and artifact-first callbacks, then let a local or user-controlled runner execute the work and report back without creating a new AI workspace.

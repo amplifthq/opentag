@@ -129,6 +129,27 @@ const cases = [
     requiredCommands: ["corepack"]
   },
   {
+    id: "completion-governance",
+    label: "GitHub completion governance loop",
+    command: [
+      "corepack pnpm vitest run",
+      "packages/dispatcher/test/completion-governance-replay.test.ts",
+      "packages/dispatcher/test/completion-governance.test.ts",
+      "packages/github/test/completion-evidence.test.ts",
+      "packages/cli/test/completion.test.ts",
+      "packages/cli/test/status.test.ts",
+      "packages/cli/test/release-package-plan.test.ts"
+    ].join(" "),
+    covers: [
+      "GitHub admission, Context Packet, durable WorkThread, and fenced local attempt",
+      "executor success remains pending before current-head provider evidence",
+      "verified required checks and merge append a superseding satisfied assessment",
+      "duplicate evidence is replay-safe and source-thread projection stays quiet",
+      "CLI completion explanation, durable success metric, restart recovery, and packed publication set"
+    ],
+    requiredCommands: ["corepack"]
+  },
+  {
     id: "privacy-redaction",
     label: "Callback, report, status, and artifact privacy scan",
     command: [

@@ -1,4 +1,11 @@
-import { createOpenTagClient, type ChannelRuntimeStatus, type ControlPlaneAlert, type RunMetrics } from "@opentag/client";
+import {
+  createOpenTagClient,
+  OpenTagClientHttpError,
+  type ChannelRuntimeStatus,
+  type CompletionExplanation,
+  type ControlPlaneAlert,
+  type RunMetrics
+} from "@opentag/client";
 import {
   createSourceThreadStatusPresentation,
   formatProjectTargetRef,
@@ -74,6 +81,7 @@ export type RunStatusSummary = {
   runTimeoutPolicy?: string;
   events: RunAuditEvent[];
   ledgerEntries?: RunLedgerEntry[];
+  completion?: CompletionExplanation;
 };
 
 export type ChannelStatusSummary = {
@@ -263,17 +271,29 @@ export async function runStatusFromConfig(input: {
   runId: string;
   fetchImpl?: typeof fetch;
 }): Promise<RunStatusSummary> {
-  const token = runnerDispatcherToken(input.config.daemon);
-  const client = createOpenTagClient({
+  const runnerToken = runnerDispatcherToken(input.config.daemon);
+  const runnerClient = createOpenTagClient({
     dispatcherUrl: input.config.daemon.dispatcherUrl,
-    ...(token ? { pairingToken: token } : {}),
+    ...(runnerToken ? { pairingToken: runnerToken } : {}),
     ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
   });
-  const [claimed, events, metrics, ledger] = await Promise.all([
-    client.getRun({ runId: input.runId }),
-    client.listRunEvents({ runId: input.runId }),
-    client.getRunMetrics({ runId: input.runId }),
-    client.getRunLedger({ runId: input.runId }).catch(() => undefined)
+  const pairingToken = input.config.daemon.pairingToken;
+  const completionRequest = pairingToken
+    ? createOpenTagClient({
+        dispatcherUrl: input.config.daemon.dispatcherUrl,
+        pairingToken,
+        ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {})
+      }).getCompletion({ runId: input.runId }).catch((error: unknown) => {
+        if (isCompletionNotAvailable(error)) return undefined;
+        throw error;
+      })
+    : Promise.resolve(undefined);
+  const [claimed, events, metrics, ledger, completion] = await Promise.all([
+    runnerClient.getRun({ runId: input.runId }),
+    runnerClient.listRunEvents({ runId: input.runId }),
+    runnerClient.getRunMetrics({ runId: input.runId }),
+    runnerClient.getRunLedger({ runId: input.runId }).catch(() => undefined),
+    completionRequest
   ]);
   return {
     configPath: input.configPath,
@@ -283,8 +303,19 @@ export async function runStatusFromConfig(input: {
     metrics: metrics.metrics,
     runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
     events: events.events as RunAuditEvent[],
-    ...(ledger?.ledger && Array.isArray(ledger.ledger.entries) ? { ledgerEntries: ledger.ledger.entries as RunLedgerEntry[] } : {})
+    ...(ledger?.ledger && Array.isArray(ledger.ledger.entries) ? { ledgerEntries: ledger.ledger.entries as RunLedgerEntry[] } : {}),
+    ...(completion?.completion ? { completion: completion.completion } : {})
   };
+}
+
+function isCompletionNotAvailable(error: unknown): boolean {
+  if (!(error instanceof OpenTagClientHttpError) || error.status !== 404) return false;
+  try {
+    const body = JSON.parse(error.responseBody) as { error?: unknown };
+    return body.error === "completion_not_available";
+  } catch {
+    return false;
+  }
 }
 
 export function formatStatus(summary: StatusSummary): string {
@@ -710,6 +741,7 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     `Updated: ${summary.run.updatedAt}`,
     ...formatRunContextPacket(summary.run),
     ...formatRunResult(summary.run),
+    ...(summary.completion ? formatCompletionExplanation(summary.completion) : []),
     `Metrics: ${summary.metrics.totalEventCount} events, ${summary.metrics.suggestedChangesCount} suggested action(s), ${summary.metrics.applyPlanCount} apply plan(s), ${summary.metrics.staleIntentCount} stale intent(s)`,
     ...formatAgentWorkLedger(summary),
     ...formatRunLiveness(summary),
@@ -717,6 +749,41 @@ export function formatRunStatus(summary: RunStatusSummary): string {
     "Recent Events:",
     ...(latestEvents.length ? latestEvents.map(formatRunEvent) : ["  none"])
   ].join("\n");
+}
+
+export function formatCompletionExplanation(completion: CompletionExplanation): string[] {
+  const current = completion.currentAssessment;
+  const lineage = completion.assessmentHistory
+    .map((assessment) => `${assessment.sequence}:${assessment.id}${assessment.supersedesAssessmentId ? `<-${assessment.supersedesAssessmentId}` : ""}`)
+    .join(" -> ");
+  return [
+    "Completion Governance:",
+    `  Execution: ${completion.execution}`,
+    `  Completion: ${completion.completion}`,
+    `  Contract: ${completion.contract.id} v${completion.contract.version} cycle=${completion.contract.cycle} mode=${completion.contract.mode}`,
+    `  Current assessment: ${current.id} sequence=${current.sequence}${current.acceptedAt ? ` accepted=${current.acceptedAt}` : ""}`,
+    `  Assessment lineage: ${lineage || "none"}`,
+    "  Gates:",
+    ...current.gateResults.map((gate) =>
+      `    ${gate.gateId}: ${gate.state} (${gate.reasonCode}) - ${gate.reason}`
+    ),
+    "  Evidence:",
+    ...(completion.evidence.length
+      ? completion.evidence.map((item) =>
+          `    ${item.id}: ${item.kind} assurance=${item.assurance} subject=${item.subject.resourceRef}@${item.subject.resourceVersion} provider=${item.subject.provider}`
+        )
+      : ["    none"]),
+    `  Missing requirements: ${completion.missingGateIds.length ? completion.missingGateIds.join(", ") : "none"}`,
+    `  Failed requirements: ${completion.failedGateIds.length ? completion.failedGateIds.join(", ") : "none"}`,
+    `  Blocked requirements: ${completion.blockedGateIds.length ? completion.blockedGateIds.join(", ") : "none"}`,
+    "  Open human escalations:",
+    ...(completion.openHumanEscalations.length
+      ? completion.openHumanEscalations.map((escalation) =>
+          `    ${escalation.id}: ${escalation.class}/${escalation.state} - ${escalation.summary}`
+        )
+      : ["    none"]),
+    `  Next action: ${completion.nextAction}`
+  ];
 }
 
 function projectTargetLabel(input: ChannelRuntimeStatus["binding"]): string | undefined {

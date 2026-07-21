@@ -1,4 +1,5 @@
 import { projectTargetRefFromLocalPath } from "@opentag/core";
+import type { CompletionAssessment, WorkThread } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
@@ -30,6 +31,57 @@ function githubIssueWorkItem(issueNumber: number) {
   };
 }
 
+const completionTimestamp = "2026-07-21T10:00:00.000Z";
+
+function completionWorkThread(): WorkThread {
+  return {
+    workItemReference: githubIssueWorkItem(42),
+    primaryAnchor: {
+      provider: "github",
+      kind: "issue_comment",
+      externalId: "comment-assessment-immutability",
+      uri: "https://github.com/acme/demo/issues/42#comment-assessment-immutability",
+      threadKey: "acme/demo#42"
+    }
+  };
+}
+
+function completionAssessment(input: {
+  id: string;
+  workThreadId: string;
+  assessedBy?: string;
+}): CompletionAssessment {
+  return {
+    id: input.id,
+    workThreadId: input.workThreadId,
+    contractId: "contract-assessment-immutability",
+    contractVersion: 1,
+    cycle: 1,
+    sequence: 1,
+    inputDigest: `sha256:${"a".repeat(64)}`,
+    targetBindings: [{
+      key: "primary_change",
+      provider: "github",
+      resourceRef: "github:acme/demo:pull_request:7",
+      resourceVersion: "abc123",
+      artifactId: "artifact-pr-7"
+    }],
+    state: "pending",
+    evidenceBacked: true,
+    gateResults: [{
+      gateId: "checks",
+      targetKey: "primary_change",
+      state: "missing",
+      evidenceIds: [],
+      reasonCode: "verification_missing",
+      reason: "Required check evidence has not arrived.",
+      evaluatedAt: completionTimestamp
+    }],
+    assessedAt: completionTimestamp,
+    assessedBy: input.assessedBy ?? "opentag"
+  };
+}
+
 function larkEvent(input: { id: string; sourceEventId: string; owner?: string; repo?: string; chatId?: string }): Parameters<ReturnType<typeof createOpenTagRepository>["createRun"]>[0]["event"] {
   const owner = input.owner ?? "acme";
   const repo = input.repo ?? "demo";
@@ -56,6 +108,105 @@ function larkEvent(input: { id: string; sourceEventId: string; owner?: string; r
 }
 
 describe("OpenTag repository", () => {
+  it("returns only a completed canonical latest run for each WorkThread", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const eventFor = (suffix: string) => ({
+      id: `evt_current_work_thread_${suffix}`,
+      source: "github" as const,
+      sourceEventId: `comment_current_work_thread_${suffix}`,
+      receivedAt: `2026-07-21T10:00:0${suffix === "old" ? "0" : "1"}.000Z`,
+      actor: { provider: "github" as const, providerUserId: "42", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix" as const, args: {} },
+      context: githubIssueContext(99),
+      workItem: githubIssueWorkItem(99),
+      permissions: [{ scope: "issue:comment" as const, reason: "reply to source thread" }],
+      callback: { provider: "github" as const, uri: "https://api.github.com/repos/acme/demo/issues/99/comments" },
+      metadata: { owner: "acme", repo: "demo", issueNumber: 99 }
+    });
+
+    await repo.createRun({ id: "run_current_work_thread_B", event: eventFor("old") });
+    await repo.completeRun({
+      runId: "run_current_work_thread_B",
+      result: {
+        conclusion: "success",
+        summary: "old delivery completed",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/7"
+      }
+    });
+    await repo.createRun({ id: "run_current_work_thread_a", event: eventFor("new") });
+    sqlite.prepare("UPDATE runs SET created_at = ? WHERE id = ?")
+      .run("2026-07-21T10:00:00.000Z", "run_current_work_thread_B");
+    sqlite.prepare("UPDATE runs SET created_at = ? WHERE id = ?")
+      .run("2026-07-21T10:00:00.000Z", "run_current_work_thread_a");
+
+    await expect(repo.listCurrentWorkThreadRunsWithResults()).resolves.toEqual([]);
+
+    await repo.completeRun({
+      runId: "run_current_work_thread_a",
+      result: {
+        conclusion: "success",
+        summary: "new delivery completed",
+        createdPullRequestUrl: "https://github.com/acme/demo/pull/8"
+      }
+    });
+
+    await expect(repo.listCurrentWorkThreadRunsWithResults()).resolves.toMatchObject([
+      { run: { id: "run_current_work_thread_a", result: { createdPullRequestUrl: "https://github.com/acme/demo/pull/8" } } }
+    ]);
+    expect(sqlite.prepare("PRAGMA index_list(runs)").all()).toContainEqual(expect.objectContaining({
+      name: "runs_work_thread_authority_idx"
+    }));
+  });
+
+  it("accepts completion assessment replay only when the canonical assessment is identical", async () => {
+    const sqlite = new Database(":memory:");
+    const db = drizzle(sqlite);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(db);
+    const thread = (await repo.upsertWorkThread({ thread: completionWorkThread() })).thread;
+    await repo.recordCompletionContract({
+      contract: {
+        id: "contract-assessment-immutability",
+        version: 1,
+        workThreadId: thread.id,
+        cycle: 1,
+        mode: "governed",
+        targetSelectors: [{ key: "primary_change", kind: "change_request", lineage: "current_cycle", cardinality: "exactly_one" }],
+        resolvedFrom: [{ scope: "work_context_owner_container", ref: "github:acme/demo", version: "1" }],
+        gates: [{ id: "checks", kind: "verification", targetKey: "primary_change", evidenceKind: "source_control.required_checks", requiredOutcome: "passed", minimumAssurance: "verified" }],
+        maxAutomaticRetries: 1,
+        onSatisfied: "report_only",
+        createdAt: completionTimestamp
+      }
+    });
+    const original = completionAssessment({ id: "assessment-immutable", workThreadId: thread.id });
+
+    await expect(repo.appendCompletionAssessment({ assessment: original, expectedCurrentAssessmentId: null }))
+      .resolves.toMatchObject({ outcome: "recorded" });
+    await expect(repo.appendCompletionAssessment({ assessment: original, expectedCurrentAssessmentId: null }))
+      .resolves.toMatchObject({ outcome: "duplicate", assessment: original });
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: { ...original, assessedBy: "human" },
+      expectedCurrentAssessmentId: null
+    })).rejects.toThrow(/CompletionAssessment assessment-immutable is immutable/u);
+
+    await expect(repo.appendCompletionAssessment({
+      assessment: completionAssessment({
+        id: "assessment-same-input-digest",
+        workThreadId: thread.id,
+        assessedBy: "human"
+      }),
+      expectedCurrentAssessmentId: original.id
+    })).rejects.toThrow(/CompletionAssessment input digest .* is immutable/u);
+
+    await expect(repo.listCompletionAssessments({ workThreadId: thread.id })).resolves.toEqual([original]);
+  });
+
   it("migrates legacy callback deliveries before creating the idempotency index", () => {
     const sqlite = new Database(":memory:");
     sqlite.exec(`
@@ -1335,6 +1486,8 @@ describe("OpenTag repository", () => {
     });
 
     expect(second.id).toBe(first.id);
+    expect(first.enqueueOutcome).toBe("queued");
+    expect(second.enqueueOutcome).toBe("duplicate");
     expect(first.idempotencyKey).toBe(second.idempotencyKey);
     const pending = await repo.claimPendingCallbackDeliveries({ limit: 10 });
     expect(pending).toHaveLength(1);

@@ -38,6 +38,7 @@ import {
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   PolicyRuleSchema,
+  PolicyScopeSchema,
   RunEventImportanceSchema,
   RunEventVisibilitySchema,
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -52,6 +53,7 @@ import {
   type FetchLike as GitHubFetchLike
 } from "@opentag/github";
 import type { GitHubIssueMutationOperation } from "@opentag/github";
+import type { GitHubCompletionReconciliationEscalationRequest } from "@opentag/github";
 import {
   applyGitLabMutationOperation,
   createGitLabMutationCompiler,
@@ -315,6 +317,11 @@ function createDispatcherRateLimitMiddleware(options: DispatcherRateLimitOptions
 }
 import { createAdmissionRuntime, sourceRepoIsPublic, type AgentAccessProfileCheck } from "./admission.js";
 import { createDefaultCallbackPresentation, type CallbackPresentation, type LarkRenderLocale } from "./presentation.js";
+import {
+  createDispatcherCompletionGovernance,
+  currentWorkThreadRun,
+  type GitHubCompletionPolicy
+} from "./completion-governance.js";
 import { createSourceThreadControlHandler } from "./source-thread-control.js";
 
 type CallbackRunStatusState = Parameters<CallbackPresentation["runStatusPresentation"]>[0]["state"];
@@ -627,6 +634,38 @@ const RecordControlPlaneEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.string().datetime().optional()
 });
+
+const GitHubCompletionEvidenceSchema = z.object({
+  provider: z.literal("github"),
+  deliveryId: z.string().min(1).max(256),
+  eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
+  repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
+  pullRequest: z.object({
+    number: z.number().int().positive(),
+    resourceRef: z.string().min(1),
+    headSha: z.string().regex(/^[a-f0-9]{40,64}$/iu),
+    baseSha: z.string().regex(/^[a-f0-9]{40,64}$/iu),
+    baseBranch: z.string().min(1),
+    state: z.enum(["open", "closed", "merged"])
+  }).strict(),
+  checks: z.record(z.string().min(1), z.enum(["passed", "failed", "pending"])),
+  observedAt: z.string().datetime(),
+  payloadDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u)
+}).strict();
+
+const GitHubCompletionEvidenceBatchSchema = z.object({
+  snapshots: z.array(GitHubCompletionEvidenceSchema).min(1).max(100)
+}).strict();
+
+const CompletionWaiverInputSchema = z.object({
+  actor: ActorIdentitySchema,
+  reason: z.string().min(1).max(2_000),
+  scope: z.literal("selected_gates"),
+  policyScope: PolicyScopeSchema,
+  gateIds: z.array(z.string().min(1)).min(1).max(50),
+  waivedAt: z.string().datetime(),
+  expiresAt: z.string().datetime().optional()
+}).strict();
 
 const PruneSourceDeliveriesSchema = z.object({
   olderThan: z.string().datetime(),
@@ -2552,6 +2591,7 @@ async function deliverAndAudit(input: {
     ...(safeMessage.blocks ? { blocks: safeMessage.blocks } : {}),
     ...(safeMessage.rich ? { rich: safeMessage.rich } : {})
   });
+  if (delivery.enqueueOutcome === "duplicate") return delivery.status === "delivered";
   return deliverCallbackDelivery({
     repo: input.repo,
     sink: input.sink,
@@ -2728,10 +2768,17 @@ export function createDispatcherApp(input: {
   relayCapabilities?: {
     platforms?: RelayPlatformCapability[];
   };
+  completionPolicies?: GitHubCompletionPolicy[];
+  completionNow?: () => string;
 }) {
   const sqlite = new Database(input.databasePath);
   migrateSchema(sqlite);
   const repo = createOpenTagRepository(drizzle(sqlite));
+  const completionGovernance = createDispatcherCompletionGovernance({
+    repo,
+    policies: input.completionPolicies ?? [],
+    ...(input.completionNow ? { now: input.completionNow } : {})
+  });
   const app = new Hono();
   const channelPrincipals = configuredChannelPrincipals(input.channelPrincipals);
   const configuredCallbackSink = input.callbackSink ?? noopCallbackSink;
@@ -2745,6 +2792,56 @@ export function createDispatcherApp(input: {
   const setLarkStatusCardTimeout = larkStatusCardOptions.setTimeout ?? ((callback, delayMs) => globalThis.setTimeout(callback, delayMs));
   const clearLarkStatusCardTimeout = larkStatusCardOptions.clearTimeout ?? ((handle) => globalThis.clearTimeout(handle));
   const delayedLarkStatusCards = new Map<string, DelayedLarkStatusState>();
+
+  async function deliverCompletionTransition(workThreadId: string): Promise<void> {
+    const transition = await completionGovernance.getSourceThreadTransition(workThreadId);
+    if (!transition) return;
+    const state = transition.completion.completion;
+    const projection = state === "satisfied"
+      ? { state: "completed" as const, message: "Complete: provider-verified completion requirements are satisfied." }
+      : state === "waived"
+        ? { state: "completed" as const, message: "Complete: the remaining gates were covered by an attributed bounded waiver." }
+        : state === "blocked"
+          ? { state: "failed" as const, message: "Work completion is blocked and needs human attention." }
+          : state === "unsatisfied"
+            ? { state: "failed" as const, message: "Execution finished, but the completion requirements are not satisfied." }
+            : { state: "running" as const, message: "Execution succeeded; work completion is waiting for verified evidence." };
+    if (!presentation.shouldDeliverStatusUpdate(transition.event.callback.provider)) return;
+    const semantic = presentation.runStatusPresentation({
+      runId: transition.runId,
+      state: projection.state,
+      message: projection.message,
+      nextAction: transition.completion.nextAction,
+      detailVisibility: "source_thread"
+    });
+    const rendered = presentation.render({
+      provider: transition.event.callback.provider,
+      ...larkRenderLocaleRenderOption(transition.event),
+      presentation: semantic
+    });
+    const statusMessageKey = lifecycleStatusMessageKey({
+      provider: transition.event.callback.provider,
+      runId: transition.runId
+    });
+    await deliverAndAudit({
+      repo,
+      sink: callbackSink,
+      retry: callbackRetry,
+      message: {
+        runId: transition.runId,
+        kind: projection.state === "completed" ? "final" : "progress",
+        provider: transition.event.callback.provider,
+        uri: transition.event.callback.uri,
+        body: rendered.body,
+        ...(transition.event.target.agentId ? { agentId: transition.event.target.agentId } : {}),
+        ...(transition.event.callback.threadKey ? { threadKey: transition.event.callback.threadKey } : {}),
+        ...(statusMessageKey ? { statusMessageKey } : {}),
+        ...(rendered.blocks?.length ? { blocks: rendered.blocks } : {}),
+        ...(rendered.rich ? { rich: rendered.rich } : {}),
+        idempotencyKey: transition.transitionKey
+      }
+    });
+  }
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const runnerLeaseSeconds = input.runnerLeaseSeconds ?? 60;
   const runnerTokens = configuredRunnerTokens(input);
@@ -3043,6 +3140,32 @@ export function createDispatcherApp(input: {
     deliverAuditedMessage: (message) => deliverAndAudit({ repo, sink: callbackSink, retry: callbackRetry, message }),
     deliverDirectMessage: (message) => callbackSink.deliver(message),
     recordControlPlaneEvent
+  });
+  queueMicrotask(() => {
+    void (async () => {
+      const completedRuns = await repo.listRunsWithResults();
+      const workThreadIds = [...new Set(completedRuns.flatMap((stored) =>
+        stored.run.thread?.id ? [stored.run.thread.id] : []
+      ))].sort();
+      for (const workThreadId of workThreadIds) {
+        const latest = currentWorkThreadRun(await repo.listRunsForWorkThread({ workThreadId }));
+        if (!latest?.run.result) continue;
+        await completionGovernance.ingestRunResult(latest.run.id);
+        await deliverCompletionTransition(workThreadId);
+      }
+    })().catch(async (error) => {
+      try {
+        await recordControlPlaneEvent({
+          type: "completion_governance.recovery_failed",
+          severity: "error",
+          payload: { error: error instanceof Error ? error.message : String(error) }
+        });
+      } catch {
+        // The owning process may already be shutting down and its SQLite file
+        // may have been removed. Recovery failure reporting must not create an
+        // unhandled rejection during teardown.
+      }
+    });
   });
   const parseDispatcherBody = async <S extends z.ZodTypeAny>(
     c: Context,
@@ -3700,6 +3823,72 @@ export function createDispatcherApp(input: {
     const parsed = await parseDispatcherBody(c, RecordControlPlaneEventSchema);
     await recordControlPlaneEvent(parsed);
     return c.json({ ok: true }, 201);
+  });
+
+  app.post("/v1/completion-evidence/github", async (c) => {
+    const snapshot = await parseDispatcherBody(c, GitHubCompletionEvidenceSchema);
+    const expectedRef = `github:${snapshot.repository.owner}/${snapshot.repository.repo}:pull_request:${snapshot.pullRequest.number}`;
+    if (snapshot.pullRequest.resourceRef !== expectedRef) {
+      return c.json({ error: "invalid_completion_evidence_identity" }, 400);
+    }
+    let result;
+    try {
+      result = await completionGovernance.ingestGitHubSnapshot(snapshot);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("delivery payload conflicts")) {
+        return c.json({ error: "completion_evidence_delivery_conflict", message: error.message }, 409);
+      }
+      throw error;
+    }
+    if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
+    return c.json(result, result.outcome === "recorded" ? 201 : 200);
+  });
+
+  app.post("/v1/completion-evidence/github/batch", async (c) => {
+    const { snapshots } = await parseDispatcherBody(c, GitHubCompletionEvidenceBatchSchema);
+    let result;
+    try {
+      result = await completionGovernance.ingestGitHubSnapshotSet(snapshots);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("delivery payload conflicts")) {
+        return c.json({ error: "completion_evidence_delivery_conflict", message: error.message }, 409);
+      }
+      throw error;
+    }
+    for (const workThreadId of result.workThreadIds) await deliverCompletionTransition(workThreadId);
+    return c.json(result, result.outcome === "recorded" ? 201 : 200);
+  });
+
+  app.post("/v1/completion-escalations/github", async (c) => {
+    const request = await parseDispatcherBody(c, z.object({
+      operation: z.enum(["open", "resolve"]),
+      escalation: z.object({
+        class: z.literal("reconciliation"),
+        audience: z.literal("repo_owner"),
+        subjectRef: z.string().min(1),
+        state: z.enum(["open", "resolved"]),
+        blocking: z.literal(true),
+        summary: z.string().min(1),
+        reason: z.string().min(1),
+        dedupeKey: z.string().min(1)
+      }).strict(),
+      correlation: z.object({
+        provider: z.literal("github"),
+        deliveryId: z.string().min(1),
+        eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
+        repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
+        pullRequestNumbers: z.array(z.number().int().positive()),
+        headSha: z.string().min(1).optional()
+      }).strict().superRefine((correlation, ctx) => {
+        if (correlation.pullRequestNumbers.length === 0 && !correlation.headSha) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A pull request number or head SHA is required." });
+        }
+      })
+    }).strict()) as GitHubCompletionReconciliationEscalationRequest;
+    const result = await completionGovernance.handleGitHubReconciliationEscalation(request);
+    if (result.workThreadId) await deliverCompletionTransition(result.workThreadId);
+    const status = result.outcome === "opened" ? 201 : result.outcome === "uncorrelated" ? 404 : result.outcome === "ambiguous" ? 409 : 200;
+    return c.json(result, status);
   });
 
   app.get("/v1/control-plane-alerts", async (c) => {
@@ -4943,7 +5132,9 @@ export function createDispatcherApp(input: {
     });
     if (!resolution) return c.json({ error: "action_not_found" }, 404);
     if (resolution.state === "stale") return c.json({ error: "stale_attempt", resolution }, 409);
-    return c.json({ resolution }, 200);
+    const completion = await completionGovernance.reassessRun(c.req.param("runId"));
+    if (completion) await deliverCompletionTransition(completion.assessment.workThreadId);
+    return c.json({ resolution, ...(completion ? { completion: completion.view } : {}) }, 200);
   });
 
   app.post("/v1/material-actions/:actionId/reconcile", async (c) => {
@@ -4960,6 +5151,8 @@ export function createDispatcherApp(input: {
     if (result.outcome === "not_found") return c.json({ error: "action_not_found" }, 404);
     if (result.outcome === "conflict") return c.json({ error: "reconciliation_conflict", action: result.action }, 409);
     if (result.outcome === "reconciled" && result.action) {
+      const completion = await completionGovernance.reassessRun(result.action.runId);
+      if (completion) await deliverCompletionTransition(completion.assessment.workThreadId);
       const stored = await repo.getRun({ runId: result.action.runId });
       if (stored) {
         const bodyText = `Material action ${result.action.id} reconciled as ${result.action.status}.`;
@@ -5186,10 +5379,17 @@ export function createDispatcherApp(input: {
     });
     if (outcome === "not_found") return c.json({ error: "run_not_claimed_by_runner" }, 404);
     if (outcome === "stale_attempt") return c.json({ error: "stale_attempt" }, 409);
-    if (outcome === "duplicate") return c.json({ ok: true, replayed: true });
+    if (outcome === "duplicate") {
+      const replayedRun = await repo.getRun({ runId });
+      const completion = replayedRun?.run.thread?.id
+        ? (await completionGovernance.ingestRunResult(runId))?.view ?? await completionGovernance.getWorkLoop(replayedRun.run.thread.id)
+        : null;
+      return c.json({ ok: true, replayed: true, ...(completion ? { completion } : {}) });
+    }
     const stored = await repo.getRun({ runId });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     const completedResult = OpenTagRunResultSchema.parse(stored.run.result);
+    const completionResult = await completionGovernance.ingestRunResult(runId);
     cancelPendingDelayedLarkStatusCard(runId);
     const linearApply = await linearApplyOptionsForEvent(stored.event);
     const receiptContext = await actionReceiptContextForFinal({
@@ -5233,11 +5433,44 @@ export function createDispatcherApp(input: {
         }
       });
     }
-    const finalPresentation = presentation.finalPresentation({
-      result: completedResult,
-      runId,
-      receiptContext
-    });
+    const strictExecutionWaiting = completedResult.conclusion === "success"
+      && completionResult?.view.contract.mode === "governed"
+      && completionResult.assessment.state !== "satisfied"
+      && completionResult.assessment.state !== "waived";
+    const strictExecutionNotComplete = completionResult?.view.contract.mode === "governed"
+      && (
+        completedResult.conclusion === "failure"
+        || completedResult.conclusion === "cancelled"
+        || completedResult.conclusion === "interrupted"
+        || completedResult.conclusion === "timed_out"
+      );
+    const finalPresentation = strictExecutionWaiting
+      ? presentation.runStatusPresentation({
+          runId,
+          state: "running",
+          message: "Execution succeeded; work completion is waiting for verified repository evidence.",
+          nextAction: completionResult.view.nextAction,
+          detailVisibility: "source_thread"
+        })
+      : strictExecutionNotComplete
+        ? presentation.runStatusPresentation({
+            runId,
+            state: completedResult.conclusion === "failure"
+              ? "failed"
+              : completedResult.conclusion === "cancelled"
+                ? "cancelled"
+                : completedResult.conclusion === "interrupted"
+                  ? "interrupted"
+                  : "timed_out",
+            message: `Execution ${completedResult.conclusion}; work is not complete.`,
+            nextAction: completionResult.view.nextAction,
+            detailVisibility: "source_thread"
+          })
+      : presentation.finalPresentation({
+          result: completedResult,
+          runId,
+          receiptContext
+        });
     const finalCallback = presentation.render({
       provider: stored.event.callback.provider,
       ...larkRenderLocaleRenderOption(stored.event),
@@ -5266,6 +5499,7 @@ export function createDispatcherApp(input: {
     const promotedFollowUp = shouldPromoteFollowUp ? await promoteNextFollowUpAfterTerminalRun({ activeRunId: runId }) : null;
     return c.json({
       ok: true,
+      ...(completionResult ? { completion: completionResult.view } : {}),
       ...(promotedFollowUp
         ? {
             promotedFollowUp: {
@@ -5551,6 +5785,35 @@ export function createDispatcherApp(input: {
     const stored = await repo.getRun({ runId: c.req.param("runId") });
     if (!stored) return c.json({ error: "run_not_found" }, 404);
     return c.json(stored);
+  });
+
+  app.get("/v1/runs/:runId/completion", async (c) => {
+    const stored = await repo.getRun({ runId: c.req.param("runId") });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const completion = await completionGovernance.explainRun(stored.run.id);
+    if (!completion) return c.json({ error: "completion_not_available" }, 404);
+    if (stored.run.thread?.id) await deliverCompletionTransition(stored.run.thread.id);
+    return c.json({ completion });
+  });
+
+  app.post("/v1/runs/:runId/completion/waivers", async (c) => {
+    const runId = c.req.param("runId");
+    const stored = await repo.getRun({ runId });
+    if (!stored) return c.json({ error: "run_not_found" }, 404);
+    const input = CompletionWaiverInputSchema.parse(sanitizeCredentialLikeValue(
+      await parseDispatcherBody(c, CompletionWaiverInputSchema)
+    ));
+    try {
+      const result = await completionGovernance.applyWaiverForRun(runId, input);
+      if (!result) return c.json({ error: "completion_not_available" }, 404);
+      await deliverCompletionTransition(result.assessment.workThreadId);
+      const completion = await completionGovernance.explainRun(runId);
+      if (!completion || !result.assessment.waiver) return c.json({ error: "completion_not_available" }, 404);
+      return c.json({ outcome: result.outcome, completion, waiver: result.assessment.waiver }, result.outcome === "recorded" ? 201 : 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Invalid completion waiver.";
+      return c.json({ error: "invalid_completion_waiver", message }, 400);
+    }
   });
 
   app.post("/v1/runs/:runId/cancel", async (c) => {

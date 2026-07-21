@@ -4,7 +4,11 @@ import {
   ApprovalDecisionSchema,
   ApplyPlanSchema,
   CapabilityContractSchema,
+  CompletionAssessmentSchema,
+  CompletionContractSchema,
+  CompletionGateSchema,
   ContextPacketSchema,
+  HumanEscalationSchema,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
   OpenTagRunSchema,
@@ -575,5 +579,158 @@ describe("Agent Work Protocol schemas", () => {
 
     expect(run.parentRunId).toBe("run_1");
     expect(run.triggeredByAction?.kind).toBe("generate_patch");
+  });
+});
+
+describe("Completion governance schemas", () => {
+  const createdAt = "2026-07-21T00:00:00.000Z";
+
+  it("accepts the finite completion gate vocabulary and immutable contract snapshot", () => {
+    const gates = [
+      { id: "pr", kind: "artifact", targetKey: "primary_change", artifactKind: "pull_request", minimum: 1 },
+      {
+        id: "checks",
+        kind: "verification",
+        targetKey: "primary_change",
+        evidenceKind: "source_control.required_checks",
+        requiredOutcome: "passed",
+        minimumAssurance: "verified"
+      },
+      {
+        id: "merge",
+        kind: "external_state",
+        targetKey: "primary_change",
+        provider: "github",
+        requiredState: "merged",
+        minimumAssurance: "verified"
+      },
+      { id: "publish", kind: "material_action", actionFamily: "release", requiredOutcome: "succeeded" },
+      { id: "acceptance", kind: "human_acceptance", requiredRole: "repo_owner" }
+    ] as const;
+
+    for (const gate of gates) {
+      expect(CompletionGateSchema.parse(gate)).toMatchObject({ id: gate.id, kind: gate.kind });
+    }
+
+    const contract = CompletionContractSchema.parse({
+      id: "contract_github_1",
+      version: 1,
+      workThreadId: "thread_github_1",
+      cycle: 1,
+      mode: "governed",
+      targetSelectors: [{ key: "primary_change", kind: "change_request", lineage: "current_cycle", cardinality: "exactly_one" }],
+      resolvedFrom: [{ scope: "work_context_owner_container", ref: "github:acme/demo", version: "1" }],
+      gates,
+      maxAutomaticRetries: 1,
+      onSatisfied: "report_only",
+      createdAt
+    });
+
+    expect(contract.gates).toHaveLength(5);
+    expect(() => CompletionContractSchema.parse({ ...contract, gates: [gates[0], gates[0]] })).toThrow(/must be unique/u);
+    expect(() => CompletionContractSchema.parse({ ...contract, targetSelectors: [] })).toThrow(/must reference a target selector/u);
+    expect(() => CompletionGateSchema.parse({ ...gates[1], minimumAssurance: "unverifiable" })).toThrow();
+  });
+
+  it("keeps execution success separate from attributed completion assessment", () => {
+    const assessment = CompletionAssessmentSchema.parse({
+      id: "assessment_1",
+      workThreadId: "thread_github_1",
+      triggeredByRunId: "run_1",
+      contractId: "contract_github_1",
+      contractVersion: 1,
+      cycle: 1,
+      sequence: 1,
+      inputDigest: `sha256:${"a".repeat(64)}`,
+      targetBindings: [{
+        key: "primary_change",
+        provider: "github",
+        resourceRef: "github:acme/demo:pull_request:42",
+        resourceVersion: "abc123",
+        artifactId: "artifact_pr_42"
+      }],
+      state: "pending",
+      evidenceBacked: true,
+      gateResults: [
+        {
+          gateId: "checks",
+          state: "missing",
+          evidenceIds: [],
+          reasonCode: "verification_missing",
+          reason: "Required check evidence has not arrived.",
+          evaluatedAt: createdAt
+        }
+      ],
+      assessedAt: createdAt,
+      assessedBy: "opentag"
+    });
+
+    expect(assessment.state).toBe("pending");
+    expect(assessment.triggeredByRunId).toBe("run_1");
+    expect(() => CompletionAssessmentSchema.parse({ ...assessment, state: "waived" })).toThrow(/waiver attribution/u);
+
+    const waived = CompletionAssessmentSchema.parse({
+      ...assessment,
+      id: "assessment_2",
+      state: "waived",
+      assessedBy: "human",
+      supersedesAssessmentId: assessment.id,
+      gateResults: [
+        {
+          gateId: "checks",
+          state: "waived",
+          evidenceIds: [],
+          reasonCode: "gate_waived",
+          reason: "Repository owner accepted the bounded missing check.",
+          evaluatedAt: createdAt
+        }
+      ],
+      waiver: {
+        id: "waiver_1",
+        contractId: "contract_github_1",
+        contractVersion: 1,
+        cycle: 1,
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        reason: "Emergency documentation-only change.",
+        scope: "selected_gates",
+        policyScope: "work_context_owner_container",
+        gateIds: ["checks"],
+        waivedAt: createdAt
+      }
+    });
+
+    expect(waived.waiver?.gateIds).toEqual(["checks"]);
+  });
+
+  it("requires resolved human escalations to retain actor attribution", () => {
+    const open = HumanEscalationSchema.parse({
+      id: "escalation_1",
+      workThreadId: "thread_github_1",
+      runId: "run_1",
+      class: "verification",
+      audience: "repo_owner",
+      subjectRef: "github:acme/demo:pull_request:42",
+      state: "open",
+      blocking: true,
+      summary: "Required check evidence is unavailable.",
+      reason: "The configured check has not reported a result for the current head SHA.",
+      nextAction: { kind: "request_human_decision", targetId: "checks" },
+      dedupeKey: "thread_github_1:verification:checks:v1",
+      openedAt: createdAt
+    });
+
+    expect(open.class).toBe("verification");
+    expect(() => HumanEscalationSchema.parse({ ...open, state: "resolved" })).toThrow(/resolution attribution/u);
+
+    const resolved = HumanEscalationSchema.parse({
+      ...open,
+      state: "resolved",
+      resolution: {
+        actor: { provider: "github", providerUserId: "42", handle: "octocat" },
+        reason: "The repository check configuration was repaired.",
+        resolvedAt: "2026-07-21T00:05:00.000Z"
+      }
+    });
+    expect(resolved.resolution?.actor.handle).toBe("octocat");
   });
 });

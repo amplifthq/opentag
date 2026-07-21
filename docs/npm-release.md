@@ -14,9 +14,12 @@ The release is first published on the npm `next` dist-tag, tested from the
 registry, then promoted to `latest`. The exact commit that produced the npm
 artifacts must also receive the matching `v0.6.0` git tag and GitHub Release.
 
-All 15 package names already have a `0.5.0` release. Publishing `0.6.0` with
-`--tag next` must leave every `latest` pointer on `0.5.0` until the complete
-registry, ACP, and live-platform gate passes.
+The public release set contains 16 packages. Fifteen existing package names
+already have a `0.5.0` release; `@opentag/governance` debuts in `0.6.0`.
+Publishing `0.6.0` with `--tag next` must leave each existing package's
+`latest` pointer on `0.5.0` until the complete registry, ACP, and live-platform
+gate passes. Treat the new package's npm-created `latest` tag as part of the
+documented first-release rollback boundary below.
 
 ## Public package discovery and order
 
@@ -43,7 +46,7 @@ plan.
 ## Release gate
 
 Start from the intended release commit with a clean working tree. Confirm that
-all 15 public manifests use `0.6.0` and that the frozen lockfile is current,
+all 16 public manifests use `0.6.0` and that the frozen lockfile is current,
 then run the verification ladder in this order:
 
 ```bash
@@ -70,6 +73,11 @@ family, the audit finds a high/critical vulnerability, or the installed CLI
 checks fail. If the npm audit service is temporarily unavailable, retain the
 error as release evidence and retry the gate; do not treat an unavailable audit
 as a clean result.
+
+The packed-install gate also imports `@opentag/governance`, evaluates a minimal
+completion contract, and checks the installed CLI's bounded completion-waiver
+help. This proves the new public package and CLI surface resolve from tarballs,
+not from workspace aliases.
 
 The OpenClaw gate expects a running Gateway and the named profile. Override
 `OPENTAG_OPENCLAW_COMMAND`, `OPENTAG_OPENCLAW_GATEWAY_URL`, or
@@ -107,7 +115,7 @@ corepack pnpm release:publish -- --tag next
 ```
 
 The publish command uses the same automatic publication set and topological
-order as `release:check`. A coordinated release is incomplete until all 15
+order as `release:check`. A coordinated release is incomplete until all 16
 packages exist at `0.6.0`; do not promote a partial package family.
 
 If npm asks for a two-factor one-time password, do not pass `--otp` by default
@@ -187,7 +195,7 @@ done
 ```
 
 Rerun the package loop from the registry-verification section and confirm both
-`next` and `latest` point at `0.6.0` for all 15 packages.
+`next` and `latest` point at `0.6.0` for all 16 packages.
 
 ## Create the matching source release
 

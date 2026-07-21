@@ -16,6 +16,7 @@ import {
   createTeamsCallbackSink,
   createTelegramCallbackSink,
   type ChannelPrincipalCredential,
+  type GitHubCompletionPolicy,
   type LinearTokenProvider
 } from "@opentag/dispatcher";
 import type { DispatcherRateLimitOptions, LinearOAuthInstallOptions, RelayPlatformCapability } from "@opentag/dispatcher";
@@ -59,6 +60,7 @@ export type LocalDispatcherRuntimeInput = {
   githubToken?: string;
   githubCallbackToken?: string;
   githubApplyToken?: string | null;
+  completionPolicies?: GitHubCompletionPolicy[];
   gitlabToken?: string;
   gitlabBaseUrl?: string;
   gitlabWebhookSecret?: string;
@@ -242,6 +244,43 @@ function parseStringList(name: string, raw: string | undefined): string[] | unde
     return values.length ? values : undefined;
   } catch (error) {
     throw new Error(`Failed to parse ${name}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function parseGitHubCompletionPolicies(raw: string | undefined): GitHubCompletionPolicy[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("Value is not a JSON array");
+    const policies = parsed.map((candidate, index): GitHubCompletionPolicy => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        throw new Error(`Entry ${index} must be an object`);
+      }
+      const value = candidate as Record<string, unknown>;
+      if (value["provider"] !== "github") throw new Error(`Entry ${index} provider must be github`);
+      if (typeof value["owner"] !== "string" || !value["owner"].trim()) throw new Error(`Entry ${index} owner must be a non-empty string`);
+      if (typeof value["repo"] !== "string" || !value["repo"].trim()) throw new Error(`Entry ${index} repo must be a non-empty string`);
+      if (!Array.isArray(value["requiredChecks"]) || value["requiredChecks"].length === 0 || !value["requiredChecks"].every((name) => typeof name === "string" && name.trim())) {
+        throw new Error(`Entry ${index} requiredChecks must be a non-empty string array`);
+      }
+      if (value["baseBranch"] !== undefined && (typeof value["baseBranch"] !== "string" || !value["baseBranch"].trim())) {
+        throw new Error(`Entry ${index} baseBranch must be a non-empty string`);
+      }
+      if (value["requireMerge"] !== undefined && typeof value["requireMerge"] !== "boolean") {
+        throw new Error(`Entry ${index} requireMerge must be a boolean`);
+      }
+      return {
+        provider: "github",
+        owner: value["owner"].trim(),
+        repo: value["repo"].trim(),
+        requiredChecks: (value["requiredChecks"] as string[]).map((name) => name.trim()),
+        ...(typeof value["baseBranch"] === "string" ? { baseBranch: value["baseBranch"].trim() } : {}),
+        ...(typeof value["requireMerge"] === "boolean" ? { requireMerge: value["requireMerge"] } : {})
+      };
+    });
+    return policies.length > 0 ? policies : undefined;
+  } catch (error) {
+    throw new Error(`Failed to parse OPENTAG_GITHUB_COMPLETION_POLICIES_JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -563,6 +602,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
       : env.OPENTAG_GITHUB_APPLY_TOKEN
         ? env.OPENTAG_GITHUB_APPLY_TOKEN
         : undefined;
+  const completionPolicies = parseGitHubCompletionPolicies(env.OPENTAG_GITHUB_COMPLETION_POLICIES_JSON);
 
   return {
     port,
@@ -575,6 +615,7 @@ export function dispatcherRuntimeInputFromEnv(env: NodeJS.ProcessEnv): LocalDisp
     ...(env.OPENTAG_GITHUB_TOKEN ? { githubToken: env.OPENTAG_GITHUB_TOKEN } : {}),
     ...(env.OPENTAG_GITHUB_CALLBACK_TOKEN ? { githubCallbackToken: env.OPENTAG_GITHUB_CALLBACK_TOKEN } : {}),
     ...(githubApplyToken !== undefined ? { githubApplyToken } : {}),
+    ...(completionPolicies ? { completionPolicies } : {}),
     ...(env.OPENTAG_GITLAB_TOKEN ? { gitlabToken: env.OPENTAG_GITLAB_TOKEN } : {}),
     ...(env.OPENTAG_GITLAB_BASE_URL ? { gitlabBaseUrl: env.OPENTAG_GITLAB_BASE_URL } : {}),
     ...(env.OPENTAG_GITLAB_WEBHOOK_SECRET ? { gitlabWebhookSecret: env.OPENTAG_GITLAB_WEBHOOK_SECRET } : {}),
@@ -735,6 +776,7 @@ export function startDispatcher(input: LocalDispatcherRuntimeInput): LocalDispat
 
   const app = createDispatcherApp({
     databasePath: input.databasePath,
+    ...(input.completionPolicies ? { completionPolicies: input.completionPolicies } : {}),
     ...(input.pairingToken ? { pairingToken: input.pairingToken } : {}),
     ...(input.runnerToken ? { runnerToken: input.runnerToken } : {}),
     ...(input.runnerTokens ? { runnerTokens: input.runnerTokens } : {}),

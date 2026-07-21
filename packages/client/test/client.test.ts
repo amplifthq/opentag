@@ -23,7 +23,127 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function completionExplanationFixture() {
+  const waivedAt = "2026-07-21T10:05:00.000Z";
+  const waiver = {
+    id: "waiver-client-1",
+    contractId: "contract-client-1",
+    contractVersion: 1,
+    cycle: 1,
+    actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
+    reason: "This gate is waived only for the current governed cycle.",
+    scope: "selected_gates" as const,
+    policyScope: "work_context_owner_container" as const,
+    gateIds: ["pull_request"],
+    waivedAt
+  };
+  const contract = {
+    id: "contract-client-1",
+    version: 1,
+    workThreadId: "thread-client-1",
+    cycle: 1,
+    mode: "governed" as const,
+    targetSelectors: [{ key: "primary_change", kind: "change_request" as const, lineage: "current_cycle" as const, cardinality: "exactly_one" as const }],
+    resolvedFrom: [{ scope: "work_context_owner_container" as const, ref: "github:acme/demo", version: "1" }],
+    gates: [{ id: "pull_request", kind: "artifact" as const, targetKey: "primary_change", artifactKind: "pull_request" as const, minimum: 1 }],
+    maxAutomaticRetries: 0,
+    onSatisfied: "report_only" as const,
+    createdAt: "2026-07-21T10:00:00.000Z"
+  };
+  const assessment = {
+    id: "assessment-client-1",
+    workThreadId: "thread-client-1",
+    contractId: contract.id,
+    contractVersion: 1,
+    cycle: 1,
+    sequence: 1,
+    inputDigest: `sha256:${"a".repeat(64)}`,
+    targetBindings: [],
+    state: "waived" as const,
+    evidenceBacked: false,
+    gateResults: [{
+      gateId: "pull_request",
+      targetKey: "primary_change",
+      state: "waived" as const,
+      evidenceIds: [],
+      reasonCode: "gate_waived" as const,
+      reason: "Gate covered by an attributed bounded waiver.",
+      evaluatedAt: waivedAt
+    }],
+    assessedAt: waivedAt,
+    assessedBy: "human" as const,
+    acceptedAt: waivedAt,
+    waiver
+  };
+  return {
+    completion: {
+      workThreadId: contract.workThreadId,
+      execution: "succeeded" as const,
+      completion: "waived" as const,
+      evidenceBacked: false,
+      contract: { id: contract.id, version: 1, cycle: 1, mode: "governed" as const },
+      currentAssessment: assessment,
+      targetBindings: [],
+      missingGateIds: [],
+      failedGateIds: [],
+      blockedGateIds: [],
+      nextAction: "No action required.",
+      contractSnapshot: contract,
+      assessmentHistory: [assessment],
+      evidence: [],
+      openHumanEscalations: []
+    },
+    waiver
+  };
+}
+
 describe("@opentag/client", () => {
+  it("reads completion explanations and submits attributed bounded waivers", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fixture = completionExplanationFixture();
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test/",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return init?.method === "POST"
+          ? jsonResponse({ outcome: "recorded", ...fixture }, 201)
+          : jsonResponse({ completion: fixture.completion });
+      }
+    });
+
+    await expect(client.getCompletion({ runId: "run_completion" })).resolves.toMatchObject({
+      completion: { completion: "waived", currentAssessment: { id: "assessment-client-1" } }
+    });
+    await expect(client.waiveCompletion({
+      runId: "run_completion",
+      waiver: {
+        actor: fixture.waiver.actor,
+        reason: fixture.waiver.reason,
+        scope: fixture.waiver.scope,
+        policyScope: fixture.waiver.policyScope,
+        gateIds: fixture.waiver.gateIds,
+        waivedAt: fixture.waiver.waivedAt
+      }
+    })).resolves.toMatchObject({
+      outcome: "recorded",
+      completion: { completion: "waived" },
+      waiver: { id: fixture.waiver.id }
+    });
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "http://dispatcher.test/v1/runs/run_completion/completion",
+      "http://dispatcher.test/v1/runs/run_completion/completion/waivers"
+    ]);
+    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe("Bearer pair_1");
+    expect(new Headers(requests[1]?.init?.headers).get("authorization")).toBe("Bearer pair_1");
+    expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({
+      actor: fixture.waiver.actor,
+      reason: fixture.waiver.reason,
+      gateIds: ["pull_request"]
+    });
+  });
+
   it("sends and reads repo-less channel bindings", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const binding: ChannelBindingInput = {
@@ -475,6 +595,88 @@ describe("@opentag/client", () => {
       subject: "github:POST /github/webhooks",
       payload: { provider: "github", reason: "invalid_signature" }
     });
+  });
+
+  it("submits sanitized GitHub completion evidence through the dispatcher API", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pair_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ outcome: "recorded" }, 201);
+      }
+    });
+    const snapshot = {
+      provider: "github" as const,
+      deliveryId: "delivery-completion-1",
+      eventName: "pull_request" as const,
+      repository: { owner: "acme", repo: "demo" },
+      pullRequest: {
+        number: 7,
+        resourceRef: "github:acme/demo:pull_request:7",
+        headSha: "b".repeat(40),
+        baseSha: "c".repeat(40),
+        baseBranch: "main",
+        state: "merged" as const
+      },
+      checks: { build: "passed" as const },
+      observedAt: "2026-07-21T10:00:00.000Z",
+      payloadDigest: `sha256:${"d".repeat(64)}`
+    };
+
+    await client.ingestGitHubCompletionEvidence(snapshot);
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/completion-evidence/github");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pair_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(snapshot);
+  });
+
+  it("submits GitHub completion reconciliation escalation intents with pairing authorization", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const client = createOpenTagClient({
+      dispatcherUrl: "http://dispatcher.test",
+      pairingToken: "pairing_admin_1",
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({ outcome: "recorded" }, 202);
+      }
+    });
+    const request = {
+      operation: "open" as const,
+      escalation: {
+        class: "reconciliation" as const,
+        audience: "repo_owner" as const,
+        subjectRef: "github:acme/demo:pull_request:7",
+        state: "open" as const,
+        blocking: true as const,
+        summary: "GitHub completion reconciliation needs repository-owner attention.",
+        reason: "The authoritative pull request snapshot could not be loaded.",
+        dedupeKey: "github:completion-reconciliation:acme/demo:7"
+      },
+      correlation: {
+        provider: "github" as const,
+        deliveryId: "delivery-reconcile-1",
+        eventName: "check_run" as const,
+        repository: { owner: "acme", repo: "demo" },
+        pullRequestNumbers: [7],
+        headSha: "b".repeat(40)
+      }
+    };
+
+    await client.requestGitHubCompletionReconciliationEscalation(request);
+
+    expect(requests[0]?.url).toBe("http://dispatcher.test/v1/completion-escalations/github");
+    expect(requests[0]?.init?.method).toBe("POST");
+    expect(requests[0]?.init?.headers).toMatchObject({
+      "content-type": "application/json",
+      authorization: "Bearer pairing_admin_1"
+    });
+    expect(JSON.parse(String(requests[0]?.init?.body))).toEqual(request);
   });
 
   it("prunes source delivery replay keys through the dispatcher API", async () => {

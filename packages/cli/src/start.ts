@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createServer } from "node:net";
 import {
+  createOpenTagClient,
   createDispatcherAdminClient,
   type ChannelBindingInput,
   type CreateLinearOAuthInstallationInput,
@@ -554,15 +555,29 @@ export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConf
 
 export function githubIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
-  input: { env?: NodeJS.ProcessEnv } = {}
+  input: { env?: NodeJS.ProcessEnv; dispatcherFetchImpl?: typeof fetch } = {}
 ): GitHubIngressConfig {
   const github = requireGitHubConfig(config);
   const maxRequestBodyBytes = maxRequestBodyBytesFromEnv(input.env);
+  const pairingToken = config.daemon.pairingToken;
+  const governanceClient = pairingToken
+    ? createOpenTagClient({
+        dispatcherUrl: config.daemon.dispatcherUrl,
+        pairingToken,
+        ...(input.dispatcherFetchImpl ? { fetchImpl: input.dispatcherFetchImpl } : {})
+      })
+    : undefined;
   return {
     webhookSecret: github.webhookSecret,
     dispatcherUrl: config.daemon.dispatcherUrl,
     ...(config.daemon.pairingToken ? { dispatcherToken: config.daemon.pairingToken } : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
+    ...(governanceClient
+      ? {
+          requestCompletionReconciliationEscalation: (request) =>
+            governanceClient.requestGitHubCompletionReconciliationEscalation(request)
+        }
+      : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
     port: github.port ?? DEFAULT_GITHUB_WEBHOOK_PORT,
     ...(github.webhookPath ? { webhookPath: github.webhookPath } : {})

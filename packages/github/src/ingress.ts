@@ -7,10 +7,19 @@ import {
   parseThreadActionCommand,
   parseThreadControlCommand,
   readRequestTextWithLimit,
+  type HumanEscalation,
   type OpenTagEvent
 } from "@opentag/core";
 import { Hono } from "hono";
 import { githubPermissionHasWriteAccess, normalizeGitHubIssueComment, normalizeGitHubPullRequestReviewComment } from "./normalize.js";
+import {
+  createGitHubCompletionApi,
+  githubCompletionEventCorrelation,
+  isGitHubCompletionEventName,
+  reconcileGitHubCompletionEvidence,
+  type GitHubCompletionApi,
+  type GitHubVerifiedPullRequestSnapshot
+} from "./completion-evidence.js";
 
 type GitHubActor = {
   id: number;
@@ -71,12 +80,39 @@ export type GitHubActorWriteAccessResolver = (input: {
   username: string;
 }) => Promise<boolean | undefined>;
 
+export type GitHubCompletionReconciliationEscalationRequest = {
+  operation: "open" | "resolve";
+  escalation: Pick<HumanEscalation, "audience" | "subjectRef" | "summary" | "reason"> & {
+    class: "reconciliation";
+    audience: "repo_owner";
+    state: "open" | "resolved";
+    blocking: true;
+    dedupeKey: string;
+  };
+  correlation: {
+    provider: "github";
+    deliveryId: string;
+    eventName: GitHubVerifiedPullRequestSnapshot["eventName"];
+    repository: { owner: string; repo: string };
+    pullRequestNumbers: number[];
+    headSha?: string;
+  };
+};
+
+export type GitHubCompletionReconciliationEscalationRequester = (
+  request: GitHubCompletionReconciliationEscalationRequest
+) => Promise<void>;
+
 export type GitHubWebhookAppInput = {
   webhookSecret: string;
   webhookPath?: string;
   createRun(event: OpenTagEvent): Promise<{ runId?: string }>;
   submitThreadAction?(action: GitHubThreadActionInput): Promise<unknown>;
   resolveActorWriteAccess?: GitHubActorWriteAccessResolver;
+  completionApi?: GitHubCompletionApi;
+  ingestCompletionEvidence?(snapshot: GitHubVerifiedPullRequestSnapshot): Promise<unknown>;
+  ingestCompletionEvidenceBatch?(snapshots: GitHubVerifiedPullRequestSnapshot[]): Promise<unknown>;
+  requestCompletionReconciliationEscalation?: GitHubCompletionReconciliationEscalationRequester;
   recordControlPlaneEvent?(event: {
     type: string;
     severity?: "info" | "warn" | "error";
@@ -92,6 +128,7 @@ export type GitHubIngressConfig = {
   dispatcherUrl: string;
   dispatcherToken?: string;
   githubToken?: string;
+  requestCompletionReconciliationEscalation?: GitHubCompletionReconciliationEscalationRequester;
   fetchImpl?: typeof fetch;
   port?: number;
   hostname?: string;
@@ -438,6 +475,50 @@ async function handlePullRequestReviewCommentCreated(input: {
   }
 }
 
+function completionReconciliationEscalationRequest(input: {
+  operation: GitHubCompletionReconciliationEscalationRequest["operation"];
+  eventName: GitHubVerifiedPullRequestSnapshot["eventName"];
+  deliveryId: string;
+  payload: unknown;
+  reason: string;
+  snapshots?: GitHubVerifiedPullRequestSnapshot[];
+}): GitHubCompletionReconciliationEscalationRequest | null {
+  const correlation = githubCompletionEventCorrelation({ eventName: input.eventName, payload: input.payload });
+  if (!correlation) return null;
+  const sourcePullRequestNumbers = [...new Set(correlation.pullRequestNumbers)].sort((left, right) => left - right);
+  const resolvedPullRequestNumbers = [...new Set(input.snapshots?.map((snapshot) => snapshot.pullRequest.number) ?? [])]
+    .sort((left, right) => left - right);
+  const pullRequestNumbers = resolvedPullRequestNumbers.length > 0 ? resolvedPullRequestNumbers : sourcePullRequestNumbers;
+  const subjectRef = sourcePullRequestNumbers.length === 1
+    ? `github:${correlation.repository.owner}/${correlation.repository.repo}:pull_request:${sourcePullRequestNumbers[0]}`
+    : correlation.headSha
+      ? `github:${correlation.repository.owner}/${correlation.repository.repo}:commit:${correlation.headSha}`
+      : `github:${correlation.repository.owner}/${correlation.repository.repo}:completion`;
+  return {
+    operation: input.operation,
+    escalation: {
+      class: "reconciliation",
+      audience: "repo_owner",
+      subjectRef,
+      state: input.operation === "open" ? "open" : "resolved",
+      blocking: true,
+      summary: input.operation === "open"
+        ? "GitHub completion evidence could not be reconciled."
+        : "GitHub completion evidence reconciliation recovered.",
+      reason: input.reason,
+      dedupeKey: `github:completion-reconciliation:${subjectRef}`
+    },
+    correlation: {
+      provider: "github",
+      deliveryId: input.deliveryId,
+      eventName: input.eventName,
+      repository: correlation.repository,
+      pullRequestNumbers,
+      ...(correlation.headSha ? { headSha: correlation.headSha } : {})
+    }
+  };
+}
+
 export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
   const app = new Hono();
   const webhookPath = input.webhookPath ?? "/github/webhooks";
@@ -505,6 +586,107 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
     if (eventName === "ping") {
       return c.json({ ok: true });
     }
+    if (isGitHubCompletionEventName(eventName)) {
+      if (!deliveryId) return c.json({ error: "missing_delivery_id" }, 400);
+      const canIngestCompletionEvidence = Boolean(input.ingestCompletionEvidenceBatch || input.ingestCompletionEvidence);
+      if (!input.completionApi && !canIngestCompletionEvidence) {
+        return c.json({ ok: true, ignored: "completion_reconciliation_unconfigured" });
+      }
+      if (!input.completionApi || !canIngestCompletionEvidence) {
+        return c.json({ error: "completion_reconciliation_unavailable" }, 503);
+      }
+      let snapshots: GitHubVerifiedPullRequestSnapshot[];
+      try {
+        snapshots = await reconcileGitHubCompletionEvidence({
+          eventName,
+          deliveryId,
+          payload,
+          api: input.completionApi,
+          now: input.now
+        });
+        if (input.ingestCompletionEvidenceBatch) {
+          await input.ingestCompletionEvidenceBatch(snapshots);
+        } else {
+          if (snapshots.length > 1) {
+            throw new Error("completion_snapshot_batch_ingestion_required");
+          }
+          await input.ingestCompletionEvidence!(snapshots[0]!);
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : "completion_reconciliation_failed";
+        await input.recordControlPlaneEvent?.({
+          type: "github.completion_reconciliation_failed",
+          severity: "warn",
+          subject: `github:${deliveryId}`,
+          payload: {
+            provider: "github",
+            deliveryId,
+            eventName,
+            reason
+          }
+        });
+        if (reason === "completion_snapshot_batch_ingestion_required") {
+          return c.json({
+            error: "completion_snapshot_batch_ingestion_required",
+            retryable: true
+          }, 503);
+        }
+        const escalation = completionReconciliationEscalationRequest({
+          operation: "open",
+          eventName,
+          deliveryId,
+          payload,
+          reason
+        });
+        if (escalation) {
+          try {
+            await input.requestCompletionReconciliationEscalation?.(escalation);
+          } catch (escalationError) {
+            await input.recordControlPlaneEvent?.({
+              type: "github.completion_reconciliation_escalation_failed",
+              severity: "error",
+              subject: escalation.escalation.subjectRef,
+              payload: {
+                provider: "github",
+                deliveryId,
+                eventName,
+                operation: "open",
+                reason: escalationError instanceof Error ? escalationError.message : "completion_reconciliation_escalation_failed"
+              }
+            });
+          }
+        }
+        return c.json({ error: "completion_reconciliation_failed" }, 503);
+      }
+      const resolvedEscalation = completionReconciliationEscalationRequest({
+        operation: "resolve",
+        eventName,
+        deliveryId,
+        payload,
+        reason: "Authoritative GitHub completion evidence was reconciled and ingested successfully.",
+        snapshots
+      });
+      if (resolvedEscalation && input.requestCompletionReconciliationEscalation) {
+        try {
+          await input.requestCompletionReconciliationEscalation(resolvedEscalation);
+        } catch (error) {
+          await input.recordControlPlaneEvent?.({
+            type: "github.completion_reconciliation_escalation_failed",
+            severity: "error",
+            subject: resolvedEscalation.escalation.subjectRef,
+            payload: {
+              provider: "github",
+              deliveryId,
+              eventName,
+              operation: "resolve",
+              reason: error instanceof Error ? error.message : "completion_reconciliation_escalation_failed"
+            }
+          });
+          return c.json({ error: "completion_reconciliation_escalation_unavailable" }, 503);
+        }
+      }
+      return c.json({ ok: true, evidenceSnapshots: snapshots.length });
+    }
     if (eventName === "issue_comment") {
       if (!isGitHubIssueCommentPayload(payload)) {
         await recordGitHubRequestBodyRejected({
@@ -567,6 +749,26 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
   const port = config.port ?? 3000;
   const hostname = config.hostname ?? "127.0.0.1";
   const webhookPath = config.webhookPath ?? "/github/webhooks";
+  const completionApi = githubToken
+    ? createGitHubCompletionApi({ token: githubToken, ...(config.fetchImpl ? { fetchImpl: config.fetchImpl } : {}) })
+    : undefined;
+  const requestCompletionReconciliationEscalation = config.requestCompletionReconciliationEscalation
+    ?? (async (request: GitHubCompletionReconciliationEscalationRequest) => {
+      const response = await (config.fetchImpl ?? fetch)(
+        `${config.dispatcherUrl.replace(/\/$/u, "")}/v1/completion-escalations/github`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(config.dispatcherToken ? { authorization: `Bearer ${config.dispatcherToken}` } : {})
+          },
+          body: JSON.stringify(request)
+        }
+      );
+      if (!response.ok) {
+        throw new Error(`Dispatcher rejected GitHub completion reconciliation escalation (${response.status}).`);
+      }
+    });
   const server = serve({
     fetch: createGitHubWebhookApp({
       webhookSecret: config.webhookSecret,
@@ -574,6 +776,21 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
       ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
       ...(githubToken
         ? {
+            completionApi: completionApi!,
+            async ingestCompletionEvidenceBatch(snapshots) {
+              const response = await (config.fetchImpl ?? fetch)(
+                `${config.dispatcherUrl.replace(/\/$/u, "")}/v1/completion-evidence/github/batch`,
+                {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    ...(config.dispatcherToken ? { authorization: `Bearer ${config.dispatcherToken}` } : {})
+                  },
+                  body: JSON.stringify({ snapshots })
+                }
+              );
+              if (!response.ok) throw new Error(`Dispatcher rejected GitHub completion evidence batch (${response.status}).`);
+            },
             resolveActorWriteAccess: (input) =>
               resolveGitHubActorWriteAccessWithToken({
                 ...input,
@@ -582,6 +799,7 @@ export function startGitHubIngress(config: GitHubIngressConfig): GitHubIngressHa
               })
           }
         : {}),
+      requestCompletionReconciliationEscalation,
       async createRun(event) {
         const runId = `run_${randomUUID()}`;
         const created = await dispatcherClient.createRun({ runId, event });

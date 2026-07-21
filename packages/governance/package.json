@@ -1,0 +1,43 @@
+{
+  "name": "@opentag/governance",
+  "version": "0.6.0",
+  "description": "Deterministic completion governance for OpenTag work loops.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "opentag",
+    "governance",
+    "completion",
+    "agents"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentag/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2"
+  }
+}
