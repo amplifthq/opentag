@@ -6,6 +6,7 @@ import {
 } from "./acp-agent.js";
 import type { ExecutorAdapter } from "./executor.js";
 import { DEFAULT_HERMES_PROFILE } from "./hermes-profile.js";
+import { createOpenClawPreflight } from "./openclaw-preflight.js";
 import type { RunnerSecurityPolicy } from "./security.js";
 
 export type BuiltInAcpAgentId = "codex" | "claude-code" | "cursor" | "opencode" | "hermes" | "openclaw";
@@ -20,6 +21,7 @@ export type BuiltInAcpAgentOptions = {
     command?: string;
     profile?: string;
     gatewayUrl?: string;
+    expectedVersion?: string;
   };
 };
 
@@ -35,6 +37,7 @@ export function builtInAcpAgentDefinitions(
     "acp",
     ...(options.openclaw?.gatewayUrl ? ["--url", options.openclaw.gatewayUrl] : [])
   ];
+  const openclawCommand = options.openclaw?.command ?? "openclaw";
 
   return {
     codex: {
@@ -105,8 +108,14 @@ export function builtInAcpAgentDefinitions(
       label: "OpenClaw ACP",
       workspaceCwd: "required",
       readinessTimeoutMs: 30_000,
+      preflight: createOpenClawPreflight({
+        command: openclawCommand,
+        ...(options.openclaw?.profile ? { profile: options.openclaw.profile } : {}),
+        ...(options.openclaw?.gatewayUrl ? { gatewayUrl: options.openclaw.gatewayUrl } : {}),
+        ...(options.openclaw?.expectedVersion ? { expectedVersion: options.openclaw.expectedVersion } : {})
+      }),
       launch: {
-        command: options.openclaw?.command ?? "openclaw",
+        command: openclawCommand,
         args: openclawArgs
       },
       capabilities: { supportsProfile: true, supportsCancel: false }

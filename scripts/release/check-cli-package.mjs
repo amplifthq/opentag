@@ -194,6 +194,27 @@ function checkInstalledCompletionGovernance(installDir) {
   run(commandPath(installDir, "opentag"), ["completion", "waive", "--help"], { cwd: installDir });
 }
 
+function checkInstalledTeamsAuthDependencies(installDir) {
+  const probe = `
+    import { readFileSync } from "node:fs";
+    import { createRequire } from "node:module";
+    import { dirname, resolve } from "node:path";
+
+    const require = createRequire(import.meta.url);
+    const teamsEntry = require.resolve("@opentag/teams");
+    const teamsPackage = JSON.parse(readFileSync(resolve(dirname(teamsEntry), "../package.json"), "utf8"));
+    if (teamsPackage.dependencies?.["botframework-connector"]) {
+      throw new Error("Packed @opentag/teams still publishes the vulnerable Bot Framework UUID dependency graph.");
+    }
+    if (!teamsPackage.dependencies?.jose) {
+      throw new Error("Packed @opentag/teams does not publish its JOSE runtime dependency.");
+    }
+    const requireFromTeams = createRequire(teamsEntry);
+    requireFromTeams.resolve("jose");
+  `;
+  run(process.execPath, ["--input-type=module", "--eval", probe], { cwd: installDir });
+}
+
 const tempRoot = mkdtempSync(path.join(tmpdir(), "opentag-release-check-"));
 const packDir = path.join(tempRoot, "packs");
 const installDir = path.join(tempRoot, "install");
@@ -227,6 +248,9 @@ try {
 
   console.log("Checking installed completion governance...");
   checkInstalledCompletionGovernance(installDir);
+
+  console.log("Checking installed Teams authentication dependencies...");
+  checkInstalledTeamsAuthDependencies(installDir);
 
   console.log("");
   console.log("OpenTag CLI package check passed.");

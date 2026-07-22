@@ -45,7 +45,8 @@ export function builtInAcpOptionsFromConfig(config: OpenTagDaemonConfig): BuiltI
     openclaw: {
       ...(config.openclaw?.command ? { command: config.openclaw.command } : {}),
       ...(config.openclaw?.profile ? { profile: config.openclaw.profile } : {}),
-      ...(config.openclaw?.gatewayUrl ? { gatewayUrl: config.openclaw.gatewayUrl } : {})
+      ...(config.openclaw?.gatewayUrl ? { gatewayUrl: config.openclaw.gatewayUrl } : {}),
+      ...(config.openclaw?.expectedVersion ? { expectedVersion: config.openclaw.expectedVersion } : {})
     }
   };
 }

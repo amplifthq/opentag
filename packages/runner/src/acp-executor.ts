@@ -274,6 +274,7 @@ export type AcpPermissionResolver = (request: AcpPermissionRequest) => Promise<A
 export type AcpExecutorOptions = {
   manifest: OpenTagIntegrationManifestInput;
   launchEnvironment?: Readonly<Record<string, string>>;
+  preflight?: () => Promise<{ ready: boolean; reason?: string }>;
   permissionResolver?: AcpPermissionResolver;
   runner?: CommandRunner;
   cancelGraceMs?: number;
@@ -724,6 +725,17 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
   const cancelGraceMs = options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS;
   const readinessTimeoutMs = options.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
   const supportsCancel = options.capabilityOverrides?.supportsCancel ?? false;
+  const runPreflight = async (): Promise<{ ready: boolean; reason?: string }> => {
+    if (!options.preflight) return { ready: true };
+    try {
+      return await options.preflight();
+    } catch {
+      return {
+        ready: false,
+        reason: `ACP provider compatibility preflight failed for ${manifest.id}.`
+      };
+    }
+  };
   const terminateActiveChild = (active: ActiveRun, child: ChildProcessWithoutNullStreams): Promise<boolean> => {
     if (!active.terminationPromise) {
       active.terminationPromise = terminateChild(child, cancelGraceMs, runner).then((confirmed) => {
@@ -781,6 +793,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       } catch (error) {
         return { ready: false, reason: error instanceof Error ? error.message : String(error) };
       }
+      const preflight = await runPreflight();
+      if (!preflight.ready) return preflight;
       return probeAcpInitialization({
         manifest,
         cwd: childCwd,
@@ -803,6 +817,12 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       let worktreeCreated = false;
       let changedFileCount: number | undefined;
       try {
+        const preflight = await runPreflight();
+        if (!preflight.ready) {
+          const reason = preflight.reason ?? `ACP provider compatibility preflight failed for ${manifest.id}.`;
+          await sink.emit({ type: "executor.failed", message: reason, at: new Date().toISOString() });
+          throw new AcpPublicFailure(reason);
+        }
         if (workspace.kind === "repository") {
           executionPath = executionPathForAttempt({
             workspace,

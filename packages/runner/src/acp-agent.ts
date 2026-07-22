@@ -16,6 +16,7 @@ export type AcpAgentCandidate = {
     version: string;
   };
   launch: AcpAgentLaunchSpec;
+  preflight?: () => Promise<{ ready: boolean; reason?: string }>;
   sessionModeId?: string;
   capabilities?: {
     supportsProfile?: boolean;
@@ -31,7 +32,7 @@ export type AcpAgentDefinition = AcpAgentCandidate & {
 
 export type AcpAgentExecutorOptions = Omit<
   AcpExecutorOptions,
-  "manifest" | "sessionModeId" | "capabilityOverrides" | "launchEnvironment"
+  "manifest" | "sessionModeId" | "capabilityOverrides" | "launchEnvironment" | "preflight"
 >;
 
 export function createAcpAgentManifest(definition: AcpAgentDefinition): OpenTagIntegrationManifest {
@@ -70,6 +71,7 @@ export function createAcpAgentExecutor(
       ? { readinessTimeoutMs: definition.readinessTimeoutMs }
       : {}),
     ...(definition.launchEnvironment ? { launchEnvironment: definition.launchEnvironment } : {}),
+    ...(definition.preflight ? { preflight: definition.preflight } : {}),
     ...(definition.sessionModeId ? { sessionModeId: definition.sessionModeId } : {}),
     ...(definition.capabilities ? { capabilityOverrides: definition.capabilities } : {})
   });

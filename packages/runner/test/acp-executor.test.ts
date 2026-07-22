@@ -170,6 +170,25 @@ describe("ACP executor", () => {
     await expect(executor.canRun(input({ kind: "scratch", path: scratch }, "run_readiness"))).resolves.toEqual({ ready: true });
   });
 
+  it("fails closed before ACP startup when a provider compatibility preflight rejects the runtime", async () => {
+    const scratch = tempDir("preflight-rejected");
+    const preflight = vi.fn(async () => ({
+      ready: false as const,
+      reason: "OpenClaw CLI 2026.7.1 is incompatible with the selected 2026.7.2 profile."
+    }));
+    const executor = createAcpExecutor({ manifest: manifest(), preflight });
+
+    await expect(executor.canRun(input({ kind: "scratch", path: scratch }, "run_preflight_readiness"))).resolves.toEqual({
+      ready: false,
+      reason: "OpenClaw CLI 2026.7.1 is incompatible with the selected 2026.7.2 profile."
+    });
+    await expect(
+      executor.run(input({ kind: "scratch", path: scratch }, "run_preflight_rejected"), { emit: async () => undefined })
+    ).rejects.toThrow(/incompatible with the selected 2026\.7\.2 profile/u);
+    expect(existsSync(join(scratch, "acp-session.json"))).toBe(false);
+    expect(preflight).toHaveBeenCalledTimes(2);
+  });
+
   it("reports an unavailable ACP adapter as not ready", async () => {
     const scratch = tempDir("readiness-missing");
     const configured = manifest();

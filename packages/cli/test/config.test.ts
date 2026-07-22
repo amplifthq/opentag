@@ -72,7 +72,8 @@ describe("OpenTag CLI config", () => {
         openclaw: {
           command: "/opt/openclaw/bin/openclaw",
           profile: "opentag",
-          gatewayUrl: "ws://127.0.0.1:19093"
+          gatewayUrl: "ws://127.0.0.1:19093",
+          expectedVersion: "2026.7.2"
         }
       }
     });
@@ -80,7 +81,8 @@ describe("OpenTag CLI config", () => {
     expect(parsed.daemon.openclaw).toEqual({
       command: "/opt/openclaw/bin/openclaw",
       profile: "opentag",
-      gatewayUrl: "ws://127.0.0.1:19093"
+      gatewayUrl: "ws://127.0.0.1:19093",
+      expectedVersion: "2026.7.2"
     });
   });
 

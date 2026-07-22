@@ -197,7 +197,8 @@ const OpenClawSchema = z
   .object({
     command: z.string().trim().min(1).optional(),
     profile: z.string().trim().min(1).optional(),
-    gatewayUrl: z.string().url().optional()
+    gatewayUrl: z.string().url().optional(),
+    expectedVersion: z.string().trim().min(1).optional()
   })
   .strict();
 

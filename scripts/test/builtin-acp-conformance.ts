@@ -91,6 +91,7 @@ const providerStatusPatterns = [
   /\bECONNREFUSED\b/u,
   /gateway .*?(?:not ready|unavailable|connection failed)/iu,
   /inference provider/iu,
+  /provider\/runtime did not complete the ACP prompt after verified tool execution/iu,
   /error calling (?:the )?llm api/iu,
   /model .*?(?:not found|unavailable|unsupported)/iu,
   /profile .*?(?:does not exist|not found|not ready)/iu
@@ -263,6 +264,22 @@ function assertMarker(path: string, nonce: string, expectedCwd: string): void {
   assert(realpathSync(marker.pwd) === realpathSync(expectedCwd), `Tool ran in '${marker.pwd}', expected '${expectedCwd}'.`);
 }
 
+export function providerRuntimeTimeoutAfterVerifiedTool(input: {
+  agent: string;
+  error: unknown;
+  markerPath: string;
+  nonce: string;
+  expectedCwd: string;
+}): Error | undefined {
+  if (input.agent !== "hermes" || !(input.error instanceof ConformanceDeadlineError) || !existsSync(input.markerPath)) {
+    return undefined;
+  }
+  assertMarker(input.markerPath, input.nonce, input.expectedCwd);
+  return new Error(
+    `${input.agent} provider/runtime did not complete the ACP prompt after verified tool execution before the deadline.`
+  );
+}
+
 async function runCase(
   agent: string,
   caseId: CaseId,
@@ -371,15 +388,29 @@ async function testAgent(definition: AcpAgentDefinition, root: string): Promise<
       "Do not change directories and do not use an absolute destination path.",
       `Verify the file, then include exactly ${sentinel} in the final response.`
     ].join(" ");
-    const result = await boundedRun(
-      agent,
-      executor(),
-      runInput(`conformance-${agent}-scratch`, { kind: "scratch", path: scratch }, prompt),
-      failureDiagnostics
-    );
+    const markerPath = join(scratch, markerName);
+    let result: Awaited<ReturnType<ReturnType<typeof executor>["run"]>>;
+    try {
+      result = await boundedRun(
+        agent,
+        executor(),
+        runInput(`conformance-${agent}-scratch`, { kind: "scratch", path: scratch }, prompt),
+        failureDiagnostics
+      );
+    } catch (error) {
+      const providerTimeout = providerRuntimeTimeoutAfterVerifiedTool({
+        agent,
+        error,
+        markerPath,
+        nonce,
+        expectedCwd: scratch
+      });
+      if (providerTimeout) throw providerTimeout;
+      throw error;
+    }
     assert(result.conclusion === "success", `${agent} scratch run concluded '${result.conclusion}'.`);
     assert(result.summary.includes(sentinel), `${agent} scratch response omitted ${sentinel}.`);
-    assertMarker(join(scratch, markerName), nonce, scratch);
+    assertMarker(markerPath, nonce, scratch);
   });
   if (scratchStatus !== "passed") {
     for (const caseId of cases.filter((id) => id === "worktree-cwd" || id === "cancel-process-tree")) {
