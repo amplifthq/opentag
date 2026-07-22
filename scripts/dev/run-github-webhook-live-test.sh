@@ -10,8 +10,9 @@ Run a real GitHub repository-webhook OpenTag dogfood session.
 
 This starts the local OpenTag CLI stack, exposes the GitHub webhook listener
 through ngrok, creates a temporary repository webhook, posts a real GitHub issue
-comment, waits for OpenTag to finish, replies `apply 1`, and waits for the
-created pull request.
+comment, waits for OpenTag to finish, and by default proves strict PR/check/merge
+completion with a durable restart. Disable strict mode only to exercise the
+older optional `apply 1` compatibility path.
 
 Required:
   gh CLI authenticated as a user with admin access to the target repository.
@@ -22,7 +23,21 @@ Helpful env:
   OPENTAG_GH_REPO                 owner/repo, default amplifthq/opentag-test
   OPENTAG_GH_PUBLIC_URL           fixed public tunnel URL, if already running
   OPENTAG_GH_LIVE_COMMAND         prompt after `@opentag run`
+  OPENTAG_GH_LIVE_EXECUTOR        built-in ACP agent, default claude-code; use
+                                     phase1-fixture for the deterministic
+                                     repository-writing ACP fixture
   OPENTAG_GH_LIVE_APPLY           true/false, default true
+  OPENTAG_GH_LIVE_STRICT_COMPLETION
+                                     true/false, default true. Enables the
+                                     Phase 1 PR/check/merge completion policy,
+                                     creates the PR during the run, records a
+                                     real commit status, merges the PR, and
+                                     verifies restart-safe completion.
+  OPENTAG_GH_LIVE_REQUIRED_CHECK  required commit-status context, default
+                                     opentag-phase1-live
+  OPENTAG_GH_LIVE_REPORT          optional structured evidence JSON path
+  OPENTAG_GH_LIVE_CLI_BIN         optional installed `opentag` executable;
+                                     defaults to the source CLI through tsx
   OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN
                                      true/false, default false. Keeps GitHub
                                      callbacks working but verifies Needs setup
@@ -53,6 +68,8 @@ fi
 : "${OPENTAG_GH_LIVE_EXECUTOR:=claude-code}"
 : "${OPENTAG_GH_LIVE_KEEP_WEBHOOK:=false}"
 : "${OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN:=false}"
+: "${OPENTAG_GH_LIVE_STRICT_COMPLETION:=true}"
+: "${OPENTAG_GH_LIVE_REQUIRED_CHECK:=opentag-phase1-live}"
 
 cd "$ROOT_DIR"
 
@@ -65,6 +82,11 @@ NGROK_LOG=""
 HOOK_ID=""
 ISSUE_NUMBER=""
 PUBLIC_URL=""
+PR_URL=""
+PR_NUMBER=""
+PR_HEAD_SHA=""
+COMPLETION_PAYLOAD=""
+REPORT_PATH=""
 
 bool_true() {
   case "${1:-}" in
@@ -127,6 +149,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 require_cmd curl
+require_cmd corepack
 require_cmd gh
 require_cmd lsof
 require_cmd node
@@ -151,7 +174,22 @@ if [[ "$PERMISSION" != "ADMIN" && "$PERMISSION" != "MAINTAIN" ]]; then
 fi
 GITHUB_TOKEN="$(gh auth token)"
 export GITHUB_TOKEN
-export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN
+export OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN OPENTAG_GH_LIVE_STRICT_COMPLETION OPENTAG_GH_LIVE_REQUIRED_CHECK
+
+if bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
+  if [[ "$OPENTAG_GH_LIVE_EXECUTOR" == "echo" ]]; then
+    echo "Strict completion requires an executor that can create a real repository change." >&2
+    exit 1
+  fi
+  if [[ -z "${OPENTAG_GH_LIVE_REQUIRED_CHECK// }" ]]; then
+    echo "OPENTAG_GH_LIVE_REQUIRED_CHECK must be non-empty in strict completion mode." >&2
+    exit 1
+  fi
+  if bool_true "$OPENTAG_GH_LIVE_APPLY"; then
+    echo "Strict completion creates the pull request during the run; disabling the later apply-comment path."
+    OPENTAG_GH_LIVE_APPLY=false
+  fi
+fi
 
 if bool_true "$OPENTAG_GH_LIVE_DISABLE_APPLY_TOKEN" && bool_true "$OPENTAG_GH_LIVE_APPLY"; then
   echo "GitHub apply token is disabled for this run; skipping apply-comment execution and expecting Needs setup."
@@ -170,7 +208,7 @@ BASE_BRANCH="${OPENTAG_BASE_BRANCH:-main}"
 PUSH_REMOTE="${OPENTAG_PUSH_REMOTE:-origin}"
 export CHECKOUT_PATH WORKTREE_ROOT STATE_DIR CONFIG_PATH DATABASE_PATH WEBHOOK_SECRET BASE_BRANCH PUSH_REMOTE
 export OPENTAG_PAIRING_TOKEN OPENTAG_DISPATCHER_PORT OPENTAG_GITHUB_PORT OPENTAG_RUNNER_ID
-export OPENTAG_GH_LIVE_EXECUTOR
+export OPENTAG_GH_LIVE_EXECUTOR ROOT_DIR
 
 ensure_port_free() {
   local port="$1"
@@ -260,13 +298,20 @@ wait_for_ngrok_url() {
 
 public_ingress_probe() {
   local public_url="$1"
-  local code
-  code="$(curl -sS -o "$TMP_ROOT/github-ingress-probe.json" -w "%{http_code}" -X POST "$public_url/github/webhooks" -H "content-type: application/json" --data '{}' || true)"
-  if [[ "$code" == "401" ]]; then
-    echo "Public GitHub ingress probe reached OpenTag (401 without GitHub signature is expected)."
-    return 0
+  local code=""
+  local deadline=$((SECONDS + 45))
+  while (( SECONDS < deadline )); do
+    code="$(curl -sS -o "$TMP_ROOT/github-ingress-probe.json" -w "%{http_code}" -X POST "$public_url/github/webhooks" -H "content-type: application/json" --data '{}' || true)"
+    if [[ "$code" == "401" ]]; then
+      echo "Public GitHub ingress probe reached OpenTag (401 without GitHub signature is expected)."
+      return 0
+    fi
+    sleep 1
+  done
+  echo "Public GitHub ingress probe returned HTTP ${code:-unknown}, expected 401." >&2
+  if [[ -f "$TMP_ROOT/github-ingress-probe.json" ]]; then
+    sed -n '1,40p' "$TMP_ROOT/github-ingress-probe.json" >&2 || true
   fi
-  echo "Public GitHub ingress probe returned HTTP $code, expected 401." >&2
   exit 1
 }
 
@@ -294,6 +339,118 @@ summary = {
 }
 print("Run metrics:", json.dumps(summary, sort_keys=True))
 PY
+}
+
+completion_payload() {
+  local run_id="$1"
+  curl -fsS \
+    -H "authorization: Bearer $OPENTAG_PAIRING_TOKEN" \
+    "http://localhost:${OPENTAG_DISPATCHER_PORT}/v1/runs/${run_id}/completion"
+}
+
+wait_for_completion() {
+  local run_id="$1"
+  local expected_states="$2"
+  local gate_id="${3:-}"
+  local expected_gate_state="${4:-}"
+  local deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+  local payload=""
+  while (( SECONDS < deadline )); do
+    payload="$(completion_payload "$run_id" 2>/dev/null || true)"
+    if [[ -n "$payload" ]]; then
+      if python3 -c '
+import json
+import sys
+payload = json.loads(sys.argv[1]).get("completion", {})
+expected_states = sys.argv[2].split(",")
+if payload.get("completion") not in expected_states:
+    raise SystemExit(1)
+gate_id = sys.argv[3]
+expected_gate_state = sys.argv[4]
+if gate_id:
+    gates = {gate.get("gateId"): gate.get("state") for gate in payload.get("currentAssessment", {}).get("gateResults", [])}
+    if gates.get(gate_id) != expected_gate_state:
+        raise SystemExit(1)
+' "$payload" "$expected_states" "$gate_id" "$expected_gate_state"; then
+        COMPLETION_PAYLOAD="$payload"
+        return 0
+      fi
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for completion in [$expected_states]${gate_id:+ and $gate_id=$expected_gate_state}." >&2
+  if [[ -n "$payload" ]]; then
+    python3 -m json.tool <<<"$payload" >&2 || true
+  fi
+  exit 1
+}
+
+wait_for_issue_comment() {
+  local pattern="$1"
+  local deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    if issue_comments_contain "$pattern"; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Timed out waiting for GitHub issue comment containing: $pattern" >&2
+  exit 1
+}
+
+completion_receipt_count() {
+  gh api --paginate "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+    --jq '.[].body' \
+    | grep -F -c "provider-verified completion requirements are satisfied" \
+    || true
+}
+
+stable_completion_receipt_count() {
+  local stable_window_seconds="${1:-10}"
+  local deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+  local stable_since="$SECONDS"
+  local previous_count
+  local current_count
+  previous_count="$(completion_receipt_count)"
+  while (( SECONDS < deadline )); do
+    sleep 1
+    current_count="$(completion_receipt_count)"
+    if [[ "$current_count" != "$previous_count" ]]; then
+      previous_count="$current_count"
+      stable_since="$SECONDS"
+      continue
+    fi
+    if (( SECONDS - stable_since >= stable_window_seconds )); then
+      printf '%s\n' "$current_count"
+      return 0
+    fi
+  done
+  echo "Timed out waiting for the provider-verified completion receipt count to stabilize." >&2
+  exit 1
+}
+
+start_cli_stack() {
+  echo "Starting OpenTag CLI stack on dispatcher :${OPENTAG_DISPATCHER_PORT}, GitHub ingress :${OPENTAG_GITHUB_PORT}"
+  if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
+    if [[ ! -x "$OPENTAG_GH_LIVE_CLI_BIN" ]]; then
+      echo "OPENTAG_GH_LIVE_CLI_BIN is not executable: $OPENTAG_GH_LIVE_CLI_BIN" >&2
+      exit 1
+    fi
+    "$OPENTAG_GH_LIVE_CLI_BIN" start --config "$CONFIG_PATH" &
+  else
+    NODE_OPTIONS='--conditions=development' corepack pnpm --dir apps/dispatcher exec tsx ../../packages/cli/src/index.ts start --config "$CONFIG_PATH" &
+  fi
+  CLI_PID=$!
+  wait_for_http "http://localhost:${OPENTAG_DISPATCHER_PORT}/healthz"
+  wait_for_github_ingress
+}
+
+stop_cli_stack() {
+  kill_pid "$CLI_PID"
+  if [[ -n "$CLI_PID" ]]; then
+    wait "$CLI_PID" 2>/dev/null || true
+  fi
+  CLI_PID=""
 }
 
 issue_comments_contain() {
@@ -364,6 +521,28 @@ config = {
                 "keepWorktree": "on_failure",
             }
         ],
+        **(
+            {
+                "agents": {
+                    "phase1-fixture": {
+                        "label": "Phase 1 live deterministic ACP fixture",
+                        "command": "node",
+                        "args": [
+                            os.path.join(
+                                os.environ["ROOT_DIR"],
+                                "packages/runner/test/fixtures/acp-agent.mjs",
+                            ),
+                            "success",
+                        ],
+                        "workspaceCwd": "required",
+                        "supportsCancel": True,
+                        "readinessTimeoutMs": 30_000,
+                    }
+                }
+            }
+            if os.environ["OPENTAG_GH_LIVE_EXECUTOR"] == "phase1-fixture"
+            else {}
+        ),
         "githubToken": os.environ["GITHUB_TOKEN"],
         **(
             {"githubApplyToken": None}
@@ -371,6 +550,23 @@ config = {
             else {}
         ),
         "preparePullRequestBranch": True,
+        **(
+            {
+                "allowAutoCreatePullRequest": True,
+                "completionPolicies": [
+                    {
+                        "provider": "github",
+                        "owner": os.environ["OWNER"],
+                        "repo": os.environ["REPO"],
+                        "requiredChecks": [os.environ["OPENTAG_GH_LIVE_REQUIRED_CHECK"]],
+                        "baseBranch": os.environ["BASE_BRANCH"],
+                        "requireMerge": True,
+                    }
+                ],
+            }
+            if os.environ.get("OPENTAG_GH_LIVE_STRICT_COMPLETION", "").lower() in {"1", "true", "yes", "y"}
+            else {}
+        ),
         "pairingToken": os.environ["OPENTAG_PAIRING_TOKEN"],
         "pollIntervalMs": 1000,
         "heartbeatIntervalMs": 15000,
@@ -394,12 +590,7 @@ PY
 ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
 ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
 
-echo "Starting OpenTag CLI stack on dispatcher :${OPENTAG_DISPATCHER_PORT}, GitHub ingress :${OPENTAG_GITHUB_PORT}"
-NODE_OPTIONS='--conditions=development' packages/cli/node_modules/.bin/tsx packages/cli/src/index.ts start --config "$CONFIG_PATH" &
-CLI_PID=$!
-
-wait_for_http "http://localhost:${OPENTAG_DISPATCHER_PORT}/healthz"
-wait_for_github_ingress
+start_cli_stack
 
 PUBLIC_URL="${OPENTAG_GH_PUBLIC_URL:-}"
 if bool_true "$OPENTAG_GH_LIVE_START_NGROK"; then
@@ -440,7 +631,7 @@ import json
 print(json.dumps({
     "name": "web",
     "active": True,
-    "events": ["issue_comment", "pull_request_review_comment"],
+    "events": ["issue_comment", "pull_request_review_comment", "pull_request", "check_run", "check_suite", "status"],
     "config": {
         "url": "${PUBLIC_URL}/github/webhooks",
         "content_type": "json",
@@ -506,6 +697,152 @@ if [[ "$status" != "succeeded" ]]; then
 fi
 print_metrics "$RUN_ID"
 
+if bool_true "$OPENTAG_GH_LIVE_STRICT_COMPLETION"; then
+  echo "Verifying executor success does not satisfy completion before provider evidence is complete..."
+  wait_for_completion "$RUN_ID" "pending,unsatisfied"
+  INITIAL_COMPLETION_PATH="$TMP_ROOT/completion-initial.json"
+  printf '%s\n' "$COMPLETION_PAYLOAD" >"$INITIAL_COMPLETION_PATH"
+
+  deadline=$((SECONDS + OPENTAG_GH_LIVE_TIMEOUT_SECONDS))
+  while (( SECONDS < deadline )); do
+    PR_URL="$(sqlite_one "select json_extract(result_json, '$.createdPullRequestUrl') from runs where id = '$(sql_escape "$RUN_ID")';")"
+    if [[ -n "$PR_URL" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$PR_URL" ]]; then
+    echo "Strict completion run did not record a created pull request URL." >&2
+    exit 1
+  fi
+
+  PR_INFO_PATH="$TMP_ROOT/pull-request.json"
+  gh pr view "$PR_URL" --json number,state,headRefName,headRefOid,baseRefName,url >"$PR_INFO_PATH"
+  PR_NUMBER="$(python3 - "$PR_INFO_PATH" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["number"])
+PY
+)"
+  PR_HEAD_SHA="$(python3 - "$PR_INFO_PATH" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["headRefOid"])
+PY
+)"
+  echo "Created governed PR #$PR_NUMBER at head $PR_HEAD_SHA: $PR_URL"
+
+  echo "Recording real GitHub commit status '$OPENTAG_GH_LIVE_REQUIRED_CHECK' on the current PR head..."
+  gh api "repos/${OWNER}/${REPO}/statuses/${PR_HEAD_SHA}" \
+    --method POST \
+    -f state=success \
+    -f context="$OPENTAG_GH_LIVE_REQUIRED_CHECK" \
+    -f description="OpenTag Phase 1 live completion acceptance" \
+    -f target_url="$PR_URL" >/dev/null
+
+  wait_for_completion "$RUN_ID" "pending,unsatisfied" "required_checks" "passed"
+  CHECKED_COMPLETION_PATH="$TMP_ROOT/completion-after-check.json"
+  printf '%s\n' "$COMPLETION_PAYLOAD" >"$CHECKED_COMPLETION_PATH"
+  echo "Required check passed for the current head; completion remains unsatisfied until merge."
+
+  echo "Merging governed PR #$PR_NUMBER after OpenTag observed the required check..."
+  gh pr merge "$PR_URL" --merge --delete-branch
+
+  wait_for_completion "$RUN_ID" "satisfied" "merge" "passed"
+  FINAL_COMPLETION_PATH="$TMP_ROOT/completion-final.json"
+  printf '%s\n' "$COMPLETION_PAYLOAD" >"$FINAL_COMPLETION_PATH"
+  gh pr view "$PR_URL" \
+    --json number,state,headRefName,headRefOid,baseRefName,url,mergedAt,mergeCommit \
+    >"$PR_INFO_PATH"
+  wait_for_issue_comment "provider-verified completion requirements are satisfied"
+  RECEIPTS_BEFORE_RESTART="$(completion_receipt_count)"
+
+  echo "Restarting the CLI stack to verify durable satisfied completion and callback deduplication..."
+  stop_cli_stack
+  deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    if [[ -z "$(lsof -ti "tcp:${OPENTAG_DISPATCHER_PORT}" 2>/dev/null || true)" && -z "$(lsof -ti "tcp:${OPENTAG_GITHUB_PORT}" 2>/dev/null || true)" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  ensure_port_free "$OPENTAG_DISPATCHER_PORT" "dispatcher"
+  ensure_port_free "$OPENTAG_GITHUB_PORT" "GitHub ingress"
+  start_cli_stack
+  wait_for_completion "$RUN_ID" "satisfied" "merge" "passed"
+  RESTARTED_COMPLETION_PATH="$TMP_ROOT/completion-after-restart.json"
+  printf '%s\n' "$COMPLETION_PAYLOAD" >"$RESTARTED_COMPLETION_PATH"
+  RECEIPTS_AFTER_RESTART="$(stable_completion_receipt_count 10)"
+  if [[ "$RECEIPTS_AFTER_RESTART" != "$RECEIPTS_BEFORE_RESTART" ]]; then
+    echo "Restart emitted a duplicate provider-verified completion receipt ($RECEIPTS_BEFORE_RESTART -> $RECEIPTS_AFTER_RESTART)." >&2
+    exit 1
+  fi
+
+  REPORT_PATH="${OPENTAG_GH_LIVE_REPORT:-$ROOT_DIR/.omx/live-e2e/github-completion-governance-$(date -u +%Y%m%dT%H%M%SZ).json}"
+  mkdir -p "$(dirname "$REPORT_PATH")"
+  ASSESSMENT_COUNT="$(sqlite_one "select count(*) from completion_assessments where work_thread_id = (select work_thread_id from runs where id = '$(sql_escape "$RUN_ID")');")"
+  RUNTIME_SOURCE="source_checkout"
+  if [[ -n "${OPENTAG_GH_LIVE_CLI_BIN:-}" ]]; then
+    RUNTIME_SOURCE="registry_install"
+  fi
+  python3 - \
+    "$REPORT_PATH" "$INITIAL_COMPLETION_PATH" "$CHECKED_COMPLETION_PATH" "$FINAL_COMPLETION_PATH" "$RESTARTED_COMPLETION_PATH" "$PR_INFO_PATH" \
+    "$OWNER/$REPO" "$ISSUE_URL" "$RUN_ID" "$OPENTAG_GH_LIVE_REQUIRED_CHECK" "$ASSESSMENT_COUNT" "$RECEIPTS_AFTER_RESTART" "$RUNTIME_SOURCE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+(
+    report_path,
+    initial_path,
+    checked_path,
+    final_path,
+    restarted_path,
+    pr_path,
+    repository,
+    issue_url,
+    run_id,
+    required_check,
+    assessment_count,
+    receipt_count,
+    runtime_source,
+) = sys.argv[1:]
+
+def read(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+report = {
+    "schemaVersion": 1,
+    "case": "github-completion-governance-live",
+    "recordedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "repository": repository,
+    "issueUrl": issue_url,
+    "runId": run_id,
+    "requiredCheck": required_check,
+    "runtimeSource": runtime_source,
+    "pullRequest": read(pr_path),
+    "completion": {
+        "afterExecutorSuccess": read(initial_path)["completion"],
+        "afterRequiredCheck": read(checked_path)["completion"],
+        "afterMerge": read(final_path)["completion"],
+        "afterRestart": read(restarted_path)["completion"],
+    },
+    "assessmentCount": int(assessment_count),
+    "providerVerifiedReceiptCount": int(receipt_count),
+    "assertions": {
+        "executorSuccessDidNotSatisfyCompletion": True,
+        "requiredCheckBoundToCurrentHead": True,
+        "requiredCheckDidNotBypassMerge": True,
+        "mergeSatisfiedContract": True,
+        "restartPreservedSatisfiedAssessment": True,
+        "restartDidNotDuplicateFinalReceipt": True,
+    },
+}
+Path(report_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  echo "Structured Phase 1 live evidence: $REPORT_PATH"
+else
 echo "Recent issue comments after final receipt:"
 gh api "repos/${OWNER}/${REPO}/issues/${ISSUE_NUMBER}/comments?sort=created&direction=desc&per_page=4" \
   --jq 'reverse[] | {author: .user.login, body: (.body | split("\n")[0:8] | join("\n"))}'
@@ -613,6 +950,7 @@ PY
     echo "Applied receipt ended with duplicate punctuation." >&2
     exit 1
   fi
+fi
 fi
 
 echo

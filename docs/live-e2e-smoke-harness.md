@@ -22,7 +22,7 @@ Current cases:
 | `protocol-runtime` | No | In-memory GitHub-shaped protocol smoke using dispatcher/client/store paths |
 | `slack-protocol` | No | In-memory Slack-shaped protocol smoke with quiet progress and Block Kit final callback |
 | `openclaw-acp` | Yes | Strict OpenClaw hard-cancellation probe plus worktree cwd, scratch cwd, and fresh-session checks through the generic ACP host |
-| `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, final action receipt, optional `apply 1` PR flow |
+| `github-webhook-live` | Yes | Real GitHub repository webhook, local CLI stack, current-head required check, merged PR, durable satisfied assessment, and restart-safe final receipt |
 | `github-cli-live` | Yes | Real GitHub issue callback using dispatcher-assisted run creation |
 | `slack-local-live` | Yes | Real Slack callback using dispatcher-assisted run creation |
 | `slack-ui-live` | Yes | Real Slack source-thread mention or button flow through Socket Mode or Events API |
@@ -167,6 +167,34 @@ It requires:
   `claude-code`; its exact ACP package is resolved through `npx` from Registry
   launch data.
 - `ngrok` unless `OPENTAG_GH_PUBLIC_URL` points at an existing public tunnel.
+
+Strict completion mode is enabled by default. The case creates a real pull
+request during the run, verifies that executor success does not satisfy the
+completion contract, records
+the `opentag-phase1-live` GitHub commit status on the exact PR head, verifies
+that completion still waits for merge, merges the PR, and then requires a
+provider-verified satisfied assessment. It restarts the CLI stack against the
+same database and fails if completion is lost or the final source-thread
+receipt is duplicated.
+
+Set `OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture` when the acceptance target is the
+GitHub/governance chain itself. The repository's deterministic ACP fixture
+still performs a real isolated-worktree write that OpenTag commits, pushes, and
+opens as a pull request, but model-provider authentication and availability do
+not become part of the Phase 1 completion-governance proof. Run built-in agent
+ACP conformance as a separate release gate.
+
+The case writes a sanitized evidence document under `.omx/live-e2e` containing
+the issue, run and PR identities, the required check name, assessment snapshots
+before and after each provider transition, and restart assertions. Override the
+path with `OPENTAG_GH_LIVE_REPORT`. Set
+`OPENTAG_GH_LIVE_STRICT_COMPLETION=false` only when intentionally exercising
+the older optional `apply 1` compatibility flow.
+
+After publishing a candidate to npm `next`, install `@opentag/cli@0.7.0` into a
+fresh directory and set `OPENTAG_GH_LIVE_CLI_BIN` to that installation's
+`node_modules/.bin/opentag`. The same strict case then proves the immutable
+registry artifacts rather than the source checkout.
 
 ### Slack UI
 
