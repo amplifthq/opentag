@@ -281,16 +281,19 @@ export function createGitHubCompletionApi(input: {
     },
     async getCombinedStatusForRef({ owner, repo, ref }) {
       const value = await request(`/repos/${segment(owner)}/${segment(repo)}/commits/${segment(ref)}/status?per_page=100`);
-      if (!isRecord(value) || !Array.isArray(value["statuses"])) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
-      return value["statuses"].map((candidate) => {
+      if (!isRecord(value)) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
+      const sha = nonEmptyString(value["sha"]);
+      const statuses = value["statuses"];
+      if (!sha || !Array.isArray(statuses)) throw new Error("GitHub commit-status reconciliation returned an invalid response.");
+      return statuses.map((candidate) => {
         if (!isRecord(candidate) || !nonEmptyString(candidate["context"])
-          || !nonEmptyString(candidate["state"]) || !nonEmptyString(candidate["sha"])) {
+          || !nonEmptyString(candidate["state"])) {
           throw new Error("GitHub commit-status reconciliation returned an invalid response.");
         }
         return {
           context: candidate["context"] as string,
           state: candidate["state"] as string,
-          sha: candidate["sha"] as string
+          sha
         };
       });
     },

@@ -97,6 +97,39 @@ describe("GitHub webhook ingress", () => {
     ]);
   });
 
+  it("ignores a status delivery that has no correlated pull request", async () => {
+    const api = completionApi();
+    api.listPullRequestsForCommit = async () => [];
+    const ingestCompletionEvidenceBatch = vi.fn(async () => ({ outcome: "recorded" }));
+    const requestCompletionReconciliationEscalation = vi.fn(async () => undefined);
+    const app = createGitHubWebhookApp({
+      webhookSecret: "secret",
+      createRun: vi.fn(async () => ({})),
+      completionApi: api,
+      ingestCompletionEvidenceBatch,
+      requestCompletionReconciliationEscalation,
+      now: () => "2026-07-21T10:00:00.000Z"
+    });
+    const body = JSON.stringify({
+      sha: COMPLETION_HEAD,
+      repository: { name: "demo", owner: { login: "acme" } }
+    });
+
+    const response = await app.request(
+      "/github/webhooks",
+      signedRequest({ body, secret: "secret", event: "status", deliveryId: "delivery-no-pull-request" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      evidenceSnapshots: 0,
+      ignored: "no_correlated_pull_requests"
+    });
+    expect(ingestCompletionEvidenceBatch).not.toHaveBeenCalled();
+    expect(requestCompletionReconciliationEscalation).not.toHaveBeenCalled();
+  });
+
   it("fails a multi-PR delivery before any single-snapshot fallback write when batch ingestion is unavailable", async () => {
     const api = completionApi();
     api.listPullRequestsForCommit = async () => [{ number: 7 }, { number: 8 }];
