@@ -604,6 +604,9 @@ export function createGitHubWebhookApp(input: GitHubWebhookAppInput) {
           api: input.completionApi,
           now: input.now
         });
+        if (snapshots.length === 0) {
+          return c.json({ ok: true, evidenceSnapshots: 0, ignored: "no_correlated_pull_requests" });
+        }
         if (input.ingestCompletionEvidenceBatch) {
           await input.ingestCompletionEvidenceBatch(snapshots);
         } else {

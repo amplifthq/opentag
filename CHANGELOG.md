@@ -4,6 +4,59 @@
 
 No changes yet.
 
+## v0.7.0 - 2026-07-22
+
+OpenTag 0.7.0 completes the Phase 1 completion-governance vertical slice. A
+successful executor result is now distinct from evidence-backed completion:
+OpenTag can persist a work loop, evaluate its configured contract against
+current-cycle evidence, explain blockers, and accept narrowly scoped human
+waivers. This is a coordinated release of all 16 public packages, including
+`@opentag/governance` as a first-class member of the package family.
+
+### Added
+
+- Additive `WorkThread`, `CompletionContract`, `CompletionGateResult`,
+  `CompletionAssessment`, and `HumanEscalation` protocol schemas and JSON Schema
+  exports in `@opentag/core`.
+- Durable work-thread, contract, assessment, escalation, waiver, evidence, and
+  delivery records in `@opentag/store`, including assessment history and
+  completion metrics.
+- The public `@opentag/governance` package, with a deterministic evaluator and
+  a small command/query surface for reassessment, evidence ingestion, and
+  bounded completion waivers.
+- GitHub pull-request, required-check, head-SHA, and merge evidence
+  normalization, plus dispatcher correlation from verified webhook facts to
+  the current work thread.
+- CLI completion explanation and pairing-authenticated waiver commands. Waivers
+  are limited to selected gates in the current contract, carry an expiry, and
+  remain attributable to a human actor.
+- A replay fixture and governance-matrix scenario covering the GitHub
+  completion path from executor success through current-head checks, merge
+  evidence, reassessment, source-thread projection, and restart recovery.
+
+### Changed
+
+- Completion is evaluated from the latest run attached to a work thread. Run
+  artifacts and receipts from older delivery epochs cannot satisfy the current
+  contract, and external evidence must be observed during the current epoch.
+- Dispatcher reassessment is idempotent and replay-safe across duplicate
+  result/evidence delivery and process restarts. Conflicting or stale inputs
+  fail closed instead of silently advancing completion.
+- Local CLI startup accepts strict GitHub completion policies and forwards them
+  to the dispatcher runtime, closing the configuration path needed for a real
+  webhook-to-assessment run.
+- Hermes ACP readiness allows the adapter's observed startup latency instead of
+  inheriting the generic three-second probe deadline.
+- Package discovery, packed-install validation, and release documentation now
+  cover the complete 16-package publication set.
+
+### Release validation note
+
+The repository fixtures and release gates cover the deterministic and packaged
+paths. A registry-installed, credentialed live GitHub chain must still pass
+before `0.7.0` is promoted from `next` to `latest`; this changelog does not claim
+that live proof in advance.
+
 ## v0.6.0 - 2026-07-16
 
 OpenTag 0.6.0 moves every built-in coding agent onto the Generic ACP host,

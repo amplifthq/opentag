@@ -66,10 +66,11 @@ const cases = [
   },
   {
     id: "github-webhook-live",
-    label: "Live GitHub repository webhook smoke",
+    label: "Live GitHub completion-governance smoke",
     live: true,
     command: "scripts/dev/run-github-webhook-live-test.sh",
     requiredCommands: [
+      "corepack",
       "curl",
       "gh",
       "lsof",
@@ -82,7 +83,9 @@ const cases = [
     notes: [
       "Requires gh auth with ADMIN or MAINTAIN access to OPENTAG_GH_REPO.",
       "Requires npx plus working local authentication for the selected Registry-backed ACP launch.",
-      "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true."
+      "Set OPENTAG_GH_LIVE_EXECUTOR=phase1-fixture to isolate the real GitHub/governance chain from model-provider readiness while retaining a real ACP worktree write.",
+      "Set OPENTAG_GH_PUBLIC_URL or allow ngrok with OPENTAG_GH_LIVE_START_NGROK=true.",
+      "Strict mode creates and merges a real PR, records a current-head GitHub status, and writes sanitized evidence under .omx/live-e2e."
     ]
   },
   {

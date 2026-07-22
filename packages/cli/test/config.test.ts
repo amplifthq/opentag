@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   defaultConfigPath,
   defaultStateDirectory,
+  formatCliConfigError,
   parseCliConfig,
   readCliConfig,
   readKeychainSecret,
@@ -81,6 +82,62 @@ describe("OpenTag CLI config", () => {
       profile: "opentag",
       gatewayUrl: "ws://127.0.0.1:19093"
     });
+  });
+
+  it("accepts strict GitHub completion policies in daemon JSON", () => {
+    const source = config();
+    const parsed = parseCliConfig({
+      ...source,
+      daemon: {
+        ...source.daemon,
+        completionPolicies: [
+          {
+            provider: "github",
+            owner: " acme ",
+            repo: " demo ",
+            requiredChecks: [" build ", "test"],
+            baseBranch: " main ",
+            requireMerge: true
+          }
+        ]
+      }
+    });
+
+    expect(parsed.daemon.completionPolicies).toEqual([
+      {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        requiredChecks: ["build", "test"],
+        baseBranch: "main",
+        requireMerge: true
+      }
+    ]);
+  });
+
+  it("rejects invalid GitHub completion policies with a config path", () => {
+    const source = config();
+    let error: unknown;
+    try {
+      parseCliConfig({
+        ...source,
+        daemon: {
+          ...source.daemon,
+          completionPolicies: [
+            {
+              provider: "github",
+              owner: "acme",
+              repo: "demo",
+              requiredChecks: []
+            }
+          ]
+        }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(formatCliConfigError(error)).toContain("daemon.completionPolicies.0.requiredChecks");
   });
 
   it("writes config atomically with private file permissions", () => {

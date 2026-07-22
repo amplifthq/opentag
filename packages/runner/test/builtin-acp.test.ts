@@ -84,6 +84,7 @@ describe("built-in ACP coding agents", () => {
     expect(definitions.opencode.readinessTimeoutMs).toBe(30_000);
     expect(definitions.hermes).toMatchObject({
       id: "hermes",
+      readinessTimeoutMs: 60_000,
       capabilities: { supportsProfile: true, supportsCancel: true }
     });
     expect(definitions.openclaw).toMatchObject({

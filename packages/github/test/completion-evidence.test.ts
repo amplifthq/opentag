@@ -182,4 +182,20 @@ describe("GitHub completion evidence", () => {
     await expect(api.getPullRequest({ owner: "acme", repo: "demo", pullRequestNumber: 7 }))
       .rejects.not.toThrow("github_secret_token");
   });
+
+  it("uses the combined-status response SHA for status entries", async () => {
+    const fetchImpl = vi.fn(async () => Response.json({
+      sha: HEAD_CURRENT,
+      statuses: [
+        { context: "build", state: "success" },
+        { context: "test", state: "pending" }
+      ]
+    }));
+    const api = createGitHubCompletionApi({ token: "github_token", fetchImpl });
+
+    await expect(api.getCombinedStatusForRef({ owner: "acme", repo: "demo", ref: HEAD_CURRENT })).resolves.toEqual([
+      { context: "build", state: "success", sha: HEAD_CURRENT },
+      { context: "test", state: "pending", sha: HEAD_CURRENT }
+    ]);
+  });
 });

@@ -7,19 +7,19 @@ version.
 ## Current release
 
 ```text
-0.6.0
+0.7.0
 ```
 
 The release is first published on the npm `next` dist-tag, tested from the
 registry, then promoted to `latest`. The exact commit that produced the npm
-artifacts must also receive the matching `v0.6.0` git tag and GitHub Release.
+artifacts must also receive the matching `v0.7.0` git tag and GitHub Release.
 
-The public release set contains 16 packages. Fifteen existing package names
-already have a `0.5.0` release; `@opentag/governance` debuts in `0.6.0`.
-Publishing `0.6.0` with `--tag next` must leave each existing package's
-`latest` pointer on `0.5.0` until the complete registry, ACP, and live-platform
-gate passes. Treat the new package's npm-created `latest` tag as part of the
-documented first-release rollback boundary below.
+The public release set contains 16 packages, including
+`@opentag/governance`. Established packages have a coordinated `0.6.0`
+release, while a newly introduced package may not have a previous `latest`
+target. Publishing `0.7.0` with `--tag next` must leave each package's existing
+`latest` pointer unchanged until the complete registry, ACP, governance, and
+live-platform gate passes.
 
 ## Public package discovery and order
 
@@ -46,7 +46,7 @@ plan.
 ## Release gate
 
 Start from the intended release commit with a clean working tree. Confirm that
-all 16 public manifests use `0.6.0` and that the frozen lockfile is current,
+all 16 public manifests use `0.7.0` and that the frozen lockfile is current,
 then run the verification ladder in this order:
 
 ```bash
@@ -116,7 +116,7 @@ corepack pnpm release:publish -- --tag next
 
 The publish command uses the same automatic publication set and topological
 order as `release:check`. A coordinated release is incomplete until all 16
-packages exist at `0.6.0`; do not promote a partial package family.
+packages exist at `0.7.0`; do not promote a partial package family.
 
 If npm asks for a two-factor one-time password, do not pass `--otp` by default
 for OpenTag releases. Refresh the local npm browser login, then rerun the normal
@@ -140,13 +140,13 @@ registry:
 
 ```bash
 smoke_root="$(mktemp -d)"
-npm install --prefix "$smoke_root" --no-audit --no-fund @opentag/cli@0.6.0
+npm install --prefix "$smoke_root" --no-audit --no-fund @opentag/cli@0.7.0
 "$smoke_root/node_modules/.bin/opentag" --version
 "$smoke_root/node_modules/.bin/opentag" --help
 npm audit --prefix "$smoke_root" --omit=dev --audit-level=high
 ```
 
-The version must be `0.6.0`. With isolated config and state directories, run
+The version must be `0.7.0`. With isolated config and state directories, run
 the setup, doctor, and foreground-start path for one platform that has real
 test credentials:
 
@@ -174,7 +174,8 @@ Also verify every package and its canary tag before promotion:
 for manifest in packages/*/package.json; do
   [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
   package="$(jq -r '.name' "$manifest")"
-  test "$(npm view "$package@0.6.0" version)" = "0.6.0"
+  test "$(npm view "$package@0.7.0" version)" = "0.7.0"
+  test "$(npm view "$package" dist-tags.next)" = "0.7.0"
   npm view "$package" dist-tags --json
 done
 ```
@@ -183,62 +184,76 @@ done
 
 Promotion changes dist-tags only; it must not rebuild or republish. After all
 registry and live-platform checks pass, run the same command for every package.
-It is intentionally idempotent for first-release packages whose `latest` tag
-was created by npm:
+Repeating the dist-tag update is intentionally idempotent for every package:
 
 ```bash
+rollback_file="$(mktemp)"
+chmod 600 "$rollback_file"
 for manifest in packages/*/package.json; do
   [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
   package="$(jq -r '.name' "$manifest")"
-  npm dist-tag add "$package@0.6.0" latest
+  previous_latest="$(npm view "$package" dist-tags.latest)"
+  printf '%s\t%s\n' "$package" "$previous_latest" >>"$rollback_file"
+done
+
+for manifest in packages/*/package.json; do
+  [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
+  package="$(jq -r '.name' "$manifest")"
+  npm dist-tag add "$package@0.7.0" latest
 done
 ```
 
+Keep `rollback_file` until the release is complete. It records the actual
+pre-promotion `latest` target for each package, including an empty target for a
+package that did not previously have one.
+
 Rerun the package loop from the registry-verification section and confirm both
-`next` and `latest` point at `0.6.0` for all 16 packages.
+`next` and `latest` point at `0.7.0` for all 16 packages.
 
 ## Create the matching source release
 
 Create the source tag from the exact clean commit used for `release:publish`.
-Copy the `v0.6.0` section of `CHANGELOG.md` into a temporary release-notes file,
+Copy the `v0.7.0` section of `CHANGELOG.md` into a temporary release-notes file,
 then run:
 
 ```bash
-git tag -a v0.6.0 -m "OpenTag v0.6.0"
-git push origin v0.6.0
-gh release create v0.6.0 \
+git tag -a v0.7.0 -m "OpenTag v0.7.0"
+git push origin v0.7.0
+gh release create v0.7.0 \
   --verify-tag \
-  --title "OpenTag v0.6.0" \
-  --notes-file /tmp/opentag-v0.6.0-release-notes.md
+  --title "OpenTag v0.7.0" \
+  --notes-file /tmp/opentag-v0.7.0-release-notes.md
 ```
 
 Verify that the GitHub Release tag resolves to the same commit that produced
 the npm tarballs. The release is not complete until npm, git, and GitHub all
-identify version `0.6.0`.
+identify version `0.7.0`.
 
 ## Dist-tag rollback
 
 Do not unpublish immutable package versions during rollback.
 
-- If canary validation fails before promotion, leave the existing packages'
-  previous `latest` tags untouched and stop the rollout. npm has already
-  created `latest` for any first-release package and rejects removing that tag;
-  if the new package is unsafe, deprecate the bad version and publish a fixed
-  version rather than trying to erase immutable history. Preserve `next` for
-  diagnosis or move it to the corrected version.
+- If canary validation fails before promotion, leave every package's previous
+  `latest` tag unchanged and stop the rollout. Preserve `next` for diagnosis or
+  move it to the corrected version.
 - If `latest` promotion fails partway, first finish or retry the idempotent
-  promotion loop. If 0.6.0 itself must be withdrawn, restore `0.5.0` for the
-  complete package family and leave 0.6.0 on `next` for diagnosis:
+  promotion loop. If 0.7.0 itself must be withdrawn, restore each package's
+  recorded pre-promotion target and leave 0.7.0 on `next` for diagnosis:
 
 ```bash
-for manifest in packages/*/package.json; do
-  [ "$(jq -r '.publishConfig.access // ""' "$manifest")" = "public" ] || continue
-  package="$(jq -r '.name' "$manifest")"
-  test "$(npm view "$package@0.5.0" version)" = "0.5.0"
-  npm dist-tag add "$package@0.5.0" latest
-  npm dist-tag add "$package@0.6.0" next
-done
+while IFS=$'\t' read -r package previous_latest; do
+  if [ -n "$previous_latest" ]; then
+    test "$(npm view "$package@$previous_latest" version)" = "$previous_latest"
+    npm dist-tag add "$package@$previous_latest" latest
+  else
+    current_latest="$(npm view "$package" dist-tags.latest)"
+    if [ -n "$current_latest" ]; then
+      npm dist-tag rm "$package" latest
+    fi
+  fi
+  npm dist-tag add "$package@0.7.0" next
+done <"$rollback_file"
 ```
 
 Verify all dist-tags after rollback and publish a clear incident note. A later
-fix must use a new version; never overwrite `0.6.0`.
+fix must use a new version; never overwrite `0.7.0`.
