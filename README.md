@@ -270,13 +270,14 @@ opentag-dev setup
 
 ## Packages
 
-Current public release: `v0.6.0`. The npm package family is published under the `@opentag` scope.
+Current public release: `v0.7.0`. The coordinated npm package family contains 16 public packages under the `@opentag` scope.
 
 | Package | Purpose |
 | --- | --- |
 | [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | Setup and local runtime command line interface |
 | [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | In-process local dispatcher, runner, and platform runtime |
 | [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | Protocol schemas, types, mention parsing, and JSON Schema exports |
+| [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | Deterministic completion evaluation and governance orchestration |
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode, Events API handling, and thread replies |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook handling, comments, PR helpers, and action application |

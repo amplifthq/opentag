@@ -265,13 +265,14 @@ opentag-dev setup
 
 ## 软件包
 
-当前公开发布版本：`v0.6.0`。OpenTag 的 npm 包发布在 `@opentag` scope 下。
+当前公开发布版本：`v0.7.0`。OpenTag 在 `@opentag` scope 下协调发布 16 个公开软件包。
 
 | 包 | 用途 |
 | --- | --- |
 | [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | setup 和本地 runtime CLI |
 | [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | 进程内本地 dispatcher、runner 和平台 runtime |
 | [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | 协议 schema、类型、mention 解析和 JSON Schema 导出 |
+| [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | 确定性的完成条件评估和治理编排 |
 | [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
 | [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode、Events API 和回复 |
 | [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook、评论、PR helper 和 action apply |
