@@ -93,6 +93,7 @@ export function builtInAcpAgentDefinitions(
       id: "hermes",
       label: "Hermes ACP",
       workspaceCwd: "required",
+      readinessTimeoutMs: 60_000,
       launch: {
         command: hermesCommand,
         args: ["-p", hermesProfile, "acp"]
