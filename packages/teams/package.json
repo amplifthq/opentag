@@ -23,11 +23,10 @@
   },
   "dependencies": {
     "@opentag/core": "workspace:*",
-    "botframework-connector": "^4.23.3",
-    "hono": "^4.12.27"
+    "hono": "^4.12.27",
+    "jose": "^5.9.6"
   },
   "devDependencies": {
-    "jose": "^5.9.6",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3"
   }

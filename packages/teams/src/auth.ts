@@ -1,16 +1,12 @@
-import {
-  AuthenticationConfiguration,
-  AuthenticationConstants,
-  BotFrameworkAuthenticationFactory,
-  PasswordServiceClientCredentialFactory,
-  type BotFrameworkAuthentication
-} from "botframework-connector";
+import { importJWK, jwtVerify, type JWK } from "jose";
 
 /** Bot Framework OpenID metadata document; it points at the signing JWKS. */
 const DEFAULT_OPENID_METADATA_URL = "https://login.botframework.com/v1/.well-known/openidconfiguration";
+const BOT_FRAMEWORK_TOKEN_ISSUER = "https://api.botframework.com";
 const TEAMS_CHANNEL_ID = "msteams";
 const JWKS_CACHE_MS = 5 * 60_000;
 const METADATA_REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_CLOCK_TOLERANCE_SECONDS = 5 * 60;
 
 export type TeamsAuthResult = { ok: true } | { ok: false; reason: string };
 
@@ -19,13 +15,15 @@ export type TeamsAuthConfig = {
   appId: string;
   /** Override the Bot Framework OpenID metadata document URL. */
   openIdMetadataUrl?: string;
-  /** Injectable official authenticator for focused tests. Production builds one from Bot Framework SDK. */
-  botFrameworkAuthentication?: Pick<BotFrameworkAuthentication, "authenticateRequest">;
-  /** Fetch implementation used by the Teams endorsement precheck. */
+  /** Optional additional authenticator; built-in JOSE validation always runs first. */
+  botFrameworkAuthentication?: {
+    authenticateRequest(activity: unknown, authorizationHeader: string): Promise<unknown>;
+  };
+  /** Fetch implementation used to load Bot Framework OpenID metadata and signing keys. */
   fetchImpl?: typeof fetch;
 };
 
-type JwkWithEndorsements = {
+type JwkWithEndorsements = JWK & {
   kid?: string;
   endorsements?: unknown;
 };
@@ -34,25 +32,6 @@ type CachedJwks = {
   expiresAt: number;
   keys: JwkWithEndorsements[];
 };
-
-function createOfficialBotFrameworkAuthentication(input: { appId: string; openIdMetadataUrl: string }): BotFrameworkAuthentication {
-  return BotFrameworkAuthenticationFactory.create(
-    "",
-    true,
-    AuthenticationConstants.ToChannelFromBotLoginUrl,
-    AuthenticationConstants.ToChannelFromBotOAuthScope,
-    AuthenticationConstants.ToBotFromChannelTokenIssuer,
-    AuthenticationConstants.OAuthUrl,
-    input.openIdMetadataUrl,
-    AuthenticationConstants.ToBotFromEmulatorOpenIdMetadataUrl,
-    "urn:botframework:azure",
-    // Inbound validation only needs appId matching; password is used when the
-    // official auth object later creates outbound credentials, which this
-    // OpenTag wrapper does not use.
-    new PasswordServiceClientCredentialFactory(input.appId, ""),
-    new AuthenticationConfiguration([TEAMS_CHANNEL_ID])
-  );
-}
 
 function bearerToken(authorizationHeader: string | undefined): string | null {
   const match = /^Bearer\s+(.+)$/i.exec((authorizationHeader ?? "").trim());
@@ -81,7 +60,7 @@ function tokenAlg(token: string): string | null {
   return typeof decoded?.alg === "string" && decoded.alg ? decoded.alg : null;
 }
 
-function createTeamsEndorsementValidator(input: { metadataUrl: string; fetchImpl: typeof fetch; now?: () => number }) {
+function createTeamsSigningKeyResolver(input: { metadataUrl: string; fetchImpl: typeof fetch; now?: () => number }) {
   const now = input.now ?? (() => Date.now());
   let cached: CachedJwks | null = null;
 
@@ -116,7 +95,9 @@ function createTeamsEndorsementValidator(input: { metadataUrl: string; fetchImpl
     return keys;
   }
 
-  return async (token: string): Promise<TeamsAuthResult> => {
+  return async (token: string): Promise<
+    { ok: true; key: JwkWithEndorsements } | { ok: false; reason: string }
+  > => {
     const kid = tokenKid(token);
     if (!kid) return { ok: false, reason: "invalid_token" };
     const keys = await loadKeys();
@@ -125,16 +106,15 @@ function createTeamsEndorsementValidator(input: { metadataUrl: string; fetchImpl
     const endorsements = Array.isArray(key.endorsements)
       ? key.endorsements.filter((value): value is string => typeof value === "string")
       : [];
-    return endorsements.includes(TEAMS_CHANNEL_ID) ? { ok: true } : { ok: false, reason: "endorsement_missing" };
+    return endorsements.includes(TEAMS_CHANNEL_ID)
+      ? { ok: true, key }
+      : { ok: false, reason: "endorsement_missing" };
   };
 }
 
 export function createTeamsAuthenticator(config: TeamsAuthConfig) {
   const openIdMetadataUrl = config.openIdMetadataUrl ?? DEFAULT_OPENID_METADATA_URL;
-  const officialAuth =
-    config.botFrameworkAuthentication ??
-    createOfficialBotFrameworkAuthentication({ appId: config.appId, openIdMetadataUrl });
-  const validateTeamsEndorsement = createTeamsEndorsementValidator({
+  const resolveTeamsSigningKey = createTeamsSigningKeyResolver({
     metadataUrl: openIdMetadataUrl,
     fetchImpl: config.fetchImpl ?? fetch
   });
@@ -160,10 +140,23 @@ export function createTeamsAuthenticator(config: TeamsAuthConfig) {
       }
 
       try {
-        const endorsement = await validateTeamsEndorsement(token);
-        if (!endorsement.ok) return endorsement;
+        const signingKey = await resolveTeamsSigningKey(token);
+        if (!signingKey.ok) return signingKey;
 
-        await officialAuth.authenticateRequest(input.activity as never, input.authorizationHeader ?? "");
+        const verificationKey = await importJWK(signingKey.key, "RS256");
+        const verified = await jwtVerify(token, verificationKey, {
+          algorithms: ["RS256"],
+          issuer: BOT_FRAMEWORK_TOKEN_ISSUER,
+          audience: config.appId,
+          requiredClaims: ["exp"],
+          clockTolerance: TOKEN_CLOCK_TOLERANCE_SECONDS
+        });
+        if (verified.payload.serviceurl !== input.activity.serviceUrl) {
+          return { ok: false, reason: "serviceUrl_mismatch" };
+        }
+        if (config.botFrameworkAuthentication) {
+          await config.botFrameworkAuthentication.authenticateRequest(input.activity, input.authorizationHeader ?? "");
+        }
         return { ok: true };
       } catch (error) {
         const message = error instanceof Error ? error.message : "";

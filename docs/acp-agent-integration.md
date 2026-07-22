@@ -91,6 +91,12 @@ OPENTAG_OPENCLAW_PROFILE=opentag-conformance \
 corepack pnpm smoke:openclaw-acp-conformance
 ```
 
+Normal runtime startup also performs a bounded, read-only compatibility
+preflight. It checks the CLI version and selected Gateway/profile before
+spawning `openclaw acp`; an optional `expectedVersion` daemon setting can pin
+the operator-approved version. A mismatch is a setup failure, and OpenTag never
+uses a downgrade override or mutates the provider-owned profile to make it pass.
+
 The gate checks exact worktree and scratch writes plus distinct disposable
 Gateway session keys. For hard cancellation, it waits until a real long-running
 shell command writes its start marker, cancels the ACP session, then waits beyond
@@ -108,6 +114,12 @@ not weaken that assertion or reinterpret it as a provider-admission gate.
 
 This OpenClaw-specific gate complements rather than replaces the generic ACP
 executor, governance, and privacy suites required by the checklist below.
+
+For provider-backed conformance, a verified scratch marker proves only that a
+tool ran in the supplied cwd. If the provider/runtime then omits the ACP
+`session/prompt` stop response until the deadline, the gate records
+`needs_setup` with that tool evidence; it does not claim completion and does not
+misdiagnose the configured provider behavior as an OpenTag protocol pass.
 
 ## ACP session lifecycle
 

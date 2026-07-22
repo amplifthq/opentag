@@ -103,7 +103,8 @@ const HermesAcpConfigSchema = z.object({
 const OpenClawAcpConfigSchema = z.object({
   command: z.string().trim().min(1).optional(),
   profile: z.string().trim().min(1).optional(),
-  gatewayUrl: z.string().url().optional()
+  gatewayUrl: z.string().url().optional(),
+  expectedVersion: z.string().trim().min(1).optional()
 });
 
 const AgentSessionProfileConfigSchema = z.object({
@@ -469,12 +470,13 @@ export function loadConfigFromEnv(): OpenTagDaemonConfig {
           }
         }
       : {}),
-    ...(process.env.OPENTAG_OPENCLAW_COMMAND || process.env.OPENTAG_OPENCLAW_PROFILE || process.env.OPENTAG_OPENCLAW_GATEWAY_URL
+    ...(process.env.OPENTAG_OPENCLAW_COMMAND || process.env.OPENTAG_OPENCLAW_PROFILE || process.env.OPENTAG_OPENCLAW_GATEWAY_URL || process.env.OPENTAG_OPENCLAW_EXPECTED_VERSION
       ? {
           openclaw: {
             ...(process.env.OPENTAG_OPENCLAW_COMMAND ? { command: process.env.OPENTAG_OPENCLAW_COMMAND } : {}),
             ...(process.env.OPENTAG_OPENCLAW_PROFILE ? { profile: process.env.OPENTAG_OPENCLAW_PROFILE } : {}),
-            ...(process.env.OPENTAG_OPENCLAW_GATEWAY_URL ? { gatewayUrl: process.env.OPENTAG_OPENCLAW_GATEWAY_URL } : {})
+            ...(process.env.OPENTAG_OPENCLAW_GATEWAY_URL ? { gatewayUrl: process.env.OPENTAG_OPENCLAW_GATEWAY_URL } : {}),
+            ...(process.env.OPENTAG_OPENCLAW_EXPECTED_VERSION ? { expectedVersion: process.env.OPENTAG_OPENCLAW_EXPECTED_VERSION } : {})
           }
         }
       : {}),

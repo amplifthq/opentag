@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.7",
+    "@hono/node-server": "^2.0.11",
     "@opentag/dispatcher": "workspace:*",
     "@opentag/local-runtime": "workspace:*"
   },

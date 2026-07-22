@@ -320,10 +320,19 @@ the OpenTag runtime should not depend on that ambient selection:
   "openclaw": {
     "command": "openclaw",
     "profile": "opentag",
-    "gatewayUrl": "ws://127.0.0.1:19093"
+    "gatewayUrl": "ws://127.0.0.1:19093",
+    "expectedVersion": "2026.7.2"
   }
 }
 ```
+
+Before OpenTag starts the ACP bridge, it performs a bounded, read-only
+compatibility preflight. The preflight verifies the installed CLI version,
+queries the selected Gateway/profile, and requires the CLI and Gateway versions
+to match. `expectedVersion` adds an explicit operator-owned version authority;
+the equivalent environment variable is `OPENTAG_OPENCLAW_EXPECTED_VERSION`.
+Version skew fails closed with upgrade/profile-selection guidance. OpenTag does
+not rewrite, downgrade, or delete the selected OpenClaw profile.
 
 OpenClaw is available for normal ACP runs and retains failed or cancelled
 workspaces for inspection. Its current capability is `supportsCancel: false`:
@@ -572,6 +581,7 @@ for repeatable setups.
 | `OPENTAG_OPENCLAW_COMMAND` | `openclaw` | OpenClaw CLI command used by the built-in ACP launch and CLI detection |
 | `OPENTAG_OPENCLAW_PROFILE` | OpenClaw default | Optional profile passed before the `acp` subcommand |
 | `OPENTAG_OPENCLAW_GATEWAY_URL` | OpenClaw default | Optional Gateway WebSocket URL passed as `acp --url <url>` |
+| `OPENTAG_OPENCLAW_EXPECTED_VERSION` | unset | Optional exact CLI/Gateway version authority checked before ACP startup |
 | `OPENTAG_AGENT_PROFILE` | none | Fixed executor-neutral agent session identity |
 | `OPENTAG_AGENT_PROFILE_TEMPLATE` | derived per run | Executor-neutral profile template; supports tokens such as `{provider}`, `{projectTarget}`, `{accountId}`, `{conversationId}`, `{owner}`, `{repo}`, `{actorId}`, and `{runId}` |
 | `OPENTAG_SECURITY_MODE` | none | `enforce`, `audit`, or `off` |

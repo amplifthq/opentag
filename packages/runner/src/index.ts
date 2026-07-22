@@ -6,6 +6,7 @@ export * from "./echo.js";
 export * from "./executor.js";
 export * from "./git.js";
 export * from "./hermes-profile.js";
+export * from "./openclaw-preflight.js";
 export * from "./result.js";
 export * from "./security.js";
 export * from "./session-profile.js";

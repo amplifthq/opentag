@@ -8,7 +8,8 @@ describe("built-in ACP coding agents", () => {
       openclaw: {
         command: "/opt/openclaw/bin/openclaw",
         profile: "opentag-review",
-        gatewayUrl: "ws://127.0.0.1:19093"
+        gatewayUrl: "ws://127.0.0.1:19093",
+        expectedVersion: "2026.7.2"
       }
     });
 
@@ -90,6 +91,7 @@ describe("built-in ACP coding agents", () => {
     expect(definitions.openclaw).toMatchObject({
       id: "openclaw",
       launch: { command: "openclaw", args: ["acp"] },
+      preflight: expect.any(Function),
       capabilities: { supportsProfile: true, supportsCancel: false }
     });
   });

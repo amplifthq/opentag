@@ -60,7 +60,8 @@ describe("parseDaemonConfig ACP agents", () => {
       openclaw: {
         command: "/opt/openclaw/bin/openclaw",
         profile: "opentag",
-        gatewayUrl: "ws://127.0.0.1:19093"
+        gatewayUrl: "ws://127.0.0.1:19093",
+        expectedVersion: "2026.7.2"
       }
     });
 
@@ -68,7 +69,8 @@ describe("parseDaemonConfig ACP agents", () => {
       openclaw: {
         command: "/opt/openclaw/bin/openclaw",
         profile: "opentag",
-        gatewayUrl: "ws://127.0.0.1:19093"
+        gatewayUrl: "ws://127.0.0.1:19093",
+        expectedVersion: "2026.7.2"
       }
     });
     expect(executorsFromConfig(config).openclaw).toMatchObject({
@@ -469,6 +471,28 @@ describe("parseDaemonConfig secret refs", () => {
         } else {
           process.env[key] = value;
         }
+      }
+    }
+  });
+
+  it("loads the OpenClaw version authority from env without changing the selected profile", () => {
+    const previous = {
+      OPENTAG_CONFIG_PATH: process.env.OPENTAG_CONFIG_PATH,
+      OPENTAG_OPENCLAW_PROFILE: process.env.OPENTAG_OPENCLAW_PROFILE,
+      OPENTAG_OPENCLAW_EXPECTED_VERSION: process.env.OPENTAG_OPENCLAW_EXPECTED_VERSION
+    };
+    delete process.env.OPENTAG_CONFIG_PATH;
+    process.env.OPENTAG_OPENCLAW_PROFILE = "opentag";
+    process.env.OPENTAG_OPENCLAW_EXPECTED_VERSION = "2026.7.2";
+    try {
+      expect(loadConfigFromEnv().openclaw).toEqual({
+        profile: "opentag",
+        expectedVersion: "2026.7.2"
+      });
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
       }
     }
   });

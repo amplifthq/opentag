@@ -62,11 +62,15 @@ async function setup(endorsements: string[] | null = ["msteams"]) {
     (jwk as JWK & { endorsements?: string[] }).endorsements = endorsements;
   }
   const openIdMetadataUrl = await startOpenIdServer(jwk);
-  async function mint(claims: Record<string, unknown>, issuer: string = ISSUER) {
+  async function mint(
+    claims: Record<string, unknown>,
+    issuer: string = ISSUER,
+    expirationTime: string | number = "5m"
+  ) {
     return new SignJWT(claims)
       .setProtectedHeader({ alg: "RS256", kid: "test-key" })
       .setIssuer(issuer)
-      .setExpirationTime("5m")
+      .setExpirationTime(expirationTime)
       .sign(privateKey);
   }
   return { openIdMetadataUrl, mint };
@@ -158,6 +162,69 @@ describe("teams inbound JWT authentication", () => {
     const token = await mint({ aud: "app-123", serviceurl: SERVICE_URL }, "https://evil.example");
     const result = await auth.verify(verifyInput(token));
     expect(result).toEqual({ ok: false, reason: expect.stringMatching(/issuer|invalid_token/i) });
+  });
+
+  it("rejects a token whose signature does not match the advertised key", async () => {
+    const { openIdMetadataUrl } = await setup();
+    const { privateKey } = await generateKeyPair("RS256");
+    const token = await new SignJWT({ aud: "app-123", serviceurl: SERVICE_URL })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const result = await createTeamsAuthenticator({ appId: "app-123", openIdMetadataUrl }).verify(verifyInput(token));
+    expect(result).toEqual({ ok: false, reason: "invalid_token" });
+  });
+
+  it("does not let an injected authenticator bypass the built-in signature verification", async () => {
+    const { openIdMetadataUrl } = await setup();
+    const { privateKey } = await generateKeyPair("RS256");
+    const token = await new SignJWT({ aud: "app-123", serviceurl: SERVICE_URL })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer(ISSUER)
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const result = await createTeamsAuthenticator({
+      appId: "app-123",
+      openIdMetadataUrl,
+      botFrameworkAuthentication: { authenticateRequest: async () => ({}) }
+    }).verify(verifyInput(token));
+    expect(result).toEqual({ ok: false, reason: "invalid_token" });
+  });
+
+  it("rejects expired tokens beyond the five-minute clock tolerance", async () => {
+    const { openIdMetadataUrl, mint } = await setup();
+    const token = await mint({ aud: "app-123", serviceurl: SERVICE_URL }, ISSUER, "-10m");
+    const result = await createTeamsAuthenticator({ appId: "app-123", openIdMetadataUrl }).verify(verifyInput(token));
+    expect(result).toEqual({ ok: false, reason: "invalid_token" });
+  });
+
+  it("rejects tokens without an expiration claim", async () => {
+    const { publicKey, privateKey } = await generateKeyPair("RS256");
+    const jwk = await exportJWK(publicKey);
+    jwk.kid = "missing-exp-key";
+    jwk.alg = "RS256";
+    (jwk as JWK & { endorsements?: string[] }).endorsements = ["msteams"];
+    const metadataUrl = await startOpenIdServer(jwk);
+    const token = await new SignJWT({ aud: "app-123", serviceurl: SERVICE_URL })
+      .setProtectedHeader({ alg: "RS256", kid: "missing-exp-key" })
+      .setIssuer(ISSUER)
+      .sign(privateKey);
+    const result = await createTeamsAuthenticator({ appId: "app-123", openIdMetadataUrl: metadataUrl }).verify(
+      verifyInput(token)
+    );
+    expect(result).toEqual({ ok: false, reason: "invalid_token" });
+  });
+
+  it("rejects tokens that are not valid for more than the five-minute clock tolerance", async () => {
+    const { openIdMetadataUrl, mint } = await setup();
+    const token = await mint({
+      aud: "app-123",
+      serviceurl: SERVICE_URL,
+      nbf: Math.floor(Date.now() / 1000) + 10 * 60
+    });
+    const result = await createTeamsAuthenticator({ appId: "app-123", openIdMetadataUrl }).verify(verifyInput(token));
+    expect(result).toEqual({ ok: false, reason: "invalid_token" });
   });
 
   it("rejects a missing Authorization header", async () => {
