@@ -399,6 +399,9 @@ export function dispatcherRuntimeInputFromCliConfig(
     ...(channelPrincipals.length > 0 ? { channelPrincipals } : {}),
     ...(config.daemon.githubToken ? { githubToken: config.daemon.githubToken } : {}),
     ...(config.daemon.githubToken ? { githubCallbackToken: config.daemon.githubToken } : {}),
+    ...(config.daemon.completionPolicies !== undefined
+      ? { completionPolicies: config.daemon.completionPolicies }
+      : {}),
     ...(config.daemon.githubApplyToken !== undefined
       ? { githubApplyToken: config.daemon.githubApplyToken }
       : config.daemon.githubToken

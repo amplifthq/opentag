@@ -364,6 +364,53 @@ describe("OpenTag CLI start wiring", () => {
     });
   });
 
+  it("forwards daemon GitHub completion policies through the local start path", async () => {
+    const built = githubConfig();
+    built.daemon.completionPolicies = [
+      {
+        provider: "github",
+        owner: "acme",
+        repo: "demo",
+        requiredChecks: ["build", "test"],
+        baseBranch: "main",
+        requireMerge: true
+      }
+    ];
+    let dispatcherInput: Parameters<NonNullable<StartRuntimeDependencies["startDispatcher"]>>[0] | undefined;
+
+    await startFromConfig({
+      config: built,
+      configPath: "/tmp/opentag/config.json",
+      signal: abortedSignal(),
+      listenForProcessSignals: false,
+      dependencies: {
+        async assertStartPortsAvailable() {},
+        startDispatcher(input) {
+          dispatcherInput = input;
+          return {
+            url: "http://localhost:3030",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        async waitForDispatcher() {},
+        async bootstrapDispatcher() {},
+        async serveDaemon() {},
+        startGitHubIngress() {
+          return {
+            url: "http://127.0.0.1:3050",
+            webhookPath: "/github/webhooks",
+            server: {} as ReturnType<typeof import("@hono/node-server").serve>,
+            async close() {}
+          };
+        },
+        logger: { log() {} }
+      }
+    });
+
+    expect(dispatcherInput?.completionPolicies).toEqual(built.daemon.completionPolicies);
+  });
+
   it("wires GitHub reconciliation escalation intents to the pairing-authenticated dispatcher client", async () => {
     const built = githubConfig();
     built.daemon.pairingToken = "pairing_admin_token";

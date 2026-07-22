@@ -7,7 +7,12 @@ import {
   AdapterMutationMappingSchema,
   OpenTagManagedChannelBindingOwnershipSchema
 } from "@opentag/core";
-import { formatConfigError as formatDaemonConfigError, parseDaemonConfig, type OpenTagDaemonConfig } from "@opentag/local-runtime";
+import {
+  formatConfigError as formatDaemonConfigError,
+  parseDaemonConfig,
+  type LocalDispatcherRuntimeInput,
+  type OpenTagDaemonConfig
+} from "@opentag/local-runtime";
 import { z } from "zod";
 import type { CliLanguage } from "./catalogs/languages.js";
 import type { PlatformId } from "./catalogs/platforms.js";
@@ -27,6 +32,29 @@ const TelegramModeSchema = z.enum(["polling", "webhook"]);
 const DiscordModeSchema = z.enum(["gateway", "webhook"]);
 const BindingMethodSchema = z.enum(["default_project", "bind_later"]);
 const OptionalPortSchema = z.number().int().min(1).max(65535).optional();
+
+export type GitHubCompletionPolicyConfig = NonNullable<LocalDispatcherRuntimeInput["completionPolicies"]>[number];
+
+const GitHubCompletionPolicySchema = z
+  .object({
+    provider: z.literal("github"),
+    owner: z.string().trim().min(1),
+    repo: z.string().trim().min(1),
+    requiredChecks: z.array(z.string().trim().min(1)).min(1),
+    baseBranch: z.string().trim().min(1).optional(),
+    requireMerge: z.boolean().optional()
+  })
+  .strict()
+  .transform(
+    (policy): GitHubCompletionPolicyConfig => ({
+      provider: policy.provider,
+      owner: policy.owner,
+      repo: policy.repo,
+      requiredChecks: policy.requiredChecks,
+      ...(policy.baseBranch !== undefined ? { baseBranch: policy.baseBranch } : {}),
+      ...(policy.requireMerge !== undefined ? { requireMerge: policy.requireMerge } : {})
+    })
+  );
 
 const SecretRefSchema = z.discriminatedUnion("kind", [
   z
@@ -219,6 +247,7 @@ const DaemonConfigSchema = z
     security: SecuritySchema.optional(),
     githubToken: SecretStringSchema.optional(),
     githubApplyToken: SecretStringSchema.nullable().optional(),
+    completionPolicies: z.array(GitHubCompletionPolicySchema).optional(),
     preparePullRequestBranch: z.boolean().optional(),
     allowAutoCreatePullRequest: z.boolean().optional(),
     runnerToken: SecretStringSchema.optional(),
@@ -471,7 +500,7 @@ export const OpenTagCliConfigSchema = z
   .strict();
 
 export type OpenTagCliConfig = Omit<z.infer<typeof OpenTagCliConfigSchema>, "daemon"> & {
-  daemon: OpenTagDaemonConfig;
+  daemon: OpenTagDaemonConfig & { completionPolicies?: GitHubCompletionPolicyConfig[] };
 };
 
 export type OpenTagCliPreferences = NonNullable<OpenTagCliConfig["preferences"]>;
@@ -517,7 +546,12 @@ export function parseCliConfig(value: unknown): OpenTagCliConfig {
   const parsed = OpenTagCliConfigSchema.parse(value);
   return {
     ...parsed,
-    daemon: parseDaemonConfig(parsed.daemon)
+    daemon: {
+      ...parseDaemonConfig(parsed.daemon),
+      ...(parsed.daemon.completionPolicies !== undefined
+        ? { completionPolicies: parsed.daemon.completionPolicies }
+        : {})
+    }
   };
 }
 
