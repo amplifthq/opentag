@@ -20,6 +20,8 @@ export type SlackEventsAppInput = {
     payload?: Record<string, unknown>;
   }): Promise<void>;
   maxRequestBodyBytes?: number;
+  maxAsyncConcurrency?: number;
+  maxAsyncOutstanding?: number;
 } & SlackEventProcessorInput;
 
 export type SlackEventsApiIngressConfig = {
@@ -33,9 +35,83 @@ export type SlackEventsApiIngressConfig = {
   bindingAdminUserIds?: string[];
   runTimeoutMs?: number;
   maxRequestBodyBytes?: number;
+  maxAsyncConcurrency?: number;
+  maxAsyncOutstanding?: number;
+  linear?: SlackEventProcessorInput["linear"];
 } & SlackChannelPrincipalConfig;
 
 export type SlackIngressConfig = SlackEventsApiIngressConfig;
+
+
+const DEFAULT_SLACK_ASYNC_CONCURRENCY = 8;
+const DEFAULT_SLACK_ASYNC_MAX_OUTSTANDING = 100;
+
+type AsyncTask = () => Promise<void>;
+
+function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 1) throw new Error(`${name} must be a positive integer.`);
+  return resolved;
+}
+
+function createBoundedAsyncExecutor(input: {
+  concurrency: number;
+  maxOutstanding: number;
+  onError(error: unknown): void;
+}) {
+  let active = 0;
+  const queue: AsyncTask[] = [];
+
+  function drain(): void {
+    while (active < input.concurrency && queue.length > 0) {
+      const task = queue.shift()!;
+      active += 1;
+      void Promise.resolve()
+        .then(task)
+        .catch(input.onError)
+        .finally(() => {
+          active -= 1;
+          drain();
+        });
+    }
+  }
+
+  return {
+    tryEnqueue(task: AsyncTask): boolean {
+      if (active + queue.length >= input.maxOutstanding) return false;
+      queue.push(task);
+      drain();
+      return true;
+    }
+  };
+}
+
+function recordSlackAsyncQueueFull(input: {
+  recordControlPlaneEvent?: SlackEventsAppInput["recordControlPlaneEvent"];
+  apiAppId?: string;
+  maxAsyncConcurrency: number;
+  maxAsyncOutstanding: number;
+}): void {
+  void (async () => {
+    try {
+      await input.recordControlPlaneEvent?.({
+        type: "availability.backpressure",
+        severity: "warn",
+        subject: "slack:POST /slack/events",
+        payload: {
+          provider: "slack",
+          endpoint: "POST /slack/events",
+          reason: "async_queue_full",
+          maxAsyncConcurrency: input.maxAsyncConcurrency,
+          maxAsyncOutstanding: input.maxAsyncOutstanding,
+          ...(input.apiAppId ? { apiAppId: input.apiAppId } : {})
+        }
+      });
+    } catch {
+      // Backpressure must remain visible to Slack even when audit reporting is unavailable.
+    }
+  })();
+}
 
 export type SlackIngressHandle = {
   url: string;
@@ -191,6 +267,23 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
   const app = new Hono();
   const processor = createSlackEventProcessor(input);
   const maxRequestBodyBytes = input.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const maxAsyncConcurrency = positiveInteger(
+    input.maxAsyncConcurrency,
+    DEFAULT_SLACK_ASYNC_CONCURRENCY,
+    "maxAsyncConcurrency"
+  );
+  const maxAsyncOutstanding = positiveInteger(
+    input.maxAsyncOutstanding,
+    DEFAULT_SLACK_ASYNC_MAX_OUTSTANDING,
+    "maxAsyncOutstanding"
+  );
+  const asyncExecutor = createBoundedAsyncExecutor({
+    concurrency: maxAsyncConcurrency,
+    maxOutstanding: maxAsyncOutstanding,
+    onError(error) {
+      console.error("[slack] async event processing failed:", error);
+    }
+  });
 
   function parseSlackPayload(rawBody: string, contentType?: string): unknown | null {
     try {
@@ -298,11 +391,30 @@ export function createSlackEventsApp(input: SlackEventsAppInput) {
       });
       return c.json({ error: resolvedSlackApp.error }, 401);
     }
-    const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
-    if (result.kind === "text") {
-      return c.text(result.body, result.status);
+    if (payload.type === "url_verification") {
+      const result = await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+      if (result.kind === "text") {
+        return c.text(result.body, result.status);
+      }
+      return c.json(result.body, result.status);
     }
-    return c.json(result.body, result.status);
+    // Reserve a bounded async slot before ACKing. Accepted work is processed
+    // out-of-band so slow Linear/dispatcher/Slack calls cannot consume Slack's
+    // three-second acknowledgement window. A full queue returns 503 so Slack
+    // can retry instead of allowing unbounded detached promises to accumulate.
+    const accepted = asyncExecutor.tryEnqueue(async () => {
+      await processor.process(payload, resolvedSlackApp.slackApp, { signatureVerified: true });
+    });
+    if (!accepted) {
+      recordSlackAsyncQueueFull({
+        recordControlPlaneEvent: input.recordControlPlaneEvent,
+        ...(payload.api_app_id ? { apiAppId: payload.api_app_id } : {}),
+        maxAsyncConcurrency,
+        maxAsyncOutstanding
+      });
+      return c.json({ error: "slack_async_queue_full" }, 503);
+    }
+    return c.json({ ok: true }, 200);
   });
 
   return app;
@@ -324,7 +436,9 @@ export function startSlackIngress(config: SlackEventsApiIngressConfig): SlackIng
           ...(config.callbackUri ? { callbackUri: config.callbackUri } : {})
         }
       ],
-      ...(config.maxRequestBodyBytes ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(config.maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes: config.maxRequestBodyBytes } : {}),
+      ...(config.maxAsyncConcurrency !== undefined ? { maxAsyncConcurrency: config.maxAsyncConcurrency } : {}),
+      ...(config.maxAsyncOutstanding !== undefined ? { maxAsyncOutstanding: config.maxAsyncOutstanding } : {}),
       async recordControlPlaneEvent(event) {
         await dispatcherClient.recordControlPlaneEvent(event);
       },

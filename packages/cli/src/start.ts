@@ -48,6 +48,7 @@ import {
   type OpenTagCliConfig
 } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
+import { linearBacklogConfigDiagnostics } from "./linear-backlog-config.js";
 import { discordLocalInteractionsUrl, discordPublicInteractionsUrlPlaceholder } from "./platforms/discord/display.js";
 import { githubLocalWebhookUrl, githubPublicWebhookUrlPlaceholder, githubWebhooksSettingsUrl } from "./platforms/github/display.js";
 import { gitlabLocalWebhookUrl, gitlabProjectWebhooksSettingsUrl, gitlabPublicWebhookUrlPlaceholder } from "./platforms/gitlab/display.js";
@@ -56,11 +57,14 @@ import { DEFAULT_GITHUB_WEBHOOK_PORT, DEFAULT_GITLAB_WEBHOOK_PORT, DEFAULT_LINEA
 import { teamsLocalWebhookUrl, teamsPublicWebhookUrlPlaceholder } from "./platforms/teams/display.js";
 import { telegramLocalWebhookUrl, telegramPublicWebhookUrlPlaceholder } from "./platforms/telegram/display.js";
 import { assertRelayTransportAllowed, relayTrustWarning } from "./relay-security.js";
+import { createSlackLinearBacklogHandler } from "./slack-linear-backlog.js";
 
 export type StartCommandOptions = {
   config?: string;
   background?: boolean;
 };
+
+type LinearTokenProvider = NonNullable<LocalDispatcherRuntimeInput["linearTokenProvider"]>;
 
 type Logger = Pick<Console, "log">;
 
@@ -169,6 +173,15 @@ function requireLinearConfig(config: OpenTagCliConfig): NonNullable<OpenTagCliCo
   return linear;
 }
 
+// A query-only Linear config (token + projectId, no webhookSecret) powers the
+// read-only Slack /linear backlog command and must not mount webhook ingress.
+function linearIngressEnabled(
+  linear: OpenTagCliConfig["platforms"]["linear"]
+): linear is NonNullable<OpenTagCliConfig["platforms"]["linear"]> {
+  if (!linear) return false;
+  return Boolean(linear.webhookSecret) || linear.auth?.method === "hosted_oauth_app";
+}
+
 function hasStartablePlatform(config: OpenTagCliConfig): boolean {
   return Boolean(
     config.platforms.lark ||
@@ -240,7 +253,7 @@ function localStartPortChecks(config: OpenTagCliConfig): LocalPortCheck[] {
     });
   }
   const linear = config.platforms.linear;
-  if (linear) {
+  if (linearIngressEnabled(linear)) {
     checks.push({
       label: "Linear local webhook",
       port: linear.port ?? DEFAULT_LINEAR_WEBHOOK_PORT,
@@ -408,7 +421,7 @@ export function dispatcherRuntimeInputFromCliConfig(
         ? { githubApplyToken: config.daemon.githubToken }
         : {}),
     ...(gitlab ? { gitlabToken: gitlab.token, gitlabBaseUrl: gitlab.baseUrl } : {}),
-    ...(linear && linear.token
+    ...(linearIngressEnabled(linear) && linear.token
       ? {
           linearToken: linear.token,
           ...(linear.graphqlUrl ? { linearGraphqlUrl: linear.graphqlUrl } : {}),
@@ -504,7 +517,7 @@ function slackModeFromCliConfig(config: OpenTagCliConfig): "socket_mode" | "even
 
 export function slackIngressConfigFromCliConfig(
   config: OpenTagCliConfig,
-  input: { env?: NodeJS.ProcessEnv } = {}
+  input: { env?: NodeJS.ProcessEnv; linearTokenProvider?: LinearTokenProvider } = {}
 ): SlackEventsApiIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.signingSecret) {
@@ -528,11 +541,19 @@ export function slackIngressConfigFromCliConfig(
     ...(slack.appId ? { appId: slack.appId } : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
     ...(maxRequestBodyBytes ? { maxRequestBodyBytes } : {}),
-    ...(slack.port ? { port: slack.port } : {})
+    ...(slack.port ? { port: slack.port } : {}),
+    linear: createSlackLinearBacklogHandler({
+      ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
+      env: input.env ?? process.env,
+      ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {})
+    })
   };
 }
 
-export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConfig): SlackSocketModeIngressConfig {
+export function slackSocketModeIngressConfigFromCliConfig(
+  config: OpenTagCliConfig,
+  input: { env?: NodeJS.ProcessEnv; linearTokenProvider?: LinearTokenProvider } = {}
+): SlackSocketModeIngressConfig {
   const slack = requireSlackConfig(config);
   if (!slack.appToken) {
     throw new Error("Slack Socket Mode requires platforms.slack.appToken.");
@@ -552,7 +573,12 @@ export function slackSocketModeIngressConfigFromCliConfig(config: OpenTagCliConf
         }
       : {}),
     ...(config.daemon.runTimeoutMs ? { runTimeoutMs: config.daemon.runTimeoutMs } : {}),
-    ...(slack.appId ? { appId: slack.appId } : {})
+    ...(slack.appId ? { appId: slack.appId } : {}),
+    linear: createSlackLinearBacklogHandler({
+      ...(config.platforms.linear ? { linear: config.platforms.linear } : {}),
+      env: input.env ?? process.env,
+      ...(input.linearTokenProvider ? { getToken: input.linearTokenProvider } : {})
+    })
   };
 }
 
@@ -986,7 +1012,10 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     refreshLinearOAuthToken: dependencies.refreshLinearOAuthToken,
     writeConfig: dependencies.writeConfig
   });
-  if (linearTokenProvider) {
+  // OAuth refresh is also used by the read-only Slack /linear handler, but a
+  // token provider only grants dispatcher mutation capability when Linear
+  // webhook/apply ingress is explicitly enabled.
+  if (linearTokenProvider && linearIngressEnabled(config.platforms.linear)) {
     dispatcherInput.linearTokenProvider = linearTokenProvider;
   }
   const dispatcher = dependencies.startDispatcher(dispatcherInput);
@@ -1009,11 +1038,15 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     }
     if (config.platforms.slack) {
       if (slackModeFromCliConfig(config) === "socket_mode") {
-        const handle = dependencies.startSlackSocketModeIngress(slackSocketModeIngressConfigFromCliConfig(config));
+        const handle = dependencies.startSlackSocketModeIngress(
+          slackSocketModeIngressConfigFromCliConfig(config, { env, ...(linearTokenProvider ? { linearTokenProvider } : {}) })
+        );
         ingresses.push({ platform: "slack", mode: "socket_mode", handle });
         abortOnSubsystemFailure(handle.startPromise, abortController);
       } else {
-        const handle = dependencies.startSlackIngress(slackIngressConfigFromCliConfig(config, { env }));
+        const handle = dependencies.startSlackIngress(
+          slackIngressConfigFromCliConfig(config, { env, ...(linearTokenProvider ? { linearTokenProvider } : {}) })
+        );
         ingresses.push({ platform: "slack", mode: "events_api", url: handle.url, handle });
       }
     }
@@ -1025,7 +1058,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
       const handle = dependencies.startGitLabIngress(gitlabIngressConfigFromCliConfig(config));
       ingresses.push({ platform: "gitlab", url: handle.url, webhookPath: handle.webhookPath, handle });
     }
-    if (config.platforms.linear) {
+    if (linearIngressEnabled(config.platforms.linear)) {
       const linearIngressConfig = linearIngressConfigFromCliConfig(config);
       if (linearTokenProvider) {
         linearIngressConfig.getLinearToken = linearTokenProvider;
@@ -1039,6 +1072,7 @@ async function startLocalMode(input: StartFromConfigInput, abortController: Abor
     logger.log(`Dispatcher: ${config.daemon.dispatcherUrl}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
     if (hermesWarning) logger.log(hermesWarning);
+    for (const diagnostic of linearBacklogConfigDiagnostics(config)) logger.log(`Warning: ${diagnostic.message}`);
     for (const ingress of ingresses) {
       if (ingress.platform === "slack") {
         const slack = config.platforms.slack!;
@@ -1167,6 +1201,7 @@ async function startRelayMode(input: StartFromConfigInput, abortController: Abor
     logger.log(`Runner: ${config.daemon.runnerId}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
     if (hermesWarning) logger.log(hermesWarning);
+    for (const diagnostic of linearBacklogConfigDiagnostics(config)) logger.log(`Warning: ${diagnostic.message}`);
     if (config.platforms.github) {
       logger.log(`GitHub webhook URL: ${githubRelayWebhookUrl(config)}`);
       logger.log("GitHub webhook secret: the relay must verify the configured secret before creating runs.");

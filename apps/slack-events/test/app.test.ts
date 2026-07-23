@@ -84,7 +84,7 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(createRun).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(createRun).toHaveBeenCalledOnce());
     const [event] = createRun.mock.calls[0] ?? [];
     expect(event.target.agentId).toBe("gemini");
     expect(event.metadata.repoProvider).toBe("gitlab");
@@ -141,7 +141,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "status" });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
       channelId: "C123",
@@ -205,7 +206,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind" });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(bindChannel).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(canManageBinding).toHaveBeenCalledWith({
       action: "bind",
@@ -277,7 +279,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unauthorized: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
@@ -334,7 +337,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", usage: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(bindChannel).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
@@ -389,7 +393,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, selfService: "bind", unavailable: true });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(reply).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(reply).toHaveBeenCalledWith({
       channelId: "C123",
@@ -445,12 +450,8 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      ok: true,
-      selfService: "stop",
-      outcome: "cancelled",
-      runId: "run_active"
-    });
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    await vi.waitFor(() => expect(stopRun).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(stopRun).toHaveBeenCalledWith({
       teamId: "T123",
@@ -518,6 +519,7 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(submitThreadAction).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(submitThreadAction).toHaveBeenCalledWith({
       id: "approval_slack_EvAction",
@@ -620,6 +622,7 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(submitThreadAction).toHaveBeenCalledOnce());
     expect(createRun).not.toHaveBeenCalled();
     expect(submitThreadAction).toHaveBeenCalledWith({
       id: "approval_slack_block_trigger_apply_1",
@@ -802,7 +805,7 @@ describe("Slack events app", () => {
     });
 
     expect(response.status).toBe(200);
-    expect(createRun).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(createRun).toHaveBeenCalledOnce());
     const [event] = createRun.mock.calls[0] ?? [];
     expect(event.target.agentId).toBe("deepseek");
   });
