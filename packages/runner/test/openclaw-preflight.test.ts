@@ -3,12 +3,19 @@ import {
   checkOpenClawCompatibility,
   type OpenClawCommandResult
 } from "../src/openclaw-preflight.js";
+import * as runnerPublicApi from "../src/index.js";
 
 function result(stdout: string, exitCode = 0, stderr = ""): OpenClawCommandResult {
   return { exitCode, stdout, stderr };
 }
 
 describe("OpenClaw compatibility preflight", () => {
+  it("keeps the OpenClaw compatibility helpers out of the public runner API", () => {
+    expect(runnerPublicApi).not.toHaveProperty("checkOpenClawCompatibility");
+    expect(runnerPublicApi).not.toHaveProperty("createOpenClawPreflight");
+    expect(runnerPublicApi).not.toHaveProperty("parseOpenClawCliVersion");
+  });
+
   it("rejects an installed CLI older than the configured profile authority before querying Gateway", async () => {
     const run = vi.fn(async () => result("OpenClaw 2026.7.1 (2d2ddc4)\n"));
 
