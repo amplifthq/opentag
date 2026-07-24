@@ -1040,7 +1040,11 @@ describe("dispatcher completion governance", () => {
   });
 
   it("applies and replays a bounded current-contract waiver with one semantic callback", async () => {
-    const setup = await startRun({ runId: "run_waived", completionPolicies: [strictPolicy] });
+    const setup = await startRun({
+      runId: "run_waived",
+      completionPolicies: [strictPolicy],
+      completionNow: () => "2026-07-21T10:11:00.000Z"
+    });
     await completeRun({ setup, runId: "run_waived", conclusion: "success" });
     const body = {
       actor: { provider: "github", providerUserId: "owner-1", handle: "repo-owner" },
