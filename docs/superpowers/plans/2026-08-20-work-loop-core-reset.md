@@ -1,5 +1,10 @@
 # OpenTag Work-Loop Core Reset Implementation Plan
 
+> **Status: Superseded.** Do not execute this destructive reset. It is replaced
+> by [2026-08-28-self-hosted-team-relay.md](./2026-08-28-self-hosted-team-relay.md),
+> which preserves the source-thread product, existing Control Plane, paired
+> local Runner, ACP execution, delivery kernel, and evidence governance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` (recommended) or `executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current multi-channel end-to-end Agent application with a small, embeddable protocol and deep Work Loop Module that owns admission, attempts, approval, cancellation, evidence, completion, and durable effect identity.
