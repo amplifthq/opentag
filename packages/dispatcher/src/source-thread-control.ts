@@ -65,7 +65,7 @@ type RecordControlPlaneEvent = (input: {
   createdAt?: string | undefined;
 }) => Promise<void>;
 
-type SourceThreadControlOptions = {
+export type SourceThreadControlOptions = {
   repo: OpenTagRepository;
   presentation: Pick<ProviderPresentation, "render">;
   conversationKeysFromThreadAction(input: {

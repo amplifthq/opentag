@@ -8,3 +8,5 @@ export * from "./presentation.js";
 export * from "./reassessment-obligations.js";
 export * from "./reassessment-processor.js";
 export * from "./server.js";
+export * from "./source-app-commands.js";
+export * from "./source-app-registry.js";

@@ -12,6 +12,7 @@
     { "path": "packages/linear" },
     { "path": "packages/local-runtime" },
     { "path": "packages/slack" },
+    { "path": "packages/source-app-runtime" },
     { "path": "packages/telegram" },
     { "path": "packages/runner" },
     { "path": "packages/store" },

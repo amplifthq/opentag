@@ -92,3 +92,9 @@ export type OpenTagChannelInboundMessageInput = z.input<typeof OpenTagChannelInb
 export type OpenTagChannelInboundMessage = z.infer<typeof OpenTagChannelInboundMessageSchema>;
 export type OpenTagChannelPresentationCommandInput = z.input<typeof OpenTagChannelPresentationCommandSchema>;
 export type OpenTagChannelPresentationCommand = z.infer<typeof OpenTagChannelPresentationCommandSchema>;
+
+export type OpenTagChannelIngressVerificationInput = {
+  rawBody: Uint8Array;
+  headers: Headers;
+  receivedAt: string;
+};

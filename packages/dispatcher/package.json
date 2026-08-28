@@ -43,6 +43,7 @@
     "@opentag/lark": "workspace:*",
     "@opentag/linear": "workspace:*",
     "@opentag/slack": "workspace:*",
+    "@opentag/source-app-runtime": "workspace:*",
     "@opentag/teams": "workspace:*",
     "@opentag/telegram": "workspace:*",
     "@opentag/store": "workspace:*",
