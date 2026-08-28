@@ -95,6 +95,7 @@ export const sourceReplayTombstones = pgTable("cp_source_replay_tombstone", {
       AND length(${table.invalidationReceipt}->>'commandId') BETWEEN 1 AND 512
       AND length(${table.invalidationReceipt}->>'organizationId') BETWEEN 1 AND 512
       AND length(${table.invalidationReceipt}->>'sourceVersionRef') BETWEEN 1 AND 512
+      AND length(${table.invalidationReceipt}->>'recordedAt') BETWEEN 1 AND 64
     )
   )`),
   index("cp_source_replay_tombstone_expiry_idx").on(table.expiresAt),

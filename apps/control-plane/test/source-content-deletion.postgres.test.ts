@@ -133,6 +133,39 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     }
   });
 
+  it("catches an oversized but syntactically valid receipt timestamp mutating custody state", async () => {
+    const command = verifiedWithdrawal("withdraw_long_time", "s:long-time:v1", "d_long_time");
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
+        async invalidate() {
+          return { ...invalidationReceipt(command.commandId, command.sourceVersionRef),
+            recordedAt: `2026-08-28T00:00:00.${"1".repeat(100_000)}Z` };
+        },
+      } });
+    await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
+      sourceDeliveryId: "d_long_time", sourceMessageId: "m_long_time",
+      sourceVersionRef: "s:long-time:v1", purpose: "source_context",
+      contentId: "content_long_time", payload: { text: "must remain" },
+      expiresAt: new Date("2026-09-01T00:00:00Z") });
+    const grant = await custody.issueReadGrant({ organizationId: "org_a", runId: "run_long",
+      attemptId: "attempt_long", fenceDigest: "fence_long", contentIds: ["content_long_time"],
+      purpose: "source_context", expiresAt: new Date("2026-08-28T00:01:00Z") });
+    await expect(custody.withdraw(command)).rejects
+      .toThrow("source_invalidation_receipt_invalid");
+    const state = await fixture.pool.query(
+      `SELECT content.ciphertext IS NOT NULL AS readable, content.deleted_at,
+        grant_record.revoked_at,
+        (SELECT count(*)::int FROM cp_source_replay_tombstone
+         WHERE organization_id = $1 AND command_id = $2) AS tombstones
+       FROM cp_source_content content
+       JOIN cp_source_content_read_grant grant_record ON grant_record.grant_id = $3
+       WHERE content.organization_id = $1 AND content.content_id = $4`,
+      ["org_a", command.commandId, grant.grantId, "content_long_time"],
+    );
+    expect(state.rows[0]).toEqual({ readable: true, deleted_at: null,
+      revoked_at: null, tombstones: 0 });
+  });
+
   it("catches source-version races allowing different command IDs to call authority twice", async () => {
     let calls = 0;
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
@@ -232,14 +265,37 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     expect(authorityCalls).toBe(1);
   });
 
-  it("catches settling transient authority failure or retrying immutable same-command replay", async () => {
-    let authorityCalls = 0;
-    let failAuthority = true;
+  it("catches retrying an unknown authority error instead of failing with a stable redacted code", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
+        async invalidate() { throw new Error("provider-secret-canary"); },
+      } });
+    await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
+      sourceDeliveryId: "d_job_unknown", sourceMessageId: "m_job_unknown",
+      sourceVersionRef: "s:job:unknown", purpose: "source_context",
+      contentId: "content_job_unknown", payload: { text: "keep" },
+      expiresAt: new Date("2026-09-01T00:00:00Z") });
+    const queue = createQueue();
+    await enqueueWithdrawal(queue, "job_unknown",
+      verifiedWithdrawal("withdraw_job_unknown", "s:job:unknown", "d_job_unknown"));
+    expect(await runWithdrawalJob(queue, custody)).toEqual({ kind: "failed", jobId: "job_unknown" });
+    expect((await fixture.pool.query(
+      "SELECT state, last_error_code FROM cp_job WHERE job_id = $1", ["job_unknown"],
+    )).rows[0]).toEqual({ state: "failed", last_error_code: "source_invalidation_failed" });
+  });
+
+  it("catches failing an explicit transient authority error or requiring authority for stored replay", async () => {
+    const sourceContentModule = (await import("../src/modules/source-content/index.js")) as unknown as Record<string, unknown>;
+    const TransientError = sourceContentModule.SourceContentInvalidationAuthorityTransientError as (new () => Error) | undefined;
+    expect(TransientError).toBeTypeOf("function");
+    let authorityCalls = 0;
+    let failAuthority = true;
+    const key = randomBytes(32);
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key, keyVersion: "v1" }, invalidationAuthority: {
         async invalidate(input) {
           authorityCalls += 1;
-          if (failAuthority) throw new Error("provider-secret-canary");
+          if (failAuthority) throw new TransientError!();
           return invalidationReceipt(input.commandId, input.sourceVersionRef);
         },
       } });
@@ -263,11 +319,59 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     await fixture.pool.query("UPDATE cp_job SET available_at = $2 WHERE job_id = $1", ["job_retry", now]);
     failAuthority = false;
     expect((await runWithdrawalJob(queue, custody)).kind).toBe("settled");
+    const replayWithoutAuthority = createRelayContentCustody({ pool: fixture.pool,
+      clock: { now: () => now }, key: { key: Buffer.from(key), keyVersion: "v1" } });
     await enqueueWithdrawal(queue, "job_replay", command);
+    expect((await runWithdrawalJob(queue, replayWithoutAuthority)).kind).toBe("settled");
+    expect(authorityCalls).toBe(2);
+  });
+
+  it("catches losing same-command recovery after authority returns but PostgreSQL commit fails", async () => {
+    let authorityCalls = 0;
+    const logicalInvalidations = new Set<string>();
+    const receipt = invalidationReceipt("withdraw_post_authority", "s:post-authority:v1");
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
+        async invalidate(input) {
+          authorityCalls += 1;
+          logicalInvalidations.add(input.commandId);
+          return receipt;
+        },
+      } });
+    await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
+      sourceDeliveryId: "d_post_authority", sourceMessageId: "m_post_authority",
+      sourceVersionRef: "s:post-authority:v1", purpose: "source_context",
+      contentId: "content_post_authority", payload: { text: "recover" },
+      expiresAt: new Date("2026-09-01T00:00:00Z") });
+    await fixture.pool.query(
+      `CREATE FUNCTION cp_test_fail_withdrawal_commit() RETURNS trigger
+       LANGUAGE plpgsql AS $$ BEGIN
+         RAISE EXCEPTION 'forced post-authority database failure' USING ERRCODE = '40001';
+       END $$`,
+    );
+    await fixture.pool.query(
+      `CREATE TRIGGER cp_test_fail_withdrawal_commit_trigger
+       BEFORE UPDATE OF ciphertext ON cp_source_content
+       FOR EACH ROW EXECUTE FUNCTION cp_test_fail_withdrawal_commit()`,
+    );
+    const queue = createQueue();
+    const command = verifiedWithdrawal(
+      "withdraw_post_authority", "s:post-authority:v1", "d_post_authority");
+    await enqueueWithdrawal(queue, "job_post_authority", command);
+    expect(await runWithdrawalJob(queue, custody)).toEqual({
+      kind: "retry_scheduled", jobId: "job_post_authority",
+    });
+    expect(authorityCalls).toBe(1);
+    expect(logicalInvalidations.size).toBe(1);
+    await fixture.pool.query("DROP TRIGGER cp_test_fail_withdrawal_commit_trigger ON cp_source_content");
+    await fixture.pool.query("UPDATE cp_job SET available_at = $2 WHERE job_id = $1",
+      ["job_post_authority", now]);
     expect((await runWithdrawalJob(queue, custody)).kind).toBe("settled");
     expect(authorityCalls).toBe(2);
-    expect(JSON.stringify((await fixture.pool.query(
-      "SELECT last_error_code FROM cp_job WHERE job_id = $1", ["job_retry"],
-    )).rows)).not.toContain("provider-secret-canary");
+    expect(logicalInvalidations.size).toBe(1);
+    expect((await fixture.pool.query(
+      "SELECT invalidation_receipt FROM cp_source_replay_tombstone WHERE command_id = $1",
+      [command.commandId],
+    )).rows[0]?.invalidation_receipt).toEqual(receipt);
   });
 });

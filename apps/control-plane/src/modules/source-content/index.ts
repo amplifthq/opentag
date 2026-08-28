@@ -13,6 +13,7 @@ export type SourceContextEnvelopeRef = {
 
 const boundedIdentity = z.string().min(1).max(512).refine((value) => value === value.trim());
 const sha256Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+const boundedIsoDateTime = z.string().max(64).pipe(z.iso.datetime({ offset: true }));
 
 export const VerifiedSourceWithdrawalCommandSchema = z.object({
   schemaVersion: z.literal(1),
@@ -24,7 +25,7 @@ export const VerifiedSourceWithdrawalCommandSchema = z.object({
     installationId: boundedIdentity,
     sourceAppId: boundedIdentity,
     sourceDeliveryId: boundedIdentity,
-    verifiedAt: z.iso.datetime({ offset: true }),
+    verifiedAt: boundedIsoDateTime,
     evidenceDigest: sha256Digest,
   }).strict(),
 }).strict();
@@ -38,7 +39,7 @@ export const ImmutableInvalidationReceiptSchema = z.object({
   organizationId: boundedIdentity,
   sourceVersionRef: boundedIdentity,
   reason: z.literal("source_content_deleted"),
-  recordedAt: z.iso.datetime({ offset: true }),
+  recordedAt: boundedIsoDateTime,
   authorityReceiptDigest: sha256Digest,
 }).strict();
 
@@ -51,6 +52,13 @@ export interface SourceContentInvalidationAuthority {
     organizationId: string; sourceVersionRef: string; contentIds: string[];
     reason: "source_content_deleted"; commandId: string;
   }): Promise<unknown>;
+}
+
+export class SourceContentInvalidationAuthorityTransientError extends Error {
+  constructor() {
+    super("source_invalidation_authority_transient");
+    this.name = "SourceContentInvalidationAuthorityTransientError";
+  }
 }
 
 export function parseVerifiedSourceWithdrawalCommand(
@@ -279,7 +287,6 @@ export function createRelayContentCustody(input: {
 
     async withdraw(inputCommand: VerifiedSourceWithdrawalCommand) {
       const command = parseVerifiedSourceWithdrawalCommand(inputCommand);
-      if (!input.invalidationAuthority) throw new Error("source_invalidation_unavailable");
       const requestDigest = digest(["opentag.relay.source-withdrawal/v1",
         command.organizationId, command.sourceVersionRef, command.commandId]);
       return withPostgresTransaction(input.pool, async (client) => {
@@ -320,14 +327,19 @@ export function createRelayContentCustody(input: {
           || row.source_delivery_id !== command.verification.sourceDeliveryId)) {
           throw new Error("source_withdrawal_verification_invalid");
         }
+        if (!input.invalidationAuthority) throw new Error("source_invalidation_unavailable");
         let authorityOutput: unknown;
         try {
           authorityOutput = await input.invalidationAuthority!.invalidate({
             organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
             contentIds, reason: "source_content_deleted", commandId: command.commandId,
           });
-        } catch {
-          throw new Error("source_invalidation_transient");
+        } catch (error) {
+          throw new Error(
+            error instanceof SourceContentInvalidationAuthorityTransientError
+              ? "source_invalidation_transient"
+              : "source_invalidation_failed",
+          );
         }
         const receipt = parseInvalidationReceipt(authorityOutput, command);
         await client.query(

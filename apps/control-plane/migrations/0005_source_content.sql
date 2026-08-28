@@ -98,6 +98,7 @@ CREATE TABLE cp_source_replay_tombstone (
       AND length(invalidation_receipt->>'commandId') BETWEEN 1 AND 512
       AND length(invalidation_receipt->>'organizationId') BETWEEN 1 AND 512
       AND length(invalidation_receipt->>'sourceVersionRef') BETWEEN 1 AND 512
+      AND length(invalidation_receipt->>'recordedAt') BETWEEN 1 AND 64
     )
   )
 );

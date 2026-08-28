@@ -10,6 +10,7 @@ export const SOURCE_CONTENT_PURGE_JOB = "source-content-purge";
 const PERMANENT_SOURCE_CONTENT_ERRORS = new Set([
   "source_content_unavailable",
   "source_invalidation_receipt_invalid",
+  "source_invalidation_failed",
   "source_invalidation_unavailable",
   "source_withdrawal_conflict",
   "source_withdrawal_verification_invalid",
