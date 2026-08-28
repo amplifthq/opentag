@@ -43,7 +43,33 @@ describe("Control Plane configuration", () => {
       port: 3000,
       publicOrigin: "http://127.0.0.1:3000",
       releaseSha: "local",
+      relayContentKey: null,
     });
+  });
+
+  it("catches inline, partial, or mutable relay content key configuration", () => {
+    const base = {
+      DATABASE_URL: "postgresql://opentag:secret@postgres:5432/opentag",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_ID: "org_local",
+      OPENTAG_BOOTSTRAP_ORGANIZATION_NAME: "Local OpenTag",
+      OPENTAG_BOOTSTRAP_PAIRING_TOKEN: "bootstrap_secret",
+      OPENTAG_PUBLIC_URL: "http://127.0.0.1:3000",
+    };
+    expect(parseControlPlaneConfig({
+      ...base,
+      OPENTAG_RELAY_CONTENT_KEK_FILE: "/run/secrets/opentag_relay_content_kek",
+      OPENTAG_RELAY_CONTENT_KEY_VERSION: "v1",
+    }).relayContentKey).toEqual({
+      file: "/run/secrets/opentag_relay_content_kek",
+      keyVersion: "v1",
+    });
+    for (const partial of [
+      { OPENTAG_RELAY_CONTENT_KEK_FILE: "/run/secrets/key" },
+      { OPENTAG_RELAY_CONTENT_KEY_VERSION: "v1" },
+      { OPENTAG_RELAY_CONTENT_KEK_FILE: "replace-with-key-file", OPENTAG_RELAY_CONTENT_KEY_VERSION: "v1" },
+      { OPENTAG_RELAY_CONTENT_KEK_FILE: "/run/secrets/key", OPENTAG_RELAY_CONTENT_KEY_VERSION: "latest key" },
+    ]) expect(() => parseControlPlaneConfig({ ...base, ...partial }))
+      .toThrow("configuration_invalid");
   });
 
   it("requires HTTPS and an immutable release identity outside local development", () => {

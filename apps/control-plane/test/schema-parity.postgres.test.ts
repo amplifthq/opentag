@@ -142,6 +142,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       ]);
 
       expect(migrated).toEqual(generated);
+      const tableNames = new Set(
+        (migrated.columns as Array<{ table_name: string }>).map((row) => row.table_name),
+      );
+      for (const required of ["cp_source_content", "cp_source_content_dependency",
+        "cp_source_content_read_grant", "cp_source_replay_tombstone"]) {
+        expect(tableNames.has(required), `missing ${required}`).toBe(true);
+      }
     });
   },
 );

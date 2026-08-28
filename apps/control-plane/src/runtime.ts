@@ -9,6 +9,7 @@ import { createControlPlaneApplication } from "./application.js";
 import type { ControlPlaneConfig } from "./config.js";
 import {
   checkMigrationReadiness,
+  checkSourceContentSchemaReadiness,
   type SqlMigration,
 } from "./database/migrations.js";
 import {
@@ -29,6 +30,12 @@ import {
 } from "./modules/jobs/index.js";
 import { createGithubIngress } from "./modules/github-ingress/index.js";
 import { createRunnerDirectory } from "./modules/runners/index.js";
+import {
+  createRelayContentCustody,
+  type SourceContentInvalidationAuthority,
+} from "./modules/source-content/index.js";
+import { loadRelayContentKey } from "./modules/source-content/crypto.js";
+import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
 
 const BASE_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -77,6 +84,7 @@ export function createControlPlaneRuntime(input: {
   config: ControlPlaneConfig;
   migrations: readonly SqlMigration[];
   postgres?: PostgresCapability;
+  sourceContentInvalidationAuthority?: SourceContentInvalidationAuthority;
 }) {
   const postgres = input.postgres ?? createPostgresRuntime({
     databaseUrl: input.config.databaseUrl,
@@ -133,6 +141,24 @@ export function createControlPlaneRuntime(input: {
     leaseDurationMs: input.config.jobLeaseDurationMs,
     tokenFactory: () => runtimeSecret("job_lease"),
   });
+  let sourceContentKey: ReturnType<typeof loadRelayContentKey> | null = null;
+  if (input.config.relayContentKey) {
+    try {
+      sourceContentKey = loadRelayContentKey(input.config.relayContentKey);
+    } catch {
+      sourceContentKey = null;
+    }
+  }
+  const sourceContent = sourceContentKey
+    ? createRelayContentCustody({
+        pool: postgres.pool,
+        clock,
+        key: sourceContentKey,
+        ...(input.sourceContentInvalidationAuthority
+          ? { invalidationAuthority: input.sourceContentInvalidationAuthority }
+          : {}),
+      })
+    : null;
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: {
       organizationId: string | null;
@@ -140,10 +166,12 @@ export function createControlPlaneRuntime(input: {
     "runner-readiness-retention": async (job: {
       organizationId: string | null;
     }) => runners.pruneExpiredReadiness(job.organizationId),
+    ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };
   const scheduleJobs = () => scheduleControlPlaneMaintenance({
     queue: jobs,
     clock,
+    includeSourceContentPurge: Boolean(sourceContent),
   });
   const github = input.config.githubIngressMasterSecret
     ? createGithubIngress({
@@ -178,7 +206,18 @@ export function createControlPlaneRuntime(input: {
       async check() {
         const database = await checkPostgresReadiness(postgres.pool);
         if (!database.ready) return database;
-        return checkMigrationReadiness(postgres.pool, input.migrations);
+        const migrations = await checkMigrationReadiness(postgres.pool, input.migrations);
+        if (!migrations.ready) return migrations;
+        // Hand-constructed legacy test configs omit the property. Parsed runtime
+        // configs always carry null or an explicit reference and therefore fail
+        // closed when relay content custody has no usable operator key.
+        if (input.config.relayContentKey !== undefined) {
+          if (!sourceContent) return { ready: false, reason: "configuration_invalid" };
+          const sourceSchema = await checkSourceContentSchemaReadiness(postgres.pool);
+          if (!sourceSchema.ready) return sourceSchema;
+          return sourceContent.checkReadiness();
+        }
+        return { ready: true };
       },
     },
     control: {
@@ -227,6 +266,7 @@ export function createControlPlaneRuntime(input: {
           };
         },
       },
+      ...(sourceContent ? { sourceContent } : {}),
     },
     console: {
       identity,
@@ -250,6 +290,7 @@ export function createControlPlaneRuntime(input: {
     permissions,
     reads,
     runners,
+    sourceContent,
     close: () => postgres.close(),
   };
 }

@@ -28,10 +28,12 @@ type WorkerQueue = {
   }): Promise<{ kind: string }>;
 };
 
-type JobHandler = (input: {
+export type JobHandler = (input: {
   organizationId: string | null;
   payload: unknown;
 }) => Promise<unknown>;
+
+export type JobHandlerMap = Readonly<Record<string, JobHandler>>;
 
 export class JobHandlerError extends Error {
   constructor(
@@ -46,7 +48,7 @@ export class JobHandlerError extends Error {
 export async function runOneJob(input: {
   queue: WorkerQueue;
   workerId: string;
-  handlers: Readonly<Record<string, JobHandler>>;
+  handlers: JobHandlerMap;
   retryDelayMs: number;
   clock: { now(): Date };
   beforeClaim?: () => Promise<void>;
@@ -98,7 +100,7 @@ export async function runOneJob(input: {
 export async function runJobLoop(input: {
   queue: WorkerQueue;
   workerId: string;
-  handlers: Readonly<Record<string, JobHandler>>;
+  handlers: JobHandlerMap;
   retryDelayMs: number;
   pollIntervalMs: number;
   clock: { now(): Date };

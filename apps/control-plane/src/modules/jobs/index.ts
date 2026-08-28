@@ -268,12 +268,16 @@ const MAINTENANCE_WINDOW_MS = 60_000;
 export async function scheduleControlPlaneMaintenance(input: {
   queue: Pick<DurableJobQueue, "enqueue">;
   clock: Clock;
+  includeSourceContentPurge?: boolean;
 }): Promise<void> {
   const windowStart = new Date(
     Math.floor(input.clock.now().getTime() / MAINTENANCE_WINDOW_MS)
       * MAINTENANCE_WINDOW_MS,
   ).toISOString();
-  const commands = [
+  const commands: Array<{
+    jobId: string; organizationId: null; kind: string;
+    payload: { windowStart: string }; maxAttempts: number;
+  }> = [
     {
       jobId: `hosted-attempt-reconciliation:${windowStart}`,
       organizationId: null,
@@ -288,7 +292,14 @@ export async function scheduleControlPlaneMaintenance(input: {
       payload: { windowStart },
       maxAttempts: 5,
     },
-  ] as const;
+  ];
+  if (input.includeSourceContentPurge) commands.push({
+    jobId: `source-content-purge:${windowStart}`,
+    organizationId: null,
+    kind: "source-content-purge",
+    payload: { windowStart },
+    maxAttempts: 5,
+  });
   const outcomes = await Promise.all(
     commands.map((command) => input.queue.enqueue(command)),
   );

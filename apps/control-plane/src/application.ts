@@ -36,6 +36,7 @@ import type {
   RunnerDirectory,
   RuntimePrincipal,
 } from "./modules/runners/index.js";
+import type { RelayContentCustody } from "./modules/source-content/index.js";
 
 export type RelayCapabilitiesResponseV1 = ReturnType<
   typeof RelayCapabilitiesResponseV1Schema.parse
@@ -83,6 +84,7 @@ export type ControlPlaneDependencies = {
         | { kind: "insufficient_scope" }
       >;
     };
+    sourceContent?: RelayContentCustody;
   };
   console?: {
     identity: IdentityModule;
@@ -202,6 +204,10 @@ export function createControlPlaneApplication(
 
   if (dependencies.github) {
     app.post("/v1/providers/github/webhooks/:bindingId", async (context) => {
+      const readiness = await dependencies.readiness.check();
+      if (!readiness.ready) {
+        return context.json({ error: "relay_not_ready" }, 503);
+      }
       const deliveryId = context.req.header("x-github-delivery");
       const eventName = context.req.header("x-github-event");
       const signature = context.req.header("x-hub-signature-256");

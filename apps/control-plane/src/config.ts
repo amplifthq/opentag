@@ -64,6 +64,14 @@ const RawConfigSchema = z
     OPENTAG_PUBLIC_URL: z.string().min(1),
     OPENTAG_DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
     OPENTAG_RELEASE_SHA: ReleaseShaSchema.default("local"),
+    OPENTAG_RELAY_CONTENT_KEK_FILE: z.preprocess(
+      (value) => value === "" ? undefined : value,
+      z.string().min(1).max(4096).refine((value) => value === value.trim()).optional(),
+    ),
+    OPENTAG_RELAY_CONTENT_KEY_VERSION: z.preprocess(
+      (value) => value === "" ? undefined : value,
+      z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u).optional(),
+    ),
   })
   .passthrough();
 
@@ -92,6 +100,7 @@ export type ControlPlaneConfig = {
   publicOrigin: string;
   recoveryPairingToken: string | null;
   releaseSha: "local" | string;
+  relayContentKey?: { file: string; keyVersion: string } | null;
 };
 
 const AdminBootstrapConfigSchema = z
@@ -177,6 +186,7 @@ export function parseControlPlaneConfig(
       parsed.OPENTAG_FENCING_TOKEN_SECRET,
       parsed.OPENTAG_LOGIN_THROTTLE_SECRET,
       parsed.OPENTAG_GITHUB_INGRESS_MASTER_SECRET,
+      parsed.OPENTAG_RELAY_CONTENT_KEK_FILE,
     ]) {
       if (secret?.startsWith(PLACEHOLDER_SECRET_PREFIX)) {
         throw new Error("example placeholder secrets must be replaced");
@@ -184,6 +194,12 @@ export function parseControlPlaneConfig(
     }
     if (parsed.OPENTAG_ENVIRONMENT !== "local" && parsed.OPENTAG_RELEASE_SHA === "local") {
       throw new Error("non-local deployments require an immutable release identity");
+    }
+    if (
+      (parsed.OPENTAG_RELAY_CONTENT_KEK_FILE === undefined)
+      !== (parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION === undefined)
+    ) {
+      throw new Error("relay content key reference is incomplete");
     }
     if (
       parsed.OPENTAG_RECOVERY_PAIRING_TOKEN !== undefined
@@ -259,6 +275,13 @@ export function parseControlPlaneConfig(
         parsed.OPENTAG_ENVIRONMENT,
       ),
       recoveryPairingToken: parsed.OPENTAG_RECOVERY_PAIRING_TOKEN ?? null,
+      relayContentKey: parsed.OPENTAG_RELAY_CONTENT_KEK_FILE
+        && parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION
+        ? {
+            file: parsed.OPENTAG_RELAY_CONTENT_KEK_FILE,
+            keyVersion: parsed.OPENTAG_RELAY_CONTENT_KEY_VERSION,
+          }
+        : null,
       releaseSha: parsed.OPENTAG_RELEASE_SHA,
     };
   } catch {
