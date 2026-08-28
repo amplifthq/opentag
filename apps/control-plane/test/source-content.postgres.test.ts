@@ -94,8 +94,12 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
 
   it("catches backups that lose encrypted content, revocation, or replay tombstones", async () => {
     let mutableNow = new Date("2026-08-28T00:00:00.000Z");
-    const authority = { async invalidate(input: { commandId: string }) {
-      return { commandId: input.commandId, receiptId: "immutable_restore_receipt" };
+    const authority = { async invalidate(input: { commandId: string; organizationId: string;
+      sourceVersionRef: string }) {
+      return { commandId: input.commandId, organizationId: input.organizationId,
+        sourceVersionRef: input.sourceVersionRef, reason: "source_content_deleted" as const,
+        recordedAt: "2026-08-28T00:00:00.000Z",
+        authorityReceiptDigest: `sha256:${"a".repeat(64)}` };
     } };
     const original = createRelayContentCustody({ pool: fixture.pool,
       clock: { now: () => mutableNow }, key: { key, keyVersion: "v1" },
@@ -112,8 +116,12 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
       runId: "run_revoked", attemptId: "attempt_revoked", fenceDigest: "fence_revoked",
       contentIds: ["revoked"], purpose: "source_context",
       expiresAt: new Date("2026-12-01T00:00:00.000Z") });
-    await original.withdraw({ organizationId: "org_a", sourceVersionRef: "s:revoked:v1",
-      commandId: "withdraw_restore", authenticated: true });
+    await original.withdraw({ schemaVersion: 1, kind: "verified_source_withdrawal",
+      organizationId: "org_a", sourceVersionRef: "s:revoked:v1",
+      commandId: "withdraw_restore", verification: { installationId: "install_1",
+        sourceAppId: "slack", sourceDeliveryId: "delivery_revoked",
+        verifiedAt: "2026-08-28T00:00:00.000Z",
+        evidenceDigest: `sha256:${"b".repeat(64)}` } });
     await original.markTerminal({ organizationId: "org_a", contentId: "purged" });
     mutableNow = new Date("2026-09-04T00:00:01.000Z");
     await original.purge();

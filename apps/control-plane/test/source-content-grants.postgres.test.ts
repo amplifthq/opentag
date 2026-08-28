@@ -7,6 +7,7 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   let now = new Date("2026-08-28T00:00:00.000Z");
   beforeEach(async () => {
+    now = new Date("2026-08-28T00:00:00.000Z");
     fixture = await createIsolatedPostgres(); await fixture.migrate();
     await fixture.pool.query("INSERT INTO cp_organization VALUES($1,$2,$3)", ["org_a", "A", now]);
   });
@@ -44,5 +45,25 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     await expect(custody.read({ ...expired, organizationId: "org_a", runId: "run_2",
       attemptId: "attempt_2", fenceDigest: "fence_2", contentIds: ["content_2"],
       purpose: "source_context" })).rejects.toThrow("source_content_grant_expired");
+  });
+
+  it("catches denying nonterminal content only because its source retention hint elapsed", async () => {
+    const custody = createRelayContentCustody({ pool: fixture.pool,
+      clock: { now: () => now }, key: { key: randomBytes(32), keyVersion: "v1" } });
+    await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
+      sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:live:v1",
+      purpose: "source_context", contentId: "content_live", payload: { text: "still required" },
+      expiresAt: new Date("2026-08-28T00:01:00Z") });
+    await custody.addDependency({ organizationId: "org_a", contentId: "content_live",
+      sourceVersionRef: "s:live:v1", dependencyId: "run_live", terminal: false });
+    now = new Date("2026-08-28T00:02:00Z");
+    const grant = await custody.issueReadGrant({ organizationId: "org_a", runId: "run_live",
+      attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
+      purpose: "source_context", expiresAt: new Date("2026-08-28T00:03:00Z") });
+    await expect(custody.read({ ...grant, organizationId: "org_a", runId: "run_live",
+      attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
+      purpose: "source_context" })).resolves.toEqual([
+        { contentId: "content_live", payload: { text: "still required" } },
+      ]);
   });
 });

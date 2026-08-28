@@ -80,7 +80,26 @@ CREATE TABLE cp_source_replay_tombstone (
   invalidation_receipt jsonb,
   created_at timestamptz NOT NULL,
   expires_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, replay_identity_digest)
+  PRIMARY KEY (organization_id, replay_identity_digest),
+  CHECK (
+    invalidation_receipt IS NULL OR (
+      jsonb_typeof(invalidation_receipt) = 'object'
+      AND invalidation_receipt ?& ARRAY[
+        'commandId', 'organizationId', 'sourceVersionRef', 'reason',
+        'recordedAt', 'authorityReceiptDigest'
+      ]
+      AND invalidation_receipt - ARRAY[
+        'commandId', 'organizationId', 'sourceVersionRef', 'reason',
+        'recordedAt', 'authorityReceiptDigest'
+      ] = '{}'::jsonb
+      AND invalidation_receipt->>'reason' = 'source_content_deleted'
+      AND invalidation_receipt->>'authorityReceiptDigest'
+        ~ '^sha256:[a-f0-9]{64}$'
+      AND length(invalidation_receipt->>'commandId') BETWEEN 1 AND 512
+      AND length(invalidation_receipt->>'organizationId') BETWEEN 1 AND 512
+      AND length(invalidation_receipt->>'sourceVersionRef') BETWEEN 1 AND 512
+    )
+  )
 );
 
 CREATE INDEX cp_source_replay_tombstone_expiry_idx

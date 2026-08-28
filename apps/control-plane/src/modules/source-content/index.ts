@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import { decryptSourceContent, digest, encryptSourceContent,
   type RelayContentKey, type SourceContentContext } from "./crypto.js";
@@ -10,14 +11,79 @@ export type SourceContextEnvelopeRef = {
   contentId: string; sourceVersionRef: string; aadDigest: string; keyVersion: string;
 };
 
-export type ImmutableInvalidationReceipt = Readonly<Record<string, unknown>> & {
-  commandId: string;
-};
+const boundedIdentity = z.string().min(1).max(512).refine((value) => value === value.trim());
+const sha256Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+
+export const VerifiedSourceWithdrawalCommandSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("verified_source_withdrawal"),
+  commandId: boundedIdentity,
+  organizationId: boundedIdentity,
+  sourceVersionRef: boundedIdentity,
+  verification: z.object({
+    installationId: boundedIdentity,
+    sourceAppId: boundedIdentity,
+    sourceDeliveryId: boundedIdentity,
+    verifiedAt: z.iso.datetime({ offset: true }),
+    evidenceDigest: sha256Digest,
+  }).strict(),
+}).strict();
+
+export type VerifiedSourceWithdrawalCommand = z.infer<
+  typeof VerifiedSourceWithdrawalCommandSchema
+>;
+
+export const ImmutableInvalidationReceiptSchema = z.object({
+  commandId: boundedIdentity,
+  organizationId: boundedIdentity,
+  sourceVersionRef: boundedIdentity,
+  reason: z.literal("source_content_deleted"),
+  recordedAt: z.iso.datetime({ offset: true }),
+  authorityReceiptDigest: sha256Digest,
+}).strict();
+
+export type ImmutableInvalidationReceipt = Readonly<z.infer<
+  typeof ImmutableInvalidationReceiptSchema
+>>;
+
 export interface SourceContentInvalidationAuthority {
   invalidate(input: {
     organizationId: string; sourceVersionRef: string; contentIds: string[];
     reason: "source_content_deleted"; commandId: string;
-  }): Promise<ImmutableInvalidationReceipt>;
+  }): Promise<unknown>;
+}
+
+export function parseVerifiedSourceWithdrawalCommand(
+  input: unknown,
+): VerifiedSourceWithdrawalCommand {
+  try {
+    const parsed = VerifiedSourceWithdrawalCommandSchema.parse(input);
+    return Object.freeze({
+      ...parsed,
+      verification: Object.freeze({ ...parsed.verification }),
+    });
+  } catch {
+    throw new Error("source_withdrawal_verification_invalid");
+  }
+}
+
+function parseInvalidationReceipt(
+  input: unknown,
+  expected: Pick<VerifiedSourceWithdrawalCommand,
+    "commandId" | "organizationId" | "sourceVersionRef">,
+): ImmutableInvalidationReceipt {
+  try {
+    const parsed = ImmutableInvalidationReceiptSchema.parse(input);
+    if (parsed.commandId !== expected.commandId
+      || parsed.organizationId !== expected.organizationId
+      || parsed.sourceVersionRef !== expected.sourceVersionRef
+      || parsed.reason !== "source_content_deleted") {
+      throw new Error("mismatch");
+    }
+    return Object.freeze({ ...parsed });
+  } catch {
+    throw new Error("source_invalidation_receipt_invalid");
+  }
 }
 
 type ContentRow = {
@@ -151,27 +217,74 @@ export function createRelayContentCustody(input: {
 
     async addDependency(command: { organizationId: string; contentId: string;
       sourceVersionRef: string; dependencyId: string; terminal: boolean }) {
-      await input.pool.query(
-        `INSERT INTO cp_source_content_dependency(organization_id, content_id,
-          source_version_ref, dependency_id, terminal, created_at)
-         VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`,
-        [command.organizationId, command.contentId, command.sourceVersionRef,
-          command.dependencyId, command.terminal, input.clock.now()],
-      );
+      await withPostgresTransaction(input.pool, async (client) => {
+        const content = await client.query(
+          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
+             AND content_id = $2 AND source_version_ref = $3 FOR UPDATE`,
+          [command.organizationId, command.contentId, command.sourceVersionRef],
+        );
+        if (!content.rows[0]) throw new Error("source_content_unavailable");
+        await client.query(
+          `INSERT INTO cp_source_content_dependency(organization_id, content_id,
+            source_version_ref, dependency_id, terminal, created_at)
+           VALUES($1,$2,$3,$4,$5,$6)
+           ON CONFLICT (organization_id, content_id, dependency_id)
+           DO UPDATE SET terminal = cp_source_content_dependency.terminal OR EXCLUDED.terminal`,
+          [command.organizationId, command.contentId, command.sourceVersionRef,
+            command.dependencyId, command.terminal, input.clock.now()],
+        );
+        const state = await client.query<{ all_terminal: boolean }>(
+          `SELECT bool_and(terminal) AS all_terminal
+           FROM cp_source_content_dependency WHERE organization_id = $1 AND content_id = $2`,
+          [command.organizationId, command.contentId],
+        );
+        await client.query(
+          `UPDATE cp_source_content SET terminal_at = CASE WHEN $3
+             THEN COALESCE(terminal_at, $4) ELSE NULL END
+           WHERE organization_id = $1 AND content_id = $2`,
+          [command.organizationId, command.contentId,
+            state.rows[0]?.all_terminal === true, input.clock.now()],
+        );
+      });
     },
 
-    async withdraw(command: { organizationId: string; sourceVersionRef: string;
-      commandId: string; authenticated: boolean }) {
-      if (!command.authenticated) throw new Error("source_withdrawal_unauthorized");
-      if (!command.organizationId || !command.sourceVersionRef || !command.commandId
-        || command.organizationId.length > 512 || command.sourceVersionRef.length > 512
-        || command.commandId.length > 512) throw new Error("source_withdrawal_invalid");
+    async markDependencyTerminal(command: { organizationId: string; contentId: string;
+      dependencyId: string }) {
+      await withPostgresTransaction(input.pool, async (client) => {
+        const content = await client.query(
+          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
+             AND content_id = $2 FOR UPDATE`,
+          [command.organizationId, command.contentId],
+        );
+        if (!content.rows[0]) throw new Error("source_content_unavailable");
+        const dependency = await client.query(
+          `UPDATE cp_source_content_dependency SET terminal = true
+           WHERE organization_id = $1 AND content_id = $2 AND dependency_id = $3
+           RETURNING dependency_id`,
+          [command.organizationId, command.contentId, command.dependencyId],
+        );
+        if (!dependency.rows[0]) throw new Error("source_content_dependency_unavailable");
+        const remaining = await client.query(
+          `SELECT 1 FROM cp_source_content_dependency WHERE organization_id = $1
+             AND content_id = $2 AND terminal = false LIMIT 1`,
+          [command.organizationId, command.contentId],
+        );
+        if (!remaining.rows[0]) await client.query(
+          `UPDATE cp_source_content SET terminal_at = COALESCE(terminal_at, $3)
+           WHERE organization_id = $1 AND content_id = $2`,
+          [command.organizationId, command.contentId, input.clock.now()],
+        );
+      });
+    },
+
+    async withdraw(inputCommand: VerifiedSourceWithdrawalCommand) {
+      const command = parseVerifiedSourceWithdrawalCommand(inputCommand);
       if (!input.invalidationAuthority) throw new Error("source_invalidation_unavailable");
       const requestDigest = digest(["opentag.relay.source-withdrawal/v1",
         command.organizationId, command.sourceVersionRef, command.commandId]);
       return withPostgresTransaction(input.pool, async (client) => {
         await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-          `${command.organizationId}:${command.commandId}`,
+          sourceVersionDigest(command.organizationId, command.sourceVersionRef),
         ]);
         const existing = await client.query<{ request_digest: string | null;
           invalidation_receipt: ImmutableInvalidationReceipt | null }>(
@@ -182,7 +295,9 @@ export function createRelayContentCustody(input: {
         const replay = existing.rows[0];
         if (replay) {
           if (replay.request_digest !== requestDigest) throw new Error("source_withdrawal_conflict");
-          if (replay.invalidation_receipt) return replay.invalidation_receipt;
+          if (replay.invalidation_receipt) {
+            return parseInvalidationReceipt(replay.invalidation_receipt, command);
+          }
         }
         const versionReplay = await client.query<{ command_id: string | null }>(
           `SELECT command_id FROM cp_source_replay_tombstone
@@ -200,6 +315,21 @@ export function createRelayContentCustody(input: {
         );
         const contentIds = rows.rows.map((row) => row.content_id);
         if (contentIds.length === 0 && !replay) throw new Error("source_content_unavailable");
+        if (rows.rows.some((row) => row.installation_id !== command.verification.installationId
+          || row.source_app_id !== command.verification.sourceAppId
+          || row.source_delivery_id !== command.verification.sourceDeliveryId)) {
+          throw new Error("source_withdrawal_verification_invalid");
+        }
+        let authorityOutput: unknown;
+        try {
+          authorityOutput = await input.invalidationAuthority!.invalidate({
+            organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
+            contentIds, reason: "source_content_deleted", commandId: command.commandId,
+          });
+        } catch {
+          throw new Error("source_invalidation_transient");
+        }
+        const receipt = parseInvalidationReceipt(authorityOutput, command);
         await client.query(
           `UPDATE cp_source_content SET ciphertext = NULL, content_nonce = NULL,
              content_tag = NULL, wrapped_dek = NULL, wrapping_nonce = NULL,
@@ -217,34 +347,38 @@ export function createRelayContentCustody(input: {
           await client.query(
             `INSERT INTO cp_source_replay_tombstone(organization_id,
               replay_identity_digest, source_version_digest, command_id,
-              request_digest, created_at, expires_at)
-             VALUES($1,$2,$3,$4,$5,$6,$7)`,
+              request_digest, invalidation_receipt, created_at, expires_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
             [command.organizationId, replayDigest(contextFromRow(first)),
               sourceVersionDigest(command.organizationId, command.sourceVersionRef),
-              command.commandId, requestDigest, input.clock.now(),
+              command.commandId, requestDigest, receipt, input.clock.now(),
               new Date(input.clock.now().getTime() + 90 * 86_400_000)],
           );
         }
-        const receipt = await input.invalidationAuthority!.invalidate({
-          organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
-          contentIds, reason: "source_content_deleted", commandId: command.commandId,
-        });
-        await client.query(
-          `UPDATE cp_source_replay_tombstone SET invalidation_receipt = $3
-           WHERE organization_id = $1 AND command_id = $2`,
-          [command.organizationId, command.commandId, receipt],
-        );
         return receipt;
       });
     },
 
     async markTerminal(command: { organizationId: string; contentId: string }) {
-      const result = await input.pool.query(
-        `UPDATE cp_source_content SET terminal_at = COALESCE(terminal_at, $3)
-         WHERE organization_id = $1 AND content_id = $2`,
-        [command.organizationId, command.contentId, input.clock.now()],
-      );
-      if (result.rowCount !== 1) throw new Error("source_content_unavailable");
+      await withPostgresTransaction(input.pool, async (client) => {
+        const result = await client.query(
+          `SELECT 1 FROM cp_source_content WHERE organization_id = $1
+             AND content_id = $2 FOR UPDATE`,
+          [command.organizationId, command.contentId],
+        );
+        if (!result.rows[0]) throw new Error("source_content_unavailable");
+        const nonterminal = await client.query(
+          `SELECT 1 FROM cp_source_content_dependency WHERE organization_id = $1
+             AND content_id = $2 AND terminal = false LIMIT 1`,
+          [command.organizationId, command.contentId],
+        );
+        if (nonterminal.rows[0]) throw new Error("source_content_nonterminal");
+        await client.query(
+          `UPDATE cp_source_content SET terminal_at = COALESCE(terminal_at, $3)
+           WHERE organization_id = $1 AND content_id = $2`,
+          [command.organizationId, command.contentId, input.clock.now()],
+        );
+      });
     },
 
     async purge() {
@@ -252,9 +386,9 @@ export function createRelayContentCustody(input: {
         const cutoff = new Date(input.clock.now().getTime() - 7 * 86_400_000);
         const rows = await client.query<ContentRow>(
           `SELECT * FROM cp_source_content
-           WHERE (terminal_at IS NOT NULL AND terminal_at <= $1) OR expires_at <= $2
+           WHERE terminal_at IS NOT NULL AND terminal_at <= $1
            ORDER BY organization_id, content_id FOR UPDATE`,
-          [cutoff, input.clock.now()],
+          [cutoff],
         );
         for (const row of rows.rows) await client.query(
           `INSERT INTO cp_source_replay_tombstone(organization_id,
@@ -268,8 +402,8 @@ export function createRelayContentCustody(input: {
         if (rows.rows.length > 0) await client.query(
           `DELETE FROM cp_source_content WHERE (organization_id, content_id) IN
            (SELECT organization_id, content_id FROM cp_source_content
-            WHERE (terminal_at IS NOT NULL AND terminal_at <= $1) OR expires_at <= $2)`,
-          [cutoff, input.clock.now()],
+            WHERE terminal_at IS NOT NULL AND terminal_at <= $1)`,
+          [cutoff],
         );
         const expired = await client.query(
           "DELETE FROM cp_source_replay_tombstone WHERE expires_at <= $1",

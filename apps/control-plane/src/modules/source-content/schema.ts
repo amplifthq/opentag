@@ -78,6 +78,25 @@ export const sourceReplayTombstones = pgTable("cp_source_replay_tombstone", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 }, (table) => [
   primaryKey({ columns: [table.organizationId, table.replayIdentityDigest] }),
+  check("cp_source_replay_tombstone_receipt_check", sql`(
+    ${table.invalidationReceipt} IS NULL OR (
+      jsonb_typeof(${table.invalidationReceipt}) = 'object'
+      AND ${table.invalidationReceipt} ?& ARRAY[
+        'commandId', 'organizationId', 'sourceVersionRef', 'reason',
+        'recordedAt', 'authorityReceiptDigest'
+      ]
+      AND ${table.invalidationReceipt} - ARRAY[
+        'commandId', 'organizationId', 'sourceVersionRef', 'reason',
+        'recordedAt', 'authorityReceiptDigest'
+      ] = '{}'::jsonb
+      AND ${table.invalidationReceipt}->>'reason' = 'source_content_deleted'
+      AND ${table.invalidationReceipt}->>'authorityReceiptDigest'
+        ~ '^sha256:[a-f0-9]{64}$'
+      AND length(${table.invalidationReceipt}->>'commandId') BETWEEN 1 AND 512
+      AND length(${table.invalidationReceipt}->>'organizationId') BETWEEN 1 AND 512
+      AND length(${table.invalidationReceipt}->>'sourceVersionRef') BETWEEN 1 AND 512
+    )
+  )`),
   index("cp_source_replay_tombstone_expiry_idx").on(table.expiresAt),
   uniqueIndex("cp_source_replay_tombstone_command_idx").on(table.organizationId, table.commandId)
     .where(sql`${table.commandId} IS NOT NULL`),
