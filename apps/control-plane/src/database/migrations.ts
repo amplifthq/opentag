@@ -151,3 +151,21 @@ export async function checkSourceContentSchemaReadiness(
     return { ready: false, reason: "migrations_pending" };
   }
 }
+
+export async function checkSourceIngressSchemaReadiness(
+  pool: Pick<MigrationPool, "query">,
+): Promise<ReadinessResult> {
+  try {
+    const result = await pool.query<{ present: boolean }>(
+      `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
+       FROM unnest($1::text[]) AS required(name)`,
+      [["cp_source_app_installation", "cp_source_binding",
+        "cp_ingress_reservation", "cp_source_resolution"]],
+    );
+    return result.rows[0]?.present
+      ? { ready: true }
+      : { ready: false, reason: "migrations_pending" };
+  } catch {
+    return { ready: false, reason: "migrations_pending" };
+  }
+}

@@ -38,6 +38,9 @@ importers:
       '@opentag/control-protocol':
         specifier: workspace:*
         version: link:../../packages/control-protocol
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../../packages/source-app-runtime
       '@tanstack/react-query':
         specifier: ^5.101.4
         version: 5.101.4(react@19.2.8)

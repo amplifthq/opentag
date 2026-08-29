@@ -1,7 +1,10 @@
 import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import {
+  withPostgresTransaction,
+  type PostgresTransactionClient,
+} from "../../database/postgres.js";
 import { decryptSourceContent, digest, encryptSourceContent,
   type RelayContentKey, type SourceContentContext } from "./crypto.js";
 import { createSourceContentGrantStore } from "./grants.js";
@@ -137,6 +140,65 @@ export function createRelayContentCustody(input: {
   tokenFactory?: () => string;
 }) {
   const grants = createSourceContentGrantStore(input);
+  const storeInTransaction = async (
+    client: PostgresTransactionClient,
+    command: SourceContentContext & { payload: unknown; expiresAt: Date },
+  ): Promise<SourceContextEnvelopeRef> => {
+    const fields = [command.organizationId, command.installationId, command.sourceAppId,
+      command.sourceDeliveryId, command.sourceMessageId, command.sourceVersionRef,
+      command.purpose, command.contentId];
+    if (fields.some((field) => !field || field.length > 512)
+      || !Number.isFinite(command.expiresAt.getTime())
+      || command.expiresAt.getTime() <= input.clock.now().getTime()) {
+      throw new Error("source_content_invalid");
+    }
+    let serialized: string;
+    try {
+      const candidate = JSON.stringify(command.payload);
+      if (candidate === undefined) throw new Error("invalid");
+      serialized = candidate;
+    } catch {
+      throw new Error("source_content_invalid");
+    }
+    const plaintext = Buffer.from(serialized, "utf8");
+    if (plaintext.length > 256 * 1024) {
+      plaintext.fill(0);
+      throw new Error("source_content_too_large");
+    }
+    const encrypted = encryptSourceContent({ key: input.key, context: command, plaintext });
+    plaintext.fill(0);
+    const identityDigest = replayDigest(command);
+    const tombstone = await client.query(
+      `SELECT 1 FROM cp_source_replay_tombstone
+       WHERE organization_id = $1
+         AND (replay_identity_digest = $2 OR source_version_digest = $3)
+         AND expires_at > $4`,
+      [command.organizationId, identityDigest,
+        sourceVersionDigest(command.organizationId, command.sourceVersionRef),
+        input.clock.now()],
+    );
+    if (tombstone.rows[0]) throw new Error("source_content_replayed");
+    try {
+      await client.query(
+        `INSERT INTO cp_source_content(
+          organization_id, content_id, installation_id, source_app_id,
+          source_delivery_id, source_message_id, source_version_ref, purpose,
+          ciphertext, content_nonce, content_tag, wrapped_dek, wrapping_nonce,
+          wrapping_tag, aad_digest, key_version, expires_at, created_at
+        ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [command.organizationId, command.contentId, command.installationId,
+          command.sourceAppId, command.sourceDeliveryId, command.sourceMessageId,
+          command.sourceVersionRef, command.purpose, encrypted.ciphertext,
+          encrypted.contentNonce, encrypted.contentTag, encrypted.wrappedDek,
+          encrypted.wrappingNonce, encrypted.wrappingTag, encrypted.aadDigest,
+          encrypted.keyVersion, command.expiresAt, input.clock.now()],
+      );
+    } catch {
+      throw new Error("source_content_conflict");
+    }
+    return { contentId: command.contentId, sourceVersionRef: command.sourceVersionRef,
+      aadDigest: encrypted.aadDigest, keyVersion: encrypted.keyVersion };
+  };
   return {
     async checkReadiness() {
       if (input.key.key.length !== 32 || !input.key.keyVersion) {
@@ -153,58 +215,9 @@ export function createRelayContentCustody(input: {
       }
     },
 
-    async store(command: SourceContentContext & { payload: unknown; expiresAt: Date }): Promise<SourceContextEnvelopeRef> {
-      const fields = [command.organizationId, command.installationId, command.sourceAppId,
-        command.sourceDeliveryId, command.sourceMessageId, command.sourceVersionRef,
-        command.purpose, command.contentId];
-      if (fields.some((field) => !field || field.length > 512)
-        || !Number.isFinite(command.expiresAt.getTime())
-        || command.expiresAt.getTime() <= input.clock.now().getTime()) {
-        throw new Error("source_content_invalid");
-      }
-      let serialized: string;
-      try {
-        const candidate = JSON.stringify(command.payload);
-        if (candidate === undefined) throw new Error("invalid");
-        serialized = candidate;
-      } catch {
-        throw new Error("source_content_invalid");
-      }
-      const plaintext = Buffer.from(serialized, "utf8");
-      if (plaintext.length > 256 * 1024) { plaintext.fill(0); throw new Error("source_content_too_large"); }
-      const encrypted = encryptSourceContent({ key: input.key, context: command, plaintext });
-      plaintext.fill(0);
-      return withPostgresTransaction(input.pool, async (client) => {
-        const identityDigest = replayDigest(command);
-        const tombstone = await client.query(
-          `SELECT 1 FROM cp_source_replay_tombstone
-           WHERE organization_id = $1
-             AND (replay_identity_digest = $2 OR source_version_digest = $3)
-             AND expires_at > $4`,
-          [command.organizationId, identityDigest,
-            sourceVersionDigest(command.organizationId, command.sourceVersionRef),
-            input.clock.now()],
-        );
-        if (tombstone.rows[0]) throw new Error("source_content_replayed");
-        try {
-          await client.query(
-            `INSERT INTO cp_source_content(
-              organization_id, content_id, installation_id, source_app_id,
-              source_delivery_id, source_message_id, source_version_ref, purpose,
-              ciphertext, content_nonce, content_tag, wrapped_dek, wrapping_nonce,
-              wrapping_tag, aad_digest, key_version, expires_at, created_at
-            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-            [command.organizationId, command.contentId, command.installationId,
-              command.sourceAppId, command.sourceDeliveryId, command.sourceMessageId,
-              command.sourceVersionRef, command.purpose, encrypted.ciphertext,
-              encrypted.contentNonce, encrypted.contentTag, encrypted.wrappedDek,
-              encrypted.wrappingNonce, encrypted.wrappingTag, encrypted.aadDigest,
-              encrypted.keyVersion, command.expiresAt, input.clock.now()],
-          );
-        } catch { throw new Error("source_content_conflict"); }
-        return { contentId: command.contentId, sourceVersionRef: command.sourceVersionRef,
-          aadDigest: encrypted.aadDigest, keyVersion: encrypted.keyVersion };
-      });
+    storeInTransaction,
+    async store(command: SourceContentContext & { payload: unknown; expiresAt: Date }) {
+      return withPostgresTransaction(input.pool, (client) => storeInTransaction(client, command));
     },
 
     issueReadGrant: grants.issue,

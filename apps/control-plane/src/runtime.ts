@@ -10,6 +10,7 @@ import type { ControlPlaneConfig } from "./config.js";
 import {
   checkMigrationReadiness,
   checkSourceContentSchemaReadiness,
+  checkSourceIngressSchemaReadiness,
   type SqlMigration,
 } from "./database/migrations.js";
 import {
@@ -36,6 +37,11 @@ import {
 } from "./modules/source-content/index.js";
 import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
+import { createSourceIngressService } from "./modules/source-ingress/index.js";
+import {
+  createSourceIngressWorker,
+  type SourceResolutionPort,
+} from "./modules/source-ingress/worker.js";
 
 const BASE_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -85,6 +91,7 @@ export function createControlPlaneRuntime(input: {
   migrations: readonly SqlMigration[];
   postgres?: PostgresCapability;
   sourceContentInvalidationAuthority?: SourceContentInvalidationAuthority;
+  sourceResolutionPort?: SourceResolutionPort;
 }) {
   const postgres = input.postgres ?? createPostgresRuntime({
     databaseUrl: input.config.databaseUrl,
@@ -159,6 +166,24 @@ export function createControlPlaneRuntime(input: {
           : {}),
       })
     : null;
+  const sourceIngress = sourceContent
+    ? createSourceIngressService({
+        pool: postgres.pool,
+        clock,
+        custody: sourceContent,
+        jobs,
+      })
+    : null;
+  const sourceIngressWorker = sourceIngress && input.sourceResolutionPort
+    ? createSourceIngressWorker({
+        ingress: sourceIngress,
+        queue: jobs,
+        resolver: input.sourceResolutionPort,
+        workerId: `source_ingress_${process.pid}`,
+        retryDelayMs: input.config.jobRetryDelayMs,
+        clock,
+      })
+    : null;
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: {
       organizationId: string | null;
@@ -215,6 +240,8 @@ export function createControlPlaneRuntime(input: {
           if (!sourceContent) return { ready: false, reason: "configuration_invalid" };
           const sourceSchema = await checkSourceContentSchemaReadiness(postgres.pool);
           if (!sourceSchema.ready) return sourceSchema;
+          const ingressSchema = await checkSourceIngressSchemaReadiness(postgres.pool);
+          if (!ingressSchema.ready) return ingressSchema;
           return sourceContent.checkReadiness();
         }
         return { ready: true };
@@ -267,6 +294,7 @@ export function createControlPlaneRuntime(input: {
         },
       },
       ...(sourceContent ? { sourceContent } : {}),
+      ...(sourceIngress ? { sourceIngress } : {}),
     },
     console: {
       identity,
@@ -291,6 +319,8 @@ export function createControlPlaneRuntime(input: {
     reads,
     runners,
     sourceContent,
+    sourceIngress,
+    sourceIngressWorker,
     close: () => postgres.close(),
   };
 }

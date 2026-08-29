@@ -37,6 +37,7 @@ import type {
   RuntimePrincipal,
 } from "./modules/runners/index.js";
 import type { RelayContentCustody } from "./modules/source-content/index.js";
+import type { SourceIngressService } from "./modules/source-ingress/index.js";
 
 export type RelayCapabilitiesResponseV1 = ReturnType<
   typeof RelayCapabilitiesResponseV1Schema.parse
@@ -85,6 +86,7 @@ export type ControlPlaneDependencies = {
       >;
     };
     sourceContent?: RelayContentCustody;
+    sourceIngress?: Pick<SourceIngressService, "reserve">;
   };
   console?: {
     identity: IdentityModule;

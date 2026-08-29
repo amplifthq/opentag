@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
+import { withPostgresTransaction } from "../src/database/postgres.js";
 import { runMigrations } from "../src/database/migrations.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
@@ -31,6 +32,23 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
     contentId: "content_1",
     payload: { text: "fix this", channel: "private" },
     expiresAt: new Date("2026-09-04T00:00:00.000Z"),
+  });
+
+  it("joins an outer transaction so a later failure rolls ciphertext back", async () => {
+    const custody = createRelayContentCustody({
+      pool: fixture.pool, clock, key: { key, keyVersion: "v1" },
+    });
+
+    await expect(withPostgresTransaction(fixture.pool, async (client) => {
+      await custody.storeInTransaction(client, content());
+      throw new Error("later_ingress_write_failed");
+    })).rejects.toThrow("later_ingress_write_failed");
+
+    const stored = await fixture.pool.query(
+      "SELECT content_id FROM cp_source_content WHERE organization_id = $1",
+      ["org_a"],
+    );
+    expect(stored.rows).toEqual([]);
   });
 
   it("catches tenant, source-version, or purpose substitution during decryption", async () => {

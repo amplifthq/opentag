@@ -11,7 +11,7 @@ type ClaimedJob = {
 };
 
 type WorkerQueue = {
-  claim(workerId: string): Promise<
+  claim(workerId: string, jobKinds?: readonly string[]): Promise<
     | { kind: "claimed"; job: ClaimedJob }
     | { kind: "empty" }
   >;
@@ -54,7 +54,7 @@ export async function runOneJob(input: {
   beforeClaim?: () => Promise<void>;
 }) {
   await input.beforeClaim?.();
-  const claim = await input.queue.claim(input.workerId);
+  const claim = await input.queue.claim(input.workerId, Object.keys(input.handlers).sort());
   if (claim.kind === "empty") return { kind: "empty" } as const;
   const handler = input.handlers[claim.job.kind];
   if (!handler) {

@@ -65,6 +65,7 @@ describe("durable job worker", () => {
       beforeClaim,
     })).resolves.toEqual({ kind: "settled", jobId: "job_1" });
     expect(beforeClaim).toHaveBeenCalledOnce();
+    expect(queue.claim).toHaveBeenCalledWith("worker_1", ["retention"]);
     expect(handler).toHaveBeenCalledWith({
       organizationId: "org_1",
       payload: { before: "2026-01-01" },

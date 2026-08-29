@@ -24,6 +24,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0003_bind_session_tenant.sql",
       "0004_login_throttle.sql",
       "0005_source_content.sql",
+      "0006_source_ingress.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -52,6 +53,10 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         "cp_material_action_current",
         "cp_management_audit_event",
         "cp_login_throttle",
+        "cp_source_app_installation",
+        "cp_source_binding",
+        "cp_ingress_reservation",
+        "cp_source_resolution",
       ]),
     );
 
