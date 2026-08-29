@@ -492,7 +492,7 @@ describe("hosted admission and claim V1 protocol", () => {
       sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
         aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest },
       queueClaimDeadline: "2026-08-09T00:00:00.000Z",
-      permissionCeiling: { allowedActions: ["workspace_write"], digest },
+      permissionCeiling: { allowedActions: ["workspace.write"], digest },
       publicationPolicy: { mode: "proposal_only", digest },
       completionContract: { mode: "proposal_ready", digest },
       admissionPolicySnapshot: {
@@ -1201,6 +1201,7 @@ describe("permission V1 control protocol", () => {
     permissionRequestId: "permission_request_1",
     actionId: "action_1",
     actionFamily: "publish",
+    permissionCapability: "github.release.create",
     riskTier: "high",
     targetFingerprint: otherDigest,
     permissionScopes: ["npm:publish", "package:write"],
@@ -1220,6 +1221,7 @@ describe("permission V1 control protocol", () => {
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
     actionFamily: request.actionFamily,
+    permissionCapability: request.permissionCapability,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
     permissionScopes: request.permissionScopes,
@@ -1251,6 +1253,7 @@ describe("permission V1 control protocol", () => {
       permissionRequestDigest: otherDigest,
       actionId: "action_1",
       actionFamily: "publish",
+      permissionCapability: "github.release.create",
       riskTier: "high",
       targetFingerprint: otherDigest,
       permissionScopes: ["npm:publish", "package:write"],
@@ -1309,7 +1312,7 @@ describe("permission V1 control protocol", () => {
 
     const expectedDigest = await computePermissionRequestDigestV1(digestSource);
     expect(expectedDigest).toBe(
-      "sha256:bc7e39fcc63caab71661680c54ec90dc7a98fd043082b8af45c1d78cffb19154",
+      "sha256:a5bbd6e21d191382932e35c0e5a043a93feb4c072f306880db8d79e9921db6de",
     );
     expect(await computePermissionRequestDigestV1(buildPermissionRequestDigestInputV1(digestSource))).toBe(expectedDigest);
 

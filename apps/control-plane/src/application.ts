@@ -401,6 +401,9 @@ export function createControlPlaneApplication(
         return context.json(outcome.claim, 200);
       }
       if (outcome.kind === "empty") return context.body(null, 204);
+      if (outcome.kind === "legacy_interrupted") {
+        return context.json(outcome, 409);
+      }
       return context.json(
         controlError("idempotency_conflict", request.requestId),
         409,

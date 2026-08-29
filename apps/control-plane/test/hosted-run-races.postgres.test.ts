@@ -208,6 +208,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       ["org_race", "run_start_crash", new Date(now.getTime() - 1)],
     );
 
+    await expect(service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_start_crash_direct",
+      requestId: "request_claim_start_crash_direct",
+      credentialId: "credential_race" }) })).resolves.toEqual({ kind: "empty" });
+
     await service.reconcileExpiredAttempts("org_race");
 
     await expect(service.inspect({ organizationId: "org_race", runId: "run_start_crash" }))
@@ -217,6 +222,50 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       operationId: "operation_claim_start_crash_replacement",
       requestId: "request_claim_start_crash_replacement",
       credentialId: "credential_race" }) })).resolves.toEqual({ kind: "empty" });
+  });
+
+  it("serializes exact negative proof against replacement claim and rejects stale proof", async () => {
+    now = new Date("2026-08-15T09:30:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_proof_claim_race",
+      suffix: "proof_claim_race", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T10:30:00.000Z" });
+    await service.admit({ runId: "run_proof_claim_race", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_proof_race", requestId: "request_claim_proof_race",
+      credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    await expect(materials.recordNotStarted({ principal, fencingToken: "stale_fence",
+      runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+      attemptNumber: claim.claim.attempt.number, proofId: "proof_stale",
+      proofDigest: `sha256:${"8".repeat(64)}` })).resolves.toEqual({ kind: "stale_fence" });
+
+    const [proof, replacement] = await Promise.all([
+      materials.recordNotStarted({ principal,
+        fencingToken: claim.claim.attempt.fencingToken,
+        runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number, proofId: "proof_claim_race",
+        proofDigest: `sha256:${"9".repeat(64)}` }),
+      service.claim({ principal, request: hostedClaimRequest({
+        operationId: "operation_claim_proof_race_replacement",
+        requestId: "request_claim_proof_race_replacement",
+        credentialId: "credential_race" }) }),
+    ]);
+    expect(proof).toEqual({ kind: "recorded" });
+    expect(replacement).toEqual({ kind: "empty" });
+    now = new Date(now.getTime() + 61_000);
+    const afterExpiry = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_proof_race_after_expiry",
+      requestId: "request_claim_proof_race_after_expiry",
+      credentialId: "credential_race" }) });
+    expect(afterExpiry.kind).toBe("claimed");
+    const attempts = await fixture.pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM cp_hosted_attempt WHERE run_id = $1",
+      [claim.claim.runId],
+    );
+    expect(attempts.rows[0]?.count).toBe(2);
   });
 
   it("makes cancellation terminal before any later claim", async () => {
@@ -268,6 +317,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       ["org_race", "receipt_delete_material", "operation_delete_material",
         "run_delete_material", "runner_race", claim.claim.attempt.id,
         claim.claim.attempt.number, "action_delete_material", `sha256:${"7".repeat(64)}`, now],
+    );
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET material_start_state = 'started_or_ambiguous'
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3`,
+      ["org_race", "run_delete_material", claim.claim.attempt.number],
     );
 
     await service.invalidate({ organizationId: "org_race",

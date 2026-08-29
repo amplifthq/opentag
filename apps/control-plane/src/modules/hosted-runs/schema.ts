@@ -117,6 +117,7 @@ export const hostedAttempts = pgTable(
     credentialId: text("credential_id").notNull(),
     fencingTokenDigest: text("fencing_token_digest").notNull(),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+    materialStartState: text("material_start_state").notNull().default("open"),
     state: text("state").notNull(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -139,8 +140,10 @@ export const hostedAttempts = pgTable(
     ),
     check(
       "cp_hosted_attempt_state_check",
-      sql`${table.state} IN ('claimed', 'running', 'needs_approval', 'cancelled', 'completed', 'rejected', 'interrupted', 'timed_out', 'expired')`,
+      sql`${table.state} IN ('claimed', 'running', 'needs_approval', 'succeeded', 'failed', 'rejected', 'cancelled', 'interrupted', 'timed_out', 'expired')`,
     ),
+    check("cp_hosted_attempt_material_start_state_check",
+      sql`${table.materialStartState} IN ('open','proven_not_started','started_or_ambiguous')`),
   ],
 );
 
@@ -150,6 +153,7 @@ export const hostedClaims = pgTable(
     organizationId: text("organization_id").notNull(),
     operationId: text("operation_id").notNull(),
     requestDigest: text("request_digest").notNull(),
+    claimVersion: integer("claim_version").notNull().default(1),
     runId: text("run_id").notNull(),
     claim: jsonb("claim").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -160,6 +164,7 @@ export const hostedClaims = pgTable(
       columns: [table.organizationId, table.runId],
       foreignColumns: [hostedRuns.organizationId, hostedRuns.runId],
     }),
+    check("cp_hosted_claim_version_check", sql`${table.claimVersion} IN (1, 2)`),
   ],
 );
 

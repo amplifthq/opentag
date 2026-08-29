@@ -5,6 +5,7 @@ import {
   computeHostedAdmissionEnvelopeDigestV1,
   HostedAdmissionEnvelopeV1Schema,
   HostedClaimRequestV1Schema,
+  type HostedAdmissionEnvelopeV1,
 } from "@opentag/control-protocol";
 import type { Pool, PoolClient } from "pg";
 import { createHash } from "node:crypto";
@@ -65,7 +66,7 @@ export async function hostedAdmissionFixture(input: {
   runnerId?: string;
   queueClaimDeadline?: string;
   contentId?: string;
-  permissionActions?: string[];
+  permissionActions?: HostedAdmissionEnvelopeV1["permissionCeiling"]["allowedActions"];
   publicationMode?: "proposal_only" | "pull_request";
 }) {
   const organizationId = input.organizationId ?? "org_hosted";
@@ -183,7 +184,7 @@ export async function hostedAdmissionFixture(input: {
     },
     queueClaimDeadline: input.queueClaimDeadline ?? "2026-08-29T00:00:00.000Z",
     permissionCeiling: {
-      allowedActions: input.permissionActions ?? ["workspace_write"],
+      allowedActions: input.permissionActions ?? ["workspace.write"],
       digest: digest("1"),
     },
     publicationPolicy: {

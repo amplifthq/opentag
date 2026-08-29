@@ -512,7 +512,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       suffix: "93",
       organizationId: "org_permission_http",
       runnerId: "runner_permission_http",
-      permissionActions: ["github.merge"],
+      permissionActions: ["workspace.write"],
     });
     await hosted.admit({
       runId: "run_permission_http",
@@ -585,6 +585,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       permissionRequestId: "permission_request_http",
       actionId: "action_permission_http",
       actionFamily: "github.merge",
+      permissionCapability: "workspace.write",
       riskTier: "high" as const,
       targetFingerprint: `sha256:${"3".repeat(64)}`,
       permissionScopes: ["github:merge"],

@@ -115,6 +115,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
           `sha256:${"1".repeat(64)}`, `sha256:${"2".repeat(64)}`,
           "runner_legacy", "executor_legacy", createdAt],
       );
+      await legacy.pool.query(
+        `INSERT INTO cp_hosted_claim(organization_id, operation_id, request_digest,
+           run_id, claim, created_at) VALUES($1,$2,$3,$4,'{}'::jsonb,$5)`,
+        ["org_legacy", "operation_claim_legacy", `sha256:${"3".repeat(64)}`,
+          "run_legacy", createdAt],
+      );
 
       await runMigrations(legacy.pool, legacy.migrations);
 
@@ -127,6 +133,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         source_version_ref: `legacy:sha256:${"2".repeat(64)}`,
         source_content_ids: ["legacy:run_legacy"], publication_mode: "proposal_only",
         completion_mode: "proposal_ready" });
+      expect((await legacy.pool.query(
+        "SELECT claim_version FROM cp_hosted_claim WHERE operation_id = $1",
+        ["operation_claim_legacy"])).rows).toEqual([{ claim_version: 1 }]);
       await expect(legacy.pool.query(
         "UPDATE cp_hosted_run SET queue_claim_deadline = queue_claim_deadline + interval '1 hour' WHERE run_id = $1",
         ["run_legacy"],

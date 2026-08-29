@@ -128,8 +128,9 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     expect(grants.rows).toHaveLength(1);
     if (claim.kind === "claimed") expect(grants.rows[0]).toMatchObject({ run_id: "run_grant",
       attempt_id: claim.claim.attempt.id, fence_digest: claim.claim.attempt.fencingTokenDigest });
-    const persisted = await fixture.pool.query<{ claim: unknown; grant: unknown }>(
-      `SELECT claim, to_jsonb(grant_record) AS grant FROM cp_hosted_claim claim_record
+    const persisted = await fixture.pool.query<{ claim_version: number;
+      claim: unknown; grant: unknown }>(
+      `SELECT claim_record.claim_version, claim, to_jsonb(grant_record) AS grant FROM cp_hosted_claim claim_record
        JOIN cp_source_content_read_grant grant_record
          ON grant_record.organization_id = claim_record.organization_id
         AND grant_record.run_id = claim_record.run_id
@@ -137,6 +138,7 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       ["org_grant", "run_grant"],
     );
     if (claim.kind === "claimed") {
+      expect(persisted.rows[0]?.claim_version).toBe(2);
       expect(JSON.stringify(persisted.rows[0])).not.toContain(claim.claim.sourceContentGrant.token);
       expect(claim.claim.sourceContentGrant).toMatchObject({
         fenceDigest: claim.claim.attempt.fencingTokenDigest,

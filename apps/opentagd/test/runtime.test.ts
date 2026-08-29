@@ -196,7 +196,7 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
     sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
       aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: controlDigest },
     queueClaimDeadline: "2026-08-09T00:00:00.000Z",
-    permissionCeiling: { allowedActions: ["workspace_write"], digest: controlDigest },
+    permissionCeiling: { allowedActions: ["workspace.write"], digest: controlDigest },
     publicationPolicy: { mode: "proposal_only" as const, digest: controlDigest },
     completionContract: { mode: "proposal_ready" as const, digest: controlDigest },
     admissionPolicySnapshot: {

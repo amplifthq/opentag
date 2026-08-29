@@ -95,7 +95,7 @@ async function admission(
       aadDigest: '1'.repeat(64), keyVersion: 'v1',
       envelopeDigest: `sha256:${'5'.repeat(64)}` },
     queueClaimDeadline: '2026-08-11T00:00:00.000Z',
-    permissionCeiling: { allowedActions: ['workspace_write'],
+    permissionCeiling: { allowedActions: ['workspace.write'],
       digest: `sha256:${'6'.repeat(64)}` },
     publicationPolicy: { mode: 'proposal_only' as const,
       digest: `sha256:${'7'.repeat(64)}` },

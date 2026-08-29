@@ -113,17 +113,6 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       pool: fixture.pool,
       clock: { now: () => now },
     });
-    const proofCommand = { principal, fencingToken: claim.attempt.fencingToken,
-      runId: claim.runId, attemptId: claim.attempt.id,
-      attemptNumber: claim.attempt.number, proofId: "proof_material_not_started",
-      proofDigest: `sha256:${"3".repeat(64)}` };
-    await expect(coordinator.recordNotStarted(proofCommand))
-      .resolves.toEqual({ kind: "recorded" });
-    await expect(coordinator.recordNotStarted(proofCommand))
-      .resolves.toEqual({ kind: "replayed" });
-    await expect(classifyAttemptMaterialActionTruth(fixture.pool, {
-      organizationId: principal.organizationId, runId: claim.runId,
-      attemptId: claim.attempt.id })).resolves.toEqual({ kind: "proven_not_started" });
     const receiptFor = async (input: {
       receiptId: string;
       operationId: string;

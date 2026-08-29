@@ -225,3 +225,86 @@ Base: `80207419 feat: admit finite work while the Runner is offline`.
 - `@opentag/control-protocol`, `@opentag/client`, and
   `@opentag/control-plane` builds: passed.
 - `git diff --check`: clean.
+
+## Fix Round 2/5 — State, Proof, Taxonomy, and Legacy Replay
+
+Base: `83108c5f fix: harden offline hosted authority boundaries`.
+
+### Fixed findings
+
+1. **Completion/approval state-machine bypass**
+   - Executor conclusions now use unambiguous Attempt states:
+     `succeeded`, `failed`, `cancelled`, `interrupted`, `timed_out`, and
+     `needs_approval`. `rejected` is reserved exclusively for `reject-start`.
+   - Under the existing Run→Attempt locks, a `needs_approval` Attempt accepts
+     heartbeat/cancellation only. Direct Runner `running` or successful
+     completion is rejected as `invalid_transition`.
+   - Exact current Attempt/fence and immutable policy-bound `allow_once`
+     evidence atomically moves both Run and Attempt back to `running`.
+     An exact denial atomically settles Attempt/Run as `failed` with the
+     permission-resolution receipt and `permission_denied` reason.
+   - Regressions cover all six conclusions, bypass attempts, tampered/wrong
+     approval, exact resume then success, exact denial, and reject-start-only
+     `rejected` state.
+
+2. **Negative-proof replacement bypass**
+   - Added `material_start_state` to the exact Attempt:
+     `open | proven_not_started | started_or_ambiguous`.
+   - Recording a negative-start proof locks the current Run/Attempt, requires
+     the exact current fence while authority is still `open`, persists the
+     proof, and atomically closes start authority as `proven_not_started`.
+   - Recording the first material receipt atomically closes authority as
+     `started_or_ambiguous`; proof-then-start is rejected, while an append-only
+     reconciliation receipt chain remains allowed after start.
+   - Expired-Attempt claim SQL now requires the exact current Attempt number,
+     ID, fence digest, `proven_not_started` state, and matching durable proof.
+     Absence/unknown can no longer claim directly before reconciliation.
+   - Regressions cover direct claim before reconciliation, start/crash without
+     receipt, proof-then-start, stale proof, concurrent proof/claim, and safe
+     replacement only after proof plus lease expiry.
+
+3. **Closed publication capability taxonomy**
+   - Added a shared closed `HostedActionCapabilityV1` taxonomy used by both
+     Admission permission ceilings and Runner permission requests/receipts.
+   - Non-publication capabilities are explicit (`workspace.read`,
+     `workspace.write`, `command.execute`, `git.read`). Publication-capable
+     entries explicitly cover git push/force-push/target write, GitHub pull
+     request create/update/merge, release creation, and branch deletion.
+   - `proposal_only` checks the typed capability set at both request and
+     `allow_once`; no regex or action-family naming heuristic remains.
+     Unknown/future capability values fail schema validation closed.
+   - The local Control V1 adapter performs an exact closed mapping from known
+     operations and throws `permission_action_capability_unknown` otherwise.
+   - Regressions cover merge, push, force-push, target write, PR create/update,
+     release, branch deletion, unknown future actions, and a valid
+     non-publication workspace action.
+
+4. **Legacy persisted claim replay**
+   - Added explicit `claim_version` migration/schema support. Pre-0007 claims
+     backfill as version 1; every new claim is persisted as version 2.
+   - Version-1 replay never parses the current strict claim schema, fabricates
+     a grant/token, or attempts replacement. Under Run→Attempt locks it fences
+     the legacy Attempt, revokes future grants, and settles the Run as
+     controlled `interrupted + outcome_unknown` with a stable reconciliation
+     identity and `legacy_claim_authority_unrecoverable` reason.
+   - The coordinator/application return typed `legacy_interrupted` state on
+     exact replay. Current version-2 replay continues to reconstruct and
+     verify the exact deterministic grant token.
+   - Migration coverage inserts a pre-fix claim before 0007 and proves it is
+     version 1; coordinator coverage replays that row without a Zod exception.
+
+### Round-2 TDD and verification evidence
+
+- Initial real-PostgreSQL RED: `6 failed | 23 passed` across the amended
+  hosted/race/permission tests. Failures showed direct approval bypass,
+  no-proof replacement, missing `claim_version`, unrecognized typed
+  capability, and ambiguous `completed/rejected` Attempt states.
+- Serial amended focused suite: `17 test files / 249 tests passed`; the final
+  reject-start-exclusive focused file passed `22/22`.
+- Fresh serialized full suite: `216 test files / 2869 tests passed` in
+  `103.32s` with one worker and PostgreSQL required.
+- `corepack pnpm typecheck`: passed.
+- Workspace lint across 28 projects: passed.
+- `@opentag/control-protocol`, `@opentag/client`, and
+  `@opentag/control-plane` builds: passed.
+- `git diff --check`: clean.

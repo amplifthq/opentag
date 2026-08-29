@@ -721,7 +721,7 @@ export function createGithubIngress(input: {
           new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
         ).toISOString(),
         permissionCeiling: {
-          allowedActions: ["workspace_write"],
+          allowedActions: ["workspace.write" as const],
           digest: await computeControlPayloadDigestV1({
             bindingId: binding.binding_id,
             mode: "workspace_write",

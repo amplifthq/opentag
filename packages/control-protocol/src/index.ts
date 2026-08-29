@@ -312,6 +312,18 @@ export const PermissionActionFamilyV1Schema = z
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Action family must not contain credential-like data.");
 
+export const HostedActionCapabilityV1Schema = z.enum([
+  "workspace.read", "workspace.write", "command.execute", "git.read",
+  "git.push", "git.force_push", "git.target_write",
+  "github.pull_request.create", "github.pull_request.update",
+  "github.pull_request.merge", "github.release.create", "github.branch.delete",
+]);
+export const HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1 = [
+  "git.push", "git.force_push", "git.target_write",
+  "github.pull_request.create", "github.pull_request.update",
+  "github.pull_request.merge", "github.release.create", "github.branch.delete",
+] as const;
+
 export const PermissionScopeV1Schema = z
   .string()
   .min(1)
@@ -519,6 +531,7 @@ export const MaterialActionPayloadV1Schema = z
 const PermissionActionSummaryV1Shape = {
   actionId: PermissionStableIdV1Schema,
   actionFamily: PermissionActionFamilyV1Schema,
+  permissionCapability: HostedActionCapabilityV1Schema,
   riskTier: z.enum(["low", "medium", "high", "critical"]),
   targetFingerprint: ReceiptDigestSchema,
   permissionScopes: PermissionScopesV1Schema,
@@ -1678,7 +1691,7 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   }).strict(),
   queueClaimDeadline: ControlTimestampSchema,
   permissionCeiling: z.object({
-    allowedActions: sortedUniqueArray(NonEmptyIdSchema),
+    allowedActions: sortedUniqueArray(HostedActionCapabilityV1Schema),
     digest: ReceiptDigestSchema,
   }).strict(),
   publicationPolicy: z.object({

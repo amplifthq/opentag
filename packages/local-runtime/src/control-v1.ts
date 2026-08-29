@@ -1371,6 +1371,31 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       const requestedAt = new Date().toISOString();
       const actionFamily = request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool";
+      const permissionCapability = (() => {
+        const normalized = actionFamily.replaceAll("_", ".");
+        const exact = new Map<string, "workspace.read" | "workspace.write" | "command.execute"
+          | "git.read" | "git.push" | "git.force_push" | "git.target_write"
+          | "github.pull_request.create" | "github.pull_request.update"
+          | "github.pull_request.merge" | "github.release.create" | "github.branch.delete">([
+          ["read", "workspace.read"], ["list", "workspace.read"], ["search", "workspace.read"],
+          ["write", "workspace.write"], ["edit", "workspace.write"], ["patch", "workspace.write"],
+          ["execute", "command.execute"], ["command", "command.execute"], ["shell", "command.execute"],
+          ["git.read", "git.read"], ["git.push", "git.push"],
+          ["git.force.push", "git.force_push"], ["git.target.write", "git.target_write"],
+          ["publish", "github.pull_request.create"],
+          ["github.pull.request.create", "github.pull_request.create"],
+          ["github.pull.request.update", "github.pull_request.update"],
+          ["merge", "github.pull_request.merge"],
+          ["github.pull.request.merge", "github.pull_request.merge"],
+          ["release", "github.release.create"],
+          ["github.release.create", "github.release.create"],
+          ["branch.delete", "github.branch.delete"],
+          ["github.branch.delete", "github.branch.delete"],
+        ]);
+        const capability = exact.get(normalized);
+        if (!capability) throw new Error("permission_action_capability_unknown");
+        return capability;
+      })();
       const targetFingerprint = request.targetFingerprint
         ?? await computeControlPayloadDigestV1({
           connectionId: request.connectionId,
@@ -1395,6 +1420,7 @@ async function createHostedExecutionClient(input: {
         permissionRequestId,
         actionId,
         actionFamily,
+        permissionCapability,
         riskTier: "high" as const,
         targetFingerprint,
         permissionScopes: [...request.permissionScopes].sort(),

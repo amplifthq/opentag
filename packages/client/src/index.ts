@@ -2008,6 +2008,7 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         permissionRequestId: request.permissionRequestId,
         actionId: request.actionId,
         actionFamily: request.actionFamily,
+        permissionCapability: request.permissionCapability,
         riskTier: request.riskTier,
         targetFingerprint: request.targetFingerprint,
         permissionScopes: request.permissionScopes,

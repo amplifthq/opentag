@@ -1,4 +1,5 @@
 import {
+  buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
@@ -84,7 +85,10 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       suffix: "91",
       organizationId: "org_permission",
       runnerId: "runner_permission",
-      permissionActions: ["github.merge"],
+      permissionActions: ["git.force_push", "git.push", "git.target_write",
+        "github.branch.delete", "github.pull_request.create",
+        "github.pull_request.merge", "github.pull_request.update",
+        "github.release.create", "workspace.write"],
     });
     await hosted.admit({
       runId: "run_permission",
@@ -101,6 +105,19 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     });
     if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
     const claim = claimOutcome.claim;
+    const lifecycleAttempt = { attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest };
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "needs_human",
+      reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [],
+    });
+    await hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
     const digestInput = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -117,6 +134,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       permissionRequestId: "permission_request_1",
       actionId: "action_1",
       actionFamily: "github.merge",
+      permissionCapability: "workspace.write",
       riskTier: "high" as const,
       targetFingerprint: `sha256:${"1".repeat(64)}`,
       permissionScopes: ["github:merge"],
@@ -146,6 +164,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       permissionRequestId: "permission_request_publication_denied",
       actionId: "action_publication_denied",
       actionFamily: "github.pull_request",
+      permissionCapability: "github.pull_request.create",
       permissionScopes: ["github:pull_request"],
     };
     const publicationRequest = RunnerPermissionRequestV1Schema.parse({
@@ -160,6 +179,27 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     });
     await expect(permissions.request({ principal, request: publicationRequest }))
       .resolves.toEqual({ kind: "conflict" });
+    for (const [index, permissionCapability] of ([
+      "git.push", "git.force_push", "git.target_write",
+      "github.pull_request.create", "github.pull_request.update",
+      "github.pull_request.merge", "github.release.create", "github.branch.delete",
+    ] as const).entries()) {
+      const publication = { ...digestInput,
+        permissionRequestId: `permission_publication_${index}`,
+        actionId: `action_publication_${index}`,
+        actionFamily: `publication_${index}`,
+        permissionCapability };
+      const candidate = RunnerPermissionRequestV1Schema.parse({ ...publication,
+        requestId: `request_publication_${index}`,
+        operationId: `operation_publication_${index}`,
+        attempt: { ...publication.attempt, fencingToken: claim.attempt.fencingToken },
+        permissionRequestDigest: await computePermissionRequestDigestV1(publication),
+      });
+      await expect(permissions.request({ principal, request: candidate }))
+        .resolves.toEqual({ kind: "conflict" });
+    }
+    expect(RunnerPermissionRequestV1Schema.safeParse({ ...publicationRequest,
+      permissionCapability: "github.future.publish" }).success).toBe(false);
     const untrustedPolicyDigestInput = {
       ...digestInput,
       permissionRequestId: "permission_request_untrusted_policy",
@@ -213,7 +253,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       .resolves.toMatchObject({ kind: "waiting" });
     await fixture.pool.query(
       `UPDATE cp_permission_request
-       SET request = jsonb_set(request, '{actionFamily}', '"github.pull_request"'::jsonb)
+       SET request = jsonb_set(request, '{permissionCapability}', '"github.pull_request.create"'::jsonb)
        WHERE organization_id = $1 AND permission_request_id = $2`,
       [principal.organizationId, tamperRequest.permissionRequestId],
     );
@@ -275,37 +315,92 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       decision: "allow_once",
       decidedAt: now.toISOString(),
     });
-    const deny = HumanPermissionDecisionRequestV1Schema.parse({
-      ...allow,
-      requestId: "request_permission_decision_deny",
-      operationId: "operation_permission_decision_deny",
-      decisionId: "decision_deny_1",
-      decision: "deny",
-    });
-    const decisions = await Promise.all([
-      permissions.resolve({
-        principal: {
-          organizationId: "org_permission",
-          actorId: "api_key_approver",
-        },
-        runnerId: "runner_permission",
-        decision: allow,
-      }),
-      permissions.resolve({
-        principal: {
-          organizationId: "org_permission",
-          actorId: "api_key_approver",
-        },
-        runnerId: "runner_permission",
-        decision: deny,
-      }),
-    ]);
-    expect(decisions.filter((outcome) => outcome.kind === "resolved")).toHaveLength(1);
-    expect(decisions.filter((outcome) => outcome.kind === "conflict")).toHaveLength(1);
+    await expect(permissions.resolve({
+      principal: { organizationId: "org_permission", actorId: "api_key_approver" },
+      runnerId: "runner_permission", decision: allow,
+    })).resolves.toMatchObject({ kind: "resolved",
+      receipt: { payload: { state: "authorized" } } });
+    await expect(hosted.inspect({ organizationId: "org_permission",
+      runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "running" });
     const current = await permissions.current({ principal, query });
     expect(current.kind).toBe("resolved");
     if (current.kind !== "resolved") throw new Error("resolution missing");
-    expect(current.receipt.payload.state).toMatch(/authorized|denied/u);
+    expect(current.receipt.payload.state).toBe("authorized");
     expect(current.receipt.payload.decisionActorRef).toBe("api_key_approver");
+    const success = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "success",
+      reasonCode: "executor_success", resultDigest: `sha256:${"2".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [],
+    });
+    await expect(hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: success })).resolves.toMatchObject({ kind: "accepted" });
+    await expect(hosted.inspect({ organizationId: "org_permission",
+      runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "succeeded" });
+  });
+
+  it("terminally rejects an exact needs-approval denial", async () => {
+    const hosted = createHostedRunCoordinator({ pool: fixture.pool,
+      clock: { now: () => now }, leaseDurationMs: 60_000,
+      idFactory: () => "attempt_permission_deny", tokenFactory: () => "fence_permission_deny",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+    const admission = await hostedAdmissionFixture({ runId: "run_permission_deny",
+      suffix: "permission_deny", organizationId: "org_permission",
+      runnerId: "runner_permission", permissionActions: ["workspace.write"] });
+    await hosted.admit({ runId: "run_permission_deny", admission: admission.admission,
+      policy: admission.policy });
+    const claimOutcome = await hosted.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_permission_deny",
+      requestId: "request_claim_permission_deny", credentialId: "credential_permission" }) });
+    if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
+    const claim = claimOutcome.claim;
+    const lifecycleAttempt = { attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest };
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "needs_human",
+      reasonCode: "executor_needs_human", resultDigest: `sha256:${"4".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [] });
+    await hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
+    const digestInput = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.permission.v1"] as const,
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, attempt: { attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      permissionRequestId: "permission_request_deny", actionId: "action_deny",
+      actionFamily: "workspace_write", permissionCapability: "workspace.write" as const,
+      riskTier: "high" as const, targetFingerprint: `sha256:${"5".repeat(64)}`,
+      permissionScopes: ["workspace:write"],
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest, requestedAt: now.toISOString() };
+    const request = RunnerPermissionRequestV1Schema.parse({ ...digestInput,
+      requestId: "request_permission_deny", operationId: "operation_permission_deny",
+      attempt: { ...digestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(digestInput) });
+    const permissions = createPermissionCoordinator({ pool: fixture.pool,
+      clock: { now: () => now }, idFactory: (kind) => `${kind}_deny` });
+    await permissions.request({ principal, request });
+    const deny = HumanPermissionDecisionRequestV1Schema.parse({ schemaVersion: 1,
+      protocolVersion: "1.0", requiredCapabilities: ["relay.permission.v1"],
+      requestId: "request_decision_deny", operationId: "operation_decision_deny",
+      organizationId: principal.organizationId, runId: claim.runId,
+      attempt: digestInput.attempt, actionId: request.actionId,
+      permissionRequestId: request.permissionRequestId,
+      permissionRequestDigest: request.permissionRequestDigest,
+      policySnapshotDigest: request.policySnapshotDigest,
+      decisionId: "decision_deny", decision: "deny", decidedAt: now.toISOString() });
+
+    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
+      actorId: "api_key_approver" }, runnerId: principal.runnerId, decision: deny }))
+      .resolves.toMatchObject({ kind: "resolved", receipt: { payload: { state: "denied" } } });
+    await expect(hosted.inspect({ organizationId: principal.organizationId,
+      runId: claim.runId })).resolves.toMatchObject({ canonicalStatus: "failed",
+        terminalReason: "permission_denied" });
   });
 });

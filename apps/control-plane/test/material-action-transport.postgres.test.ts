@@ -68,11 +68,12 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       organizationId: authentication.principal.organizationId,
       runnerId: authentication.principal.runnerId,
     });
+    let attemptIdentity = 0;
     const hosted = createHostedRunCoordinator({
       pool: fixture.pool,
       clock: { now: () => now },
       leaseDurationMs: 60_000,
-      idFactory: () => "attempt_material_http",
+      idFactory: () => `attempt_material_http_${++attemptIdentity}`,
       tokenFactory: () => "fence_material_http",
       issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
@@ -212,6 +213,32 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       runnerId: "runner_material_http",
       fencingToken: claim.attempt.fencingToken,
       receipt,
+    })).rejects.toMatchObject({ status: 409 });
+    const recordAdmission = await hostedAdmissionFixture({
+      runId: "run_material_http_record", suffix: "96",
+      organizationId: "org_material_http", runnerId: "runner_material_http",
+    });
+    await hosted.admit({ runId: "run_material_http_record",
+      admission: recordAdmission.admission, policy: recordAdmission.policy });
+    const recordClaimOutcome = await hosted.claim({ principal: authentication.principal,
+      request: hostedClaimRequest({ operationId: "operation_claim_material_http_record",
+        requestId: "request_claim_material_http_record",
+        credentialId: "credential_material_http" }) });
+    if (recordClaimOutcome.kind !== "claimed") throw new Error("record claim failed");
+    const recordClaim = recordClaimOutcome.claim;
+    const recordSeed = { ...seed, runId: recordClaim.runId,
+      identity: { ...seed.identity, parts: ["org_material_http", recordClaim.runId,
+        recordClaim.attempt.id, payload.actionId, "receipt_material_http_record"] },
+      receiptId: "receipt_material_http_record",
+      attempt: { attemptId: recordClaim.attempt.id,
+        attemptNumber: recordClaim.attempt.number, epoch: recordClaim.attempt.epoch,
+        fencingTokenDigest: recordClaim.attempt.fencingTokenDigest } };
+    const { receiptDigest: _recordDigest, ...recordDigestInput } = recordSeed;
+    const recordReceipt = MaterialActionReceiptEnvelopeV1Schema.parse({ ...recordSeed,
+      receiptDigest: await computeMaterialActionReceiptDigestV1(recordDigestInput) });
+    await expect(client.recordMaterialActionReceiptControlV1({
+      runnerId: "runner_material_http", fencingToken: recordClaim.attempt.fencingToken,
+      receipt: recordReceipt,
     })).resolves.toMatchObject({ status: 201, replayed: false });
     await expect(client.reconcileMaterialActionControlV1({
       schemaVersion: 1,
@@ -220,14 +247,14 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       requestId: "request_reconcile_material_http",
       organizationId: "org_material_http",
       runnerId: "runner_material_http",
-      runId: "run_material_http",
+      runId: recordClaim.runId,
       actionId: payload.actionId,
       attempt: {
-        ...receipt.attempt,
-        fencingToken: claim.attempt.fencingToken,
+        ...recordReceipt.attempt,
+        fencingToken: recordClaim.attempt.fencingToken,
       },
-      expectedCurrentReceiptId: receipt.receiptId,
-      expectedCurrentReceiptDigest: receipt.receiptDigest,
+      expectedCurrentReceiptId: recordReceipt.receiptId,
+      expectedCurrentReceiptDigest: recordReceipt.receiptDigest,
     })).resolves.toMatchObject({ status: 200, outcome: "resolved" });
   });
 });

@@ -338,6 +338,34 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     });
   });
 
+  it("contains a pre-grant persisted claim as controlled interrupted outcome_unknown", async () => {
+    const service = coordinator();
+    const input = await hostedAdmissionFixture({ runId: "run_legacy_claim",
+      suffix: "legacy_claim" });
+    await service.admit({ runId: "run_legacy_claim", admission: input.admission,
+      policy: input.policy });
+    const request = hostedClaimRequest({ operationId: "operation_legacy_claim",
+      requestId: "request_legacy_claim" });
+    const first = await service.claim({ principal, request });
+    if (first.kind !== "claimed") throw new Error("claim failed");
+    await fixture.pool.query(
+      `UPDATE cp_hosted_claim SET claim_version = 1,
+         claim = claim - 'sourceContentGrant'
+       WHERE organization_id = $1 AND operation_id = $2`,
+      [principal.organizationId, request.operationId],
+    );
+
+    await expect(service.claim({ principal, request })).resolves.toMatchObject({
+      kind: "legacy_interrupted", runId: "run_legacy_claim",
+      outcome: "outcome_unknown",
+    });
+    await expect(service.inspect({ organizationId: principal.organizationId,
+      runId: "run_legacy_claim" })).resolves.toMatchObject({
+        canonicalStatus: "interrupted", outcome: "outcome_unknown",
+        terminalReason: "legacy_claim_authority_unrecoverable",
+      });
+  });
+
   it("replays one concurrent claim operation without claiming a second pending Run", async () => {
     const service = coordinator();
     const first = await hostedAdmissionFixture({
@@ -512,8 +540,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
   });
 
   it.each([
-    ["0success", "success", "succeeded", "completed", "proposal_ready"],
-    ["1failure", "failure", "failed", "rejected", "failed"],
+    ["0success", "success", "succeeded", "succeeded", "proposal_ready"],
+    ["1failure", "failure", "failed", "failed", "failed"],
     ["2cancelled", "cancelled", "cancelled", "cancelled", "cancelled"],
     ["3interrupted", "interrupted", "interrupted", "interrupted", "interrupted"],
     ["4timed_out", "timed_out", "timed_out", "timed_out", "timed_out"],
@@ -546,6 +574,62 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [principal.organizationId, claim.runId, claim.attempt.number],
     );
     expect(attempt.rows[0]?.state).toBe(attemptState);
+  });
+
+  it("blocks Runner lifecycle bypass while exact approval is pending", async () => {
+    const service = coordinator();
+    const claim = await admitAndClaim("approval_bypass");
+    const attempt = { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest };
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt, occurredAt: now.toISOString(),
+      conclusion: "needs_human", reasonCode: "executor_needs_human",
+      resultDigest: `sha256:${"a".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+    });
+    await service.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
+    const running = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "running", attempt, occurredAt: now.toISOString(),
+      executorId: claim.executorId,
+      executorCapabilityDigest: claim.authority.executorCapabilityDigest,
+    });
+    const success = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt, occurredAt: now.toISOString(),
+      conclusion: "success", reasonCode: "executor_success",
+      resultDigest: `sha256:${"b".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+    });
+
+    await expect(service.lifecycle({ principal, runId: claim.runId,
+      action: "running", request: running })).resolves.toEqual({
+        kind: "conflict", reason: "invalid_transition",
+      });
+    await expect(service.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: success })).resolves.toEqual({
+        kind: "conflict", reason: "invalid_transition",
+      });
+  });
+
+  it("keeps rejected exclusively for reject-start", async () => {
+    const service = coordinator();
+    const claim = await admitAndClaim("reject_start_state");
+    const rejected = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "reject-start",
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      occurredAt: now.toISOString(), executorId: claim.executorId,
+      reasonCode: "executor_unavailable",
+    });
+    await service.lifecycle({ principal, runId: claim.runId,
+      action: "reject-start", request: rejected });
+    expect((await fixture.pool.query<{ state: string }>(
+      "SELECT state FROM cp_hosted_attempt WHERE run_id = $1",
+      [claim.runId])).rows[0]?.state).toBe("rejected");
   });
 
   it("settles cancellation racing completion exactly once", async () => {

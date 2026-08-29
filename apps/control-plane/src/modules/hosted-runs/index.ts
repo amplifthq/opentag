@@ -126,6 +126,8 @@ export type HostedRunCoordinator = {
     request: HostedClaimRequestV1;
   }): Promise<
     | { kind: "claimed" | "replayed"; claim: HostedClaimV1 }
+    | { kind: "legacy_interrupted"; runId: string; outcome: "outcome_unknown";
+        reconciliationIdentity: string }
     | { kind: "empty" }
     | { kind: "conflict"; reason: "authority_mismatch" | "operation_mismatch" }
   >;
@@ -138,7 +140,7 @@ export type HostedRunCoordinator = {
     | { kind: "accepted" | "replayed"; receipt: HostedLifecycleReceiptEnvelopeV1 }
     | { kind: "stale_fence" }
     | { kind: "terminal"; terminalKind: TerminalKind }
-    | { kind: "conflict"; reason: "operation_mismatch" | "invalid_request" }
+    | { kind: "conflict"; reason: "operation_mismatch" | "invalid_request" | "invalid_transition" }
   >;
   reconcileExpiredAttempts(
     organizationId: string | null,
@@ -486,15 +488,56 @@ export function createHostedRunCoordinator(input: {
           ],
         );
         const existingClaim = await client.query(
-          `SELECT request_digest, claim
+          `SELECT request_digest, claim_version, run_id, claim
            FROM cp_hosted_claim
            WHERE organization_id = $1 AND operation_id = $2`,
           [principal.organizationId, request.operationId],
-        ) as { rows: Array<{ request_digest: string; claim: unknown }> };
+        ) as { rows: Array<{ request_digest: string; claim_version: number;
+          run_id: string; claim: unknown }> };
         const replay = existingClaim.rows[0];
         if (replay) {
           if (replay.request_digest !== requestDigest) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
+          }
+          if (replay.claim_version === 1) {
+            const reconciliationIdentity = `${principal.organizationId}:${replay.run_id}:${request.operationId}:legacy_claim`;
+            const run = await client.query<HostedRunRow>(
+              `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2
+               FOR UPDATE`, [principal.organizationId, replay.run_id],
+            );
+            if (run.rows[0] && !run.rows[0].terminal_kind) {
+              await client.query(
+                `SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
+                 AND attempt_number = $3 FOR UPDATE`,
+                [principal.organizationId, replay.run_id,
+                  run.rows[0].current_attempt_number],
+              );
+              const now = input.clock.now().toISOString();
+              await client.query(
+                `UPDATE cp_hosted_attempt SET state = 'interrupted',
+                   material_start_state = 'started_or_ambiguous', updated_at = $4
+                 WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3`,
+                [principal.organizationId, replay.run_id,
+                  run.rows[0].current_attempt_number, now],
+              );
+              await client.query(
+                `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $3)
+                 WHERE organization_id = $1 AND run_id = $2 AND consumed_at IS NULL`,
+                [principal.organizationId, replay.run_id, now],
+              );
+              await client.query(
+                `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
+                   terminal_reason = 'legacy_claim_authority_unrecoverable',
+                   outcome_state = 'outcome_unknown', reconciliation_identity = $3,
+                   terminal_receipt = $4::jsonb, updated_at = $5
+                 WHERE organization_id = $1 AND run_id = $2`,
+                [principal.organizationId, replay.run_id, reconciliationIdentity,
+                  JSON.stringify({ kind: "legacy_claim_interrupted",
+                    outcome: "outcome_unknown", reconciliationIdentity }), now],
+              );
+            }
+            return { kind: "legacy_interrupted", runId: replay.run_id,
+              outcome: "outcome_unknown", reconciliationIdentity } as const;
           }
           const claim = await hydrateStoredClaim(client as PoolClient, replay.claim);
           if (!claim) {
@@ -548,11 +591,14 @@ export function createHostedRunCoordinator(input: {
                    AND attempt.run_id = run.run_id
                    AND attempt.attempt_number = run.current_attempt_number
                    AND attempt.lease_expires_at <= $3
-                   AND NOT EXISTS (
-                     SELECT 1 FROM cp_material_action_receipt material
-                     WHERE material.organization_id = attempt.organization_id
-                       AND material.run_id = attempt.run_id
-                       AND material.attempt_id = attempt.attempt_id
+                   AND attempt.material_start_state = 'proven_not_started'
+                   AND EXISTS (
+                     SELECT 1 FROM cp_material_action_non_start_proof proof
+                     WHERE proof.organization_id = attempt.organization_id
+                       AND proof.run_id = attempt.run_id
+                       AND proof.attempt_id = attempt.attempt_id
+                       AND proof.attempt_number = attempt.attempt_number
+                       AND proof.fencing_token_digest = attempt.fencing_token_digest
                    )
                )
              )
@@ -684,9 +730,9 @@ export function createHostedRunCoordinator(input: {
         );
         await client.query(
           `INSERT INTO cp_hosted_claim(
-             organization_id, operation_id, request_digest, run_id, claim,
+             organization_id, operation_id, request_digest, claim_version, run_id, claim,
              created_at
-           ) VALUES($1, $2, $3, $4, $5::jsonb, $6)`,
+           ) VALUES($1, $2, $3, 2, $4, $5::jsonb, $6)`,
           [
             principal.organizationId,
             request.operationId,
@@ -825,6 +871,10 @@ export function createHostedRunCoordinator(input: {
         }
 
         const operation = lifecycleOperation(command.action);
+        if (attempt.state === "needs_approval"
+          && command.action !== "heartbeat" && command.action !== "cancel") {
+          return { kind: "conflict", reason: "invalid_transition" } as const;
+        }
         let leaseExpiresAt: string | undefined;
         let payload: HostedLifecycleReceiptEnvelopeV1["payload"];
         if (command.action === "heartbeat") {
@@ -956,8 +1006,8 @@ export function createHostedRunCoordinator(input: {
         } else if (command.action === "complete") {
           const conclusion = HostedCompleteRequestV1Schema.parse(request).conclusion;
           const completion = {
-            success: ["succeeded", "completed", "succeeded"],
-            failure: ["failed", "rejected", "failed"],
+            success: ["succeeded", "succeeded", "succeeded"],
+            failure: ["failed", "failed", "failed"],
             cancelled: ["cancelled", "cancelled", "cancelled"],
             interrupted: ["interrupted", "interrupted", "interrupted"],
             timed_out: ["timed_out", "timed_out", "timed_out"],

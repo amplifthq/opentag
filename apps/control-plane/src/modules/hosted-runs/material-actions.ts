@@ -21,18 +21,34 @@ export async function classifyAttemptMaterialActionTruth(
     values?: readonly unknown[]): Promise<{ rows: Row[] }> },
   input: { organizationId: string; runId: string; attemptId: string },
 ): Promise<AttemptMaterialActionTruth> {
+  const attempt = await client.query<{ material_start_state: string;
+    fencing_token_digest: string }>(
+    `SELECT material_start_state, fencing_token_digest FROM cp_hosted_attempt
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  const attemptRow = attempt.rows[0];
+  if (!attemptRow || attemptRow.material_start_state === "open") {
+    return { kind: "started_or_ambiguous",
+      reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
+  }
   const result = await client.query<{ receipt_id: string }>(
     `SELECT receipt_id FROM cp_material_action_receipt
      WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
      ORDER BY created_at, receipt_id LIMIT 1`,
     [input.organizationId, input.runId, input.attemptId],
   );
-  if (result.rows[0]) return { kind: "started_or_ambiguous",
-    reconciliationIdentity: `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}` };
+  if (attemptRow.material_start_state === "started_or_ambiguous" || result.rows[0]) {
+    return { kind: "started_or_ambiguous",
+      reconciliationIdentity: result.rows[0]
+        ? `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}`
+        : `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
+  }
   const proof = await client.query<{ proof_id: string }>(
     `SELECT proof_id FROM cp_material_action_non_start_proof
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
-    [input.organizationId, input.runId, input.attemptId],
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+       AND fencing_token_digest = $4`,
+    [input.organizationId, input.runId, input.attemptId, attemptRow.fencing_token_digest],
   );
   return proof.rows[0]
     ? { kind: "proven_not_started" }
@@ -86,6 +102,7 @@ async function currentAttemptMatches(
     attemptNumber: number;
     fencingTokenDigest: string;
     now: Date;
+    materialStartState?: "open" | "material_allowed";
   },
 ): Promise<boolean> {
   const result = await client.query(
@@ -101,6 +118,10 @@ async function currentAttemptMatches(
        AND attempt.fencing_token_digest = $6
        AND attempt.credential_id = $7
        AND attempt.lease_expires_at > $8
+       AND ($9::text IS NULL
+         OR ($9 = 'open' AND attempt.material_start_state = 'open')
+         OR ($9 = 'material_allowed'
+           AND attempt.material_start_state IN ('open','started_or_ambiguous')))
      FOR UPDATE OF run, attempt`,
     [
       input.principal.organizationId,
@@ -111,6 +132,7 @@ async function currentAttemptMatches(
       input.fencingTokenDigest,
       input.principal.credentialId,
       input.now,
+      input.materialStartState ?? null,
     ],
   ) as { rows: unknown[] };
   return result.rows.length === 1;
@@ -157,7 +179,15 @@ export function createMaterialActionCoordinator(input: {
           principal: command.principal, runId: command.runId,
           attemptId: command.attemptId, attemptNumber: command.attemptNumber,
           fencingTokenDigest, now: input.clock.now(),
+          materialStartState: "open",
         }))) return { kind: "stale_fence" as const };
+        await client.query(
+          `UPDATE cp_hosted_attempt SET material_start_state = 'proven_not_started',
+             updated_at = $4 WHERE organization_id = $1 AND run_id = $2
+             AND attempt_number = $3 AND material_start_state = 'open'`,
+          [command.principal.organizationId, command.runId,
+            command.attemptNumber, input.clock.now()],
+        );
         await client.query(
           `INSERT INTO cp_material_action_non_start_proof(
              organization_id, run_id, attempt_id, attempt_number,
@@ -218,7 +248,15 @@ export function createMaterialActionCoordinator(input: {
           attemptNumber: receipt.attempt.attemptNumber,
           fencingTokenDigest: receipt.attempt.fencingTokenDigest,
           now: input.clock.now(),
+          materialStartState: "material_allowed",
         }))) return { kind: "stale_fence" as const };
+        await client.query(
+          `UPDATE cp_hosted_attempt SET material_start_state = 'started_or_ambiguous',
+             updated_at = $4 WHERE organization_id = $1 AND run_id = $2
+             AND attempt_number = $3 AND material_start_state = 'open'`,
+          [command.principal.organizationId, receipt.runId,
+            receipt.attempt.attemptNumber, input.clock.now()],
+        );
 
         const currentResult = await client.query(
           `SELECT receipt_id, receipt_digest, outcome, receipt

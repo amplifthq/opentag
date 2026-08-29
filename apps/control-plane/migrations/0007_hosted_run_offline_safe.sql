@@ -99,8 +99,11 @@ ALTER TABLE cp_source_content_read_grant ALTER COLUMN key_version SET NOT NULL;
 
 ALTER TABLE cp_hosted_attempt DROP CONSTRAINT cp_hosted_attempt_state_check;
 ALTER TABLE cp_hosted_attempt ADD CONSTRAINT cp_hosted_attempt_state_check
-  CHECK (state IN ('claimed','running','needs_approval','cancelled','completed',
-    'rejected','interrupted','timed_out','expired'));
+  CHECK (state IN ('claimed','running','needs_approval','succeeded','failed',
+    'rejected','cancelled','interrupted','timed_out','expired'));
+ALTER TABLE cp_hosted_attempt ADD COLUMN material_start_state text
+  NOT NULL DEFAULT 'open' CHECK (material_start_state IN
+    ('open','proven_not_started','started_or_ambiguous'));
 
 CREATE TABLE cp_material_action_non_start_proof (
   organization_id text NOT NULL,
@@ -128,6 +131,9 @@ CREATE TABLE cp_source_resolution_admission (
   CHECK ((state = 'pending' AND resolution IS NULL) OR
     (state = 'decided' AND resolution->>'kind' IN ('accepted','waiting_for_runner')))
 );
+
+ALTER TABLE cp_hosted_claim ADD COLUMN claim_version integer NOT NULL DEFAULT 1
+  CHECK (claim_version IN (1, 2));
 
 CREATE FUNCTION cp_hosted_run_frozen_admission_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$

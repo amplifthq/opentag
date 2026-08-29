@@ -4,6 +4,7 @@ import {
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionRequestV1Schema,
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
   HostedAdmissionEnvelopeV1Schema,
   PermissionRequestDigestInputV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
@@ -48,10 +49,9 @@ type StoredPermissionRequestV1 = ReturnType<
   typeof StoredPermissionRequestV1Schema.parse
 >;
 
-function isPublicationPermission(request: StoredPermissionRequestV1): boolean {
-  const values = [request.actionFamily, ...request.permissionScopes];
-  return values.some((value) => /pull[_-]?request|publication|github:push/iu.test(value));
-}
+const publicationCapabilities = new Set<string>(
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
+);
 
 async function withinFrozenPermissionAuthority(
   client: { query<Row extends Record<string, unknown>>(text: string,
@@ -66,8 +66,9 @@ async function withinFrozenPermissionAuthority(
   const row = result.rows[0];
   if (!row) return false;
   const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
-  return admission.permissionCeiling.allowedActions.includes(input.request.actionFamily)
-    && !(row.publication_mode === "proposal_only" && isPublicationPermission(input.request));
+  return admission.permissionCeiling.allowedActions.includes(input.request.permissionCapability)
+    && !(row.publication_mode === "proposal_only"
+      && publicationCapabilities.has(input.request.permissionCapability));
 }
 
 export type PermissionCoordinator = {
@@ -115,6 +116,7 @@ function permissionDigestInput(request: RunnerPermissionRequestV1) {
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
     actionFamily: request.actionFamily,
+    permissionCapability: request.permissionCapability,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
     permissionScopes: request.permissionScopes,
@@ -156,6 +158,7 @@ async function buildReceipt(input: {
     permissionRequestDigest: input.request.permissionRequestDigest,
     actionId: input.request.actionId,
     actionFamily: input.request.actionFamily,
+    permissionCapability: input.request.permissionCapability,
     riskTier: input.request.riskTier,
     targetFingerprint: input.request.targetFingerprint,
     permissionScopes: input.request.permissionScopes,
@@ -515,6 +518,17 @@ export function createPermissionCoordinator(input: {
             decidedAt: decision.decidedAt,
           },
         });
+        const approvalState = await client.query<{ run_state: string; attempt_state: string }>(
+          `SELECT run.state AS run_state, attempt.state AS attempt_state
+           FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
+             ON attempt.organization_id = run.organization_id
+            AND attempt.run_id = run.run_id
+            AND attempt.attempt_number = run.current_attempt_number
+           WHERE run.organization_id = $1 AND run.run_id = $2`,
+          [command.principal.organizationId, decision.runId],
+        );
+        const resumesApproval = approvalState.rows[0]?.run_state === "needs_approval"
+          && approvalState.rows[0]?.attempt_state === "needs_approval";
         await client.query(
           `UPDATE cp_permission_request
            SET state = $3, current_receipt = $4::jsonb, updated_at = $5
@@ -527,6 +541,38 @@ export function createPermissionCoordinator(input: {
             observedAt,
           ],
         );
+        if (resumesApproval) {
+          if (decision.decision === "allow_once") {
+            await client.query(
+              `UPDATE cp_hosted_attempt SET state = 'running', updated_at = $4
+               WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                decision.attempt.attemptNumber, observedAt],
+            );
+            await client.query(
+              `UPDATE cp_hosted_run SET state = 'running', updated_at = $3
+               WHERE organization_id = $1 AND run_id = $2 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId, observedAt],
+            );
+          } else {
+            await client.query(
+              `UPDATE cp_hosted_attempt SET state = 'failed', updated_at = $4
+               WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                decision.attempt.attemptNumber, observedAt],
+            );
+            await client.query(
+              `UPDATE cp_hosted_run SET state = 'failed', terminal_kind = 'failed',
+                 terminal_reason = 'permission_denied', terminal_receipt = $3::jsonb,
+                 updated_at = $4 WHERE organization_id = $1 AND run_id = $2
+                 AND state = 'needs_approval'`,
+              [command.principal.organizationId, decision.runId,
+                JSON.stringify(receipt), observedAt],
+            );
+          }
+        }
         await client.query(
           `INSERT INTO cp_permission_operation(
              organization_id, operation_id, request_digest,
