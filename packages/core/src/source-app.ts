@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type {
   OpenTagChannelIngressVerificationInput,
-  OpenTagChannelInboundMessage,
+  OpenTagSourceIngressEvent,
   OpenTagChannelPresentationCommand
 } from "./channel-protocol.js";
 import type { OpenTagReplyTargetRef } from "./integration-protocol.js";
@@ -26,7 +26,7 @@ export type SourceAppCorePorts<_RawDelivery, NativePresentation> = {
   capabilities: SourceAppCapabilities;
   ingress: {
     verify(input: OpenTagChannelIngressVerificationInput): Promise<unknown>;
-    normalize(input: unknown): OpenTagChannelInboundMessage | null;
+    normalize(input: unknown): OpenTagSourceIngressEvent | null;
   };
   context: {
     readThread(input: {

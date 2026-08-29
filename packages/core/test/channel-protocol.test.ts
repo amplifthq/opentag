@@ -3,7 +3,8 @@ import {
   channelProgressVisibility,
   OpenTagChannelInboundMessageSchema,
   OpenTagManagedChannelBindingOwnershipSchema,
-  OpenTagChannelPresentationCommandSchema
+  OpenTagChannelPresentationCommandSchema,
+  OpenTagSourceDeletionEventSchema
 } from "../src/channel-protocol.js";
 import { presentationDeliveryTier } from "../src/presentation.js";
 
@@ -13,6 +14,30 @@ const replyTarget = {
 } as const;
 
 describe("opentag.channel.v1", () => {
+  it("keeps source deletion outside invocation triggers", () => {
+    expect(() => OpenTagChannelInboundMessageSchema.parse({
+      protocol: "opentag.channel.v1", eventId: "EvDelete1",
+      occurredAt: "2026-08-30T00:00:00.000Z", trigger: "source_content_deleted",
+      source: { kind: "channel_message",
+        channel: { provider: "slack", workspace: "T1", id: "C1" },
+        thread: { provider: "slack", id: "1700000000.000100" },
+        actor: { provider: "slack", id: "U1" } },
+      attachments: [], replyTarget: { channel: { provider: "slack", id: "C1" } }
+    })).toThrow();
+
+    expect(OpenTagSourceDeletionEventSchema.parse({
+      protocol: "opentag.channel.v1", eventId: "EvDelete1",
+      occurredAt: "2026-08-30T00:00:00.000Z", trigger: "source_content_deleted",
+      source: { provider: "slack",
+        channel: { provider: "slack", workspace: "T1", id: "C1" },
+        thread: { provider: "slack", id: "1700000000.000100" },
+        actor: { provider: "slack", id: "U1" }, messageId: "1700000000.000100",
+        sourceVersionRef: "slack:T1:C1:1700000000.000100" },
+      verification: { sourceDeliveryId: "EvDelete1",
+        verifiedAt: "2026-08-30T00:00:01.000Z",
+        evidenceDigest: `sha256:${"a".repeat(64)}` }
+    })).toMatchObject({ trigger: "source_content_deleted" });
+  });
   it("keeps routine executor progress audit-only even when a caller requests source-thread delivery", () => {
     expect(channelProgressVisibility({ type: "executor.progress", requested: "human" })).toBe("audit");
     expect(channelProgressVisibility({ type: "executor.started", requested: "human" })).toBe("audit");

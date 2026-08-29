@@ -66,6 +66,31 @@ export const OpenTagChannelInboundMessageSchema = z
     }
   });
 
+export const OpenTagSourceDeletionEventSchema = z.object({
+  protocol: OpenTagChannelProtocolSchema,
+  eventId: z.string().trim().min(1),
+  occurredAt: z.string().datetime({ offset: true }),
+  trigger: z.literal("source_content_deleted"),
+  source: z.object({
+    provider: z.string().trim().min(1),
+    channel: OpenTagChannelRefSchema,
+    thread: OpenTagThreadRefSchema,
+    actor: OpenTagActorRefSchema,
+    messageId: z.string().trim().min(1),
+    sourceVersionRef: z.string().trim().min(1).max(512)
+  }).strict(),
+  verification: z.object({
+    sourceDeliveryId: z.string().trim().min(1).max(512),
+    verifiedAt: z.string().datetime({ offset: true }),
+    evidenceDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/u)
+  }).strict()
+}).strict();
+
+export const OpenTagSourceIngressEventSchema = z.union([
+  OpenTagChannelInboundMessageSchema,
+  OpenTagSourceDeletionEventSchema
+]);
+
 export const OpenTagChannelPresentationCommandSchema = z
   .object({
     protocol: OpenTagChannelProtocolSchema,
@@ -90,6 +115,8 @@ export type OpenTagChannelAttachmentRef = z.infer<typeof OpenTagChannelAttachmen
 export type OpenTagChannelInboundSource = z.infer<typeof OpenTagChannelInboundSourceSchema>;
 export type OpenTagChannelInboundMessageInput = z.input<typeof OpenTagChannelInboundMessageSchema>;
 export type OpenTagChannelInboundMessage = z.infer<typeof OpenTagChannelInboundMessageSchema>;
+export type OpenTagSourceDeletionEvent = z.infer<typeof OpenTagSourceDeletionEventSchema>;
+export type OpenTagSourceIngressEvent = z.infer<typeof OpenTagSourceIngressEventSchema>;
 export type OpenTagChannelPresentationCommandInput = z.input<typeof OpenTagChannelPresentationCommandSchema>;
 export type OpenTagChannelPresentationCommand = z.infer<typeof OpenTagChannelPresentationCommandSchema>;
 

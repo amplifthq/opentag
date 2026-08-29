@@ -134,6 +134,21 @@ export function createSourceIngressService(input: {
     code: "source_ingress_processing_poisoned",
   } as const satisfies SourceResolution;
   return {
+    async findSourceIdentity(inputValue: { organizationId: string; installationId: string;
+      sourceAppId: string; sourceVersionRef: string }) {
+      try {
+        const value = z.object({ organizationId: identity, installationId: identity,
+          sourceAppId: identity, sourceVersionRef: identity }).strict().parse(inputValue);
+        const result = await input.pool.query<{ source_delivery_id: string; source_message_id: string }>(
+          `SELECT source_delivery_id, source_message_id FROM cp_ingress_reservation
+           WHERE organization_id = $1 AND installation_id = $2 AND source_app_id = $3
+             AND source_version_ref = $4 ORDER BY created_at LIMIT 2`,
+          [value.organizationId, value.installationId, value.sourceAppId, value.sourceVersionRef],
+        );
+        return result.rows.length === 1 ? { sourceDeliveryId: result.rows[0]!.source_delivery_id,
+          sourceMessageId: result.rows[0]!.source_message_id } : null;
+      } catch { return null; }
+    },
     async reserve(candidate: SourceIngressCommand) {
       let command: SourceIngressCommand;
       try {

@@ -5,7 +5,7 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type { Pool } from "pg";
-import { createControlPlaneApplication } from "./application.js";
+import { createControlPlaneApplication, type ControlPlaneDependencies } from "./application.js";
 import type { ControlPlaneConfig } from "./config.js";
 import {
   checkMigrationReadiness,
@@ -98,6 +98,7 @@ export function createControlPlaneRuntime(input: {
   postgres?: PostgresCapability;
   sourceContentInvalidationAuthority?: SourceContentInvalidationAuthority;
   sourceResolutionPort?: SourceResolutionPort;
+  slackIngress?: ControlPlaneDependencies["slack"];
 }) {
   const postgres = input.postgres ?? createPostgresRuntime({
     databaseUrl: input.config.databaseUrl,
@@ -374,6 +375,7 @@ export function createControlPlaneRuntime(input: {
       targets: runners,
     },
     ...(github ? { github } : {}),
+    ...(input.slackIngress ? { slack: input.slackIngress } : {}),
   });
 
   return {

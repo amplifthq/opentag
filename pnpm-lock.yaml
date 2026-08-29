@@ -38,6 +38,12 @@ importers:
       '@opentag/control-protocol':
         specifier: workspace:*
         version: link:../../packages/control-protocol
+      '@opentag/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@opentag/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
       '@opentag/source-app-runtime':
         specifier: workspace:*
         version: link:../../packages/source-app-runtime
@@ -691,6 +697,9 @@ importers:
       '@opentag/delivery-contract':
         specifier: workspace:*
         version: link:../delivery-contract
+      '@opentag/source-app-runtime':
+        specifier: workspace:*
+        version: link:../source-app-runtime
       hono:
         specifier: ^4.6.15
         version: 4.12.34

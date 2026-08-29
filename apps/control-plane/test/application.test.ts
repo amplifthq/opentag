@@ -16,6 +16,34 @@ const capabilities = RelayCapabilitiesResponseV1Schema.parse({
 });
 
 describe("Control Plane Fetch application", () => {
+  it("forwards raw Slack Events API and interactivity bodies to the typed ingress", async () => {
+    const calls: Array<{ kind: string; installationId: string; body: string }> = [];
+    const application = createControlPlaneApplication({ capabilities,
+      readiness: { check: async () => ({ ready: true }) },
+      slack: {
+        async receiveEvents(installationId, request) {
+          calls.push({ kind: "events", installationId,
+            body: new TextDecoder().decode(request.rawBody) });
+          return { status: 200, body: { ok: true } };
+        },
+        async receiveInteractivity(installationId, request) {
+          calls.push({ kind: "interactivity", installationId,
+            body: new TextDecoder().decode(request.rawBody) });
+          return { status: 200, body: { ok: true } };
+        }
+      } });
+    const event = await application.fetch(new Request(
+      "http://control.test/v1/providers/slack/events/install_1",
+      { method: "POST", body: "event-body" }));
+    const action = await application.fetch(new Request(
+      "http://control.test/v1/providers/slack/interactivity/install_1",
+      { method: "POST", body: "action-body" }));
+    expect([event.status, action.status]).toEqual([200, 200]);
+    expect(calls).toEqual([
+      { kind: "events", installationId: "install_1", body: "event-body" },
+      { kind: "interactivity", installationId: "install_1", body: "action-body" }
+    ]);
+  });
   it("keeps liveness independent from database readiness", async () => {
     let readinessChecks = 0;
     const application = createControlPlaneApplication({

@@ -98,6 +98,14 @@ export type ControlPlaneDependencies = {
     targets?: Pick<RunnerDirectory, "declareProjectTarget">;
   };
   github?: Pick<GithubIngress, "receive"> & Partial<Pick<GithubIngress, "createBinding">>;
+  slack?: {
+    receiveEvents(installationId: string, request: {
+      rawBody: Uint8Array; headers: Headers; receivedAt: string;
+    }): Promise<{ status: number; body: unknown }>;
+    receiveInteractivity(installationId: string, request: {
+      rawBody: Uint8Array; headers: Headers; receivedAt: string;
+    }): Promise<{ status: number; body: unknown }>;
+  };
 };
 
 export type ControlPlaneApplication = {
@@ -205,6 +213,23 @@ export function createControlPlaneApplication(
   });
 
   app.get("/v1/relay/capabilities", (context) => context.json(capabilities));
+
+  if (dependencies.slack) {
+    const slackRoute = (kind: "events" | "interactivity") => async (context: any) => {
+      const readiness = await dependencies.readiness.check();
+      if (!readiness.ready) return context.json({ error: "relay_not_ready" }, 503);
+      const request = { rawBody: new Uint8Array(await context.req.raw.arrayBuffer()),
+        headers: context.req.raw.headers, receivedAt: new Date().toISOString() };
+      const result = kind === "events"
+        ? await dependencies.slack!.receiveEvents(context.req.param("installationId"), request)
+        : await dependencies.slack!.receiveInteractivity(context.req.param("installationId"), request);
+      return typeof result.body === "string"
+        ? context.body(result.body, result.status)
+        : context.json(result.body, result.status);
+    };
+    app.post("/v1/providers/slack/events/:installationId", slackRoute("events"));
+    app.post("/v1/providers/slack/interactivity/:installationId", slackRoute("interactivity"));
+  }
 
   if (dependencies.github) {
     app.post("/v1/providers/github/webhooks/:bindingId", async (context) => {

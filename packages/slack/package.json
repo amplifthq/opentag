@@ -39,6 +39,7 @@
     "@opentag/client": "workspace:*",
     "@opentag/core": "workspace:*",
     "@opentag/delivery-contract": "workspace:*",
+    "@opentag/source-app-runtime": "workspace:*",
     "hono": "^4.6.15",
     "ws": "^8.21.0"
   },
