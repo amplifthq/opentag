@@ -21,8 +21,17 @@ const JobPayloadSchema = z.object({
 
 export interface SourceResolutionPort {
   resolve(input: {
+    idempotencyKey: string;
     reservation: NonNullable<Awaited<ReturnType<SourceIngressService["readReservation"]>>>;
     sourceContext: unknown;
+    job: {
+      jobId: string;
+      leaseOwner: string;
+      leaseToken: string;
+      leaseExpiresAt: string;
+      attemptNumber: number;
+      maxAttempts: number;
+    };
   }): Promise<SourceResolution>;
 }
 
@@ -45,6 +54,11 @@ export function createSourceIngressWorker(input: {
 }) {
   return {
     async processNext() {
+      const finalized = await input.ingress.finalizeExpiredProcessing();
+      if (finalized) {
+        return { kind: "settled", jobId: finalized.jobId,
+          resolution: finalized.resolution } as const;
+      }
       const claim = await input.queue.claim(input.workerId, ["source_ingress.process"]);
       if (claim.kind === "empty") return { kind: "empty" } as const;
       const { job } = claim;
@@ -66,7 +80,22 @@ export function createSourceIngressWorker(input: {
             reservation: reservation!, jobId: job.jobId, leaseToken: job.leaseToken,
             expiresAt: new Date(job.leaseExpiresAt),
           });
-          const resolved = await input.resolver.resolve({ reservation: reservation!, sourceContext });
+          await input.ingress.assertProcessingLease({
+            reservation: reservation!, jobId: job.jobId, leaseToken: job.leaseToken,
+          });
+          const resolved = await input.resolver.resolve({
+            idempotencyKey: `source-ingress:${reservation!.reservationId}`,
+            reservation: reservation!,
+            sourceContext,
+            job: {
+              jobId: job.jobId,
+              leaseOwner: job.leaseOwner,
+              leaseToken: job.leaseToken,
+              leaseExpiresAt: job.leaseExpiresAt,
+              attemptNumber: job.attemptCount,
+              maxAttempts: job.maxAttempts,
+            },
+          });
           return input.ingress.recordResolution({ reservation: reservation!, resolution: resolved,
             jobId: job.jobId, leaseToken: job.leaseToken });
         })();

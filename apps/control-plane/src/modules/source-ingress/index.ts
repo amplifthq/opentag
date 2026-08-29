@@ -15,6 +15,7 @@ import type {
 const identity = z.string().min(1).max(512).refine((value) => value === value.trim());
 const sha256Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const closedCode = z.string().regex(/^[a-z][a-z0-9_.-]{0,127}$/u);
+const opaqueIdentifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u);
 
 const SourceIngressCommandSchema = z.object({
   organizationId: identity,
@@ -70,9 +71,9 @@ export type SourceResolution =
   | { kind: "temporarily_unavailable"; code: string };
 
 const SourceResolutionSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("accepted"), runId: identity }).strict(),
-  z.object({ kind: z.literal("waiting_for_runner"), runId: identity }).strict(),
-  z.object({ kind: z.literal("follow_up_queued"), followUpId: identity }).strict(),
+  z.object({ kind: z.literal("accepted"), runId: opaqueIdentifier }).strict(),
+  z.object({ kind: z.literal("waiting_for_runner"), runId: opaqueIdentifier }).strict(),
+  z.object({ kind: z.literal("follow_up_queued"), followUpId: opaqueIdentifier }).strict(),
   ...(["binding_change_pending", "setup_required", "not_authorized", "invalid_request",
     "queue_full", "storage_quota_exceeded", "source_content_deleted",
     "temporarily_unavailable"] as const).map((kind) => z.object({
@@ -128,6 +129,10 @@ export function createSourceIngressService(input: {
   jobs: Pick<DurableJobQueue, "enqueueInTransaction">;
 }) {
   const jobs = input.jobs;
+  const poisonedResolution = {
+    kind: "temporarily_unavailable",
+    code: "source_ingress_processing_poisoned",
+  } as const satisfies SourceResolution;
   return {
     async reserve(candidate: SourceIngressCommand) {
       let command: SourceIngressCommand;
@@ -261,6 +266,74 @@ export function createSourceIngressService(input: {
         fenceDigest: command.leaseToken,
         contentIds: [command.reservation.contentRef.contentId], purpose: "source_context" });
       return rows[0]?.payload;
+    },
+
+    async assertProcessingLease(command: { reservation: IngressReservation;
+      jobId: string; leaseToken: string }) {
+      const result = await input.pool.query(
+        `SELECT 1 FROM cp_job
+         WHERE job_id = $1 AND organization_id = $2
+           AND job_kind = 'source_ingress.process' AND state = 'claimed'
+           AND lease_token = $3 AND lease_expires_at > $4
+           AND payload->>'reservationId' = $5`,
+        [command.jobId, command.reservation.organizationId, command.leaseToken,
+          input.clock.now(), command.reservation.reservationId],
+      );
+      if (!result.rows[0]) throw new Error("source_ingress_stale_lease");
+    },
+
+    async finalizeExpiredProcessing() {
+      return withPostgresTransaction(input.pool, async (client) => {
+        const exhausted = await client.query<ReservationRow & {
+          job_id: string; lease_token: string;
+        }>(
+          `SELECT reservation.*, job.job_id, job.lease_token
+           FROM cp_job job
+           JOIN cp_ingress_reservation reservation
+             ON reservation.organization_id = job.organization_id
+            AND reservation.reservation_id = job.payload->>'reservationId'
+           WHERE job.job_kind = 'source_ingress.process' AND job.state = 'claimed'
+             AND job.lease_expires_at <= $1 AND job.attempt_count >= job.max_attempts
+           ORDER BY job.available_at, job.created_at, job.job_id
+           FOR UPDATE OF job, reservation SKIP LOCKED
+           LIMIT 1`,
+          [input.clock.now()],
+        );
+        const row = exhausted.rows[0];
+        if (!row) return null;
+        const existing = await client.query<{ resolution: SourceResolution }>(
+          `SELECT resolution FROM cp_source_resolution
+           WHERE organization_id = $1 AND reservation_id = $2 FOR UPDATE`,
+          [row.organization_id, row.reservation_id],
+        );
+        const resolution = existing.rows[0]?.resolution ?? poisonedResolution;
+        if (!existing.rows[0]) {
+          await client.query(
+            `INSERT INTO cp_source_resolution(resolution_id, organization_id, reservation_id,
+               resolution, operator_attention, created_at) VALUES($1,$2,$3,$4,true,$5)`,
+            [stableId("resolution", [row.organization_id, row.reservation_id]),
+              row.organization_id, row.reservation_id, resolution, input.clock.now()],
+          );
+        }
+        await client.query(
+          `UPDATE cp_ingress_reservation SET state = 'resolved', updated_at = $2
+           WHERE reservation_id = $1`,
+          [row.reservation_id, input.clock.now()],
+        );
+        await client.query(
+          `UPDATE cp_job SET state = 'succeeded', lease_owner = NULL,
+             lease_token = NULL, lease_expires_at = NULL,
+             last_error_code = 'lease_expired', updated_at = $2
+           WHERE job_id = $1`,
+          [row.job_id, input.clock.now()],
+        );
+        await client.query(
+          `INSERT INTO cp_job_settlement(job_id, lease_token, outcome, settled_at)
+           VALUES($1,$2,$3,$4)`,
+          [row.job_id, row.lease_token, resolution, input.clock.now()],
+        );
+        return { jobId: row.job_id, resolution } as const;
+      });
     },
 
     async recordResolution(command: { reservation: IngressReservation;

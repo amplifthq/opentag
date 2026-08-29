@@ -206,6 +206,94 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     expect(row.rows).toEqual([{ state: "succeeded", attempt_count: 2 }]);
   });
 
+  it("domain-finalizes an expired final attempt before a generic worker can reap it", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    await ingress.reserve(command());
+    await fixture.pool.query("UPDATE cp_job SET max_attempts = 1");
+    const abandoned = await jobs.claim("source-final-crash", ["source_ingress.process"]);
+    expect(abandoned.kind).toBe("claimed");
+    current = new Date(now.getTime() + 30_001);
+
+    await expect(jobs.claim("generic-worker", ["hosted-attempt-reconciliation"]))
+      .resolves.toEqual({ kind: "empty" });
+    const beforeFinalizer = await fixture.pool.query(
+      "SELECT state FROM cp_job WHERE job_kind = 'source_ingress.process'",
+    );
+    expect(beforeFinalizer.rows).toEqual([{ state: "claimed" }]);
+
+    const worker = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "source-finalizer", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async () => {
+        throw new Error("authority_must_not_run_after_final_crash");
+      } } });
+    await expect(worker.processNext()).resolves.toEqual(expect.objectContaining({
+      kind: "settled",
+      resolution: { kind: "temporarily_unavailable",
+        code: "source_ingress_processing_poisoned" },
+    }));
+    const closed = await fixture.pool.query(
+      `SELECT reservation.state, resolution.resolution,
+              resolution.operator_attention, job.state AS job_state,
+              settlement.outcome
+       FROM cp_ingress_reservation reservation
+       JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
+       JOIN cp_job job ON job.organization_id = reservation.organization_id
+       JOIN cp_job_settlement settlement USING (job_id)`,
+    );
+    expect(closed.rows).toEqual([{
+      state: "resolved", resolution: { kind: "temporarily_unavailable",
+        code: "source_ingress_processing_poisoned" },
+      operator_attention: true, job_state: "succeeded",
+      outcome: { kind: "temporarily_unavailable",
+        code: "source_ingress_processing_poisoned" },
+    }]);
+  });
+
+  it("fences an in-flight final attempt after the domain finalizer closes it", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    await ingress.reserve(command());
+    await fixture.pool.query("UPDATE cp_job SET max_attempts = 1");
+    let releaseAuthority!: () => void;
+    const authorityReleased = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    let authorityEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { authorityEntered = resolve; });
+    const stale = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "source-inflight-stale", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async () => {
+        authorityEntered();
+        await authorityReleased;
+        return { kind: "accepted", runId: "run_stale_final" };
+      } } });
+    const staleResult = stale.processNext();
+    await entered;
+    current = new Date(now.getTime() + 30_001);
+
+    const recovery = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "source-inflight-finalizer", retryDelayMs: 10_000, clock,
+      resolver: { resolve: async () => ({ kind: "accepted", runId: "run_forbidden" }) } });
+    await expect(recovery.processNext()).resolves.toEqual(expect.objectContaining({ kind: "settled" }));
+    releaseAuthority();
+    await expect(staleResult).resolves.toEqual(expect.objectContaining({ kind: "stale_lease" }));
+    const rows = await fixture.pool.query(
+      `SELECT reservation.state, resolution.resolution,
+              resolution.operator_attention, count(settlement.job_id)::int AS settlements
+       FROM cp_ingress_reservation reservation
+       JOIN cp_source_resolution resolution USING (organization_id, reservation_id)
+       JOIN cp_job job ON job.organization_id = reservation.organization_id
+       JOIN cp_job_settlement settlement USING (job_id)
+       GROUP BY reservation.state, resolution.resolution, resolution.operator_attention`,
+    );
+    expect(rows.rows).toEqual([{
+      state: "resolved", resolution: { kind: "temporarily_unavailable",
+        code: "source_ingress_processing_poisoned" },
+      operator_attention: true, settlements: 1,
+    }]);
+  });
+
   it("prevents a worker whose lease expires inside resolution from closing the reservation", async () => {
     let current = now;
     const clock = { now: () => current };
@@ -230,6 +318,54 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     }));
     const resolution = await fixture.pool.query("SELECT resolution FROM cp_source_resolution");
     expect(resolution.rows).toEqual([{ resolution: { kind: "accepted", runId: "run_current" } }]);
+  });
+
+  it("uses one immutable authority decision across a lease-expiry replay", async () => {
+    let current = now;
+    const clock = { now: () => current };
+    const { ingress, jobs } = components(clock);
+    await ingress.reserve(command());
+    const decisions = new Map<string, { kind: "accepted"; runId: string }>();
+    const calls: Array<{ idempotencyKey: string; jobId: string; leaseToken: string;
+      attemptNumber: number; leaseExpiresAt: string }> = [];
+    let logicalDecisions = 0;
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { firstEntered = resolve; });
+    const resolver = { async resolve(input: { idempotencyKey: string; job: {
+      jobId: string; leaseToken: string; attemptNumber: number; leaseExpiresAt: string } }) {
+      calls.push({ idempotencyKey: input.idempotencyKey, ...input.job });
+      let decision = decisions.get(input.idempotencyKey);
+      if (!decision) {
+        logicalDecisions += 1;
+        decision = { kind: "accepted", runId: "run_authoritative" };
+        decisions.set(input.idempotencyKey, decision);
+      }
+      if (input.job.attemptNumber === 1) {
+        firstEntered();
+        await firstReleased;
+      }
+      return decision;
+    } };
+    const first = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "authority-first", retryDelayMs: 10_000, clock, resolver });
+    const firstResult = first.processNext();
+    await entered;
+    current = new Date(now.getTime() + 30_001);
+    const recovery = createSourceIngressWorker({ ingress, queue: jobs,
+      workerId: "authority-recovery", retryDelayMs: 10_000, clock, resolver });
+    await expect(recovery.processNext()).resolves.toEqual(expect.objectContaining({
+      kind: "settled", resolution: { kind: "accepted", runId: "run_authoritative" },
+    }));
+    releaseFirst();
+    await expect(firstResult).resolves.toEqual(expect.objectContaining({ kind: "stale_lease" }));
+    expect(logicalDecisions).toBe(1);
+    expect(calls).toHaveLength(2);
+    expect(new Set(calls.map((call) => call.idempotencyKey)).size).toBe(1);
+    expect(calls[0]?.jobId).toBe(calls[1]?.jobId);
+    expect(calls[0]?.leaseToken).not.toBe(calls[1]?.leaseToken);
+    expect(calls.map((call) => call.attemptNumber)).toEqual([1, 2]);
   });
 
   it("closes poisoned work with operator attention instead of leaving processing state", async () => {
@@ -273,5 +409,46 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
       operator_attention: true,
     }]);
     expect(JSON.stringify(resolution.rows)).not.toContain("private provider message");
+  });
+
+  it("rejects plaintext-like run and follow-up identifiers from resolutions and settlements", async () => {
+    const cases = [
+      { deliveryId: "opaque_accepted", resolution: {
+        kind: "accepted" as const, runId: "private accepted text must not persist" } },
+      { deliveryId: "opaque_waiting", resolution: {
+        kind: "waiting_for_runner" as const, runId: "private waiting text must not persist" } },
+      { deliveryId: "opaque_followup", resolution: {
+        kind: "follow_up_queued" as const, followUpId: "private follow up text must not persist" } },
+    ];
+    for (const item of cases) {
+      const { ingress, jobs } = components();
+      const reserved = await ingress.reserve({ ...command(item.deliveryId, digest(item.deliveryId)),
+        sourceMessageId: item.deliveryId, sourceVersionRef: `fixture:${item.deliveryId}:v1` });
+      if (reserved.outcome !== "reserved") throw new Error("test_reservation_failed");
+      await fixture.pool.query(
+        "UPDATE cp_job SET max_attempts = 1 WHERE payload->>'reservationId' = $1",
+        [reserved.reservation.reservationId],
+      );
+      const worker = createSourceIngressWorker({ ingress, queue: jobs,
+        workerId: `opaque-${item.deliveryId}`, retryDelayMs: 10_000,
+        clock: { now: () => now }, resolver: { resolve: async () => item.resolution } });
+      await worker.processNext();
+    }
+    const persisted = await fixture.pool.query(
+      `SELECT resolution.resolution, settlement.outcome
+       FROM cp_source_resolution resolution
+       JOIN cp_job job ON job.organization_id = resolution.organization_id
+         AND job.payload->>'reservationId' = resolution.reservation_id
+       JOIN cp_job_settlement settlement USING (job_id)
+       ORDER BY resolution.reservation_id`,
+    );
+    expect(persisted.rows).toHaveLength(3);
+    expect(persisted.rows.every((row) => row.resolution.kind === "temporarily_unavailable"
+      && row.resolution.code === "source_ingress_processing_poisoned"
+      && row.outcome.kind === "temporarily_unavailable")).toBe(true);
+    const serialized = JSON.stringify(persisted.rows);
+    for (const phrase of ["private accepted text", "private waiting text", "private follow up text"]) {
+      expect(serialized).not.toContain(phrase);
+    }
   });
 });

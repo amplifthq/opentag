@@ -4,6 +4,8 @@ import { withPostgresTransaction, type PostgresTransactionClient } from "../../d
 
 type Clock = { now(): Date };
 
+const DOMAIN_FINALIZED_JOB_KINDS = ["source_ingress.process"] as const;
+
 type JobRow = {
   job_id: string;
   organization_id: string | null;
@@ -108,6 +110,8 @@ export function createDurableJobQueue(input: {
              SELECT job_id FROM cp_job
              WHERE state = 'claimed' AND lease_expires_at <= $1
                AND attempt_count >= max_attempts
+               AND NOT (job_kind = ANY($2::text[]))
+               AND ($3::text[] IS NULL OR job_kind = ANY($3::text[]))
              FOR UPDATE SKIP LOCKED
            )
            UPDATE cp_job job
@@ -115,7 +119,7 @@ export function createDurableJobQueue(input: {
                lease_expires_at = NULL, last_error_code = 'lease_expired',
                updated_at = $1
            FROM exhausted WHERE job.job_id = exhausted.job_id`,
-          [now],
+          [now, DOMAIN_FINALIZED_JOB_KINDS, jobKinds ?? null],
         );
         const result = await client.query(
           `WITH candidate AS (
