@@ -66,9 +66,11 @@ async function withinFrozenPermissionAuthority(
   const row = result.rows[0];
   if (!row) return false;
   const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
-  return admission.permissionCeiling.allowedActions.includes(input.request.permissionCapability)
+  return input.request.actionDescriptorDigest
+      === await computeControlPayloadDigestV1(input.request.actionDescriptor)
+    && admission.permissionCeiling.allowedActionDescriptors.includes(input.request.actionDescriptor)
     && !(row.publication_mode === "proposal_only"
-      && publicationCapabilities.has(input.request.permissionCapability));
+      && publicationCapabilities.has(input.request.actionDescriptor));
 }
 
 export type PermissionCoordinator = {
@@ -115,11 +117,10 @@ function permissionDigestInput(request: RunnerPermissionRequestV1) {
     },
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
-    actionFamily: request.actionFamily,
-    permissionCapability: request.permissionCapability,
+    actionDescriptor: request.actionDescriptor,
+    actionDescriptorDigest: request.actionDescriptorDigest,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
-    permissionScopes: request.permissionScopes,
     policySnapshotRef: request.policySnapshotRef,
     policySnapshotDigest: request.policySnapshotDigest,
     requestedAt: request.requestedAt,
@@ -157,11 +158,10 @@ async function buildReceipt(input: {
     permissionRequestId: input.request.permissionRequestId,
     permissionRequestDigest: input.request.permissionRequestDigest,
     actionId: input.request.actionId,
-    actionFamily: input.request.actionFamily,
-    permissionCapability: input.request.permissionCapability,
+    actionDescriptor: input.request.actionDescriptor,
+    actionDescriptorDigest: input.request.actionDescriptorDigest,
     riskTier: input.request.riskTier,
     targetFingerprint: input.request.targetFingerprint,
-    permissionScopes: input.request.permissionScopes,
     policySnapshotRef: input.request.policySnapshotRef,
     policySnapshotDigest: input.request.policySnapshotDigest,
     state: input.state,
@@ -518,8 +518,14 @@ export function createPermissionCoordinator(input: {
             decidedAt: decision.decidedAt,
           },
         });
-        const approvalState = await client.query<{ run_state: string; attempt_state: string }>(
-          `SELECT run.state AS run_state, attempt.state AS attempt_state
+        const approvalState = await client.query<{ run_state: string; attempt_state: string;
+          blocked_permission_request_id: string | null;
+          blocked_action_descriptor_digest: string | null;
+          blocked_policy_snapshot_digest: string | null }>(
+          `SELECT run.state AS run_state, attempt.state AS attempt_state,
+                  attempt.blocked_permission_request_id,
+                  attempt.blocked_action_descriptor_digest,
+                  attempt.blocked_policy_snapshot_digest
            FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
              ON attempt.organization_id = run.organization_id
             AND attempt.run_id = run.run_id
@@ -528,7 +534,13 @@ export function createPermissionCoordinator(input: {
           [command.principal.organizationId, decision.runId],
         );
         const resumesApproval = approvalState.rows[0]?.run_state === "needs_approval"
-          && approvalState.rows[0]?.attempt_state === "needs_approval";
+          && approvalState.rows[0]?.attempt_state === "needs_approval"
+          && approvalState.rows[0]?.blocked_permission_request_id
+            === decision.permissionRequestId
+          && approvalState.rows[0]?.blocked_action_descriptor_digest
+            === request.actionDescriptorDigest
+          && approvalState.rows[0]?.blocked_policy_snapshot_digest
+            === decision.policySnapshotDigest;
         await client.query(
           `UPDATE cp_permission_request
            SET state = $3, current_receipt = $4::jsonb, updated_at = $5
@@ -544,7 +556,10 @@ export function createPermissionCoordinator(input: {
         if (resumesApproval) {
           if (decision.decision === "allow_once") {
             await client.query(
-              `UPDATE cp_hosted_attempt SET state = 'running', updated_at = $4
+              `UPDATE cp_hosted_attempt SET state = 'running',
+                 blocked_permission_request_id = NULL,
+                 blocked_action_descriptor_digest = NULL,
+                 blocked_policy_snapshot_digest = NULL, updated_at = $4
                WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
                  AND state = 'needs_approval'`,
               [command.principal.organizationId, decision.runId,
@@ -557,7 +572,10 @@ export function createPermissionCoordinator(input: {
             );
           } else {
             await client.query(
-              `UPDATE cp_hosted_attempt SET state = 'failed', updated_at = $4
+              `UPDATE cp_hosted_attempt SET state = 'failed',
+                 blocked_permission_request_id = NULL,
+                 blocked_action_descriptor_digest = NULL,
+                 blocked_policy_snapshot_digest = NULL, updated_at = $4
                WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
                  AND state = 'needs_approval'`,
               [command.principal.organizationId, decision.runId,

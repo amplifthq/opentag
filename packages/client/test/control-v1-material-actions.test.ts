@@ -61,7 +61,9 @@ function materialReceipt(
     },
     payload: {
       actionId: "action:1",
-      actionFamily: "publish",
+      actionDescriptor: "github.release.create",
+      actionDescriptorDigest: digest,
+      idempotencyKey: "material_publish_1",
       provider: "npm",
       connectionRef: "connection_1",
       targetFingerprint: digest,

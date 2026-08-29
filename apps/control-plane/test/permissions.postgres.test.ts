@@ -1,6 +1,7 @@
 import {
   buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
+  computeControlPayloadDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
@@ -109,15 +110,6 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
       fencingToken: claim.attempt.fencingToken,
       fencingTokenDigest: claim.attempt.fencingTokenDigest };
-    const needsHuman = await buildHostedLifecycleRequestV1({
-      organizationId: principal.organizationId, runnerId: principal.runnerId,
-      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
-      occurredAt: now.toISOString(), conclusion: "needs_human",
-      reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
-      artifactDigests: [], evidenceDigests: [],
-    });
-    await hosted.lifecycle({ principal, runId: claim.runId,
-      action: "complete", request: needsHuman });
     const digestInput = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -133,11 +125,10 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       },
       permissionRequestId: "permission_request_1",
       actionId: "action_1",
-      actionFamily: "github.merge",
-      permissionCapability: "workspace.write",
+      actionDescriptor: "workspace.write" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
       riskTier: "high" as const,
       targetFingerprint: `sha256:${"1".repeat(64)}`,
-      permissionScopes: ["github:merge"],
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
       requestedAt: now.toISOString(),
@@ -163,9 +154,9 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       ...digestInput,
       permissionRequestId: "permission_request_publication_denied",
       actionId: "action_publication_denied",
-      actionFamily: "github.pull_request",
-      permissionCapability: "github.pull_request.create",
-      permissionScopes: ["github:pull_request"],
+      actionDescriptor: "github.pull_request.create" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1(
+        "github.pull_request.create"),
     };
     const publicationRequest = RunnerPermissionRequestV1Schema.parse({
       ...publicationDigestInput,
@@ -179,7 +170,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     });
     await expect(permissions.request({ principal, request: publicationRequest }))
       .resolves.toEqual({ kind: "conflict" });
-    for (const [index, permissionCapability] of ([
+    for (const [index, actionDescriptor] of ([
       "git.push", "git.force_push", "git.target_write",
       "github.pull_request.create", "github.pull_request.update",
       "github.pull_request.merge", "github.release.create", "github.branch.delete",
@@ -187,8 +178,8 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       const publication = { ...digestInput,
         permissionRequestId: `permission_publication_${index}`,
         actionId: `action_publication_${index}`,
-        actionFamily: `publication_${index}`,
-        permissionCapability };
+        actionDescriptor,
+        actionDescriptorDigest: await computeControlPayloadDigestV1(actionDescriptor) };
       const candidate = RunnerPermissionRequestV1Schema.parse({ ...publication,
         requestId: `request_publication_${index}`,
         operationId: `operation_publication_${index}`,
@@ -199,7 +190,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
         .resolves.toEqual({ kind: "conflict" });
     }
     expect(RunnerPermissionRequestV1Schema.safeParse({ ...publicationRequest,
-      permissionCapability: "github.future.publish" }).success).toBe(false);
+      actionDescriptor: "github.future.publish" }).success).toBe(false);
     const untrustedPolicyDigestInput = {
       ...digestInput,
       permissionRequestId: "permission_request_untrusted_policy",
@@ -229,6 +220,18 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     expect(
       PermissionResolutionReceiptEnvelopeV1Schema.parse(waiting.receipt).payload,
     ).toMatchObject({ state: "waiting", nextAction: "wait_for_operator" });
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "needs_human",
+      reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [], blockedPermission: {
+        permissionRequestId: request.permissionRequestId,
+        actionDescriptorDigest: request.actionDescriptorDigest,
+        policySnapshotDigest: request.policySnapshotDigest },
+    });
+    await hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
     const storedRequest = await fixture.pool.query<{ request: unknown }>(
       `SELECT request FROM cp_permission_request
        WHERE organization_id = $1 AND permission_request_id = $2`,
@@ -253,7 +256,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       .resolves.toMatchObject({ kind: "waiting" });
     await fixture.pool.query(
       `UPDATE cp_permission_request
-       SET request = jsonb_set(request, '{permissionCapability}', '"github.pull_request.create"'::jsonb)
+       SET request = jsonb_set(request, '{actionDescriptor}', '"github.pull_request.create"'::jsonb)
        WHERE organization_id = $1 AND permission_request_id = $2`,
       [principal.organizationId, tamperRequest.permissionRequestId],
     );
@@ -359,14 +362,6 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
       fencingToken: claim.attempt.fencingToken,
       fencingTokenDigest: claim.attempt.fencingTokenDigest };
-    const needsHuman = await buildHostedLifecycleRequestV1({
-      organizationId: principal.organizationId, runnerId: principal.runnerId,
-      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
-      occurredAt: now.toISOString(), conclusion: "needs_human",
-      reasonCode: "executor_needs_human", resultDigest: `sha256:${"4".repeat(64)}`,
-      artifactDigests: [], evidenceDigests: [] });
-    await hosted.lifecycle({ principal, runId: claim.runId,
-      action: "complete", request: needsHuman });
     const digestInput = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
       requiredCapabilities: ["relay.permission.v1"] as const,
       organizationId: principal.organizationId, runnerId: principal.runnerId,
@@ -374,9 +369,9 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
         attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
         fencingTokenDigest: claim.attempt.fencingTokenDigest },
       permissionRequestId: "permission_request_deny", actionId: "action_deny",
-      actionFamily: "workspace_write", permissionCapability: "workspace.write" as const,
+      actionDescriptor: "workspace.write" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
       riskTier: "high" as const, targetFingerprint: `sha256:${"5".repeat(64)}`,
-      permissionScopes: ["workspace:write"],
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest, requestedAt: now.toISOString() };
     const request = RunnerPermissionRequestV1Schema.parse({ ...digestInput,
@@ -386,6 +381,17 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     const permissions = createPermissionCoordinator({ pool: fixture.pool,
       clock: { now: () => now }, idFactory: (kind) => `${kind}_deny` });
     await permissions.request({ principal, request });
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "needs_human",
+      reasonCode: "executor_needs_human", resultDigest: `sha256:${"4".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [], blockedPermission: {
+        permissionRequestId: request.permissionRequestId,
+        actionDescriptorDigest: request.actionDescriptorDigest,
+        policySnapshotDigest: request.policySnapshotDigest } });
+    await hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
     const deny = HumanPermissionDecisionRequestV1Schema.parse({ schemaVersion: 1,
       protocolVersion: "1.0", requiredCapabilities: ["relay.permission.v1"],
       requestId: "request_decision_deny", operationId: "operation_decision_deny",

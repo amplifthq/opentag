@@ -312,7 +312,7 @@ export const PermissionActionFamilyV1Schema = z
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Action family must not contain credential-like data.");
 
-export const HostedActionCapabilityV1Schema = z.enum([
+export const PermissionActionDescriptorV1Schema = z.enum([
   "workspace.read", "workspace.write", "command.execute", "git.read",
   "git.push", "git.force_push", "git.target_write",
   "github.pull_request.create", "github.pull_request.update",
@@ -460,10 +460,30 @@ export const RunnerMaterialActionNonStartProofV1Schema = z.object({
   recordedAt: ControlTimestampSchema,
 }).strict();
 
+export const RunnerMaterialActionBeginV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  actionDescriptor: PermissionActionDescriptorV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
+  idempotencyKey: MaterialActionStableIdV1Schema,
+  begunAt: ControlTimestampSchema,
+}).strict();
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
-    actionFamily: MaterialActionNormalizedNameV1Schema,
+    actionDescriptor: PermissionActionDescriptorV1Schema,
+    actionDescriptorDigest: ReceiptDigestSchema,
+    idempotencyKey: MaterialActionStableIdV1Schema,
     provider: MaterialActionNormalizedNameV1Schema,
     connectionRef: MaterialActionStableIdV1Schema,
     targetFingerprint: ReceiptDigestSchema,
@@ -530,11 +550,10 @@ export const MaterialActionPayloadV1Schema = z
 
 const PermissionActionSummaryV1Shape = {
   actionId: PermissionStableIdV1Schema,
-  actionFamily: PermissionActionFamilyV1Schema,
-  permissionCapability: HostedActionCapabilityV1Schema,
+  actionDescriptor: PermissionActionDescriptorV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
   riskTier: z.enum(["low", "medium", "high", "critical"]),
   targetFingerprint: ReceiptDigestSchema,
-  permissionScopes: PermissionScopesV1Schema,
 };
 
 const PermissionMutationRequestV1Shape = {
@@ -1691,7 +1710,7 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   }).strict(),
   queueClaimDeadline: ControlTimestampSchema,
   permissionCeiling: z.object({
-    allowedActions: sortedUniqueArray(HostedActionCapabilityV1Schema),
+    allowedActionDescriptors: sortedUniqueArray(PermissionActionDescriptorV1Schema),
     digest: ReceiptDigestSchema,
   }).strict(),
   publicationPolicy: z.object({
@@ -2160,6 +2179,11 @@ export const HostedExecutorResultReasonCodeV1Schema = z.enum([
   "executor_timed_out",
   "executor_needs_human",
 ]);
+const HostedBlockedPermissionRefV1Schema = z.object({
+  permissionRequestId: PermissionStableIdV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
+  policySnapshotDigest: ReceiptDigestSchema,
+}).strict();
 const hostedExecutorResultReasonCodeV1 = (
   conclusion: z.infer<typeof HostedExecutorResultConclusionV1Schema>,
 ): z.infer<typeof HostedExecutorResultReasonCodeV1Schema> =>
@@ -2171,11 +2195,14 @@ export const HostedCompleteRequestV1Schema = HostedLifecycleRequestBaseV1Schema
     resultDigest: ReceiptDigestSchema,
     artifactDigests: HostedLifecycleSortedDigestsV1Schema,
     evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+    blockedPermission: HostedBlockedPermissionRefV1Schema.optional(),
   })
   .strict()
   .refine(
-    (value) =>
-      value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+    (value) => value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion)
+      && (value.conclusion === "needs_human"
+        ? value.blockedPermission !== undefined
+        : value.blockedPermission === undefined),
     {
       path: ["reasonCode"],
       message: "Executor result reason code must match the conclusion.",
@@ -2229,12 +2256,16 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       resultDigest: ReceiptDigestSchema,
       artifactDigests: HostedLifecycleSortedDigestsV1Schema,
       evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
+      blockedPermission: HostedBlockedPermissionRefV1Schema.optional(),
     }).strict(),
   ],
 ).refine(
   (value) =>
     value.operation !== "executor_result"
-    || value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion),
+    || (value.reasonCode === hostedExecutorResultReasonCodeV1(value.conclusion)
+      && (value.conclusion === "needs_human"
+        ? value.blockedPermission !== undefined
+        : value.blockedPermission === undefined)),
   {
     path: ["reasonCode"],
     message: "Executor result reason code must match the conclusion.",
@@ -2437,6 +2468,7 @@ export async function buildHostedLifecycleRequestV1(input: {
       resultDigest: string;
       artifactDigests: string[];
       evidenceDigests: string[];
+      blockedPermission?: z.input<typeof HostedBlockedPermissionRefV1Schema>;
     }
 )): Promise<HostedLifecycleRequestV1> {
   const common = {
@@ -2472,6 +2504,9 @@ export async function buildHostedLifecycleRequestV1(input: {
                 resultDigest: input.resultDigest,
                 artifactDigests: input.artifactDigests,
                 evidenceDigests: input.evidenceDigests,
+                ...(input.blockedPermission
+                  ? { blockedPermission: input.blockedPermission }
+                  : {}),
               };
   const requestSeed = HostedLifecycleRequestV1Schema.parse({
     ...common,
@@ -3529,6 +3564,9 @@ export type RunnerMaterialActionReconcileRequestV1 = z.infer<
 >;
 export type RunnerMaterialActionNonStartProofV1 = z.infer<
   typeof RunnerMaterialActionNonStartProofV1Schema
+>;
+export type RunnerMaterialActionBeginV1 = z.infer<
+  typeof RunnerMaterialActionBeginV1Schema
 >;
 export type MaterialActionPayloadV1 = z.infer<typeof MaterialActionPayloadV1Schema>;
 export type MaterialActionReceiptDigestInputV1 = z.infer<

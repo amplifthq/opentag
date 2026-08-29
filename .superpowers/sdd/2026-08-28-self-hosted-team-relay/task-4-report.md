@@ -308,3 +308,112 @@ Base: `83108c5f fix: harden offline hosted authority boundaries`.
 - `@opentag/control-protocol`, `@opentag/client`, and
   `@opentag/control-plane` builds: passed.
 - `git diff --check`: clean.
+
+## Fix Round 3/5 — Exact Approval, Begin CAS, Canonical Descriptor, and Global Containment
+
+Base: `fff0e4a1 fix: close hosted approval and replay bypasses`.
+
+### Fixed findings
+
+1. **Exact `needs_approval` linkage and bounded expiry**
+   - A `needs_human` executor result is no longer self-authorizing. The request
+     must identify exactly one current `waiting` permission request for the
+     same Run, Attempt number/ID, fencing-token digest, canonical action
+     descriptor digest, and immutable policy snapshot digest.
+   - The coordinator persists `blocked_permission_request_id`,
+     `blocked_action_descriptor_digest`, and
+     `blocked_policy_snapshot_digest` on the exact Attempt. Database checks
+     require all three fields only while the Attempt is `needs_approval`.
+   - Resume or denial requires the matching durable permission-resolution
+     evidence under the same Run→Attempt locks. Unrelated, stale, wrong-action,
+     wrong-policy, or wrong-fence decisions cannot resume the blocked Attempt.
+   - Approval-pending Attempts participate in reconciliation. Lease expiry
+     clears blocked linkage, revokes the pending permission, interrupts with
+     `outcome_unknown`, and cannot be replaced without an exact negative-start
+     proof. A proof winner instead revokes the permission and safely moves the
+     Run into replacement eligibility.
+
+2. **Server-authoritative material begin/proof CAS**
+   - Added `cp_material_action_begin_intent` and an authenticated Control V1
+     begin endpoint/client operation. The begin tuple binds organization, Run,
+     Attempt ID/number, fence digest, canonical action descriptor/digest, and
+     idempotency key.
+   - Before provider execution, the trusted local Control V1 adapter now calls
+     begin after exact permission authorization. Begin atomically CASes
+     `material_start_state: open -> started_or_ambiguous`.
+   - Negative proof is guarded by a PostgreSQL trigger. Under the exact Attempt
+     lock it can win only when state is `open` and no begin intent or material
+     receipt exists. Its single transaction changes state to
+     `proven_not_started`, expires/fences the old Attempt, clears approval
+     linkage, revokes its content grant and waiting permissions, and moves the
+     Run to safe replacement eligibility.
+   - Every lifecycle, permission, begin, receipt, and claim gate observes the
+     same material-start state. Proof-vs-begin has one database winner;
+     proof-then-lifecycle/permission/begin is stale.
+   - Evidence arriving after proof is never discarded. It is appended to the
+     evidence tables and atomically changes the Run to controlled
+     `interrupted + outcome_unknown` with a reconciliation identity and
+     `late_material_evidence_after_non_start_proof` reason.
+
+3. **One canonical action descriptor**
+   - Removed independently self-labelled `actionFamily`, permission scope, and
+     capability fields from permission authority. Permission requests and
+     receipts now carry one closed `PermissionActionDescriptor` plus its
+     canonical digest.
+   - Admission freezes an exact sorted descriptor allow-list and a digest of
+     that list. The coordinator verifies the ceiling digest during Admission.
+   - The descriptor enum inseparably defines operation and publication
+     semantics for workspace read/write, command execution, git read/push/
+     force-push/target-write, GitHub pull-request create/update/merge, release
+     creation, and branch deletion.
+   - Request and `allow_once` validate the same descriptor/digest against the
+     Admission ceiling. `proposal_only` rejects every publication descriptor.
+     Legacy field combinations, mismatched descriptors/digests, and unknown
+     future values fail strict schema or coordinator validation.
+   - The trusted local adapter uses an exact closed operation-to-descriptor
+     mapping; there is no regex classification or permissive fallback.
+
+4. **Global version-1 claim containment**
+   - Migration 0007 now contains every persisted `claim_version = 1` Run,
+     fences the exact referenced Attempt when present, revokes future grant
+     authority, and stores controlled `interrupted + outcome_unknown`
+     reconciliation state.
+   - Every hosted claim poll performs global tenant/Runner containment before
+     operation replay or candidate selection. Candidate SQL independently
+     excludes any Run referenced by a version-1 claim, so a different
+     operation ID cannot bypass containment.
+   - Missing legacy Attempts still contain the Run. Exact legacy replay returns
+     typed controlled state without parsing the modern claim schema or
+     fabricating a grant/token. A stale legacy replay whose Run already has a
+     later Attempt fences only the exact old Attempt and does not modify the
+     later Attempt or current Run.
+   - Current version-2 replay remains unchanged and verifies/reconstructs the
+     exact deterministic grant.
+
+5. **Material-truth migration dominance and database invariant**
+   - Migration backfill computes `material_start_state` with strict priority:
+     receipt or begin evidence -> `started_or_ambiguous`; exact matching proof
+     and no evidence -> `proven_not_started`; neither -> `open`.
+   - The migration corpus includes receipt-only, proof-only, both, and missing
+     cases; receipt evidence dominates proof.
+   - The proof trigger prevents proof from overriding committed begin/receipt
+     evidence even under concurrent clients. Exact replay repairs an `open`
+     state only when no evidence exists; otherwise it fails closed.
+
+### Round-3 TDD and verification evidence
+
+- Initial amended RED covered missing waiting-request linkage, proof/begin
+  authority gaps, legacy descriptor combinations, global v1 bypass, and
+  incomplete migration truth.
+- Real-PostgreSQL proof/begin and approval races were exercised with separate
+  clients, including proof-vs-begin, proof-vs-claim, proof-then-lifecycle,
+  proof-then-begin, late evidence, approval proof/replacement, and
+  approval-pending expiry without proof.
+- Final serial focused matrix: `18 test files / 266 tests passed`.
+- Fresh serialized full suite: `216 test files / 2874 tests passed` in
+  `107.52s` with one worker and PostgreSQL required.
+- `corepack pnpm typecheck`: passed.
+- Workspace lint across 28 projects: passed.
+- `@opentag/control-protocol`, `@opentag/client`, and
+  `@opentag/control-plane` builds: passed.
+- `git diff --check`: clean.

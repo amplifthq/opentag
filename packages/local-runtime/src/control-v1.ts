@@ -992,9 +992,9 @@ function permissionResolutionFromReceipt(input: {
       id: receipt.payload.actionId,
       runId: receipt.runId,
       attemptId: receipt.attempt.attemptId,
-      actionFamily: receipt.payload.actionFamily,
-      capability: request.operation,
-      scope: { permissionScopes: receipt.payload.permissionScopes },
+      actionFamily: receipt.payload.actionDescriptor,
+      capability: receipt.payload.actionDescriptor,
+      scope: { permissionScopes: request.permissionScopes },
       target: { fingerprint: receipt.payload.targetFingerprint },
       riskTier: receipt.payload.riskTier,
       status: state === "waiting"
@@ -1095,6 +1095,12 @@ async function createHostedExecutionClient(input: {
     request: ActionPermissionRequest;
     permissionRequestId: string;
     permissionRequestDigest: string;
+    actionDescriptor: "workspace.read" | "workspace.write" | "command.execute"
+      | "git.read" | "git.push" | "git.force_push" | "git.target_write"
+      | "github.pull_request.create" | "github.pull_request.update"
+      | "github.pull_request.merge" | "github.release.create" | "github.branch.delete";
+    actionDescriptorDigest: string;
+    materialIdempotencyKey: string;
   }>();
   const attempt = {
     attemptId: authority.attemptId,
@@ -1328,6 +1334,15 @@ async function createHostedExecutionClient(input: {
       }
       const completionMetadata =
         await buildHostedCompletionMetadataForControlV1(result);
+      const blockedPermission = completionMetadata.conclusion === "needs_human"
+        ? (() => {
+            const pending = [...permissionRequests.values()];
+            if (pending.length !== 1) throw new Error("hosted_needs_human_permission_link_missing");
+            return { permissionRequestId: pending[0]!.permissionRequestId,
+              actionDescriptorDigest: pending[0]!.actionDescriptorDigest,
+              policySnapshotDigest: authority.policySnapshotDigest };
+          })()
+        : undefined;
       assertNotCancelled();
       const request = HostedCompleteRequestV1Schema.parse(
         await buildLifecycleRequest({
@@ -1338,6 +1353,7 @@ async function createHostedExecutionClient(input: {
           attempt,
           occurredAt: executionOccurredAt,
           ...completionMetadata,
+          ...(blockedPermission ? { blockedPermission } : {}),
         }),
       );
       assertNotCancelled();
@@ -1371,7 +1387,7 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       const requestedAt = new Date().toISOString();
       const actionFamily = request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool";
-      const permissionCapability = (() => {
+      const actionDescriptor = (() => {
         const normalized = actionFamily.replaceAll("_", ".");
         const exact = new Map<string, "workspace.read" | "workspace.write" | "command.execute"
           | "git.read" | "git.push" | "git.force_push" | "git.target_write"
@@ -1396,6 +1412,10 @@ async function createHostedExecutionClient(input: {
         if (!capability) throw new Error("permission_action_capability_unknown");
         return capability;
       })();
+      const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+      const materialIdempotencyKey = `material_begin_${(await computeControlPayloadDigestV1({
+        runId, actionId, permissionRequestId,
+      })).slice("sha256:".length, "sha256:".length + 32)}`;
       const targetFingerprint = request.targetFingerprint
         ?? await computeControlPayloadDigestV1({
           connectionId: request.connectionId,
@@ -1419,11 +1439,10 @@ async function createHostedExecutionClient(input: {
         },
         permissionRequestId,
         actionId,
-        actionFamily,
-        permissionCapability,
+        actionDescriptor,
+        actionDescriptorDigest,
         riskTier: "high" as const,
         targetFingerprint,
-        permissionScopes: [...request.permissionScopes].sort(),
         policySnapshotRef: authority.policySnapshotRef,
         policySnapshotDigest: authority.policySnapshotDigest,
         requestedAt,
@@ -1438,7 +1457,17 @@ async function createHostedExecutionClient(input: {
         permissionRequestDigest,
       });
       assertNotCancelled();
-      permissionRequests.set(actionId, { request, permissionRequestId, permissionRequestDigest });
+      const pending = { request, permissionRequestId, permissionRequestDigest,
+        actionDescriptor, actionDescriptorDigest, materialIdempotencyKey };
+      permissionRequests.set(actionId, pending);
+      if (result.receipt.payload.state === "authorized") {
+        await client.beginMaterialActionControlV1({ schemaVersion: 1,
+          protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
+          requestId: materialIdempotencyKey, operationId: materialIdempotencyKey,
+          organizationId: authority.organizationId, runnerId: authority.runnerId,
+          runId, attempt, actionDescriptor, actionDescriptorDigest,
+          idempotencyKey: materialIdempotencyKey, begunAt: clock().toISOString() });
+      }
       return permissionResolutionFromReceipt({ receipt: result.receipt, request });
     },
     async resolveActionPermission(runId, _lease, actionId) {
@@ -1460,6 +1489,16 @@ async function createHostedExecutionClient(input: {
         permissionRequestDigest: pending.permissionRequestDigest,
       });
       assertNotCancelled();
+      if (result.receipt.payload.state === "authorized") {
+        await client.beginMaterialActionControlV1({ schemaVersion: 1,
+          protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
+          requestId: pending.materialIdempotencyKey,
+          operationId: pending.materialIdempotencyKey,
+          organizationId: authority.organizationId, runnerId: authority.runnerId,
+          runId, attempt, actionDescriptor: pending.actionDescriptor,
+          actionDescriptorDigest: pending.actionDescriptorDigest,
+          idempotencyKey: pending.materialIdempotencyKey, begunAt: clock().toISOString() });
+      }
       return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
     },
     async recordMaterialActionReceipt(runId, _lease, actionId, receipt: MaterialActionReceipt) {
@@ -1470,7 +1509,9 @@ async function createHostedExecutionClient(input: {
       const operationId = `material_${receipt.id}`;
       const payload = {
         actionId,
-        actionFamily: pending.request.operation.toLowerCase().replace(/[^a-z0-9._-]/gu, "_").slice(0, 64) || "tool",
+        actionDescriptor: pending.actionDescriptor,
+        actionDescriptorDigest: pending.actionDescriptorDigest,
+        idempotencyKey: pending.materialIdempotencyKey,
         provider: receipt.provider,
         connectionRef: receipt.connectionId ?? pending.request.connectionId,
         targetFingerprint: receipt.targetFingerprint ?? pending.request.targetFingerprint

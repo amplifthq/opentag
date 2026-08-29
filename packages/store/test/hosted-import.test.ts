@@ -159,7 +159,7 @@ async function fixture(input: {
     sourceContextEnvelope: { contentId: "content-1", sourceVersionRef: "source-1",
       aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digestA },
     queueClaimDeadline: "2026-08-11T00:00:00.000Z",
-    permissionCeiling: { allowedActions: ["workspace.write"], digest: digestA },
+    permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest: digestA },
     publicationPolicy: { mode: "proposal_only" as const, digest: digestA },
     completionContract: { mode: "proposal_ready" as const, digest: digestA },
     admissionPolicySnapshot: { snapshotId: "policy-1", digest: digestB },

@@ -129,7 +129,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
            publication_mode, completion_mode FROM cp_hosted_run WHERE run_id = $1`,
         ["run_legacy"],
       );
-      expect(row.rows[0]).toMatchObject({ state: "queued",
+      expect(row.rows[0]).toMatchObject({ state: "interrupted",
         source_version_ref: `legacy:sha256:${"2".repeat(64)}`,
         source_content_ids: ["legacy:run_legacy"], publication_mode: "proposal_only",
         completion_mode: "proposal_ready" });
@@ -143,5 +143,73 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     } finally {
       await legacy.close();
     }
+  });
+
+  it("backfills material truth with receipt evidence dominant over proof", async () => {
+    const legacy = await createIsolatedPostgres();
+    try {
+      await runMigrations(legacy.pool, legacy.migrations.slice(0, -1));
+      const createdAt = "2026-08-28T01:00:00.000Z";
+      await legacy.pool.query(
+        "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES($1,$2,$3)",
+        ["org_truth", "Truth", createdAt]);
+      await legacy.pool.query(
+        `INSERT INTO cp_runner(organization_id, runner_id, registration_generation,
+           credential_generation, current_credential_id, capabilities, created_at, updated_at)
+         VALUES($1,$2,1,1,$3,'[]'::jsonb,$4,$4)`,
+        ["org_truth", "runner_truth", "credential_truth", createdAt]);
+      for (const kind of ["receipt", "proof", "both", "missing"] as const) {
+        const runId = `run_truth_${kind}`;
+        await legacy.pool.query(
+          `INSERT INTO cp_hosted_run(organization_id, run_id, admission_id,
+             admission_operation_id, admission_digest, source_identity_digest,
+             runner_id, executor_id, state, current_attempt_number, hosted_admission,
+             admission_policy_snapshot, created_at, updated_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,'executor','claimed',1,'{}','{}',$8,$8)`,
+          ["org_truth", runId, `admission_${kind}`, `operation_${kind}`,
+            `sha256:${kind[0]!.repeat(64)}`, `sha256:${kind.at(-1)!.repeat(64)}`,
+            "runner_truth", createdAt]);
+        await legacy.pool.query(
+          `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
+             attempt_id, runner_id, credential_id, fencing_token_digest,
+             lease_expires_at, state, claimed_at, updated_at)
+           VALUES($1,$2,1,$3,$4,$5,$6,$7,'claimed',$8,$8)`,
+          ["org_truth", runId, `attempt_${kind}`, "runner_truth", "credential_truth",
+            `sha256:${"a".repeat(64)}`, "2026-08-29T00:00:00.000Z", createdAt]);
+        if (kind === "receipt" || kind === "both") await legacy.pool.query(
+          `INSERT INTO cp_material_action_receipt(organization_id, receipt_id,
+             operation_id, run_id, runner_id, attempt_id, attempt_number,
+             action_id, receipt_digest, outcome, receipt, created_at)
+           VALUES($1,$2,$3,$4,$5,$6,1,$7,$8,'outcome_unknown','{}',$9)`,
+          ["org_truth", `receipt_${kind}`, `material_${kind}`, runId,
+            "runner_truth", `attempt_${kind}`, `action_${kind}`,
+            `sha256:${(kind === "receipt" ? "b" : "c").repeat(64)}`, createdAt]);
+      }
+      await legacy.pool.query(
+        `CREATE TABLE cp_material_action_non_start_proof(
+           organization_id text NOT NULL, run_id text NOT NULL, attempt_id text NOT NULL,
+           attempt_number integer NOT NULL, fencing_token_digest text NOT NULL,
+           proof_id text NOT NULL, proof_digest text NOT NULL, recorded_at timestamptz NOT NULL,
+           PRIMARY KEY(organization_id,run_id,attempt_id), UNIQUE(organization_id,proof_id),
+           FOREIGN KEY(organization_id,run_id,attempt_number)
+             REFERENCES cp_hosted_attempt(organization_id,run_id,attempt_number))`);
+      for (const kind of ["proof", "both"] as const) await legacy.pool.query(
+        `INSERT INTO cp_material_action_non_start_proof VALUES($1,$2,$3,1,$4,$5,$6,$7)`,
+        ["org_truth", `run_truth_${kind}`, `attempt_${kind}`,
+          `sha256:${"a".repeat(64)}`, `proof_${kind}`,
+          `sha256:${"d".repeat(64)}`, createdAt]);
+
+      await runMigrations(legacy.pool, legacy.migrations);
+
+      const states = await legacy.pool.query(
+        `SELECT run_id, material_start_state FROM cp_hosted_attempt
+         WHERE organization_id = $1 ORDER BY run_id`, ["org_truth"]);
+      expect(states.rows).toEqual([
+        { run_id: "run_truth_both", material_start_state: "started_or_ambiguous" },
+        { run_id: "run_truth_missing", material_start_state: "open" },
+        { run_id: "run_truth_proof", material_start_state: "proven_not_started" },
+        { run_id: "run_truth_receipt", material_start_state: "started_or_ambiguous" },
+      ]);
+    } finally { await legacy.close(); }
   });
 });

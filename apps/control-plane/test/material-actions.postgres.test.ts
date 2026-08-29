@@ -1,4 +1,5 @@
 import {
+  computeControlPayloadDigestV1,
   computeMaterialActionFencingTokenDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
@@ -113,6 +114,13 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       pool: fixture.pool,
       clock: { now: () => now },
     });
+    await expect(coordinator.begin({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionDescriptor: "github.pull_request.merge",
+      actionDescriptorDigest: await computeControlPayloadDigestV1(
+        "github.pull_request.merge"), idempotencyKey: "material_action_material" }))
+      .resolves.toEqual({ kind: "begun" });
     const receiptFor = async (input: {
       receiptId: string;
       operationId: string;
@@ -121,7 +129,10 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     }) => {
       const payload = {
         actionId: "action_material",
-        actionFamily: "github.merge",
+        actionDescriptor: "github.pull_request.merge" as const,
+        actionDescriptorDigest: await computeControlPayloadDigestV1(
+          "github.pull_request.merge"),
+        idempotencyKey: "material_action_material",
         provider: "github",
         connectionRef: "connection_material",
         targetFingerprint: `sha256:${"4".repeat(64)}`,

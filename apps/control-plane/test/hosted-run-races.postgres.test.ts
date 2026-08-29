@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
@@ -130,7 +131,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       operationId: "operation_claim_attempt_deadline",
       requestId: "request_claim_attempt_deadline", credentialId: "credential_race" }) });
     if (claim.kind !== "claimed") throw new Error("claim failed");
-    await createMaterialActionCoordinator({ pool: fixture.pool, clock }).recordNotStarted({
+    const materialAuthority = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    await materialAuthority.recordNotStarted({
       principal, fencingToken: claim.claim.attempt.fencingToken,
       runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
       attemptNumber: claim.claim.attempt.number, proofId: "proof_attempt_deadline",
@@ -254,18 +256,178 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
         credentialId: "credential_race" }) }),
     ]);
     expect(proof).toEqual({ kind: "recorded" });
-    expect(replacement).toEqual({ kind: "empty" });
-    now = new Date(now.getTime() + 61_000);
-    const afterExpiry = await service.claim({ principal, request: hostedClaimRequest({
-      operationId: "operation_claim_proof_race_after_expiry",
-      requestId: "request_claim_proof_race_after_expiry",
-      credentialId: "credential_race" }) });
-    expect(afterExpiry.kind).toBe("claimed");
+    expect(["claimed", "empty"]).toContain(replacement.kind);
+    if (replacement.kind === "empty") {
+      const afterProof = await service.claim({ principal, request: hostedClaimRequest({
+        operationId: "operation_claim_proof_race_after_proof",
+        requestId: "request_claim_proof_race_after_proof",
+        credentialId: "credential_race" }) });
+      expect(afterProof.kind).toBe("claimed");
+    }
     const attempts = await fixture.pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM cp_hosted_attempt WHERE run_id = $1",
       [claim.claim.runId],
     );
     expect(attempts.rows[0]?.count).toBe(2);
+  });
+
+  it("gives proof or server-authoritative material begin one CAS winner", async () => {
+    now = new Date("2026-08-15T09:45:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_proof_begin_race",
+      suffix: "proof_begin_race", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T10:45:00.000Z" });
+    await service.admit({ runId: "run_proof_begin_race", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_proof_begin", requestId: "request_claim_proof_begin",
+      credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    const actionDescriptor = "github.pull_request.merge" as const;
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+
+    const [proof, begin] = await Promise.all([
+      materials.recordNotStarted({ principal, fencingToken: claim.claim.attempt.fencingToken,
+        runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number, proofId: "proof_begin_race",
+        proofDigest: `sha256:${"a".repeat(64)}` }),
+      materials.begin({ principal, fencingToken: claim.claim.attempt.fencingToken,
+        runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number, actionDescriptor,
+        actionDescriptorDigest, idempotencyKey: "begin_proof_race" }),
+    ]);
+
+    expect([proof.kind, begin.kind].filter((kind) => kind === "recorded" || kind === "begun"))
+      .toHaveLength(1);
+    const state = await fixture.pool.query<{ material_start_state: string }>(
+      "SELECT material_start_state FROM cp_hosted_attempt WHERE run_id = $1",
+      [claim.claim.runId]);
+    expect(["proven_not_started", "started_or_ambiguous"])
+      .toContain(state.rows[0]?.material_start_state);
+  });
+
+  it("moves linked approval-pending work to safe replacement only when proof wins", async () => {
+    now = new Date("2026-08-15T10:00:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_approval_proof",
+      suffix: "approval_proof", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T11:00:00.000Z" });
+    await service.admit({ runId: "run_approval_proof", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_approval_proof",
+      requestId: "request_claim_approval_proof", credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    const actionDescriptorDigest = await computeControlPayloadDigestV1("workspace.write");
+    await fixture.pool.query(
+      `INSERT INTO cp_permission_request(organization_id, permission_request_id,
+         run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
+         permission_request_digest, policy_snapshot_digest, state, request,
+         current_receipt, created_at, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'waiting',$11::jsonb,'{}',$12,$12)`,
+      ["org_race", "permission_approval_proof", claim.claim.runId, "runner_race",
+        claim.claim.attempt.id, claim.claim.attempt.number, "action_approval_proof",
+        "resolution_approval_proof", `sha256:${"b".repeat(64)}`,
+        claim.claim.admissionPolicySnapshot.receiptDigest,
+        JSON.stringify({ actionDescriptorDigest,
+          attempt: { fencingTokenDigest: claim.claim.attempt.fencingTokenDigest } }), now]);
+    const waiting = await import("@opentag/control-protocol").then(({ buildHostedLifecycleRequestV1 }) =>
+      buildHostedLifecycleRequestV1({ organizationId: "org_race", runnerId: "runner_race",
+        runId: claim.claim.runId, action: "complete", attempt: {
+          attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+          epoch: claim.claim.attempt.epoch, fencingToken: claim.claim.attempt.fencingToken,
+          fencingTokenDigest: claim.claim.attempt.fencingTokenDigest }, occurredAt: now.toISOString(),
+        conclusion: "needs_human", reasonCode: "executor_needs_human",
+        resultDigest: `sha256:${"c".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+        blockedPermission: { permissionRequestId: "permission_approval_proof",
+          actionDescriptorDigest,
+          policySnapshotDigest: claim.claim.admissionPolicySnapshot.receiptDigest } }));
+    await service.lifecycle({ principal, runId: claim.claim.runId,
+      action: "complete", request: waiting });
+    const materialAuthority = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    await materialAuthority.recordNotStarted({
+      principal, fencingToken: claim.claim.attempt.fencingToken,
+      runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+      attemptNumber: claim.claim.attempt.number, proofId: "proof_approval_pending",
+      proofDigest: `sha256:${"d".repeat(64)}` });
+    const heartbeat = await import("@opentag/control-protocol").then(
+      ({ buildHostedLifecycleRequestV1 }) => buildHostedLifecycleRequestV1({
+        organizationId: "org_race", runnerId: "runner_race", runId: claim.claim.runId,
+        action: "heartbeat", attempt: { attemptId: claim.claim.attempt.id,
+          attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
+          fencingToken: claim.claim.attempt.fencingToken,
+          fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+        occurredAt: now.toISOString(),
+        expectedLeaseExpiresAt: claim.claim.attempt.leaseExpiresAt }));
+    await expect(service.lifecycle({ principal, runId: claim.claim.runId,
+      action: "heartbeat", request: heartbeat })).resolves.toEqual({ kind: "stale_fence" });
+    await expect(materialAuthority.begin({ principal,
+      fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
+      attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+      actionDescriptor: "workspace.write", actionDescriptorDigest,
+      idempotencyKey: "begin_after_proof" })).resolves.toEqual({ kind: "stale_fence" });
+
+    const replacement = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_approval_proof_replacement",
+      requestId: "request_claim_approval_proof_replacement",
+      credentialId: "credential_race" }) });
+    expect(replacement.kind).toBe("claimed");
+    expect((await fixture.pool.query(
+      "SELECT state FROM cp_permission_request WHERE permission_request_id = $1",
+      ["permission_approval_proof"])).rows).toEqual([{ state: "revoked" }]);
+  });
+
+  it("interrupts approval-pending work on lease expiry without proof", async () => {
+    now = new Date("2026-08-15T11:30:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_approval_expiry",
+      suffix: "approval_expiry", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T12:30:00.000Z" });
+    await service.admit({ runId: "run_approval_expiry", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_approval_expiry",
+      requestId: "request_claim_approval_expiry", credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    const descriptorDigest = await computeControlPayloadDigestV1("workspace.write");
+    await fixture.pool.query(
+      `INSERT INTO cp_permission_request(organization_id, permission_request_id,
+         run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
+         permission_request_digest, policy_snapshot_digest, state, request,
+         current_receipt, created_at, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'waiting',$11::jsonb,'{}',$12,$12)`,
+      ["org_race", "permission_approval_expiry", claim.claim.runId, "runner_race",
+        claim.claim.attempt.id, claim.claim.attempt.number, "action_approval_expiry",
+        "resolution_approval_expiry", `sha256:${"e".repeat(64)}`,
+        claim.claim.admissionPolicySnapshot.receiptDigest,
+        JSON.stringify({ actionDescriptorDigest: descriptorDigest,
+          attempt: { fencingTokenDigest: claim.claim.attempt.fencingTokenDigest } }), now]);
+    const complete = await import("@opentag/control-protocol").then(({ buildHostedLifecycleRequestV1 }) =>
+      buildHostedLifecycleRequestV1({ organizationId: "org_race", runnerId: "runner_race",
+        runId: claim.claim.runId, action: "complete", attempt: {
+          attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+          epoch: claim.claim.attempt.epoch, fencingToken: claim.claim.attempt.fencingToken,
+          fencingTokenDigest: claim.claim.attempt.fencingTokenDigest }, occurredAt: now.toISOString(),
+        conclusion: "needs_human", reasonCode: "executor_needs_human",
+        resultDigest: `sha256:${"f".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+        blockedPermission: { permissionRequestId: "permission_approval_expiry",
+          actionDescriptorDigest: descriptorDigest,
+          policySnapshotDigest: claim.claim.admissionPolicySnapshot.receiptDigest } }));
+    await service.lifecycle({ principal, runId: claim.claim.runId,
+      action: "complete", request: complete });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET lease_expires_at = $3 WHERE organization_id = $1 AND run_id = $2",
+      ["org_race", claim.claim.runId, new Date(now.getTime() - 1)]);
+
+    await service.reconcileExpiredAttempts("org_race");
+
+    await expect(service.inspect({ organizationId: "org_race", runId: claim.claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "interrupted", outcome: "outcome_unknown" });
+    await expect(service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_approval_expiry_replacement",
+      requestId: "request_claim_approval_expiry_replacement",
+      credentialId: "credential_race" }) })).resolves.toEqual({ kind: "empty" });
   });
 
   it("makes cancellation terminal before any later claim", async () => {

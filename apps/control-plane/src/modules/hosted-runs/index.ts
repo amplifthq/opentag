@@ -349,6 +349,67 @@ export function createHostedRunCoordinator(input: {
     return receipt;
   }
 
+  async function containLegacyClaims(client: PoolClient, principal: RuntimePrincipal) {
+    const legacy = await client.query<{ run_id: string; operation_id: string;
+      claim: unknown; current_attempt_number: number; terminal_kind: string | null }>(
+      `SELECT legacy.run_id, legacy.operation_id, legacy.claim,
+              run.current_attempt_number, run.terminal_kind
+       FROM cp_hosted_claim legacy JOIN cp_hosted_run run
+         ON run.organization_id = legacy.organization_id AND run.run_id = legacy.run_id
+       WHERE legacy.organization_id = $1 AND legacy.claim_version = 1
+         AND run.runner_id = $2 ORDER BY legacy.run_id FOR UPDATE OF run`,
+      [principal.organizationId, principal.runnerId],
+    );
+    for (const row of legacy.rows) {
+      const rawAttempt = row.claim && typeof row.claim === "object"
+        ? (row.claim as { attempt?: unknown }).attempt : undefined;
+      const attemptId = rawAttempt && typeof rawAttempt === "object"
+        && typeof (rawAttempt as { id?: unknown }).id === "string"
+        ? (rawAttempt as { id: string }).id : null;
+      const attemptNumber = rawAttempt && typeof rawAttempt === "object"
+        && Number.isInteger((rawAttempt as { number?: unknown }).number)
+        ? (rawAttempt as { number: number }).number : null;
+      let exactAttempt = false;
+      if (attemptId && attemptNumber && attemptNumber > 0) {
+        const locked = await client.query(
+          `SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
+             AND attempt_id = $3 AND attempt_number = $4 FOR UPDATE`,
+          [principal.organizationId, row.run_id, attemptId, attemptNumber],
+        );
+        exactAttempt = locked.rows.length === 1;
+        if (exactAttempt) await client.query(
+          `UPDATE cp_hosted_attempt SET state = 'interrupted',
+             material_start_state = 'started_or_ambiguous', updated_at = $5
+           WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+             AND attempt_number = $4`,
+          [principal.organizationId, row.run_id, attemptId, attemptNumber,
+            input.clock.now()],
+        );
+      }
+      const staleAgainstLaterAttempt = attemptNumber !== null
+        && row.current_attempt_number > attemptNumber;
+      if (!staleAgainstLaterAttempt && !row.terminal_kind) {
+        const reconciliationIdentity = `${principal.organizationId}:${row.run_id}:${row.operation_id}:legacy_claim`;
+        await client.query(
+          `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
+             terminal_reason = 'legacy_claim_authority_unrecoverable',
+             outcome_state = 'outcome_unknown', reconciliation_identity = $3,
+             terminal_receipt = $4::jsonb, updated_at = $5
+           WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
+          [principal.organizationId, row.run_id, reconciliationIdentity,
+            JSON.stringify({ kind: "legacy_claim_interrupted",
+              outcome: "outcome_unknown", reconciliationIdentity }), input.clock.now()],
+        );
+      }
+      if (attemptId && exactAttempt) await client.query(
+        `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $4)
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+           AND consumed_at IS NULL`,
+        [principal.organizationId, row.run_id, attemptId, input.clock.now()],
+      );
+    }
+  }
+
   return {
     async admit(command) {
       const admission = HostedAdmissionEnvelopeV1Schema.parse(command.admission);
@@ -357,6 +418,8 @@ export function createHostedRunCoordinator(input: {
       );
       if (
         !(await verifyHostedAdmissionEnvelopeDigestV1(admission))
+        || admission.permissionCeiling.digest !== await computeControlPayloadDigestV1(
+          admission.permissionCeiling.allowedActionDescriptors)
         || !(await verifyPolicyReceipt(policy))
         || !linkedAdmission(command.runId, admission, policy)
       ) {
@@ -487,6 +550,7 @@ export function createHostedRunCoordinator(input: {
             ]),
           ],
         );
+        await containLegacyClaims(client as PoolClient, principal);
         const existingClaim = await client.query(
           `SELECT request_digest, claim_version, run_id, claim
            FROM cp_hosted_claim
@@ -501,41 +565,6 @@ export function createHostedRunCoordinator(input: {
           }
           if (replay.claim_version === 1) {
             const reconciliationIdentity = `${principal.organizationId}:${replay.run_id}:${request.operationId}:legacy_claim`;
-            const run = await client.query<HostedRunRow>(
-              `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2
-               FOR UPDATE`, [principal.organizationId, replay.run_id],
-            );
-            if (run.rows[0] && !run.rows[0].terminal_kind) {
-              await client.query(
-                `SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
-                 AND attempt_number = $3 FOR UPDATE`,
-                [principal.organizationId, replay.run_id,
-                  run.rows[0].current_attempt_number],
-              );
-              const now = input.clock.now().toISOString();
-              await client.query(
-                `UPDATE cp_hosted_attempt SET state = 'interrupted',
-                   material_start_state = 'started_or_ambiguous', updated_at = $4
-                 WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3`,
-                [principal.organizationId, replay.run_id,
-                  run.rows[0].current_attempt_number, now],
-              );
-              await client.query(
-                `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $3)
-                 WHERE organization_id = $1 AND run_id = $2 AND consumed_at IS NULL`,
-                [principal.organizationId, replay.run_id, now],
-              );
-              await client.query(
-                `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
-                   terminal_reason = 'legacy_claim_authority_unrecoverable',
-                   outcome_state = 'outcome_unknown', reconciliation_identity = $3,
-                   terminal_receipt = $4::jsonb, updated_at = $5
-                 WHERE organization_id = $1 AND run_id = $2`,
-                [principal.organizationId, replay.run_id, reconciliationIdentity,
-                  JSON.stringify({ kind: "legacy_claim_interrupted",
-                    outcome: "outcome_unknown", reconciliationIdentity }), now],
-              );
-            }
             return { kind: "legacy_interrupted", runId: replay.run_id,
               outcome: "outcome_unknown", reconciliationIdentity } as const;
           }
@@ -583,6 +612,9 @@ export function createHostedRunCoordinator(input: {
              AND run.terminal_kind IS NULL
              AND run.queue_claim_deadline > $3
              AND run.outcome_state IS NULL
+             AND NOT EXISTS (SELECT 1 FROM cp_hosted_claim legacy
+               WHERE legacy.organization_id = run.organization_id
+                 AND legacy.run_id = run.run_id AND legacy.claim_version = 1)
              AND (
                run.state = 'queued'
                OR EXISTS (
@@ -876,6 +908,8 @@ export function createHostedRunCoordinator(input: {
           return { kind: "conflict", reason: "invalid_transition" } as const;
         }
         let leaseExpiresAt: string | undefined;
+        let blockedPermission: { permissionRequestId: string;
+          actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
         let payload: HostedLifecycleReceiptEnvelopeV1["payload"];
         if (command.action === "heartbeat") {
           const heartbeat = HostedHeartbeatRequestV1Schema.parse(request);
@@ -932,6 +966,31 @@ export function createHostedRunCoordinator(input: {
           };
         } else {
           const complete = HostedCompleteRequestV1Schema.parse(request);
+          if (complete.conclusion === "needs_human") {
+            const blocked = complete.blockedPermission!;
+            if (blocked.policySnapshotDigest
+              !== AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
+                run.admission_policy_snapshot).receiptDigest) {
+              return { kind: "conflict", reason: "invalid_transition" } as const;
+            }
+            const waiting = await client.query(
+              `SELECT 1 FROM cp_permission_request
+               WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+                 AND attempt_number = $4 AND permission_request_id = $5
+                 AND policy_snapshot_digest = $6 AND state = 'waiting'
+                 AND request->>'actionDescriptorDigest' = $7
+                 AND request->'attempt'->>'fencingTokenDigest' = $8
+               FOR UPDATE`,
+              [command.principal.organizationId, command.runId, attempt.attempt_id,
+                attempt.attempt_number, blocked.permissionRequestId,
+                blocked.policySnapshotDigest, blocked.actionDescriptorDigest,
+                attempt.fencing_token_digest],
+            );
+            if (waiting.rows.length !== 1) {
+              return { kind: "conflict", reason: "invalid_transition" } as const;
+            }
+            blockedPermission = blocked;
+          }
           payload = {
             operation: "executor_result",
             occurredAt: complete.occurredAt,
@@ -940,6 +999,7 @@ export function createHostedRunCoordinator(input: {
             resultDigest: complete.resultDigest,
             artifactDigests: complete.artifactDigests,
             evidenceDigests: complete.evidenceDigests,
+            ...(blockedPermission ? { blockedPermission } : {}),
           };
         }
 
@@ -1041,7 +1101,10 @@ export function createHostedRunCoordinator(input: {
           `UPDATE cp_hosted_attempt
            SET state = $4,
                lease_expires_at = COALESCE($5, lease_expires_at),
-               updated_at = $6
+               blocked_permission_request_id = $6,
+               blocked_action_descriptor_digest = $7,
+               blocked_policy_snapshot_digest = $8,
+               updated_at = $9
            WHERE organization_id = $1 AND run_id = $2
              AND attempt_number = $3`,
           [
@@ -1050,6 +1113,9 @@ export function createHostedRunCoordinator(input: {
             attempt.attempt_number,
             nextAttemptState,
             leaseExpiresAt ?? null,
+            blockedPermission?.permissionRequestId ?? null,
+            blockedPermission?.actionDescriptorDigest ?? null,
+            blockedPermission?.policySnapshotDigest ?? null,
             now.toISOString(),
           ],
         );
@@ -1163,7 +1229,7 @@ export function createHostedRunCoordinator(input: {
              ON attempt.organization_id = run.organization_id
             AND attempt.run_id = run.run_id
             AND attempt.attempt_number = run.current_attempt_number
-           WHERE attempt.state IN ('claimed','running')
+           WHERE attempt.state IN ('claimed','running','needs_approval','expired')
              AND attempt.lease_expires_at <= $1 AND run.terminal_kind IS NULL
              AND ($2::text IS NULL OR run.organization_id = $2)
            ORDER BY run.organization_id, run.run_id
@@ -1172,19 +1238,28 @@ export function createHostedRunCoordinator(input: {
         );
         let expired = 0;
         for (const run of candidates.rows) {
-          const attemptResult = await client.query<{ attempt_id: string }>(
-            `SELECT attempt_id FROM cp_hosted_attempt
+          const attemptResult = await client.query<{ attempt_id: string; state: string }>(
+            `SELECT attempt_id, state FROM cp_hosted_attempt
              WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
-               AND state IN ('claimed','running') AND lease_expires_at <= $4
+               AND state IN ('claimed','running','needs_approval','expired') AND lease_expires_at <= $4
              FOR UPDATE`,
             [run.organization_id, run.run_id, run.current_attempt_number, now],
           );
           const attempt = attemptResult.rows[0];
           if (!attempt) continue;
           await client.query(
-            `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
+            `UPDATE cp_hosted_attempt SET state = 'expired',
+               blocked_permission_request_id = NULL,
+               blocked_action_descriptor_digest = NULL,
+               blocked_policy_snapshot_digest = NULL, updated_at = $4
              WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3`,
             [run.organization_id, run.run_id, run.current_attempt_number, now],
+          );
+          if (attempt.state === "needs_approval") await client.query(
+            `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
+             WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+               AND state = 'waiting'`,
+            [run.organization_id, run.run_id, attempt.attempt_id, now],
           );
           expired += 1;
           const material = await classifyAttemptMaterialActionTruth(client, {

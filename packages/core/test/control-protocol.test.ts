@@ -492,7 +492,7 @@ describe("hosted admission and claim V1 protocol", () => {
       sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
         aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest },
       queueClaimDeadline: "2026-08-09T00:00:00.000Z",
-      permissionCeiling: { allowedActions: ["workspace.write"], digest },
+      permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest },
       publicationPolicy: { mode: "proposal_only", digest },
       completionContract: { mode: "proposal_ready", digest },
       admissionPolicySnapshot: {
@@ -1026,6 +1026,9 @@ describe("hosted admission and claim V1 protocol", () => {
         ...common,
         conclusion,
         reasonCode,
+        ...(conclusion === "needs_human" ? { blockedPermission: {
+          permissionRequestId: "permission_1", actionDescriptorDigest: digest,
+          policySnapshotDigest: otherDigest } } : {}),
       }).success).toBe(true);
       expect(HostedLifecycleReceiptPayloadV1Schema.safeParse({
         operation: "executor_result",
@@ -1035,6 +1038,9 @@ describe("hosted admission and claim V1 protocol", () => {
         resultDigest: digest,
         artifactDigests: [],
         evidenceDigests: [],
+        ...(conclusion === "needs_human" ? { blockedPermission: {
+          permissionRequestId: "permission_1", actionDescriptorDigest: digest,
+          policySnapshotDigest: otherDigest } } : {}),
       }).success).toBe(true);
     }
 
@@ -1200,11 +1206,10 @@ describe("permission V1 control protocol", () => {
     },
     permissionRequestId: "permission_request_1",
     actionId: "action_1",
-    actionFamily: "publish",
-    permissionCapability: "github.release.create",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
     riskTier: "high",
     targetFingerprint: otherDigest,
-    permissionScopes: ["npm:publish", "package:write"],
     policySnapshotRef: "policy_1",
     policySnapshotDigest: digest,
     permissionRequestDigest: otherDigest,
@@ -1220,11 +1225,10 @@ describe("permission V1 control protocol", () => {
     attempt,
     permissionRequestId: request.permissionRequestId,
     actionId: request.actionId,
-    actionFamily: request.actionFamily,
-    permissionCapability: request.permissionCapability,
+    actionDescriptor: request.actionDescriptor,
+    actionDescriptorDigest: request.actionDescriptorDigest,
     riskTier: request.riskTier,
     targetFingerprint: request.targetFingerprint,
-    permissionScopes: request.permissionScopes,
     policySnapshotRef: request.policySnapshotRef,
     policySnapshotDigest: request.policySnapshotDigest,
     requestedAt: request.requestedAt,
@@ -1252,11 +1256,10 @@ describe("permission V1 control protocol", () => {
       permissionRequestId: "permission_request_1",
       permissionRequestDigest: otherDigest,
       actionId: "action_1",
-      actionFamily: "publish",
-      permissionCapability: "github.release.create",
+      actionDescriptor: "github.release.create",
+      actionDescriptorDigest: digest,
       riskTier: "high",
       targetFingerprint: otherDigest,
-      permissionScopes: ["npm:publish", "package:write"],
       policySnapshotRef: "policy_1",
       policySnapshotDigest: digest,
       state: "waiting",
@@ -1312,7 +1315,7 @@ describe("permission V1 control protocol", () => {
 
     const expectedDigest = await computePermissionRequestDigestV1(digestSource);
     expect(expectedDigest).toBe(
-      "sha256:a5bbd6e21d191382932e35c0e5a043a93feb4c072f306880db8d79e9921db6de",
+      "sha256:6497e6c33f021a605448c46aca080ff1d67d98bf7aef6c2bd70c4a094508212b",
     );
     expect(await computePermissionRequestDigestV1(buildPermissionRequestDigestInputV1(digestSource))).toBe(expectedDigest);
 
@@ -1341,10 +1344,10 @@ describe("permission V1 control protocol", () => {
       { ...digestSource, attempt: { ...attempt, fencingTokenDigest: otherDigest } },
       { ...digestSource, permissionRequestId: "permission_request_2" },
       { ...digestSource, actionId: "action_2" },
-      { ...digestSource, actionFamily: "deploy" },
+      { ...digestSource, actionDescriptor: "workspace.write" as const },
+      { ...digestSource, actionDescriptorDigest: otherDigest },
       { ...digestSource, riskTier: "critical" as const },
       { ...digestSource, targetFingerprint: digest },
-      { ...digestSource, permissionScopes: ["npm:publish"] as const },
       { ...digestSource, policySnapshotRef: "policy_2" },
       { ...digestSource, policySnapshotDigest: otherDigest },
       { ...digestSource, requestedAt: "2026-08-08T00:00:01.000Z" },
@@ -1541,7 +1544,9 @@ describe("permission V1 control protocol", () => {
 describe("material action receipt V1 control protocol", () => {
   const payload = {
     actionId: "action_1",
-    actionFamily: "publish",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
+    idempotencyKey: "material_publish_1",
     provider: "npm",
     connectionRef: "connection_1",
     targetFingerprint: digest,

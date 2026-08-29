@@ -11,6 +11,7 @@ import {
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerMaterialActionNonStartProofV1Schema,
+  RunnerMaterialActionBeginV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
@@ -587,6 +588,36 @@ export function createControlPlaneApplication(
           }
           return context.json(controlError(outcome.kind === "stale_fence"
             ? "stale_attempt" : "idempotency_conflict", proof.requestId), 409);
+        },
+      );
+
+      app.post(
+        "/v1/runners/:runnerId/runs/:runId/material-actions/begin",
+        async (context) => {
+          const principal = await runtimePrincipal(context.req.raw);
+          if (!principal) return context.json(controlError("invalid_credential"), 401);
+          let begin;
+          try { begin = RunnerMaterialActionBeginV1Schema.parse(await context.req.json()); }
+          catch { return context.json(controlError("invalid_request_body"), 400); }
+          if (principal.runnerId !== context.req.param("runnerId")
+            || begin.runnerId !== principal.runnerId
+            || begin.runId !== context.req.param("runId")
+            || begin.organizationId !== principal.organizationId) {
+            return context.json(controlError("stale_attempt", begin.requestId), 409);
+          }
+          const outcome = await materials.begin({ principal,
+            fencingToken: begin.attempt.fencingToken, runId: begin.runId,
+            attemptId: begin.attempt.attemptId,
+            attemptNumber: begin.attempt.attemptNumber,
+            actionDescriptor: begin.actionDescriptor,
+            actionDescriptorDigest: begin.actionDescriptorDigest,
+            idempotencyKey: begin.idempotencyKey });
+          if (outcome.kind === "begun" || outcome.kind === "replayed") {
+            return context.json({ outcome: outcome.kind,
+              idempotencyKey: begin.idempotencyKey }, outcome.kind === "begun" ? 201 : 200);
+          }
+          return context.json(controlError(outcome.kind === "stale_fence"
+            ? "stale_attempt" : "idempotency_conflict", begin.requestId), 409);
         },
       );
 

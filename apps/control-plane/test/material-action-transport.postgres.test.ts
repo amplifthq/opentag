@@ -1,4 +1,5 @@
 import {
+  computeControlPayloadDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   MaterialActionReceiptEnvelopeV1Schema,
@@ -149,7 +150,10 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       [proofBody.proofId])).rows[0]?.count).toBe(1);
     const payload = {
       actionId: "action_material_http",
-      actionFamily: "github.merge",
+      actionDescriptor: "github.pull_request.merge" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1(
+        "github.pull_request.merge"),
+      idempotencyKey: "material_action_http",
       provider: "github",
       connectionRef: "connection_material_http",
       targetFingerprint: `sha256:${"7".repeat(64)}`,
@@ -213,7 +217,12 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       runnerId: "runner_material_http",
       fencingToken: claim.attempt.fencingToken,
       receipt,
-    })).rejects.toMatchObject({ status: 409 });
+    })).resolves.toMatchObject({ status: 201, replayed: false });
+    await expect(hosted.inspect({ organizationId: "org_material_http",
+      runId: "run_material_http" })).resolves.toMatchObject({
+        canonicalStatus: "interrupted", outcome: "outcome_unknown",
+        terminalReason: "late_material_evidence_after_non_start_proof",
+      });
     const recordAdmission = await hostedAdmissionFixture({
       runId: "run_material_http_record", suffix: "96",
       organizationId: "org_material_http", runnerId: "runner_material_http",
@@ -226,7 +235,11 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
         credentialId: "credential_material_http" }) });
     if (recordClaimOutcome.kind !== "claimed") throw new Error("record claim failed");
     const recordClaim = recordClaimOutcome.claim;
+    const recordPayload = { ...payload, operationId: "operation_material_http_record",
+      idempotencyKey: "material_action_http_record" };
     const recordSeed = { ...seed, runId: recordClaim.runId,
+      operationId: recordPayload.operationId, payload: recordPayload,
+      payloadDigest: await computeMaterialActionPayloadDigestV1(recordPayload),
       identity: { ...seed.identity, parts: ["org_material_http", recordClaim.runId,
         recordClaim.attempt.id, payload.actionId, "receipt_material_http_record"] },
       receiptId: "receipt_material_http_record",
@@ -236,6 +249,18 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
     const { receiptDigest: _recordDigest, ...recordDigestInput } = recordSeed;
     const recordReceipt = MaterialActionReceiptEnvelopeV1Schema.parse({ ...recordSeed,
       receiptDigest: await computeMaterialActionReceiptDigestV1(recordDigestInput) });
+    await expect(client.beginMaterialActionControlV1({ schemaVersion: 1,
+      protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
+      requestId: "begin_material_http_record", operationId: "begin_material_http_record",
+      organizationId: "org_material_http", runnerId: "runner_material_http",
+      runId: recordClaim.runId, attempt: { attemptId: recordClaim.attempt.id,
+        attemptNumber: recordClaim.attempt.number, epoch: recordClaim.attempt.epoch,
+        fencingToken: recordClaim.attempt.fencingToken,
+        fencingTokenDigest: recordClaim.attempt.fencingTokenDigest },
+      actionDescriptor: recordPayload.actionDescriptor,
+      actionDescriptorDigest: recordPayload.actionDescriptorDigest,
+      idempotencyKey: recordPayload.idempotencyKey, begunAt: now.toISOString(),
+    })).resolves.toMatchObject({ status: 201, replayed: false });
     await expect(client.recordMaterialActionReceiptControlV1({
       runnerId: "runner_material_http", fencingToken: recordClaim.attempt.fencingToken,
       receipt: recordReceipt,

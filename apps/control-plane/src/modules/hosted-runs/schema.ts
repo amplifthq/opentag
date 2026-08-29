@@ -118,6 +118,9 @@ export const hostedAttempts = pgTable(
     fencingTokenDigest: text("fencing_token_digest").notNull(),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
     materialStartState: text("material_start_state").notNull().default("open"),
+    blockedPermissionRequestId: text("blocked_permission_request_id"),
+    blockedActionDescriptorDigest: text("blocked_action_descriptor_digest"),
+    blockedPolicySnapshotDigest: text("blocked_policy_snapshot_digest"),
     state: text("state").notNull(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -144,6 +147,14 @@ export const hostedAttempts = pgTable(
     ),
     check("cp_hosted_attempt_material_start_state_check",
       sql`${table.materialStartState} IN ('open','proven_not_started','started_or_ambiguous')`),
+    check("cp_hosted_attempt_blocked_permission_check", sql`(
+      (${table.state} = 'needs_approval' AND ${table.blockedPermissionRequestId} IS NOT NULL
+        AND ${table.blockedActionDescriptorDigest} IS NOT NULL
+        AND ${table.blockedPolicySnapshotDigest} IS NOT NULL)
+      OR (${table.state} <> 'needs_approval' AND ${table.blockedPermissionRequestId} IS NULL
+        AND ${table.blockedActionDescriptorDigest} IS NULL
+        AND ${table.blockedPolicySnapshotDigest} IS NULL)
+    )`),
   ],
 );
 
@@ -266,7 +277,7 @@ export const permissionRequests = pgTable(
     ),
     check(
       "cp_permission_request_state_check",
-      sql`${table.state} IN ('waiting', 'authorized', 'denied')`,
+      sql`${table.state} IN ('waiting', 'authorized', 'denied', 'revoked')`,
     ),
     index("cp_permission_current_idx").on(
       table.organizationId,
@@ -426,3 +437,21 @@ export const materialActionNonStartProofs = pgTable(
       sql`${table.attemptNumber} > 0`),
   ],
 );
+
+export const materialActionBeginIntents = pgTable("cp_material_action_begin_intent", {
+  organizationId: text("organization_id").notNull(), runId: text("run_id").notNull(),
+  attemptId: text("attempt_id").notNull(), attemptNumber: integer("attempt_number").notNull(),
+  fencingTokenDigest: text("fencing_token_digest").notNull(),
+  actionDescriptor: text("action_descriptor").notNull(),
+  actionDescriptorDigest: text("action_descriptor_digest").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  begunAt: timestamp("begun_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ name: "cp_material_action_begin_intent_pkey",
+    columns: [table.organizationId, table.runId, table.attemptId] }),
+  unique("cp_material_action_begin_intent_idempotency_key").on(
+    table.organizationId, table.idempotencyKey),
+  foreignKey({ columns: [table.organizationId, table.runId, table.attemptNumber],
+    foreignColumns: [hostedAttempts.organizationId, hostedAttempts.runId,
+      hostedAttempts.attemptNumber] }),
+]);

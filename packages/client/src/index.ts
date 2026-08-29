@@ -108,6 +108,7 @@ import {
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerMaterialActionReconcileAttemptV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
+  RunnerMaterialActionBeginV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
@@ -140,6 +141,7 @@ import {
   type RunnerCredentialReprovisionRequestV1,
   type RunnerCredentialResponseV1,
   type RunnerMaterialActionReconcileRequestV1,
+  type RunnerMaterialActionBeginV1,
   type RunnerPermissionCurrentQueryV1,
   type RunnerPermissionRequestV1,
   type RunnerReadinessReceiptEnvelopeV1,
@@ -700,6 +702,8 @@ export type OpenTagClient = {
   getActionPermissionCurrentControlV1(input: RunnerPermissionCurrentQueryV1): Promise<PermissionResolutionCurrentControlV1Result>;
   recordMaterialActionReceiptControlV1(input: { runnerId: string; fencingToken: string; receipt: MaterialActionReceiptEnvelopeV1 }): Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
   reconcileMaterialActionControlV1(input: RunnerMaterialActionReconcileRequestV1): Promise<MaterialActionReconcileControlV1Result>;
+  beginMaterialActionControlV1(input: RunnerMaterialActionBeginV1): Promise<{
+    status: 200 | 201; replayed: boolean; outcome: "accepted" }>;
   projectWorkThreadRefControlV1(input: WorkThreadRefReceiptEnvelopeV1): Promise<ControlReceiptResult<WorkThreadRefReceiptEnvelopeV1>>;
   projectCompletionContractRefControlV1(input: CompletionContractRefReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionContractRefReceiptEnvelopeV1>>;
   projectCompletionAssessmentControlV1(input: CompletionAssessmentReceiptEnvelopeV1): Promise<ControlReceiptResult<CompletionAssessmentReceiptEnvelopeV1>>;
@@ -1346,11 +1350,10 @@ async function parseRunnerPermissionRequestControlV1Response(
     policySnapshotDigest: request.policySnapshotDigest,
   }, action, response.status);
   if (
-    receipt.payload.actionFamily !== request.actionFamily
+    receipt.payload.actionDescriptor !== request.actionDescriptor
+    || receipt.payload.actionDescriptorDigest !== request.actionDescriptorDigest
     || receipt.payload.riskTier !== request.riskTier
     || receipt.payload.targetFingerprint !== request.targetFingerprint
-    || canonicalJsonStringify(receipt.payload.permissionScopes)
-      !== canonicalJsonStringify(request.permissionScopes)
     || receipt.payload.policySnapshotRef !== request.policySnapshotRef
     || receipt.payload.requestedAt !== request.requestedAt
   ) {
@@ -2007,11 +2010,10 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         },
         permissionRequestId: request.permissionRequestId,
         actionId: request.actionId,
-        actionFamily: request.actionFamily,
-        permissionCapability: request.permissionCapability,
+        actionDescriptor: request.actionDescriptor,
+        actionDescriptorDigest: request.actionDescriptorDigest,
         riskTier: request.riskTier,
         targetFingerprint: request.targetFingerprint,
-        permissionScopes: request.permissionScopes,
         policySnapshotRef: request.policySnapshotRef,
         policySnapshotDigest: request.policySnapshotDigest,
         requestedAt: request.requestedAt,
@@ -2087,6 +2089,29 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         trustedControlOrigin,
         query
       );
+    },
+
+    async beginMaterialActionControlV1(input) {
+      const request = RunnerMaterialActionBeginV1Schema.parse(input);
+      const action = "beginMaterialActionControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/material-actions/begin`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      const body = await parseControlJson(response, action, trustedControlOrigin) as {
+        outcome?: unknown; idempotencyKey?: unknown };
+      if ((response.status !== 200 && response.status !== 201)
+        || body.idempotencyKey !== request.idempotencyKey
+        || body.outcome !== (response.status === 201 ? "begun" : "replayed")) {
+        if (response.status !== 200 && response.status !== 201) {
+          throwControlV1Error(response, body, action, request.requestId);
+        }
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return { status: response.status, replayed: response.status === 200,
+        outcome: "accepted" as const };
     },
 
     async recordMaterialActionReceiptControlV1(input) {

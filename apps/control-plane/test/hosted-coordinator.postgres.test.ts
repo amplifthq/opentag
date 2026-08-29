@@ -355,6 +355,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [principal.organizationId, request.operationId],
     );
 
+    await expect(service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_legacy_claim_different_poll",
+      requestId: "request_legacy_claim_different_poll",
+    }) })).resolves.toEqual({ kind: "empty" });
+
     await expect(service.claim({ principal, request })).resolves.toMatchObject({
       kind: "legacy_interrupted", runId: "run_legacy_claim",
       outcome: "outcome_unknown",
@@ -364,6 +369,43 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
         canonicalStatus: "interrupted", outcome: "outcome_unknown",
         terminalReason: "legacy_claim_authority_unrecoverable",
       });
+  });
+
+  it("does not mutate a later unrelated Attempt on stale legacy replay", async () => {
+    const service = coordinator();
+    const input = await hostedAdmissionFixture({ runId: "run_legacy_stale",
+      suffix: "legacy_stale" });
+    await service.admit({ runId: "run_legacy_stale", admission: input.admission,
+      policy: input.policy });
+    const request = hostedClaimRequest({ operationId: "operation_legacy_stale",
+      requestId: "request_legacy_stale" });
+    const first = await service.claim({ principal, request });
+    if (first.kind !== "claimed") throw new Error("claim failed");
+    await fixture.pool.query(
+      `UPDATE cp_hosted_claim SET claim_version = 1,
+         claim = claim - 'sourceContentGrant' WHERE operation_id = $1`,
+      [request.operationId]);
+    await fixture.pool.query(
+      `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
+         attempt_id, runner_id, credential_id, fencing_token_digest,
+         lease_expires_at, material_start_state, state, claimed_at, updated_at)
+       VALUES($1,$2,2,$3,$4,$5,$6,$7,'open','claimed',$8,$8)`,
+      [principal.organizationId, first.claim.runId, "attempt_legacy_later",
+        principal.runnerId, principal.credentialId, `sha256:${"7".repeat(64)}`,
+        "2026-08-15T08:00:00.000Z", now]);
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run SET current_attempt_number = 2, state = 'assigned'
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, first.claim.runId]);
+
+    await expect(service.claim({ principal, request })).resolves.toMatchObject({
+      kind: "legacy_interrupted", runId: first.claim.runId,
+    });
+    expect((await fixture.pool.query(
+      `SELECT state FROM cp_hosted_attempt WHERE run_id = $1 AND attempt_number = 2`,
+      [first.claim.runId])).rows).toEqual([{ state: "claimed" }]);
+    await expect(service.inspect({ organizationId: principal.organizationId,
+      runId: first.claim.runId })).resolves.toMatchObject({ canonicalStatus: "assigned" });
   });
 
   it("replays one concurrent claim operation without claiming a second pending Run", async () => {
@@ -551,6 +593,24 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
   ) => {
     const service = coordinator();
     const claim = await admitAndClaim(suffix);
+    const blockedPermission = conclusion === "needs_human" ? {
+      permissionRequestId: `permission_${suffix}`,
+      actionDescriptorDigest: `sha256:${"c".repeat(64)}`,
+      policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest,
+    } : undefined;
+    if (blockedPermission) await fixture.pool.query(
+      `INSERT INTO cp_permission_request(organization_id, permission_request_id,
+         run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
+         permission_request_digest, policy_snapshot_digest, state, request,
+         current_receipt, created_at, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'waiting',$11::jsonb,'{}'::jsonb,$12,$12)`,
+      [principal.organizationId, blockedPermission.permissionRequestId, claim.runId,
+        principal.runnerId, claim.attempt.id, claim.attempt.number,
+        `action_${suffix}`, `resolution_${suffix}`, `sha256:${"d".repeat(64)}`,
+        blockedPermission.policySnapshotDigest,
+        JSON.stringify({ actionDescriptorDigest: blockedPermission.actionDescriptorDigest,
+          attempt: { fencingTokenDigest: claim.attempt.fencingTokenDigest } }), now],
+    );
     const complete = await buildHostedLifecycleRequestV1({
       organizationId: principal.organizationId,
       runnerId: principal.runnerId,
@@ -563,6 +623,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       reasonCode: `executor_${conclusion}`,
       resultDigest: `sha256:${"8".repeat(64)}`,
       artifactDigests: [], evidenceDigests: [],
+      ...(blockedPermission ? { blockedPermission } : {}),
     });
     await expect(service.lifecycle({ principal, runId: claim.runId,
       action: "complete", request: complete })).resolves.toMatchObject({ kind: "accepted" });
@@ -587,7 +648,27 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       runId: claim.runId, action: "complete", attempt, occurredAt: now.toISOString(),
       conclusion: "needs_human", reasonCode: "executor_needs_human",
       resultDigest: `sha256:${"a".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+      blockedPermission: { permissionRequestId: "permission_approval_bypass",
+        actionDescriptorDigest: `sha256:${"e".repeat(64)}`,
+        policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest },
     });
+    await expect(service.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman })).resolves.toEqual({
+        kind: "conflict", reason: "invalid_transition",
+      });
+    await fixture.pool.query(
+      `INSERT INTO cp_permission_request(organization_id, permission_request_id,
+         run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
+         permission_request_digest, policy_snapshot_digest, state, request,
+         current_receipt, created_at, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'waiting',$11::jsonb,'{}'::jsonb,$12,$12)`,
+      [principal.organizationId, "permission_approval_bypass", claim.runId,
+        principal.runnerId, claim.attempt.id, claim.attempt.number,
+        "action_approval_bypass", "resolution_approval_bypass",
+        `sha256:${"f".repeat(64)}`, claim.admissionPolicySnapshot.receiptDigest,
+        JSON.stringify({ actionDescriptorDigest: `sha256:${"e".repeat(64)}`,
+          attempt: { fencingTokenDigest: claim.attempt.fencingTokenDigest } }), now],
+    );
     await service.lifecycle({ principal, runId: claim.runId,
       action: "complete", request: needsHuman });
     const running = await buildHostedLifecycleRequestV1({

@@ -61,11 +61,10 @@ function runnerRequest(): RunnerPermissionRequestV1 {
     },
     permissionRequestId: "permission_request_1",
     actionId: "action:1",
-    actionFamily: "publish",
-    permissionCapability: "github.release.create",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
     riskTier: "high",
     targetFingerprint: otherDigest,
-    permissionScopes: ["npm:publish", "package:write"],
     policySnapshotRef: "policy_1",
     policySnapshotDigest: digest,
     permissionRequestDigest: digest,
@@ -87,11 +86,10 @@ function runnerRequest(): RunnerPermissionRequestV1 {
       },
       permissionRequestId: request.permissionRequestId,
       actionId: request.actionId,
-      actionFamily: request.actionFamily,
-      permissionCapability: request.permissionCapability,
+      actionDescriptor: request.actionDescriptor,
+      actionDescriptorDigest: request.actionDescriptorDigest,
       riskTier: request.riskTier,
       targetFingerprint: request.targetFingerprint,
-      permissionScopes: request.permissionScopes,
       policySnapshotRef: request.policySnapshotRef,
       policySnapshotDigest: request.policySnapshotDigest,
       requestedAt: request.requestedAt,
@@ -130,11 +128,10 @@ function waitingReceipt(): PermissionResolutionReceiptEnvelopeV1 {
       permissionRequestId: "permission_request_1",
       permissionRequestDigest: request.permissionRequestDigest,
       actionId: "action:1",
-      actionFamily: "publish",
-      permissionCapability: "github.release.create",
+      actionDescriptor: "github.release.create",
+      actionDescriptorDigest: digest,
       riskTier: "high",
       targetFingerprint: otherDigest,
-      permissionScopes: ["npm:publish", "package:write"],
       policySnapshotRef: "policy_1",
       policySnapshotDigest: digest,
       state: "waiting",
@@ -546,7 +543,7 @@ describe("Control V1 permission transport", () => {
     });
 
     const requestDigestMismatch = runnerRequest();
-    requestDigestMismatch.actionFamily = "deploy";
+    requestDigestMismatch.actionDescriptor = "github.pull_request.create";
     await expect(sdk.requestActionPermissionControlV1(requestDigestMismatch)).rejects.toMatchObject({
       responseBody: "invalid_permission_request_digest",
     });

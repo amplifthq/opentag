@@ -1,6 +1,7 @@
 import {
   buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
+  computeControlPayloadDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
@@ -584,11 +585,10 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       },
       permissionRequestId: "permission_request_http",
       actionId: "action_permission_http",
-      actionFamily: "github.merge",
-      permissionCapability: "workspace.write",
+      actionDescriptor: "workspace.write" as const,
+      actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
       riskTier: "high" as const,
       targetFingerprint: `sha256:${"3".repeat(64)}`,
-      permissionScopes: ["github:merge"],
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
       requestedAt: now.toISOString(),
