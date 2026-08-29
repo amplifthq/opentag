@@ -1,0 +1,16 @@
+{
+  "name": "@opentag/delivery-runtime",
+  "version": "0.11.0",
+  "description": "Provider-neutral durable delivery producer and side-effect kernel.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "development": "./src/index.ts", "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "publishConfig": { "access": "public" },
+  "license": "MIT",
+  "scripts": { "build": "tsup && tsc -b tsconfig.json --emitDeclarationOnly --force", "lint": "tsc --noEmit" },
+  "dependencies": { "@opentag/delivery-contract": "workspace:*", "@opentag/source-app-runtime": "workspace:*" },
+  "devDependencies": { "@types/node": "^22.10.2", "tsup": "^8.3.5", "typescript": "^5.7.2" }
+}

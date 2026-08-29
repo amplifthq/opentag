@@ -61,8 +61,8 @@ function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDe
 
 export function createSlackLifecycleComposition(options: SlackLifecycleCompositionOptions) {
   const kernel = new ProviderSideEffectKernel<SlackRequest>({ repository: options.repository, registry: new ProviderAdapterRegistry<SlackRequest>().register(options.adapter),
-    prepareRequest: (intent, payload) => { const stored = payload as SlackRequest; let operation = stored.operation;
-      if (intent.operation === 'update' && stored.statusMessageId) { const prior = options.repository.findAcceptedExternalResource({ intent, statusMessageId: stored.statusMessageId });
+    prepareRequest: async (intent, payload) => { const stored = payload as SlackRequest; let operation = stored.operation;
+      if (intent.operation === 'update' && stored.statusMessageId) { const prior = await options.repository.findAcceptedExternalResource({ intent, statusMessageId: stored.statusMessageId });
         if (prior.outcome !== 'exact' || prior.externalResourceDigest !== stored.expectedResourceDigest || operation.kind !== 'create_message') throw new Error('Exact accepted Slack lifecycle resource unavailable.');
         operation = { kind: 'update_message', channelId: operation.channelId, messageTs: prior.externalResourceId }; } return { request: { ...stored, operation }, operation: intent.operation, ...requestDigests(stored) }; } });
   const producer = new UnifiedDeliveryProducer<DispatcherDeliveryPresentation>({ submitter: kernel,
@@ -71,7 +71,7 @@ export function createSlackLifecycleComposition(options: SlackLifecycleCompositi
       const authority = await options.resolveAuthority(presentation); if (!authority || authority.providerBinding.providerId !== 'slack') return null;
       const request = requestFor(presentation); if (!request) return null;
       let operation: DeliveryIntentV2['operation'] = presentation.kind === 'source_thread_control' ? 'control_reply' : 'create';
-      if (request.statusMessageId) { const prior = options.repository.findAcceptedExternalResource({ intent: intentFor(authority, presentation, request, 'create'),
+      if (request.statusMessageId) { const prior = await options.repository.findAcceptedExternalResource({ intent: intentFor(authority, presentation, request, 'create'),
           statusMessageId: request.statusMessageId });
         if (prior.outcome === 'ambiguous' || (prior.outcome === 'none' && presentation.kind === 'business' && presentation.phase !== 'acknowledgement')) return null;
         if (prior.outcome === 'exact') { operation = 'update'; request.expectedResourceDigest = prior.externalResourceDigest; }

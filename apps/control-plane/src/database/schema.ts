@@ -3,6 +3,7 @@ export * from "../modules/github-ingress/schema.js";
 export * from "../modules/hosted-runs/schema.js";
 export * from "../modules/identity/schema.js";
 export * from "../modules/jobs/schema.js";
+export * from "../modules/provider-delivery/schema.js";
 export * from "../modules/runners/schema.js";
 export * from "../modules/source-content/schema.js";
 export * from "../modules/source-ingress/schema.js";

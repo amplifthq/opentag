@@ -40,6 +40,7 @@ import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
 import { createSourceIngressService } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
+import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
 import type { SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import {
@@ -167,6 +168,13 @@ export function createControlPlaneRuntime(input: {
     clock,
     leaseDurationMs: input.config.jobLeaseDurationMs,
     tokenFactory: () => runtimeSecret("job_lease"),
+  });
+  const providerDeliveryRepository = createPostgresDeliveryRepository({
+    pool: postgres.pool,
+    owner: { runtimeOwnerId: "control-plane", runtimeGeneration: 1, schemaGeneration: 1 },
+    leaseOwner: `control-plane-${process.pid}`,
+    leaseSeconds: Math.min(86_400,
+      Math.max(1, Math.ceil(input.config.jobLeaseDurationMs / 1_000))),
   });
   let sourceContentKey: ReturnType<typeof loadRelayContentKey> | null = null;
   if (input.config.relayContentKey) {
@@ -414,6 +422,7 @@ export function createControlPlaneRuntime(input: {
     scheduleJobs,
     materials,
     permissions,
+    providerDeliveryRepository,
     reads,
     runners,
     sourceContent,

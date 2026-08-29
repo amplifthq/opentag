@@ -153,6 +153,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         "cp_source_app_installation", "cp_source_binding",
         "cp_ingress_reservation", "cp_source_resolution",
         "cp_slack_installation", "cp_slack_action_authority",
+        "cp_provider_delivery_intent",
         "cp_source_content_invalidation_receipt"]) {
         expect(tableNames.has(required), `missing ${required}`).toBe(true);
       }

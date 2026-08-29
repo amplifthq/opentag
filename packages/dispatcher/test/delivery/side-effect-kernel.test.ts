@@ -309,9 +309,6 @@ describe('ProviderSideEffectKernel', () => {
     ['providerId', { providerId: 'teams' }],
     ['providerInstanceId', { providerInstanceId: 'workspace-b' }],
     ['bindingDigest', { bindingDigest: `sha256:${'2'.repeat(64)}` }],
-    ['providerPrincipalDigest', {
-      providerPrincipalDigest: `sha256:${'3'.repeat(64)}`,
-    }],
     ['providerConfigGeneration', { providerConfigGeneration: 8 }],
     ['providerConfigGenerationDigest', {
       providerConfigGenerationDigest: `sha256:${'4'.repeat(64)}`,
@@ -444,7 +441,7 @@ describe('ProviderSideEffectKernel', () => {
   it.each([
     'https://hooks.slack.test/171.002', 'xoxb-secret', 'message-171',
     `${'1'.repeat(21)}.002`, `171.${'2'.repeat(21)}`,
-  ])('fails closed before persistence for invalid Slack resource ID %s', async (externalResourceId) => {
+  ])('keeps provider-native resource identity validation outside the kernel for %s', async (externalResourceId) => {
     const repo = repository();
     const registry = new ProviderAdapterRegistry<Request>().register(
       registered(async () => ({
@@ -456,8 +453,7 @@ describe('ProviderSideEffectKernel', () => {
       prepareRequest: () => ({ request: { presentation: 'hello' }, operation: 'create',
         presentationDigest: digest, targetDigest: digest }),
     }).deliverNext();
-    expect(result).toMatchObject({ outcome: 'outcome_unknown',
-      errorCode: 'provider_result_invalid' });
-    expect(repo.settlements[0]).not.toHaveProperty('externalResourceId');
+    expect(result).toMatchObject({ outcome: 'accepted', externalResourceId,
+      externalResourceDigest: expect.stringMatching(/^sha256:/u) });
   });
 });
