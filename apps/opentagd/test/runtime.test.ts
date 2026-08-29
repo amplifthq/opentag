@@ -235,6 +235,11 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       fencingTokenDigest,
       leaseExpiresAt: "2099-08-08T00:02:00.000Z",
     },
+    sourceContentGrant: {
+      grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+      fenceDigest: fencingTokenDigest, contentIds: ["content_1"],
+      purpose: "source_context", expiresAt: "2099-08-08T00:02:00.000Z",
+    },
     authority: {
       organizationId: "org_1",
       runnerId: "runner_hosted",

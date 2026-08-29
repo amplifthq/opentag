@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
+import { deriveSourceContentGrantToken } from "../src/modules/source-content/crypto.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
@@ -51,6 +52,20 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       purpose: "source_context" })).rejects.toThrow("source_content_grant_expired");
   });
 
+  it("derives grant tokens with purpose and key-version separation", () => {
+    const keyBytes = Buffer.alloc(32, 4);
+    const command = { organizationId: "org", runId: "run", attemptId: "attempt",
+      fenceDigest: `sha256:${"1".repeat(64)}`, contentIds: ["content"],
+      purpose: "source_context", expiresAt: new Date("2030-01-01T00:00:00.000Z") };
+    const first = deriveSourceContentGrantToken({ key: { key: keyBytes, keyVersion: "v1" },
+      ...command });
+    expect(deriveSourceContentGrantToken({ key: { key: keyBytes, keyVersion: "v1" },
+      ...command })).toBe(first);
+    expect(deriveSourceContentGrantToken({ key: { key: keyBytes, keyVersion: "v2" },
+      ...command })).not.toBe(first);
+    expect(first).not.toContain(keyBytes.toString("base64"));
+  });
+
   it("catches denying nonterminal content only because its source retention hint elapsed", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool,
       clock: { now: () => now }, key: { key: randomBytes(32), keyVersion: "v1" } });
@@ -85,7 +100,7 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     await recordHostedReadiness({ pool: fixture.pool, organizationId: "org_grant",
       runnerId: "runner_grant" });
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
-      key: { key: randomBytes(32), keyVersion: "v1" }, tokenFactory: () => "grant_token" });
+      key: { key: randomBytes(32), keyVersion: "v1" } });
     const admission = await hostedAdmissionFixture({ runId: "run_grant", suffix: "agrant",
       organizationId: "org_grant", runnerId: "runner_grant", contentId: "content_grant" });
     await custody.store({ organizationId: "org_grant", installationId: "installation_grant",
@@ -105,14 +120,29 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       requestId: "request_claim_grant", credentialId: "credential_grant" });
     const claim = await hosted.claim({ principal: authenticated.principal, request });
     expect(claim.kind).toBe("claimed");
-    await expect(hosted.claim({ principal: authenticated.principal, request }))
-      .resolves.toMatchObject({ kind: "replayed" });
+    const replay = await hosted.claim({ principal: authenticated.principal, request });
+    expect(replay).toEqual(claim.kind === "claimed" ? { kind: "replayed", claim: claim.claim } : claim);
     const grants = await fixture.pool.query(
       `SELECT run_id, attempt_id, fence_digest FROM cp_source_content_read_grant
        WHERE organization_id = $1`, ["org_grant"]);
     expect(grants.rows).toHaveLength(1);
     if (claim.kind === "claimed") expect(grants.rows[0]).toMatchObject({ run_id: "run_grant",
       attempt_id: claim.claim.attempt.id, fence_digest: claim.claim.attempt.fencingTokenDigest });
+    const persisted = await fixture.pool.query<{ claim: unknown; grant: unknown }>(
+      `SELECT claim, to_jsonb(grant_record) AS grant FROM cp_hosted_claim claim_record
+       JOIN cp_source_content_read_grant grant_record
+         ON grant_record.organization_id = claim_record.organization_id
+        AND grant_record.run_id = claim_record.run_id
+       WHERE claim_record.organization_id = $1 AND claim_record.run_id = $2`,
+      ["org_grant", "run_grant"],
+    );
+    if (claim.kind === "claimed") {
+      expect(JSON.stringify(persisted.rows[0])).not.toContain(claim.claim.sourceContentGrant.token);
+      expect(claim.claim.sourceContentGrant).toMatchObject({
+        fenceDigest: claim.claim.attempt.fencingTokenDigest,
+        contentIds: ["content_grant"], purpose: "source_context", keyVersion: "v1",
+      });
+    }
 
     const missing = await hostedAdmissionFixture({ runId: "run_grant_missing",
       suffix: "bgrant", organizationId: "org_grant", runnerId: "runner_grant",
@@ -129,5 +159,28 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
       "SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2",
       ["org_grant", "run_grant_missing"]);
     expect(attempts.rowCount).toBe(0);
+    await hosted.cancelRun({ organizationId: "org_grant", runId: "run_grant_missing",
+      reason: "test_cleanup" });
+
+    const unavailable = createHostedRunCoordinator({ pool: fixture.pool,
+      clock: { now: () => now }, leaseDurationMs: 60_000,
+      idFactory: () => "attempt_custody_unavailable",
+      tokenFactory: () => "fence_custody_unavailable",
+      async issueSourceContentGrantInTransaction() {
+        throw new Error("source_content_unavailable");
+      } });
+    const unavailableAdmission = await hostedAdmissionFixture({
+      runId: "run_custody_unavailable", suffix: "custody_unavailable",
+      organizationId: "org_grant", runnerId: "runner_grant",
+      contentId: "content_grant" });
+    await unavailable.admit({ runId: "run_custody_unavailable",
+      admission: unavailableAdmission.admission, policy: unavailableAdmission.policy });
+    await expect(unavailable.claim({ principal: authenticated.principal,
+      request: hostedClaimRequest({ operationId: "operation_claim_custody_unavailable",
+        requestId: "request_claim_custody_unavailable", credentialId: "credential_grant" }) }))
+      .rejects.toThrow("source_content_unavailable");
+    expect((await fixture.pool.query(
+      "SELECT 1 FROM cp_hosted_attempt WHERE run_id = $1", ["run_custody_unavailable"])
+    ).rowCount).toBe(0);
   });
 });

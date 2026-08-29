@@ -1,10 +1,14 @@
 import { randomBytes } from "node:crypto";
+import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { createSourceContentJobHandlers } from "../src/modules/source-content/worker.js";
 import { createDurableJobQueue } from "../src/modules/jobs/index.js";
 import { runOneJob } from "../src/modules/jobs/worker.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
+import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createRunnerDirectory } from "../src/modules/runners/index.js";
+import { HOSTED_CAPABILITIES, hostedAdmissionFixture } from "./control-fixtures.js";
 
 describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
@@ -53,7 +57,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     const receipt = invalidationReceipt("withdraw_1");
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) { calls.push(input); return receipt; },
+        async invalidateInTransaction(_client, input) { calls.push(input); return receipt; },
       } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
       sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:v1",
@@ -81,7 +85,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
   it("catches a withdrawal winner releasing plaintext through a concurrent grant read", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) { return invalidationReceipt(input.commandId); },
+        async invalidateInTransaction(_client, input) { return invalidationReceipt(input.commandId); },
       } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
       sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:v1",
@@ -94,6 +98,58 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     await expect(custody.read({ ...grant, organizationId: "org_a", runId: "run",
       attemptId: "attempt", fenceDigest: "fence", contentIds: ["content_1"],
       purpose: "source_context" })).rejects.toThrow("source_content_deleted");
+  });
+
+  it("uses one shared transaction with poolMax=1 under concurrent withdrawal replay", async () => {
+    const singlePool = new Pool({ connectionString: TEST_DATABASE_URL!, max: 1,
+      options: `-c search_path=${fixture.schema}` });
+    try {
+      const clock = { now: () => now };
+      const runners = createRunnerDirectory({ pool: singlePool, clock,
+        idFactory: () => "credential_atomic", tokenFactory: () => "runtime_atomic_secret" });
+      const registered = await runners.register({ organizationId: "org_atomic",
+        organizationName: "Atomic", request: { schemaVersion: 1, protocolVersion: "1.0",
+          requiredCapabilities: ["relay.registration.v1"], requestId: "request_atomic",
+          operationId: "operation_atomic", runnerId: "runner_atomic",
+          capabilities: [...HOSTED_CAPABILITIES] } });
+      expect(registered.kind).toBe("created");
+      let custody: ReturnType<typeof createRelayContentCustody>;
+      const hosted = createHostedRunCoordinator({ pool: singlePool, clock,
+        leaseDurationMs: 60_000, idFactory: () => "attempt_atomic",
+        tokenFactory: () => "fence_atomic",
+        issueSourceContentGrantInTransaction: (client, command) =>
+          custody.issueReadGrantInTransaction(client, command) });
+      custody = createRelayContentCustody({ pool: singlePool, clock,
+        key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: hosted });
+      const admission = await hostedAdmissionFixture({ runId: "run_atomic",
+        suffix: "atomic", organizationId: "org_atomic", runnerId: "runner_atomic",
+        contentId: "content_atomic" });
+      await custody.store({ organizationId: "org_atomic", installationId: "i",
+        sourceAppId: "slack", sourceDeliveryId: "d", sourceMessageId: "m",
+        sourceVersionRef: admission.admission.sourceContextEnvelope.sourceVersionRef,
+        purpose: "source_context", contentId: "content_atomic", payload: { text: "erase" },
+        expiresAt: new Date("2026-09-01T00:00:00.000Z") });
+      await hosted.admit({ runId: "run_atomic", admission: admission.admission,
+        policy: admission.policy });
+      const command = { schemaVersion: 1 as const, kind: "verified_source_withdrawal" as const,
+        commandId: "withdraw_atomic", organizationId: "org_atomic",
+        sourceVersionRef: admission.admission.sourceContextEnvelope.sourceVersionRef,
+        verification: { installationId: "i", sourceAppId: "slack", sourceDeliveryId: "d",
+          verifiedAt: now.toISOString(), evidenceDigest: `sha256:${"b".repeat(64)}` } };
+
+      const receipts = await Promise.all(Array.from({ length: 8 }, () => custody.withdraw(command)));
+
+      expect(receipts.every((receipt) => JSON.stringify(receipt) === JSON.stringify(receipts[0])))
+        .toBe(true);
+      await expect(hosted.inspect({ organizationId: "org_atomic", runId: "run_atomic" }))
+        .resolves.toMatchObject({ canonicalStatus: "cancelled",
+          terminalReason: "source_content_deleted" });
+      expect((await singlePool.query(
+        "SELECT count(*)::int AS count FROM cp_source_content_invalidation_receipt WHERE command_id = $1",
+        ["withdraw_atomic"])).rows[0]?.count).toBe(1);
+    } finally {
+      await singlePool.end();
+    }
   });
 
   it("catches persisting mismatched, oversized, nonserializable, or content-bearing receipts", async () => {
@@ -114,7 +170,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
       const contentId = `content_bad_${index + 1}`;
       const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
         key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-          async invalidate() { return invalidReceipt as never; },
+          async invalidateInTransaction() { return invalidReceipt as never; },
         } });
       await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
         sourceDeliveryId: `d_${index}`, sourceMessageId: `m_${index}`, sourceVersionRef,
@@ -137,7 +193,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     const command = verifiedWithdrawal("withdraw_long_time", "s:long-time:v1", "d_long_time");
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate() {
+        async invalidateInTransaction() {
           return { ...invalidationReceipt(command.commandId, command.sourceVersionRef),
             recordedAt: `2026-08-28T00:00:00.${"1".repeat(100_000)}Z` };
         },
@@ -170,7 +226,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     let calls = 0;
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) {
+        async invalidateInTransaction(_client, input) {
           calls += 1;
           await new Promise((resolve) => setTimeout(resolve, 25));
           return invalidationReceipt(input.commandId, input.sourceVersionRef);
@@ -198,7 +254,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     let authorityCalls = 0;
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) { authorityCalls += 1; return invalidationReceipt(input.commandId); },
+        async invalidateInTransaction(_client, input) { authorityCalls += 1; return invalidationReceipt(input.commandId); },
       } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
       sourceDeliveryId: "d_job_unverified", sourceMessageId: "m_job_unverified",
@@ -223,7 +279,8 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
 
   it("catches retrying permanent withdrawal conflict, unavailable content, or missing authority", async () => {
     let authorityCalls = 0;
-    const authority = { async invalidate(input: { commandId: string; sourceVersionRef: string }) {
+    const authority = { async invalidateInTransaction(_client: unknown,
+      input: { commandId: string; sourceVersionRef: string }) {
       authorityCalls += 1; return invalidationReceipt(input.commandId, input.sourceVersionRef);
     } };
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
@@ -268,7 +325,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
   it("catches retrying an unknown authority error instead of failing with a stable redacted code", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate() { throw new Error("provider-secret-canary"); },
+        async invalidateInTransaction() { throw new Error("provider-secret-canary"); },
       } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
       sourceDeliveryId: "d_job_unknown", sourceMessageId: "m_job_unknown",
@@ -293,7 +350,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     const key = randomBytes(32);
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key, keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) {
+        async invalidateInTransaction(_client, input) {
           authorityCalls += 1;
           if (failAuthority) throw new TransientError!();
           return invalidationReceipt(input.commandId, input.sourceVersionRef);
@@ -332,7 +389,7 @@ describe.skipIf(!TEST_DATABASE_URL)("authenticated source withdrawal", () => {
     const receipt = invalidationReceipt("withdraw_post_authority", "s:post-authority:v1");
     const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
       key: { key: randomBytes(32), keyVersion: "v1" }, invalidationAuthority: {
-        async invalidate(input) {
+        async invalidateInTransaction(_client, input) {
           authorityCalls += 1;
           logicalInvalidations.add(input.commandId);
           return receipt;

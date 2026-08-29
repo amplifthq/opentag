@@ -1,16 +1,18 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withPostgresTransaction } from "../../database/postgres.js";
+import { deriveSourceContentGrantToken, type RelayContentKey } from "./crypto.js";
 
 export const hashGrantToken = (token: string) => createHash("sha256")
   .update(token, "utf8").digest("hex");
 
-export type SourceContentReadGrant = { grantId: string; token: string };
+export type SourceContentReadGrant = { grantId: string; token: string; keyVersion: string;
+  fenceDigest: string; contentIds: string[]; purpose: "source_context"; expiresAt: string };
 
 type GrantRow = {
   grant_id: string; organization_id: string; token_hash: string; run_id: string;
   attempt_id: string; fence_digest: string; content_ids: string[]; purpose: string;
-  expires_at: Date; consumed_at: Date | null; revoked_at: Date | null;
+  key_version: string; expires_at: Date; consumed_at: Date | null; revoked_at: Date | null;
 };
 
 const same = (left: readonly string[], right: readonly string[]) =>
@@ -19,12 +21,11 @@ export const normalizeContentIds = (ids: readonly string[]) =>
   [...new Set(ids)].sort();
 
 export function createSourceContentGrantStore(input: {
-  pool: Pool; clock: { now(): Date }; tokenFactory?: () => string;
+  pool: Pool; clock: { now(): Date }; key: RelayContentKey;
 }) {
-  const tokenFactory = input.tokenFactory ?? (() => randomBytes(32).toString("base64url"));
   const issueInTransaction = async (client: PoolClient, command: {
     organizationId: string; runId: string; attemptId: string; fenceDigest: string;
-    contentIds: string[]; purpose: string; expiresAt: Date;
+    contentIds: string[]; purpose: "source_context"; expiresAt: Date;
   }): Promise<SourceContentReadGrant> => {
     const contentIds = normalizeContentIds(command.contentIds);
     if (!command.organizationId || !command.runId || !command.attemptId
@@ -41,8 +42,21 @@ export function createSourceContentGrantStore(input: {
        WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3 FOR UPDATE`,
       [command.organizationId, command.runId, command.attemptId],
     );
-    if (existing.rows[0]) throw new Error("source_content_grant_already_issued");
-    const token = tokenFactory();
+    if (existing.rows[0]) {
+      const row = existing.rows[0];
+      if (row.fence_digest !== command.fenceDigest || row.purpose !== command.purpose
+        || row.key_version !== input.key.keyVersion
+        || row.expires_at.getTime() !== command.expiresAt.getTime()
+        || !same(row.content_ids, contentIds)) {
+        throw new Error("source_content_grant_conflict");
+      }
+      const token = deriveSourceContentGrantToken({ key: input.key, ...command, contentIds });
+      if (hashGrantToken(token) !== row.token_hash) throw new Error("source_content_grant_invalid");
+      return { grantId: row.grant_id, token, keyVersion: row.key_version,
+        fenceDigest: row.fence_digest, contentIds: row.content_ids,
+        purpose: row.purpose, expiresAt: row.expires_at.toISOString() };
+    }
+    const token = deriveSourceContentGrantToken({ key: input.key, ...command, contentIds });
     const grantId = `source_grant_${randomBytes(16).toString("hex")}`;
     const locked = await client.query<{ content_id: string }>(
       `SELECT content_id FROM cp_source_content
@@ -57,19 +71,21 @@ export function createSourceContentGrantStore(input: {
     await client.query(
       `INSERT INTO cp_source_content_read_grant(
          grant_id, organization_id, token_hash, run_id, attempt_id,
-         fence_digest, content_ids, purpose, expires_at, created_at
-       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+         fence_digest, content_ids, purpose, key_version, expires_at, created_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [grantId, command.organizationId, hashGrantToken(token), command.runId,
         command.attemptId, command.fenceDigest, contentIds, command.purpose,
-        command.expiresAt, input.clock.now()],
+        input.key.keyVersion, command.expiresAt, input.clock.now()],
     );
-    return { grantId, token };
+    return { grantId, token, keyVersion: input.key.keyVersion,
+      fenceDigest: command.fenceDigest, contentIds, purpose: command.purpose,
+      expiresAt: command.expiresAt.toISOString() };
   };
   return {
     issueInTransaction,
     async issue(command: {
       organizationId: string; runId: string; attemptId: string; fenceDigest: string;
-      contentIds: string[]; purpose: string; expiresAt: Date;
+      contentIds: string[]; purpose: "source_context"; expiresAt: Date;
     }): Promise<SourceContentReadGrant> {
       return withPostgresTransaction(input.pool, (client) =>
         issueInTransaction(client as PoolClient, command));

@@ -7,6 +7,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGithubIngress } from "../src/modules/github-ingress/index.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { hostedGrantIssuerFixture } from "./control-fixtures.js";
 import {
   createIsolatedPostgres,
   TEST_DATABASE_URL,
@@ -147,6 +148,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "unused_attempt",
       tokenFactory: () => "unused_fence",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     ingress = createGithubIngress({
       pool: fixture.pool,

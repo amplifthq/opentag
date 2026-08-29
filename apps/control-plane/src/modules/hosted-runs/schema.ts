@@ -139,7 +139,7 @@ export const hostedAttempts = pgTable(
     ),
     check(
       "cp_hosted_attempt_state_check",
-      sql`${table.state} IN ('claimed', 'running', 'cancelled', 'completed', 'rejected', 'expired')`,
+      sql`${table.state} IN ('claimed', 'running', 'needs_approval', 'cancelled', 'completed', 'rejected', 'interrupted', 'timed_out', 'expired')`,
     ),
   ],
 );
@@ -392,5 +392,32 @@ export const materialActionCurrent = pgTable(
       "cp_material_action_current_outcome_check",
       sql`${table.outcome} IN ('succeeded', 'failed', 'outcome_unknown')`,
     ),
+  ],
+);
+
+export const materialActionNonStartProofs = pgTable(
+  "cp_material_action_non_start_proof",
+  {
+    organizationId: text("organization_id").notNull(),
+    runId: text("run_id").notNull(),
+    attemptId: text("attempt_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    fencingTokenDigest: text("fencing_token_digest").notNull(),
+    proofId: text("proof_id").notNull(),
+    proofDigest: text("proof_digest").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({ name: "cp_material_action_non_start_proof_pkey",
+      columns: [table.organizationId, table.runId, table.attemptId] }),
+    unique("cp_material_action_non_start_proof_organization_id_proof_id_key")
+      .on(table.organizationId, table.proofId),
+    foreignKey({
+      columns: [table.organizationId, table.runId, table.attemptNumber],
+      foreignColumns: [hostedAttempts.organizationId, hostedAttempts.runId,
+        hostedAttempts.attemptNumber],
+    }),
+    check("cp_material_action_non_start_proof_attempt_number_check",
+      sql`${table.attemptNumber} > 0`),
   ],
 );

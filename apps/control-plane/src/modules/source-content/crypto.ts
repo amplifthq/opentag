@@ -1,7 +1,28 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync,
+  randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 export type RelayContentKey = { key: Buffer; keyVersion: string };
+
+export function deriveSourceContentGrantToken(input: {
+  key: RelayContentKey;
+  organizationId: string; runId: string; attemptId: string; fenceDigest: string;
+  contentIds: string[]; purpose: string; expiresAt: Date;
+}): string {
+  assertKey(input.key);
+  const subkey = Buffer.from(hkdfSync("sha256", input.key.key,
+    Buffer.from(input.key.keyVersion, "utf8"),
+    Buffer.from("opentag.relay.source-content-grant-token/v1", "utf8"), 32));
+  try {
+    return `source_grant_token_${createHmac("sha256", subkey).update(JSON.stringify([
+      "opentag.relay.source-content-grant/v1", input.key.keyVersion,
+      input.organizationId, input.runId, input.attemptId, input.fenceDigest,
+      [...new Set(input.contentIds)].sort(), input.purpose, input.expiresAt.toISOString(),
+    ])).digest("base64url")}`;
+  } finally {
+    subkey.fill(0);
+  }
+}
 
 export function loadRelayContentKey(reference: { file: string; keyVersion: string }): RelayContentKey {
   try {

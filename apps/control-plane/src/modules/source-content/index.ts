@@ -51,7 +51,7 @@ export type ImmutableInvalidationReceipt = Readonly<z.infer<
 >>;
 
 export interface SourceContentInvalidationAuthority {
-  invalidate(input: {
+  invalidateInTransaction(client: PoolClient, input: {
     organizationId: string; sourceVersionRef: string; contentIds: string[];
     reason: "source_content_deleted"; commandId: string;
   }): Promise<unknown>;
@@ -137,7 +137,6 @@ function decryptRow(row: ContentRow, key: RelayContentKey): unknown {
 export function createRelayContentCustody(input: {
   pool: Pool; clock: { now(): Date }; key: RelayContentKey;
   invalidationAuthority?: SourceContentInvalidationAuthority;
-  tokenFactory?: () => string;
 }) {
   const grants = createSourceContentGrantStore(input);
   const storeInTransaction = async (
@@ -344,7 +343,8 @@ export function createRelayContentCustody(input: {
         if (!input.invalidationAuthority) throw new Error("source_invalidation_unavailable");
         let authorityOutput: unknown;
         try {
-          authorityOutput = await input.invalidationAuthority!.invalidate({
+          authorityOutput = await input.invalidationAuthority!.invalidateInTransaction(
+            client as PoolClient, {
             organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
             contentIds, reason: "source_content_deleted", commandId: command.commandId,
           });

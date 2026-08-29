@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
-  recordHostedReadiness } from "./control-fixtures.js";
+  hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
 describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
@@ -35,7 +36,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
 
   const coordinator = () => createHostedRunCoordinator({ pool: fixture.pool, clock,
     leaseDurationMs: 60_000, idFactory: () => `attempt_race_${++sequence}`,
-    tokenFactory: (context) => `fence_${context.attemptId}` });
+    tokenFactory: (context) => `fence_${context.attemptId}`,
+    issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
 
   async function releaseTwoClientBarrier() {
     const left = await fixture.pool.connect();
@@ -128,6 +130,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       operationId: "operation_claim_attempt_deadline",
       requestId: "request_claim_attempt_deadline", credentialId: "credential_race" }) });
     if (claim.kind !== "claimed") throw new Error("claim failed");
+    await createMaterialActionCoordinator({ pool: fixture.pool, clock }).recordNotStarted({
+      principal, fencingToken: claim.claim.attempt.fencingToken,
+      runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+      attemptNumber: claim.claim.attempt.number, proofId: "proof_attempt_deadline",
+      proofDigest: `sha256:${"6".repeat(64)}`,
+    });
     await fixture.pool.query(
       "UPDATE cp_hosted_attempt SET lease_expires_at = $3 WHERE organization_id = $1 AND run_id = $2",
       ["org_race", "run_attempt_deadline", new Date("2026-08-15T07:30:20.000Z")],
@@ -141,6 +149,73 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     await expect(service.claim({ principal, request: hostedClaimRequest({
       operationId: "operation_claim_attempt_replacement_late",
       requestId: "request_claim_attempt_replacement_late",
+      credentialId: "credential_race" }) })).resolves.toEqual({ kind: "empty" });
+  });
+
+  it("reconciles in deterministic Run then Attempt lock order without deadlock", async () => {
+    now = new Date("2026-08-15T07:45:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_lock_order",
+      suffix: "lock_order", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T08:45:00.000Z" });
+    await service.admit({ runId: "run_lock_order", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_lock_order", requestId: "request_claim_lock_order",
+      credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET lease_expires_at = $3 WHERE organization_id = $1 AND run_id = $2",
+      ["org_race", "run_lock_order", new Date(now.getTime() - 1)],
+    );
+    const lifecycleClient = await fixture.pool.connect();
+    try {
+      await lifecycleClient.query("BEGIN");
+      await lifecycleClient.query("SET LOCAL lock_timeout = '3s'");
+      await lifecycleClient.query(
+        "SELECT 1 FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2 FOR UPDATE",
+        ["org_race", "run_lock_order"],
+      );
+      const reconciliation = service.reconcileExpiredAttempts("org_race");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await expect(lifecycleClient.query(
+        `SELECT 1 FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
+         AND attempt_number = $3 FOR UPDATE`,
+        ["org_race", "run_lock_order", claim.claim.attempt.number],
+      )).resolves.toBeDefined();
+      await lifecycleClient.query("COMMIT");
+      await expect(reconciliation).resolves.toMatchObject({ expired: expect.any(Number) });
+    } finally {
+      await lifecycleClient.query("ROLLBACK").catch(() => undefined);
+      lifecycleClient.release();
+    }
+  });
+
+  it("blocks replacement when external start may have crashed before any receipt", async () => {
+    now = new Date("2026-08-15T09:00:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_start_crash",
+      suffix: "start_crash", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T10:00:00.000Z" });
+    await service.admit({ runId: "run_start_crash", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_start_crash", requestId: "request_claim_start_crash",
+      credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET lease_expires_at = $3 WHERE organization_id = $1 AND run_id = $2",
+      ["org_race", "run_start_crash", new Date(now.getTime() - 1)],
+    );
+
+    await service.reconcileExpiredAttempts("org_race");
+
+    await expect(service.inspect({ organizationId: "org_race", runId: "run_start_crash" }))
+      .resolves.toMatchObject({ canonicalStatus: "interrupted", outcome: "outcome_unknown",
+        terminalReason: "attempt_lease_expired_after_material_start" });
+    await expect(service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_start_crash_replacement",
+      requestId: "request_claim_start_crash_replacement",
       credentialId: "credential_race" }) })).resolves.toEqual({ kind: "empty" });
   });
 

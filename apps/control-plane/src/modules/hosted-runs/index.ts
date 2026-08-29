@@ -51,16 +51,26 @@ const StoredHostedClaimAttemptV1Schema = z
     leaseExpiresAt: HostedClaimV1Schema.shape.attempt.shape.leaseExpiresAt,
   })
   .strict();
+const StoredHostedSourceContentGrantV1Schema = z.object({
+  grantId: HostedClaimV1Schema.shape.sourceContentGrant.shape.grantId,
+  keyVersion: HostedClaimV1Schema.shape.sourceContentGrant.shape.keyVersion,
+  fenceDigest: HostedClaimV1Schema.shape.sourceContentGrant.shape.fenceDigest,
+  contentIds: HostedClaimV1Schema.shape.sourceContentGrant.shape.contentIds,
+  purpose: HostedClaimV1Schema.shape.sourceContentGrant.shape.purpose,
+  expiresAt: HostedClaimV1Schema.shape.sourceContentGrant.shape.expiresAt,
+}).strict();
 const StoredHostedClaimV1Schema = z
   .object({
     ...HostedClaimV1Schema.shape,
     attempt: StoredHostedClaimAttemptV1Schema,
+    sourceContentGrant: StoredHostedSourceContentGrantV1Schema,
   })
   .strict();
 
 function claimForStorage(claim: HostedClaimV1) {
   const { fencingToken: _fencingToken, ...attempt } = claim.attempt;
-  return StoredHostedClaimV1Schema.parse({ ...claim, attempt });
+  const { token: _grantToken, ...sourceContentGrant } = claim.sourceContentGrant;
+  return StoredHostedClaimV1Schema.parse({ ...claim, attempt, sourceContentGrant });
 }
 
 export type CanonicalRunStatus =
@@ -139,6 +149,9 @@ export type HostedRunCoordinator = {
   >;
   invalidate(input: { organizationId: string; sourceVersionRef: string;
     contentIds: string[]; reason: "source_content_deleted"; commandId: string }): Promise<unknown>;
+  invalidateInTransaction(client: PoolClient, input: { organizationId: string;
+    sourceVersionRef: string; contentIds: string[]; reason: "source_content_deleted";
+    commandId: string }): Promise<unknown>;
   inspect(input: {
     organizationId: string;
     runId: string;
@@ -216,12 +229,12 @@ export function createHostedRunCoordinator(input: {
   leaseDurationMs: number;
   idFactory: IdFactory;
   tokenFactory: TokenFactory;
-  issueSourceContentGrantInTransaction?: (client: PoolClient, input: {
+  issueSourceContentGrantInTransaction: (client: PoolClient, input: {
     organizationId: string; runId: string; attemptId: string; fenceDigest: string;
-    contentIds: string[]; purpose: string; expiresAt: Date;
-  }) => Promise<{ grantId: string; token: string }>;
+    contentIds: string[]; purpose: "source_context"; expiresAt: Date;
+  }) => Promise<HostedClaimV1["sourceContentGrant"]>;
 }): HostedRunCoordinator {
-  async function hydrateStoredClaim(value: unknown): Promise<HostedClaimV1 | null> {
+  async function hydrateStoredClaim(client: PoolClient, value: unknown): Promise<HostedClaimV1 | null> {
     const stored = StoredHostedClaimV1Schema.parse(value);
     const fencingToken = input.tokenFactory({
       organizationId: stored.organizationId,
@@ -234,10 +247,104 @@ export function createHostedRunCoordinator(input: {
       await computeHostedClaimFencingTokenDigestV1(fencingToken)
         !== stored.attempt.fencingTokenDigest
     ) return null;
+    const sourceContentGrant = await input.issueSourceContentGrantInTransaction(client, {
+      organizationId: stored.organizationId, runId: stored.runId,
+      attemptId: stored.attempt.id, fenceDigest: stored.attempt.fencingTokenDigest,
+      contentIds: stored.sourceContentGrant.contentIds,
+      purpose: stored.sourceContentGrant.purpose,
+      expiresAt: new Date(stored.sourceContentGrant.expiresAt),
+    });
     return HostedClaimV1Schema.parse({
       ...stored,
       attempt: { ...stored.attempt, fencingToken },
+      sourceContentGrant,
     });
+  }
+
+  async function invalidateInTransaction(client: PoolClient, command: {
+    organizationId: string; sourceVersionRef: string; contentIds: string[];
+    reason: "source_content_deleted"; commandId: string;
+  }) {
+    const normalizedContentIds = [...new Set(command.contentIds)].sort();
+    const requestDigest = await computeControlPayloadDigestV1({
+      organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
+      contentIds: normalizedContentIds, reason: command.reason, commandId: command.commandId,
+    });
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      JSON.stringify(["opentag.control.source-invalidation/v1",
+        command.organizationId, command.commandId]),
+    ]);
+    const prior = await client.query<{ request_digest: string; receipt: unknown }>(
+      `SELECT request_digest, receipt FROM cp_source_content_invalidation_receipt
+       WHERE organization_id = $1 AND command_id = $2 FOR UPDATE`,
+      [command.organizationId, command.commandId],
+    );
+    if (prior.rows[0]) {
+      if (prior.rows[0].request_digest !== requestDigest) {
+        throw new Error("source_invalidation_conflict");
+      }
+      return prior.rows[0].receipt;
+    }
+    const runs = await client.query<HostedRunRow>(
+      `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND source_version_ref = $2
+       ORDER BY run_id FOR UPDATE`,
+      [command.organizationId, command.sourceVersionRef],
+    );
+    const now = input.clock.now().toISOString();
+    for (const run of runs.rows) {
+      if (run.terminal_kind) continue;
+      const attemptIdentity = run.current_attempt_number > 0
+        ? await client.query<{ attempt_id: string }>(
+            `SELECT attempt_id FROM cp_hosted_attempt WHERE organization_id = $1
+             AND run_id = $2 AND attempt_number = $3`,
+            [run.organization_id, run.run_id, run.current_attempt_number],
+          )
+        : { rows: [] as Array<{ attempt_id: string }> };
+      const material = attemptIdentity.rows[0]
+        ? await classifyAttemptMaterialActionTruth(client, {
+            organizationId: run.organization_id, runId: run.run_id,
+            attemptId: attemptIdentity.rows[0].attempt_id,
+          })
+        : { kind: "proven_not_started" as const };
+      const nextState: CanonicalRunStatus = run.current_attempt_number > 0
+        ? "interrupted" : "cancelled";
+      const outcome = material.kind === "started_or_ambiguous" ? "outcome_unknown" : null;
+      const reconciliationIdentity = material.kind === "started_or_ambiguous"
+        ? material.reconciliationIdentity : null;
+      await client.query(
+        `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+           AND state IN ('claimed','running','needs_approval')`,
+        [run.organization_id, run.run_id, run.current_attempt_number, now],
+      );
+      await client.query(
+        `UPDATE cp_hosted_run SET state = $3, terminal_kind = $3,
+           terminal_reason = 'source_content_deleted', outcome_state = $4,
+           reconciliation_identity = $5, terminal_receipt = $6::jsonb,
+           updated_at = $7 WHERE organization_id = $1 AND run_id = $2`,
+        [run.organization_id, run.run_id, nextState, outcome, reconciliationIdentity,
+          JSON.stringify({ kind: "source_invalidation", reason: "source_content_deleted",
+            recordedAt: now }), now],
+      );
+    }
+    if (normalizedContentIds.length > 0) await client.query(
+      `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $3)
+       WHERE organization_id = $1 AND content_ids && $2::text[] AND consumed_at IS NULL`,
+      [command.organizationId, normalizedContentIds, now],
+    );
+    const receiptSeed = { commandId: command.commandId,
+      organizationId: command.organizationId, sourceVersionRef: command.sourceVersionRef,
+      reason: "source_content_deleted" as const, recordedAt: now };
+    const receipt = { ...receiptSeed,
+      authorityReceiptDigest: await computeControlPayloadDigestV1(receiptSeed) };
+    await client.query(
+      `INSERT INTO cp_source_content_invalidation_receipt(organization_id, command_id,
+         request_digest, source_version_ref, receipt, created_at)
+       VALUES($1,$2,$3,$4,$5::jsonb,$6)`,
+      [command.organizationId, command.commandId, requestDigest,
+        command.sourceVersionRef, JSON.stringify(receipt), now],
+    );
+    return receipt;
   }
 
   return {
@@ -389,7 +496,7 @@ export function createHostedRunCoordinator(input: {
           if (replay.request_digest !== requestDigest) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
           }
-          const claim = await hydrateStoredClaim(replay.claim);
+          const claim = await hydrateStoredClaim(client as PoolClient, replay.claim);
           if (!claim) {
             return { kind: "conflict", reason: "authority_mismatch" } as const;
           }
@@ -493,6 +600,13 @@ export function createHostedRunCoordinator(input: {
         const leaseExpiresAt = new Date(
           now.getTime() + input.leaseDurationMs,
         ).toISOString();
+        const sourceContentGrant = await input.issueSourceContentGrantInTransaction(
+          client as PoolClient, {
+            organizationId: principal.organizationId, runId: run.run_id,
+            attemptId, fenceDigest: fencingTokenDigest, contentIds: run.source_content_ids,
+            purpose: "source_context", expiresAt: new Date(leaseExpiresAt),
+          },
+        );
         const claim = HostedClaimV1Schema.parse({
           kind: "hosted_claim",
           schemaVersion: 1,
@@ -514,6 +628,7 @@ export function createHostedRunCoordinator(input: {
             fencingTokenDigest,
             leaseExpiresAt,
           },
+          sourceContentGrant,
           authority: {
             organizationId: principal.organizationId,
             runnerId: principal.runnerId,
@@ -561,17 +676,6 @@ export function createHostedRunCoordinator(input: {
             now.toISOString(),
           ],
         );
-        if (input.issueSourceContentGrantInTransaction) {
-          await input.issueSourceContentGrantInTransaction(client as PoolClient, {
-            organizationId: principal.organizationId,
-            runId: run.run_id,
-            attemptId,
-            fenceDigest: fencingTokenDigest,
-            contentIds: run.source_content_ids,
-            purpose: "source_context",
-            expiresAt: new Date(leaseExpiresAt),
-          });
-        }
         await client.query(
           `UPDATE cp_hosted_run
            SET state = 'assigned', current_attempt_number = $3, updated_at = $4
@@ -850,9 +954,17 @@ export function createHostedRunCoordinator(input: {
           nextAttemptState = "rejected";
           nextTerminal = "failed";
         } else if (command.action === "complete") {
-          nextRunState = "succeeded";
-          nextAttemptState = "completed";
-          nextTerminal = "succeeded";
+          const conclusion = HostedCompleteRequestV1Schema.parse(request).conclusion;
+          const completion = {
+            success: ["succeeded", "completed", "succeeded"],
+            failure: ["failed", "rejected", "failed"],
+            cancelled: ["cancelled", "cancelled", "cancelled"],
+            interrupted: ["interrupted", "interrupted", "interrupted"],
+            timed_out: ["timed_out", "timed_out", "timed_out"],
+            needs_human: ["needs_approval", "needs_approval", null],
+          } as const satisfies Record<typeof conclusion,
+            readonly [CanonicalRunStatus, string, TerminalKind | null]>;
+          [nextRunState, nextAttemptState, nextTerminal] = completion[conclusion];
         } else if (command.action === "cancel") {
           nextRunState = "cancelled";
           nextAttemptState = "cancelled";
@@ -984,121 +1096,49 @@ export function createHostedRunCoordinator(input: {
     },
 
     async invalidate(command) {
-      const normalizedContentIds = [...new Set(command.contentIds)].sort();
-      const requestDigest = await computeControlPayloadDigestV1({
-        organizationId: command.organizationId,
-        sourceVersionRef: command.sourceVersionRef,
-        contentIds: normalizedContentIds,
-        reason: command.reason,
-        commandId: command.commandId,
-      });
-      return withPostgresTransaction(input.pool, async (client) => {
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-          [JSON.stringify(["opentag.control.source-invalidation/v1",
-            command.organizationId, command.commandId])],
-        );
-        const prior = await client.query<{ request_digest: string; receipt: unknown }>(
-          `SELECT request_digest, receipt FROM cp_source_content_invalidation_receipt
-           WHERE organization_id = $1 AND command_id = $2 FOR UPDATE`,
-          [command.organizationId, command.commandId],
-        );
-        if (prior.rows[0]) {
-          if (prior.rows[0].request_digest !== requestDigest) {
-            throw new Error("source_invalidation_conflict");
-          }
-          return prior.rows[0].receipt;
-        }
-        const runs = await client.query<HostedRunRow>(
-          `SELECT * FROM cp_hosted_run
-           WHERE organization_id = $1 AND source_version_ref = $2
-           ORDER BY run_id FOR UPDATE`,
-          [command.organizationId, command.sourceVersionRef],
-        );
-        const now = input.clock.now().toISOString();
-        for (const run of runs.rows) {
-          if (run.terminal_kind) continue;
-          const attemptIdentity = run.current_attempt_number > 0
-            ? await client.query<{ attempt_id: string }>(
-                `SELECT attempt_id FROM cp_hosted_attempt WHERE organization_id = $1
-                   AND run_id = $2 AND attempt_number = $3`,
-                [run.organization_id, run.run_id, run.current_attempt_number],
-              )
-            : { rows: [] as Array<{ attempt_id: string }> };
-          const material = attemptIdentity.rows[0]
-            ? await classifyAttemptMaterialActionTruth(client, {
-                organizationId: run.organization_id, runId: run.run_id,
-                attemptId: attemptIdentity.rows[0].attempt_id,
-              })
-            : { kind: "proven_not_started" as const };
-          const hasAttempt = run.current_attempt_number > 0;
-          const nextState: CanonicalRunStatus = hasAttempt ? "interrupted" : "cancelled";
-          const outcome = material.kind === "started_or_ambiguous" ? "outcome_unknown" : null;
-          const reconciliationIdentity = material.kind === "started_or_ambiguous"
-            ? material.reconciliationIdentity : null;
-          await client.query(
-            `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
-             WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
-               AND state IN ('claimed','running')`,
-            [run.organization_id, run.run_id, run.current_attempt_number, now],
-          );
-          await client.query(
-            `UPDATE cp_hosted_run SET state = $3, terminal_kind = $3,
-               terminal_reason = 'source_content_deleted', outcome_state = $4,
-               reconciliation_identity = $5, terminal_receipt = $6::jsonb,
-               updated_at = $7 WHERE organization_id = $1 AND run_id = $2`,
-            [run.organization_id, run.run_id, nextState, outcome,
-              reconciliationIdentity, JSON.stringify({ kind: "source_invalidation",
-                reason: "source_content_deleted", recordedAt: now }), now],
-          );
-        }
-        if (normalizedContentIds.length > 0) {
-          await client.query(
-            `UPDATE cp_source_content_read_grant
-             SET revoked_at = COALESCE(revoked_at, $3)
-             WHERE organization_id = $1 AND content_ids && $2::text[]
-               AND consumed_at IS NULL`,
-            [command.organizationId, normalizedContentIds, now],
-          );
-        }
-        const receiptSeed = {
-          commandId: command.commandId,
-          organizationId: command.organizationId,
-          sourceVersionRef: command.sourceVersionRef,
-          reason: "source_content_deleted" as const,
-          recordedAt: now,
-        };
-        const receipt = { ...receiptSeed,
-          authorityReceiptDigest: await computeControlPayloadDigestV1(receiptSeed) };
-        await client.query(
-          `INSERT INTO cp_source_content_invalidation_receipt(
-             organization_id, command_id, request_digest, source_version_ref,
-             receipt, created_at) VALUES($1,$2,$3,$4,$5::jsonb,$6)`,
-          [command.organizationId, command.commandId, requestDigest,
-            command.sourceVersionRef, JSON.stringify(receipt), now],
-        );
-        return receipt;
-      });
+      return withPostgresTransaction(input.pool, (client) =>
+        invalidateInTransaction(client as PoolClient, command));
     },
+
+    invalidateInTransaction,
 
     async reconcileExpiredAttempts(organizationId: string | null) {
       const now = input.clock.now();
       return withPostgresTransaction(input.pool, async (client) => {
-        const expired = await client.query<{ organization_id: string; run_id: string;
-          attempt_id: string }>(
-          `UPDATE cp_hosted_attempt attempt SET state = 'expired', updated_at = $1
+        const candidates = await client.query<{ organization_id: string; run_id: string;
+          current_attempt_number: number }>(
+          `SELECT run.organization_id, run.run_id, run.current_attempt_number
            FROM cp_hosted_run run
-           WHERE attempt.organization_id = run.organization_id
-             AND attempt.run_id = run.run_id
-             AND attempt.state IN ('claimed','running')
+           JOIN cp_hosted_attempt attempt
+             ON attempt.organization_id = run.organization_id
+            AND attempt.run_id = run.run_id
+            AND attempt.attempt_number = run.current_attempt_number
+           WHERE attempt.state IN ('claimed','running')
              AND attempt.lease_expires_at <= $1 AND run.terminal_kind IS NULL
-             AND ($2::text IS NULL OR attempt.organization_id = $2)
-           RETURNING attempt.organization_id, attempt.run_id, attempt.attempt_id`,
+             AND ($2::text IS NULL OR run.organization_id = $2)
+           ORDER BY run.organization_id, run.run_id
+           FOR UPDATE OF run SKIP LOCKED LIMIT 100`,
           [now, organizationId],
         );
-        for (const attempt of expired.rows) {
+        let expired = 0;
+        for (const run of candidates.rows) {
+          const attemptResult = await client.query<{ attempt_id: string }>(
+            `SELECT attempt_id FROM cp_hosted_attempt
+             WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+               AND state IN ('claimed','running') AND lease_expires_at <= $4
+             FOR UPDATE`,
+            [run.organization_id, run.run_id, run.current_attempt_number, now],
+          );
+          const attempt = attemptResult.rows[0];
+          if (!attempt) continue;
+          await client.query(
+            `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
+             WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3`,
+            [run.organization_id, run.run_id, run.current_attempt_number, now],
+          );
+          expired += 1;
           const material = await classifyAttemptMaterialActionTruth(client, {
-            organizationId: attempt.organization_id, runId: attempt.run_id,
+            organizationId: run.organization_id, runId: run.run_id,
             attemptId: attempt.attempt_id,
           });
           if (material.kind === "started_or_ambiguous") await client.query(
@@ -1107,7 +1147,7 @@ export function createHostedRunCoordinator(input: {
                outcome_state = 'outcome_unknown', reconciliation_identity = $3,
                terminal_receipt = $4::jsonb, updated_at = $5
              WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
-            [attempt.organization_id, attempt.run_id,
+            [run.organization_id, run.run_id,
               material.reconciliationIdentity,
               JSON.stringify({ kind: "attempt_interrupted", outcome: "outcome_unknown" }), now],
           );
@@ -1123,10 +1163,10 @@ export function createHostedRunCoordinator(input: {
                  ), updated_at = $3
              WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL
                AND queue_claim_deadline <= $3`,
-            [attempt.organization_id, attempt.run_id, now.toISOString()],
+            [run.organization_id, run.run_id, now.toISOString()],
           );
         }
-        return { expired: expired.rowCount ?? 0 };
+        return { expired };
       });
     },
 

@@ -431,6 +431,23 @@ export const RunnerMaterialActionReconcileRequestV1Schema = z
     }
   });
 
+export const RunnerMaterialActionNonStartProofV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.material-receipt.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  proofId: MaterialActionStableIdV1Schema,
+  proofDigest: ReceiptDigestSchema,
+  recordedAt: ControlTimestampSchema,
+}).strict();
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
@@ -1870,6 +1887,16 @@ const HostedClaimAttemptV1Schema = z
     }
   });
 
+const HostedSourceContentGrantV1Schema = z.object({
+  grantId: NonEmptyIdSchema,
+  token: z.string().min(1).max(4096),
+  keyVersion: NonEmptyIdSchema,
+  fenceDigest: ReceiptDigestSchema,
+  contentIds: sortedUniqueArray(NonEmptyIdSchema).min(1),
+  purpose: z.literal("source_context"),
+  expiresAt: ControlTimestampSchema,
+}).strict();
+
 const HostedClaimAuthorityV1Schema = z
   .object({
     organizationId: NonEmptyIdSchema,
@@ -1930,6 +1957,7 @@ export const HostedClaimV1Schema = z
     hostedAdmission: HostedAdmissionEnvelopeV1Schema,
     admissionPolicySnapshot: AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
     attempt: HostedClaimAttemptV1Schema,
+    sourceContentGrant: HostedSourceContentGrantV1Schema,
     authority: HostedClaimAuthorityV1Schema,
   })
   .strict()
@@ -1970,6 +1998,9 @@ export const HostedClaimV1Schema = z
       [["authority", "attemptNumber"], authority.attemptNumber !== claim.attempt.number, "Authority Attempt number must match the claim."],
       [["authority", "epoch"], authority.epoch !== claim.attempt.epoch, "Authority Attempt epoch must match the claim."],
       [["authority", "fencingTokenDigest"], authority.fencingTokenDigest !== claim.attempt.fencingTokenDigest, "Authority fence digest must match the claim."],
+      [["sourceContentGrant", "fenceDigest"], claim.sourceContentGrant.fenceDigest !== claim.attempt.fencingTokenDigest, "Source grant fence must match the Attempt."],
+      [["sourceContentGrant", "contentIds"], claim.sourceContentGrant.contentIds.length !== 1 || claim.sourceContentGrant.contentIds[0] !== admission.sourceContextEnvelope.contentId, "Source grant content must match the Admission."],
+      [["sourceContentGrant", "expiresAt"], claim.sourceContentGrant.expiresAt !== claim.attempt.leaseExpiresAt, "Source grant expiry must match the Attempt lease."],
     ];
     for (const [path, mismatch, message] of mismatches) {
       if (mismatch) ctx.addIssue({ code: z.ZodIssueCode.custom, path, message });
@@ -3482,6 +3513,9 @@ export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
 >;
 export type RunnerMaterialActionReconcileRequestV1 = z.infer<
   typeof RunnerMaterialActionReconcileRequestV1Schema
+>;
+export type RunnerMaterialActionNonStartProofV1 = z.infer<
+  typeof RunnerMaterialActionNonStartProofV1Schema
 >;
 export type MaterialActionPayloadV1 = z.infer<typeof MaterialActionPayloadV1Schema>;
 export type MaterialActionReceiptDigestInputV1 = z.infer<

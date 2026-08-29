@@ -12,6 +12,7 @@ import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import {
   hostedAdmissionFixture,
   hostedClaimRequest,
+  hostedGrantIssuerFixture,
   recordHostedReadiness,
 } from "./control-fixtures.js";
 import {
@@ -73,6 +74,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       leaseDurationMs: 60_000,
       idFactory: () => "attempt_material_http",
       tokenFactory: () => "fence_material_http",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const admission = await hostedAdmissionFixture({
       runId: "run_material_http",
@@ -121,6 +123,29 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
+    const proofBody = {
+      schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.material-receipt.v1"],
+      requestId: "request_non_start_http", operationId: "operation_non_start_http",
+      organizationId: "org_material_http", runnerId: "runner_material_http",
+      runId: "run_material_http", attempt: { attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
+        fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      proofId: "proof_non_start_http", proofDigest: `sha256:${"6".repeat(64)}`,
+      recordedAt: now.toISOString(),
+    };
+    for (const expectedStatus of [201, 200]) {
+      const response = await fetchImpl(
+        "http://control.test/v1/runners/runner_material_http/runs/run_material_http/material-actions/non-start-proof",
+        { method: "POST", headers: { authorization: "Bearer runtime_material_http",
+          "content-type": "application/json" }, body: JSON.stringify(proofBody) },
+      );
+      expect(response.status).toBe(expectedStatus);
+    }
+    expect((await fixture.pool.query(
+      "SELECT count(*)::int AS count FROM cp_material_action_non_start_proof WHERE proof_id = $1",
+      [proofBody.proofId])).rows[0]?.count).toBe(1);
     const payload = {
       actionId: "action_material_http",
       actionFamily: "github.merge",

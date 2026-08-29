@@ -584,6 +584,11 @@ describe("hosted admission and claim V1 protocol", () => {
         fencingTokenDigest: publicFenceDigest,
         leaseExpiresAt: "2026-08-08T00:02:00.000Z",
       },
+      sourceContentGrant: {
+        grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+        fenceDigest: publicFenceDigest, contentIds: ["content_1"],
+        purpose: "source_context", expiresAt: "2026-08-08T00:02:00.000Z",
+      },
       authority: {
         organizationId: "org_1",
         runnerId: "runner_1",

@@ -58,6 +58,7 @@ export const sourceContentReadGrants = pgTable("cp_source_content_read_grant", {
   tokenHash: text("token_hash").notNull(), runId: text("run_id").notNull(),
   attemptId: text("attempt_id").notNull(), fenceDigest: text("fence_digest").notNull(),
   contentIds: text("content_ids").array().notNull(), purpose: text("purpose").notNull(),
+  keyVersion: text("key_version").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),

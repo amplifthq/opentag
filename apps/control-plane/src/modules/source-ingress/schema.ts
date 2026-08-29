@@ -72,3 +72,18 @@ export const sourceResolutions = pgTable("cp_source_resolution", {
     'storage_quota_exceeded','source_content_deleted','temporarily_unavailable'
   )`),
 ]);
+
+export const sourceResolutionAdmissions = pgTable("cp_source_resolution_admission", {
+  idempotencyKey: text("idempotency_key").primaryKey(),
+  organizationId: text("organization_id").notNull().references(() => organizations.organizationId),
+  requestDigest: text("request_digest").notNull(), runId: text("run_id").notNull(),
+  state: text("state").notNull(), resolution: jsonb("resolution"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  check("cp_source_resolution_admission_state_check",
+    sql`${table.state} IN ('pending','decided')`),
+  check("cp_source_resolution_admission_kind_check", sql`(
+    (${table.state} = 'pending' AND ${table.resolution} IS NULL) OR
+    (${table.state} = 'decided' AND ${table.resolution}->>'kind' IN ('accepted','waiting_for_runner'))
+  )`),
+]);

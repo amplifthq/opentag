@@ -169,6 +169,11 @@ async function hostedClaim() {
       fencingTokenDigest: sha256(fencingToken),
       leaseExpiresAt: "2026-08-08T00:02:00.000Z",
     },
+    sourceContentGrant: {
+      grantId: "grant_1", token: "grant_token_1", keyVersion: "test-v1",
+      fenceDigest: sha256(fencingToken), contentIds: ["content_1"],
+      purpose: "source_context" as const, expiresAt: "2026-08-08T00:02:00.000Z",
+    },
     authority: {
       organizationId: "org_1",
       runnerId: "runner_1",

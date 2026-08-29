@@ -6,7 +6,8 @@ import {
   HostedAdmissionEnvelopeV1Schema,
   HostedClaimRequestV1Schema,
 } from "@opentag/control-protocol";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
+import { createHash } from "node:crypto";
 
 export const HOSTED_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -15,6 +16,21 @@ export const HOSTED_CAPABILITIES = [
   "relay.lifecycle.v1",
   "relay.readiness.v1",
 ] as const;
+
+export async function hostedGrantIssuerFixture(_client: PoolClient, input: {
+  organizationId: string; runId: string; attemptId: string; fenceDigest: string;
+  contentIds: string[]; purpose: string; expiresAt: Date;
+}) {
+  return {
+    grantId: `grant_${input.attemptId}`,
+    token: `grant_token_${input.attemptId}`,
+    keyVersion: "test-v1",
+    fenceDigest: input.fenceDigest,
+    contentIds: [...new Set(input.contentIds)].sort(),
+    purpose: "source_context" as const,
+    expiresAt: input.expiresAt.toISOString(),
+  };
+}
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
 
@@ -49,11 +65,14 @@ export async function hostedAdmissionFixture(input: {
   runnerId?: string;
   queueClaimDeadline?: string;
   contentId?: string;
+  permissionActions?: string[];
+  publicationMode?: "proposal_only" | "pull_request";
 }) {
   const organizationId = input.organizationId ?? "org_hosted";
   const runnerId = input.runnerId ?? "runner_hosted";
   const observedAt = "2026-08-15T07:00:00.000Z";
   const readinessDigest = digest("a");
+  const publicationMode = input.publicationMode ?? "proposal_only";
   const policyPayload = {
     snapshotId: `policy_${input.suffix}`,
     capturedAt: observedAt,
@@ -121,11 +140,8 @@ export async function hostedAdmissionFixture(input: {
     provider: "github" as const,
     deliveryId: `delivery_${input.suffix}`,
     deliveryPayloadDigest: digest("c"),
-    sourceIdentityDigest: digest(
-      /^[a-f0-9]$/u.test(input.suffix.slice(0, 1).toLowerCase())
-        ? input.suffix.slice(0, 1).toLowerCase()
-        : "9",
-    ),
+    sourceIdentityDigest: `sha256:${createHash("sha256")
+      .update(input.suffix, "utf8").digest("hex")}`,
     eventName: "issue_comment" as const,
     action: "created" as const,
     repository: {
@@ -167,15 +183,16 @@ export async function hostedAdmissionFixture(input: {
     },
     queueClaimDeadline: input.queueClaimDeadline ?? "2026-08-29T00:00:00.000Z",
     permissionCeiling: {
-      allowedActions: ["workspace_write"],
+      allowedActions: input.permissionActions ?? ["workspace_write"],
       digest: digest("1"),
     },
     publicationPolicy: {
-      mode: "proposal_only" as const,
+      mode: publicationMode,
       digest: digest("2"),
     },
     completionContract: {
-      mode: "proposal_ready" as const,
+      mode: publicationMode === "proposal_only" ? "proposal_ready" as const
+        : "pull_request_ready" as const,
       digest: digest("3"),
     },
     admissionPolicySnapshot: {

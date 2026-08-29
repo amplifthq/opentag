@@ -27,10 +27,17 @@ export async function classifyAttemptMaterialActionTruth(
      ORDER BY created_at, receipt_id LIMIT 1`,
     [input.organizationId, input.runId, input.attemptId],
   );
-  return result.rows[0]
-    ? { kind: "started_or_ambiguous",
-        reconciliationIdentity: `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}` }
-    : { kind: "proven_not_started" };
+  if (result.rows[0]) return { kind: "started_or_ambiguous",
+    reconciliationIdentity: `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}` };
+  const proof = await client.query<{ proof_id: string }>(
+    `SELECT proof_id FROM cp_material_action_non_start_proof
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  return proof.rows[0]
+    ? { kind: "proven_not_started" }
+    : { kind: "started_or_ambiguous",
+        reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
 }
 type CurrentReceipt = {
   receipt_id: string;
@@ -40,6 +47,16 @@ type CurrentReceipt = {
 };
 
 export type MaterialActionCoordinator = {
+  recordNotStarted(input: {
+    principal: RuntimePrincipal;
+    fencingToken: string;
+    fencingTokenDigest?: string;
+    runId: string;
+    attemptId: string;
+    attemptNumber: number;
+    proofId: string;
+    proofDigest: string;
+  }): Promise<{ kind: "recorded" | "replayed" } | { kind: "stale_fence" | "conflict" }>;
   record(input: {
     principal: RuntimePrincipal;
     fencingToken: string;
@@ -114,6 +131,46 @@ export function createMaterialActionCoordinator(input: {
   clock: Clock;
 }): MaterialActionCoordinator {
   return {
+    async recordNotStarted(command) {
+      if (!command.proofId || !/^sha256:[a-f0-9]{64}$/u.test(command.proofDigest)) {
+        return { kind: "conflict" };
+      }
+      const fencingTokenDigest = await computeMaterialActionFencingTokenDigestV1(
+        command.fencingToken,
+      );
+      if (command.fencingTokenDigest !== undefined
+        && command.fencingTokenDigest !== fencingTokenDigest) return { kind: "conflict" };
+      return withPostgresTransaction(input.pool, async (client) => {
+        const existing = await client.query<{ fencing_token_digest: string;
+          proof_id: string; proof_digest: string }>(
+          `SELECT fencing_token_digest, proof_id, proof_digest
+           FROM cp_material_action_non_start_proof
+           WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+          [command.principal.organizationId, command.runId, command.attemptId],
+        );
+        if (existing.rows[0]) return existing.rows[0].fencing_token_digest === fencingTokenDigest
+          && existing.rows[0].proof_id === command.proofId
+          && existing.rows[0].proof_digest === command.proofDigest
+          ? { kind: "replayed" as const }
+          : { kind: "conflict" as const };
+        if (!(await currentAttemptMatches(client, {
+          principal: command.principal, runId: command.runId,
+          attemptId: command.attemptId, attemptNumber: command.attemptNumber,
+          fencingTokenDigest, now: input.clock.now(),
+        }))) return { kind: "stale_fence" as const };
+        await client.query(
+          `INSERT INTO cp_material_action_non_start_proof(
+             organization_id, run_id, attempt_id, attempt_number,
+             fencing_token_digest, proof_id, proof_digest, recorded_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [command.principal.organizationId, command.runId, command.attemptId,
+            command.attemptNumber, fencingTokenDigest, command.proofId,
+            command.proofDigest, input.clock.now()],
+        );
+        return { kind: "recorded" as const };
+      });
+    },
+
     async record(command) {
       const receipt = MaterialActionReceiptEnvelopeV1Schema.parse(
         command.receipt,

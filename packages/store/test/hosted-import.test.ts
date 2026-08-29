@@ -218,6 +218,12 @@ async function fixture(input: {
       fencingTokenDigest,
       leaseExpiresAt: claimLeaseExpiresAt
     },
+    sourceContentGrant: {
+      grantId: `grant-${attemptId}`, token: `grant-token-${attemptId}`,
+      keyVersion: "test-v1", fenceDigest: fencingTokenDigest,
+      contentIds: ["content-1"], purpose: "source_context",
+      expiresAt: claimLeaseExpiresAt,
+    },
     authority: {
       organizationId: "org-1",
       runnerId: "runner-1",

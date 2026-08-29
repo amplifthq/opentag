@@ -129,3 +129,99 @@ deadline mutation is rejected.
   envelope; they do not certify a new GitHub source path.
 - Generic Source processing remains Source-App-neutral and preserves Task 3's
   reservation idempotency and exact job lease/fence identity.
+
+## Fix Round 1/5 — Critical and Important Review Findings
+
+Base: `80207419 feat: admit finite work while the Runner is offline`.
+
+### Fixed findings
+
+1. **Executor completion mapping**
+   - Added explicit six-way mapping:
+     `success -> succeeded`, `failure -> failed`, `cancelled -> cancelled`,
+     `interrupted -> interrupted`, `timed_out -> timed_out`, and
+     `needs_human -> needs_approval`.
+   - `needs_human` is nonterminal and projects only
+     `waiting_for_approval`; proposal/review readiness is emitted only for
+     terminal `succeeded` Runs.
+   - Extended Attempt state constraints for `needs_approval`, `interrupted`,
+     and `timed_out` and tested every conclusion.
+
+2. **Material-action negative truth**
+   - Absence of a material receipt now fails closed as
+     `started_or_ambiguous`, with a stable reconciliation identity and
+     `outcome_unknown`.
+   - Added `cp_material_action_non_start_proof` and an authenticated
+     Attempt/fence-bound Control V1 proof endpoint.
+   - Replacement is possible only when that durable negative-start proof
+     exists and the original deadline remains open. A start/crash before any
+     receipt now interrupts and blocks replacement.
+
+3. **Permission ceiling and Publication mode**
+   - Request and `allow_once` resolution both recheck the current Run/Attempt
+     under lock against Admission-frozen `permissionCeiling.allowedActions`,
+     policy snapshot identity, and `publication_mode`.
+   - `proposal_only` rejects pull-request/publication permissions even if a
+     human attempts to approve them.
+   - Added request-time rejection and approval-time tampering/stale-policy
+     regressions.
+
+4. **Reconciliation lock order**
+   - Replaced the Attempt-first bulk update with a bounded batch of at most
+     100 Runs locked deterministically by organization/Run, followed by each
+     exact current Attempt lock.
+   - The two-client RED reproduced PostgreSQL `40P01 deadlock detected`; the
+     same barrier is GREEN with Run-to-Attempt ordering.
+
+5. **Atomic invalidation transaction**
+   - Added the transaction-aware invalidation authority method and passed the
+     custody transaction client into the coordinator.
+   - Withdrawal, Run/Attempt fencing, grant revocation, immutable authority
+     receipt, crypto-shredding, and tombstone persistence now commit or roll
+     back through one PostgreSQL transaction. Content custody still does not
+     import or write hosted Run state.
+   - A `poolMax=1` regression with eight concurrent same-command withdrawals
+     proves no nested-transaction pool starvation and exact receipt replay.
+
+6. **Mandatory exact grant authority**
+   - Every source-backed claim now requires one Attempt/fence/content/purpose/
+     expiry-bound grant; custody or content unavailability rolls back the
+     Attempt, grant, claim journal, and assignment.
+   - Claim responses include the exact grant descriptor and token. Stored
+     claim/grant rows contain only the token hash and key version, never the
+     plaintext token.
+   - Tokens are deterministically derived using a purpose-separated HKDF
+     subkey and HMAC bound to KEK key version plus the complete authority
+     tuple. Replay reconstructs the same token after verifying the stored hash.
+   - Added zero/one/rollback/replay, key-version separation, one-time read, and
+     retained Control V1 consumer coverage.
+
+7. **Real runtime restart proof**
+   - Replaced direct fake `SourceResolutionPort` calls with a real Source App
+     installation/binding, encrypted reservation, durable job, runtime worker
+     processing, runtime recreation, and post-restart empty poll.
+   - Added durable two-phase reservation-idempotency admission state. A crash
+     before Admission or after Admission but before decision persistence can
+     resume safely; a changed physical request cannot create a second Run.
+   - The test proves one hosted Run, one Source resolution, one durable
+     idempotency record, and a succeeded Source job after restart.
+
+### Fix-round TDD evidence
+
+- Completion/material RED: `8 failed | 13 passed`; failures showed every
+  non-success conclusion incorrectly becoming `succeeded` and absence of a
+  receipt incorrectly proving no start.
+- Permission RED: proposal-only pull-request permission returned `waiting`
+  instead of `conflict`.
+- Lock-order RED: the two-client barrier produced PostgreSQL error `40P01`
+  with the old Attempt-first reconciliation update.
+- Focused final GREEN: `19 test files / 258 tests passed` against real
+  PostgreSQL, covering hosted/races/control-v1/grants/permissions/runtime/
+  source deletion/material/migration/schema plus retained consumers.
+- Fresh serialized full suite: `216 test files / 2864 tests passed` in
+  `104.55s` with one worker and PostgreSQL required.
+- `corepack pnpm typecheck`: passed.
+- Workspace lint across 28 projects: passed.
+- `@opentag/control-protocol`, `@opentag/client`, and
+  `@opentag/control-plane` builds: passed.
+- `git diff --check`: clean.

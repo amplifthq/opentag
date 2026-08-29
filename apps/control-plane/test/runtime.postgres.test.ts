@@ -2,6 +2,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import type { SourceAppDefinition } from "@opentag/source-app-runtime";
+import { computeHostedAdmissionEnvelopeDigestV1,
+  HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
+import { digest as contentDigest, sourceContentAad } from "../src/modules/source-content/crypto.js";
 import { createControlPlaneRuntime } from "../src/runtime.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture } from "./control-fixtures.js";
 import {
@@ -81,8 +86,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const keyFile = join(directory, "relay.key");
     await writeFile(keyFile, Buffer.alloc(32, 7), { mode: 0o600 });
     await fixture.migrate();
-    const runtime = createControlPlaneRuntime({
-      config: {
+    const config = {
         bootstrapOrganizationId: "org_runtime_source",
         bootstrapOrganizationName: "Runtime Source",
         bootstrapPairingToken: "bootstrap_runtime_source_secret",
@@ -94,7 +98,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           windowMs: 300_000, lockoutMs: 900_000 }, poolMax: 4, port: 3000,
         publicOrigin: "http://127.0.0.1:3000", recoveryPairingToken: null,
         releaseSha: "local", relayContentKey: { file: keyFile, keyVersion: "v1" },
-      },
+      } as const;
+    const runtime = createControlPlaneRuntime({
+      config,
       postgres: { pool: fixture.pool, async close() {} },
       migrations: fixture.migrations,
     });
@@ -111,28 +117,99 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           runnerId: "runner_runtime_source", capabilities: [...HOSTED_CAPABILITIES] },
       });
       expect(registered.kind).toBe("created");
-      const admission = await hostedAdmissionFixture({ runId: "run_runtime_source",
+      const sourceDigest = (value: string) => `sha256:${createHash("sha256")
+        .update(value).digest("hex")}`;
+      const bindingDigest = sourceDigest("runtime_binding");
+      const generationDigest = sourceDigest("runtime_generation");
+      const sourceApp: SourceAppDefinition<unknown, unknown, unknown> = {
+        appId: "runtime-source", protocol: "opentag.channel.v1",
+        capabilities: { threads: true, messageUpdate: true, reactions: false,
+          interactiveActions: false, attachments: "metadata",
+          authenticatedDeletion: true, stableSourceVersions: true },
+        installation: { appInstanceId: "runtime-instance", bindingDigest,
+          credentialGeneration: 1, credentialGenerationDigest: generationDigest },
+        ingress: { verify: async (value) => value, normalize: () => null },
+        context: { readThread: async () => ({ messages: [], truncated: false,
+          decodedBytes: 0 }) }, presentation: { render: () => ({}) },
+        delivery: { prepare: () => ({}),
+          deliver: async () => ({ status: "failed", error: { code: "unused", retryable: false } }),
+          reconcile: async () => ({ status: "failed", error: { code: "unused", retryable: false } }) },
+      };
+      await fixture.pool.query(
+        `INSERT INTO cp_source_app_installation(organization_id, installation_id,
+           source_app_id, app_instance_id, binding_digest, credential_generation,
+           credential_generation_digest, state, created_at, updated_at)
+         VALUES($1,$2,$3,$4,$5,1,$6,'active',clock_timestamp(),clock_timestamp())`,
+        ["org_runtime_source", "runtime_installation", sourceApp.appId,
+          sourceApp.installation.appInstanceId, bindingDigest, generationDigest],
+      );
+      await fixture.pool.query(
+        `INSERT INTO cp_source_binding(organization_id, binding_id, installation_id,
+           binding_digest, state, created_at, updated_at)
+         VALUES($1,$2,$3,$4,'active',clock_timestamp(),clock_timestamp())`,
+        ["org_runtime_source", "runtime_binding", "runtime_installation", bindingDigest],
+      );
+      const rawDigest = sourceDigest("runtime_raw");
+      const deliveryId = "runtime_delivery";
+      const reservationId = `ingress_${createHash("sha256").update(JSON.stringify([
+        "org_runtime_source", "runtime_installation", deliveryId,
+      ])).digest("hex")}`;
+      const contentId = `content_${createHash("sha256").update(JSON.stringify([
+        "org_runtime_source", "runtime_installation", deliveryId, rawDigest,
+      ])).digest("hex")}`;
+      const admissionFixture = await hostedAdmissionFixture({ runId: "run_runtime_source",
         suffix: "fruntimesource", organizationId: "org_runtime_source",
         runnerId: "runner_runtime_source",
-        queueClaimDeadline: "2030-08-29T00:00:00.000Z" });
-      const resolve = () => runtime.sourceResolutionPort.resolve({
-        idempotencyKey: "source-ingress:reservation_runtime_source",
-        reservation: {} as never,
-        sourceContext: { runId: "run_runtime_source", hostedAdmission: admission.admission,
-          admissionPolicySnapshot: admission.policy },
-        job: {} as never,
+        queueClaimDeadline: "2030-08-29T00:00:00.000Z", contentId });
+      const sourceVersionRef = "runtime:message:v1";
+      const unsignedAdmission = {
+        ...admissionFixture.admission,
+        sourceContextEnvelope: { contentId, sourceVersionRef,
+          aadDigest: contentDigest(sourceContentAad({ organizationId: "org_runtime_source",
+            contentId, installationId: "runtime_installation", sourceAppId: sourceApp.appId,
+            sourceDeliveryId: deliveryId, sourceMessageId: "runtime_message",
+            sourceVersionRef, purpose: "source_context" })),
+          keyVersion: "v1", envelopeDigest: rawDigest },
+      };
+      const admission = HostedAdmissionEnvelopeV1Schema.parse({ ...unsignedAdmission,
+        envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(unsignedAdmission) });
+      const reserved = await runtime.sourceIngress!.reserve({
+        organizationId: "org_runtime_source", installationId: "runtime_installation",
+        bindingId: "runtime_binding", sourceApp, sourceDeliveryId: deliveryId,
+        sourceMessageId: "runtime_message", sourceVersionRef,
+        rawDigest, normalizedContent: { runId: "run_runtime_source",
+          hostedAdmission: admission, admissionPolicySnapshot: admissionFixture.policy },
+        expiresAt: new Date("2030-08-30T00:00:00.000Z"),
       });
-      await expect(resolve()).resolves.toEqual({ kind: "waiting_for_runner",
-        runId: "run_runtime_source" });
-      await expect(resolve()).resolves.toEqual({ kind: "waiting_for_runner",
-        runId: "run_runtime_source" });
-      const durable = await fixture.pool.query(
-        "SELECT run_id FROM cp_hosted_run WHERE organization_id = $1",
-        ["org_runtime_source"],
-      );
-      expect(durable.rows).toEqual([{ run_id: "run_runtime_source" }]);
-    } finally {
+      expect(reserved).toMatchObject({ outcome: "reserved",
+        reservation: { reservationId } });
+      await expect(runtime.sourceIngressWorker!.processNext()).resolves.toMatchObject({
+        kind: "settled", resolution: { kind: "waiting_for_runner",
+          runId: "run_runtime_source" },
+      });
       await runtime.close();
+      const restarted = createControlPlaneRuntime({ config,
+        postgres: { pool: fixture.pool, async close() {} }, migrations: fixture.migrations });
+      try {
+        await expect(restarted.sourceIngressWorker!.processNext()).resolves.toEqual({ kind: "empty" });
+      } finally {
+        await restarted.close();
+      }
+      const durable = await fixture.pool.query(
+        `SELECT (SELECT count(*)::int FROM cp_hosted_run
+                   WHERE organization_id = $1) AS runs,
+                (SELECT count(*)::int FROM cp_source_resolution
+                   WHERE organization_id = $1) AS resolutions,
+                (SELECT count(*)::int FROM cp_source_resolution_admission
+                   WHERE idempotency_key = $2) AS admissions,
+                (SELECT state FROM cp_job WHERE job_id = $3) AS job_state`,
+        ["org_runtime_source", `source-ingress:${reservationId}`,
+          `source-ingress:${reservationId}`],
+      );
+      expect(durable.rows[0]).toEqual({ runs: 1, resolutions: 1,
+        admissions: 1, job_state: "succeeded" });
+    } finally {
+      await runtime.close().catch(() => undefined);
       await rm(directory, { recursive: true, force: true });
     }
   });

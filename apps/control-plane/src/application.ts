@@ -10,6 +10,7 @@ import {
   MaterialActionReceiptEnvelopeV1Schema,
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
+  RunnerMaterialActionNonStartProofV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
@@ -553,6 +554,38 @@ export function createControlPlaneApplication(
 
     if (control.materials) {
       const materials = control.materials;
+
+      app.post(
+        "/v1/runners/:runnerId/runs/:runId/material-actions/non-start-proof",
+        async (context) => {
+          const principal = await runtimePrincipal(context.req.raw);
+          if (!principal) return context.json(controlError("invalid_credential"), 401);
+          let proof;
+          try {
+            proof = RunnerMaterialActionNonStartProofV1Schema.parse(await context.req.json());
+          } catch {
+            return context.json(controlError("invalid_request_body"), 400);
+          }
+          if (principal.runnerId !== context.req.param("runnerId")
+            || proof.runnerId !== principal.runnerId
+            || proof.runId !== context.req.param("runId")
+            || proof.organizationId !== principal.organizationId) {
+            return context.json(controlError("stale_attempt", proof.requestId), 409);
+          }
+          const outcome = await materials.recordNotStarted({ principal,
+            fencingToken: proof.attempt.fencingToken,
+            fencingTokenDigest: proof.attempt.fencingTokenDigest, runId: proof.runId,
+            attemptId: proof.attempt.attemptId,
+            attemptNumber: proof.attempt.attemptNumber,
+            proofId: proof.proofId, proofDigest: proof.proofDigest });
+          if (outcome.kind === "recorded" || outcome.kind === "replayed") {
+            return context.json({ outcome: outcome.kind, proofId: proof.proofId },
+              outcome.kind === "recorded" ? 201 : 200);
+          }
+          return context.json(controlError(outcome.kind === "stale_fence"
+            ? "stale_attempt" : "idempotency_conflict", proof.requestId), 409);
+        },
+      );
 
       app.post(
         "/v1/runners/:runnerId/runs/:runId/material-actions/:actionId/receipt",

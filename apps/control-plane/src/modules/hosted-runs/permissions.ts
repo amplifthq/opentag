@@ -4,6 +4,7 @@ import {
   computePermissionFencingTokenDigestV1,
   computePermissionRequestDigestV1,
   HumanPermissionDecisionRequestV1Schema,
+  HostedAdmissionEnvelopeV1Schema,
   PermissionRequestDigestInputV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
   ReceiptDigestSchema,
@@ -46,6 +47,28 @@ const StoredPermissionRequestV1Schema = PermissionRequestDigestInputV1Schema.ext
 type StoredPermissionRequestV1 = ReturnType<
   typeof StoredPermissionRequestV1Schema.parse
 >;
+
+function isPublicationPermission(request: StoredPermissionRequestV1): boolean {
+  const values = [request.actionFamily, ...request.permissionScopes];
+  return values.some((value) => /pull[_-]?request|publication|github:push/iu.test(value));
+}
+
+async function withinFrozenPermissionAuthority(
+  client: { query<Row extends Record<string, unknown>>(text: string,
+    values?: readonly unknown[]): Promise<{ rows: Row[] }> },
+  input: { organizationId: string; runId: string; request: StoredPermissionRequestV1 },
+): Promise<boolean> {
+  const result = await client.query<{ hosted_admission: unknown; publication_mode: string }>(
+    `SELECT hosted_admission, publication_mode FROM cp_hosted_run
+     WHERE organization_id = $1 AND run_id = $2`,
+    [input.organizationId, input.runId],
+  );
+  const row = result.rows[0];
+  if (!row) return false;
+  const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
+  return admission.permissionCeiling.allowedActions.includes(input.request.actionFamily)
+    && !(row.publication_mode === "proposal_only" && isPublicationPermission(input.request));
+}
 
 export type PermissionCoordinator = {
   request(input: {
@@ -301,6 +324,11 @@ export function createPermissionCoordinator(input: {
         }))) {
           return { kind: "stale_fence" } as const;
         }
+        if (!(await withinFrozenPermissionAuthority(client, {
+          organizationId: command.principal.organizationId,
+          runId: request.runId,
+          request: permissionRequestForStorage(request),
+        }))) return { kind: "conflict" } as const;
         const existing = await client.query(
           `SELECT permission_request_digest
            FROM cp_permission_request
@@ -455,9 +483,17 @@ export function createPermissionCoordinator(input: {
           attemptId: decision.attempt.attemptId,
           attemptNumber: decision.attempt.attemptNumber,
           fencingTokenDigest: decision.attempt.fencingTokenDigest,
+          policySnapshotRef: StoredPermissionRequestV1Schema.parse(stored.request).policySnapshotRef,
+          policySnapshotDigest: stored.policy_snapshot_digest,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
         const request = StoredPermissionRequestV1Schema.parse(stored.request);
+        if (decision.decision === "allow_once"
+          && !(await withinFrozenPermissionAuthority(client, {
+            organizationId: command.principal.organizationId,
+            runId: decision.runId,
+            request,
+          }))) return { kind: "conflict" } as const;
         const state = decision.decision === "allow_once"
           ? "authorized" as const
           : "denied" as const;

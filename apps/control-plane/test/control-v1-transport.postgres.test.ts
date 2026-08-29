@@ -14,6 +14,7 @@ import {
   HOSTED_CAPABILITIES,
   hostedAdmissionFixture,
   hostedClaimRequest,
+  hostedGrantIssuerFixture,
   recordHostedReadiness,
 } from "./control-fixtures.js";
 import {
@@ -48,6 +49,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: (kind) => `${kind}_http_${++identity}`,
       tokenFactory: () => `fence_http_${identity}`,
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const application = createControlPlaneApplication({
       capabilities: {
@@ -323,6 +325,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
           pool: fixture.pool,
           clock: { now: () => now },
           tokenFactory: () => "unused",
+          issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
           idFactory: () => "unused",
         }),
         hosted: createHostedRunCoordinator({
@@ -358,6 +361,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "unused_reprovision_attempt",
       tokenFactory: () => "unused_reprovision_fence",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const application = createControlPlaneApplication({
       capabilities: {
@@ -501,12 +505,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "attempt_permission_http",
       tokenFactory: () => "fence_permission_http",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const admission = await hostedAdmissionFixture({
       runId: "run_permission_http",
       suffix: "93",
       organizationId: "org_permission_http",
       runnerId: "runner_permission_http",
+      permissionActions: ["github.merge"],
     });
     await hosted.admit({
       runId: "run_permission_http",

@@ -13,6 +13,7 @@ import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/run
 import {
   hostedAdmissionFixture,
   hostedClaimRequest,
+  hostedGrantIssuerFixture,
   recordHostedReadiness,
 } from "./control-fixtures.js";
 import {
@@ -76,12 +77,14 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       leaseDurationMs: 60_000,
       idFactory: () => "attempt_permission",
       tokenFactory: () => "fence_permission",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const admission = await hostedAdmissionFixture({
       runId: "run_permission",
       suffix: "91",
       organizationId: "org_permission",
       runnerId: "runner_permission",
+      permissionActions: ["github.merge"],
     });
     await hosted.admit({
       runId: "run_permission",
@@ -138,6 +141,25 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       clock: { now: () => now },
       idFactory: (kind) => `${kind}_1`,
     });
+    const publicationDigestInput = {
+      ...digestInput,
+      permissionRequestId: "permission_request_publication_denied",
+      actionId: "action_publication_denied",
+      actionFamily: "github.pull_request",
+      permissionScopes: ["github:pull_request"],
+    };
+    const publicationRequest = RunnerPermissionRequestV1Schema.parse({
+      ...publicationDigestInput,
+      requestId: "request_publication_denied",
+      operationId: "operation_publication_denied",
+      attempt: { ...publicationDigestInput.attempt,
+        fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(
+        publicationDigestInput,
+      ),
+    });
+    await expect(permissions.request({ principal, request: publicationRequest }))
+      .resolves.toEqual({ kind: "conflict" });
     const untrustedPolicyDigestInput = {
       ...digestInput,
       permissionRequestId: "permission_request_untrusted_policy",
@@ -178,6 +200,38 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     expect(JSON.stringify(storedRequest.rows[0]?.request)).toContain(
       claim.attempt.fencingTokenDigest,
     );
+    const tamperDigestInput = { ...digestInput,
+      permissionRequestId: "permission_request_tampered_approval",
+      actionId: "action_tampered_approval" };
+    const tamperRequest = RunnerPermissionRequestV1Schema.parse({
+      ...tamperDigestInput, requestId: "request_tampered_approval",
+      operationId: "operation_tampered_approval",
+      attempt: { ...tamperDigestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(tamperDigestInput),
+    });
+    await expect(permissions.request({ principal, request: tamperRequest }))
+      .resolves.toMatchObject({ kind: "waiting" });
+    await fixture.pool.query(
+      `UPDATE cp_permission_request
+       SET request = jsonb_set(request, '{actionFamily}', '"github.pull_request"'::jsonb)
+       WHERE organization_id = $1 AND permission_request_id = $2`,
+      [principal.organizationId, tamperRequest.permissionRequestId],
+    );
+    const tamperAllow = HumanPermissionDecisionRequestV1Schema.parse({
+      schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.permission.v1"],
+      requestId: "request_tampered_allow", operationId: "operation_tampered_allow",
+      organizationId: principal.organizationId, runId: tamperRequest.runId,
+      attempt: digestInput.attempt, actionId: tamperRequest.actionId,
+      permissionRequestId: tamperRequest.permissionRequestId,
+      permissionRequestDigest: tamperRequest.permissionRequestDigest,
+      policySnapshotDigest: tamperRequest.policySnapshotDigest,
+      decisionId: "decision_tampered_allow", decision: "allow_once",
+      decidedAt: now.toISOString(),
+    });
+    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
+      actorId: "api_key_approver" }, runnerId: principal.runnerId,
+      decision: tamperAllow })).resolves.toEqual({ kind: "conflict" });
     const consolePermissions = await createConsoleReadModel({
       pool: fixture.pool,
     }).listPermissions({

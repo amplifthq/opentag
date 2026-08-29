@@ -93,6 +93,42 @@ CREATE TABLE cp_source_content_invalidation_receipt (
 CREATE UNIQUE INDEX cp_source_content_grant_attempt_key
   ON cp_source_content_read_grant(organization_id, run_id, attempt_id);
 
+ALTER TABLE cp_source_content_read_grant ADD COLUMN key_version text;
+UPDATE cp_source_content_read_grant SET key_version = 'legacy' WHERE key_version IS NULL;
+ALTER TABLE cp_source_content_read_grant ALTER COLUMN key_version SET NOT NULL;
+
+ALTER TABLE cp_hosted_attempt DROP CONSTRAINT cp_hosted_attempt_state_check;
+ALTER TABLE cp_hosted_attempt ADD CONSTRAINT cp_hosted_attempt_state_check
+  CHECK (state IN ('claimed','running','needs_approval','cancelled','completed',
+    'rejected','interrupted','timed_out','expired'));
+
+CREATE TABLE cp_material_action_non_start_proof (
+  organization_id text NOT NULL,
+  run_id text NOT NULL,
+  attempt_id text NOT NULL,
+  attempt_number integer NOT NULL CHECK (attempt_number > 0),
+  fencing_token_digest text NOT NULL,
+  proof_id text NOT NULL,
+  proof_digest text NOT NULL,
+  recorded_at timestamptz NOT NULL,
+  PRIMARY KEY (organization_id, run_id, attempt_id),
+  UNIQUE (organization_id, proof_id),
+  FOREIGN KEY (organization_id, run_id, attempt_number)
+    REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number)
+);
+
+CREATE TABLE cp_source_resolution_admission (
+  idempotency_key text PRIMARY KEY,
+  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+  request_digest text NOT NULL,
+  run_id text NOT NULL,
+  state text NOT NULL CHECK (state IN ('pending','decided')),
+  resolution jsonb,
+  created_at timestamptz NOT NULL,
+  CHECK ((state = 'pending' AND resolution IS NULL) OR
+    (state = 'decided' AND resolution->>'kind' IN ('accepted','waiting_for_runner')))
+);
+
 CREATE FUNCTION cp_hosted_run_frozen_admission_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN

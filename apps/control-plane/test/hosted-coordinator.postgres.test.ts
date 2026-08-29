@@ -5,9 +5,11 @@ import {
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   HOSTED_CAPABILITIES,
+  hostedGrantIssuerFixture,
   hostedAdmissionFixture,
   hostedClaimRequest,
   recordHostedReadiness,
@@ -67,6 +69,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     leaseDurationMs: 60_000,
     idFactory: (kind) => `${kind}_${++identity}`,
     tokenFactory: (context) => `fence_${context.attemptId}`,
+    issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
   });
 
   async function admitAndClaim(suffix: string): Promise<HostedClaimV1> {
@@ -303,6 +306,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       leaseDurationMs: 60_000,
       idFactory: (kind) => `${kind}_${++identity}`,
       tokenFactory: () => "fence_original_authority",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     await original.admit({
       runId: "run_claim_secret_rotation",
@@ -326,6 +330,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       leaseDurationMs: 60_000,
       idFactory: (kind) => `${kind}_${++identity}`,
       tokenFactory: () => "fence_rotated_authority",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     await expect(rotated.claim(command)).resolves.toEqual({
       kind: "conflict",
@@ -506,6 +511,43 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     ).resolves.toEqual({ kind: "terminal", terminalKind: "succeeded" });
   });
 
+  it.each([
+    ["0success", "success", "succeeded", "completed", "proposal_ready"],
+    ["1failure", "failure", "failed", "rejected", "failed"],
+    ["2cancelled", "cancelled", "cancelled", "cancelled", "cancelled"],
+    ["3interrupted", "interrupted", "interrupted", "interrupted", "interrupted"],
+    ["4timed_out", "timed_out", "timed_out", "timed_out", "timed_out"],
+    ["5needs_human", "needs_human", "needs_approval", "needs_approval", "waiting_for_approval"],
+  ] as const)("maps executor conclusion %s explicitly", async (
+    suffix, conclusion, canonicalStatus, attemptState, status,
+  ) => {
+    const service = coordinator();
+    const claim = await admitAndClaim(suffix);
+    const complete = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId,
+      runnerId: principal.runnerId,
+      runId: claim.runId,
+      action: "complete",
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      occurredAt: now.toISOString(), conclusion,
+      reasonCode: `executor_${conclusion}`,
+      resultDigest: `sha256:${"8".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [],
+    });
+    await expect(service.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: complete })).resolves.toMatchObject({ kind: "accepted" });
+    await expect(service.inspect({ organizationId: principal.organizationId,
+      runId: claim.runId })).resolves.toMatchObject({ canonicalStatus, status });
+    const attempt = await fixture.pool.query<{ state: string }>(
+      `SELECT state FROM cp_hosted_attempt WHERE organization_id = $1
+       AND run_id = $2 AND attempt_number = $3`,
+      [principal.organizationId, claim.runId, claim.attempt.number],
+    );
+    expect(attempt.rows[0]?.state).toBe(attemptState);
+  });
+
   it("settles cancellation racing completion exactly once", async () => {
     const service = coordinator();
     const claim = await admitAndClaim("4");
@@ -610,6 +652,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
   it("reclaims an expired lease with a new attempt and fences the old one", async () => {
     const service = coordinator();
     const claim = await admitAndClaim("5");
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    await expect(materials.recordNotStarted({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      proofId: "proof_no_start_5", proofDigest: `sha256:${"5".repeat(64)}` }))
+      .resolves.toEqual({ kind: "recorded" });
     now = new Date(now.getTime() + 61_000);
     const reclaimed = await service.claim({
       principal,

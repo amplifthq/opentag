@@ -112,7 +112,8 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
 
   it("catches backups that lose encrypted content, revocation, or replay tombstones", async () => {
     let mutableNow = new Date("2026-08-28T00:00:00.000Z");
-    const authority = { async invalidate(input: { commandId: string; organizationId: string;
+    const authority = { async invalidateInTransaction(_client: unknown,
+      input: { commandId: string; organizationId: string;
       sourceVersionRef: string }) {
       return { commandId: input.commandId, organizationId: input.organizationId,
         sourceVersionRef: input.sourceVersionRef, reason: "source_content_deleted" as const,
@@ -161,7 +162,7 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
           "terminal_at", "deleted_at", "created_at"]],
         ["cp_source_content_read_grant", ["grant_id", "organization_id", "token_hash",
           "run_id", "attempt_id", "fence_digest", "content_ids", "purpose", "expires_at",
-          "consumed_at", "revoked_at", "created_at"]],
+          "key_version", "consumed_at", "revoked_at", "created_at"]],
         ["cp_source_replay_tombstone", ["organization_id", "replay_identity_digest",
           "source_version_digest", "command_id", "request_digest", "invalidation_receipt",
           "created_at", "expires_at"]],

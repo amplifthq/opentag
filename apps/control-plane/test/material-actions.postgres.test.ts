@@ -8,10 +8,12 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
+import { classifyAttemptMaterialActionTruth } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   hostedAdmissionFixture,
   hostedClaimRequest,
+  hostedGrantIssuerFixture,
   recordHostedReadiness,
 } from "./control-fixtures.js";
 import {
@@ -68,6 +70,15 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     await fixture.close();
   });
 
+  it("fails closed without a durable Attempt/fence-bound negative-start proof", async () => {
+    const truth = await classifyAttemptMaterialActionTruth(fixture.pool, {
+      organizationId: "org_material",
+      runId: "run_without_material_receipt",
+      attemptId: "attempt_without_material_receipt",
+    });
+    expect(truth).toMatchObject({ kind: "started_or_ambiguous" });
+  });
+
   it("keeps an append-only receipt chain and reconciles the current evidence", async () => {
     const hosted = createHostedRunCoordinator({
       pool: fixture.pool,
@@ -75,6 +86,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       leaseDurationMs: 60_000,
       idFactory: () => "attempt_material",
       tokenFactory: () => "fence_material",
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
     const admission = await hostedAdmissionFixture({
       runId: "run_material",
@@ -101,6 +113,17 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       pool: fixture.pool,
       clock: { now: () => now },
     });
+    const proofCommand = { principal, fencingToken: claim.attempt.fencingToken,
+      runId: claim.runId, attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, proofId: "proof_material_not_started",
+      proofDigest: `sha256:${"3".repeat(64)}` };
+    await expect(coordinator.recordNotStarted(proofCommand))
+      .resolves.toEqual({ kind: "recorded" });
+    await expect(coordinator.recordNotStarted(proofCommand))
+      .resolves.toEqual({ kind: "replayed" });
+    await expect(classifyAttemptMaterialActionTruth(fixture.pool, {
+      organizationId: principal.organizationId, runId: claim.runId,
+      attemptId: claim.attempt.id })).resolves.toEqual({ kind: "proven_not_started" });
     const receiptFor = async (input: {
       receiptId: string;
       operationId: string;
@@ -180,6 +203,9 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       fencingToken: claim.attempt.fencingToken,
       receipt: unknown,
     })).resolves.toMatchObject({ kind: "recorded" });
+    await expect(classifyAttemptMaterialActionTruth(fixture.pool, {
+      organizationId: principal.organizationId, runId: claim.runId,
+      attemptId: claim.attempt.id })).resolves.toMatchObject({ kind: "started_or_ambiguous" });
     await expect(coordinator.record({
       principal,
       fencingToken: claim.attempt.fencingToken,

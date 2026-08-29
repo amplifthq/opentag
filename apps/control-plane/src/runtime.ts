@@ -45,6 +45,7 @@ import {
 import { z } from "zod";
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  computeControlPayloadDigestV1,
   HostedAdmissionEnvelopeV1Schema,
 } from "@opentag/control-protocol";
 
@@ -126,12 +127,10 @@ export function createControlPlaneRuntime(input: {
       context.attemptId,
       context.attemptNumber,
     ])).digest("base64url")}`,
-    ...(input.config.relayContentKey ? {
-      issueSourceContentGrantInTransaction: (client, command) => {
-        if (!sourceContent) throw new Error("source_content_unavailable");
-        return sourceContent.issueReadGrantInTransaction(client, command);
-      },
-    } : {}),
+    issueSourceContentGrantInTransaction: (client, command) => {
+      if (!sourceContent) throw new Error("source_content_unavailable");
+      return sourceContent.issueReadGrantInTransaction(client, command);
+    },
   });
   const identity = createIdentityModule({
     pool: postgres.pool,
@@ -191,17 +190,54 @@ export function createControlPlaneRuntime(input: {
         hostedAdmission: HostedAdmissionEnvelopeV1Schema,
         admissionPolicySnapshot: AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
       }).strict().parse(command.sourceContext);
-      const admitted = await hosted.admit({
-        runId: context.runId,
-        admission: context.hostedAdmission,
-        policy: context.admissionPolicySnapshot,
+      if (context.hostedAdmission.organizationId !== command.reservation.organizationId
+        || context.hostedAdmission.sourceContextEnvelope.contentId
+          !== command.reservation.contentRef.contentId
+        || context.hostedAdmission.sourceContextEnvelope.sourceVersionRef
+          !== command.reservation.contentRef.sourceVersionRef
+        || context.hostedAdmission.sourceContextEnvelope.aadDigest
+          !== command.reservation.contentRef.aadDigest
+        || context.hostedAdmission.sourceContextEnvelope.keyVersion
+          !== command.reservation.contentRef.keyVersion) {
+        return { kind: "invalid_request", code: "source_context_identity_mismatch" } as const;
+      }
+      const requestDigest = await computeControlPayloadDigestV1({
+        idempotencyKey: command.idempotencyKey, runId: context.runId,
+        admissionDigest: context.hostedAdmission.envelopeDigest,
+        policyDigest: context.admissionPolicySnapshot.receiptDigest,
       });
+      await postgres.pool.query(
+        `INSERT INTO cp_source_resolution_admission(idempotency_key, organization_id,
+           request_digest, run_id, state, resolution, created_at)
+         VALUES($1,$2,$3,$4,'pending',NULL,$5) ON CONFLICT (idempotency_key) DO NOTHING`,
+        [command.idempotencyKey, context.hostedAdmission.organizationId,
+          requestDigest, context.runId, clock.now()],
+      );
+      const durable = await postgres.pool.query<{ request_digest: string;
+        run_id: string; state: "pending" | "decided"; resolution: {
+          kind: "accepted" | "waiting_for_runner"; runId: string } | null }>(
+        `SELECT request_digest, run_id, state, resolution FROM cp_source_resolution_admission
+         WHERE idempotency_key = $1`, [command.idempotencyKey],
+      );
+      const stored = durable.rows[0];
+      if (!stored || stored.request_digest !== requestDigest || stored.run_id !== context.runId) {
+        return { kind: "invalid_request", code: "source_resolution_idempotency_conflict" } as const;
+      }
+      if (stored.state === "decided" && stored.resolution) return stored.resolution;
+      const admitted = await hosted.admit({ runId: context.runId,
+        admission: context.hostedAdmission, policy: context.admissionPolicySnapshot });
       if (admitted.kind === "conflict") {
         return { kind: "invalid_request", code: admitted.reason } as const;
       }
-      return admitted.view.status === "waiting_for_runner"
+      const resolution = admitted.view.status === "waiting_for_runner"
         ? { kind: "waiting_for_runner", runId: admitted.runId } as const
         : { kind: "accepted", runId: admitted.runId } as const;
+      await postgres.pool.query(
+        `UPDATE cp_source_resolution_admission SET state = 'decided', resolution = $2::jsonb
+         WHERE idempotency_key = $1 AND request_digest = $3 AND run_id = $4`,
+        [command.idempotencyKey, JSON.stringify(resolution), requestDigest, context.runId],
+      );
+      return resolution;
     },
   } satisfies SourceResolutionPort;
   const sourceIngressWorker = sourceIngress
