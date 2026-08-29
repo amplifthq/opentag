@@ -117,7 +117,8 @@ describe("SourceAppRegistry", () => {
     expect(await app!.context.readThread({
       replyTarget: normalized!.replyTarget,
       maxMessages: 20,
-      maxDecodedBytes: 65536
+      maxDecodedBytes: 65536,
+      sourceMessageId: "message_1"
     })).toEqual({ messages: [20, 65536], truncated: false, decodedBytes: 8 });
 
     const command = {
@@ -193,7 +194,8 @@ describe("SourceAppRegistry", () => {
         type: "approve",
         commandId: "command_1",
         actor: { provider: "chat", id: "U1" },
-        requestId: "approval_1"
+        requestId: "approval_1",
+        decision: "allow_once"
       }
     })).resolves.toEqual({ outcome: "completed", value: "approval_1" });
 
@@ -207,7 +209,8 @@ describe("SourceAppRegistry", () => {
     expect(await registered!.context.readThread({
       replyTarget: normalized!.replyTarget,
       maxMessages: 20,
-      maxDecodedBytes: 65536
+      maxDecodedBytes: 65536,
+      sourceMessageId: "message_1"
     })).toEqual({ messages: [20, 65536], truncated: false, decodedBytes: 8 });
     const command = presentationCommand();
     expect(registered!.presentation.render(command)).toEqual({ text: "final_summary" });

@@ -169,3 +169,18 @@ export async function checkSourceIngressSchemaReadiness(
     return { ready: false, reason: "migrations_pending" };
   }
 }
+
+export async function checkSlackIngressSchemaReadiness(
+  pool: Pick<MigrationPool, "query">,
+): Promise<ReadinessResult> {
+  try {
+    const result = await pool.query<{ present: boolean }>(
+      `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
+       FROM unnest($1::text[]) AS required(name)`,
+      [["cp_slack_installation", "cp_slack_action_authority"]],
+    );
+    return result.rows[0]?.present
+      ? { ready: true }
+      : { ready: false, reason: "migrations_pending" };
+  } catch { return { ready: false, reason: "migrations_pending" }; }
+}

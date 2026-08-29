@@ -31,6 +31,7 @@ export type SourceAppCorePorts<_RawDelivery, NativePresentation> = {
   context: {
     readThread(input: {
       replyTarget: OpenTagReplyTargetRef;
+      sourceMessageId: string;
       maxMessages: 20;
       maxDecodedBytes: 65536;
     }): Promise<{ messages: unknown[]; truncated: boolean; decodedBytes: number }>;

@@ -5,12 +5,13 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import type { Pool } from "pg";
-import { createControlPlaneApplication, type ControlPlaneDependencies } from "./application.js";
+import { createControlPlaneApplication } from "./application.js";
 import type { ControlPlaneConfig } from "./config.js";
 import {
   checkMigrationReadiness,
   checkSourceContentSchemaReadiness,
   checkSourceIngressSchemaReadiness,
+  checkSlackIngressSchemaReadiness,
   type SqlMigration,
 } from "./database/migrations.js";
 import {
@@ -38,6 +39,8 @@ import {
 import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
 import { createSourceIngressService } from "./modules/source-ingress/index.js";
+import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
+import type { SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import {
   createSourceIngressWorker,
   type SourceResolutionPort,
@@ -98,7 +101,9 @@ export function createControlPlaneRuntime(input: {
   postgres?: PostgresCapability;
   sourceContentInvalidationAuthority?: SourceContentInvalidationAuthority;
   sourceResolutionPort?: SourceResolutionPort;
-  slackIngress?: ControlPlaneDependencies["slack"];
+  slackSecrets?: SlackSecretResolver;
+  slackCommandAuthority?: SourceThreadCommandAuthorityPorts;
+  slackFetchImpl?: typeof fetch;
 }) {
   const postgres = input.postgres ?? createPostgresRuntime({
     databaseUrl: input.config.databaseUrl,
@@ -277,6 +282,11 @@ export function createControlPlaneRuntime(input: {
         masterSecret: input.config.githubIngressMasterSecret,
       })
     : null;
+  const slack = sourceContent && input.slackSecrets && input.slackCommandAuthority
+    ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
+        jobs, secrets: input.slackSecrets, commandAuthority: input.slackCommandAuthority,
+        ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
+    : null;
   const application = createControlPlaneApplication({
     capabilities: {
       schemaVersion: 1,
@@ -313,6 +323,10 @@ export function createControlPlaneRuntime(input: {
           if (!sourceSchema.ready) return sourceSchema;
           const ingressSchema = await checkSourceIngressSchemaReadiness(postgres.pool);
           if (!ingressSchema.ready) return ingressSchema;
+          if (input.slackSecrets && input.slackCommandAuthority) {
+            const slackSchema = await checkSlackIngressSchemaReadiness(postgres.pool);
+            if (!slackSchema.ready) return slackSchema;
+          }
           return sourceContent.checkReadiness();
         }
         return { ready: true };
@@ -375,7 +389,7 @@ export function createControlPlaneRuntime(input: {
       targets: runners,
     },
     ...(github ? { github } : {}),
-    ...(input.slackIngress ? { slack: input.slackIngress } : {}),
+    ...(slack ? { slack } : {}),
   });
 
   return {

@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { computeSlackSignature } from "@opentag/slack";
 import type { SourceAppDefinition } from "@opentag/source-app-runtime";
 import { computeHostedAdmissionEnvelopeDigestV1,
   HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
@@ -79,6 +80,62 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     expect(after.status).toBe(200);
     await runtime.close();
     expect(closes).toBe(1);
+  });
+
+  it("composes canonical Slack ingress through raw runtime HTTP routes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-slack-key-"));
+    const keyFile = join(directory, "relay.key"); await writeFile(keyFile, Buffer.alloc(32, 9), { mode: 0o600 });
+    await fixture.migrate(); const now = new Date("2026-08-30T00:00:00.000Z");
+    const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+    await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_slack_runtime','Slack')");
+    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
+      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
+      state,created_at,updated_at) VALUES('org_slack_runtime','install_runtime','slack','A_RUNTIME',$1,1,$2,'active',$3,$3)`,
+      [digest("binding"), digest("generation"), now]);
+    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
+      binding_digest,state,created_at,updated_at) VALUES('org_slack_runtime','binding_runtime',
+      'install_runtime',$1,'active',$2,$2)`, [digest("binding"), now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
+      team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_slack_runtime','install_runtime','binding_runtime','T_RUNTIME','A_RUNTIME','C_RUNTIME',
+      'U_APP',ARRAY['U_MEMBER'],'secret://signing','secret://bot',$1,$1)`, [now]);
+    const completed = { outcome: "completed" as const };
+    const runtime = createControlPlaneRuntime({ config: {
+      bootstrapOrganizationId: "org_slack_runtime", bootstrapOrganizationName: "Slack",
+      bootstrapPairingToken: "bootstrap_slack_runtime_secret", databaseUrl: TEST_DATABASE_URL!,
+      environment: "local", fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
+      host: "127.0.0.1", jobLeaseDurationMs: 30_000, jobPollIntervalMs: 1_000,
+      jobRetryDelayMs: 30_000, loginRateLimit: { secret: "l".repeat(32), networkMode: "direct-peer",
+        maxFailures: 5, networkMaxFailures: 50, windowMs: 300_000, lockoutMs: 900_000 },
+      poolMax: 4, port: 3000, publicOrigin: "http://127.0.0.1:3000",
+      recoveryPairingToken: null, releaseSha: "local", relayContentKey: { file: keyFile, keyVersion: "v1" }
+    }, postgres: { pool: fixture.pool, async close() {} }, migrations: fixture.migrations,
+    slackSecrets: { async resolve(reference) { return reference === "secret://signing" ? "secret" : "bot"; } },
+    slackCommandAuthority: { async status() { return completed; }, async cancel() { return completed; },
+      async approve() { return completed; }, async reject() { return completed; },
+      async bind() { return completed; }, async unbind() { return completed; } },
+    slackFetchImpl: async () => { throw new Error("provider_call_forbidden"); } });
+    const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
+      const body = JSON.stringify({ type: "event_callback", team_id: teamId, api_app_id: "A_RUNTIME",
+        event_id: `Ev_${teamId}`, event_time: Math.floor(now.getTime() / 1000),
+        authorizations: [{ user_id: "U_APP" }], event: { type: "app_mention", user: "U_MEMBER",
+          text: "<@U_APP> fix", ts: "1700000000.000100", channel: "C_RUNTIME" } });
+      return runtime.application.fetch(new Request("http://control.test/v1/providers/slack/events/install_runtime",
+        { method: "POST", headers: { "content-type": "application/json",
+          "x-slack-request-timestamp": timestamp,
+          "x-slack-signature": computeSlackSignature({ signingSecret: "secret", timestamp, rawBody: body }) },
+          body })); };
+    try { expect((await send("T_RUNTIME")).status).toBe(200);
+      expect((await send("T_WRONG")).status).toBe(404); }
+    finally { await runtime.close();
+      await fixture.pool.query("DELETE FROM cp_job WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_ingress_reservation WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_source_content WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_slack_installation WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_source_binding WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_source_app_installation WHERE organization_id='org_slack_runtime'");
+      await fixture.pool.query("DELETE FROM cp_organization WHERE organization_id='org_slack_runtime'");
+      await rm(directory, { recursive: true, force: true }); }
   });
 
   it("wires the restart-safe Source worker to the coordinator resolver by default", async () => {

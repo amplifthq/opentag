@@ -136,18 +136,20 @@ export function createSourceIngressService(input: {
   return {
     async findSourceIdentity(inputValue: { organizationId: string; installationId: string;
       sourceAppId: string; sourceVersionRef: string }) {
-      try {
-        const value = z.object({ organizationId: identity, installationId: identity,
-          sourceAppId: identity, sourceVersionRef: identity }).strict().parse(inputValue);
-        const result = await input.pool.query<{ source_delivery_id: string; source_message_id: string }>(
-          `SELECT source_delivery_id, source_message_id FROM cp_ingress_reservation
-           WHERE organization_id = $1 AND installation_id = $2 AND source_app_id = $3
-             AND source_version_ref = $4 ORDER BY created_at LIMIT 2`,
-          [value.organizationId, value.installationId, value.sourceAppId, value.sourceVersionRef],
-        );
-        return result.rows.length === 1 ? { sourceDeliveryId: result.rows[0]!.source_delivery_id,
-          sourceMessageId: result.rows[0]!.source_message_id } : null;
-      } catch { return null; }
+      const parsed = z.object({ organizationId: identity, installationId: identity,
+        sourceAppId: identity, sourceVersionRef: identity }).strict().safeParse(inputValue);
+      if (!parsed.success) return { kind: "not_found" } as const;
+      const value = parsed.data;
+      const result = await input.pool.query<{ source_delivery_id: string; source_message_id: string }>(
+        `SELECT source_delivery_id, source_message_id FROM cp_ingress_reservation
+         WHERE organization_id = $1 AND installation_id = $2 AND source_app_id = $3
+           AND source_version_ref = $4 ORDER BY created_at LIMIT 2`,
+        [value.organizationId, value.installationId, value.sourceAppId, value.sourceVersionRef],
+      );
+      if (result.rows.length === 0) return { kind: "not_found" } as const;
+      if (result.rows.length > 1) return { kind: "ambiguous" } as const;
+      return { kind: "found", sourceDeliveryId: result.rows[0]!.source_delivery_id,
+        sourceMessageId: result.rows[0]!.source_message_id } as const;
     },
     async reserve(candidate: SourceIngressCommand) {
       let command: SourceIngressCommand;

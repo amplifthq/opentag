@@ -75,6 +75,7 @@ describe("opentag.channel.v1", () => {
         kind: "channel_message",
         channel: replyTarget.channel,
         thread: replyTarget.thread,
+        messageId: "message-2",
         actor: { provider: "chat", id: "actor-3", displayName: "Ming" }
       },
       text: "continue the run",
@@ -91,6 +92,7 @@ describe("opentag.channel.v1", () => {
     });
 
     expect(event.source.thread?.id).toBe("thread-99");
+    expect(event.source.messageId).toBe("message-2");
     expect(event.replyTarget.purpose).toBe("all");
     expect(event.attachments[0]?.kind).toBe("file");
   });

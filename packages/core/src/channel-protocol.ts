@@ -40,6 +40,7 @@ export const OpenTagChannelInboundSourceSchema = z
     kind: z.literal("channel_message"),
     channel: OpenTagChannelRefSchema,
     thread: OpenTagThreadRefSchema.optional(),
+    messageId: z.string().trim().min(1).optional(),
     actor: OpenTagActorRefSchema
   })
   .strict();

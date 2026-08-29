@@ -18,6 +18,13 @@ type SlackNativeRequest = { operation: SlackDeliveryOperation; presentation: Sla
 type VerifiedSlackInput = { payload: unknown; verifiedAt: string; evidenceDigest: string };
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 
+export class SlackVerificationError extends Error {
+  constructor(readonly kind: "missing_signature" | "stale_signature_timestamp"
+    | "invalid_signature" | "malformed_payload") {
+    super(kind); this.name = "SlackVerificationError";
+  }
+}
+
 function render(command: OpenTagChannelPresentationCommand): SlackDeliveryPresentation {
   const presentation = command.presentation; let text: string; let blocks: SlackBlock[] | undefined;
   switch (presentation.kind) {
@@ -29,7 +36,9 @@ function render(command: OpenTagChannelPresentationCommand): SlackDeliveryPresen
     case "action_receipt": text = renderSlackActionReceiptPresentation(presentation); blocks = createSlackActionReceiptBlocks(presentation); break;
     default: text = "OpenTag update";
   }
-  return { kind: "message", text, textFormat: "mrkdwn", ...(blocks ? { blocks } : {}) };
+  const certifiedBlocks = blocks?.filter((block) => block.type !== "actions");
+  return { kind: "message", text, textFormat: "mrkdwn",
+    ...(certifiedBlocks?.length ? { blocks: certifiedBlocks } : {}) };
 }
 
 function normalize(payloadInput: unknown, botUserId: string, verified?: VerifiedSlackInput): OpenTagSourceIngressEvent | null {
@@ -47,7 +56,7 @@ function normalize(payloadInput: unknown, botUserId: string, verified?: Verified
     if (!message) return null;
     const threadTs = event.thread_ts ?? event.ts;
     const thread = { provider: "slack", id: `${event.channel}:${threadTs}`, parentMessageId: threadTs };
-    return { ...message, source: { ...message.source, thread },
+    return { ...message, source: { ...message.source, thread, messageId: event.ts },
       replyTarget: { ...message.replyTarget, thread } };
   }
   const deletedTs = event.deleted_ts ?? event.previous_message?.ts;
@@ -85,14 +94,20 @@ export function createSlackSourceApp(options: { installation: SourceAppInstallat
         const timestamp = input.headers.get("x-slack-request-timestamp");
         const signature = input.headers.get("x-slack-signature");
         const rawBody = new TextDecoder().decode(input.rawBody);
-        if (!timestamp || !signature || !verifySlackTimestamp({ timestamp, nowMs: options.clock?.() ?? Date.now() })
-          || !verifySlackSignature({ signingSecret: options.signingSecret, timestamp, rawBody, signature })) {
-          throw new Error("slack_signature_invalid");
+        if (!timestamp || !signature) throw new SlackVerificationError("missing_signature");
+        if (!verifySlackTimestamp({ timestamp, nowMs: options.clock?.() ?? Date.now() })) {
+          throw new SlackVerificationError("stale_signature_timestamp");
+        }
+        if (!verifySlackSignature({ signingSecret: options.signingSecret, timestamp, rawBody, signature })) {
+          throw new SlackVerificationError("invalid_signature");
         }
         const contentType = input.headers.get("content-type") ?? "";
-        const payload = contentType.includes("application/x-www-form-urlencoded")
+        let payload: unknown;
+        try { payload = contentType.includes("application/x-www-form-urlencoded")
           ? JSON.parse(new URLSearchParams(rawBody).get("payload") ?? "null")
-          : JSON.parse(rawBody);
+          : JSON.parse(rawBody); }
+        catch { throw new SlackVerificationError("malformed_payload"); }
+        if (!payload || typeof payload !== "object") throw new SlackVerificationError("malformed_payload");
         return { payload, verifiedAt: input.receivedAt,
           evidenceDigest: digest(`v0:${timestamp}:${rawBody}`) } satisfies VerifiedSlackInput;
       },

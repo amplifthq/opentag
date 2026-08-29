@@ -4,7 +4,8 @@ import type { SourceAppDefinition } from "./definition.js";
 export type SourceThreadCommand =
   | { type: "status"; commandId: string; actor: OpenTagActorRef }
   | { type: "cancel"; commandId: string; actor: OpenTagActorRef; reason: string }
-  | { type: "approve"; commandId: string; actor: OpenTagActorRef; requestId: string }
+  | { type: "approve"; commandId: string; actor: OpenTagActorRef; requestId: string;
+      decision: "allow_once" | "allow_run" }
   | { type: "reject"; commandId: string; actor: OpenTagActorRef; requestId: string }
   | { type: "bind"; commandId: string; actor: OpenTagActorRef; bindingDigest: string }
   | { type: "unbind"; commandId: string; actor: OpenTagActorRef; bindingDigest: string };
@@ -27,7 +28,7 @@ export type SourceThreadCommandAuthorityPorts = {
 const commandFields = {
   status: ["type", "commandId", "actor"],
   cancel: ["type", "commandId", "actor", "reason"],
-  approve: ["type", "commandId", "actor", "requestId"],
+  approve: ["type", "commandId", "actor", "requestId", "decision"],
   reject: ["type", "commandId", "actor", "requestId"],
   bind: ["type", "commandId", "actor", "bindingDigest"],
   unbind: ["type", "commandId", "actor", "bindingDigest"]
@@ -54,6 +55,9 @@ export const SourceThreadCommandSchema = {
       : undefined;
     if (detailKey && (typeof value[detailKey] !== "string" || value[detailKey].trim().length === 0)) {
       throw new Error(`Source Thread ${detailKey} must be a non-empty string.`);
+    }
+    if (type === "approve" && value.decision !== "allow_once" && value.decision !== "allow_run") {
+      throw new Error("Source Thread approval decision must be allow_once or allow_run.");
     }
     return value as SourceThreadCommand;
   }

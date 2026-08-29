@@ -128,6 +128,21 @@ describe.skipIf(!TEST_DATABASE_URL)("generic durable Source App ingress", () => 
     expect(counts.rows[0]).toEqual({ reservations: 1, contents: 1, jobs: 1 });
   });
 
+  it("returns typed not-found, found, and ambiguous source-version identity outcomes", async () => {
+    const { ingress } = components();
+    await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
+      sourceAppId: "fixture-source", sourceVersionRef: "missing" }))
+      .resolves.toEqual({ kind: "not_found" });
+    await ingress.reserve(command("evt_1"));
+    await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
+      sourceAppId: "fixture-source", sourceVersionRef: "fixture:message_1:v1" }))
+      .resolves.toEqual({ kind: "found", sourceDeliveryId: "evt_1", sourceMessageId: "message_1" });
+    await ingress.reserve(command("evt_2", digest("raw_b")));
+    await expect(ingress.findSourceIdentity({ organizationId: "org_a", installationId: "install_1",
+      sourceAppId: "fixture-source", sourceVersionRef: "fixture:message_1:v1" }))
+      .resolves.toEqual({ kind: "ambiguous" });
+  });
+
   it("returns a stable conflict without mutation for the same id and a different digest", async () => {
     const { ingress } = components();
     await ingress.reserve(command());

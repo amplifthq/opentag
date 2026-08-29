@@ -45,7 +45,8 @@ describe("executeSourceThreadCommand", () => {
         type: "approve",
         commandId: "cmd_1",
         actor: { provider: "chat", id: "U1" },
-        requestId: "approval_1"
+        requestId: "approval_1",
+        decision: "allow_once"
       }
     });
     expect(result).toEqual({ outcome: "unsupported_capability", capability: "interactiveActions" });
@@ -68,9 +69,26 @@ describe("executeSourceThreadCommand", () => {
         type: "approve",
         commandId: "cmd_2",
         actor: { provider: "chat", id: "U1" },
-        requestId: "approval_2"
+        requestId: "approval_2",
+        decision: "allow_run"
       }
     })).resolves.toEqual({ outcome: "completed", value: "approval_2" });
+  });
+
+  it("preserves allow-once and allow-for-run as distinct approval decisions", async () => {
+    const decisions: string[] = [];
+    const authority: SourceThreadCommandAuthorityPorts = {
+      async status() { return { outcome: "completed" }; }, async cancel() { return { outcome: "completed" }; },
+      async approve(command) { decisions.push(command.decision); return { outcome: "completed" }; },
+      async reject() { return { outcome: "completed" }; }, async bind() { return { outcome: "completed" }; },
+      async unbind() { return { outcome: "completed" }; }
+    };
+    for (const decision of ["allow_once", "allow_run"] as const) {
+      await executeSourceThreadCommand({ adapter: fakeSourceApp(), authority,
+        command: { type: "approve", commandId: `cmd_${decision}`,
+          actor: { provider: "slack", id: "U_APPROVER" }, requestId: "approval_1", decision } });
+    }
+    expect(decisions).toEqual(["allow_once", "allow_run"]);
   });
 
   it("requires thread support before executing thread status", async () => {

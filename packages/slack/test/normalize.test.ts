@@ -132,7 +132,8 @@ describe("Slack normalization", () => {
     expect(message).toMatchObject({
       protocol: "opentag.channel.v1",
       trigger: "mention",
-      source: { channel: { provider: "slack", workspace: "T123", id: "C123" }, actor: { id: "U456" } },
+      source: { channel: { provider: "slack", workspace: "T123", id: "C123" },
+        actor: { id: "U456" }, messageId: "1710000000.000100" },
       text: "summarize this thread",
       replyTarget: { purpose: "all" }
     });

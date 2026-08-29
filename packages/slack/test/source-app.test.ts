@@ -21,11 +21,11 @@ function app() {
   });
 }
 
-const mention = () => ({
-  type: "event_callback", team_id: "T1", api_app_id: "A1", event_id: "Ev1",
+const mention = (input: { ts?: string; threadTs?: string; eventId?: string } = {}) => ({
+  type: "event_callback", team_id: "T1", api_app_id: "A1", event_id: input.eventId ?? "Ev1",
   event_time: 1_700_000_000, authorizations: [{ user_id: "U_APP" }],
   event: { type: "app_mention", user: "U1", text: "<@U_APP> fix this",
-    ts: "1700000000.000100", channel: "C1" }
+    ts: input.ts ?? "1700000000.000100", ...(input.threadTs ? { thread_ts: input.threadTs } : {}), channel: "C1" }
 });
 
 describe("Slack typed Source App", () => {
@@ -33,6 +33,16 @@ describe("Slack typed Source App", () => {
     const normalized = app().ingress.normalize(mention());
     expect(normalized?.trigger).toBe("mention");
     expect(normalized?.source.thread?.id).toBe("C1:1700000000.000100");
+    expect(normalized?.source.messageId).toBe("1700000000.000100");
+  });
+
+  it("keeps thread root separate from the exact triggering message identity", () => {
+    const normalized = app().ingress.normalize(mention({ ts: "1700000001.000200",
+      threadTs: "1700000000.000100", eventId: "EvThreaded" }));
+    expect(normalized).toMatchObject({ source: {
+      thread: { id: "C1:1700000000.000100", parentMessageId: "1700000000.000100" },
+      messageId: "1700000001.000200"
+    } });
   });
 
   it("does not turn an ordinary channel message into ambient work", () => {
@@ -72,12 +82,12 @@ describe("Slack typed Source App", () => {
     await expect(app().ingress.verify({ rawBody: new TextEncoder().encode(rawBody),
       headers: new Headers({ "x-slack-request-timestamp": "1700000000",
         "x-slack-signature": "v0=invalid" }),
-      receivedAt: "2023-11-14T22:13:20.000Z" })).rejects.toThrow("slack_signature_invalid");
+      receivedAt: "2023-11-14T22:13:20.000Z" })).rejects.toThrow("invalid_signature");
     await expect(app().ingress.verify({ rawBody: new TextEncoder().encode(rawBody),
       headers: new Headers({ "x-slack-request-timestamp": "1600000000",
         "x-slack-signature": computeSlackSignature({ signingSecret: "test-signing-secret",
           timestamp: "1600000000", rawBody }) }),
-      receivedAt: "2023-11-14T22:13:20.000Z" })).rejects.toThrow("slack_signature_invalid");
+      receivedAt: "2023-11-14T22:13:20.000Z" })).rejects.toThrow("stale_signature_timestamp");
   });
 
   it("returns null for unsupported events", () => {

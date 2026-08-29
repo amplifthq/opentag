@@ -26,6 +26,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0005_source_content.sql",
       "0006_source_ingress.sql",
       "0007_hosted_run_offline_safe.sql",
+      "0008_slack_source_app.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -59,6 +60,8 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         "cp_ingress_reservation",
         "cp_source_resolution",
         "cp_source_content_invalidation_receipt",
+        "cp_slack_installation",
+        "cp_slack_action_authority",
       ]),
     );
 
@@ -93,7 +96,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("carries legacy hosted rows into the canonical immutable lifecycle", async () => {
     const legacy = await createIsolatedPostgres();
     try {
-      await runMigrations(legacy.pool, legacy.migrations.slice(0, -1));
+      await runMigrations(legacy.pool, legacy.migrations.slice(0, 7));
       const createdAt = "2026-08-28T00:00:00.000Z";
       await legacy.pool.query(
         "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES($1,$2,$3)",
@@ -148,7 +151,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("backfills migration material precedence and fully closes exact proof authority", async () => {
     const legacy = await createIsolatedPostgres();
     try {
-      await runMigrations(legacy.pool, legacy.migrations.slice(0, -1));
+      await runMigrations(legacy.pool, legacy.migrations.slice(0, 7));
       const createdAt = "2026-08-28T01:00:00.000Z";
       await legacy.pool.query(
         "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES($1,$2,$3)",

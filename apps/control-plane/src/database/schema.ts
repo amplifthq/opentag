@@ -6,3 +6,4 @@ export * from "../modules/jobs/schema.js";
 export * from "../modules/runners/schema.js";
 export * from "../modules/source-content/schema.js";
 export * from "../modules/source-ingress/schema.js";
+export * from "../modules/slack-ingress/schema.js";
