@@ -143,8 +143,7 @@ CREATE TABLE IF NOT EXISTS cp_material_action_begin_intent (
   action_descriptor_digest text NOT NULL,
   target_fingerprint text NOT NULL,
   policy_snapshot_digest text NOT NULL,
-  authority_kind text NOT NULL CHECK (authority_kind IN
-    ('permission_resolution','admission_preauthorization')),
+  authority_kind text NOT NULL CHECK (authority_kind = 'permission_resolution'),
   authority_reference_id text NOT NULL,
   authority_reference_digest text NOT NULL,
   idempotency_key text NOT NULL,

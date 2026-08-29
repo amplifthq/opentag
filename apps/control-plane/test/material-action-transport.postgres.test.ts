@@ -1,6 +1,5 @@
 import {
   computeControlPayloadDigestV1,
-  computeMaterialActionAdmissionPreauthorizationDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   MaterialActionReceiptEnvelopeV1Schema,
@@ -12,6 +11,7 @@ import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js"
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import {
+  authorizeHostedMaterialActionFixture,
   hostedAdmissionFixture,
   hostedClaimRequest,
   hostedGrantIssuerFixture,
@@ -251,22 +251,15 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
     const { receiptDigest: _recordDigest, ...recordDigestInput } = recordSeed;
     const recordReceipt = MaterialActionReceiptEnvelopeV1Schema.parse({ ...recordSeed,
       receiptDigest: await computeMaterialActionReceiptDigestV1(recordDigestInput) });
-    const beginPreauthorizationDigest =
-      await computeMaterialActionAdmissionPreauthorizationDigestV1({
-        organizationId: "org_material_http", runId: recordClaim.runId,
-        admissionId: recordAdmission.admission.admissionId,
-        attempt: { attemptId: recordClaim.attempt.id,
-          attemptNumber: recordClaim.attempt.number, epoch: recordClaim.attempt.epoch,
-          fencingTokenDigest: recordClaim.attempt.fencingTokenDigest },
-        actionId: recordPayload.actionId,
-        actionDescriptor: recordPayload.actionDescriptor,
-        actionDescriptorDigest: recordPayload.actionDescriptorDigest,
-        targetFingerprint: recordPayload.targetFingerprint,
-        policySnapshotRef: recordAdmission.policy.payload.snapshotId,
-        policySnapshotDigest: recordAdmission.policy.receiptDigest,
-        permissionCeilingDigest: recordAdmission.admission.permissionCeiling.digest,
-        publicationPolicyDigest: recordAdmission.admission.publicationPolicy.digest,
-      });
+    const authorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock: { now: () => now }, principal: authentication.principal,
+      runId: recordClaim.runId, attempt: recordClaim.attempt,
+      actionId: recordPayload.actionId, actionDescriptor: recordPayload.actionDescriptor,
+      targetFingerprint: recordPayload.targetFingerprint,
+      policySnapshotRef: recordAdmission.policy.payload.snapshotId,
+      policySnapshotDigest: recordAdmission.policy.receiptDigest,
+      suffix: "material_http_record",
+    });
     await expect(client.beginMaterialActionControlV1({ schemaVersion: 1,
       protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
       requestId: "begin_material_http_record", operationId: "begin_material_http_record",
@@ -281,9 +274,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       targetFingerprint: recordPayload.targetFingerprint,
       policySnapshotRef: recordAdmission.policy.payload.snapshotId,
       policySnapshotDigest: recordAdmission.policy.receiptDigest,
-      authority: { kind: "admission_preauthorization",
-        admissionId: recordAdmission.admission.admissionId,
-        preauthorizationDigest: beginPreauthorizationDigest },
+      authority: authorization.authority,
       idempotencyKey: recordPayload.idempotencyKey, begunAt: now.toISOString(),
     })).resolves.toMatchObject({ status: 201, replayed: false });
     await expect(client.recordMaterialActionReceiptControlV1({

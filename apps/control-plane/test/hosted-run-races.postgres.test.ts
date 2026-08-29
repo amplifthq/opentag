@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { computeControlPayloadDigestV1,
-  computeMaterialActionAdmissionPreauthorizationDigestV1,
   computePermissionRequestDigestV1,
   RunnerPermissionRequestV1Schema } from "@opentag/control-protocol";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
-import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
+import { authorizeHostedMaterialActionFixture, HOSTED_CAPABILITIES,
+  hostedAdmissionFixture, hostedClaimRequest,
   hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
@@ -294,17 +294,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     const actionDescriptor = "github.pull_request.merge" as const;
     const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
     const targetFingerprint = `sha256:${"b".repeat(64)}`;
-    const preauthorizationDigest = await computeMaterialActionAdmissionPreauthorizationDigestV1({
-      organizationId: principal.organizationId, runId: claim.claim.runId,
-      admissionId: candidate.admission.admissionId,
-      attempt: { attemptId: claim.claim.attempt.id,
-        attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
-        fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
-      actionId: "action_proof_begin_race", actionDescriptor, actionDescriptorDigest,
-      targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
+    const authorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock, principal, runId: claim.claim.runId,
+      attempt: claim.claim.attempt, actionId: "action_proof_begin_race",
+      actionDescriptor, targetFingerprint,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
       policySnapshotDigest: candidate.policy.receiptDigest,
-      permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
-      publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
+      suffix: "proof_begin_race",
     });
 
     const [proof, begin] = await Promise.all([
@@ -319,8 +315,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
         actionDescriptorDigest, targetFingerprint,
         policySnapshotRef: candidate.policy.payload.snapshotId,
         policySnapshotDigest: candidate.policy.receiptDigest,
-        authority: { kind: "admission_preauthorization",
-          admissionId: candidate.admission.admissionId, preauthorizationDigest },
+        authority: authorization.authority,
         idempotencyKey: "begin_proof_race" }),
     ]);
 
@@ -348,6 +343,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       requestId: "request_claim_approval_proof", credentialId: "credential_race" }) });
     if (claim.kind !== "claimed") throw new Error("claim failed");
     const actionDescriptorDigest = await computeControlPayloadDigestV1("workspace.write");
+    const beginAuthorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock, principal, runId: claim.claim.runId,
+      attempt: claim.claim.attempt, actionId: "action_approval_after_proof",
+      actionDescriptor: "workspace.write", targetFingerprint: `sha256:${"e".repeat(64)}`,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      suffix: "approval_after_proof",
+    });
     await fixture.pool.query(
       `INSERT INTO cp_permission_request(organization_id, permission_request_id,
          run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
@@ -398,21 +401,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       targetFingerprint: `sha256:${"e".repeat(64)}`,
       policySnapshotRef: candidate.policy.payload.snapshotId,
       policySnapshotDigest: candidate.policy.receiptDigest,
-      authority: { kind: "admission_preauthorization",
-        admissionId: candidate.admission.admissionId,
-        preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
-          organizationId: principal.organizationId, runId: claim.claim.runId,
-          admissionId: candidate.admission.admissionId,
-          attempt: { attemptId: claim.claim.attempt.id,
-            attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
-            fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
-          actionId: "action_approval_after_proof", actionDescriptor: "workspace.write",
-          actionDescriptorDigest, targetFingerprint: `sha256:${"e".repeat(64)}`,
-          policySnapshotRef: candidate.policy.payload.snapshotId,
-          policySnapshotDigest: candidate.policy.receiptDigest,
-          permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
-          publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
-        }) },
+      authority: beginAuthorization.authority,
       idempotencyKey: "begin_after_proof" })).resolves.toEqual({ kind: "stale_fence" });
 
     const replacement = await service.claim({ principal, request: hostedClaimRequest({
@@ -440,6 +429,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       requestId: "request_claim_proof_future_lease", credentialId: "credential_race" }) });
     if (claim.kind !== "claimed") throw new Error("claim failed");
     const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    const actionDescriptor = "workspace.write" as const;
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const targetFingerprint = `sha256:${"3".repeat(64)}`;
+    const beginAuthorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock, principal, runId: claim.claim.runId,
+      attempt: claim.claim.attempt, actionId: "action_future_lease_proof",
+      actionDescriptor, targetFingerprint,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      suffix: "future_lease_proof_begin",
+    });
     const proof = { principal, fencingToken: claim.claim.attempt.fencingToken,
       runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
       attemptNumber: claim.claim.attempt.number, proofId: "proof_future_lease",
@@ -481,8 +481,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       action: "heartbeat", request: heartbeat })).resolves.toEqual({ kind: "stale_fence" });
     await expect(service.lifecycle({ principal, runId: claim.claim.runId,
       action: "complete", request: complete })).resolves.toEqual({ kind: "stale_fence" });
-    const actionDescriptor = "workspace.write" as const;
-    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
     const permissionDigestInput = { schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
       requiredCapabilities: ["relay.permission.v1"] as const,
@@ -508,27 +506,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       idFactory: (kind) => `${kind}_future_lease_proof` }).request({
       principal, request: permissionRequest,
     })).resolves.toEqual({ kind: "stale_fence" });
-    const targetFingerprint = permissionDigestInput.targetFingerprint;
     await expect(materials.begin({ principal,
       fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
       attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
       actionId: permissionDigestInput.actionId, actionDescriptor, actionDescriptorDigest,
       targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
       policySnapshotDigest: candidate.policy.receiptDigest,
-      authority: { kind: "admission_preauthorization",
-        admissionId: candidate.admission.admissionId,
-        preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
-          organizationId: principal.organizationId, runId: claim.claim.runId,
-          admissionId: candidate.admission.admissionId,
-          attempt: { attemptId: claim.claim.attempt.id,
-            attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
-            fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
-          actionId: permissionDigestInput.actionId, actionDescriptor, actionDescriptorDigest,
-          targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
-          policySnapshotDigest: candidate.policy.receiptDigest,
-          permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
-          publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
-        }) },
+      authority: beginAuthorization.authority,
       idempotencyKey: "begin_future_lease_proof",
     })).resolves.toEqual({ kind: "stale_fence" });
     await expect(materials.recordNotStarted(proof)).resolves.toEqual({ kind: "replayed" });

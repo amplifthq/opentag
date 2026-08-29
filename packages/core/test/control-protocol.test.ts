@@ -1639,6 +1639,13 @@ describe("material action receipt V1 control protocol", () => {
     expect(RunnerMaterialActionBeginV1Schema.safeParse(missingAuthority).success).toBe(false);
     expect(RunnerMaterialActionBeginV1Schema.safeParse({ ...beginRequest,
       authority: { kind: "runner_declared", digest } }).success).toBe(false);
+    expect(RunnerMaterialActionBeginV1Schema.safeParse({ ...beginRequest,
+      authority: {
+        kind: "admission_preauthorization",
+        admissionId: "admission_1",
+        preauthorizationDigest: digest,
+      },
+    }).success).toBe(false);
     expect(MaterialActionPayloadV1Schema.safeParse(payload).success).toBe(true);
     expect(MaterialActionReceiptEnvelopeV1Schema.safeParse(receipt).success).toBe(true);
     const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;

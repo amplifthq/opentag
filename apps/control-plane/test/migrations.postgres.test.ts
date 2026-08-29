@@ -227,12 +227,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       for (const kind of ["begin", "begin_proof", "receipt_begin_proof"] as const) {
         await legacy.pool.query(
           `INSERT INTO cp_material_action_begin_intent VALUES(
-             $1,$2,$3,1,$4,$5,'workspace.write',$6,$7,$8,'admission_preauthorization',
+             $1,$2,$3,1,$4,$5,'workspace.write',$6,$7,$8,'permission_resolution',
              $9,$10,$11,$12)`,
           ["org_truth", `run_truth_${kind}`, `attempt_${kind}`,
             `sha256:${"a".repeat(64)}`, `action_${kind}`, `sha256:${"b".repeat(64)}`,
             `sha256:${"c".repeat(64)}`, `sha256:${"d".repeat(64)}`,
-            `preauthorization_${kind}`, `sha256:${"e".repeat(64)}`,
+            `permission_receipt_${kind}`, `sha256:${"e".repeat(64)}`,
             `begin_${kind}`, createdAt]);
       }
       for (const kind of ["proof", "proof_future", "begin_proof",
@@ -290,12 +290,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
 
       await legacy.pool.query(
         `INSERT INTO cp_material_action_begin_intent VALUES(
-           $1,$2,$3,1,$4,$5,'workspace.write',$6,$7,$8,'admission_preauthorization',
+           $1,$2,$3,1,$4,$5,'workspace.write',$6,$7,$8,'permission_resolution',
            $9,$10,$11,$12)`,
         ["org_truth", "run_truth_missing", "attempt_missing",
           `sha256:${"a".repeat(64)}`, "action_guard", `sha256:${"b".repeat(64)}`,
           `sha256:${"c".repeat(64)}`, `sha256:${"d".repeat(64)}`,
-          "preauthorization_guard", `sha256:${"e".repeat(64)}`,
+          "permission_receipt_guard", `sha256:${"e".repeat(64)}`,
           "begin_guard", createdAt]);
       await legacy.pool.query(
         `UPDATE cp_hosted_attempt SET material_start_state = 'started_or_ambiguous'

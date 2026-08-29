@@ -1521,6 +1521,10 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       const pending = permissionRequests.get(actionId);
       if (!pending) throw new Error("hosted_material_action_permission_unknown");
+      if (receipt.targetFingerprint !== undefined
+        && receipt.targetFingerprint !== pending.targetFingerprint) {
+        throw new Error("hosted_material_action_target_mismatch");
+      }
       const observedAt = receipt.observedAt;
       const operationId = `material_${receipt.id}`;
       const payload = {
@@ -1530,8 +1534,7 @@ async function createHostedExecutionClient(input: {
         idempotencyKey: pending.materialIdempotencyKey,
         provider: receipt.provider,
         connectionRef: receipt.connectionId ?? pending.request.connectionId,
-        targetFingerprint: receipt.targetFingerprint ?? pending.request.targetFingerprint
-          ?? await computeControlPayloadDigestV1({ resource: pending.request.resource ?? null }),
+        targetFingerprint: pending.targetFingerprint,
         operationId,
         requestDigest: pending.permissionRequestDigest,
         actionPayloadDigest: await computeControlPayloadDigestV1(receipt.metadata ?? {}),

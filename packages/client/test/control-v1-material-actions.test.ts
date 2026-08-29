@@ -181,6 +181,20 @@ describe("Control V1 material action transport", () => {
     expect(body).toEqual(request);
   });
 
+  it("rejects caller-computable Admission preauthorization before transport", async () => {
+    let calls = 0;
+    const sdk = client(async () => {
+      calls += 1;
+      return jsonResponse({}, 201, "https://control.example/response");
+    });
+    await expect(sdk.beginMaterialActionControlV1({
+      ...beginRequest(),
+      authority: { kind: "admission_preauthorization", admissionId: "admission_1",
+        preauthorizationDigest: digest },
+    } as never)).rejects.toThrow();
+    expect(calls).toBe(0);
+  });
+
   it("rejects every non-runtime credential before either transport", async () => {
     let calls = 0;
     const receipt = materialReceipt();

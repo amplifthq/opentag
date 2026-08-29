@@ -3886,4 +3886,145 @@ describe("Control V1 projection pump", () => {
     });
     expect(client.claim).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects a hosted material receipt whose target differs from the pending permission", async () => {
+    const lease = { attemptId: "attempt_target_mismatch", fencingToken: "fence_target_mismatch" };
+    const targetFingerprint = `sha256:${"1".repeat(64)}`;
+    const mismatchedTargetFingerprint = `sha256:${"2".repeat(64)}`;
+    const repository = { provider: "github", owner: "acme", repo: "widget",
+      checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
+      pushRemote: "origin", keepWorktree: "on_failure" as const };
+    const executor = { id: "reviewer", displayName: "Review Agent",
+      capability: { id: "reviewer", protocol: "acp" },
+      canRun: vi.fn(async () => ({ ready: true })) } as never;
+    const context = {
+      schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const,
+      organizationId: "org_1",
+      runnerId: "runner_1",
+      credentialId: "credential_1",
+      registrationGeneration: 1,
+      credentialGeneration: 1,
+      capabilities: ["relay.claim-fence.v1", "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1", "relay.lifecycle.v1", "relay.material-receipt.v1",
+        "relay.permission.v1", "relay.readiness.v1"] as const,
+      targets: [{ projectTargetId: "target_1",
+        bindingDigest: `sha256:${"3".repeat(64)}`, provider: "github",
+        owner: "acme", repo: "widget", defaultExecutor: "reviewer",
+        defaultBranch: "main" }],
+      observedAt: now.toISOString(),
+    };
+    const readiness = await buildRunnerReadinessReceipt({ context,
+      executors: { reviewer: executor }, repositories: [repository], now: () => now });
+    const repo = {
+      ...emptyLifecycleRepository(),
+      getHostedAssignedRunForRecovery: vi.fn(async () => ({
+        claimed: { run: { id: "run_1" }, attemptId: lease.attemptId,
+          fencingToken: lease.fencingToken },
+        leaseExpiresAt: "2026-08-09T00:05:00.000Z",
+        hostedAuthority: {
+          organizationId: "org_1", runnerId: "runner_1", runId: "run_1",
+          credentialId: "credential_1", registrationGeneration: 1,
+          credentialGeneration: 1, projectTargetId: "target_1", bindingId: "binding_1",
+          targetBindingDigest: `sha256:${"3".repeat(64)}`,
+          admissionPolicyReceiptId: "policy_receipt_1",
+          admissionPolicySnapshotId: "policy_1",
+          admissionPolicySnapshotDigest: `sha256:${"4".repeat(64)}`,
+          runnerReadinessReceiptId: readiness.receiptId,
+          runnerReadinessReceiptDigest: readiness.receiptDigest,
+          targetReadinessReceiptId: readiness.receiptId,
+          targetReadinessReceiptDigest: readiness.receiptDigest,
+          executorId: "reviewer",
+          executorCapabilityDigest: readiness.payload.executors[0]!.capabilityDigest,
+          attemptId: lease.attemptId, attemptNumber: 1, epoch: 1,
+          fencingTokenDigest: `sha256:${"8".repeat(64)}`,
+          claimOperationId: "claim_operation_1", projectTargetVersion: 1,
+          admissionPolicySnapshotVersion: 1,
+          policyReceiptDigest: `sha256:${"9".repeat(64)}`,
+          importedAt: now.toISOString(),
+        },
+      })),
+      acquireHostedExecutionStart: vi.fn(async () => true),
+      isHostedExecutionCurrent: vi.fn(async () => true),
+      getHostedExecutionLease: vi.fn(async () => ({
+        leaseExpiresAt: "2026-08-09T00:05:00.000Z",
+      })),
+    } as never;
+    const authorizedReceipt = {
+      receiptId: "permission_receipt_1",
+      receiptDigest: `sha256:${"a".repeat(64)}`,
+      runId: "run_1",
+      observedAt: now.toISOString(),
+      attempt: { attemptId: lease.attemptId, attemptNumber: 1, epoch: 1,
+        fencingTokenDigest: `sha256:${"8".repeat(64)}` },
+      payload: {
+        state: "authorized" as const,
+        decision: "allow_once" as const,
+        decisionActorRef: "operator_1",
+        reasonCode: "human_approved" as const,
+        actionId: "action_unused",
+        permissionRequestId: "permission_unused",
+        riskTier: "high" as const,
+        requestedAt: now.toISOString(),
+        targetFingerprint,
+      },
+    };
+    const recordMaterialActionReceiptControlV1 = vi.fn(async () => ({
+      status: 201 as const, replayed: false as const, outcome: "accepted" as const,
+      receipt: { receiptId: "material_receipt_1" },
+    }));
+    const executeClaimedRunImpl = vi.fn(async (execution) => {
+      const permission = await execution.client.requestActionPermission("run_1", lease, {
+        toolCallId: "tool_target_mismatch", title: "Write target", kind: "execute",
+        permissionScopes: [], mode: "ask", connectionId: "connection_1",
+        operation: "write", resource: "resource_1", targetFingerprint,
+      });
+      await expect(execution.client.recordMaterialActionReceipt("run_1", lease,
+        permission.action.id, {
+          id: "material_receipt_1", actionId: permission.action.id,
+          provider: "github", connectionId: "connection_1",
+          targetFingerprint: mismatchedTargetFingerprint,
+          receiptRef: "provider_receipt_1", outcome: "succeeded",
+          observedAt: now.toISOString(),
+        })).rejects.toThrow("hosted_material_action_target_mismatch");
+      return true;
+    });
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [repository], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_1", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_1", runnerId: "runner_1",
+            credentialId: "credential_1", registrationGeneration: 1,
+            credentialGeneration: 1, credentialPurpose: "runtime",
+            createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: { reviewer: executor }, now: () => now,
+      controlClient: {
+        getRunnerControlContextV1: vi.fn(async () => context),
+        requestActionPermissionControlV1: vi.fn(async (request) => ({
+          status: 200 as const, replayed: false as const, outcome: "resolved" as const,
+          receipt: { ...authorizedReceipt, payload: { ...authorizedReceipt.payload,
+            actionId: request.actionId, actionDescriptor: request.actionDescriptor,
+            actionDescriptorDigest: request.actionDescriptorDigest,
+            permissionRequestId: request.permissionRequestId,
+            permissionRequestDigest: request.permissionRequestDigest,
+            policySnapshotRef: request.policySnapshotRef,
+            policySnapshotDigest: request.policySnapshotDigest } },
+        })),
+        beginMaterialActionControlV1: vi.fn(async () => ({ status: 201 as const,
+          replayed: false as const, outcome: "accepted" as const })),
+        recordMaterialActionReceiptControlV1,
+        getActionPermissionCurrentControlV1: vi.fn(async () => ({
+          status: 200 as const, outcome: "resolved" as const,
+          receipt: authorizedReceipt,
+        })),
+      } as never,
+      governanceStore: { repo, close: vi.fn() },
+      executeClaimedRunImpl: executeClaimedRunImpl as never,
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(recordMaterialActionReceiptControlV1).not.toHaveBeenCalled();
+    await loop?.close();
+  });
 });

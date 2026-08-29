@@ -461,5 +461,5 @@ export const materialActionBeginIntents = pgTable("cp_material_action_begin_inte
     foreignColumns: [hostedAttempts.organizationId, hostedAttempts.runId,
       hostedAttempts.attemptNumber] }),
   check("cp_material_action_begin_intent_authority_kind_check",
-    sql`${table.authorityKind} IN ('permission_resolution','admission_preauthorization')`),
+    sql`${table.authorityKind} = 'permission_resolution'`),
 ]);

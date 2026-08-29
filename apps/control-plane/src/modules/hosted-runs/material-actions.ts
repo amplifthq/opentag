@@ -2,14 +2,16 @@ import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
-  computeMaterialActionAdmissionPreauthorizationDigestV1,
   computeMaterialActionFencingTokenDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
+  computePermissionRequestDigestV1,
   HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
   HostedAdmissionEnvelopeV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
+  PermissionRequestDigestInputV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
+  ReceiptDigestSchema,
   RunnerMaterialActionReconcileRequestV1Schema,
   type MaterialActionReceiptEnvelopeV1,
   type MaterialActionBeginAuthorityV1,
@@ -70,6 +72,10 @@ type CurrentReceipt = {
   outcome: "succeeded" | "failed" | "outcome_unknown";
   receipt: unknown;
 };
+
+const StoredPermissionRequestV1Schema = PermissionRequestDigestInputV1Schema.extend({
+  permissionRequestDigest: ReceiptDigestSchema,
+});
 
 export type MaterialActionCoordinator = {
   begin(input: { principal: RuntimePrincipal; fencingToken: string;
@@ -352,7 +358,17 @@ export function createMaterialActionCoordinator(input: {
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
           current.admission_policy_snapshot,
         );
-        if (command.policySnapshotRef !== policy.payload.snapshotId
+        const { receiptDigest: _policyReceiptDigest, ...policyReceiptDigestInput } = policy;
+        if (policy.payloadDigest !== await computeControlPayloadDigestV1(policy.payload)
+          || policy.receiptDigest !== await computeControlReceiptDigestV1(
+            policyReceiptDigestInput,
+          )
+          || admission.permissionCeiling.digest !== await computeControlPayloadDigestV1(
+            admission.permissionCeiling.allowedActionDescriptors,
+          )
+          || command.actionDescriptorDigest
+            !== await computeControlPayloadDigestV1(command.actionDescriptor)
+          || command.policySnapshotRef !== policy.payload.snapshotId
           || command.policySnapshotDigest !== policy.receiptDigest
           || !admission.permissionCeiling.allowedActionDescriptors.includes(
             command.actionDescriptor,
@@ -362,12 +378,10 @@ export function createMaterialActionCoordinator(input: {
           return { kind: "conflict" as const };
         }
 
-        let authorityReferenceId: string;
-        let authorityReferenceDigest: string;
-        if (command.authority.kind === "permission_resolution") {
-          const permission = await client.query<{ permission_request_digest: string;
-            state: string; current_receipt: unknown }>(
+        const permission = await client.query<{ permission_request_digest: string;
+          state: string; request: unknown; current_receipt: unknown }>(
             `SELECT permission_request_digest, state, current_receipt
+                    , request
              FROM cp_permission_request
              WHERE organization_id = $1 AND permission_request_id = $2
                AND run_id = $3 AND attempt_id = $4 AND attempt_number = $5
@@ -375,67 +389,66 @@ export function createMaterialActionCoordinator(input: {
             [command.principal.organizationId, command.authority.permissionRequestId,
               command.runId, command.attemptId, command.attemptNumber, command.actionId],
           );
-          const permissionRow = permission.rows[0];
-          if (!permissionRow || permissionRow.state !== "authorized"
-            || permissionRow.permission_request_digest
-              !== command.authority.permissionRequestDigest) {
-            return { kind: "conflict" as const };
-          }
-          const resolution = PermissionResolutionReceiptEnvelopeV1Schema.parse(
-            permissionRow.current_receipt,
-          );
-          const { receiptDigest: _resolutionReceiptDigest,
-            ...resolutionDigestInput } = resolution;
-          if (resolution.payloadDigest !== await computeControlPayloadDigestV1(
-            resolution.payload,
-          )
-            || resolution.receiptDigest !== await computeControlReceiptDigestV1(
-              resolutionDigestInput,
-            )
-            || resolution.receiptId !== command.authority.resolutionReceiptId
-            || resolution.receiptDigest !== command.authority.resolutionReceiptDigest
-            || resolution.payload.state !== "authorized"
-            || resolution.payload.permissionRequestId
-              !== command.authority.permissionRequestId
-            || resolution.payload.permissionRequestDigest
-              !== command.authority.permissionRequestDigest
-            || resolution.payload.actionId !== command.actionId
-            || resolution.payload.actionDescriptor !== command.actionDescriptor
-            || resolution.payload.actionDescriptorDigest !== command.actionDescriptorDigest
-            || resolution.payload.targetFingerprint !== command.targetFingerprint
-            || resolution.payload.policySnapshotRef !== command.policySnapshotRef
-            || resolution.payload.policySnapshotDigest !== command.policySnapshotDigest
-            || resolution.attempt.attemptId !== command.attemptId
-            || resolution.attempt.attemptNumber !== command.attemptNumber
-            || resolution.attempt.fencingTokenDigest !== fencingTokenDigest) {
-            return { kind: "conflict" as const };
-          }
-          authorityReferenceId = resolution.receiptId;
-          authorityReferenceDigest = resolution.receiptDigest;
-        } else {
-          const expected = await computeMaterialActionAdmissionPreauthorizationDigestV1({
-            organizationId: command.principal.organizationId,
-            runId: command.runId,
-            admissionId: admission.admissionId,
-            attempt: { attemptId: command.attemptId,
-              attemptNumber: command.attemptNumber, epoch: command.attemptNumber,
-              fencingTokenDigest },
-            actionId: command.actionId,
-            actionDescriptor: command.actionDescriptor,
-            actionDescriptorDigest: command.actionDescriptorDigest,
-            targetFingerprint: command.targetFingerprint,
-            policySnapshotRef: command.policySnapshotRef,
-            policySnapshotDigest: command.policySnapshotDigest,
-            permissionCeilingDigest: admission.permissionCeiling.digest,
-            publicationPolicyDigest: admission.publicationPolicy.digest,
-          });
-          if (command.authority.admissionId !== admission.admissionId
-            || command.authority.preauthorizationDigest !== expected) {
-            return { kind: "conflict" as const };
-          }
-          authorityReferenceId = command.authority.admissionId;
-          authorityReferenceDigest = command.authority.preauthorizationDigest;
+        const permissionRow = permission.rows[0];
+        if (!permissionRow || permissionRow.state !== "authorized"
+          || permissionRow.permission_request_digest
+            !== command.authority.permissionRequestDigest) {
+          return { kind: "conflict" as const };
         }
+        const storedRequest = StoredPermissionRequestV1Schema.parse(permissionRow.request);
+        const { permissionRequestDigest: _storedRequestDigest,
+          ...storedRequestDigestInput } = storedRequest;
+        if (storedRequest.permissionRequestDigest !== command.authority.permissionRequestDigest
+          || storedRequest.permissionRequestDigest !== await computePermissionRequestDigestV1(
+            storedRequestDigestInput,
+          )
+          || storedRequest.organizationId !== command.principal.organizationId
+          || storedRequest.runnerId !== command.principal.runnerId
+          || storedRequest.runId !== command.runId
+          || storedRequest.attempt.attemptId !== command.attemptId
+          || storedRequest.attempt.attemptNumber !== command.attemptNumber
+          || storedRequest.attempt.fencingTokenDigest !== fencingTokenDigest
+          || storedRequest.actionId !== command.actionId
+          || storedRequest.actionDescriptor !== command.actionDescriptor
+          || storedRequest.actionDescriptorDigest !== command.actionDescriptorDigest
+          || storedRequest.targetFingerprint !== command.targetFingerprint
+          || storedRequest.policySnapshotRef !== command.policySnapshotRef
+          || storedRequest.policySnapshotDigest !== command.policySnapshotDigest) {
+          return { kind: "conflict" as const };
+        }
+        const resolution = PermissionResolutionReceiptEnvelopeV1Schema.parse(
+          permissionRow.current_receipt,
+        );
+        const { receiptDigest: _resolutionReceiptDigest,
+          ...resolutionDigestInput } = resolution;
+        if (resolution.payloadDigest !== await computeControlPayloadDigestV1(
+          resolution.payload,
+        )
+          || resolution.receiptDigest !== await computeControlReceiptDigestV1(
+            resolutionDigestInput,
+          )
+          || resolution.receiptId !== command.authority.resolutionReceiptId
+          || resolution.receiptDigest !== command.authority.resolutionReceiptDigest
+          || resolution.organizationId !== command.principal.organizationId
+          || resolution.runId !== command.runId
+          || resolution.payload.state !== "authorized"
+          || resolution.payload.permissionRequestId
+            !== command.authority.permissionRequestId
+          || resolution.payload.permissionRequestDigest
+            !== command.authority.permissionRequestDigest
+          || resolution.payload.actionId !== command.actionId
+          || resolution.payload.actionDescriptor !== command.actionDescriptor
+          || resolution.payload.actionDescriptorDigest !== command.actionDescriptorDigest
+          || resolution.payload.targetFingerprint !== command.targetFingerprint
+          || resolution.payload.policySnapshotRef !== command.policySnapshotRef
+          || resolution.payload.policySnapshotDigest !== command.policySnapshotDigest
+          || resolution.attempt.attemptId !== command.attemptId
+          || resolution.attempt.attemptNumber !== command.attemptNumber
+          || resolution.attempt.fencingTokenDigest !== fencingTokenDigest) {
+          return { kind: "conflict" as const };
+        }
+        const authorityReferenceId = resolution.receiptId;
+        const authorityReferenceDigest = resolution.receiptDigest;
 
         const existing = await client.query<{ fencing_token_digest: string;
           action_id: string; action_descriptor: string; action_descriptor_digest: string;
@@ -553,8 +566,8 @@ export function createMaterialActionCoordinator(input: {
         }
         const lateAfterProof = attemptAuthority.material_start_state === "proven_not_started";
         if (!lateAfterProof) {
-          const begin = await client.query(
-            `SELECT 1 FROM cp_material_action_begin_intent
+          const begin = await client.query<{ target_fingerprint: string }>(
+            `SELECT target_fingerprint FROM cp_material_action_begin_intent
              WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
                AND action_id = $4 AND fencing_token_digest = $5
                AND action_descriptor = $6
@@ -572,6 +585,9 @@ export function createMaterialActionCoordinator(input: {
             fencingTokenDigest: receipt.attempt.fencingTokenDigest,
             now: input.clock.now(), materialStartState: "material_allowed",
           }))) return { kind: "stale_fence" as const };
+          if (begin.rows[0]?.target_fingerprint !== receipt.payload.targetFingerprint) {
+            return { kind: "conflict" as const };
+          }
         }
 
         const currentResult = await client.query(
