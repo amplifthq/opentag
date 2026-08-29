@@ -77,6 +77,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     }), receivedAt: now.toISOString() };
   }
 
+  function challengeRequest(challenge: unknown = "challenge_abc123",
+    identity: { teamId?: string; appId?: string } = {}) {
+    const body = JSON.stringify({ type: "url_verification", team_id: identity.teamId ?? "T1",
+      api_app_id: identity.appId ?? "A1", challenge });
+    const timestamp = String(Math.floor(now.getTime() / 1000));
+    return { rawBody: new TextEncoder().encode(body), headers: new Headers({
+      "content-type": "application/json", "x-slack-request-timestamp": timestamp,
+      "x-slack-signature": computeSlackSignature({ signingSecret: "secret", timestamp, rawBody: body })
+    }), receivedAt: now.toISOString() };
+  }
+
   async function insertSlackInstallation() {
     await fixture.pool.query(`INSERT INTO cp_slack_installation(
       organization_id, installation_id, binding_id, team_id, app_id, channel_id,
@@ -187,6 +198,35 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveEvents("install_1", request("EvWrongChannel", {
       type: "app_mention", user: "U1", text: "<@U_APP> fix", ts: "1700000002.1", channel: "C2"
     }))).resolves.toMatchObject({ status: 404 });
+  });
+
+  it("answers only signed bounded challenges for the exact production installation without admission", async () => {
+    await insertSlackInstallation();
+    const { ingress } = productionComponents();
+
+    await expect(ingress.receiveEvents("install_1", challengeRequest()))
+      .resolves.toEqual({ status: 200, body: "challenge_abc123" });
+
+    const invalidSignature = challengeRequest();
+    invalidSignature.headers.set("x-slack-signature", "v0=invalid");
+    await expect(ingress.receiveEvents("install_1", invalidSignature))
+      .resolves.toMatchObject({ status: 401 });
+    await expect(ingress.receiveEvents("wrong_install", challengeRequest()))
+      .resolves.toMatchObject({ status: 404 });
+    await expect(ingress.receiveEvents("install_1", challengeRequest("challenge_abc123", { teamId: "T2" })))
+      .resolves.toMatchObject({ status: 404 });
+    await expect(ingress.receiveEvents("install_1", challengeRequest("challenge_abc123", { appId: "A2" })))
+      .resolves.toMatchObject({ status: 404 });
+    for (const malformed of [null, "", "x".repeat(4097)]) {
+      await expect(ingress.receiveEvents("install_1", challengeRequest(malformed)))
+        .resolves.toEqual({ status: 400, body: { error: "invalid_slack_challenge" } });
+    }
+
+    const counts = await fixture.pool.query(`SELECT
+      (SELECT count(*)::int FROM cp_ingress_reservation) reservations,
+      (SELECT count(*)::int FROM cp_job) jobs,
+      (SELECT count(*)::int FROM cp_hosted_run) runs`);
+    expect(counts.rows[0]).toEqual({ reservations: 0, jobs: 0, runs: 0 });
   });
 
   it("maps signature, malformed payload, secret failure, and guest invocation to typed statuses", async () => {

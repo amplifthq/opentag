@@ -24,6 +24,10 @@ type SlackInstallation = {
 };
 type InstallationResolution = { kind: "found"; installation: SlackInstallation }
   | { kind: "not_found" } | { kind: "ambiguous" };
+type SlackUrlVerificationResult = { kind: "not_url_verification" }
+  | { kind: "malformed" }
+  | { kind: "accepted"; challenge: string };
+const MAX_SLACK_CHALLENGE_LENGTH = 4096;
 
 type ActionRow = { organization_id: string; action_id: string; installation_id: string;
   action_token_hash: string;
@@ -116,6 +120,14 @@ function verificationFailure(error: unknown): HttpResult {
 function identityMatches(installation: SlackInstallation, identity: ReturnType<typeof payloadIdentity>) {
   return identity && identity.teamId === installation.teamId && identity.appId === installation.appId
     && (identity.channelId === undefined || identity.channelId === installation.channelId);
+}
+
+function urlVerificationResult(payload: Record<string, any>): SlackUrlVerificationResult {
+  if (payload.type !== "url_verification") return { kind: "not_url_verification" };
+  return typeof payload.challenge === "string" && payload.challenge.length > 0
+    && payload.challenge.length <= MAX_SLACK_CHALLENGE_LENGTH
+    ? { kind: "accepted", challenge: payload.challenge }
+    : { kind: "malformed" };
 }
 
 function createInstallationApp(input: { installation: SlackInstallation; signingSecret: string;
@@ -260,10 +272,18 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         if (resolved.kind === "not_found") return { status: 404, body: { error: "slack_installation_not_found" } };
         if (resolved.kind === "ambiguous") return { status: 409, body: { error: "slack_installation_ambiguous" } };
         const trusted = await resolved.sourceApp.ingress.verify(request);
-        const identity = payloadIdentity(payloadRecord(trusted) ?? {});
+        const payload = payloadRecord(trusted);
+        const identity = payloadIdentity(payload ?? {});
         if (!identity) return { status: 400, body: { error: "invalid_slack_envelope" } };
         if (!identityMatches(resolved.installation, identity)) {
           return { status: 404, body: { error: "slack_installation_not_found" } };
+        }
+        const urlVerification = urlVerificationResult(payload!);
+        if (urlVerification.kind === "malformed") {
+          return { status: 400, body: { error: "invalid_slack_challenge" } };
+        }
+        if (urlVerification.kind === "accepted") {
+          return { status: 200, body: urlVerification.challenge };
         }
         const bound = createBoundIngress({ sourceApp: resolved.sourceApp,
           installation: resolved.installation, sourceIngress,
