@@ -1,11 +1,19 @@
 import {
+  AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
   computeControlPayloadDigestV1,
+  computeControlReceiptDigestV1,
+  computeMaterialActionAdmissionPreauthorizationDigestV1,
   computeMaterialActionFencingTokenDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
+  HostedAdmissionEnvelopeV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
+  PermissionResolutionReceiptEnvelopeV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   type MaterialActionReceiptEnvelopeV1,
+  type MaterialActionBeginAuthorityV1,
+  type RunnerMaterialActionBeginV1,
   type RunnerMaterialActionReconcileRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
@@ -66,7 +74,11 @@ type CurrentReceipt = {
 export type MaterialActionCoordinator = {
   begin(input: { principal: RuntimePrincipal; fencingToken: string;
     runId: string; attemptId: string; attemptNumber: number;
-    actionDescriptor: string; actionDescriptorDigest: string;
+    actionId: string;
+    actionDescriptor: RunnerMaterialActionBeginV1["actionDescriptor"];
+    actionDescriptorDigest: string;
+    targetFingerprint: string; policySnapshotRef: string; policySnapshotDigest: string;
+    authority: MaterialActionBeginAuthorityV1;
     idempotencyKey: string }): Promise<
       { kind: "begun" | "replayed" } | { kind: "stale_fence" | "conflict" }
     >;
@@ -109,7 +121,8 @@ async function currentAttemptMatches(
     attemptNumber: number;
     fencingTokenDigest: string;
     now: Date;
-    materialStartState?: "open" | "material_allowed";
+    materialStartState?: "open" | "material_allowed" | "begin_allowed";
+    allowNeedsApproval?: boolean;
   },
 ): Promise<boolean> {
   const result = await client.query(
@@ -125,9 +138,14 @@ async function currentAttemptMatches(
        AND attempt.fencing_token_digest = $6
        AND attempt.credential_id = $7
        AND attempt.lease_expires_at > $8
+       AND ((run.state IN ('assigned','running') AND attempt.state IN ('claimed','running'))
+         OR ($10::boolean AND run.state = 'needs_approval'
+           AND attempt.state = 'needs_approval'))
        AND ($9::text IS NULL
          OR ($9 = 'open' AND attempt.material_start_state = 'open')
          OR ($9 = 'material_allowed'
+           AND attempt.material_start_state IN ('open','started_or_ambiguous'))
+         OR ($9 = 'begin_allowed'
            AND attempt.material_start_state IN ('open','started_or_ambiguous')))
      FOR UPDATE OF run, attempt`,
     [
@@ -140,9 +158,58 @@ async function currentAttemptMatches(
       input.principal.credentialId,
       input.now,
       input.materialStartState ?? null,
+      input.allowNeedsApproval ?? false,
     ],
   ) as { rows: unknown[] };
   return result.rows.length === 1;
+}
+
+const publicationCapabilities = new Set<string>(
+  HOSTED_PUBLICATION_ACTION_CAPABILITIES_V1,
+);
+
+async function closeProvenNotStartedAuthority(
+  client: { query(text: string, values?: readonly unknown[]): Promise<unknown> },
+  command: { organizationId: string; runId: string; attemptId: string;
+    attemptNumber: number; fencingTokenDigest: string },
+  recordedAt: Date,
+) {
+  await client.query(
+    `UPDATE cp_hosted_attempt SET material_start_state = 'proven_not_started',
+       state = 'expired', lease_expires_at = LEAST(lease_expires_at, $6),
+       blocked_permission_request_id = NULL, blocked_action_descriptor_digest = NULL,
+       blocked_policy_snapshot_digest = NULL, updated_at = $6
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+       AND attempt_number = $4 AND fencing_token_digest = $5
+       AND material_start_state IN ('open','proven_not_started')`,
+    [command.organizationId, command.runId, command.attemptId,
+      command.attemptNumber, command.fencingTokenDigest, recordedAt],
+  );
+  await client.query(
+    `UPDATE cp_hosted_run SET state = 'assigned', updated_at = $4
+     WHERE organization_id = $1 AND run_id = $2 AND current_attempt_number = $3
+       AND terminal_kind IS NULL
+       AND EXISTS (SELECT 1 FROM cp_hosted_attempt attempt
+         WHERE attempt.organization_id = cp_hosted_run.organization_id
+           AND attempt.run_id = cp_hosted_run.run_id
+           AND attempt.attempt_number = cp_hosted_run.current_attempt_number
+           AND attempt.attempt_id = $5
+           AND attempt.material_start_state = 'proven_not_started')`,
+    [command.organizationId, command.runId, command.attemptNumber,
+      recordedAt, command.attemptId],
+  );
+  await client.query(
+    `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $4)
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+       AND consumed_at IS NULL`,
+    [command.organizationId, command.runId, command.attemptId, recordedAt],
+  );
+  await client.query(
+    `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+       AND state = 'waiting'`,
+    [command.organizationId, command.runId, command.attemptId, recordedAt],
+  );
 }
 
 function exactPredecessor(
@@ -198,37 +265,13 @@ export function createMaterialActionCoordinator(input: {
             || replay.has_evidence || replay.material_start_state === "started_or_ambiguous") {
             return { kind: "conflict" as const };
           }
-          if (replay.material_start_state === "open") await client.query(
-            `UPDATE cp_hosted_attempt SET material_start_state = 'proven_not_started',
-               state = 'expired', lease_expires_at = LEAST(lease_expires_at, $4),
-               blocked_permission_request_id = NULL, blocked_action_descriptor_digest = NULL,
-               blocked_policy_snapshot_digest = NULL, updated_at = $4
-             WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
-            [command.principal.organizationId, command.runId, command.attemptId,
-              input.clock.now()],
-          );
-          if (replay.material_start_state === "open") {
-            await client.query(
-              `UPDATE cp_hosted_run SET state = 'assigned', updated_at = $3
-               WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
-              [command.principal.organizationId, command.runId, input.clock.now()],
-            );
-            await client.query(
-              `UPDATE cp_source_content_read_grant
-               SET revoked_at = COALESCE(revoked_at, $4)
-               WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-                 AND consumed_at IS NULL`,
-              [command.principal.organizationId, command.runId,
-                command.attemptId, input.clock.now()],
-            );
-            await client.query(
-              `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
-               WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-                 AND state = 'waiting'`,
-              [command.principal.organizationId, command.runId,
-                command.attemptId, input.clock.now()],
-            );
-          }
+          await closeProvenNotStartedAuthority(client, {
+            organizationId: command.principal.organizationId,
+            runId: command.runId,
+            attemptId: command.attemptId,
+            attemptNumber: command.attemptNumber,
+            fencingTokenDigest,
+          }, input.clock.now());
           return { kind: "replayed" as const };
         }
         if (!(await currentAttemptMatches(client, {
@@ -236,6 +279,7 @@ export function createMaterialActionCoordinator(input: {
           attemptId: command.attemptId, attemptNumber: command.attemptNumber,
           fencingTokenDigest, now: input.clock.now(),
           materialStartState: "open",
+          allowNeedsApproval: true,
         }))) return { kind: "stale_fence" as const };
         await client.query(
           `INSERT INTO cp_material_action_non_start_proof(
@@ -246,6 +290,13 @@ export function createMaterialActionCoordinator(input: {
             command.attemptNumber, fencingTokenDigest, command.proofId,
             command.proofDigest, input.clock.now()],
         );
+        await closeProvenNotStartedAuthority(client, {
+          organizationId: command.principal.organizationId,
+          runId: command.runId,
+          attemptId: command.attemptId,
+          attemptNumber: command.attemptNumber,
+          fencingTokenDigest,
+        }, input.clock.now());
           return { kind: "recorded" as const };
         });
       } catch (error) {
@@ -260,47 +311,180 @@ export function createMaterialActionCoordinator(input: {
     async begin(command) {
       if (command.actionDescriptorDigest
         !== await computeControlPayloadDigestV1(command.actionDescriptor)
-        || !command.idempotencyKey) return { kind: "conflict" };
+        || !command.actionId || !command.idempotencyKey) return { kind: "conflict" };
       const fencingTokenDigest = await computeMaterialActionFencingTokenDigestV1(
         command.fencingToken,
       );
       return withPostgresTransaction(input.pool, async (client) => {
-        const existing = await client.query<{ fencing_token_digest: string;
-          action_descriptor: string; action_descriptor_digest: string;
-          idempotency_key: string }>(
-          `SELECT fencing_token_digest, action_descriptor, action_descriptor_digest,
-                  idempotency_key FROM cp_material_action_begin_intent
-           WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
-          [command.principal.organizationId, command.runId, command.attemptId],
+        const authorityResult = await client.query<{
+          hosted_admission: unknown; admission_policy_snapshot: unknown;
+          publication_mode: string; run_state: string; terminal_kind: string | null;
+          attempt_state: string; material_start_state: string; credential_id: string;
+          fencing_token_digest: string; lease_expires_at: Date;
+        }>(
+          `SELECT run.hosted_admission, run.admission_policy_snapshot,
+                  run.publication_mode, run.state AS run_state, run.terminal_kind,
+                  attempt.state AS attempt_state, attempt.material_start_state,
+                  attempt.credential_id, attempt.fencing_token_digest,
+                  attempt.lease_expires_at
+           FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
+             ON attempt.organization_id = run.organization_id
+            AND attempt.run_id = run.run_id
+            AND attempt.attempt_number = run.current_attempt_number
+           WHERE run.organization_id = $1 AND run.run_id = $2
+             AND run.runner_id = $3 AND attempt.attempt_id = $4
+             AND attempt.attempt_number = $5
+           FOR UPDATE OF run, attempt`,
+          [command.principal.organizationId, command.runId,
+            command.principal.runnerId, command.attemptId, command.attemptNumber],
         );
-        if (existing.rows[0]) return existing.rows[0].fencing_token_digest === fencingTokenDigest
-          && existing.rows[0].action_descriptor === command.actionDescriptor
-          && existing.rows[0].action_descriptor_digest === command.actionDescriptorDigest
-          && existing.rows[0].idempotency_key === command.idempotencyKey
-          ? { kind: "replayed" as const } : { kind: "conflict" as const };
-        if (!(await currentAttemptMatches(client, { principal: command.principal,
-          runId: command.runId, attemptId: command.attemptId,
-          attemptNumber: command.attemptNumber, fencingTokenDigest,
-          now: input.clock.now(), materialStartState: "open" }))) {
+        const current = authorityResult.rows[0];
+        if (!current || current.terminal_kind !== null
+          || current.credential_id !== command.principal.credentialId
+          || current.fencing_token_digest !== fencingTokenDigest
+          || current.lease_expires_at.getTime() <= input.clock.now().getTime()
+          || !["assigned", "running"].includes(current.run_state)
+          || !["claimed", "running"].includes(current.attempt_state)
+          || !["open", "started_or_ambiguous"].includes(current.material_start_state)) {
           return { kind: "stale_fence" as const };
         }
-        const changed = await client.query(
+        const admission = HostedAdmissionEnvelopeV1Schema.parse(current.hosted_admission);
+        const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
+          current.admission_policy_snapshot,
+        );
+        if (command.policySnapshotRef !== policy.payload.snapshotId
+          || command.policySnapshotDigest !== policy.receiptDigest
+          || !admission.permissionCeiling.allowedActionDescriptors.includes(
+            command.actionDescriptor,
+          )
+          || (current.publication_mode === "proposal_only"
+            && publicationCapabilities.has(command.actionDescriptor))) {
+          return { kind: "conflict" as const };
+        }
+
+        let authorityReferenceId: string;
+        let authorityReferenceDigest: string;
+        if (command.authority.kind === "permission_resolution") {
+          const permission = await client.query<{ permission_request_digest: string;
+            state: string; current_receipt: unknown }>(
+            `SELECT permission_request_digest, state, current_receipt
+             FROM cp_permission_request
+             WHERE organization_id = $1 AND permission_request_id = $2
+               AND run_id = $3 AND attempt_id = $4 AND attempt_number = $5
+               AND action_id = $6 FOR UPDATE`,
+            [command.principal.organizationId, command.authority.permissionRequestId,
+              command.runId, command.attemptId, command.attemptNumber, command.actionId],
+          );
+          const permissionRow = permission.rows[0];
+          if (!permissionRow || permissionRow.state !== "authorized"
+            || permissionRow.permission_request_digest
+              !== command.authority.permissionRequestDigest) {
+            return { kind: "conflict" as const };
+          }
+          const resolution = PermissionResolutionReceiptEnvelopeV1Schema.parse(
+            permissionRow.current_receipt,
+          );
+          const { receiptDigest: _resolutionReceiptDigest,
+            ...resolutionDigestInput } = resolution;
+          if (resolution.payloadDigest !== await computeControlPayloadDigestV1(
+            resolution.payload,
+          )
+            || resolution.receiptDigest !== await computeControlReceiptDigestV1(
+              resolutionDigestInput,
+            )
+            || resolution.receiptId !== command.authority.resolutionReceiptId
+            || resolution.receiptDigest !== command.authority.resolutionReceiptDigest
+            || resolution.payload.state !== "authorized"
+            || resolution.payload.permissionRequestId
+              !== command.authority.permissionRequestId
+            || resolution.payload.permissionRequestDigest
+              !== command.authority.permissionRequestDigest
+            || resolution.payload.actionId !== command.actionId
+            || resolution.payload.actionDescriptor !== command.actionDescriptor
+            || resolution.payload.actionDescriptorDigest !== command.actionDescriptorDigest
+            || resolution.payload.targetFingerprint !== command.targetFingerprint
+            || resolution.payload.policySnapshotRef !== command.policySnapshotRef
+            || resolution.payload.policySnapshotDigest !== command.policySnapshotDigest
+            || resolution.attempt.attemptId !== command.attemptId
+            || resolution.attempt.attemptNumber !== command.attemptNumber
+            || resolution.attempt.fencingTokenDigest !== fencingTokenDigest) {
+            return { kind: "conflict" as const };
+          }
+          authorityReferenceId = resolution.receiptId;
+          authorityReferenceDigest = resolution.receiptDigest;
+        } else {
+          const expected = await computeMaterialActionAdmissionPreauthorizationDigestV1({
+            organizationId: command.principal.organizationId,
+            runId: command.runId,
+            admissionId: admission.admissionId,
+            attempt: { attemptId: command.attemptId,
+              attemptNumber: command.attemptNumber, epoch: command.attemptNumber,
+              fencingTokenDigest },
+            actionId: command.actionId,
+            actionDescriptor: command.actionDescriptor,
+            actionDescriptorDigest: command.actionDescriptorDigest,
+            targetFingerprint: command.targetFingerprint,
+            policySnapshotRef: command.policySnapshotRef,
+            policySnapshotDigest: command.policySnapshotDigest,
+            permissionCeilingDigest: admission.permissionCeiling.digest,
+            publicationPolicyDigest: admission.publicationPolicy.digest,
+          });
+          if (command.authority.admissionId !== admission.admissionId
+            || command.authority.preauthorizationDigest !== expected) {
+            return { kind: "conflict" as const };
+          }
+          authorityReferenceId = command.authority.admissionId;
+          authorityReferenceDigest = command.authority.preauthorizationDigest;
+        }
+
+        const existing = await client.query<{ fencing_token_digest: string;
+          action_id: string; action_descriptor: string; action_descriptor_digest: string;
+          target_fingerprint: string; policy_snapshot_digest: string;
+          authority_kind: string; authority_reference_id: string;
+          authority_reference_digest: string; idempotency_key: string }>(
+          `SELECT fencing_token_digest, action_id, action_descriptor,
+                  action_descriptor_digest, target_fingerprint, policy_snapshot_digest,
+                  authority_kind, authority_reference_id, authority_reference_digest,
+                  idempotency_key FROM cp_material_action_begin_intent
+           WHERE organization_id = $1 AND (
+             idempotency_key = $2 OR (run_id = $3 AND attempt_id = $4 AND action_id = $5))
+           FOR UPDATE`,
+          [command.principal.organizationId, command.idempotencyKey, command.runId,
+            command.attemptId, command.actionId],
+        );
+        if (existing.rows[0]) return existing.rows[0].fencing_token_digest === fencingTokenDigest
+          && existing.rows[0].action_id === command.actionId
+          && existing.rows[0].action_descriptor === command.actionDescriptor
+          && existing.rows[0].action_descriptor_digest === command.actionDescriptorDigest
+          && existing.rows[0].target_fingerprint === command.targetFingerprint
+          && existing.rows[0].policy_snapshot_digest === command.policySnapshotDigest
+          && existing.rows[0].authority_kind === command.authority.kind
+          && existing.rows[0].authority_reference_id === authorityReferenceId
+          && existing.rows[0].authority_reference_digest === authorityReferenceDigest
+          && existing.rows[0].idempotency_key === command.idempotencyKey
+          ? { kind: "replayed" as const } : { kind: "conflict" as const };
+        const changed = current.material_start_state === "open" ? await client.query(
           `UPDATE cp_hosted_attempt SET material_start_state = 'started_or_ambiguous',
              updated_at = $4 WHERE organization_id = $1 AND run_id = $2
              AND attempt_number = $3 AND material_start_state = 'open'
            RETURNING attempt_id`,
           [command.principal.organizationId, command.runId,
             command.attemptNumber, input.clock.now()],
-        );
+        ) : { rows: [{ attempt_id: command.attemptId }] };
         if (changed.rows.length !== 1) return { kind: "stale_fence" as const };
         await client.query(
           `INSERT INTO cp_material_action_begin_intent(organization_id, run_id,
-             attempt_id, attempt_number, fencing_token_digest, action_descriptor,
-             action_descriptor_digest, idempotency_key, begun_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+             attempt_id, attempt_number, fencing_token_digest, action_id,
+             action_descriptor, action_descriptor_digest, target_fingerprint,
+             policy_snapshot_digest, authority_kind, authority_reference_id,
+             authority_reference_digest, idempotency_key, begun_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
           [command.principal.organizationId, command.runId, command.attemptId,
-            command.attemptNumber, fencingTokenDigest, command.actionDescriptor,
-            command.actionDescriptorDigest, command.idempotencyKey, input.clock.now()],
+            command.attemptNumber, fencingTokenDigest, command.actionId,
+            command.actionDescriptor, command.actionDescriptorDigest,
+            command.targetFingerprint, command.policySnapshotDigest,
+            command.authority.kind, authorityReferenceId, authorityReferenceDigest,
+            command.idempotencyKey, input.clock.now()],
         );
         return { kind: "begun" as const };
       });
@@ -372,10 +556,12 @@ export function createMaterialActionCoordinator(input: {
           const begin = await client.query(
             `SELECT 1 FROM cp_material_action_begin_intent
              WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-               AND fencing_token_digest = $4 AND action_descriptor = $5
-               AND action_descriptor_digest = $6 AND idempotency_key = $7`,
+               AND action_id = $4 AND fencing_token_digest = $5
+               AND action_descriptor = $6
+               AND action_descriptor_digest = $7 AND idempotency_key = $8`,
             [command.principal.organizationId, receipt.runId,
-              receipt.attempt.attemptId, receipt.attempt.fencingTokenDigest,
+              receipt.attempt.attemptId, receipt.payload.actionId,
+              receipt.attempt.fencingTokenDigest,
               receipt.payload.actionDescriptor, receipt.payload.actionDescriptorDigest,
               receipt.payload.idempotencyKey],
           );

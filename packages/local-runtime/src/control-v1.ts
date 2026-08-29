@@ -1100,6 +1100,7 @@ async function createHostedExecutionClient(input: {
       | "github.pull_request.create" | "github.pull_request.update"
       | "github.pull_request.merge" | "github.release.create" | "github.branch.delete";
     actionDescriptorDigest: string;
+    targetFingerprint: string;
     materialIdempotencyKey: string;
   }>();
   const attempt = {
@@ -1458,14 +1459,21 @@ async function createHostedExecutionClient(input: {
       });
       assertNotCancelled();
       const pending = { request, permissionRequestId, permissionRequestDigest,
-        actionDescriptor, actionDescriptorDigest, materialIdempotencyKey };
+        actionDescriptor, actionDescriptorDigest, targetFingerprint,
+        materialIdempotencyKey };
       permissionRequests.set(actionId, pending);
       if (result.receipt.payload.state === "authorized") {
         await client.beginMaterialActionControlV1({ schemaVersion: 1,
           protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
           requestId: materialIdempotencyKey, operationId: materialIdempotencyKey,
           organizationId: authority.organizationId, runnerId: authority.runnerId,
-          runId, attempt, actionDescriptor, actionDescriptorDigest,
+          runId, attempt, actionId, actionDescriptor, actionDescriptorDigest,
+          targetFingerprint, policySnapshotRef: authority.policySnapshotRef,
+          policySnapshotDigest: authority.policySnapshotDigest,
+          authority: { kind: "permission_resolution",
+            permissionRequestId, permissionRequestDigest,
+            resolutionReceiptId: result.receipt.receiptId,
+            resolutionReceiptDigest: result.receipt.receiptDigest },
           idempotencyKey: materialIdempotencyKey, begunAt: clock().toISOString() });
       }
       return permissionResolutionFromReceipt({ receipt: result.receipt, request });
@@ -1495,8 +1503,16 @@ async function createHostedExecutionClient(input: {
           requestId: pending.materialIdempotencyKey,
           operationId: pending.materialIdempotencyKey,
           organizationId: authority.organizationId, runnerId: authority.runnerId,
-          runId, attempt, actionDescriptor: pending.actionDescriptor,
+          runId, attempt, actionId, actionDescriptor: pending.actionDescriptor,
           actionDescriptorDigest: pending.actionDescriptorDigest,
+          targetFingerprint: pending.targetFingerprint,
+          policySnapshotRef: authority.policySnapshotRef,
+          policySnapshotDigest: authority.policySnapshotDigest,
+          authority: { kind: "permission_resolution",
+            permissionRequestId: pending.permissionRequestId,
+            permissionRequestDigest: pending.permissionRequestDigest,
+            resolutionReceiptId: result.receipt.receiptId,
+            resolutionReceiptDigest: result.receipt.receiptDigest },
           idempotencyKey: pending.materialIdempotencyKey, begunAt: clock().toISOString() });
       }
       return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });

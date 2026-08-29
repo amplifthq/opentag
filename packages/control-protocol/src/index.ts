@@ -460,6 +460,44 @@ export const RunnerMaterialActionNonStartProofV1Schema = z.object({
   recordedAt: ControlTimestampSchema,
 }).strict();
 
+export const MaterialActionAdmissionPreauthorizationDigestInputV1Schema = z.object({
+  organizationId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  admissionId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema,
+  actionId: MaterialActionStableIdV1Schema,
+  actionDescriptor: PermissionActionDescriptorV1Schema,
+  actionDescriptorDigest: ReceiptDigestSchema,
+  targetFingerprint: ReceiptDigestSchema,
+  policySnapshotRef: MaterialActionStableIdV1Schema,
+  policySnapshotDigest: ReceiptDigestSchema,
+  permissionCeilingDigest: ReceiptDigestSchema,
+  publicationPolicyDigest: ReceiptDigestSchema,
+}).strict();
+
+export function computeMaterialActionAdmissionPreauthorizationDigestV1(
+  input: z.input<typeof MaterialActionAdmissionPreauthorizationDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    MaterialActionAdmissionPreauthorizationDigestInputV1Schema.parse(input),
+  ));
+}
+
+export const MaterialActionBeginAuthorityV1Schema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("permission_resolution"),
+    permissionRequestId: PermissionStableIdV1Schema,
+    permissionRequestDigest: ReceiptDigestSchema,
+    resolutionReceiptId: PermissionStableIdV1Schema,
+    resolutionReceiptDigest: ReceiptDigestSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("admission_preauthorization"),
+    admissionId: MaterialActionStableIdV1Schema,
+    preauthorizationDigest: ReceiptDigestSchema,
+  }).strict(),
+]);
+
 export const RunnerMaterialActionBeginV1Schema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
   protocolVersion: ControlProtocolVersionSchema,
@@ -472,8 +510,13 @@ export const RunnerMaterialActionBeginV1Schema = z.object({
   attempt: MaterialActionAttemptRefV1Schema.extend({
     fencingToken: z.string().min(1).max(4096),
   }).strict(),
+  actionId: MaterialActionStableIdV1Schema,
   actionDescriptor: PermissionActionDescriptorV1Schema,
   actionDescriptorDigest: ReceiptDigestSchema,
+  targetFingerprint: ReceiptDigestSchema,
+  policySnapshotRef: MaterialActionStableIdV1Schema,
+  policySnapshotDigest: ReceiptDigestSchema,
+  authority: MaterialActionBeginAuthorityV1Schema,
   idempotencyKey: MaterialActionStableIdV1Schema,
   begunAt: ControlTimestampSchema,
 }).strict();
@@ -3564,6 +3607,12 @@ export type RunnerMaterialActionReconcileRequestV1 = z.infer<
 >;
 export type RunnerMaterialActionNonStartProofV1 = z.infer<
   typeof RunnerMaterialActionNonStartProofV1Schema
+>;
+export type MaterialActionAdmissionPreauthorizationDigestInputV1 = z.infer<
+  typeof MaterialActionAdmissionPreauthorizationDigestInputV1Schema
+>;
+export type MaterialActionBeginAuthorityV1 = z.infer<
+  typeof MaterialActionBeginAuthorityV1Schema
 >;
 export type RunnerMaterialActionBeginV1 = z.infer<
   typeof RunnerMaterialActionBeginV1Schema

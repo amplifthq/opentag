@@ -114,6 +114,35 @@ export function createSourceContentGrantStore(input: {
           || !same(row.content_ids, requestedIds)) {
           throw new Error("source_content_grant_invalid");
         }
+        const hostedRun = await client.query<{ terminal_kind: string | null;
+          current_attempt_number: number }>(
+          `SELECT terminal_kind, current_attempt_number FROM cp_hosted_run
+           WHERE organization_id = $1 AND run_id = $2 FOR UPDATE`,
+          [command.organizationId, command.runId],
+        );
+        const runAuthority = hostedRun.rows[0];
+        const hostedAttempt = runAuthority ? await client.query<{
+          attempt_id: string; fencing_token_digest: string; lease_expires_at: Date;
+          state: string; material_start_state: string;
+        }>(
+          `SELECT attempt_id, fencing_token_digest, lease_expires_at, state,
+                  material_start_state FROM cp_hosted_attempt
+           WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+             AND attempt_id = $4 FOR UPDATE`,
+          [command.organizationId, command.runId, runAuthority.current_attempt_number,
+            command.attemptId],
+        ) : { rows: [] };
+        const authority = hostedAttempt.rows[0];
+        if (runAuthority && (runAuthority.terminal_kind !== null
+          || !authority
+          || authority.fencing_token_digest !== command.fenceDigest
+          || authority.lease_expires_at.getTime() <= input.clock.now().getTime()
+          || !["claimed", "running", "needs_approval"].includes(authority.state)
+          || !["open", "started_or_ambiguous"].includes(
+            authority.material_start_state ?? "",
+          ))) {
+          throw new Error("source_content_grant_stale");
+        }
         const output = await operation(client as PoolClient, requestedIds);
         await client.query(
           "UPDATE cp_source_content_read_grant SET consumed_at = $2 WHERE grant_id = $1",

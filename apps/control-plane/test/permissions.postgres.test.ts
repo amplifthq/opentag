@@ -2,6 +2,7 @@ import {
   buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
   computeControlPayloadDigestV1,
+  computeMaterialActionAdmissionPreauthorizationDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   PermissionResolutionReceiptEnvelopeV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
@@ -9,6 +10,7 @@ import {
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
 import { createConsoleReadModel } from "../src/modules/console-reads/index.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
@@ -214,35 +216,6 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       request: untrustedPolicyRequest,
     })).resolves.toEqual({ kind: "stale_fence" });
 
-    const waiting = await permissions.request({ principal, request });
-    expect(waiting.kind).toBe("waiting");
-    if (waiting.kind !== "waiting") throw new Error("waiting receipt missing");
-    expect(
-      PermissionResolutionReceiptEnvelopeV1Schema.parse(waiting.receipt).payload,
-    ).toMatchObject({ state: "waiting", nextAction: "wait_for_operator" });
-    const needsHuman = await buildHostedLifecycleRequestV1({
-      organizationId: principal.organizationId, runnerId: principal.runnerId,
-      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
-      occurredAt: now.toISOString(), conclusion: "needs_human",
-      reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
-      artifactDigests: [], evidenceDigests: [], blockedPermission: {
-        permissionRequestId: request.permissionRequestId,
-        actionDescriptorDigest: request.actionDescriptorDigest,
-        policySnapshotDigest: request.policySnapshotDigest },
-    });
-    await hosted.lifecycle({ principal, runId: claim.runId,
-      action: "complete", request: needsHuman });
-    const storedRequest = await fixture.pool.query<{ request: unknown }>(
-      `SELECT request FROM cp_permission_request
-       WHERE organization_id = $1 AND permission_request_id = $2`,
-      [principal.organizationId, request.permissionRequestId],
-    );
-    expect(JSON.stringify(storedRequest.rows[0]?.request)).not.toContain(
-      claim.attempt.fencingToken,
-    );
-    expect(JSON.stringify(storedRequest.rows[0]?.request)).toContain(
-      claim.attempt.fencingTokenDigest,
-    );
     const tamperDigestInput = { ...digestInput,
       permissionRequestId: "permission_request_tampered_approval",
       actionId: "action_tampered_approval" };
@@ -275,6 +248,110 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
       actorId: "api_key_approver" }, runnerId: principal.runnerId,
       decision: tamperAllow })).resolves.toEqual({ kind: "conflict" });
+
+    const unrelatedDigestInput = { ...digestInput,
+      permissionRequestId: "permission_request_unrelated_waiting",
+      actionId: "action_unrelated_waiting",
+      targetFingerprint: `sha256:${"6".repeat(64)}` };
+    const unrelatedRequest = RunnerPermissionRequestV1Schema.parse({
+      ...unrelatedDigestInput, requestId: "request_unrelated_waiting",
+      operationId: "operation_unrelated_waiting",
+      attempt: { ...unrelatedDigestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(unrelatedDigestInput),
+    });
+    await expect(permissions.request({ principal, request: unrelatedRequest }))
+      .resolves.toMatchObject({ kind: "waiting" });
+    const unrelatedAllow = HumanPermissionDecisionRequestV1Schema.parse({
+      schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.permission.v1"],
+      requestId: "request_unrelated_allow", operationId: "operation_unrelated_allow",
+      organizationId: principal.organizationId, runId: unrelatedRequest.runId,
+      attempt: digestInput.attempt, actionId: unrelatedRequest.actionId,
+      permissionRequestId: unrelatedRequest.permissionRequestId,
+      permissionRequestDigest: unrelatedRequest.permissionRequestDigest,
+      policySnapshotDigest: unrelatedRequest.policySnapshotDigest,
+      decisionId: "decision_unrelated_allow", decision: "allow_once",
+      decidedAt: now.toISOString(),
+    });
+    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
+      actorId: "api_key_approver" }, runnerId: principal.runnerId,
+      decision: unrelatedAllow })).resolves.toMatchObject({ kind: "resolved",
+        receipt: { payload: { state: "authorized" } } });
+
+    const waiting = await permissions.request({ principal, request });
+    expect(waiting.kind).toBe("waiting");
+    if (waiting.kind !== "waiting") throw new Error("waiting receipt missing");
+    expect(
+      PermissionResolutionReceiptEnvelopeV1Schema.parse(waiting.receipt).payload,
+    ).toMatchObject({ state: "waiting", nextAction: "wait_for_operator" });
+    const needsHuman = await buildHostedLifecycleRequestV1({
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
+      occurredAt: now.toISOString(), conclusion: "needs_human",
+      reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [], blockedPermission: {
+        permissionRequestId: request.permissionRequestId,
+        actionDescriptorDigest: request.actionDescriptorDigest,
+        policySnapshotDigest: request.policySnapshotDigest },
+    });
+    await hosted.lifecycle({ principal, runId: claim.runId,
+      action: "complete", request: needsHuman });
+    const storedRequest = await fixture.pool.query<{ request: unknown }>(
+      `SELECT request FROM cp_permission_request
+       WHERE organization_id = $1 AND permission_request_id = $2`,
+      [principal.organizationId, request.permissionRequestId],
+    );
+    expect(JSON.stringify(storedRequest.rows[0]?.request)).not.toContain(
+      claim.attempt.fencingToken,
+    );
+    expect(JSON.stringify(storedRequest.rows[0]?.request)).toContain(
+      claim.attempt.fencingTokenDigest,
+    );
+    const afterBlockedDigestInput = { ...digestInput,
+      permissionRequestId: "permission_request_after_blocked",
+      actionId: "action_after_blocked",
+      targetFingerprint: `sha256:${"7".repeat(64)}` };
+    const afterBlockedRequest = RunnerPermissionRequestV1Schema.parse({
+      ...afterBlockedDigestInput, requestId: "request_after_blocked",
+      operationId: "operation_after_blocked",
+      attempt: { ...afterBlockedDigestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(afterBlockedDigestInput),
+    });
+    await expect(permissions.request({ principal, request: afterBlockedRequest }))
+      .resolves.toEqual({ kind: "stale_fence" });
+    await expect(permissions.request({ principal, request: unrelatedRequest }))
+      .resolves.toEqual({ kind: "stale_fence" });
+    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
+      actorId: "api_key_approver" }, runnerId: principal.runnerId,
+      decision: unrelatedAllow })).resolves.toEqual({ kind: "conflict" });
+    await expect(createMaterialActionCoordinator({ pool: fixture.pool,
+      clock: { now: () => now } }).begin({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId: request.actionId,
+      actionDescriptor: request.actionDescriptor,
+      actionDescriptorDigest: request.actionDescriptorDigest,
+      targetFingerprint: request.targetFingerprint,
+      policySnapshotRef: request.policySnapshotRef,
+      policySnapshotDigest: request.policySnapshotDigest,
+      authority: { kind: "admission_preauthorization",
+        admissionId: admission.admission.admissionId,
+        preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
+          organizationId: principal.organizationId, runId: claim.runId,
+          admissionId: admission.admission.admissionId,
+          attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+            epoch: claim.attempt.epoch,
+            fencingTokenDigest: claim.attempt.fencingTokenDigest },
+          actionId: request.actionId, actionDescriptor: request.actionDescriptor,
+          actionDescriptorDigest: request.actionDescriptorDigest,
+          targetFingerprint: request.targetFingerprint,
+          policySnapshotRef: request.policySnapshotRef,
+          policySnapshotDigest: request.policySnapshotDigest,
+          permissionCeilingDigest: admission.admission.permissionCeiling.digest,
+          publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+        }) },
+      idempotencyKey: "material_begin_during_approval",
+    })).resolves.toEqual({ kind: "stale_fence" });
     const consolePermissions = await createConsoleReadModel({
       pool: fixture.pool,
     }).listPermissions({
@@ -318,11 +395,13 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       decision: "allow_once",
       decidedAt: now.toISOString(),
     });
-    await expect(permissions.resolve({
+    const approved = await permissions.resolve({
       principal: { organizationId: "org_permission", actorId: "api_key_approver" },
       runnerId: "runner_permission", decision: allow,
-    })).resolves.toMatchObject({ kind: "resolved",
+    });
+    expect(approved).toMatchObject({ kind: "resolved",
       receipt: { payload: { state: "authorized" } } });
+    if (approved.kind !== "resolved") throw new Error("approval resolution missing");
     await expect(hosted.inspect({ organizationId: "org_permission",
       runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "running" });
     const current = await permissions.current({ principal, query });
@@ -330,6 +409,23 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     if (current.kind !== "resolved") throw new Error("resolution missing");
     expect(current.receipt.payload.state).toBe("authorized");
     expect(current.receipt.payload.decisionActorRef).toBe("api_key_approver");
+    const material = createMaterialActionCoordinator({ pool: fixture.pool,
+      clock: { now: () => now } });
+    await expect(material.begin({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId: request.actionId, actionDescriptor: request.actionDescriptor,
+      actionDescriptorDigest: request.actionDescriptorDigest,
+      targetFingerprint: request.targetFingerprint,
+      policySnapshotRef: request.policySnapshotRef,
+      policySnapshotDigest: request.policySnapshotDigest,
+      authority: { kind: "permission_resolution",
+        permissionRequestId: request.permissionRequestId,
+        permissionRequestDigest: request.permissionRequestDigest,
+        resolutionReceiptId: approved.receipt.receiptId,
+        resolutionReceiptDigest: approved.receipt.receiptDigest },
+      idempotencyKey: "material_begin_exact_approval",
+    })).resolves.toEqual({ kind: "begun" });
     const success = await buildHostedLifecycleRequestV1({
       organizationId: principal.organizationId, runnerId: principal.runnerId,
       runId: claim.runId, action: "complete", attempt: lifecycleAttempt,

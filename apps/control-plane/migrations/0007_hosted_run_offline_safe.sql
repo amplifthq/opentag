@@ -138,11 +138,18 @@ CREATE TABLE IF NOT EXISTS cp_material_action_begin_intent (
   attempt_id text NOT NULL,
   attempt_number integer NOT NULL,
   fencing_token_digest text NOT NULL,
+  action_id text NOT NULL,
   action_descriptor text NOT NULL,
   action_descriptor_digest text NOT NULL,
+  target_fingerprint text NOT NULL,
+  policy_snapshot_digest text NOT NULL,
+  authority_kind text NOT NULL CHECK (authority_kind IN
+    ('permission_resolution','admission_preauthorization')),
+  authority_reference_id text NOT NULL,
+  authority_reference_digest text NOT NULL,
   idempotency_key text NOT NULL,
   begun_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, run_id, attempt_id),
+  PRIMARY KEY (organization_id, run_id, attempt_id, action_id),
   UNIQUE (organization_id, idempotency_key),
   FOREIGN KEY (organization_id, run_id, attempt_number)
     REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number)
@@ -169,6 +176,41 @@ END;
 ALTER TABLE cp_permission_request DROP CONSTRAINT cp_permission_request_state_check;
 ALTER TABLE cp_permission_request ADD CONSTRAINT cp_permission_request_state_check
   CHECK (state IN ('waiting','authorized','denied','revoked'));
+
+UPDATE cp_hosted_attempt attempt SET state = 'expired',
+  lease_expires_at = LEAST(attempt.lease_expires_at, proof.recorded_at),
+  blocked_permission_request_id = NULL,
+  blocked_action_descriptor_digest = NULL,
+  blocked_policy_snapshot_digest = NULL,
+  updated_at = proof.recorded_at
+ FROM cp_material_action_non_start_proof proof
+ WHERE attempt.organization_id = proof.organization_id
+   AND attempt.run_id = proof.run_id AND attempt.attempt_id = proof.attempt_id
+   AND attempt.attempt_number = proof.attempt_number
+   AND attempt.fencing_token_digest = proof.fencing_token_digest
+   AND attempt.material_start_state = 'proven_not_started';
+UPDATE cp_hosted_run run SET state = 'assigned', updated_at = attempt.updated_at
+ FROM cp_hosted_attempt attempt
+ WHERE run.organization_id = attempt.organization_id AND run.run_id = attempt.run_id
+   AND run.current_attempt_number = attempt.attempt_number
+   AND attempt.material_start_state = 'proven_not_started'
+   AND run.terminal_kind IS NULL;
+UPDATE cp_source_content_read_grant grant_record
+ SET revoked_at = COALESCE(grant_record.revoked_at, attempt.updated_at)
+ FROM cp_hosted_attempt attempt
+ WHERE grant_record.organization_id = attempt.organization_id
+   AND grant_record.run_id = attempt.run_id
+   AND grant_record.attempt_id = attempt.attempt_id
+   AND attempt.material_start_state = 'proven_not_started'
+   AND grant_record.consumed_at IS NULL;
+UPDATE cp_permission_request permission SET state = 'revoked',
+  updated_at = attempt.updated_at
+ FROM cp_hosted_attempt attempt
+ WHERE permission.organization_id = attempt.organization_id
+   AND permission.run_id = attempt.run_id
+   AND permission.attempt_id = attempt.attempt_id
+   AND attempt.material_start_state = 'proven_not_started'
+   AND permission.state = 'waiting';
 
 CREATE FUNCTION cp_material_non_start_proof_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -225,7 +267,12 @@ ALTER TABLE cp_hosted_claim ADD COLUMN claim_version integer NOT NULL DEFAULT 1
   CHECK (claim_version IN (1, 2));
 
 UPDATE cp_hosted_attempt attempt SET state = 'interrupted',
-  material_start_state = 'started_or_ambiguous', updated_at = clock_timestamp()
+  material_start_state = 'started_or_ambiguous',
+  lease_expires_at = LEAST(attempt.lease_expires_at, clock_timestamp()),
+  blocked_permission_request_id = NULL,
+  blocked_action_descriptor_digest = NULL,
+  blocked_policy_snapshot_digest = NULL,
+  updated_at = clock_timestamp()
  WHERE EXISTS (SELECT 1 FROM cp_hosted_claim legacy
    WHERE legacy.organization_id = attempt.organization_id
      AND legacy.run_id = attempt.run_id AND legacy.claim_version = 1
@@ -237,16 +284,33 @@ UPDATE cp_source_content_read_grant grant_record
  SET revoked_at = COALESCE(revoked_at, clock_timestamp())
  WHERE EXISTS (SELECT 1 FROM cp_hosted_claim legacy
    WHERE legacy.organization_id = grant_record.organization_id
-     AND legacy.run_id = grant_record.run_id AND legacy.claim_version = 1);
+     AND legacy.run_id = grant_record.run_id AND legacy.claim_version = 1
+     AND legacy.claim->'attempt'->>'id' = grant_record.attempt_id);
+UPDATE cp_permission_request permission SET state = 'revoked',
+  updated_at = clock_timestamp()
+ WHERE permission.state = 'waiting' AND EXISTS (
+   SELECT 1 FROM cp_hosted_claim legacy
+   WHERE legacy.organization_id = permission.organization_id
+     AND legacy.run_id = permission.run_id AND legacy.claim_version = 1
+     AND legacy.claim->'attempt'->>'id' = permission.attempt_id
+     AND CASE WHEN legacy.claim->'attempt'->>'number' ~ '^[1-9][0-9]*$'
+       THEN (legacy.claim->'attempt'->>'number')::integer = permission.attempt_number
+       ELSE false END);
 UPDATE cp_hosted_run run SET state = 'interrupted', terminal_kind = 'interrupted',
   terminal_reason = 'legacy_claim_authority_unrecoverable',
   outcome_state = 'outcome_unknown',
-  reconciliation_identity = run.organization_id || ':' || run.run_id || ':legacy_claim_migration',
+  reconciliation_identity = run.organization_id || ':' || run.run_id || ':' ||
+    (SELECT legacy.operation_id FROM cp_hosted_claim legacy
+     WHERE legacy.organization_id = run.organization_id AND legacy.run_id = run.run_id
+       AND legacy.claim_version = 1 ORDER BY legacy.operation_id LIMIT 1) || ':legacy_claim',
   terminal_receipt = jsonb_build_object('kind','legacy_claim_interrupted',
     'outcome','outcome_unknown','source','migration'), updated_at = clock_timestamp()
  WHERE run.terminal_kind IS NULL AND EXISTS (SELECT 1 FROM cp_hosted_claim legacy
    WHERE legacy.organization_id = run.organization_id AND legacy.run_id = run.run_id
-     AND legacy.claim_version = 1);
+     AND legacy.claim_version = 1
+     AND (CASE WHEN legacy.claim->'attempt'->>'number' ~ '^[1-9][0-9]*$'
+       THEN run.current_attempt_number <= (legacy.claim->'attempt'->>'number')::integer
+       ELSE true END));
 
 CREATE FUNCTION cp_hosted_run_frozen_admission_guard() RETURNS trigger
 LANGUAGE plpgsql AS $$

@@ -109,6 +109,7 @@ type HostedAttemptRow = {
   credential_id: string;
   fencing_token_digest: string;
   lease_expires_at: Date;
+  material_start_state: "open" | "proven_not_started" | "started_or_ambiguous";
   state: string;
 };
 
@@ -361,6 +362,7 @@ export function createHostedRunCoordinator(input: {
       [principal.organizationId, principal.runnerId],
     );
     for (const row of legacy.rows) {
+      const containedAt = input.clock.now();
       const rawAttempt = row.claim && typeof row.claim === "object"
         ? (row.claim as { attempt?: unknown }).attempt : undefined;
       const attemptId = rawAttempt && typeof rawAttempt === "object"
@@ -379,11 +381,15 @@ export function createHostedRunCoordinator(input: {
         exactAttempt = locked.rows.length === 1;
         if (exactAttempt) await client.query(
           `UPDATE cp_hosted_attempt SET state = 'interrupted',
-             material_start_state = 'started_or_ambiguous', updated_at = $5
+             material_start_state = 'started_or_ambiguous',
+             lease_expires_at = LEAST(lease_expires_at, $5),
+             blocked_permission_request_id = NULL,
+             blocked_action_descriptor_digest = NULL,
+             blocked_policy_snapshot_digest = NULL, updated_at = $5
            WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
              AND attempt_number = $4`,
           [principal.organizationId, row.run_id, attemptId, attemptNumber,
-            input.clock.now()],
+            containedAt],
         );
       }
       const staleAgainstLaterAttempt = attemptNumber !== null
@@ -398,14 +404,20 @@ export function createHostedRunCoordinator(input: {
            WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
           [principal.organizationId, row.run_id, reconciliationIdentity,
             JSON.stringify({ kind: "legacy_claim_interrupted",
-              outcome: "outcome_unknown", reconciliationIdentity }), input.clock.now()],
+              outcome: "outcome_unknown", reconciliationIdentity }), containedAt],
         );
       }
       if (attemptId && exactAttempt) await client.query(
         `UPDATE cp_source_content_read_grant SET revoked_at = COALESCE(revoked_at, $4)
          WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
            AND consumed_at IS NULL`,
-        [principal.organizationId, row.run_id, attemptId, input.clock.now()],
+        [principal.organizationId, row.run_id, attemptId, containedAt],
+      );
+      if (attemptId && exactAttempt) await client.query(
+        `UPDATE cp_permission_request SET state = 'revoked', updated_at = $4
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+           AND state = 'waiting'`,
+        [principal.organizationId, row.run_id, attemptId, containedAt],
       );
     }
   }
@@ -830,10 +842,6 @@ export function createHostedRunCoordinator(input: {
           ) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
           }
-          return {
-            kind: "replayed",
-            receipt: HostedLifecycleReceiptEnvelopeV1Schema.parse(replay.receipt),
-          } as const;
         }
 
         const runResult = await client.query(
@@ -865,6 +873,18 @@ export function createHostedRunCoordinator(input: {
           ) {
             return { kind: "conflict", reason: "operation_mismatch" } as const;
           }
+          const replayAttempt = await client.query<{ material_start_state: string }>(
+            `SELECT material_start_state FROM cp_hosted_attempt
+             WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+               AND attempt_number = $4 AND fencing_token_digest = $5 FOR UPDATE`,
+            [command.principal.organizationId, command.runId,
+              request.attempt.attemptId, request.attempt.attemptNumber,
+              request.attempt.fencingTokenDigest],
+          );
+          if (!replayAttempt.rows[0]
+            || replayAttempt.rows[0].material_start_state === "proven_not_started") {
+            return { kind: "stale_fence" } as const;
+          }
           return {
             kind: "replayed",
             receipt: HostedLifecycleReceiptEnvelopeV1Schema.parse(
@@ -877,7 +897,7 @@ export function createHostedRunCoordinator(input: {
 
         const attemptResult = await client.query(
           `SELECT attempt_number, attempt_id, runner_id, credential_id,
-                  fencing_token_digest, lease_expires_at, state
+                  fencing_token_digest, lease_expires_at, material_start_state, state
            FROM cp_hosted_attempt
            WHERE organization_id = $1 AND run_id = $2
              AND attempt_number = $3
@@ -898,10 +918,10 @@ export function createHostedRunCoordinator(input: {
           || attempt.credential_id !== command.principal.credentialId
           || attempt.fencing_token_digest !== request.attempt.fencingTokenDigest
           || attempt.lease_expires_at.getTime() <= now.getTime()
+          || attempt.material_start_state === "proven_not_started"
         ) {
           return { kind: "stale_fence" } as const;
         }
-
         const operation = lifecycleOperation(command.action);
         if (attempt.state === "needs_approval"
           && command.action !== "heartbeat" && command.action !== "cancel") {

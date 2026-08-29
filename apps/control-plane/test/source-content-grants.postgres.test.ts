@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { deriveSourceContentGrantToken } from "../src/modules/source-content/crypto.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
   recordHostedReadiness } from "./control-fixtures.js";
@@ -144,6 +145,55 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
         fenceDigest: claim.claim.attempt.fencingTokenDigest,
         contentIds: ["content_grant"], purpose: "source_context", keyVersion: "v1",
       });
+
+      const proof = createMaterialActionCoordinator({ pool: fixture.pool,
+        clock: { now: () => now } });
+      await expect(proof.recordNotStarted({ principal: authenticated.principal,
+        fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
+        attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+        proofId: "proof_grant_future_lease",
+        proofDigest: `sha256:${"8".repeat(64)}` })).resolves.toEqual({ kind: "recorded" });
+
+      await fixture.pool.query(
+        `UPDATE cp_hosted_attempt SET state = 'claimed', lease_expires_at = $4
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+        ["org_grant", claim.claim.runId, claim.claim.attempt.id,
+          new Date(now.getTime() + 60_000)],
+      );
+      await fixture.pool.query(
+        `UPDATE cp_source_content_read_grant SET revoked_at = NULL
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+        ["org_grant", claim.claim.runId, claim.claim.attempt.id],
+      );
+      await expect(custody.read({ ...claim.claim.sourceContentGrant,
+        organizationId: "org_grant", runId: claim.claim.runId,
+        attemptId: claim.claim.attempt.id,
+        fenceDigest: claim.claim.attempt.fencingTokenDigest,
+        contentIds: ["content_grant"], purpose: "source_context" }))
+        .rejects.toThrow("source_content_grant_stale");
+
+      await expect(proof.recordNotStarted({ principal: authenticated.principal,
+        fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
+        attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+        proofId: "proof_grant_future_lease",
+        proofDigest: `sha256:${"8".repeat(64)}` })).resolves.toEqual({ kind: "replayed" });
+      expect((await fixture.pool.query<{ state: string; lease_open: boolean;
+        revoked_at: Date | null }>(
+        `SELECT attempt.state, attempt.lease_expires_at > $4 AS lease_open,
+                grant_record.revoked_at
+         FROM cp_hosted_attempt attempt
+         JOIN cp_source_content_read_grant grant_record
+           ON grant_record.organization_id = attempt.organization_id
+          AND grant_record.run_id = attempt.run_id
+          AND grant_record.attempt_id = attempt.attempt_id
+         WHERE attempt.organization_id = $1 AND attempt.run_id = $2
+           AND attempt.attempt_id = $3`,
+        ["org_grant", claim.claim.runId, claim.claim.attempt.id, now],
+      )).rows).toEqual([{ state: "expired", lease_open: false,
+        revoked_at: expect.any(Date) }]);
+      await expect(hosted.cancelRun({ organizationId: "org_grant",
+        runId: claim.claim.runId, reason: "proof_gate_test_complete" }))
+        .resolves.toEqual({ kind: "cancelled" });
     }
 
     const missing = await hostedAdmissionFixture({ runId: "run_grant_missing",

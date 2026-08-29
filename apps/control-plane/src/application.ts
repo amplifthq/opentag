@@ -609,8 +609,13 @@ export function createControlPlaneApplication(
             fencingToken: begin.attempt.fencingToken, runId: begin.runId,
             attemptId: begin.attempt.attemptId,
             attemptNumber: begin.attempt.attemptNumber,
+            actionId: begin.actionId,
             actionDescriptor: begin.actionDescriptor,
             actionDescriptorDigest: begin.actionDescriptorDigest,
+            targetFingerprint: begin.targetFingerprint,
+            policySnapshotRef: begin.policySnapshotRef,
+            policySnapshotDigest: begin.policySnapshotDigest,
+            authority: begin.authority,
             idempotencyKey: begin.idempotencyKey });
           if (outcome.kind === "begun" || outcome.kind === "replayed") {
             return context.json({ outcome: outcome.kind,

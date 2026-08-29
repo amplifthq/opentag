@@ -6,6 +6,7 @@ import {
   OpenTagControlV1HttpError,
   type ControlCredential,
   type MaterialActionReceiptEnvelopeV1,
+  type RunnerMaterialActionBeginV1,
   type RunnerMaterialActionReconcileRequestV1,
 } from "../src/index.js";
 
@@ -111,6 +112,35 @@ function reconcileRequest(
   };
 }
 
+function beginRequest(): RunnerMaterialActionBeginV1 {
+  return {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    requestId: "material_begin_request_1",
+    operationId: "material_begin_operation_1",
+    organizationId: "org_1",
+    runnerId: "runner:1",
+    runId: "run:1",
+    attempt: reconcileRequest().attempt,
+    actionId: "action:1",
+    actionDescriptor: "github.release.create",
+    actionDescriptorDigest: digest,
+    targetFingerprint: otherDigest,
+    policySnapshotRef: "policy_1",
+    policySnapshotDigest: digest,
+    authority: {
+      kind: "permission_resolution",
+      permissionRequestId: "permission_1",
+      permissionRequestDigest: otherDigest,
+      resolutionReceiptId: "permission_receipt_1",
+      resolutionReceiptDigest: digest,
+    },
+    idempotencyKey: "material_publish_1",
+    begunAt: observedAt,
+  };
+}
+
 function jsonResponse(body: unknown, status: number, url: string): Response {
   const response = new Response(JSON.stringify(body), {
     status,
@@ -135,6 +165,22 @@ function client(
 }
 
 describe("Control V1 material action transport", () => {
+  it("posts the exact server-verifiable begin authority tuple", async () => {
+    const request = beginRequest();
+    let body: unknown;
+    const sdk = client(async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return jsonResponse({ outcome: "begun",
+        idempotencyKey: request.idempotencyKey }, 201,
+      "https://control.example/response");
+    });
+
+    await expect(sdk.beginMaterialActionControlV1(request)).resolves.toEqual({
+      status: 201, replayed: false, outcome: "accepted",
+    });
+    expect(body).toEqual(request);
+  });
+
   it("rejects every non-runtime credential before either transport", async () => {
     let calls = 0;
     const receipt = materialReceipt();

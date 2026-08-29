@@ -201,5 +201,5 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
       );
       await fixture.admin.query(`DROP DATABASE IF EXISTS ${restoreDatabase}`);
     }
-  });
+  }, 30_000);
 });

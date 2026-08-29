@@ -166,6 +166,7 @@ export type {
   HostedClaimV1,
   MaterialActionReceiptEnvelopeV1,
   PermissionResolutionReceiptEnvelopeV1,
+  RunnerMaterialActionBeginV1,
   RunnerMaterialActionReconcileRequestV1,
   RunnerPermissionCurrentQueryV1,
   RunnerPermissionRequestV1,

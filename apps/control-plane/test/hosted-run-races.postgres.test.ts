@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
+import { computeControlPayloadDigestV1,
+  computeMaterialActionAdmissionPreauthorizationDigestV1,
+  computePermissionRequestDigestV1,
+  RunnerPermissionRequestV1Schema } from "@opentag/control-protocol";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
+import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
   hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
@@ -269,6 +273,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       [claim.claim.runId],
     );
     expect(attempts.rows[0]?.count).toBe(2);
+    await service.cancelRun({ organizationId: principal.organizationId,
+      runId: claim.claim.runId, reason: "proof_claim_race_complete" });
   });
 
   it("gives proof or server-authoritative material begin one CAS winner", async () => {
@@ -276,7 +282,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     const service = coordinator();
     const candidate = await hostedAdmissionFixture({ runId: "run_proof_begin_race",
       suffix: "proof_begin_race", organizationId: "org_race", runnerId: "runner_race",
-      queueClaimDeadline: "2026-08-15T10:45:00.000Z" });
+      queueClaimDeadline: "2026-08-15T10:45:00.000Z",
+      permissionActions: ["github.pull_request.merge"], publicationMode: "pull_request" });
     await service.admit({ runId: "run_proof_begin_race", admission: candidate.admission,
       policy: candidate.policy });
     const claim = await service.claim({ principal, request: hostedClaimRequest({
@@ -286,6 +293,19 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
     const actionDescriptor = "github.pull_request.merge" as const;
     const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const targetFingerprint = `sha256:${"b".repeat(64)}`;
+    const preauthorizationDigest = await computeMaterialActionAdmissionPreauthorizationDigestV1({
+      organizationId: principal.organizationId, runId: claim.claim.runId,
+      admissionId: candidate.admission.admissionId,
+      attempt: { attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
+        fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+      actionId: "action_proof_begin_race", actionDescriptor, actionDescriptorDigest,
+      targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
+      publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
+    });
 
     const [proof, begin] = await Promise.all([
       materials.recordNotStarted({ principal, fencingToken: claim.claim.attempt.fencingToken,
@@ -294,8 +314,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
         proofDigest: `sha256:${"a".repeat(64)}` }),
       materials.begin({ principal, fencingToken: claim.claim.attempt.fencingToken,
         runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
-        attemptNumber: claim.claim.attempt.number, actionDescriptor,
-        actionDescriptorDigest, idempotencyKey: "begin_proof_race" }),
+        attemptNumber: claim.claim.attempt.number,
+        actionId: "action_proof_begin_race", actionDescriptor,
+        actionDescriptorDigest, targetFingerprint,
+        policySnapshotRef: candidate.policy.payload.snapshotId,
+        policySnapshotDigest: candidate.policy.receiptDigest,
+        authority: { kind: "admission_preauthorization",
+          admissionId: candidate.admission.admissionId, preauthorizationDigest },
+        idempotencyKey: "begin_proof_race" }),
     ]);
 
     expect([proof.kind, begin.kind].filter((kind) => kind === "recorded" || kind === "begun"))
@@ -305,6 +331,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       [claim.claim.runId]);
     expect(["proven_not_started", "started_or_ambiguous"])
       .toContain(state.rows[0]?.material_start_state);
+    await service.cancelRun({ organizationId: principal.organizationId,
+      runId: claim.claim.runId, reason: "proof_begin_race_complete" });
   });
 
   it("moves linked approval-pending work to safe replacement only when proof wins", async () => {
@@ -365,7 +393,26 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     await expect(materialAuthority.begin({ principal,
       fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
       attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+      actionId: "action_approval_after_proof",
       actionDescriptor: "workspace.write", actionDescriptorDigest,
+      targetFingerprint: `sha256:${"e".repeat(64)}`,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      authority: { kind: "admission_preauthorization",
+        admissionId: candidate.admission.admissionId,
+        preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
+          organizationId: principal.organizationId, runId: claim.claim.runId,
+          admissionId: candidate.admission.admissionId,
+          attempt: { attemptId: claim.claim.attempt.id,
+            attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
+            fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+          actionId: "action_approval_after_proof", actionDescriptor: "workspace.write",
+          actionDescriptorDigest, targetFingerprint: `sha256:${"e".repeat(64)}`,
+          policySnapshotRef: candidate.policy.payload.snapshotId,
+          policySnapshotDigest: candidate.policy.receiptDigest,
+          permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
+          publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
+        }) },
       idempotencyKey: "begin_after_proof" })).resolves.toEqual({ kind: "stale_fence" });
 
     const replacement = await service.claim({ principal, request: hostedClaimRequest({
@@ -376,6 +423,122 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
     expect((await fixture.pool.query(
       "SELECT state FROM cp_permission_request WHERE permission_request_id = $1",
       ["permission_approval_proof"])).rows).toEqual([{ state: "revoked" }]);
+    await service.cancelRun({ organizationId: principal.organizationId,
+      runId: claim.claim.runId, reason: "approval_proof_complete" });
+  });
+
+  it("rejects lifecycle authority when replayed proof encounters a fabricated future lease", async () => {
+    now = new Date("2026-08-15T10:45:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_proof_future_lease",
+      suffix: "proof_future_lease", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T11:45:00.000Z" });
+    await service.admit({ runId: "run_proof_future_lease", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_proof_future_lease",
+      requestId: "request_claim_proof_future_lease", credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    const proof = { principal, fencingToken: claim.claim.attempt.fencingToken,
+      runId: claim.claim.runId, attemptId: claim.claim.attempt.id,
+      attemptNumber: claim.claim.attempt.number, proofId: "proof_future_lease",
+      proofDigest: `sha256:${"1".repeat(64)}` };
+    await expect(materials.recordNotStarted(proof)).resolves.toEqual({ kind: "recorded" });
+    const fabricatedLease = new Date(now.getTime() + 60_000);
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET state = 'running', lease_expires_at = $3
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, claim.claim.runId, fabricatedLease],
+    );
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run SET state = 'running'
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, claim.claim.runId],
+    );
+    const heartbeat = await import("@opentag/control-protocol").then(
+      ({ buildHostedLifecycleRequestV1 }) => buildHostedLifecycleRequestV1({
+        organizationId: principal.organizationId, runnerId: principal.runnerId,
+        runId: claim.claim.runId, action: "heartbeat", attempt: {
+          attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+          epoch: claim.claim.attempt.epoch, fencingToken: claim.claim.attempt.fencingToken,
+          fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+        occurredAt: now.toISOString(), expectedLeaseExpiresAt: fabricatedLease.toISOString(),
+      }));
+    const complete = await import("@opentag/control-protocol").then(
+      ({ buildHostedLifecycleRequestV1 }) => buildHostedLifecycleRequestV1({
+        organizationId: principal.organizationId, runnerId: principal.runnerId,
+        runId: claim.claim.runId, action: "complete", attempt: {
+          attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+          epoch: claim.claim.attempt.epoch, fencingToken: claim.claim.attempt.fencingToken,
+          fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+        occurredAt: now.toISOString(), conclusion: "success",
+        reasonCode: "executor_success", resultDigest: `sha256:${"2".repeat(64)}`,
+        artifactDigests: [], evidenceDigests: [],
+      }));
+
+    await expect(service.lifecycle({ principal, runId: claim.claim.runId,
+      action: "heartbeat", request: heartbeat })).resolves.toEqual({ kind: "stale_fence" });
+    await expect(service.lifecycle({ principal, runId: claim.claim.runId,
+      action: "complete", request: complete })).resolves.toEqual({ kind: "stale_fence" });
+    const actionDescriptor = "workspace.write" as const;
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const permissionDigestInput = { schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.permission.v1"] as const,
+      organizationId: principal.organizationId, runnerId: principal.runnerId,
+      runId: claim.claim.runId,
+      attempt: { attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
+        fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+      permissionRequestId: "permission_future_lease_proof",
+      actionId: "action_future_lease_proof", actionDescriptor, actionDescriptorDigest,
+      riskTier: "high" as const, targetFingerprint: `sha256:${"3".repeat(64)}`,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      requestedAt: now.toISOString() };
+    const permissionRequest = RunnerPermissionRequestV1Schema.parse({
+      ...permissionDigestInput, requestId: "request_future_lease_proof",
+      operationId: "operation_future_lease_proof",
+      attempt: { ...permissionDigestInput.attempt,
+        fencingToken: claim.claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1(permissionDigestInput),
+    });
+    await expect(createPermissionCoordinator({ pool: fixture.pool, clock,
+      idFactory: (kind) => `${kind}_future_lease_proof` }).request({
+      principal, request: permissionRequest,
+    })).resolves.toEqual({ kind: "stale_fence" });
+    const targetFingerprint = permissionDigestInput.targetFingerprint;
+    await expect(materials.begin({ principal,
+      fencingToken: claim.claim.attempt.fencingToken, runId: claim.claim.runId,
+      attemptId: claim.claim.attempt.id, attemptNumber: claim.claim.attempt.number,
+      actionId: permissionDigestInput.actionId, actionDescriptor, actionDescriptorDigest,
+      targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      authority: { kind: "admission_preauthorization",
+        admissionId: candidate.admission.admissionId,
+        preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
+          organizationId: principal.organizationId, runId: claim.claim.runId,
+          admissionId: candidate.admission.admissionId,
+          attempt: { attemptId: claim.claim.attempt.id,
+            attemptNumber: claim.claim.attempt.number, epoch: claim.claim.attempt.epoch,
+            fencingTokenDigest: claim.claim.attempt.fencingTokenDigest },
+          actionId: permissionDigestInput.actionId, actionDescriptor, actionDescriptorDigest,
+          targetFingerprint, policySnapshotRef: candidate.policy.payload.snapshotId,
+          policySnapshotDigest: candidate.policy.receiptDigest,
+          permissionCeilingDigest: candidate.admission.permissionCeiling.digest,
+          publicationPolicyDigest: candidate.admission.publicationPolicy.digest,
+        }) },
+      idempotencyKey: "begin_future_lease_proof",
+    })).resolves.toEqual({ kind: "stale_fence" });
+    await expect(materials.recordNotStarted(proof)).resolves.toEqual({ kind: "replayed" });
+    expect((await fixture.pool.query<{ state: string; lease_open: boolean }>(
+      `SELECT state, lease_expires_at > $3 AS lease_open FROM cp_hosted_attempt
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, claim.claim.runId, now],
+    )).rows).toEqual([{ state: "expired", lease_open: false }]);
+    await service.cancelRun({ organizationId: principal.organizationId,
+      runId: claim.claim.runId, reason: "future_lease_proof_complete" });
   });
 
   it("interrupts approval-pending work on lease expiry without proof", async () => {

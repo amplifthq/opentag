@@ -1,5 +1,6 @@
 import {
   computeControlPayloadDigestV1,
+  computeMaterialActionAdmissionPreauthorizationDigestV1,
   computeMaterialActionFencingTokenDigestV1,
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
@@ -94,6 +95,8 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       suffix: "94",
       organizationId: "org_material",
       runnerId: "runner_material",
+      permissionActions: ["github.pull_request.merge"],
+      publicationMode: "pull_request",
     });
     await hosted.admit({
       runId: "run_material",
@@ -114,12 +117,33 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       pool: fixture.pool,
       clock: { now: () => now },
     });
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(
+      "github.pull_request.merge",
+    );
+    const targetFingerprint = `sha256:${"4".repeat(64)}`;
+    const preauthorizationDigest = await computeMaterialActionAdmissionPreauthorizationDigestV1({
+      organizationId: principal.organizationId, runId: claim.runId,
+      admissionId: admission.admission.admissionId,
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      actionId: "action_material", actionDescriptor: "github.pull_request.merge",
+      actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      permissionCeilingDigest: admission.admission.permissionCeiling.digest,
+      publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+    });
     await expect(coordinator.begin({ principal,
       fencingToken: claim.attempt.fencingToken, runId: claim.runId,
       attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId: "action_material",
       actionDescriptor: "github.pull_request.merge",
-      actionDescriptorDigest: await computeControlPayloadDigestV1(
-        "github.pull_request.merge"), idempotencyKey: "material_action_material" }))
+      actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      authority: { kind: "admission_preauthorization",
+        admissionId: admission.admission.admissionId, preauthorizationDigest },
+      idempotencyKey: "material_action_material" }))
       .resolves.toEqual({ kind: "begun" });
     const receiptFor = async (input: {
       receiptId: string;
@@ -135,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
         idempotencyKey: "material_action_material",
         provider: "github",
         connectionRef: "connection_material",
-        targetFingerprint: `sha256:${"4".repeat(64)}`,
+        targetFingerprint,
         operationId: input.operationId,
         requestDigest: `sha256:${"5".repeat(64)}`,
         actionPayloadDigest: `sha256:${"6".repeat(64)}`,
@@ -278,5 +302,171 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       requestId: "request_claim_material_replacement",
       credentialId: "credential_material",
     }) })).resolves.toEqual({ kind: "empty" });
+  });
+
+  it("requires frozen server authority and permits distinct authorized actions per Attempt", async () => {
+    let attemptIdentity = 0;
+    const hosted = createHostedRunCoordinator({
+      pool: fixture.pool,
+      clock: { now: () => now },
+      leaseDurationMs: 60_000,
+      idFactory: () => `attempt_material_multi_${++attemptIdentity}`,
+      tokenFactory: ({ attemptId }) => `fence_${attemptId}`,
+      issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
+    });
+    const admission = await hostedAdmissionFixture({
+      runId: "run_material_multi",
+      suffix: "material_multi",
+      organizationId: principal.organizationId,
+      runnerId: principal.runnerId,
+      permissionActions: ["git.push", "github.pull_request.create"],
+      publicationMode: "pull_request",
+    });
+    await hosted.admit({ runId: "run_material_multi", admission: admission.admission,
+      policy: admission.policy });
+    const claimOutcome = await hosted.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_material_multi",
+      requestId: "request_claim_material_multi",
+      credentialId: principal.credentialId,
+    }) });
+    if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool,
+      clock: { now: () => now } });
+    const pushDescriptorDigest = await computeControlPayloadDigestV1("git.push");
+    const prDescriptorDigest = await computeControlPayloadDigestV1(
+      "github.pull_request.create",
+    );
+    const authorityFor = async (actionId: string,
+      actionDescriptor: "workspace.write" | "git.push" | "github.pull_request.create",
+      actionDescriptorDigest: string, targetFingerprint: string) => ({
+      kind: "admission_preauthorization" as const,
+      admissionId: admission.admission.admissionId,
+      preauthorizationDigest: await computeMaterialActionAdmissionPreauthorizationDigestV1({
+        organizationId: principal.organizationId, runId: claimOutcome.claim.runId,
+        admissionId: admission.admission.admissionId,
+        attempt: { attemptId: claimOutcome.claim.attempt.id,
+          attemptNumber: claimOutcome.claim.attempt.number,
+          epoch: claimOutcome.claim.attempt.epoch,
+          fencingTokenDigest: claimOutcome.claim.attempt.fencingTokenDigest },
+        actionId, actionDescriptor, actionDescriptorDigest, targetFingerprint,
+        policySnapshotRef: admission.policy.payload.snapshotId,
+        policySnapshotDigest: admission.policy.receiptDigest,
+        permissionCeilingDigest: admission.admission.permissionCeiling.digest,
+        publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+      }),
+    });
+    const outsideTarget = `sha256:${"5".repeat(64)}`;
+
+    await expect(materials.begin({
+      principal,
+      fencingToken: claimOutcome.claim.attempt.fencingToken,
+      runId: claimOutcome.claim.runId,
+      attemptId: claimOutcome.claim.attempt.id,
+      attemptNumber: claimOutcome.claim.attempt.number,
+      actionId: "action_outside_ceiling",
+      actionDescriptor: "workspace.write",
+      actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
+      targetFingerprint: outsideTarget,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      authority: await authorityFor("action_outside_ceiling", "workspace.write",
+        await computeControlPayloadDigestV1("workspace.write"), outsideTarget),
+      idempotencyKey: "material_begin_outside_ceiling",
+    })).resolves.toEqual({ kind: "conflict" });
+
+    const pushTarget = `sha256:${"6".repeat(64)}`;
+    const push = {
+      principal,
+      fencingToken: claimOutcome.claim.attempt.fencingToken,
+      runId: claimOutcome.claim.runId,
+      attemptId: claimOutcome.claim.attempt.id,
+      attemptNumber: claimOutcome.claim.attempt.number,
+      actionId: "action_push",
+      actionDescriptor: "git.push",
+      actionDescriptorDigest: pushDescriptorDigest,
+      targetFingerprint: pushTarget,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      authority: await authorityFor("action_push", "git.push",
+        pushDescriptorDigest, pushTarget),
+      idempotencyKey: "material_begin_push",
+    } as const;
+    await expect(materials.begin({ ...push,
+      policySnapshotDigest: `sha256:${"9".repeat(64)}` }))
+      .resolves.toEqual({ kind: "conflict" });
+    await expect(materials.begin({ ...push,
+      authority: { ...push.authority,
+        preauthorizationDigest: `sha256:${"8".repeat(64)}` } }))
+      .resolves.toEqual({ kind: "conflict" });
+    const pullRequestTarget = `sha256:${"7".repeat(64)}`;
+    const pullRequest = {
+      ...push,
+      actionId: "action_pull_request",
+      actionDescriptor: "github.pull_request.create",
+      actionDescriptorDigest: prDescriptorDigest,
+      targetFingerprint: pullRequestTarget,
+      authority: await authorityFor("action_pull_request", "github.pull_request.create",
+        prDescriptorDigest, pullRequestTarget),
+      idempotencyKey: "material_begin_pull_request",
+    } as const;
+    await expect(materials.begin(push)).resolves.toEqual({ kind: "begun" });
+    await expect(materials.begin(push)).resolves.toEqual({ kind: "replayed" });
+    await expect(materials.begin(pullRequest)).resolves.toEqual({ kind: "begun" });
+    expect((await fixture.pool.query<{ action_descriptor: string }>(
+      `SELECT action_descriptor FROM cp_material_action_begin_intent
+       WHERE organization_id = $1 AND run_id = $2 ORDER BY action_descriptor`,
+      [principal.organizationId, claimOutcome.claim.runId],
+    )).rows).toEqual([
+      { action_descriptor: "github.pull_request.create" },
+      { action_descriptor: "git.push" },
+    ]);
+
+    const proposalAdmission = await hostedAdmissionFixture({
+      runId: "run_material_proposal_only",
+      suffix: "material_proposal_only",
+      organizationId: principal.organizationId,
+      runnerId: principal.runnerId,
+      permissionActions: ["git.push"],
+      publicationMode: "proposal_only",
+    });
+    await hosted.admit({ runId: "run_material_proposal_only",
+      admission: proposalAdmission.admission, policy: proposalAdmission.policy });
+    const proposalClaim = await hosted.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_material_proposal_only",
+      requestId: "request_claim_material_proposal_only",
+      credentialId: principal.credentialId,
+    }) });
+    if (proposalClaim.kind !== "claimed") throw new Error("proposal claim failed");
+    const proposalTarget = `sha256:${"a".repeat(64)}`;
+    const proposalActionDigest = await computeControlPayloadDigestV1("git.push");
+    const proposalPreauthorization =
+      await computeMaterialActionAdmissionPreauthorizationDigestV1({
+        organizationId: principal.organizationId, runId: proposalClaim.claim.runId,
+        admissionId: proposalAdmission.admission.admissionId,
+        attempt: { attemptId: proposalClaim.claim.attempt.id,
+          attemptNumber: proposalClaim.claim.attempt.number,
+          epoch: proposalClaim.claim.attempt.epoch,
+          fencingTokenDigest: proposalClaim.claim.attempt.fencingTokenDigest },
+        actionId: "action_proposal_push", actionDescriptor: "git.push",
+        actionDescriptorDigest: proposalActionDigest,
+        targetFingerprint: proposalTarget,
+        policySnapshotRef: proposalAdmission.policy.payload.snapshotId,
+        policySnapshotDigest: proposalAdmission.policy.receiptDigest,
+        permissionCeilingDigest: proposalAdmission.admission.permissionCeiling.digest,
+        publicationPolicyDigest: proposalAdmission.admission.publicationPolicy.digest,
+      });
+    await expect(materials.begin({ principal,
+      fencingToken: proposalClaim.claim.attempt.fencingToken,
+      runId: proposalClaim.claim.runId, attemptId: proposalClaim.claim.attempt.id,
+      attemptNumber: proposalClaim.claim.attempt.number, actionId: "action_proposal_push",
+      actionDescriptor: "git.push", actionDescriptorDigest: proposalActionDigest,
+      targetFingerprint: proposalTarget,
+      policySnapshotRef: proposalAdmission.policy.payload.snapshotId,
+      policySnapshotDigest: proposalAdmission.policy.receiptDigest,
+      authority: { kind: "admission_preauthorization",
+        admissionId: proposalAdmission.admission.admissionId,
+        preauthorizationDigest: proposalPreauthorization },
+      idempotencyKey: "material_begin_proposal_push",
+    })).resolves.toEqual({ kind: "conflict" });
   });
 });

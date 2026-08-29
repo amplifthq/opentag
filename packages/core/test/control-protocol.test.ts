@@ -88,6 +88,7 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
+  RunnerMaterialActionBeginV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
   RunnerRegistrationResponseV1Schema,
@@ -1605,8 +1606,39 @@ describe("material action receipt V1 control protocol", () => {
     expectedCurrentReceiptId: "material_receipt_1",
     expectedCurrentReceiptDigest: otherDigest,
   } as const;
+  const beginRequest = {
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    requestId: "material_begin_request_1",
+    operationId: "material_begin_operation_1",
+    organizationId: "org_1",
+    runnerId: "runner_1",
+    runId: "run_1",
+    attempt: reconcileRequest.attempt,
+    actionId: payload.actionId,
+    actionDescriptor: payload.actionDescriptor,
+    actionDescriptorDigest: payload.actionDescriptorDigest,
+    targetFingerprint: payload.targetFingerprint,
+    policySnapshotRef: "policy_1",
+    policySnapshotDigest: otherDigest,
+    authority: {
+      kind: "permission_resolution",
+      permissionRequestId: "permission_1",
+      permissionRequestDigest: digest,
+      resolutionReceiptId: "permission_receipt_1",
+      resolutionReceiptDigest: otherDigest,
+    },
+    idempotencyKey: payload.idempotencyKey,
+    begunAt: observedAt,
+  } as const;
 
   it("accepts the strict locally authoritative material receipt and canonical digest inputs", async () => {
+    expect(RunnerMaterialActionBeginV1Schema.safeParse(beginRequest).success).toBe(true);
+    const { authority: _authority, ...missingAuthority } = beginRequest;
+    expect(RunnerMaterialActionBeginV1Schema.safeParse(missingAuthority).success).toBe(false);
+    expect(RunnerMaterialActionBeginV1Schema.safeParse({ ...beginRequest,
+      authority: { kind: "runner_declared", digest } }).success).toBe(false);
     expect(MaterialActionPayloadV1Schema.safeParse(payload).success).toBe(true);
     expect(MaterialActionReceiptEnvelopeV1Schema.safeParse(receipt).success).toBe(true);
     const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;

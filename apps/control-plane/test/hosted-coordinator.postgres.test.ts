@@ -349,6 +349,31 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     const first = await service.claim({ principal, request });
     if (first.kind !== "claimed") throw new Error("claim failed");
     await fixture.pool.query(
+      `INSERT INTO cp_permission_request(organization_id, permission_request_id,
+         run_id, runner_id, attempt_id, attempt_number, action_id, resolution_id,
+         permission_request_digest, policy_snapshot_digest, state, request,
+         current_receipt, created_at, updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'waiting','{}','{}',$11,$11)`,
+      [principal.organizationId, "permission_legacy_claim", first.claim.runId,
+        principal.runnerId, first.claim.attempt.id, first.claim.attempt.number,
+        "action_legacy_claim", "resolution_legacy_claim", `sha256:${"6".repeat(64)}`,
+        first.claim.admissionPolicySnapshot.receiptDigest, now],
+    );
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET state = 'needs_approval',
+         blocked_permission_request_id = $3,
+         blocked_action_descriptor_digest = $4,
+         blocked_policy_snapshot_digest = $5
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, first.claim.runId, "permission_legacy_claim",
+        `sha256:${"7".repeat(64)}`, first.claim.admissionPolicySnapshot.receiptDigest],
+    );
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run SET state = 'needs_approval'
+       WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, first.claim.runId],
+    );
+    await fixture.pool.query(
       `UPDATE cp_hosted_claim SET claim_version = 1,
          claim = claim - 'sourceContentGrant'
        WHERE organization_id = $1 AND operation_id = $2`,
@@ -360,16 +385,69 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       requestId: "request_legacy_claim_different_poll",
     }) })).resolves.toEqual({ kind: "empty" });
 
-    await expect(service.claim({ principal, request })).resolves.toMatchObject({
+    const exact = await service.claim({ principal, request });
+    expect(exact).toMatchObject({
       kind: "legacy_interrupted", runId: "run_legacy_claim",
       outcome: "outcome_unknown",
     });
+    const recreated = coordinator();
+    await expect(recreated.claim({ principal, request })).resolves.toEqual(exact);
     await expect(service.inspect({ organizationId: principal.organizationId,
       runId: "run_legacy_claim" })).resolves.toMatchObject({
         canonicalStatus: "interrupted", outcome: "outcome_unknown",
         terminalReason: "legacy_claim_authority_unrecoverable",
       });
+    expect((await fixture.pool.query<{ state: string; material_start_state: string;
+      lease_open: boolean; blocked_permission_request_id: string | null }>(
+      `SELECT state, material_start_state, lease_expires_at > $3 AS lease_open,
+              blocked_permission_request_id
+       FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2`,
+      [principal.organizationId, first.claim.runId, now],
+    )).rows).toEqual([{ state: "interrupted", material_start_state: "started_or_ambiguous",
+      lease_open: false, blocked_permission_request_id: null }]);
+    expect((await fixture.pool.query(
+      `SELECT state FROM cp_permission_request
+       WHERE organization_id = $1 AND permission_request_id = $2`,
+      [principal.organizationId, "permission_legacy_claim"],
+    )).rows).toEqual([{ state: "revoked" }]);
   });
+
+  it.each([
+    ["missing", { sourceContentGrant: { fabricated: true } }],
+    ["malformed", { attempt: "not-an-attempt", sourceContentGrant: { fabricated: true } }],
+  ] as const)("contains a %s legacy Attempt reference without strict parsing or grant fabrication",
+    async (suffix, malformedClaim) => {
+      const service = coordinator();
+      const input = await hostedAdmissionFixture({ runId: `run_legacy_${suffix}`,
+        suffix: `legacy_${suffix}` });
+      await service.admit({ runId: `run_legacy_${suffix}`, admission: input.admission,
+        policy: input.policy });
+      const original = hostedClaimRequest({ operationId: `operation_legacy_${suffix}`,
+        requestId: `request_legacy_${suffix}` });
+      const claimed = await service.claim({ principal, request: original });
+      if (claimed.kind !== "claimed") throw new Error("claim failed");
+      await fixture.pool.query(
+        `UPDATE cp_hosted_claim SET claim_version = 1, claim = $3::jsonb
+         WHERE organization_id = $1 AND operation_id = $2`,
+        [principal.organizationId, original.operationId, JSON.stringify(malformedClaim)],
+      );
+
+      await expect(coordinator().claim({ principal, request: hostedClaimRequest({
+        operationId: `operation_legacy_${suffix}_other`,
+        requestId: `request_legacy_${suffix}_other`,
+      }) })).resolves.toEqual({ kind: "empty" });
+      await expect(coordinator().claim({ principal, request: original }))
+        .resolves.toMatchObject({ kind: "legacy_interrupted",
+          runId: claimed.claim.runId, outcome: "outcome_unknown" });
+      expect(JSON.stringify((await fixture.pool.query(
+        `SELECT claim FROM cp_hosted_claim WHERE organization_id = $1 AND operation_id = $2`,
+        [principal.organizationId, original.operationId],
+      )).rows[0]?.claim)).toBe(JSON.stringify(malformedClaim));
+      await expect(service.inspect({ organizationId: principal.organizationId,
+        runId: claimed.claim.runId })).resolves.toMatchObject({
+          canonicalStatus: "interrupted", outcome: "outcome_unknown",
+        });
+    });
 
   it("does not mutate a later unrelated Attempt on stale legacy replay", async () => {
     const service = coordinator();
