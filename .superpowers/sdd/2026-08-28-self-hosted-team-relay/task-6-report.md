@@ -27,7 +27,11 @@ The PostgreSQL tests cover immutable duplicate/conflict behavior, claim exclusiv
 
 ## Full-suite Note
 
-Serialized real-PostgreSQL full suite: 224 files / 2,918 tests passed; one unrelated existing material-action ordering assertion failed because this disposable database collates `git.push` before `github.pull_request.create`. Task 6's complete targeted corpus and schema parity remained green. No unrelated material-action change was made.
+The initial serialized real-PostgreSQL run exposed one test-only collation dependency in `material-actions.postgres.test.ts`: the query used the database's default collation while asserting a different literal order. The authorized follow-up made that assertion deterministic with `ORDER BY action_descriptor COLLATE "C"` and the corresponding bytewise literal order (`git.push`, then `github.pull_request.create`). No production material-action behavior changed.
+
+- RED: affected PostgreSQL file reproduced the ordering failure with 2/3 tests passing.
+- GREEN: affected PostgreSQL file passed 3/3 tests.
+- Final serialized real-PostgreSQL full suite: 225 files / 2,919 tests passed.
 
 ## Safety Review
 

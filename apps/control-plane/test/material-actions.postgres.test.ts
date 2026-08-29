@@ -453,11 +453,12 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     await expect(materials.begin(pullRequest)).resolves.toEqual({ kind: "begun" });
     expect((await fixture.pool.query<{ action_descriptor: string }>(
       `SELECT action_descriptor FROM cp_material_action_begin_intent
-       WHERE organization_id = $1 AND run_id = $2 ORDER BY action_descriptor`,
+       WHERE organization_id = $1 AND run_id = $2
+       ORDER BY action_descriptor COLLATE "C"`,
       [principal.organizationId, claimOutcome.claim.runId],
     )).rows).toEqual([
-      { action_descriptor: "github.pull_request.create" },
       { action_descriptor: "git.push" },
+      { action_descriptor: "github.pull_request.create" },
     ]);
     await hosted.cancelRun({ organizationId: principal.organizationId,
       runId: claimOutcome.claim.runId, reason: "multi_action_complete" });
