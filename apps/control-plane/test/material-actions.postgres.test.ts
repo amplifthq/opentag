@@ -236,5 +236,21 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       "receipt_material_terminal",
       "receipt_material_unknown",
     ]);
+
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET lease_expires_at = $3
+       WHERE organization_id = $1 AND run_id = $2`,
+      ["org_material", "run_material", new Date(now.getTime() - 1)],
+    );
+    await expect(hosted.reconcileExpiredAttempts("org_material"))
+      .resolves.toEqual({ expired: 1 });
+    await expect(hosted.inspect({ organizationId: "org_material", runId: "run_material" }))
+      .resolves.toMatchObject({ canonicalStatus: "interrupted", outcome: "outcome_unknown",
+        terminalReason: "attempt_lease_expired_after_material_start" });
+    await expect(hosted.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_material_replacement",
+      requestId: "request_claim_material_replacement",
+      credentialId: "credential_material",
+    }) })).resolves.toEqual({ kind: "empty" });
   });
 });

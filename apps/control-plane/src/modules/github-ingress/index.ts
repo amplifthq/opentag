@@ -615,6 +615,7 @@ export function createGithubIngress(input: {
           bindingId: binding.binding_id,
           providerRepositoryId: binding.provider_repository_id,
           defaultBranch: binding.default_branch ?? "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
         },
         runner: {
           runnerId: binding.runner_id,
@@ -709,6 +710,37 @@ export function createGithubIngress(input: {
           digest: binding.binding_digest,
         },
         runnerId: binding.runner_id,
+        sourceContextEnvelope: {
+          contentId: `github_delivery_${identitySuffix}`,
+          sourceVersionRef: `github_comment_${parsed.data.comment.id}`,
+          aadDigest: payloadDigest.slice("sha256:".length),
+          keyVersion: "github-ingress-v1",
+          envelopeDigest: payloadDigest,
+        },
+        queueClaimDeadline: new Date(
+          new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
+        ).toISOString(),
+        permissionCeiling: {
+          allowedActions: ["workspace_write"],
+          digest: await computeControlPayloadDigestV1({
+            bindingId: binding.binding_id,
+            mode: "workspace_write",
+          }),
+        },
+        publicationPolicy: {
+          mode: "proposal_only" as const,
+          digest: await computeControlPayloadDigestV1({
+            bindingId: binding.binding_id,
+            mode: "proposal_only",
+          }),
+        },
+        completionContract: {
+          mode: "proposal_ready" as const,
+          digest: await computeControlPayloadDigestV1({
+            bindingId: binding.binding_id,
+            mode: "proposal_ready",
+          }),
+        },
         admissionPolicySnapshot: {
           snapshotId,
           digest: policy.receiptDigest,

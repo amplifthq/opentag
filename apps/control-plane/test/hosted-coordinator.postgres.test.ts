@@ -100,8 +100,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     const first = await service.admit({ runId: "run_1", admission: input.admission, policy: input.policy });
     const second = await service.admit({ runId: "run_1", admission: input.admission, policy: input.policy });
 
-    expect(first).toEqual({ kind: "created", runId: "run_1" });
-    expect(second).toEqual({ kind: "replayed", runId: "run_1" });
+    expect(first).toMatchObject({ kind: "created", runId: "run_1",
+      view: { canonicalStatus: "queued", status: "waiting_for_runner" } });
+    expect(second).toEqual({ ...first, kind: "replayed" });
     const rows = await fixture.pool.query(
       "SELECT run_id FROM cp_hosted_run WHERE admission_id = $1",
       [input.admission.admissionId],
@@ -111,6 +112,70 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       "DELETE FROM cp_hosted_audit_event WHERE run_id = 'run_1'",
     );
     await fixture.pool.query("DELETE FROM cp_hosted_run WHERE run_id = 'run_1'");
+  });
+
+  it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {
+    const runners = createRunnerDirectory({
+      pool: fixture.pool,
+      clock,
+      tokenFactory: () => "runtime_offline_secret",
+      idFactory: () => "credential_offline",
+    });
+    const registration = await runners.register({
+      organizationId: principal.organizationId,
+      organizationName: "Hosted",
+      request: {
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        requiredCapabilities: ["relay.registration.v1"],
+        requestId: "request_register_offline",
+        operationId: "operation_register_offline",
+        runnerId: "runner_offline",
+        capabilities: [...HOSTED_CAPABILITIES],
+      },
+    });
+    expect(registration.kind).toBe("created");
+    const offlinePrincipal = await runners.authenticate("runtime_offline_secret");
+    if (offlinePrincipal.kind !== "authenticated") throw new Error("authentication failed");
+    const deadline = "2026-08-29T00:00:00.000Z";
+    const service = coordinator();
+    const input = await hostedAdmissionFixture({
+      runId: "run_offline",
+      suffix: "offline",
+      runnerId: "runner_offline",
+      queueClaimDeadline: deadline,
+    });
+
+    const admitted = await service.admit({
+      runId: "run_offline",
+      admission: input.admission,
+      policy: input.policy,
+    });
+
+    expect(admitted).toMatchObject({
+      kind: "created",
+      view: {
+        canonicalStatus: "queued",
+        status: "waiting_for_runner",
+        queueClaimDeadline: deadline,
+      },
+    });
+    await expect(service.claim({
+      principal: offlinePrincipal.principal,
+      request: hostedClaimRequest({
+        operationId: "operation_claim_offline",
+        requestId: "request_claim_offline",
+        credentialId: "credential_offline",
+      }),
+    })).resolves.toEqual({ kind: "empty" });
+    await expect(service.inspect({
+      organizationId: principal.organizationId,
+      runId: "run_offline",
+    })).resolves.toMatchObject({
+      canonicalStatus: "queued",
+      status: "waiting_for_runner",
+      queueClaimDeadline: deadline,
+    });
   });
 
   it("rejects a claim whose readiness identity is not current", async () => {
@@ -315,7 +380,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       `SELECT run_id
        FROM cp_hosted_run
        WHERE run_id IN ('run_claim_replay_many_a', 'run_claim_replay_many_b')
-         AND state = 'pending'`,
+         AND state = 'queued'`,
     );
     expect(pendingRuns.rowCount).toBe(1);
     const pendingRunId = pendingRuns.rows[0]?.run_id as string;
@@ -438,7 +503,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     });
     await expect(
       service.lifecycle({ principal, runId: claim.runId, action: "complete", request: late }),
-    ).resolves.toEqual({ kind: "terminal", terminalKind: "completed" });
+    ).resolves.toEqual({ kind: "terminal", terminalKind: "succeeded" });
   });
 
   it("settles cancellation racing completion exactly once", async () => {
@@ -491,7 +556,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     expect(outcomes.filter(({ kind }) => kind === "accepted")).toHaveLength(1);
     expect(outcomes.filter(({ kind }) => kind === "terminal")).toHaveLength(1);
     const terminal = await service.inspect({ organizationId: "org_hosted", runId: claim.runId });
-    expect(terminal?.state).toMatch(/cancelled|completed/u);
+    expect(terminal?.state).toMatch(/cancelled|succeeded/u);
   });
 
   it("replays one lifecycle receipt under an identical concurrent operation", async () => {

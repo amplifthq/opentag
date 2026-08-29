@@ -253,16 +253,17 @@ export function createSourceIngressService(input: {
 
     async readSourceContext(command: { reservation: IngressReservation; jobId: string;
       leaseToken: string; expiresAt: Date }) {
+      const attemptId = stableId("source_ingress_attempt", [command.jobId, command.leaseToken]);
       const grant = await input.custody.issueReadGrant({
         organizationId: command.reservation.organizationId,
-        runId: "source_ingress.process", attemptId: command.jobId,
+        runId: "source_ingress.process", attemptId,
         fenceDigest: command.leaseToken,
         contentIds: [command.reservation.contentRef.contentId], purpose: "source_context",
         expiresAt: command.expiresAt,
       });
       const rows = await input.custody.read({ ...grant,
         organizationId: command.reservation.organizationId,
-        runId: "source_ingress.process", attemptId: command.jobId,
+        runId: "source_ingress.process", attemptId,
         fenceDigest: command.leaseToken,
         contentIds: [command.reservation.contentRef.contentId], purpose: "source_context" });
       return rows[0]?.payload;

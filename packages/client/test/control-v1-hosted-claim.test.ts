@@ -97,6 +97,12 @@ async function hostedClaim() {
         digest,
       },
       runnerId: "runner_1",
+      sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+        aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest },
+      queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+      permissionCeiling: { allowedActions: ["workspace_write"], digest },
+      publicationPolicy: { mode: "proposal_only" as const, digest },
+      completionContract: { mode: "proposal_ready" as const, digest },
       admissionPolicySnapshot: {
         snapshotId: "policy_1",
         digest: otherDigest,
@@ -136,6 +142,7 @@ async function hostedClaim() {
           bindingId: "binding_1",
           providerRepositoryId: "123",
           defaultBranch: "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
         },
         runner: {
           runnerId: "runner_1",

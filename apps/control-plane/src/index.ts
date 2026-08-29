@@ -76,7 +76,10 @@ export async function main(input: {
         handlers: runtime.jobHandlers,
         retryDelayMs: config.jobRetryDelayMs,
         clock: { now: () => new Date() },
-        beforeClaim: runtime.scheduleJobs,
+        beforeClaim: async () => {
+          await runtime.scheduleJobs();
+          await runtime.sourceIngressWorker?.processNext();
+        },
       };
       if (argv.includes("--once")) {
         await runOneJob(workerInput);

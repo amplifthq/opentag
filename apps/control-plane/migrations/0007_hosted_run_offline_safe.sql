@@ -1,0 +1,122 @@
+ALTER TABLE cp_hosted_run DROP CONSTRAINT cp_hosted_run_state_check;
+ALTER TABLE cp_hosted_run DROP CONSTRAINT cp_hosted_run_terminal_kind_check;
+
+UPDATE cp_hosted_run SET state = CASE state
+  WHEN 'pending' THEN 'queued'
+  WHEN 'claimed' THEN 'assigned'
+  WHEN 'completed' THEN 'succeeded'
+  WHEN 'rejected' THEN 'failed'
+  ELSE state
+END;
+UPDATE cp_hosted_run SET terminal_kind = CASE terminal_kind
+  WHEN 'completed' THEN 'succeeded'
+  WHEN 'rejected' THEN 'failed'
+  ELSE terminal_kind
+END;
+
+ALTER TABLE cp_hosted_run
+  ADD COLUMN source_version_ref text,
+  ADD COLUMN source_content_ids text[],
+  ADD COLUMN source_context_digest text,
+  ADD COLUMN queue_claim_deadline timestamptz,
+  ADD COLUMN permission_ceiling_digest text,
+  ADD COLUMN publication_mode text,
+  ADD COLUMN publication_policy_digest text,
+  ADD COLUMN completion_mode text,
+  ADD COLUMN completion_contract_digest text,
+  ADD COLUMN outcome_state text,
+  ADD COLUMN reconciliation_identity text,
+  ADD COLUMN terminal_reason text;
+
+UPDATE cp_hosted_run SET
+  source_version_ref = COALESCE(source_version_ref, 'legacy:' || source_identity_digest),
+  source_content_ids = COALESCE(source_content_ids, ARRAY['legacy:' || run_id]),
+  source_context_digest = COALESCE(source_context_digest, admission_digest),
+  queue_claim_deadline = COALESCE(queue_claim_deadline, created_at + interval '1 microsecond'),
+  permission_ceiling_digest = COALESCE(permission_ceiling_digest, admission_digest),
+  publication_mode = COALESCE(publication_mode, 'proposal_only'),
+  publication_policy_digest = COALESCE(publication_policy_digest, admission_digest),
+  completion_mode = COALESCE(completion_mode, 'proposal_ready'),
+  completion_contract_digest = COALESCE(completion_contract_digest, admission_digest);
+
+ALTER TABLE cp_hosted_run
+  ALTER COLUMN source_version_ref SET NOT NULL,
+  ALTER COLUMN source_content_ids SET NOT NULL,
+  ALTER COLUMN source_context_digest SET NOT NULL,
+  ALTER COLUMN queue_claim_deadline SET NOT NULL,
+  ALTER COLUMN permission_ceiling_digest SET NOT NULL,
+  ALTER COLUMN publication_mode SET NOT NULL,
+  ALTER COLUMN publication_policy_digest SET NOT NULL,
+  ALTER COLUMN completion_mode SET NOT NULL,
+  ALTER COLUMN completion_contract_digest SET NOT NULL;
+
+ALTER TABLE cp_hosted_run
+  ADD CONSTRAINT cp_hosted_run_state_check CHECK (state IN (
+    'queued','assigned','running','needs_approval','succeeded','failed',
+    'cancelled','interrupted','timed_out'
+  )),
+  ADD CONSTRAINT cp_hosted_run_terminal_kind_check CHECK (terminal_kind IN (
+    'succeeded','failed','cancelled','interrupted','timed_out'
+  )),
+  ADD CONSTRAINT cp_hosted_run_source_content_ids_check
+    CHECK (cardinality(source_content_ids) > 0),
+  ADD CONSTRAINT cp_hosted_run_queue_claim_deadline_check
+    CHECK (isfinite(queue_claim_deadline) AND queue_claim_deadline > created_at),
+  ADD CONSTRAINT cp_hosted_run_publication_mode_check
+    CHECK (publication_mode IN ('proposal_only','pull_request')),
+  ADD CONSTRAINT cp_hosted_run_completion_mode_check
+    CHECK (completion_mode IN ('proposal_ready','pull_request_ready')),
+  ADD CONSTRAINT cp_hosted_run_publication_completion_check CHECK (
+    (publication_mode = 'proposal_only' AND completion_mode = 'proposal_ready') OR
+    (publication_mode = 'pull_request' AND completion_mode = 'pull_request_ready')
+  ),
+  ADD CONSTRAINT cp_hosted_run_outcome_state_check
+    CHECK (outcome_state IS NULL OR outcome_state = 'outcome_unknown');
+
+CREATE INDEX cp_hosted_run_source_version_idx
+  ON cp_hosted_run(organization_id, source_version_ref, state);
+CREATE INDEX cp_hosted_run_queue_deadline_idx
+  ON cp_hosted_run(queue_claim_deadline, organization_id)
+  WHERE state = 'queued';
+
+CREATE TABLE cp_source_content_invalidation_receipt (
+  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+  command_id text NOT NULL,
+  request_digest text NOT NULL,
+  source_version_ref text NOT NULL,
+  receipt jsonb NOT NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (organization_id, command_id),
+  CHECK (receipt->>'reason' = 'source_content_deleted')
+);
+
+CREATE UNIQUE INDEX cp_source_content_grant_attempt_key
+  ON cp_source_content_read_grant(organization_id, run_id, attempt_id);
+
+CREATE FUNCTION cp_hosted_run_frozen_admission_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.admission_id, NEW.admission_operation_id, NEW.admission_digest,
+      NEW.source_identity_digest, NEW.runner_id, NEW.executor_id,
+      NEW.source_version_ref, NEW.source_content_ids, NEW.source_context_digest,
+      NEW.queue_claim_deadline, NEW.permission_ceiling_digest,
+      NEW.publication_mode, NEW.publication_policy_digest,
+      NEW.completion_mode, NEW.completion_contract_digest,
+      NEW.hosted_admission, NEW.admission_policy_snapshot)
+    IS DISTINCT FROM
+    ROW(OLD.admission_id, OLD.admission_operation_id, OLD.admission_digest,
+      OLD.source_identity_digest, OLD.runner_id, OLD.executor_id,
+      OLD.source_version_ref, OLD.source_content_ids, OLD.source_context_digest,
+      OLD.queue_claim_deadline, OLD.permission_ceiling_digest,
+      OLD.publication_mode, OLD.publication_policy_digest,
+      OLD.completion_mode, OLD.completion_contract_digest,
+      OLD.hosted_admission, OLD.admission_policy_snapshot) THEN
+    RAISE EXCEPTION 'hosted_run_admission_frozen';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER cp_hosted_run_frozen_admission_guard
+BEFORE UPDATE ON cp_hosted_run
+FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_frozen_admission_guard();

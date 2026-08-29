@@ -221,6 +221,7 @@ export function createRelayContentCustody(input: {
     },
 
     issueReadGrant: grants.issue,
+    issueReadGrantInTransaction: grants.issueInTransaction,
     async read(command: Parameters<typeof grants.consume>[0]) {
       return grants.consume(command, async (client, contentIds) => {
         const result = await client.query<ContentRow>(
@@ -330,7 +331,7 @@ export function createRelayContentCustody(input: {
         if (!replay && versionReplay.rows[0]) throw new Error("source_withdrawal_conflict");
         const rows = await client.query<ContentRow>(
           `SELECT * FROM cp_source_content WHERE organization_id = $1
-            AND source_version_ref = $2 ORDER BY content_id FOR UPDATE`,
+            AND source_version_ref = $2 ORDER BY content_id`,
           [command.organizationId, command.sourceVersionRef],
         );
         const contentIds = rows.rows.map((row) => row.content_id);
@@ -355,6 +356,15 @@ export function createRelayContentCustody(input: {
           );
         }
         const receipt = parseInvalidationReceipt(authorityOutput, command);
+        const lockedRows = await client.query<ContentRow>(
+          `SELECT * FROM cp_source_content WHERE organization_id = $1
+            AND source_version_ref = $2 ORDER BY content_id FOR UPDATE`,
+          [command.organizationId, command.sourceVersionRef],
+        );
+        if (lockedRows.rows.map((row) => row.content_id).join("\u0000")
+          !== contentIds.join("\u0000")) {
+          throw new Error("source_content_unavailable");
+        }
         await client.query(
           `UPDATE cp_source_content SET ciphertext = NULL, content_nonce = NULL,
              content_tag = NULL, wrapped_dek = NULL, wrapping_nonce = NULL,

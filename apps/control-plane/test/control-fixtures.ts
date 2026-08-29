@@ -47,6 +47,8 @@ export async function hostedAdmissionFixture(input: {
   suffix: string;
   organizationId?: string;
   runnerId?: string;
+  queueClaimDeadline?: string;
+  contentId?: string;
 }) {
   const organizationId = input.organizationId ?? "org_hosted";
   const runnerId = input.runnerId ?? "runner_hosted";
@@ -67,6 +69,7 @@ export async function hostedAdmissionFixture(input: {
       bindingId: `binding_${input.suffix}`,
       providerRepositoryId: "123",
       defaultBranch: "main",
+      authorizedPublicationModes: ["proposal_only", "pull_request"] as const,
     },
     runner: { runnerId, readinessReceiptDigest: readinessDigest },
     executor: {
@@ -118,7 +121,11 @@ export async function hostedAdmissionFixture(input: {
     provider: "github" as const,
     deliveryId: `delivery_${input.suffix}`,
     deliveryPayloadDigest: digest("c"),
-    sourceIdentityDigest: digest(input.suffix.slice(0, 1).toLowerCase()),
+    sourceIdentityDigest: digest(
+      /^[a-f0-9]$/u.test(input.suffix.slice(0, 1).toLowerCase())
+        ? input.suffix.slice(0, 1).toLowerCase()
+        : "9",
+    ),
     eventName: "issue_comment" as const,
     action: "created" as const,
     repository: {
@@ -151,6 +158,26 @@ export async function hostedAdmissionFixture(input: {
       digest: digest("e"),
     },
     runnerId,
+    sourceContextEnvelope: {
+      contentId: input.contentId ?? `content_${input.suffix}`,
+      sourceVersionRef: `source_version_${input.suffix}`,
+      aadDigest: "a".repeat(64),
+      keyVersion: "relay-v1",
+      envelopeDigest: digest("f"),
+    },
+    queueClaimDeadline: input.queueClaimDeadline ?? "2026-08-29T00:00:00.000Z",
+    permissionCeiling: {
+      allowedActions: ["workspace_write"],
+      digest: digest("1"),
+    },
+    publicationPolicy: {
+      mode: "proposal_only" as const,
+      digest: digest("2"),
+    },
+    completionContract: {
+      mode: "proposal_ready" as const,
+      digest: digest("3"),
+    },
     admissionPolicySnapshot: {
       snapshotId: policyPayload.snapshotId,
       digest: policy.receiptDigest,

@@ -1652,6 +1652,26 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
     })
     .strict(),
   runnerId: NonEmptyIdSchema,
+  sourceContextEnvelope: z.object({
+    contentId: NonEmptyIdSchema,
+    sourceVersionRef: NonEmptyIdSchema,
+    aadDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    keyVersion: NonEmptyIdSchema,
+    envelopeDigest: ReceiptDigestSchema,
+  }).strict(),
+  queueClaimDeadline: ControlTimestampSchema,
+  permissionCeiling: z.object({
+    allowedActions: sortedUniqueArray(NonEmptyIdSchema),
+    digest: ReceiptDigestSchema,
+  }).strict(),
+  publicationPolicy: z.object({
+    mode: z.enum(["proposal_only", "pull_request"]),
+    digest: ReceiptDigestSchema,
+  }).strict(),
+  completionContract: z.object({
+    mode: z.enum(["proposal_ready", "pull_request_ready"]),
+    digest: ReceiptDigestSchema,
+  }).strict(),
   admissionPolicySnapshot: z
     .object({
       snapshotId: NonEmptyIdSchema,
@@ -1670,7 +1690,21 @@ export const HostedAdmissionEnvelopeV1Schema = z
     ...HostedAdmissionEnvelopeDigestInputV1Shape,
     envelopeDigest: ReceiptDigestSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((admission, ctx) => {
+    if (new Date(admission.queueClaimDeadline).getTime()
+      <= new Date(admission.receivedAt).getTime()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["queueClaimDeadline"],
+        message: "Hosted claim deadline must be finite and later than receipt." });
+    }
+    if ((admission.publicationPolicy.mode === "proposal_only"
+        && admission.completionContract.mode !== "proposal_ready")
+      || (admission.publicationPolicy.mode === "pull_request"
+        && admission.completionContract.mode !== "pull_request_ready")) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionContract", "mode"],
+        message: "Completion mode must match the Admission-frozen publication mode." });
+    }
+  });
 
 export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
   .object({
@@ -1744,6 +1778,9 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
         bindingId: NonEmptyIdSchema,
         providerRepositoryId: GitHubProviderIdV1Schema,
         defaultBranch: NonEmptyIdSchema,
+        authorizedPublicationModes: sortedUniqueArray(
+          z.enum(["proposal_only", "pull_request"]),
+        ),
       })
       .strict(),
     runner: z.object({ runnerId: NonEmptyIdSchema, readinessReceiptDigest: ReceiptDigestSchema }).strict(),

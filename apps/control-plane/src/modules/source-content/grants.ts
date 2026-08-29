@@ -22,45 +22,57 @@ export function createSourceContentGrantStore(input: {
   pool: Pool; clock: { now(): Date }; tokenFactory?: () => string;
 }) {
   const tokenFactory = input.tokenFactory ?? (() => randomBytes(32).toString("base64url"));
+  const issueInTransaction = async (client: PoolClient, command: {
+    organizationId: string; runId: string; attemptId: string; fenceDigest: string;
+    contentIds: string[]; purpose: string; expiresAt: Date;
+  }): Promise<SourceContentReadGrant> => {
+    const contentIds = normalizeContentIds(command.contentIds);
+    if (!command.organizationId || !command.runId || !command.attemptId
+      || !command.fenceDigest || !command.purpose || contentIds.length === 0
+      || [command.organizationId, command.runId, command.attemptId,
+        command.fenceDigest, command.purpose, ...contentIds]
+        .some((value) => value.length > 512)
+      || !Number.isFinite(command.expiresAt.getTime())
+      || command.expiresAt.getTime() <= input.clock.now().getTime()) {
+      throw new Error("source_content_grant_invalid");
+    }
+    const existing = await client.query<GrantRow>(
+      `SELECT * FROM cp_source_content_read_grant
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3 FOR UPDATE`,
+      [command.organizationId, command.runId, command.attemptId],
+    );
+    if (existing.rows[0]) throw new Error("source_content_grant_already_issued");
+    const token = tokenFactory();
+    const grantId = `source_grant_${randomBytes(16).toString("hex")}`;
+    const locked = await client.query<{ content_id: string }>(
+      `SELECT content_id FROM cp_source_content
+       WHERE organization_id = $1 AND content_id = ANY($2::text[])
+         AND purpose = $3 AND deleted_at IS NULL
+       ORDER BY content_id FOR UPDATE`,
+      [command.organizationId, contentIds, command.purpose],
+    );
+    if (!same(locked.rows.map((row) => row.content_id), contentIds)) {
+      throw new Error("source_content_unavailable");
+    }
+    await client.query(
+      `INSERT INTO cp_source_content_read_grant(
+         grant_id, organization_id, token_hash, run_id, attempt_id,
+         fence_digest, content_ids, purpose, expires_at, created_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [grantId, command.organizationId, hashGrantToken(token), command.runId,
+        command.attemptId, command.fenceDigest, contentIds, command.purpose,
+        command.expiresAt, input.clock.now()],
+    );
+    return { grantId, token };
+  };
   return {
+    issueInTransaction,
     async issue(command: {
       organizationId: string; runId: string; attemptId: string; fenceDigest: string;
       contentIds: string[]; purpose: string; expiresAt: Date;
     }): Promise<SourceContentReadGrant> {
-      const contentIds = normalizeContentIds(command.contentIds);
-      if (!command.organizationId || !command.runId || !command.attemptId
-        || !command.fenceDigest || !command.purpose || contentIds.length === 0
-        || [command.organizationId, command.runId, command.attemptId,
-          command.fenceDigest, command.purpose, ...contentIds]
-          .some((value) => value.length > 512)
-        || !Number.isFinite(command.expiresAt.getTime())
-        || command.expiresAt.getTime() <= input.clock.now().getTime()) {
-        throw new Error("source_content_grant_invalid");
-      }
-      const token = tokenFactory();
-      const grantId = `source_grant_${randomBytes(16).toString("hex")}`;
-      await withPostgresTransaction(input.pool, async (client) => {
-        const locked = await client.query<{ content_id: string }>(
-          `SELECT content_id FROM cp_source_content
-           WHERE organization_id = $1 AND content_id = ANY($2::text[])
-             AND purpose = $3 AND deleted_at IS NULL
-           ORDER BY content_id FOR UPDATE`,
-          [command.organizationId, contentIds, command.purpose],
-        );
-        if (!same(locked.rows.map((row) => row.content_id), contentIds)) {
-          throw new Error("source_content_unavailable");
-        }
-        await client.query(
-          `INSERT INTO cp_source_content_read_grant(
-             grant_id, organization_id, token_hash, run_id, attempt_id,
-             fence_digest, content_ids, purpose, expires_at, created_at
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-          [grantId, command.organizationId, hashGrantToken(token), command.runId,
-            command.attemptId, command.fenceDigest, contentIds, command.purpose,
-            command.expiresAt, input.clock.now()],
-        );
-      });
-      return { grantId, token };
+      return withPostgresTransaction(input.pool, (client) =>
+        issueInTransaction(client as PoolClient, command));
     },
 
     async consume<T>(command: {

@@ -12,6 +12,26 @@ import { withPostgresTransaction } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
+export type AttemptMaterialActionTruth =
+  | { kind: "proven_not_started" }
+  | { kind: "started_or_ambiguous"; reconciliationIdentity: string };
+
+export async function classifyAttemptMaterialActionTruth(
+  client: { query<Row extends Record<string, unknown>>(text: string,
+    values?: readonly unknown[]): Promise<{ rows: Row[] }> },
+  input: { organizationId: string; runId: string; attemptId: string },
+): Promise<AttemptMaterialActionTruth> {
+  const result = await client.query<{ receipt_id: string }>(
+    `SELECT receipt_id FROM cp_material_action_receipt
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+     ORDER BY created_at, receipt_id LIMIT 1`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  return result.rows[0]
+    ? { kind: "started_or_ambiguous",
+        reconciliationIdentity: `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}` }
+    : { kind: "proven_not_started" };
+}
 type CurrentReceipt = {
   receipt_id: string;
   receipt_digest: string;

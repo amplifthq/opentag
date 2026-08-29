@@ -489,6 +489,12 @@ describe("hosted admission and claim V1 protocol", () => {
         digest,
       },
       runnerId: "runner_1",
+      sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+        aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digest },
+      queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+      permissionCeiling: { allowedActions: ["workspace_write"], digest },
+      publicationPolicy: { mode: "proposal_only", digest },
+      completionContract: { mode: "proposal_ready", digest },
       admissionPolicySnapshot: {
         snapshotId: "policy_1",
         digest: otherDigest,
@@ -535,6 +541,7 @@ describe("hosted admission and claim V1 protocol", () => {
           bindingId: "binding_1",
           providerRepositoryId: "123",
           defaultBranch: "main",
+          authorizedPublicationModes: ["proposal_only", "pull_request"],
         },
         runner: {
           runnerId: "runner_1",
@@ -3680,6 +3687,7 @@ describe("ReceiptEnvelope V1", () => {
         bindingId: "binding_1",
         providerRepositoryId: "123",
         defaultBranch: "main",
+        authorizedPublicationModes: ["proposal_only", "pull_request"],
       },
       runner: { runnerId: "runner_1", readinessReceiptDigest: digest },
       executor: { executorId: "executor_acp", capabilityDigest: digest },

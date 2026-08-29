@@ -67,7 +67,28 @@ export const sourceContentReadGrants = pgTable("cp_source_content_read_grant", {
   check("cp_source_content_read_grant_content_ids_check", sql`cardinality(${table.contentIds}) > 0`),
   index("cp_source_content_read_grant_active_idx").on(table.organizationId, table.expiresAt)
     .where(sql`${table.consumedAt} IS NULL AND ${table.revokedAt} IS NULL`),
+  uniqueIndex("cp_source_content_grant_attempt_key").on(
+    table.organizationId, table.runId, table.attemptId,
+  ),
 ]);
+
+export const sourceContentInvalidationReceipts = pgTable(
+  "cp_source_content_invalidation_receipt",
+  {
+    organizationId: text("organization_id").notNull()
+      .references(() => organizations.organizationId),
+    commandId: text("command_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    sourceVersionRef: text("source_version_ref").notNull(),
+    receipt: jsonb("receipt").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.organizationId, table.commandId] }),
+    check("cp_source_content_invalidation_receipt_reason_check",
+      sql`${table.receipt}->>'reason' = 'source_content_deleted'`),
+  ],
+);
 
 export const sourceReplayTombstones = pgTable("cp_source_replay_tombstone", {
   organizationId: text("organization_id").notNull().references(() => organizations.organizationId),

@@ -1646,6 +1646,17 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         );
       }
       const claim = parsed.data;
+      if (new Date(claim.hostedAdmission.queueClaimDeadline).getTime()
+          <= new Date(claim.hostedAdmission.receivedAt).getTime()
+        || (claim.hostedAdmission.publicationPolicy.mode === "proposal_only"
+          ? claim.hostedAdmission.completionContract.mode !== "proposal_ready"
+          : claim.hostedAdmission.completionContract.mode !== "pull_request_ready")) {
+        throw new OpenTagClientHttpError(
+          action,
+          response.status,
+          "invalid_frozen_hosted_admission",
+        );
+      }
       if (
         claim.runnerId !== runnerId
         || !verifyHostedClaimExpectedAuthorityV1(request, claim)

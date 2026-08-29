@@ -105,6 +105,7 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       bindingId: "binding_1",
       providerRepositoryId: "123",
       defaultBranch: "main",
+      authorizedPublicationModes: ["proposal_only", "pull_request"],
     },
     runner: {
       runnerId: "runner_hosted",
@@ -192,6 +193,12 @@ async function hostedClaimFixture(request: HostedClaimRequestV1) {
       digest: controlDigest,
     },
     runnerId: "runner_hosted",
+    sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
+      aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: controlDigest },
+    queueClaimDeadline: "2026-08-09T00:00:00.000Z",
+    permissionCeiling: { allowedActions: ["workspace_write"], digest: controlDigest },
+    publicationPolicy: { mode: "proposal_only" as const, digest: controlDigest },
+    completionContract: { mode: "proposal_ready" as const, digest: controlDigest },
     admissionPolicySnapshot: {
       snapshotId: "policy_1",
       digest: policyReceipt.receiptDigest,

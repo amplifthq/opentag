@@ -53,7 +53,10 @@ async function readCatalog(pool: Pool): Promise<CatalogSnapshot> {
               index_relation.relname AS index_name,
               access_method.amname AS access_method,
               index_record.indisunique AS is_unique,
-              index_record.indnullsnotdistinct AS nulls_not_distinct,
+              COALESCE(
+                (to_jsonb(index_record)->>'indnullsnotdistinct')::boolean,
+                false
+              ) AS nulls_not_distinct,
               ARRAY(
                 SELECT pg_get_indexdef(index_record.indexrelid, position, true)
                 FROM generate_series(1, index_record.indnkeyatts) position
@@ -148,7 +151,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       for (const required of ["cp_source_content", "cp_source_content_dependency",
         "cp_source_content_read_grant", "cp_source_replay_tombstone",
         "cp_source_app_installation", "cp_source_binding",
-        "cp_ingress_reservation", "cp_source_resolution"]) {
+        "cp_ingress_reservation", "cp_source_resolution",
+        "cp_source_content_invalidation_receipt"]) {
         expect(tableNames.has(required), `missing ${required}`).toBe(true);
       }
     });

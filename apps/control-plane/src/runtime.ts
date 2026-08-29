@@ -42,6 +42,11 @@ import {
   createSourceIngressWorker,
   type SourceResolutionPort,
 } from "./modules/source-ingress/worker.js";
+import { z } from "zod";
+import {
+  AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  HostedAdmissionEnvelopeV1Schema,
+} from "@opentag/control-protocol";
 
 const BASE_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -104,6 +109,7 @@ export function createControlPlaneRuntime(input: {
     idFactory: () => randomIdentifier("credential"),
     tokenFactory: () => runtimeSecret("runtime"),
   });
+  let sourceContent: ReturnType<typeof createRelayContentCustody> | null = null;
   const hosted = createHostedRunCoordinator({
     pool: postgres.pool,
     clock,
@@ -120,6 +126,12 @@ export function createControlPlaneRuntime(input: {
       context.attemptId,
       context.attemptNumber,
     ])).digest("base64url")}`,
+    ...(input.config.relayContentKey ? {
+      issueSourceContentGrantInTransaction: (client, command) => {
+        if (!sourceContent) throw new Error("source_content_unavailable");
+        return sourceContent.issueReadGrantInTransaction(client, command);
+      },
+    } : {}),
   });
   const identity = createIdentityModule({
     pool: postgres.pool,
@@ -156,14 +168,12 @@ export function createControlPlaneRuntime(input: {
       sourceContentKey = null;
     }
   }
-  const sourceContent = sourceContentKey
+  sourceContent = sourceContentKey
     ? createRelayContentCustody({
         pool: postgres.pool,
         clock,
         key: sourceContentKey,
-        ...(input.sourceContentInvalidationAuthority
-          ? { invalidationAuthority: input.sourceContentInvalidationAuthority }
-          : {}),
+        invalidationAuthority: input.sourceContentInvalidationAuthority ?? hosted,
       })
     : null;
   const sourceIngress = sourceContent
@@ -174,11 +184,31 @@ export function createControlPlaneRuntime(input: {
         jobs,
       })
     : null;
-  const sourceIngressWorker = sourceIngress && input.sourceResolutionPort
+  const sourceResolutionPort = input.sourceResolutionPort ?? {
+    async resolve(command) {
+      const context = z.object({
+        runId: z.string().min(1).max(512),
+        hostedAdmission: HostedAdmissionEnvelopeV1Schema,
+        admissionPolicySnapshot: AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+      }).strict().parse(command.sourceContext);
+      const admitted = await hosted.admit({
+        runId: context.runId,
+        admission: context.hostedAdmission,
+        policy: context.admissionPolicySnapshot,
+      });
+      if (admitted.kind === "conflict") {
+        return { kind: "invalid_request", code: admitted.reason } as const;
+      }
+      return admitted.view.status === "waiting_for_runner"
+        ? { kind: "waiting_for_runner", runId: admitted.runId } as const
+        : { kind: "accepted", runId: admitted.runId } as const;
+    },
+  } satisfies SourceResolutionPort;
+  const sourceIngressWorker = sourceIngress
     ? createSourceIngressWorker({
         ingress: sourceIngress,
         queue: jobs,
-        resolver: input.sourceResolutionPort,
+        resolver: sourceResolutionPort,
         workerId: `source_ingress_${process.pid}`,
         retryDelayMs: input.config.jobRetryDelayMs,
         clock,
@@ -187,7 +217,11 @@ export function createControlPlaneRuntime(input: {
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: {
       organizationId: string | null;
-    }) => hosted.reconcileExpiredAttempts(job.organizationId),
+    }) => {
+      const queued = await hosted.expireQueued(job.organizationId);
+      const attempts = await hosted.reconcileExpiredAttempts(job.organizationId);
+      return { expiredQueued: queued.expired, expiredAttempts: attempts.expired };
+    },
     "runner-readiness-retention": async (job: {
       organizationId: string | null;
     }) => runners.pruneExpiredReadiness(job.organizationId),
@@ -320,6 +354,7 @@ export function createControlPlaneRuntime(input: {
     runners,
     sourceContent,
     sourceIngress,
+    sourceResolutionPort,
     sourceIngressWorker,
     close: () => postgres.close(),
   };

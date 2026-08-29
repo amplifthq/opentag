@@ -24,10 +24,11 @@ import {
   type HostedLifecycleReceiptEnvelopeV1,
   type HostedLifecycleRequestV1,
 } from "@opentag/control-protocol";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
+import { classifyAttemptMaterialActionTruth } from "./material-actions.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "attempt") => string;
@@ -62,18 +63,33 @@ function claimForStorage(claim: HostedClaimV1) {
   return StoredHostedClaimV1Schema.parse({ ...claim, attempt });
 }
 
-type TerminalKind = "cancelled" | "completed" | "rejected";
+export type CanonicalRunStatus =
+  | "queued" | "assigned" | "running" | "needs_approval" | "succeeded"
+  | "failed" | "cancelled" | "interrupted" | "timed_out";
+type TerminalKind = Extract<CanonicalRunStatus,
+  "succeeded" | "failed" | "cancelled" | "interrupted" | "timed_out">;
+type HostedRunProjection = {
+  canonicalStatus: CanonicalRunStatus;
+  status: CanonicalRunStatus | "waiting_for_runner" | "waiting_for_approval"
+    | "proposal_ready" | "ready_for_review" | "publication_pending";
+  queueClaimDeadline: string;
+  outcome: "outcome_unknown" | null;
+};
 
 type HostedRunRow = {
   organization_id: string;
   run_id: string;
   runner_id: string;
   executor_id: string;
-  state: "pending" | "claimed" | "running" | TerminalKind;
+  state: CanonicalRunStatus;
   current_attempt_number: number;
   terminal_kind: TerminalKind | null;
   hosted_admission: unknown;
   admission_policy_snapshot: unknown;
+  source_version_ref: string;
+  source_content_ids: string[];
+  queue_claim_deadline: Date;
+  outcome_state: "outcome_unknown" | null;
 };
 
 type HostedAttemptRow = {
@@ -92,8 +108,8 @@ export type HostedRunCoordinator = {
     admission: HostedAdmissionEnvelopeV1;
     policy: AdmissionPolicySnapshotReceiptEnvelopeV1;
   }): Promise<
-    | { kind: "created" | "replayed"; runId: string }
-    | { kind: "conflict"; reason: "identity_mismatch" | "admission_mismatch" }
+    | { kind: "created" | "replayed"; runId: string; view: HostedRunProjection }
+    | { kind: "conflict"; reason: "identity_mismatch" | "admission_mismatch" | "deadline_invalid" }
   >;
   claim(input: {
     principal: RuntimePrincipal;
@@ -117,10 +133,17 @@ export type HostedRunCoordinator = {
   reconcileExpiredAttempts(
     organizationId: string | null,
   ): Promise<{ expired: number }>;
+  expireQueued(organizationId: string | null): Promise<{ expired: number }>;
+  cancelRun(input: { organizationId: string; runId: string; reason: string }): Promise<
+    { kind: "cancelled" | "terminal" | "missing" }
+  >;
+  invalidate(input: { organizationId: string; sourceVersionRef: string;
+    contentIds: string[]; reason: "source_content_deleted"; commandId: string }): Promise<unknown>;
   inspect(input: {
     organizationId: string;
     runId: string;
-  }): Promise<{ state: HostedRunRow["state"]; terminalKind: TerminalKind | null } | null>;
+  }): Promise<(HostedRunProjection & { state: CanonicalRunStatus;
+    terminalKind: TerminalKind | null; terminalReason: string | null }) | null>;
 };
 
 async function verifyPolicyReceipt(
@@ -148,7 +171,16 @@ function linkedAdmission(
     && policy.payload.target.providerRepositoryId
       === admission.repository.providerRepositoryId
     && policy.payload.snapshotId === admission.admissionPolicySnapshot.snapshotId
-    && policy.receiptDigest === admission.admissionPolicySnapshot.digest;
+    && policy.receiptDigest === admission.admissionPolicySnapshot.digest
+    && policy.payload.target.authorizedPublicationModes.includes(
+      admission.publicationPolicy.mode,
+    )
+    && (
+      (admission.publicationPolicy.mode === "proposal_only"
+        && admission.completionContract.mode === "proposal_ready")
+      || (admission.publicationPolicy.mode === "pull_request"
+        && admission.completionContract.mode === "pull_request_ready")
+    );
 }
 
 function lifecycleOperation(action: HostedLifecycleActionV1) {
@@ -158,9 +190,24 @@ function lifecycleOperation(action: HostedLifecycleActionV1) {
 }
 
 function terminalKind(state: HostedRunRow["state"]): TerminalKind | null {
-  return state === "cancelled" || state === "completed" || state === "rejected"
+  return state === "succeeded" || state === "failed" || state === "cancelled"
+      || state === "interrupted" || state === "timed_out"
     ? state
     : null;
+}
+
+function projectRun(run: Pick<HostedRunRow, "state" | "queue_claim_deadline" | "outcome_state">
+  & { publication_mode?: string }): HostedRunProjection {
+  const status = run.state === "queued" ? "waiting_for_runner"
+    : run.state === "needs_approval" ? "waiting_for_approval"
+    : run.state === "succeeded" && run.publication_mode === "proposal_only"
+      ? "proposal_ready"
+      : run.state === "succeeded" && run.publication_mode === "pull_request"
+        ? "ready_for_review"
+        : run.state;
+  return { canonicalStatus: run.state, status,
+    queueClaimDeadline: run.queue_claim_deadline.toISOString(),
+    outcome: run.outcome_state };
 }
 
 export function createHostedRunCoordinator(input: {
@@ -169,6 +216,10 @@ export function createHostedRunCoordinator(input: {
   leaseDurationMs: number;
   idFactory: IdFactory;
   tokenFactory: TokenFactory;
+  issueSourceContentGrantInTransaction?: (client: PoolClient, input: {
+    organizationId: string; runId: string; attemptId: string; fenceDigest: string;
+    contentIds: string[]; purpose: string; expiresAt: Date;
+  }) => Promise<{ grantId: string; token: string }>;
 }): HostedRunCoordinator {
   async function hydrateStoredClaim(value: unknown): Promise<HostedClaimV1 | null> {
     const stored = StoredHostedClaimV1Schema.parse(value);
@@ -201,6 +252,10 @@ export function createHostedRunCoordinator(input: {
         || !linkedAdmission(command.runId, admission, policy)
       ) {
         return { kind: "conflict", reason: "identity_mismatch" };
+      }
+      const deadline = new Date(admission.queueClaimDeadline);
+      if (deadline.getTime() <= input.clock.now().getTime()) {
+        return { kind: "conflict", reason: "deadline_invalid" };
       }
       return withPostgresTransaction(input.pool, async (client) => {
         await client.query(
@@ -235,7 +290,12 @@ export function createHostedRunCoordinator(input: {
             && replay.admission_digest === admission.envelopeDigest
             && storedPolicy.receiptDigest === policy.receiptDigest
           ) {
-            return { kind: "replayed", runId: replay.run_id } as const;
+            const stored = await client.query<HostedRunRow>(
+              "SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2",
+              [admission.organizationId, replay.run_id],
+            );
+            return { kind: "replayed", runId: replay.run_id,
+              view: projectRun(stored.rows[0]!) } as const;
           }
           return { kind: "conflict", reason: "admission_mismatch" } as const;
         }
@@ -244,10 +304,12 @@ export function createHostedRunCoordinator(input: {
           `INSERT INTO cp_hosted_run(
              organization_id, run_id, admission_id, admission_operation_id,
              admission_digest, source_identity_digest, runner_id, executor_id,
-             state, hosted_admission, admission_policy_snapshot,
-             created_at, updated_at
-           ) VALUES($1, $2, $3, $4, $5, $6, $7, $8,
-                    'pending', $9::jsonb, $10::jsonb, $11, $11)`,
+             source_version_ref, source_content_ids, source_context_digest,
+             queue_claim_deadline, permission_ceiling_digest, publication_mode,
+             publication_policy_digest, completion_mode, completion_contract_digest,
+             state, hosted_admission, admission_policy_snapshot, created_at, updated_at
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                    'queued',$18::jsonb,$19::jsonb,$20,$20)`,
           [
             admission.organizationId,
             command.runId,
@@ -257,6 +319,15 @@ export function createHostedRunCoordinator(input: {
             admission.sourceIdentityDigest,
             admission.runnerId,
             policy.payload.executor.executorId,
+            admission.sourceContextEnvelope.sourceVersionRef,
+            [admission.sourceContextEnvelope.contentId],
+            admission.sourceContextEnvelope.envelopeDigest,
+            admission.queueClaimDeadline,
+            admission.permissionCeiling.digest,
+            admission.publicationPolicy.mode,
+            admission.publicationPolicy.digest,
+            admission.completionContract.mode,
+            admission.completionContract.digest,
             JSON.stringify(admission),
             JSON.stringify(policy),
             now,
@@ -277,7 +348,9 @@ export function createHostedRunCoordinator(input: {
             now,
           ],
         );
-        return { kind: "created", runId: command.runId } as const;
+        return { kind: "created", runId: command.runId,
+          view: { canonicalStatus: "queued", status: "waiting_for_runner",
+            queueClaimDeadline: admission.queueClaimDeadline, outcome: null } } as const;
       });
     },
 
@@ -342,7 +415,15 @@ export function createHostedRunCoordinator(input: {
           ],
         ) as { rows: unknown[] };
         if (readiness.rows.length !== 1) {
-          return { kind: "conflict", reason: "authority_mismatch" } as const;
+          const anyCurrentReadiness = await client.query(
+            `SELECT 1 FROM cp_runner_readiness
+             WHERE organization_id = $1 AND runner_id = $2 AND expires_at > $3
+             LIMIT 1`,
+            [principal.organizationId, principal.runnerId, now.toISOString()],
+          );
+          return anyCurrentReadiness.rows.length === 0
+            ? { kind: "empty" } as const
+            : { kind: "conflict", reason: "authority_mismatch" } as const;
         }
         const candidate = await client.query(
           `SELECT run.*
@@ -350,14 +431,22 @@ export function createHostedRunCoordinator(input: {
            WHERE run.organization_id = $1
              AND run.runner_id = $2
              AND run.terminal_kind IS NULL
+             AND run.queue_claim_deadline > $3
+             AND run.outcome_state IS NULL
              AND (
-               run.state = 'pending'
+               run.state = 'queued'
                OR EXISTS (
                  SELECT 1 FROM cp_hosted_attempt attempt
                  WHERE attempt.organization_id = run.organization_id
                    AND attempt.run_id = run.run_id
                    AND attempt.attempt_number = run.current_attempt_number
                    AND attempt.lease_expires_at <= $3
+                   AND NOT EXISTS (
+                     SELECT 1 FROM cp_material_action_receipt material
+                     WHERE material.organization_id = attempt.organization_id
+                       AND material.run_id = attempt.run_id
+                       AND material.attempt_id = attempt.attempt_id
+                   )
                )
              )
            ORDER BY run.created_at, run.run_id
@@ -374,13 +463,6 @@ export function createHostedRunCoordinator(input: {
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
           run.admission_policy_snapshot,
         );
-        if (
-          policy.payload.runner.readinessReceiptDigest
-            !== request.expectedAuthority.runnerReadinessReceiptDigest
-        ) {
-          return { kind: "conflict", reason: "authority_mismatch" } as const;
-        }
-
         if (run.current_attempt_number > 0) {
           await client.query(
             `UPDATE cp_hosted_attempt
@@ -479,9 +561,20 @@ export function createHostedRunCoordinator(input: {
             now.toISOString(),
           ],
         );
+        if (input.issueSourceContentGrantInTransaction) {
+          await input.issueSourceContentGrantInTransaction(client as PoolClient, {
+            organizationId: principal.organizationId,
+            runId: run.run_id,
+            attemptId,
+            fenceDigest: fencingTokenDigest,
+            contentIds: run.source_content_ids,
+            purpose: "source_context",
+            expiresAt: new Date(leaseExpiresAt),
+          });
+        }
         await client.query(
           `UPDATE cp_hosted_run
-           SET state = 'claimed', current_attempt_number = $3, updated_at = $4
+           SET state = 'assigned', current_attempt_number = $3, updated_at = $4
            WHERE organization_id = $1 AND run_id = $2`,
           [principal.organizationId, run.run_id, attemptNumber, now.toISOString()],
         );
@@ -753,13 +846,13 @@ export function createHostedRunCoordinator(input: {
           nextRunState = "running";
           nextAttemptState = "running";
         } else if (command.action === "reject-start") {
-          nextRunState = "rejected";
+          nextRunState = "failed";
           nextAttemptState = "rejected";
-          nextTerminal = "rejected";
+          nextTerminal = "failed";
         } else if (command.action === "complete") {
-          nextRunState = "completed";
+          nextRunState = "succeeded";
           nextAttemptState = "completed";
-          nextTerminal = "completed";
+          nextTerminal = "succeeded";
         } else if (command.action === "cancel") {
           nextRunState = "cancelled";
           nextAttemptState = "cancelled";
@@ -835,35 +928,220 @@ export function createHostedRunCoordinator(input: {
       });
     },
 
-    async reconcileExpiredAttempts(organizationId: string | null) {
+    async expireQueued(organizationId: string | null) {
       const now = input.clock.now();
       const result = await input.pool.query(
-        `UPDATE cp_hosted_attempt attempt
-         SET state = 'expired', updated_at = $1
-         FROM cp_hosted_run run
-         WHERE attempt.organization_id = run.organization_id
-           AND attempt.run_id = run.run_id
-           AND attempt.state IN ('claimed', 'running')
-           AND attempt.lease_expires_at <= $1
-           AND run.terminal_kind IS NULL
-           AND ($2::text IS NULL OR attempt.organization_id = $2)
-         RETURNING attempt.attempt_id`,
-        [now, organizationId],
+        `UPDATE cp_hosted_run
+         SET state = 'timed_out', terminal_kind = 'timed_out',
+             terminal_reason = 'queue_claim_deadline_expired',
+             terminal_receipt = jsonb_build_object(
+               'kind', 'queue_claim_expired', 'reason', 'queue_claim_deadline_expired',
+               'recordedAt', $1::text
+             ), updated_at = $1
+         WHERE state = 'queued' AND terminal_kind IS NULL
+           AND queue_claim_deadline <= $1
+           AND ($2::text IS NULL OR organization_id = $2)
+         RETURNING run_id`,
+        [now.toISOString(), organizationId],
       );
       return { expired: result.rowCount ?? 0 };
     },
 
+    async cancelRun(command) {
+      return withPostgresTransaction(input.pool, async (client) => {
+        const selected = await client.query<HostedRunRow>(
+          `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2
+           FOR UPDATE`,
+          [command.organizationId, command.runId],
+        );
+        const run = selected.rows[0];
+        if (!run) return { kind: "missing" } as const;
+        if (run.terminal_kind) return { kind: "terminal" } as const;
+        const now = input.clock.now().toISOString();
+        await client.query(
+          `UPDATE cp_hosted_attempt SET state = 'cancelled', updated_at = $3
+           WHERE organization_id = $1 AND run_id = $2
+             AND attempt_number = (SELECT current_attempt_number FROM cp_hosted_run
+               WHERE organization_id = $1 AND run_id = $2)
+             AND state IN ('claimed','running')`,
+          [command.organizationId, command.runId, now],
+        );
+        await client.query(
+          `UPDATE cp_source_content_read_grant
+           SET revoked_at = COALESCE(revoked_at, $3)
+           WHERE organization_id = $1 AND run_id = $2 AND consumed_at IS NULL`,
+          [command.organizationId, command.runId, now],
+        );
+        await client.query(
+          `UPDATE cp_hosted_run SET state = 'cancelled', terminal_kind = 'cancelled',
+             terminal_reason = $3, terminal_receipt = $4::jsonb, updated_at = $5
+           WHERE organization_id = $1 AND run_id = $2`,
+          [command.organizationId, command.runId, command.reason,
+            JSON.stringify({ kind: "run_cancelled", reason: command.reason, recordedAt: now }), now],
+        );
+        return { kind: "cancelled" } as const;
+      });
+    },
+
+    async invalidate(command) {
+      const normalizedContentIds = [...new Set(command.contentIds)].sort();
+      const requestDigest = await computeControlPayloadDigestV1({
+        organizationId: command.organizationId,
+        sourceVersionRef: command.sourceVersionRef,
+        contentIds: normalizedContentIds,
+        reason: command.reason,
+        commandId: command.commandId,
+      });
+      return withPostgresTransaction(input.pool, async (client) => {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [JSON.stringify(["opentag.control.source-invalidation/v1",
+            command.organizationId, command.commandId])],
+        );
+        const prior = await client.query<{ request_digest: string; receipt: unknown }>(
+          `SELECT request_digest, receipt FROM cp_source_content_invalidation_receipt
+           WHERE organization_id = $1 AND command_id = $2 FOR UPDATE`,
+          [command.organizationId, command.commandId],
+        );
+        if (prior.rows[0]) {
+          if (prior.rows[0].request_digest !== requestDigest) {
+            throw new Error("source_invalidation_conflict");
+          }
+          return prior.rows[0].receipt;
+        }
+        const runs = await client.query<HostedRunRow>(
+          `SELECT * FROM cp_hosted_run
+           WHERE organization_id = $1 AND source_version_ref = $2
+           ORDER BY run_id FOR UPDATE`,
+          [command.organizationId, command.sourceVersionRef],
+        );
+        const now = input.clock.now().toISOString();
+        for (const run of runs.rows) {
+          if (run.terminal_kind) continue;
+          const attemptIdentity = run.current_attempt_number > 0
+            ? await client.query<{ attempt_id: string }>(
+                `SELECT attempt_id FROM cp_hosted_attempt WHERE organization_id = $1
+                   AND run_id = $2 AND attempt_number = $3`,
+                [run.organization_id, run.run_id, run.current_attempt_number],
+              )
+            : { rows: [] as Array<{ attempt_id: string }> };
+          const material = attemptIdentity.rows[0]
+            ? await classifyAttemptMaterialActionTruth(client, {
+                organizationId: run.organization_id, runId: run.run_id,
+                attemptId: attemptIdentity.rows[0].attempt_id,
+              })
+            : { kind: "proven_not_started" as const };
+          const hasAttempt = run.current_attempt_number > 0;
+          const nextState: CanonicalRunStatus = hasAttempt ? "interrupted" : "cancelled";
+          const outcome = material.kind === "started_or_ambiguous" ? "outcome_unknown" : null;
+          const reconciliationIdentity = material.kind === "started_or_ambiguous"
+            ? material.reconciliationIdentity : null;
+          await client.query(
+            `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
+             WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
+               AND state IN ('claimed','running')`,
+            [run.organization_id, run.run_id, run.current_attempt_number, now],
+          );
+          await client.query(
+            `UPDATE cp_hosted_run SET state = $3, terminal_kind = $3,
+               terminal_reason = 'source_content_deleted', outcome_state = $4,
+               reconciliation_identity = $5, terminal_receipt = $6::jsonb,
+               updated_at = $7 WHERE organization_id = $1 AND run_id = $2`,
+            [run.organization_id, run.run_id, nextState, outcome,
+              reconciliationIdentity, JSON.stringify({ kind: "source_invalidation",
+                reason: "source_content_deleted", recordedAt: now }), now],
+          );
+        }
+        if (normalizedContentIds.length > 0) {
+          await client.query(
+            `UPDATE cp_source_content_read_grant
+             SET revoked_at = COALESCE(revoked_at, $3)
+             WHERE organization_id = $1 AND content_ids && $2::text[]
+               AND consumed_at IS NULL`,
+            [command.organizationId, normalizedContentIds, now],
+          );
+        }
+        const receiptSeed = {
+          commandId: command.commandId,
+          organizationId: command.organizationId,
+          sourceVersionRef: command.sourceVersionRef,
+          reason: "source_content_deleted" as const,
+          recordedAt: now,
+        };
+        const receipt = { ...receiptSeed,
+          authorityReceiptDigest: await computeControlPayloadDigestV1(receiptSeed) };
+        await client.query(
+          `INSERT INTO cp_source_content_invalidation_receipt(
+             organization_id, command_id, request_digest, source_version_ref,
+             receipt, created_at) VALUES($1,$2,$3,$4,$5::jsonb,$6)`,
+          [command.organizationId, command.commandId, requestDigest,
+            command.sourceVersionRef, JSON.stringify(receipt), now],
+        );
+        return receipt;
+      });
+    },
+
+    async reconcileExpiredAttempts(organizationId: string | null) {
+      const now = input.clock.now();
+      return withPostgresTransaction(input.pool, async (client) => {
+        const expired = await client.query<{ organization_id: string; run_id: string;
+          attempt_id: string }>(
+          `UPDATE cp_hosted_attempt attempt SET state = 'expired', updated_at = $1
+           FROM cp_hosted_run run
+           WHERE attempt.organization_id = run.organization_id
+             AND attempt.run_id = run.run_id
+             AND attempt.state IN ('claimed','running')
+             AND attempt.lease_expires_at <= $1 AND run.terminal_kind IS NULL
+             AND ($2::text IS NULL OR attempt.organization_id = $2)
+           RETURNING attempt.organization_id, attempt.run_id, attempt.attempt_id`,
+          [now, organizationId],
+        );
+        for (const attempt of expired.rows) {
+          const material = await classifyAttemptMaterialActionTruth(client, {
+            organizationId: attempt.organization_id, runId: attempt.run_id,
+            attemptId: attempt.attempt_id,
+          });
+          if (material.kind === "started_or_ambiguous") await client.query(
+            `UPDATE cp_hosted_run SET state = 'interrupted', terminal_kind = 'interrupted',
+               terminal_reason = 'attempt_lease_expired_after_material_start',
+               outcome_state = 'outcome_unknown', reconciliation_identity = $3,
+               terminal_receipt = $4::jsonb, updated_at = $5
+             WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL`,
+            [attempt.organization_id, attempt.run_id,
+              material.reconciliationIdentity,
+              JSON.stringify({ kind: "attempt_interrupted", outcome: "outcome_unknown" }), now],
+          );
+          else await client.query(
+            `UPDATE cp_hosted_run
+             SET state = CASE WHEN state = 'running' THEN 'interrupted' ELSE 'timed_out' END,
+                 terminal_kind = CASE WHEN state = 'running' THEN 'interrupted' ELSE 'timed_out' END,
+                 terminal_reason = 'original_claim_deadline_expired',
+                 terminal_receipt = jsonb_build_object(
+                   'kind', 'attempt_deadline_expired',
+                   'reason', 'original_claim_deadline_expired',
+                   'recordedAt', $3::text
+                 ), updated_at = $3
+             WHERE organization_id = $1 AND run_id = $2 AND terminal_kind IS NULL
+               AND queue_claim_deadline <= $3`,
+            [attempt.organization_id, attempt.run_id, now.toISOString()],
+          );
+        }
+        return { expired: expired.rowCount ?? 0 };
+      });
+    },
+
     async inspect(query) {
-      const result = await input.pool.query<{
-        state: HostedRunRow["state"];
-        terminal_kind: TerminalKind | null;
+      const result = await input.pool.query<HostedRunRow & {
+        terminal_reason: string | null;
+        publication_mode: string;
       }>(
-        `SELECT state, terminal_kind FROM cp_hosted_run
+        `SELECT * FROM cp_hosted_run
          WHERE organization_id = $1 AND run_id = $2`,
         [query.organizationId, query.runId],
       );
       const row = result.rows[0];
-      return row ? { state: row.state, terminalKind: row.terminal_kind } : null;
+      return row ? { state: row.state, terminalKind: row.terminal_kind,
+        terminalReason: row.terminal_reason, ...projectRun(row) } : null;
     },
   };
 }
