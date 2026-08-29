@@ -8,7 +8,10 @@ export type SourceThreadAuthorityEnvelope = {
   fencingTokenDigest: string; permissionRequestDigest: string; actionId: string;
   actionDescriptorDigest: string; frozenCeilingDigest: string;
   policyDigest: string; actionTokenIdentity: string;
+  selectedDecision: SourceThreadDecision; allowedDecisions: SourceThreadDecision[];
 };
+export type SourceThreadDecision = "status" | "cancel" | "allow_once" | "allow_run"
+  | "deny" | "bind" | "unbind";
 type CommandAuthority = { authority?: SourceThreadAuthorityEnvelope };
 
 export type SourceThreadCommand =
@@ -48,7 +51,9 @@ const authorityFields = ["organizationId", "installationId", "bindingId", "sourc
   "pendingRequestId", "approvalEpoch", "runnerId", "attemptId", "attemptNumber", "attemptEpoch",
   "fencingTokenDigest", "permissionRequestDigest", "actionId",
   "actionDescriptorDigest", "frozenCeilingDigest",
-  "policyDigest", "actionTokenIdentity"] as const;
+  "policyDigest", "actionTokenIdentity", "selectedDecision", "allowedDecisions"] as const;
+const decisions: readonly SourceThreadDecision[] = ["status", "cancel", "allow_once",
+  "allow_run", "deny", "bind", "unbind"];
 function parseAuthority(input: unknown): SourceThreadAuthorityEnvelope {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new Error("Source Thread authority envelope is invalid.");
@@ -73,6 +78,13 @@ function parseAuthority(input: unknown): SourceThreadAuthorityEnvelope {
     if (typeof value[field] !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value[field] as string)) {
       throw new Error("Source Thread authority envelope is invalid.");
     }
+  }
+  if (!decisions.includes(value.selectedDecision as SourceThreadDecision)
+    || !Array.isArray(value.allowedDecisions) || value.allowedDecisions.length === 0
+    || value.allowedDecisions.some((decision) => !decisions.includes(decision as SourceThreadDecision))
+    || new Set(value.allowedDecisions).size !== value.allowedDecisions.length
+    || !value.allowedDecisions.includes(value.selectedDecision)) {
+    throw new Error("Source Thread authority envelope decision is invalid.");
   }
   return value as SourceThreadAuthorityEnvelope;
 }

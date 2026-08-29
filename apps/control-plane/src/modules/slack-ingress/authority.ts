@@ -2,9 +2,12 @@ import type { SourceThreadCommandAuthorityPorts, SourceThreadAuthorityEnvelope }
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import type { PermissionCoordinator } from "../hosted-runs/permissions.js";
 
-function envelope(input: { authority?: SourceThreadAuthorityEnvelope }, requestId?: string) {
+function envelope(input: { authority?: SourceThreadAuthorityEnvelope }, requestId: string | undefined,
+  decision: SourceThreadAuthorityEnvelope["selectedDecision"]) {
   const authority = input.authority;
-  if (!authority || (requestId !== undefined && authority.pendingRequestId !== requestId)) return null;
+  if (!authority || authority.selectedDecision !== decision
+    || !authority.allowedDecisions.includes(decision)
+    || (requestId !== undefined && authority.pendingRequestId !== requestId)) return null;
   return authority;
 }
 
@@ -13,13 +16,13 @@ export function createControlPlaneSourceThreadAuthority(input: {
 }): SourceThreadCommandAuthorityPorts {
   return {
     async status(command) {
-      const authority = envelope(command); if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
+      const authority = envelope(command, undefined, "status"); if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
       const view = await input.hosted.inspect({ organizationId: authority.organizationId, runId: authority.runId });
       return view ? { outcome: "completed", value: view }
         : { outcome: "rejected", reason: "run_not_found" };
     },
     async cancel(command) {
-      const authority = envelope(command); if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
+      const authority = envelope(command, undefined, "cancel"); if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
       const result = await input.hosted.cancelRun({ organizationId: authority.organizationId,
         runId: authority.runId, reason: command.reason });
       return result.kind === "cancelled" || result.kind === "terminal"
@@ -27,19 +30,19 @@ export function createControlPlaneSourceThreadAuthority(input: {
         : { outcome: "rejected", reason: "run_not_found" };
     },
     async approve(command) {
-      const authority = envelope(command, command.requestId);
+      const authority = envelope(command, command.requestId, command.decision);
       if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
       if (command.decision === "allow_run") {
         return { outcome: "rejected", reason: "allow_run_not_supported" };
       }
       const result = await input.permissions.resolve({ principal: {
         organizationId: authority.organizationId, actorId: command.actor.id },
-        runnerId: authority.runnerId, decision: {
+        runnerId: authority.runnerId, authorityAttemptEpoch: authority.attemptEpoch, decision: {
           schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.permission.v1"],
           requestId: `slack_${command.commandId}`, operationId: command.commandId,
           organizationId: authority.organizationId, runId: authority.runId,
           attempt: { attemptId: authority.attemptId, attemptNumber: authority.attemptNumber,
-            epoch: authority.attemptEpoch, fencingTokenDigest: authority.fencingTokenDigest },
+            epoch: authority.attemptNumber, fencingTokenDigest: authority.fencingTokenDigest },
           actionId: authority.actionId, permissionRequestId: authority.pendingRequestId,
           permissionRequestDigest: authority.permissionRequestDigest,
           policySnapshotDigest: authority.policyDigest, decisionId: command.commandId,
@@ -50,16 +53,16 @@ export function createControlPlaneSourceThreadAuthority(input: {
         : { outcome: "rejected", reason: result.kind };
     },
     async reject(command) {
-      const authority = envelope(command, command.requestId);
+      const authority = envelope(command, command.requestId, "deny");
       if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
       const result = await input.permissions.resolve({ principal: {
         organizationId: authority.organizationId, actorId: command.actor.id },
-        runnerId: authority.runnerId, decision: {
+        runnerId: authority.runnerId, authorityAttemptEpoch: authority.attemptEpoch, decision: {
           schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.permission.v1"],
           requestId: `slack_${command.commandId}`, operationId: command.commandId,
           organizationId: authority.organizationId, runId: authority.runId,
           attempt: { attemptId: authority.attemptId, attemptNumber: authority.attemptNumber,
-            epoch: authority.attemptEpoch, fencingTokenDigest: authority.fencingTokenDigest },
+            epoch: authority.attemptNumber, fencingTokenDigest: authority.fencingTokenDigest },
           actionId: authority.actionId, permissionRequestId: authority.pendingRequestId,
           permissionRequestDigest: authority.permissionRequestDigest,
           policySnapshotDigest: authority.policyDigest, decisionId: command.commandId,
@@ -69,7 +72,11 @@ export function createControlPlaneSourceThreadAuthority(input: {
         ? { outcome: "completed", value: result.receipt }
         : { outcome: "rejected", reason: result.kind };
     },
-    async bind() { return { outcome: "rejected", reason: "binding_authority_unavailable" }; },
-    async unbind() { return { outcome: "rejected", reason: "binding_authority_unavailable" }; },
+    async bind(command) { return envelope(command, undefined, "bind")
+      ? { outcome: "rejected", reason: "binding_authority_unavailable" }
+      : { outcome: "rejected", reason: "authority_invalid" }; },
+    async unbind(command) { return envelope(command, undefined, "unbind")
+      ? { outcome: "rejected", reason: "binding_authority_unavailable" }
+      : { outcome: "rejected", reason: "authority_invalid" }; },
   };
 }

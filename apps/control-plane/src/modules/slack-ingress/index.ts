@@ -153,7 +153,25 @@ function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unk
       return { status: 200, body: { ok: true, withdrawn: true } };
     } catch { return { status: 503, body: { error: "source_withdrawal_unavailable" } }; }
   }
+  async function receiveNormalized(normalized: OpenTagSourceIngressEvent,
+    rawBody: Uint8Array): Promise<HttpResult> {
+    if (normalized.trigger === "source_content_deleted") return withdraw(normalized);
+    const event = normalized as Exclude<OpenTagSourceIngressEvent, OpenTagSourceDeletionEvent>;
+    const sourceMessageId = event.source.messageId;
+    if (!sourceMessageId) return { status: 400, body: { error: "source_message_identity_missing" } };
+    const workspace = event.source.channel.workspace;
+    const sourceVersionRef = `slack:${workspace ?? "unknown"}:${event.source.channel.id}:${sourceMessageId}`;
+    const reservation = await input.sourceIngress.reserve({
+      organizationId: input.installation.organizationId,
+      installationId: input.installation.installationId, bindingId: input.installation.bindingId,
+      sourceApp: input.sourceApp, sourceDeliveryId: event.eventId, sourceMessageId,
+      sourceVersionRef, rawDigest: hashBytes(rawBody), normalizedContent: event,
+      expiresAt: new Date(input.clock.now().getTime() + 7 * 86_400_000) });
+    return reservation.mayAcknowledge ? { status: 200, body: { ok: true } }
+      : { status: 503, body: { error: "source_ingress_unavailable" } };
+  }
   return {
+    receiveNormalized,
     async receiveTrusted(trusted: unknown, rawBody: Uint8Array): Promise<HttpResult> {
       const payload = payloadRecord(trusted);
       if (payload?.type === "url_verification") {
@@ -169,20 +187,7 @@ function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unk
           : input.sourceApp.ingress.normalize(trusted);
       } catch { return { status: 400, body: { error: "slack_normalization_failed" } }; }
       if (!normalized) return { status: 200, body: { ok: true, ignored: true } };
-      if (normalized.trigger === "source_content_deleted") return withdraw(normalized);
-      const event = normalized as Exclude<OpenTagSourceIngressEvent, OpenTagSourceDeletionEvent>;
-      const sourceMessageId = event.source.messageId;
-      if (!sourceMessageId) return { status: 400, body: { error: "source_message_identity_missing" } };
-      const workspace = event.source.channel.workspace;
-      const sourceVersionRef = `slack:${workspace ?? "unknown"}:${event.source.channel.id}:${sourceMessageId}`;
-      const reservation = await input.sourceIngress.reserve({
-        organizationId: input.installation.organizationId,
-        installationId: input.installation.installationId, bindingId: input.installation.bindingId,
-        sourceApp: input.sourceApp, sourceDeliveryId: event.eventId, sourceMessageId,
-        sourceVersionRef, rawDigest: hashBytes(rawBody), normalizedContent: event,
-        expiresAt: new Date(input.clock.now().getTime() + 7 * 86_400_000) });
-      return reservation.mayAcknowledge ? { status: 200, body: { ok: true } }
-        : { status: 503, body: { error: "source_ingress_unavailable" } };
+      return receiveNormalized(normalized, rawBody);
     }
   };
 }
@@ -260,15 +265,26 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         if (!identityMatches(resolved.installation, identity)) {
           return { status: 404, body: { error: "slack_installation_not_found" } };
         }
-        const payload = payloadRecord(trusted);
-        if (payload?.type === "event_callback" && payload.event?.type === "app_mention"
-          && (typeof payload.event.user !== "string"
-            || !resolved.installation.memberUserIds.includes(payload.event.user))) {
+        const bound = createBoundIngress({ sourceApp: resolved.sourceApp,
+          installation: resolved.installation, sourceIngress,
+          sourceContent: input.custody, clock: input.clock });
+        let normalization;
+        try { normalization = resolved.sourceApp.ingress.normalizeResult?.(trusted); }
+        catch { return { status: 400, body: { error: "slack_normalization_failed" } }; }
+        if (normalization?.kind === "malformed") {
+          return { status: 400, body: { error: normalization.code } };
+        }
+        if (normalization?.kind === "unsupported") {
+          return { status: 200, body: { ok: true, ignored: true } };
+        }
+        const normalized = normalization?.kind === "accepted" ? normalization.event
+          : resolved.sourceApp.ingress.normalize(trusted);
+        if (!normalized) return { status: 200, body: { ok: true, ignored: true } };
+        if (normalized.trigger === "mention"
+          && !resolved.installation.memberUserIds.includes(normalized.source.actor.id)) {
           return { status: 403, body: { error: "slack_actor_not_authorized" } };
         }
-        return createBoundIngress({ sourceApp: resolved.sourceApp,
-          installation: resolved.installation, sourceIngress,
-          sourceContent: input.custody, clock: input.clock }).receiveTrusted(trusted, request.rawBody);
+        return bound.receiveNormalized(normalized, request.rawBody);
       } catch (error) { return verificationFailure(error); }
     },
 
@@ -347,6 +363,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
               || state.permission_action_id !== row.pending_action_id
               || state.permission_policy_digest !== row.policy_digest
               || state.permission_attempt_epoch !== row.approval_epoch
+              || state.permission_attempt_epoch !== String(row.attempt_epoch)
               || state.runner_id !== row.runner_id || state.attempt_id !== row.attempt_id
               || state.attempt_number !== row.attempt_number
               || state.fencing_token_digest !== row.fencing_token_digest) {
@@ -364,7 +381,9 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
             permissionRequestDigest: row.permission_request_digest, actionId: row.pending_action_id,
             actionDescriptorDigest: row.action_descriptor_digest,
             frozenCeilingDigest: row.frozen_ceiling_digest, policyDigest: row.policy_digest,
-            actionTokenIdentity: row.action_token_hash };
+            actionTokenIdentity: row.action_token_hash,
+            selectedDecision: decision as "status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind",
+            allowedDecisions: row.allowed_decisions as Array<"status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind"> };
           let command: SourceThreadCommand | null = null;
           if (decision === "status" && row.action_kind === "status" && row.member_user_ids.includes(actorId)) command = {
             type: "status", commandId: row.action_id, actor, authority };

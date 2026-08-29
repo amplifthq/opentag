@@ -383,6 +383,17 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       decision: "allow_once",
       decidedAt: now.toISOString(),
     });
+    const wrongEpoch = HumanPermissionDecisionRequestV1Schema.parse({ ...allow,
+      requestId: "request_permission_decision_wrong_epoch",
+      operationId: "operation_permission_decision_wrong_epoch",
+      decisionId: "decision_wrong_epoch" });
+    await expect(permissions.resolve({ principal: { organizationId: "org_permission",
+      actorId: "api_key_approver" }, runnerId: "runner_permission", decision: wrongEpoch,
+      authorityAttemptEpoch: allow.attempt.epoch + 1 }))
+      .resolves.toEqual({ kind: "conflict" });
+    expect((await fixture.pool.query(`SELECT state FROM cp_permission_request
+      WHERE organization_id='org_permission' AND permission_request_id=$1`,
+    [request.permissionRequestId])).rows).toEqual([{ state: "waiting" }]);
     const approved = await permissions.resolve({
       principal: { organizationId: "org_permission", actorId: "api_key_approver" },
       runnerId: "runner_permission", decision: allow,

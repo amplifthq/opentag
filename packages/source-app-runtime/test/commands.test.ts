@@ -106,7 +106,8 @@ describe("executeSourceThreadCommand", () => {
       fencingTokenDigest: `sha256:${"e".repeat(64)}`,
       permissionRequestDigest: `sha256:${"f".repeat(64)}`, actionId: "pending_action_1",
       frozenCeilingDigest: `sha256:${"b".repeat(64)}`, policyDigest: `sha256:${"c".repeat(64)}`,
-      actionTokenIdentity: `sha256:${"d".repeat(64)}` };
+      actionTokenIdentity: `sha256:${"d".repeat(64)}`,
+      selectedDecision: "allow_once" as const, allowedDecisions: ["allow_once" as const] };
     await executeSourceThreadCommand({ adapter: fakeSourceApp(), authority,
       command: { type: "approve", commandId: "cmd_envelope", actor: { provider: "slack", id: "U1" },
         requestId: "permission_1", decision: "allow_once", authority: envelope } });

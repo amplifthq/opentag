@@ -86,6 +86,7 @@ export type PermissionCoordinator = {
     principal: ApproverPrincipal;
     runnerId: string;
     decision: HumanPermissionDecisionRequestV1;
+    authorityAttemptEpoch?: number;
   }): Promise<
     | { kind: "resolved" | "replayed"; receipt: PermissionResolutionReceiptEnvelopeV1 }
     | { kind: "stale_fence" }
@@ -455,7 +456,10 @@ export function createPermissionCoordinator(input: {
       if (decision.organizationId !== command.principal.organizationId) {
         return { kind: "conflict" };
       }
-      const operationDigest = await computeControlPayloadDigestV1(decision);
+      const operationDigest = await computeControlPayloadDigestV1(
+        command.authorityAttemptEpoch === undefined ? decision
+          : { decision, authorityAttemptEpoch: command.authorityAttemptEpoch },
+      );
       return withPostgresTransaction(input.pool, async (client) => {
         const operation = await client.query(
           `SELECT request_digest, operation_kind, receipt
@@ -528,8 +532,10 @@ export function createPermissionCoordinator(input: {
           [command.principal.organizationId, decision.permissionRequestId],
         ) as { rows: StoredPermission[] };
         const stored = result.rows[0];
+        const storedRequest = stored ? StoredPermissionRequestV1Schema.parse(stored.request) : null;
         if (
           !stored
+          || !storedRequest
           || stored.state !== "waiting"
           || stored.runner_id !== command.runnerId
           || stored.run_id !== decision.runId
@@ -539,6 +545,8 @@ export function createPermissionCoordinator(input: {
           || stored.permission_request_digest
             !== decision.permissionRequestDigest
           || stored.policy_snapshot_digest !== decision.policySnapshotDigest
+          || (command.authorityAttemptEpoch !== undefined
+            && storedRequest.attempt.epoch !== command.authorityAttemptEpoch)
         ) return { kind: "conflict" } as const;
         if (!(await currentAttemptMatches(client, {
           organizationId: command.principal.organizationId,
@@ -547,13 +555,13 @@ export function createPermissionCoordinator(input: {
           attemptId: decision.attempt.attemptId,
           attemptNumber: decision.attempt.attemptNumber,
           fencingTokenDigest: decision.attempt.fencingTokenDigest,
-          policySnapshotRef: StoredPermissionRequestV1Schema.parse(stored.request).policySnapshotRef,
+          policySnapshotRef: storedRequest.policySnapshotRef,
           policySnapshotDigest: stored.policy_snapshot_digest,
           allowNeedsApproval: true,
           permissionRequestId: decision.permissionRequestId,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
-        const request = StoredPermissionRequestV1Schema.parse(stored.request);
+        const request = storedRequest;
         if (decision.decision === "allow_once"
           && !(await withinFrozenPermissionAuthority(client, {
             organizationId: command.principal.organizationId,

@@ -205,6 +205,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveEvents("install_1", request("EvMalformedMention", {
       type: "app_mention", user: "U1", text: "<@U_APP> fix", channel: "C1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
+    await expect(ingress.receiveEvents("install_1", request("EvMissingUser", {
+      type: "app_mention", text: "<@U_APP> fix", ts: "1700000005.2", channel: "C1" })))
+      .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
     await expect(ingress.receiveEvents("install_1", request("EvMalformedDelete", {
       type: "message", subtype: "message_deleted", channel: "C1", ts: "1700000005.1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_deletion_malformed" } });
@@ -227,7 +230,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   });
 
   it("authorizes opaque action tokens by exact install/thread/role/decision and consumes them once", async () => {
-    await insertSlackInstallation(); const decisions: string[] = [];
+    await insertSlackInstallation(); const decisions: string[] = []; const envelopes: unknown[] = [];
     const frozenCeiling = { publicationMode: "proposal_only", network: ["api.example"] };
     const frozenCeilingDigest = await computeControlPayloadDigestV1(frozenCeiling);
     const actionDescriptor = "workspace.write";
@@ -264,7 +267,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     let sequence = 0;
     const completed = { outcome: "completed" as const };
     const authority = { async status() { return completed; }, async cancel() { return completed; },
-      async approve(command: any) { decisions.push(command.decision); return completed; },
+      async approve(command: any) { decisions.push(command.decision); envelopes.push(command.authority); return completed; },
       async reject() { decisions.push("deny"); return completed; }, async bind() { return completed; },
       async unbind() { return completed; } };
     const { ingress } = productionComponents({ commandAuthority: authority,
@@ -305,6 +308,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     for (const [name, override] of [
       ["cross_run", { runId: "run_other" }],
       ["stale_epoch", { approvalEpoch: "epoch_stale" }],
+      ["attempt_epoch", { attemptEpoch: 2 }],
       ["ceiling_mismatch", { frozenCeiling: { publicationMode: "pull_request" } }],
       ["policy_mismatch", { policyDigest: digest("other_policy") }]
     ] as const) {
@@ -329,5 +333,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveInteractivity("install_1", action(bind, "bind", "U_ADMIN")))
       .resolves.toMatchObject({ status: 200 });
     expect(decisions).toEqual(["allow_once", "allow_run"]);
+    expect(envelopes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ selectedDecision: "allow_once", allowedDecisions: ["allow_once"] }),
+      expect.objectContaining({ selectedDecision: "allow_run", allowedDecisions: ["allow_run"] })
+    ]));
   });
 });
