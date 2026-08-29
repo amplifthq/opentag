@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { OpenTagSourceDeletionEventSchema, type OpenTagChannelPresentationCommand,
-  type OpenTagSourceIngressEvent } from "@opentag/core";
+  type OpenTagSourceIngressEvent, type SourceIngressNormalizationResult } from "@opentag/core";
 import type { ProviderDeliveryResult } from "@opentag/delivery-contract";
 import type { SourceAppDefinition, SourceAppInstallation } from "@opentag/source-app-runtime";
 import { readSlackThreadContext } from "./context.js";
@@ -41,38 +41,49 @@ function render(command: OpenTagChannelPresentationCommand): SlackDeliveryPresen
     ...(certifiedBlocks?.length ? { blocks: certifiedBlocks } : {}) };
 }
 
-function normalize(payloadInput: unknown, botUserId: string, verified?: VerifiedSlackInput): OpenTagSourceIngressEvent | null {
+function normalizeResult(payloadInput: unknown, botUserId: string,
+  verified?: VerifiedSlackInput): SourceIngressNormalizationResult {
   const payload = payloadInput && typeof payloadInput === "object" ? payloadInput as Record<string, any> : null;
   if (!payload || payload.type !== "event_callback" || typeof payload.team_id !== "string"
-    || typeof payload.event_id !== "string" || !payload.event || typeof payload.event !== "object") return null;
+    || typeof payload.event_id !== "string" || !payload.event || typeof payload.event !== "object") {
+    return { kind: "malformed", code: "slack_event_envelope_malformed" };
+  }
   const event = payload.event as Record<string, any>;
-  if (event.type === "app_mention" && typeof event.user === "string" && typeof event.text === "string"
-    && typeof event.ts === "string" && typeof event.channel === "string") {
+  if (event.type === "app_mention") {
+    if (typeof event.user !== "string" || typeof event.text !== "string"
+      || typeof event.ts !== "string" || typeof event.channel !== "string") {
+      return { kind: "malformed", code: "slack_app_mention_malformed" };
+    }
     const message = normalizeSlackChannelMessage({ teamId: payload.team_id, channelId: event.channel,
       userId: event.user, text: event.text, ts: event.ts,
       ...(typeof event.thread_ts === "string" ? { threadTs: event.thread_ts } : {}),
       eventId: payload.event_id, eventTime: typeof payload.event_time === "number" ? payload.event_time : 0,
       botUserId, binding: { teamId: payload.team_id, channelId: event.channel } });
-    if (!message) return null;
+    if (!message) return { kind: "malformed", code: "slack_app_mention_malformed" };
     const threadTs = event.thread_ts ?? event.ts;
     const thread = { provider: "slack", id: `${event.channel}:${threadTs}`, parentMessageId: threadTs };
-    return { ...message, source: { ...message.source, thread, messageId: event.ts },
-      replyTarget: { ...message.replyTarget, thread } };
+    return { kind: "accepted", event: { ...message,
+      source: { ...message.source, thread, messageId: event.ts },
+      replyTarget: { ...message.replyTarget, thread } } };
   }
   const deletedTs = event.deleted_ts ?? event.previous_message?.ts;
-  if (event.type === "message" && event.subtype === "message_deleted"
-    && typeof event.channel === "string" && typeof deletedTs === "string" && verified) {
+  if (event.type === "message" && event.subtype === "message_deleted") {
+    if (typeof event.channel !== "string" || typeof deletedTs !== "string") {
+      return { kind: "malformed", code: "slack_deletion_malformed" };
+    }
+    if (!verified) return { kind: "malformed", code: "slack_deletion_unverified" };
     const verifiedAt = verified.verifiedAt;
-    return OpenTagSourceDeletionEventSchema.parse({ protocol: "opentag.channel.v1",
+    const threadRootTs = event.previous_message?.thread_ts ?? deletedTs;
+    return { kind: "accepted", event: OpenTagSourceDeletionEventSchema.parse({ protocol: "opentag.channel.v1",
       eventId: payload.event_id, occurredAt: verifiedAt, trigger: "source_content_deleted",
       source: { provider: "slack", channel: { provider: "slack", workspace: payload.team_id, id: event.channel },
-        thread: { provider: "slack", id: `${event.channel}:${deletedTs}`, parentMessageId: deletedTs },
+        thread: { provider: "slack", id: `${event.channel}:${threadRootTs}`, parentMessageId: threadRootTs },
         actor: { provider: "slack", id: typeof event.user === "string" ? event.user : "slack-system" },
         messageId: deletedTs, sourceVersionRef: `slack:${payload.team_id}:${event.channel}:${deletedTs}` },
       verification: { sourceDeliveryId: payload.event_id, verifiedAt,
-        evidenceDigest: verified.evidenceDigest } });
+        evidenceDigest: verified.evidenceDigest } }) };
   }
-  return null;
+  return { kind: "unsupported" };
 }
 
 export function createSlackSourceApp(options: { installation: SourceAppInstallation;
@@ -85,6 +96,9 @@ export function createSlackSourceApp(options: { installation: SourceAppInstallat
     providerConfigGeneration: options.installation.credentialGeneration,
     providerConfigGenerationDigest: options.installation.credentialGenerationDigest,
     resolveCredential: async () => options.resolveCredential(), fetchImpl });
+  const normalizePort = (input: unknown) => { const verified = input && typeof input === "object" && "payload" in input
+    ? input as VerifiedSlackInput : undefined;
+    return normalizeResult(verified?.payload ?? input, options.botUserId, verified); };
   return { appId: "slack", protocol: "opentag.channel.v1",
     capabilities: { threads: true, messageUpdate: true, reactions: true,
       interactiveActions: true, attachments: "metadata", authenticatedDeletion: true,
@@ -111,9 +125,9 @@ export function createSlackSourceApp(options: { installation: SourceAppInstallat
         return { payload, verifiedAt: input.receivedAt,
           evidenceDigest: digest(`v0:${timestamp}:${rawBody}`) } satisfies VerifiedSlackInput;
       },
-      normalize(input) { const verified = input && typeof input === "object" && "payload" in input
-        ? input as VerifiedSlackInput : undefined;
-        return normalize(verified?.payload ?? input, options.botUserId, verified); }
+      normalizeResult: normalizePort,
+      normalize(input) { const result = normalizePort(input);
+        return result.kind === "accepted" ? result.event : null; }
     },
     context: { readThread: (input) => readSlackThreadContext({ ...input,
       resolveCredential: options.resolveCredential, fetchImpl }) }, presentation: { render },

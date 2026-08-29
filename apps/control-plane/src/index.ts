@@ -11,6 +11,28 @@ import { createPostgresRuntime } from "./database/postgres.js";
 import { startNodeServer } from "./node-server.js";
 import { runJobLoop, runOneJob } from "./modules/jobs/worker.js";
 import { createControlPlaneRuntime } from "./runtime.js";
+import type { ControlPlaneConfig } from "./config.js";
+import type { SqlMigration } from "./database/migrations.js";
+
+export function createEnvironmentSlackSecretResolver(env: Record<string, string | undefined>) {
+  return { async resolve(reference: string) {
+    const match = reference.match(/^env:([A-Z][A-Z0-9_]*)$/u);
+    if (!match) throw new Error("slack_secret_reference_unsupported");
+    const value = env[match[1]!];
+    if (!value) throw new Error("slack_secret_unavailable");
+    return value;
+  } };
+}
+
+export function createProductionControlPlaneRuntime(input: {
+  config: ControlPlaneConfig; migrations: readonly SqlMigration[];
+  env: Record<string, string | undefined>;
+  postgres?: NonNullable<Parameters<typeof createControlPlaneRuntime>[0]["postgres"]>;
+}) {
+  return createControlPlaneRuntime({ config: input.config, migrations: input.migrations,
+    slackSecrets: createEnvironmentSlackSecretResolver(input.env),
+    ...(input.postgres ? { postgres: input.postgres } : {}) });
+}
 
 const migrationDirectory = fileURLToPath(
   new URL("../migrations", import.meta.url),
@@ -40,7 +62,7 @@ export async function main(input: {
   }
 
   if (command === "bootstrap-admin") {
-    const runtime = createControlPlaneRuntime({ config, migrations });
+    const runtime = createProductionControlPlaneRuntime({ config, migrations, env });
     try {
       const admin = parseAdminBootstrapConfig(env);
       const outcome = await runtime.identity.provisionOwner({
@@ -60,7 +82,7 @@ export async function main(input: {
   }
 
   if (command === "jobs") {
-    const runtime = createControlPlaneRuntime({ config, migrations });
+    const runtime = createProductionControlPlaneRuntime({ config, migrations, env });
     const abortController = new AbortController();
     const abort = () => abortController.abort();
     process.once("SIGTERM", abort);
@@ -102,7 +124,7 @@ export async function main(input: {
     throw new Error("unsupported_control_plane_command");
   }
 
-  const runtime = createControlPlaneRuntime({ config, migrations });
+  const runtime = createProductionControlPlaneRuntime({ config, migrations, env });
   const server = startNodeServer({
     application: runtime.application,
     consoleAssetsDirectory: fileURLToPath(new URL("./console", import.meta.url)),

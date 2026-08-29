@@ -71,6 +71,37 @@ describe("Slack typed Source App", () => {
     });
   });
 
+  it("keeps deleted reply identity exact while retaining its original thread root", async () => {
+    const payload = { ...mention(), event_id: "EvDeleteReply", event: { type: "message",
+      subtype: "message_deleted", user: "USLACKBOT", channel: "C1", ts: "1700000002.1",
+      deleted_ts: "1700000001.000200", previous_message: {
+        ts: "1700000001.000200", thread_ts: "1700000000.000100" } } };
+    const rawBody = JSON.stringify(payload); const timestamp = "1700000000";
+    const sourceApp = app(); const trusted = await sourceApp.ingress.verify({
+      rawBody: new TextEncoder().encode(rawBody), headers: new Headers({
+        "x-slack-request-timestamp": timestamp,
+        "x-slack-signature": computeSlackSignature({ signingSecret: "test-signing-secret", timestamp, rawBody }) }),
+      receivedAt: "2023-11-14T22:13:20.000Z" });
+    expect(sourceApp.ingress.normalize(trusted)).toMatchObject({ source: {
+      thread: { id: "C1:1700000000.000100", parentMessageId: "1700000000.000100" },
+      messageId: "1700000001.000200",
+      sourceVersionRef: "slack:T1:C1:1700000001.000200"
+    } });
+  });
+
+  it("distinguishes malformed known events from genuinely unsupported events", () => {
+    const sourceApp = app();
+    expect(sourceApp.ingress.normalizeResult?.({ ...mention(), event: {
+      type: "app_mention", user: "U1", text: "<@U_APP> fix", channel: "C1"
+    } })).toEqual({ kind: "malformed", code: "slack_app_mention_malformed" });
+    expect(sourceApp.ingress.normalizeResult?.({ ...mention(), event: {
+      type: "message", subtype: "message_deleted", channel: "C1"
+    } })).toEqual({ kind: "malformed", code: "slack_deletion_malformed" });
+    expect(sourceApp.ingress.normalizeResult?.({ ...mention(), event: {
+      type: "reaction_added", user: "U1", reaction: "eyes"
+    } })).toEqual({ kind: "unsupported" });
+  });
+
   it("rejects deletion normalization without HTTP signature verification", () => {
     expect(app().ingress.normalize({ ...mention(), event: { type: "message",
       subtype: "message_deleted", channel: "C1", deleted_ts: "1700000000.000100" } }))

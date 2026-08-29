@@ -40,6 +40,7 @@ import { loadRelayContentKey } from "./modules/source-content/crypto.js";
 import { createSourceContentJobHandlers } from "./modules/source-content/worker.js";
 import { createSourceIngressService } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
+import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
 import type { SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import {
   createSourceIngressWorker,
@@ -159,6 +160,8 @@ export function createControlPlaneRuntime(input: {
     clock,
   });
   const reads = createConsoleReadModel({ pool: postgres.pool });
+  const slackCommandAuthority = input.slackCommandAuthority
+    ?? createControlPlaneSourceThreadAuthority({ hosted, permissions, clock });
   const jobs = createDurableJobQueue({
     pool: postgres.pool,
     clock,
@@ -282,9 +285,9 @@ export function createControlPlaneRuntime(input: {
         masterSecret: input.config.githubIngressMasterSecret,
       })
     : null;
-  const slack = sourceContent && input.slackSecrets && input.slackCommandAuthority
+  const slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
-        jobs, secrets: input.slackSecrets, commandAuthority: input.slackCommandAuthority,
+        jobs, secrets: input.slackSecrets, commandAuthority: slackCommandAuthority,
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
   const application = createControlPlaneApplication({
@@ -323,9 +326,18 @@ export function createControlPlaneRuntime(input: {
           if (!sourceSchema.ready) return sourceSchema;
           const ingressSchema = await checkSourceIngressSchemaReadiness(postgres.pool);
           if (!ingressSchema.ready) return ingressSchema;
-          if (input.slackSecrets && input.slackCommandAuthority) {
+          if (input.slackSecrets) {
             const slackSchema = await checkSlackIngressSchemaReadiness(postgres.pool);
             if (!slackSchema.ready) return slackSchema;
+            const configured = await postgres.pool.query<{ count: number }>(
+              "SELECT count(*)::int AS count FROM cp_slack_installation");
+            if ((configured.rows[0]?.count ?? 0) > 0 && !slack) {
+              return { ready: false, reason: "configuration_invalid" };
+            }
+            if (slack) {
+              const slackReady = await slack.checkReadiness();
+              if (!slackReady.ready) return slackReady;
+            }
           }
           return sourceContent.checkReadiness();
         }

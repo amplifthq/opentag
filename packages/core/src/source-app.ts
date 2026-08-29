@@ -19,6 +19,10 @@ export const SourceAppCapabilitiesSchema = z
   .strict();
 
 export type SourceAppCapabilities = z.infer<typeof SourceAppCapabilitiesSchema>;
+export type SourceIngressNormalizationResult =
+  | { kind: "accepted"; event: OpenTagSourceIngressEvent }
+  | { kind: "unsupported" }
+  | { kind: "malformed"; code: string };
 
 export type SourceAppCorePorts<_RawDelivery, NativePresentation> = {
   appId: string;
@@ -27,6 +31,7 @@ export type SourceAppCorePorts<_RawDelivery, NativePresentation> = {
   ingress: {
     verify(input: OpenTagChannelIngressVerificationInput): Promise<unknown>;
     normalize(input: unknown): OpenTagSourceIngressEvent | null;
+    normalizeResult?(input: unknown): SourceIngressNormalizationResult;
   };
   context: {
     readThread(input: {

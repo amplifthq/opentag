@@ -27,6 +27,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0006_source_ingress.sql",
       "0007_hosted_run_offline_safe.sql",
       "0008_slack_source_app.sql",
+      "0009_slack_action_authority_envelope.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();

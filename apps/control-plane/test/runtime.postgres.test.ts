@@ -9,6 +9,7 @@ import { computeHostedAdmissionEnvelopeDigestV1,
   HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
 import { digest as contentDigest, sourceContentAad } from "../src/modules/source-content/crypto.js";
 import { createControlPlaneRuntime } from "../src/runtime.js";
+import { createProductionControlPlaneRuntime } from "../src/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture } from "./control-fixtures.js";
 import {
   createIsolatedPostgres,
@@ -98,9 +99,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
       team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,created_at,updated_at)
       VALUES('org_slack_runtime','install_runtime','binding_runtime','T_RUNTIME','A_RUNTIME','C_RUNTIME',
-      'U_APP',ARRAY['U_MEMBER'],'secret://signing','secret://bot',$1,$1)`, [now]);
-    const completed = { outcome: "completed" as const };
-    const runtime = createControlPlaneRuntime({ config: {
+      'U_APP',ARRAY['U_MEMBER'],'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
+    const config = {
       bootstrapOrganizationId: "org_slack_runtime", bootstrapOrganizationName: "Slack",
       bootstrapPairingToken: "bootstrap_slack_runtime_secret", databaseUrl: TEST_DATABASE_URL!,
       environment: "local", fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
@@ -109,12 +109,14 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         maxFailures: 5, networkMaxFailures: 50, windowMs: 300_000, lockoutMs: 900_000 },
       poolMax: 4, port: 3000, publicOrigin: "http://127.0.0.1:3000",
       recoveryPairingToken: null, releaseSha: "local", relayContentKey: { file: keyFile, keyVersion: "v1" }
-    }, postgres: { pool: fixture.pool, async close() {} }, migrations: fixture.migrations,
-    slackSecrets: { async resolve(reference) { return reference === "secret://signing" ? "secret" : "bot"; } },
-    slackCommandAuthority: { async status() { return completed; }, async cancel() { return completed; },
-      async approve() { return completed; }, async reject() { return completed; },
-      async bind() { return completed; }, async unbind() { return completed; } },
-    slackFetchImpl: async () => { throw new Error("provider_call_forbidden"); } });
+    } as const;
+    const unavailable = createProductionControlPlaneRuntime({ config, migrations: fixture.migrations,
+      env: {}, postgres: { pool: fixture.pool, async close() {} } });
+    expect((await unavailable.application.fetch(new Request("http://control.test/readyz"))).status).toBe(503);
+    await unavailable.close();
+    const runtime = createProductionControlPlaneRuntime({ config, migrations: fixture.migrations,
+      env: { SLACK_SIGNING_SECRET: "secret", SLACK_BOT_TOKEN: "bot" },
+      postgres: { pool: fixture.pool, async close() {} } });
     const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
       const body = JSON.stringify({ type: "event_callback", team_id: teamId, api_app_id: "A_RUNTIME",
         event_id: `Ev_${teamId}`, event_time: Math.floor(now.getTime() / 1000),

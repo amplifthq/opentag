@@ -25,7 +25,8 @@ function registrationSnapshot(definition: RegisteredSourceApp): RegisteredSource
     installation: Object.freeze({ ...definition.installation }),
     ingress: Object.freeze({
       verify: definition.ingress.verify,
-      normalize: definition.ingress.normalize
+      normalize: definition.ingress.normalize,
+      ...(definition.ingress.normalizeResult ? { normalizeResult: definition.ingress.normalizeResult } : {})
     }),
     context: Object.freeze({ readThread: definition.context.readThread }),
     presentation: Object.freeze({ render: definition.presentation.render }),

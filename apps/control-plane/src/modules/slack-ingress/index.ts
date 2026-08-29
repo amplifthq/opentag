@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { OpenTagSourceDeletionEvent, OpenTagSourceIngressEvent } from "@opentag/core";
+import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
 import { SourceAppRegistry, executeSourceThreadCommand, type SourceAppDefinition,
   type SourceThreadCommand, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import { createSlackSourceApp, SlackVerificationError } from "@opentag/slack";
@@ -25,11 +26,16 @@ type InstallationResolution = { kind: "found"; installation: SlackInstallation }
   | { kind: "not_found" } | { kind: "ambiguous" };
 
 type ActionRow = { organization_id: string; action_id: string; installation_id: string;
+  action_token_hash: string;
   binding_id: string; team_id: string; app_id: string; channel_id: string;
   thread_root_message_id: string; run_id: string; pending_request_id: string;
   action_kind: "status" | "cancel" | "approval" | "bind" | "unbind";
   action_descriptor: unknown;
+  action_descriptor_digest: string;
   approval_epoch: string; frozen_ceiling: unknown; allowed_decisions: string[];
+  frozen_ceiling_digest: string; policy_digest: string; runner_id: string;
+  attempt_id: string; attempt_number: number; attempt_epoch: number;
+  fencing_token_digest: string; permission_request_digest: string; pending_action_id: string;
   requester_user_id: string | null; operator_user_ids: string[];
   member_user_ids: string[];
   approver_user_id: string | null; admin_user_ids: string[]; expires_at: Date;
@@ -154,7 +160,14 @@ function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unk
         return typeof payload.challenge === "string" ? { status: 200, body: payload.challenge }
           : { status: 400, body: { error: "invalid_challenge" } };
       }
-      const normalized = input.sourceApp.ingress.normalize(trusted);
+      let normalized: OpenTagSourceIngressEvent | null;
+      try {
+        const result = input.sourceApp.ingress.normalizeResult?.(trusted);
+        if (result?.kind === "malformed") return { status: 400, body: { error: result.code } };
+        if (result?.kind === "unsupported") return { status: 200, body: { ok: true, ignored: true } };
+        normalized = result?.kind === "accepted" ? result.event
+          : input.sourceApp.ingress.normalize(trusted);
+      } catch { return { status: 400, body: { error: "slack_normalization_failed" } }; }
       if (!normalized) return { status: 200, body: { ok: true, ignored: true } };
       if (normalized.trigger === "source_content_deleted") return withdraw(normalized);
       const event = normalized as Exclude<OpenTagSourceIngressEvent, OpenTagSourceDeletionEvent>;
@@ -191,25 +204,46 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
   };
 
   return {
+    async checkReadiness() {
+      try {
+        const rows = await input.pool.query<{ installation_id: string }>(
+          "SELECT installation_id FROM cp_slack_installation ORDER BY organization_id, installation_id");
+        for (const row of rows.rows) {
+          const resolved = await resolve(row.installation_id);
+          if (resolved.kind !== "found") return { ready: false, reason: "configuration_invalid" } as const;
+          await input.secrets.resolve(resolved.installation.botTokenRef);
+        }
+        return { ready: true } as const;
+      } catch { return { ready: false, reason: "configuration_invalid" } as const; }
+    },
     async issueAction(command: { organizationId: string; actionId: string; installationId: string;
       bindingId: string; teamId: string; appId: string; channelId: string;
       threadRootMessageId: string; runId: string; pendingRequestId: string;
       actionKind: ActionRow["action_kind"]; actionDescriptor: unknown;
-      approvalEpoch: string; frozenCeiling: unknown;
+      approvalEpoch: string; frozenCeiling: unknown; policyDigest: string;
+      runnerId: string; attemptId: string; attemptNumber: number; attemptEpoch: number;
+      fencingTokenDigest: string; permissionRequestDigest: string; pendingActionId: string;
       allowedDecisions: string[]; requesterUserId?: string; operatorUserIds: string[];
       memberUserIds: string[];
       approverUserId?: string; adminUserIds: string[]; expiresAt: Date }) {
       const token = input.tokenFactory?.() ?? randomBytes(32).toString("base64url");
+      const actionDescriptorDigest = await computeControlPayloadDigestV1(command.actionDescriptor);
+      const frozenCeilingDigest = await computeControlPayloadDigestV1(command.frozenCeiling);
       await input.pool.query(`INSERT INTO cp_slack_action_authority(
         organization_id,action_id,action_token_hash,installation_id,binding_id,team_id,app_id,
-        channel_id,thread_root_message_id,run_id,pending_request_id,action_kind,action_descriptor,approval_epoch,
-        frozen_ceiling,allowed_decisions,requester_user_id,member_user_ids,operator_user_ids,approver_user_id,
-        admin_user_ids,expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-          $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`, [command.organizationId, command.actionId,
+        channel_id,thread_root_message_id,run_id,pending_request_id,action_kind,action_descriptor,
+        action_descriptor_digest,approval_epoch,frozen_ceiling,frozen_ceiling_digest,policy_digest,
+        runner_id,attempt_id,attempt_number,attempt_epoch,fencing_token_digest,permission_request_digest,
+        pending_action_id,allowed_decisions,requester_user_id,member_user_ids,operator_user_ids,
+        approver_user_id,admin_user_ids,expires_at,created_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`, [command.organizationId, command.actionId,
         hashBytes(token), command.installationId, command.bindingId, command.teamId, command.appId,
         command.channelId, command.threadRootMessageId, command.runId, command.pendingRequestId,
-        command.actionKind, command.actionDescriptor, command.approvalEpoch,
-        command.frozenCeiling, command.allowedDecisions,
+        command.actionKind, JSON.stringify(command.actionDescriptor), actionDescriptorDigest, command.approvalEpoch,
+        JSON.stringify(command.frozenCeiling), frozenCeilingDigest, command.policyDigest, command.runnerId,
+        command.attemptId, command.attemptNumber, command.attemptEpoch, command.fencingTokenDigest,
+        command.permissionRequestDigest, command.pendingActionId, command.allowedDecisions,
         command.requesterUserId ?? null, command.memberUserIds, command.operatorUserIds, command.approverUserId ?? null,
         command.adminUserIds, command.expiresAt, input.clock.now()]);
       return token;
@@ -276,27 +310,81 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           if (!row.allowed_decisions.includes(decision)) {
             return { status: 403, body: { error: "slack_action_not_authorized" } };
           }
+          if (row.action_kind === "approval") {
+            const current = await client.query<{
+              run_state: string; permission_ceiling_digest: string; attempt_state: string;
+              blocked_permission_request_id: string | null;
+              blocked_action_descriptor_digest: string | null;
+              blocked_policy_snapshot_digest: string | null;
+              runner_id: string; attempt_id: string; attempt_number: number;
+              fencing_token_digest: string; permission_state: string;
+              permission_request_digest: string; permission_action_id: string;
+              permission_policy_digest: string; permission_attempt_epoch: string | null;
+            }>(`SELECT run.state AS run_state, run.permission_ceiling_digest,
+                attempt.state AS attempt_state, attempt.blocked_permission_request_id,
+                attempt.blocked_action_descriptor_digest, attempt.blocked_policy_snapshot_digest,
+                attempt.runner_id, attempt.attempt_id, attempt.attempt_number,
+                attempt.fencing_token_digest, permission.state AS permission_state,
+                permission.permission_request_digest,
+                permission.action_id AS permission_action_id,
+                permission.policy_snapshot_digest AS permission_policy_digest,
+                permission.request->'attempt'->>'epoch' AS permission_attempt_epoch
+              FROM cp_hosted_run run
+              JOIN cp_hosted_attempt attempt ON attempt.organization_id = run.organization_id
+                AND attempt.run_id = run.run_id AND attempt.attempt_number = run.current_attempt_number
+              JOIN cp_permission_request permission ON permission.organization_id = run.organization_id
+                AND permission.run_id = run.run_id AND permission.permission_request_id = $3
+              WHERE run.organization_id = $1 AND run.run_id = $2`,
+            [row.organization_id, row.run_id, row.pending_request_id]);
+            const state = current.rows[0];
+            if (!state || state.run_state !== "needs_approval" || state.attempt_state !== "needs_approval"
+              || state.permission_state !== "waiting"
+              || state.blocked_permission_request_id !== row.pending_request_id
+              || state.blocked_action_descriptor_digest !== row.action_descriptor_digest
+              || state.blocked_policy_snapshot_digest !== row.policy_digest
+              || state.permission_ceiling_digest !== row.frozen_ceiling_digest
+              || state.permission_request_digest !== row.permission_request_digest
+              || state.permission_action_id !== row.pending_action_id
+              || state.permission_policy_digest !== row.policy_digest
+              || state.permission_attempt_epoch !== row.approval_epoch
+              || state.runner_id !== row.runner_id || state.attempt_id !== row.attempt_id
+              || state.attempt_number !== row.attempt_number
+              || state.fencing_token_digest !== row.fencing_token_digest) {
+              return { status: 403, body: { error: "slack_action_authority_stale" } };
+            }
+          }
           const actor = { provider: "slack", id: actorId } as const;
+          const authority = { organizationId: row.organization_id,
+            installationId: row.installation_id, bindingId: row.binding_id,
+            sourceThreadId: `${row.channel_id}:${row.thread_root_message_id}`,
+            runId: row.run_id, pendingRequestId: row.pending_request_id,
+            approvalEpoch: row.approval_epoch, runnerId: row.runner_id,
+            attemptId: row.attempt_id, attemptNumber: row.attempt_number,
+            attemptEpoch: row.attempt_epoch, fencingTokenDigest: row.fencing_token_digest,
+            permissionRequestDigest: row.permission_request_digest, actionId: row.pending_action_id,
+            actionDescriptorDigest: row.action_descriptor_digest,
+            frozenCeilingDigest: row.frozen_ceiling_digest, policyDigest: row.policy_digest,
+            actionTokenIdentity: row.action_token_hash };
           let command: SourceThreadCommand | null = null;
           if (decision === "status" && row.action_kind === "status" && row.member_user_ids.includes(actorId)) command = {
-            type: "status", commandId: row.action_id, actor };
+            type: "status", commandId: row.action_id, actor, authority };
           if (decision === "cancel" && row.action_kind === "cancel"
             && (actorId === row.requester_user_id || row.operator_user_ids.includes(actorId))) command = {
-            type: "cancel", commandId: row.action_id, actor, reason: "source_thread_request" };
+            type: "cancel", commandId: row.action_id, actor, reason: "source_thread_request", authority };
           if ((decision === "allow_once" || decision === "allow_run") && row.action_kind === "approval"
             && actorId === row.approver_user_id) command = { type: "approve", commandId: row.action_id,
-              actor, requestId: row.pending_request_id, decision };
+              actor, requestId: row.pending_request_id, decision, authority };
           if (decision === "deny" && row.action_kind === "approval" && actorId === row.approver_user_id) {
             command = { type: "reject", commandId: row.action_id, actor,
-              requestId: row.pending_request_id };
+              requestId: row.pending_request_id, authority };
           }
           if (decision === "bind" && row.action_kind === "bind" && row.admin_user_ids.includes(actorId)) {
             command = { type: "bind", commandId: row.action_id, actor,
-              bindingDigest: resolved.installation.bindingDigest };
+              bindingDigest: resolved.installation.bindingDigest, authority };
           }
           if (decision === "unbind" && row.action_kind === "unbind" && row.admin_user_ids.includes(actorId)) {
             command = { type: "unbind", commandId: row.action_id, actor,
-              bindingDigest: resolved.installation.bindingDigest };
+              bindingDigest: resolved.installation.bindingDigest, authority };
           }
           if (!command) return { status: 403, body: { error: "slack_action_not_authorized" } };
           const result = await executeSourceThreadCommand({ adapter: resolved.sourceApp,

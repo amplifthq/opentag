@@ -91,6 +91,33 @@ describe("executeSourceThreadCommand", () => {
     expect(decisions).toEqual(["allow_once", "allow_run"]);
   });
 
+  it("preserves the exact server authority envelope and rejects undeclared widening", async () => {
+    let observed: unknown;
+    const authority: SourceThreadCommandAuthorityPorts = {
+      async status() { return { outcome: "completed" }; }, async cancel() { return { outcome: "completed" }; },
+      async approve(command) { observed = command.authority; return { outcome: "completed" }; },
+      async reject() { return { outcome: "completed" }; }, async bind() { return { outcome: "completed" }; },
+      async unbind() { return { outcome: "completed" }; }
+    };
+    const envelope = { organizationId: "org_1", installationId: "install_1", bindingId: "binding_1",
+      sourceThreadId: "C1:1700000000.1", runId: "run_1", pendingRequestId: "permission_1",
+      approvalEpoch: "epoch_1", actionDescriptorDigest: `sha256:${"a".repeat(64)}`,
+      runnerId: "runner_1", attemptId: "attempt_1", attemptNumber: 1, attemptEpoch: 1,
+      fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+      permissionRequestDigest: `sha256:${"f".repeat(64)}`, actionId: "pending_action_1",
+      frozenCeilingDigest: `sha256:${"b".repeat(64)}`, policyDigest: `sha256:${"c".repeat(64)}`,
+      actionTokenIdentity: `sha256:${"d".repeat(64)}` };
+    await executeSourceThreadCommand({ adapter: fakeSourceApp(), authority,
+      command: { type: "approve", commandId: "cmd_envelope", actor: { provider: "slack", id: "U1" },
+        requestId: "permission_1", decision: "allow_once", authority: envelope } });
+    expect(observed).toEqual(envelope);
+    await expect(executeSourceThreadCommand({ adapter: fakeSourceApp(), authority,
+      command: { type: "approve", commandId: "cmd_widen", actor: { provider: "slack", id: "U1" },
+        requestId: "permission_1", decision: "allow_once",
+        authority: { ...envelope, publicationMode: "direct" } as any } }))
+      .rejects.toThrow("Source Thread authority envelope");
+  });
+
   it("requires thread support before executing thread status", async () => {
     await expect(executeSourceThreadCommand({
       adapter: fakeSourceApp({ threads: false }),

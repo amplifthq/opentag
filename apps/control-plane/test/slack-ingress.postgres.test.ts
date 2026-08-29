@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { computeSlackSignature, createSlackSourceApp } from "@opentag/slack";
+import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
 import { createDurableJobQueue } from "../src/modules/jobs/index.js";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { createSourceIngressService } from "../src/modules/source-ingress/index.js";
@@ -201,12 +202,65 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveEvents("install_1", request("EvGuest", { type: "app_mention",
       user: "U_GUEST", text: "<@U_APP> fix", ts: "1700000004.1", channel: "C1" })))
       .resolves.toMatchObject({ status: 403 });
+    await expect(ingress.receiveEvents("install_1", request("EvMalformedMention", {
+      type: "app_mention", user: "U1", text: "<@U_APP> fix", channel: "C1" })))
+      .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
+    await expect(ingress.receiveEvents("install_1", request("EvMalformedDelete", {
+      type: "message", subtype: "message_deleted", channel: "C1", ts: "1700000005.1" })))
+      .resolves.toMatchObject({ status: 400, body: { error: "slack_deletion_malformed" } });
+    await expect(ingress.receiveEvents("install_1", request("EvUnsupported", {
+      type: "reaction_added", user: "U1", reaction: "eyes", channel: "C1" })))
+      .resolves.toMatchObject({ status: 200, body: { ignored: true } });
     material.delete("secret://slack/signing");
     await expect(ingress.receiveEvents("install_1", request("EvSecret"))).resolves.toMatchObject({ status: 503 });
   });
 
+  it("returns 400 for signed malformed interactivity rather than masking it as unavailable", async () => {
+    await insertSlackInstallation(); const completed = { outcome: "completed" as const };
+    const { ingress } = productionComponents({ commandAuthority: {
+      async status() { return completed; }, async cancel() { return completed; },
+      async approve() { return completed; }, async reject() { return completed; },
+      async bind() { return completed; }, async unbind() { return completed; } } });
+    await expect(ingress.receiveInteractivity("install_1", actionRequest({ type: "block_actions",
+      api_app_id: "A1", team: { id: "T1" }, user: { id: "U1" }, channel: { id: "C1" },
+      actions: [] }))).resolves.toMatchObject({ status: 400, body: { error: "invalid_slack_envelope" } });
+  });
+
   it("authorizes opaque action tokens by exact install/thread/role/decision and consumes them once", async () => {
     await insertSlackInstallation(); const decisions: string[] = [];
+    const frozenCeiling = { publicationMode: "proposal_only", network: ["api.example"] };
+    const frozenCeilingDigest = await computeControlPayloadDigestV1(frozenCeiling);
+    const actionDescriptor = "workspace.write";
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const policyDigest = digest("policy"); const permissionRequestDigest = digest("permission");
+    const fencingTokenDigest = digest("fence");
+    await fixture.pool.query(`INSERT INTO cp_runner(organization_id,runner_id,registration_generation,
+      credential_generation,current_credential_id,capabilities,created_at,updated_at)
+      VALUES('org_a','runner_1',1,1,'credential_1','[]',$1,$1)`, [now]);
+    await fixture.pool.query(`INSERT INTO cp_hosted_run(organization_id,run_id,admission_id,
+      admission_operation_id,admission_digest,source_identity_digest,runner_id,executor_id,
+      source_version_ref,source_content_ids,source_context_digest,queue_claim_deadline,
+      permission_ceiling_digest,publication_mode,publication_policy_digest,completion_mode,
+      completion_contract_digest,state,current_attempt_number,hosted_admission,
+      admission_policy_snapshot,created_at,updated_at)
+      VALUES('org_a','run_1','admission_1','operation_1',$1,$2,'runner_1','executor_1',
+      'slack:T1:C1:1700000000.000100',ARRAY['content_1'],$3,$4,$5,'proposal_only',$6,
+      'proposal_ready',$7,'needs_approval',1,'{}','{}',$8,$8)`,
+      [digest("admission"), digest("source"), digest("context"),
+        new Date(now.getTime() + 120_000), frozenCeilingDigest, policyDigest,
+        digest("completion"), now]);
+    await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
+      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      blocked_permission_request_id,blocked_action_descriptor_digest,blocked_policy_snapshot_digest,
+      state,claimed_at,updated_at) VALUES('org_a','run_1',1,'attempt_1','runner_1','credential_1',$1,$2,
+      'open','permission_1',$3,$4,'needs_approval',$5,$5)`,
+      [fencingTokenDigest, new Date(now.getTime() + 60_000), actionDescriptorDigest, policyDigest, now]);
+    await fixture.pool.query(`INSERT INTO cp_permission_request(organization_id,permission_request_id,
+      run_id,runner_id,attempt_id,attempt_number,action_id,resolution_id,permission_request_digest,
+      policy_snapshot_digest,state,request,current_receipt,created_at,updated_at)
+      VALUES('org_a','permission_1','run_1','runner_1','attempt_1',1,'pending_action_1','resolution_1',
+      $1,$2,'waiting',$3,'{}',$4,$4)`, [permissionRequestDigest, policyDigest,
+      { attempt: { epoch: 1 } }, now]);
     let sequence = 0;
     const completed = { outcome: "completed" as const };
     const authority = { async status() { return completed; }, async cancel() { return completed; },
@@ -215,15 +269,18 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       async unbind() { return completed; } };
     const { ingress } = productionComponents({ commandAuthority: authority,
       tokenFactory: () => `opaque_action_token_${++sequence}_abcdefghijklmnopqrstuvwxyz` });
-    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "bind" | "unbind" = "approval") => ingress.issueAction({
+    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "bind" | "unbind" = "approval",
+      override: Record<string, unknown> = {}) => ingress.issueAction({
       organizationId: "org_a", actionId, installationId: "install_1", bindingId: "binding_1",
       teamId: "T1", appId: "A1", channelId: "C1", threadRootMessageId: "1700000000.000100",
       runId: "run_1", pendingRequestId: "permission_1", actionKind,
-      actionDescriptor: { kind: actionKind, target: "frozen" },
-      approvalEpoch: "epoch_1", frozenCeiling: { publicationMode: "proposal_only", network: ["api.example"] },
+      actionDescriptor: actionKind === "approval" ? actionDescriptor : { kind: actionKind, target: "frozen" },
+      approvalEpoch: "1", frozenCeiling, policyDigest,
+      runnerId: "runner_1", attemptId: "attempt_1", attemptNumber: 1, attemptEpoch: 1,
+      fencingTokenDigest, permissionRequestDigest, pendingActionId: "pending_action_1",
       allowedDecisions, memberUserIds: ["U_MEMBER"], requesterUserId: "U_REQUESTER",
       operatorUserIds: ["U_OPERATOR"], approverUserId: "U_APPROVER", adminUserIds: ["U_ADMIN"],
-      expiresAt: new Date(now.getTime() + 60_000) });
+      expiresAt: new Date(now.getTime() + 60_000), ...override });
     const action = (token: string, decision: string, userId = "U_APPROVER", thread = "1700000000.000100") =>
       actionRequest({ type: "block_actions", api_app_id: "A1", team: { id: "T1" }, user: { id: userId },
         channel: { id: "C1" }, container: { channel_id: "C1", thread_ts: thread,
@@ -245,6 +302,16 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     const run = await issue("action_run", ["allow_run"]);
     await expect(ingress.receiveInteractivity("install_1", action(run, "allow_run")))
       .resolves.toMatchObject({ status: 200 });
+    for (const [name, override] of [
+      ["cross_run", { runId: "run_other" }],
+      ["stale_epoch", { approvalEpoch: "epoch_stale" }],
+      ["ceiling_mismatch", { frozenCeiling: { publicationMode: "pull_request" } }],
+      ["policy_mismatch", { policyDigest: digest("other_policy") }]
+    ] as const) {
+      const stale = await issue(`action_${name}`, ["allow_once"], "approval", override);
+      await expect(ingress.receiveInteractivity("install_1", action(stale, "allow_once")))
+        .resolves.toMatchObject({ status: 403, body: { error: "slack_action_authority_stale" } });
+    }
     const status = await issue("action_status", ["status"], "status");
     await expect(ingress.receiveInteractivity("install_1", action(status, "status", "U_GUEST")))
       .resolves.toMatchObject({ status: 403 });

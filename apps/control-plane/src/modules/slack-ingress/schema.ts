@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, jsonb, pgTable, primaryKey, text,
+import { check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text,
   timestamp, unique } from "drizzle-orm/pg-core";
 import { sourceAppInstallations, sourceBindings } from "../source-ingress/schema.js";
 
@@ -38,7 +38,14 @@ export const slackActionAuthorities = pgTable("cp_slack_action_authority", {
   threadRootMessageId: text("thread_root_message_id").notNull(), runId: text("run_id").notNull(),
   pendingRequestId: text("pending_request_id").notNull(), actionKind: text("action_kind").notNull(),
   actionDescriptor: jsonb("action_descriptor").notNull(),
+  actionDescriptorDigest: text("action_descriptor_digest").notNull(),
   approvalEpoch: text("approval_epoch").notNull(), frozenCeiling: jsonb("frozen_ceiling").notNull(),
+  frozenCeilingDigest: text("frozen_ceiling_digest").notNull(),
+  policyDigest: text("policy_digest").notNull(), runnerId: text("runner_id").notNull(),
+  attemptId: text("attempt_id").notNull(), attemptNumber: integer("attempt_number").notNull(),
+  attemptEpoch: integer("attempt_epoch").notNull(), fencingTokenDigest: text("fencing_token_digest").notNull(),
+  permissionRequestDigest: text("permission_request_digest").notNull(),
+  pendingActionId: text("pending_action_id").notNull(),
   allowedDecisions: text("allowed_decisions").array().notNull(),
   requesterUserId: text("requester_user_id"), operatorUserIds: text("operator_user_ids").array().notNull(),
   memberUserIds: text("member_user_ids").array().notNull(),
@@ -61,6 +68,7 @@ export const slackActionAuthorities = pgTable("cp_slack_action_authority", {
     AND ${table.allowedDecisions} <@ ARRAY['status','cancel','allow_once','allow_run','deny','bind','unbind']::text[]`),
   check("cp_slack_action_authority_members_check", sql`cardinality(${table.memberUserIds}) > 0`),
   check("cp_slack_action_authority_expiry_check", sql`${table.expiresAt} > ${table.createdAt}`),
+  check("cp_slack_action_authority_attempt_number_check", sql`${table.attemptNumber} > 0`),
   index("cp_slack_action_authority_lookup_idx").on(table.organizationId,
     table.installationId, table.channelId, table.threadRootMessageId),
 ]);
