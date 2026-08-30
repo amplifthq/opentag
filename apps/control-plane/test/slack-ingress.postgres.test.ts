@@ -166,6 +166,29 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       credentialGenerationDigest: digest("generation_2") })).toBeDefined();
   });
 
+  it("republishes exact Slack delivery authority when route resolution recovers a secret", async () => {
+    await insertSlackInstallation();
+    const runtime = productionComponents();
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 1,
+      failures: [] });
+
+    runtime.material.delete("secret://slack/signing");
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 0,
+      failures: [{ organizationId: "org_a", installationId: "install_1",
+        errorCode: "slack_installation_preload_failed" }] });
+    expect(runtime.sourceApps.deliveryAuthorities()).toEqual([]);
+
+    runtime.material.set("secret://slack/signing", "secret");
+    await expect(runtime.ingress.receiveEvents("route_1", challengeRequest()))
+      .resolves.toEqual({ status: 200, body: "challenge_abc123" });
+    expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "A1", bindingDigest: digest("binding"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("generation") })).toBeDefined();
+    expect(runtime.sourceApps.deliveryAuthorities()).toEqual([{ organizationId: "org_a",
+      appId: "slack", appInstanceId: "A1", bindingDigest: digest("binding"),
+      credentialGeneration: 1, credentialGenerationDigest: digest("generation") }]);
+  });
+
   it("routes the same installation id independently across organizations", async () => {
     await insertSlackInstallation();
     await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_b','B')");

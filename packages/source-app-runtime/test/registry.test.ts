@@ -178,6 +178,27 @@ describe("SourceAppRegistry", () => {
       .not.toThrow();
   });
 
+  it("republishes an exact generation registration after snapshot eviction", async () => {
+    const registry = new SourceAppRegistry().register(fakeSourceApp({ appId: "slack",
+      organizationId: "org_a", credentialGeneration: 1, responseId: "message_before_eviction" }));
+    registry.replaceAppSnapshot("slack", []);
+
+    registry.register(fakeSourceApp({ appId: "slack", organizationId: "org_a",
+      credentialGeneration: 1, responseId: "message_after_republish" }));
+
+    expect(registry.deliveryAuthorities()).toEqual([{ organizationId: "org_a", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("a"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("b") }]);
+    const republished = registry.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("a"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("b") });
+    expect(republished).toBeDefined();
+    await expect(republished!.delivery.deliver({ request: { text: "hello" },
+      intent: {} as DeliveryIntentV2 })).resolves.toMatchObject({
+      externalResourceId: "message_after_republish"
+    });
+  });
+
   it("uses one registry entry for inbound context, presentation, and delivery", async () => {
     const registry = new SourceAppRegistry();
     registry.register(fakeSourceApp({ appId: "second-app" }));

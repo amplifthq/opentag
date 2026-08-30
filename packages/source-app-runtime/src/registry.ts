@@ -63,7 +63,7 @@ export class SourceAppRegistry {
         if (next.bindingDigest !== previous.bindingDigest
           || next.credentialGenerationDigest !== previous.credentialGenerationDigest)
           throw new Error("Source App equal generation mismatch");
-        return this;
+        if (current) return this;
       }
     }
     this.#apps.set(key, registrationSnapshot(definition as RegisteredSourceApp));
