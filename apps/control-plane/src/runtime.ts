@@ -41,8 +41,12 @@ import { createSourceContentJobHandlers } from "./modules/source-content/worker.
 import { createSourceIngressService } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
+import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
-import type { SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
+import { SourceAppRegistry, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
+import { ProviderAdapterRegistry, ProviderSideEffectKernel,
+  UnifiedDeliveryProducer } from "@opentag/delivery-runtime";
+import type { DeliveryIntentV2, DeliveryPayloadEnvelope } from "@opentag/delivery-contract";
 import {
   createSourceIngressWorker,
   type SourceResolutionPort,
@@ -169,9 +173,12 @@ export function createControlPlaneRuntime(input: {
     leaseDurationMs: input.config.jobLeaseDurationMs,
     tokenFactory: () => runtimeSecret("job_lease"),
   });
+  const sourceApps = new SourceAppRegistry();
+  const deliveryRuntimeOwner = { runtimeOwnerId: "control-plane", runtimeGeneration: 1,
+    schemaGeneration: 1 } as const;
   const providerDeliveryRepository = createPostgresDeliveryRepository({
     pool: postgres.pool,
-    owner: { runtimeOwnerId: "control-plane", runtimeGeneration: 1, schemaGeneration: 1 },
+    owner: deliveryRuntimeOwner,
     leaseOwner: `control-plane-${process.pid}`,
     leaseSeconds: Math.min(86_400,
       Math.max(1, Math.ceil(input.config.jobLeaseDurationMs / 1_000))),
@@ -267,19 +274,6 @@ export function createControlPlaneRuntime(input: {
         clock,
       })
     : null;
-  const jobHandlers = {
-    "hosted-attempt-reconciliation": async (job: {
-      organizationId: string | null;
-    }) => {
-      const queued = await hosted.expireQueued(job.organizationId);
-      const attempts = await hosted.reconcileExpiredAttempts(job.organizationId);
-      return { expiredQueued: queued.expired, expiredAttempts: attempts.expired };
-    },
-    "runner-readiness-retention": async (job: {
-      organizationId: string | null;
-    }) => runners.pruneExpiredReadiness(job.organizationId),
-    ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
-  };
   const scheduleJobs = () => scheduleControlPlaneMaintenance({
     queue: jobs,
     clock,
@@ -295,9 +289,47 @@ export function createControlPlaneRuntime(input: {
     : null;
   const slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
-        jobs, secrets: input.slackSecrets, commandAuthority: slackCommandAuthority,
+        jobs, secrets: input.slackSecrets, sourceApps, commandAuthority: slackCommandAuthority,
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
+  const providerDeliveryKernel = new ProviderSideEffectKernel<object>({
+    repository: providerDeliveryRepository,
+    registry: new ProviderAdapterRegistry<object>(sourceApps),
+    prepareRequest(intent, stored) {
+      const payload = stored as DeliveryPayloadEnvelope<object>;
+      return { request: payload.providerRequest, operation: intent.operation,
+        presentationDigest: intent.presentationDigest, targetDigest: intent.targetDigest };
+    },
+  });
+  const providerDeliveryProducer = new UnifiedDeliveryProducer<{
+    intent: DeliveryIntentV2; providerRequest: object;
+    phase: DeliveryPayloadEnvelope["phase"]; frozenDeadline: string;
+  }>({ submitter: providerDeliveryKernel, async resolveIntent(presentation) {
+    const intent = presentation.intent; const binding = intent.providerBinding;
+    const persistedPayload: DeliveryPayloadEnvelope<object> = { envelopeVersion: 1,
+      providerRequest: presentation.providerRequest, phase: presentation.phase,
+      frozenDeadline: presentation.frozenDeadline, currentTruth: {
+        runId: intent.provenance.kind === "business" ? intent.provenance.runId : "",
+        scopeKind: intent.scope.kind, scopeId: intent.scope.id, targetDigest: intent.targetDigest,
+        providerInstanceId: binding.providerInstanceId,
+        statusMessageId: "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
+        ...deliveryRuntimeOwner, providerConfigGeneration: binding.providerConfigGeneration,
+        providerConfigGenerationDigest: binding.providerConfigGenerationDigest } };
+    return { intent, persistedPayload };
+  } });
+  const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
+    preloadSourceApps: async () => { await slack?.preloadSourceApps(); }, clock });
+  const jobHandlers = {
+    "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
+      const queued = await hosted.expireQueued(job.organizationId);
+      const attempts = await hosted.reconcileExpiredAttempts(job.organizationId);
+      return { expiredQueued: queued.expired, expiredAttempts: attempts.expired };
+    },
+    "runner-readiness-retention": async (job: { organizationId: string | null }) =>
+      runners.pruneExpiredReadiness(job.organizationId),
+    "provider-delivery": async () => providerDeliveryWorker.processNext(),
+    ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
+  };
   const application = createControlPlaneApplication({
     capabilities: {
       schemaVersion: 1,
@@ -422,13 +454,17 @@ export function createControlPlaneRuntime(input: {
     scheduleJobs,
     materials,
     permissions,
+    providerDeliveryKernel,
+    providerDeliveryProducer,
     providerDeliveryRepository,
+    providerDeliveryWorker,
     reads,
     runners,
     sourceContent,
     sourceIngress,
     sourceResolutionPort,
     sourceIngressWorker,
+    sourceApps,
     close: () => postgres.close(),
   };
 }

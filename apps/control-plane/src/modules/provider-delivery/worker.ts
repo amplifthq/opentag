@@ -1,6 +1,27 @@
 import type { ProviderSideEffectKernel } from "@opentag/delivery-runtime";
 
-/** One delivery iteration. Scheduling remains outside this module; retry truth stays in the kernel/repository. */
+type Kernel = Pick<ProviderSideEffectKernel<object>, "deliverNext" | "recoverStrandedBegun">;
+const RESTART_EVIDENCE = "sha256:323861ebb04dc43a1725514126023129654b8dcf64e6be5958174af1550f6c39";
+
+export function createProviderDeliveryWorker(input: { kernel: Kernel;
+  preloadSourceApps(): Promise<void>; clock: { now(): Date } }) {
+  let startupRecovered = false;
+  return { async processNext() {
+    await input.preloadSourceApps();
+    let recovered = 0;
+    if (!startupRecovered) {
+      recovered = await input.kernel.recoverStrandedBegun({
+        before: input.clock.now().toISOString(), evidenceDigest: RESTART_EVIDENCE,
+      });
+      startupRecovered = true;
+    }
+    const result = await input.kernel.deliverNext();
+    return result === null ? { kind: "empty" as const, recovered }
+      : { kind: "delivered" as const, recovered, result };
+  } };
+}
+
+/** Compatibility one-shot seam; scheduling and retry truth remain outside this function. */
 export async function runOneProviderDelivery(kernel: Pick<ProviderSideEffectKernel<object>, "deliverNext">) {
   return kernel.deliverNext();
 }

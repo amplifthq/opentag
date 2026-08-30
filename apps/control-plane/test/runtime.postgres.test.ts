@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { computeSlackSignature } from "@opentag/slack";
 import type { SourceAppDefinition } from "@opentag/source-app-runtime";
+import { DeliveryIntentV2Schema } from "@opentag/delivery-contract";
 import { computeHostedAdmissionEnvelopeDigestV1,
   HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
 import { digest as contentDigest, sourceContentAad } from "../src/modules/source-content/crypto.js";
@@ -117,6 +118,33 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     const runtime = createProductionControlPlaneRuntime({ config, migrations: fixture.migrations,
       env: { SLACK_SIGNING_SECRET: "secret", SLACK_BOT_TOKEN: "bot" },
       postgres: { pool: fixture.pool, async close() {} } });
+    expect(runtime.providerDeliveryProducer).toBeDefined();
+    expect(runtime.providerDeliveryWorker).toBeDefined();
+    await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0 });
+    expect(runtime.sourceApps.resolveDelivery({ appId: "slack", appInstanceId: "A_RUNTIME",
+      bindingDigest: digest("binding"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("generation") })).toBeDefined();
+    const deliveryIntent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
+      sideEffectIntentId: "runtime-delivery-intent", causalId: "runtime-cause",
+      intentKind: "delivery", operation: "create", deliveryKind: "message",
+      presentationDigest: digest("runtime-presentation"), provenance: { kind: "business",
+        repositoryIdentityDigest: digest("runtime-repo"), runId: "runtime-run",
+        authorityLineageDigest: digest("runtime-authority") }, providerBinding: {
+        bindingKind: "established", providerId: "slack", providerInstanceId: "A_RUNTIME",
+        providerPrincipalDigest: digest("U_APP"), principalAssurance: "provider_verified",
+        bindingDigest: digest("binding"), providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), lifecycle: "active" },
+      targetDigest: digest("runtime-target"), authorityKind: "run_authority",
+      authoritySnapshotDigest: digest("runtime-snapshot"), evidencePolicy: "local_audit",
+      idempotencyKey: "runtime-delivery-key", scope: { kind: "local_repository", id: "runtime-repo" },
+      createdAt: now.toISOString(), initialAttemptSequence: 1 });
+    await expect(runtime.providerDeliveryProducer.enqueue({ intent: deliveryIntent,
+      providerRequest: { operation: { kind: "create_message", channelId: "C_RUNTIME" },
+        presentation: { kind: "message", text: "runtime" } }, phase: "running",
+      frozenDeadline: "2030-08-30T00:00:00.000Z" })).resolves.toMatchObject({ outcome: "queued" });
+    expect((await fixture.pool.query(`SELECT presentation_phase,payload->'currentTruth'->>'runId' AS run_id
+      FROM cp_provider_delivery_intent WHERE intent_id='runtime-delivery-intent'`)).rows)
+      .toEqual([{ presentation_phase: "running", run_id: "runtime-run" }]);
     const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
       const body = JSON.stringify({ type: "event_callback", team_id: teamId, api_app_id: "A_RUNTIME",
         event_id: `Ev_${teamId}`, event_time: Math.floor(now.getTime() / 1000),

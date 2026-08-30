@@ -234,22 +234,17 @@ describe('fresh delivery journal', () => {
       externalResourceDigest: digest('resource') });
   });
 
-  it.each([
-    ['URI', 'https://hooks.slack.test/171.002'],
-    ['token', 'xoxb-secret'],
-    ['arbitrary', 'message-171'],
-    ['unbounded', `${'1'.repeat(21)}.002`],
-  ])('rejects %s external resource identifiers atomically', (_case, value) => {
+  it('persists provider-neutral canonical external resource identities', () => {
     const { repository, sqlite } = setup(); repository.recordIntent(intent(), {});
     const claim = repository.claimNext(); if (!claim) throw new Error('missing claim');
     const begun = repository.markBegin(markers(claim));
     if (!begun) throw new Error('missing begin');
-    expect(() => repository.settleOrReadTerminal({
+    expect(repository.settleOrReadTerminal({
       ...begun, outcome: 'accepted', evidenceDigest: digest('accepted'),
-      externalResourceDigest: digest('resource'), externalResourceId: value,
-    })).toThrow(/Slack timestamp/u);
-    expect(row(sqlite)).toMatchObject({ state: 'provider_io_begun',
-      external_resource_id: null });
+      externalResourceDigest: digest('resource'), externalResourceId: 'native:message-171',
+    })).toMatchObject({ outcome: 'accepted', externalResourceId: 'native:message-171' });
+    expect(row(sqlite)).toMatchObject({ state: 'accepted',
+      external_resource_id: 'native:message-171' });
   });
 
   it('rejects unsafe owner identifiers before persistence or claim', () => {

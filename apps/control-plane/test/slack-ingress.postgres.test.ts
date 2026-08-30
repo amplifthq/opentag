@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { computeSlackSignature, createSlackSourceApp } from "@opentag/slack";
+import { SourceAppRegistry } from "@opentag/source-app-runtime";
 import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
 import { createDurableJobQueue } from "../src/modules/jobs/index.js";
 import { createRelayContentCustody } from "../src/modules/source-content/index.js";
@@ -112,6 +113,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
           recordedAt: now.toISOString(), authorityReceiptDigest: digest(command.commandId) };
       } } });
     return { material, ingress: createPostgresSlackIngress({ pool: fixture.pool, clock, custody,
+      sourceApps: new SourceAppRegistry(),
       jobs, secrets: { async resolve(reference) {
         const value = material.get(reference); if (!value) throw new Error("secret_unavailable");
         return value;

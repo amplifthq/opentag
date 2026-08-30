@@ -1,4 +1,5 @@
-import { EstablishedProviderBindingV1Schema, type DeliveryIntentV2, type EstablishedProviderBindingV1 } from '@opentag/delivery-contract';
+import { EstablishedProviderBindingV1Schema, type DeliveryIntentV2,
+  type EstablishedProviderBindingV1, type ProviderDeliveryResult } from '@opentag/delivery-contract';
 import { createSlackPostMessagePayload, createSlackReactionPayload, createSlackUpdateMessagePayload, type SlackBlock } from './render.js';
 
 export type SlackDeliveryOperation = { kind: 'create_message'; channelId: string; threadTs?: string } | { kind: 'update_message' | 'add_reaction'; channelId: string; messageTs: string };
@@ -8,7 +9,7 @@ const BINDING_FIELDS = ['providerId', 'providerInstanceId', 'bindingDigest',
   'providerPrincipalDigest', 'providerConfigGeneration', 'providerConfigGenerationDigest'] as const;
 type BindingDescriptor = Pick<EstablishedProviderBindingV1, typeof BINDING_FIELDS[number]>;
 type SlackDescriptor = Readonly<{ providerId: 'slack' } & Omit<BindingDescriptor, 'providerId'>>;
-type SlackDeliveryResult = { outcome: 'accepted' | 'rejected' | 'outcome_unknown' | 'attention'; evidenceDigest: string; externalResourceId?: string; errorCode?: string };
+type SlackDeliveryResult = ProviderDeliveryResult;
 export type SlackDeliveryAdapter = SlackDescriptor & {
   deliver(input: { intent: DeliveryIntentV2; operation: SlackDeliveryOperation; presentation: SlackDeliveryPresentation; signal?: AbortSignal }): Promise<SlackDeliveryResult> };
 type SlackDeliveryAdapterOptions = Omit<SlackDescriptor, 'providerId'> & {
@@ -19,6 +20,12 @@ const API = 'https://slack.com/api/'; const SLACK_TS = /^\d{1,20}\.\d{1,20}$/u;
 async function result(outcome: SlackDeliveryResult['outcome'], evidence: unknown, extras: Omit<SlackDeliveryResult, 'outcome' | 'evidenceDigest'> = {}): Promise<SlackDeliveryResult> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(evidence))); const evidenceDigest = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
   return { outcome, evidenceDigest: `sha256:${evidenceDigest}`, ...extras };
+}
+
+async function externalResourceDigest(providerInstanceId: string, resourceId: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`opentag.delivery.external-resource.v1\0slack\0${providerInstanceId}\0${resourceId}`);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 
 function failed(outcome: SlackDeliveryResult['outcome'], errorCode: string, evidence: unknown): Promise<SlackDeliveryResult> { return result(outcome, evidence, { errorCode }); }
@@ -78,7 +85,10 @@ export function createSlackDeliveryAdapter(options: SlackDeliveryAdapterOptions)
         if (!body.ok) return failed('rejected', 'slack_rejected', { ...responseEvidence, ok: false });
         const responseTs = 'ts' in body && typeof body.ts === 'string' && SLACK_TS.test(body.ts) ? body.ts : undefined; const resourceId = responseTs ?? request.resourceId;
         if (!resourceId) return failed('outcome_unknown', 'ambiguous_response', { ...responseEvidence, ok: true });
-        return result('accepted', { ...responseEvidence, ok: true, ts: resourceId }, { externalResourceId: resourceId });
+        return result('accepted', { ...responseEvidence, ok: true, ts: resourceId }, {
+          externalResourceId: resourceId,
+          externalResourceDigest: await externalResourceDigest(descriptor.providerInstanceId, resourceId),
+        });
       } catch {
         const errorCode = deadlineExceeded ? 'deadline_exceeded' : 'transport_error'; return failed('outcome_unknown', errorCode, { method: request.method, code: errorCode });
       } finally { clearTimeout(timer); input.signal?.removeEventListener('abort', onAbort); }

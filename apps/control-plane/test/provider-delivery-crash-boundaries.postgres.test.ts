@@ -31,7 +31,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool,
       owner: { runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1 },
       leaseOwner: "worker", leaseSeconds: 30, now: () => time });
-    await repository.recordIntent(intent, { text: "hello" });
+    await repository.recordIntent(intent, { envelopeVersion: 1, providerRequest: { text: "hello" },
+      phase: "running", frozenDeadline: "2030-08-29T00:00:00.000Z", currentTruth: {
+        runId: "run", scopeKind: "local_repository", scopeId: "repo",
+        targetDigest: intent.targetDigest, providerInstanceId: "workspace", statusMessageId: null,
+        runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1,
+        providerConfigGeneration: 1, providerConfigGenerationDigest: digest("generation") } });
     const claimed = (await repository.claimNext())!;
     const renewed = (await repository.renewLease(claimed))!;
     const marker = digest("marker");
@@ -46,5 +51,38 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
     await expect(repository.settleOrReadTerminal({ ...begun, outcome: "accepted",
       evidenceDigest: digest("late-response") })).resolves.toMatchObject({
         outcome: "outcome_unknown", errorCode: "delivery_restart_after_begin" });
+    await expect(repository.settleOrReadTerminal({ ...begun, runtimeGeneration: 99,
+      outcome: "accepted", evidenceDigest: digest("late-response") }))
+      .rejects.toThrow(/tuple conflict/u);
+    await expect(fixture.pool.query(
+      "DELETE FROM cp_provider_delivery_intent WHERE intent_id='crash-intent'"))
+      .rejects.toThrow(/immutable/u);
+  });
+
+  it("rejects a direct pending-to-begun transition that violates state shape", async () => {
+    const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+    const repository = createPostgresDeliveryRepository({ pool: fixture.pool,
+      owner: { runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1 },
+      leaseOwner: "worker", leaseSeconds: 30 });
+    const value = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: "shape-intent",
+      causalId: "cause", intentKind: "delivery", operation: "create", deliveryKind: "message",
+      presentationDigest: digest("presentation"), provenance: { kind: "business",
+        repositoryIdentityDigest: digest("repo"), runId: "run", authorityLineageDigest: digest("authority") },
+      providerBinding: { bindingKind: "established", providerId: "slack", providerInstanceId: "workspace",
+        providerPrincipalDigest: digest("principal"), principalAssurance: "provider_verified",
+        providerConfigGeneration: 1, providerConfigGenerationDigest: digest("generation"), lifecycle: "active",
+        bindingDigest: digest("binding") }, targetDigest: digest("target"), authorityKind: "run_authority",
+      authoritySnapshotDigest: digest("snapshot"), evidencePolicy: "local_audit", idempotencyKey: "shape-key",
+      scope: { kind: "local_repository", id: "repo" }, createdAt: "2026-08-28T00:00:00.000Z",
+      initialAttemptSequence: 1 });
+    await repository.recordIntent(value, { envelopeVersion: 1, providerRequest: {}, phase: "running",
+      frozenDeadline: "2026-08-29T00:00:00.000Z", currentTruth: { runId: "run",
+        scopeKind: "local_repository", scopeId: "repo", targetDigest: value.targetDigest,
+        providerInstanceId: "workspace", statusMessageId: null, runtimeOwnerId: "relay",
+        runtimeGeneration: 1, schemaGeneration: 1, providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation") } });
+    await expect(fixture.pool.query(`UPDATE cp_provider_delivery_intent
+      SET state='provider_io_begun',revision=revision+1 WHERE intent_id='shape-intent'`))
+      .rejects.toThrow(/transition|shape/u);
   });
 });

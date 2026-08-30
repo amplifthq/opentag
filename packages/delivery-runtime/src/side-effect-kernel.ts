@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { domainSeparatedCanonicalBytes, type DeliveryIntentV2 } from "@opentag/delivery-contract";
+import { DELIVERY_ERROR_CODES, domainSeparatedCanonicalBytes, type DeliveryBegin,
+  type DeliveryClaim, type DeliveryErrorCode, type DeliveryIntentV2,
+  type DeliverySettlement } from "@opentag/delivery-contract";
 import { ProviderAdapterRegistry, type ProviderDeliveryResult } from "./provider-registry.js";
-import { DELIVERY_ERROR_CODES, type DeliveryBegin, type DeliveryClaim,
-  type DeliveryErrorCode, type DeliveryKernelRepository, type DeliverySettlement } from "./repository.js";
+import type { DeliveryKernelRepository } from "./repository.js";
 
 const ATTENTION_EVIDENCE = {
   provider_adapter_not_registered: "sha256:f443f5a15f8ed4f358b38012507180672bf19df21b93c872091e323c4331716e",
@@ -63,13 +64,18 @@ export class ProviderSideEffectKernel<Request extends object> {
         controller.abort(); reject(new DeliveryTimeoutError()); }, this.#options.timeoutMs); });
       const result = await Promise.race([adapter.deliver({ request: prepared.request,
         intent: stored.intent, signal: controller.signal }), timeout]);
-      return this.#settle(begun, result);
+      if (result.outcome !== "outcome_unknown") return this.#settle(begun, result);
+      const reconciled = await this.#reconcile(adapter, stored.intent, prepared.request);
+      return this.#settle(begun, reconciled?.outcome === "accepted" ? reconciled : result);
     } catch (error) {
-      return this.#settle(begun, { outcome: "outcome_unknown",
+      const ambiguous = { outcome: "outcome_unknown" as const,
         evidenceDigest: error instanceof DeliveryTimeoutError
           ? "sha256:eb73b0d832e8a2f9c8224e4203725d771be8aae6407b5a2a30ff552ad384fb81"
           : "sha256:288f18790debd9a2eb07dd54196c2f80ef1ddacc43df02ee1d3a3893bed30ab6",
-        errorCode: error instanceof DeliveryTimeoutError ? "provider_delivery_timeout" : "provider_delivery_exception" });
+        errorCode: error instanceof DeliveryTimeoutError
+          ? "provider_delivery_timeout" as const : "provider_delivery_exception" as const };
+      const reconciled = await this.#reconcile(adapter, stored.intent, prepared.request);
+      return this.#settle(begun, reconciled?.outcome === "accepted" ? reconciled : ambiguous);
     } finally { if (timer) clearTimeout(timer); }
   }
   async recoverStrandedBegun(input: { before: string; evidenceDigest: string; outcomeRecordedAt?: string }) {
@@ -89,12 +95,17 @@ export class ProviderSideEffectKernel<Request extends object> {
     return this.#options.repository.settleOrReadTerminal({ ...claim,
       ...normalizeProviderResult(claim.providerId, claim.providerInstanceId, result) });
   }
+  async #reconcile(adapter: ReturnType<ProviderAdapterRegistry<Request>["resolve"]>,
+    intent: DeliveryIntentV2, request: Request): Promise<ProviderDeliveryResult | null> {
+    if (!adapter) return null;
+    try { return await adapter.reconcile({ intent, request }); } catch { return null; }
+  }
 }
 
 class DeliveryTimeoutError extends Error {}
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const ERROR_CODES = new Set<string>(DELIVERY_ERROR_CODES);
-function normalizeProviderResult(providerId: string, providerInstanceId: string,
+function normalizeProviderResult(_providerId: string, _providerInstanceId: string,
   result: ProviderDeliveryResult): Pick<DeliverySettlement, "outcome" | "evidenceDigest" | "errorCode" | "externalResourceDigest" | "externalResourceId"> {
   if (!SHA256.test(result.evidenceDigest)) return invalidProviderResult();
   const errorCode = result.errorCode && ERROR_CODES.has(result.errorCode)
@@ -104,11 +115,12 @@ function normalizeProviderResult(providerId: string, providerInstanceId: string,
     ? { outcome: result.outcome, evidenceDigest: result.evidenceDigest, errorCode }
     : invalidProviderResult();
   if (errorCode) return invalidProviderResult();
-  if (!result.externalResourceId) return { outcome: "accepted", evidenceDigest: result.evidenceDigest };
+  if (!result.externalResourceId && !("externalResourceDigest" in result))
+    return { outcome: "accepted", evidenceDigest: result.evidenceDigest };
   const externalResourceDigest = "externalResourceDigest" in result
     && typeof result.externalResourceDigest === "string" && SHA256.test(result.externalResourceDigest)
-    ? result.externalResourceDigest
-    : digest(`opentag.delivery.external-resource.v1\0${providerId}\0${providerInstanceId}\0${result.externalResourceId}`);
+    ? result.externalResourceDigest : undefined;
+  if (!result.externalResourceId || !externalResourceDigest) return invalidProviderResult();
   return { outcome: "accepted", evidenceDigest: result.evidenceDigest,
     externalResourceId: result.externalResourceId, externalResourceDigest };
 }

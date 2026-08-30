@@ -22,6 +22,13 @@ function sourceApp(): SourceAppDefinition<unknown, unknown, { text: string }> {
 }
 
 describe("ProviderAdapterRegistry", () => {
+  it("cannot create or mutate a second provider registration authority", () => {
+    expect(() => new ProviderAdapterRegistry(undefined as never)).toThrow(
+      "Canonical SourceAppRegistry is required");
+    const registry = new ProviderAdapterRegistry(new SourceAppRegistry());
+    expect("register" in registry).toBe(false);
+  });
+
   it("resolves delivery from the one composite SourceAppRegistry identity", async () => {
     const sources = new SourceAppRegistry().register(sourceApp());
     const registry = new ProviderAdapterRegistry<{ text: string }>(sources);

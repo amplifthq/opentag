@@ -131,7 +131,14 @@ function urlVerificationResult(payload: Record<string, any>): SlackUrlVerificati
 }
 
 function createInstallationApp(input: { installation: SlackInstallation; signingSecret: string;
-  secrets: SlackSecretResolver; fetchImpl?: typeof fetch; clock: { now(): Date } }) {
+  secrets: SlackSecretResolver; sourceApps: SourceAppRegistry;
+  fetchImpl?: typeof fetch; clock: { now(): Date } }) {
+  const identity = { appId: "slack", appInstanceId: input.installation.appInstanceId,
+    bindingDigest: input.installation.bindingDigest,
+    credentialGeneration: input.installation.credentialGeneration,
+    credentialGenerationDigest: input.installation.credentialGenerationDigest };
+  const existing = input.sourceApps.resolveDelivery(identity);
+  if (existing) return existing;
   const sourceApp = createSlackSourceApp({ installation: {
     appInstanceId: input.installation.appInstanceId,
     bindingDigest: input.installation.bindingDigest,
@@ -141,8 +148,8 @@ function createInstallationApp(input: { installation: SlackInstallation; signing
   resolveCredential: () => input.secrets.resolve(input.installation.botTokenRef),
   ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   clock: () => input.clock.now().getTime() });
-  const registry = new SourceAppRegistry().register(sourceApp);
-  return registry.resolveDelivery({ appId: "slack", ...sourceApp.installation })!;
+  input.sourceApps.register(sourceApp);
+  return input.sourceApps.resolveDelivery(identity)!;
 }
 
 function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unknown, unknown>;
@@ -206,7 +213,8 @@ function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unk
 
 export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): Date };
   custody: RelayContentCustody; jobs: Pick<DurableJobQueue, "enqueueInTransaction">;
-  secrets: SlackSecretResolver; commandAuthority?: SourceThreadCommandAuthorityPorts;
+  secrets: SlackSecretResolver; sourceApps: SourceAppRegistry;
+  commandAuthority?: SourceThreadCommandAuthorityPorts;
   fetchImpl?: typeof fetch; tokenFactory?: () => string }) {
   const sourceIngress = createSourceIngressService({ pool: input.pool, clock: input.clock,
     custody: input.custody, jobs: input.jobs });
@@ -215,12 +223,21 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
     if (resolution.kind !== "found") return resolution;
     const signingSecret = await input.secrets.resolve(resolution.installation.signingSecretRef);
     const sourceApp = createInstallationApp({ installation: resolution.installation,
-      signingSecret, secrets: input.secrets, clock: input.clock,
+      signingSecret, secrets: input.secrets, sourceApps: input.sourceApps, clock: input.clock,
       ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
     return { kind: "found" as const, installation: resolution.installation, sourceApp };
   };
 
   return {
+    async preloadSourceApps() {
+      const rows = await input.pool.query<{ installation_id: string }>(
+        `SELECT installation_id FROM cp_slack_installation
+         ORDER BY organization_id, installation_id`);
+      for (const row of rows.rows) {
+        const resolved = await resolve(row.installation_id);
+        if (resolved.kind !== "found") throw new Error("slack_installation_resolution_failed");
+      }
+    },
     async checkReadiness() {
       try {
         const rows = await input.pool.query<{ installation_id: string }>(

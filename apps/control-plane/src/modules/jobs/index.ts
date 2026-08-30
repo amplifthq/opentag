@@ -289,6 +289,13 @@ export async function scheduleControlPlaneMaintenance(input: {
       payload: { windowStart },
       maxAttempts: 5,
     },
+    {
+      jobId: `provider-delivery:${windowStart}`,
+      organizationId: null,
+      kind: "provider-delivery",
+      payload: { windowStart },
+      maxAttempts: 1,
+    },
   ];
   if (input.includeSourceContentPurge) commands.push({
     jobId: `source-content-purge:${windowStart}`,

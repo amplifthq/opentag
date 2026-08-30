@@ -75,7 +75,8 @@ describe('Slack delivery adapter', () => {
       body: JSON.stringify({ channel: 'C1', text: 'Hello *there*', thread_ts: '170.001' }),
       signal: expect.any(AbortSignal),
     });
-    expect(first).toEqual({ outcome: 'accepted', evidenceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/), externalResourceId: '171.002' });
+    expect(first).toEqual({ outcome: 'accepted', evidenceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      externalResourceId: '171.002', externalResourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) });
     expect(second.evidenceDigest).toBe(first.evidenceDigest);
   });
 

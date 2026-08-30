@@ -1,21 +1,21 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { DeliveryIntentV2Schema, domainSeparatedCanonicalBytes, type DeliveryIntentV2 } from "@opentag/delivery-contract";
+import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, domainSeparatedCanonicalBytes,
+  type DeliveryBegin, type DeliveryClaim, type DeliveryErrorCode,
+  type DeliveryIntentV2, type DeliveryOutcome, type DeliverySettlement,
+  type ExpectedDeliveryOwner } from "@opentag/delivery-contract";
 import { and, asc, eq, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { DELIVERY_ERROR_CODES, deliveryAttempts, type DeliveryErrorCode } from "./delivery-schema.js";
+import { deliveryAttempts } from "./delivery-schema.js";
 import type { DeliveryPayloadCustody, DeliveryPayloadCustodyDescriptor } from "./delivery-payload-custody.js";
 
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const ERROR_CODES = new Set<string>(DELIVERY_ERROR_CODES);
 const DELIVERY_JOURNAL_INTENT_DOMAIN = "opentag.delivery.journal-intent.v1";
 export const DELIVERY_SETTLEMENT_STALE_EVIDENCE_DIGEST = "sha256:8a5ce723353265fc801c674d1cd94727259c2d95d9759ca7044d8c34e617e29c";
-export type DeliveryOutcome = "accepted" | "rejected" | "outcome_unknown" | "attention";
 type DeliveryAttemptRecord = typeof deliveryAttempts.$inferSelect;
 type ImmutableAttempt = Omit<typeof deliveryAttempts.$inferInsert, "id" | "state" | "revision" | "leaseOwner" | "leaseExpiresAt" | "leaseFenceDigest" | "installationBeginMarkerId" | "installationBeginMarkerDigest" | "scopeBeginMarkerId" | "scopeBeginMarkerDigest" | "begunAt" | "evidenceDigest" | "errorCode" | "externalResourceDigest" | "externalResourceId" | "outcomeRecordedAt" | "updatedAt">;
-export type ExpectedDeliveryOwner = Pick<ImmutableAttempt, "providerId" | "providerInstanceId" | "providerBindingDigest" | "providerConfigGeneration" | "providerConfigGenerationDigest" | "runtimeOwnerId" | "runtimeGeneration" | "schemaGeneration">;
-export type DeliveryClaim = ExpectedDeliveryOwner & { attemptId: string; intentId: string; sequence: number; leaseFence: string; revision: number; authoritySnapshotDigest: string; journalIntentDigest: string };
-export type DeliveryBegin = DeliveryClaim & { installationBeginMarkerId: string; installationBeginMarkerDigest: string; scopeBeginMarkerId: string; scopeBeginMarkerDigest: string };
-export type DeliverySettlement = DeliveryBegin & { outcome: DeliveryOutcome; evidenceDigest: string; errorCode?: DeliveryErrorCode; externalResourceDigest?: string; externalResourceId?: string };
+export type { DeliveryBegin, DeliveryClaim, DeliveryErrorCode, DeliveryOutcome,
+  DeliverySettlement, ExpectedDeliveryOwner } from "@opentag/delivery-contract";
 type DeliveryKernelRepositoryOptions = { database: BetterSQLite3Database; payloadCustody: DeliveryPayloadCustody; owner: ExpectedDeliveryOwner; leaseOwner: string; leaseSeconds: number; now?: () => Date };
 export type DeliveryKernelRepository = ReturnType<typeof createDeliveryKernelRepository>;
 
@@ -122,7 +122,7 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
     settleOrReadTerminal(input: DeliverySettlement & { outcomeRecordedAt?: string }): DeliverySettlement {
       validDigest(input.evidenceDigest, "evidenceDigest"); if (input.errorCode && !ERROR_CODES.has(input.errorCode)) throw new Error(`unsupported delivery error code: ${input.errorCode}`);
       if (input.outcome === "accepted" ? input.errorCode : !input.errorCode) throw new Error(input.outcome === "accepted" ? "accepted delivery cannot persist an error code" : "non-accepted terminal delivery requires an error code");
-      if (input.externalResourceDigest !== undefined || input.externalResourceId !== undefined) { if (!input.externalResourceDigest || !input.externalResourceId || input.outcome !== "accepted") throw new Error("external resource identity requires accepted outcome and digest pair"); validDigest(input.externalResourceDigest, "externalResourceDigest"); if (input.providerId !== "slack" || !/^\d{1,20}\.\d{1,20}$/u.test(input.externalResourceId)) throw new Error("externalResourceId must be a bounded Slack timestamp"); }
+      if (input.externalResourceDigest !== undefined || input.externalResourceId !== undefined) { if (!input.externalResourceDigest || !input.externalResourceId || input.outcome !== "accepted") throw new Error("external resource identity requires accepted outcome and digest pair"); validDigest(input.externalResourceDigest, "externalResourceDigest"); }
       const recordedAt = input.outcomeRecordedAt ?? new Date().toISOString(); return db.transaction((tx) => { const exact = (revision: number) => and(eq(deliveryAttempts.state, "provider_io_begun"), ...claimTuple({ ...input, revision }), ...beginTuple(input));
         const write = (revision: number, state: DeliveryOutcome, evidenceDigest: string, errorCode?: string) => tx.update(deliveryAttempts).set({ state, revision: revision + 1, evidenceDigest, errorCode: errorCode ?? null,
           externalResourceDigest: input.externalResourceDigest ?? null, externalResourceId: input.externalResourceId ?? null, outcomeRecordedAt: recordedAt, updatedAt: recordedAt }).where(exact(revision)).returning().get();

@@ -30,6 +30,13 @@ describe("durable job worker", () => {
         payload: { windowStart: "2026-08-15T12:34:00.000Z" },
         maxAttempts: 5,
       },
+      {
+        jobId: "provider-delivery:2026-08-15T12:34:00.000Z",
+        organizationId: null,
+        kind: "provider-delivery",
+        payload: { windowStart: "2026-08-15T12:34:00.000Z" },
+        maxAttempts: 1,
+      },
     ]);
   });
 

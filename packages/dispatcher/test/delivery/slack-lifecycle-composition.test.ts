@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { createSlackDeliveryAdapter, createSlackEventProcessor } from '@opentag/slack';
+import { createSlackEventProcessor, createSlackSourceApp } from '@opentag/slack';
+import { SourceAppRegistry } from '@opentag/source-app-runtime';
 import { bootstrapDeliveryJournal, createDeliveryKernelRepository, createEncryptedFileDeliveryPayloadCustody, createSlackInstallationRegistry, type DeliveryPayloadCustody } from '@opentag/store';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -51,15 +52,16 @@ function open(path: string, requests: Array<{ method: string; body: Record<strin
   const payloadCustody = path === ':memory:' ? createTestPayloadCustody() :
     createEncryptedFileDeliveryPayloadCustody({ directory: `${path}.payloads`, trustedBoundary: dirname(path), key: Buffer.alloc(32, 9) });
   const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner, leaseOwner: 'worker', leaseSeconds: 30 });
+  const sourceApps = new SourceAppRegistry().register(createSlackSourceApp({ installation: {
+    appInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
+    credentialGeneration: 7, credentialGenerationDigest: stable }, signingSecret: 'test-signing',
+    botUserId: 'stable', resolveCredential: async () => 'test-token', fetchImpl: async (url, init) => {
+      const method = String(url).split('/').at(-1)!; const body = JSON.parse(String(init?.body));
+      requests.push({ method, body }); return Response.json({ ok: true, ts: body.ts ?? '171.002' });
+    } }));
   const composition = createSlackLifecycleComposition({
     repository: lookupOverride ? { ...repository, findAcceptedExternalResource: (input) => lookupOverride.current ?? repository.findAcceptedExternalResource(input) } : repository,
-    resolveAuthority,
-    adapter: createSlackDeliveryAdapter({ providerInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
-      providerPrincipalDigest: stable, providerConfigGeneration: 7, providerConfigGenerationDigest: stable,
-      resolveCredential: async () => 'test-token', fetchImpl: async (url, init) => {
-        const method = String(url).split('/').at(-1)!; const body = JSON.parse(String(init?.body));
-        requests.push({ method, body }); return Response.json({ ok: true, ts: body.ts ?? '171.002' });
-      } }),
+    resolveAuthority, sourceApps, deliveryOwner: expectedOwner,
   });
   return { sqlite, composition };
 }

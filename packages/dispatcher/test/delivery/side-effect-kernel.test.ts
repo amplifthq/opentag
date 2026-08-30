@@ -1,9 +1,9 @@
 import { DeliveryIntentV2Schema } from '@opentag/delivery-contract';
 import { describe, expect, it } from 'vitest';
 import {
-  ProviderAdapterRegistry,
   type RegisteredProviderAdapter,
 } from '../../src/delivery/provider-registry.js';
+import { providerRegistry } from './provider-registry-fixture.js';
 import {
   ProviderSideEffectKernel,
   type DeliveryClaim,
@@ -98,7 +98,7 @@ async function captureBeginMarkers(
   };
   const result = await new ProviderSideEffectKernel({
     repository: repo.value,
-    registry: new ProviderAdapterRegistry<Request>(),
+    registry: providerRegistry<Request>(),
     prepareRequest: () => ({
       request: { presentation: 'unused' },
       operation: 'create',
@@ -222,13 +222,13 @@ describe('ProviderSideEffectKernel', () => {
 
   it('commits record, claim, and begin before provider I/O', async () => {
     const repo = repository();
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async ({ intent: deliveredIntent, presentation }) => {
           repo.calls.push('provider');
           expect(deliveredIntent).toBe(intent);
           expect(presentation).toBe('hello');
           return { outcome: 'accepted', evidenceDigest: digest,
-            externalResourceId: '171.002' };
+            externalResourceId: '171.002', externalResourceDigest: digest };
         }),
     );
     const kernel = new ProviderSideEffectKernel({
@@ -260,7 +260,7 @@ describe('ProviderSideEffectKernel', () => {
     'preserves the adapter terminal outcome %s',
     async (outcome) => {
       const repo = repository();
-      const registry = new ProviderAdapterRegistry<Request>().register(
+      const registry = providerRegistry<Request>(
         registered(async () => ({ outcome, evidenceDigest: digest,
           ...(outcome === 'accepted' ? { externalResourceId: '171.002' } : {}),
           errorCode: outcome === 'rejected' ? 'slack_rejected' :
@@ -281,7 +281,7 @@ describe('ProviderSideEffectKernel', () => {
   it('journals a missing exact adapter and terminates it as attention with zero provider I/O', async () => {
     const repo = repository();
     let providerIo = 0;
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => {
           providerIo += 1;
           return { outcome: 'accepted', evidenceDigest: 'wrong' };
@@ -321,7 +321,7 @@ describe('ProviderSideEffectKernel', () => {
     async (_field, changed) => {
       const repo = repository();
       let providerIo = 0;
-      const registry = new ProviderAdapterRegistry<Request>().register(
+      const registry = providerRegistry<Request>(
         registered(async () => {
           providerIo += 1;
           return { outcome: 'accepted', evidenceDigest: digest };
@@ -348,7 +348,7 @@ describe('ProviderSideEffectKernel', () => {
 
   it('durably terminates a claim if its exact registration disappears before begin', async () => {
     const repo = repository();
-    const registry = new ProviderAdapterRegistry<Request>();
+    const registry = providerRegistry<Request>();
     const result = await new ProviderSideEffectKernel({
       repository: repo.value, registry,
       prepareRequest: () => ({ request: { presentation: 'hello' }, operation: 'create',
@@ -364,11 +364,11 @@ describe('ProviderSideEffectKernel', () => {
   it('durably terminates request preparation failure as attention before provider I/O', async () => {
     const repo = repository();
     let providerIo = 0;
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => {
         providerIo += 1;
         return { outcome: 'accepted', evidenceDigest: digest,
-          externalResourceId: '171.002' };
+          externalResourceId: '171.002', externalResourceDigest: digest };
       }),
     );
     const result = await new ProviderSideEffectKernel({
@@ -406,7 +406,7 @@ describe('ProviderSideEffectKernel', () => {
     repo.value.claimNext = async () => claims++ === 0 ? claim : null;
     repo.value.getIntent = getIntent as DeliveryKernelRepository['getIntent'];
     const kernel = new ProviderSideEffectKernel({ repository: repo.value,
-      registry: new ProviderAdapterRegistry<Request>().register(
+      registry: providerRegistry<Request>(
         registered(async () => { throw new Error('provider must not run'); })),
       prepareRequest: () => ({ request: { presentation: 'hello' },
         operation: 'create', presentationDigest: digest, targetDigest: digest }) });
@@ -424,9 +424,9 @@ describe('ProviderSideEffectKernel', () => {
       evidenceDigest: digest,
       errorCode: 'delivery_settlement_stale',
     });
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => ({ outcome: 'accepted', evidenceDigest: digest,
-        externalResourceId: '171.002' })),
+        externalResourceId: '171.002', externalResourceDigest: digest })),
     );
     const result = await new ProviderSideEffectKernel({
       repository: repo.value, registry,
@@ -443,9 +443,10 @@ describe('ProviderSideEffectKernel', () => {
     `${'1'.repeat(21)}.002`, `171.${'2'.repeat(21)}`,
   ])('keeps provider-native resource identity validation outside the kernel for %s', async (externalResourceId) => {
     const repo = repository();
-    const registry = new ProviderAdapterRegistry<Request>().register(
+    const registry = providerRegistry<Request>(
       registered(async () => ({
         outcome: 'accepted', evidenceDigest: digest, externalResourceId,
+        externalResourceDigest: digest,
       })),
     );
     const result = await new ProviderSideEffectKernel({

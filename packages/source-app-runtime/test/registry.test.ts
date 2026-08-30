@@ -13,6 +13,7 @@ function fakeSourceApp(input: {
   appId?: string;
   bindingDigest?: string;
   credentialGeneration?: number;
+  appInstanceId?: string;
 } = {}): SourceAppDefinition<unknown, { text: string }, { text: string }> {
   return {
     appId: input.appId ?? "chat",
@@ -27,7 +28,7 @@ function fakeSourceApp(input: {
       stableSourceVersions: true
     },
     installation: {
-      appInstanceId: "chat_installation_1",
+      appInstanceId: input.appInstanceId ?? "chat_installation_1",
       bindingDigest: input.bindingDigest ?? digest("a"),
       credentialGeneration: input.credentialGeneration ?? 3,
       credentialGenerationDigest: digest("b")
@@ -94,11 +95,16 @@ function presentationCommand(): OpenTagChannelPresentationCommand {
 }
 
 describe("SourceAppRegistry", () => {
-  it("registers one exact Source App and rejects a duplicate id", () => {
+  it("registers multiple installations for one app and rejects only an exact duplicate", () => {
     const registry = new SourceAppRegistry();
     registry.register(fakeSourceApp({ appId: "slack" }));
+    registry.register(fakeSourceApp({ appId: "slack", appInstanceId: "chat_installation_2" }));
     expect(() => registry.register(fakeSourceApp({ appId: "slack" })))
-      .toThrow("Source App already registered: slack");
+      .toThrow("Source App already registered: slack/chat_installation_1");
+    expect(registry.resolve("slack")).toBeUndefined();
+    expect(registry.resolveDelivery({ appId: "slack", appInstanceId: "chat_installation_2",
+      bindingDigest: digest("a"), credentialGeneration: 3,
+      credentialGenerationDigest: digest("b") })).toBeDefined();
   });
 
   it("uses one registry entry for inbound context, presentation, and delivery", async () => {

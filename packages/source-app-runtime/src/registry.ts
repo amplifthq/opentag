@@ -41,23 +41,29 @@ function registrationSnapshot(definition: RegisteredSourceApp): RegisteredSource
 export class SourceAppRegistry {
   readonly #apps = new Map<string, RegisteredSourceAppDefinition>();
 
+  static #key(appId: string, appInstanceId: string): string {
+    return `${appId}\0${appInstanceId}`;
+  }
+
   register<RawDelivery, NativePresentation, NativeRequest>(
     definition: SourceAppDefinition<RawDelivery, NativePresentation, NativeRequest>
   ): this {
     assertSourceAppDefinition(definition);
-    if (this.#apps.has(definition.appId)) {
-      throw new Error(`Source App already registered: ${definition.appId}`);
+    const key = SourceAppRegistry.#key(definition.appId, definition.installation.appInstanceId);
+    if (this.#apps.has(key)) {
+      throw new Error(`Source App already registered: ${definition.appId}/${definition.installation.appInstanceId}`);
     }
-    this.#apps.set(definition.appId, registrationSnapshot(definition as RegisteredSourceApp));
+    this.#apps.set(key, registrationSnapshot(definition as RegisteredSourceApp));
     return this;
   }
 
   resolve(appId: string): RegisteredSourceAppDefinition | undefined {
-    return this.#apps.get(appId);
+    const matches = [...this.#apps.values()].filter((definition) => definition.appId === appId);
+    return matches.length === 1 ? matches[0] : undefined;
   }
 
   resolveDelivery(input: SourceAppInstallation & { appId: string }): RegisteredSourceAppDefinition | undefined {
-    const definition = this.#apps.get(input.appId);
+    const definition = this.#apps.get(SourceAppRegistry.#key(input.appId, input.appInstanceId));
     if (!definition) return undefined;
     const installation = definition.installation;
     return installation.appInstanceId === input.appInstanceId
