@@ -48,7 +48,9 @@ function requestFor(presentation: DispatcherDeliveryPresentation): SlackRequest 
   } catch { return null; }
 }
 
-const hash = (domain: string, value: unknown) => `sha256:${createHash('sha256').update(domainSeparatedCanonicalBytes(domain, value)).digest('hex')}`; const stableId = (prefix: string, value: unknown) => `${prefix}_${hash('opentag.delivery.slack-id.v1', value).slice(7, 31)}`;
+const hash = (domain: string, value: unknown) => `sha256:${createHash('sha256').update(domainSeparatedCanonicalBytes(domain, value)).digest('hex')}`;
+const stableId = (prefix: 'intent' | 'delivery', value: unknown) =>
+  `${prefix}_${hash(`opentag.delivery.slack-${prefix}-id.v1`, value).slice(7, 31)}`;
 const requestDigests = (request: SlackRequest) => ({ presentationDigest: hash('opentag.delivery.slack-presentation.v1', request.presentation),
   targetDigest: hash('opentag.delivery.slack-target.v1', request.operation.kind === 'add_reaction' ? request.operation : { channelId: request.operation.channelId, threadTs: 'threadTs' in request.operation ? request.operation.threadTs : undefined }) });
 function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDeliveryPresentation,
@@ -62,14 +64,15 @@ function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDe
   if (!provenance || (provenance.kind === 'business' && !provenance.runId)) throw new Error('Slack authority provenance mismatch.');
   const scope = control ? { kind: 'provider_instance' as const, id: authority.providerBinding.providerInstanceId }
     : { kind: 'local_repository' as const, id: authority.provenance.scopeId };
+  const authoritySnapshotDigest = hash('opentag.delivery.authority-snapshot.v1', authority.authoritySnapshotIdentity);
   const identity = { organizationId: owner.organizationId, causalId: authority.causalId,
     operation, presentationDigest, targetDigest, statusMessageId: request.statusMessageId ?? null,
-    providerBinding: authority.providerBinding, scope, provenance,
+    providerBinding: authority.providerBinding, scope, provenance, authoritySnapshotDigest,
     runtimeOwnerId: owner.runtimeOwnerId, runtimeGeneration: owner.runtimeGeneration,
     schemaGeneration: owner.schemaGeneration };
   return DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: owner.organizationId,
     sideEffectIntentId: stableId('intent', identity), causalId: authority.causalId, intentKind: 'delivery', operation, deliveryKind: request.presentation.kind === 'reaction' ? 'reaction' : 'message',
-    presentationDigest, provenance, providerBinding: authority.providerBinding, targetDigest, authorityKind: control ? 'local_source_thread_control' : 'run_authority', authoritySnapshotDigest: hash('opentag.delivery.authority-snapshot.v1', authority.authoritySnapshotIdentity),
+    presentationDigest, provenance, providerBinding: authority.providerBinding, targetDigest, authorityKind: control ? 'local_source_thread_control' : 'run_authority', authoritySnapshotDigest,
     evidencePolicy: 'local_audit', idempotencyKey: stableId('delivery', identity), scope, createdAt: authority.createdAt,
     initialAttemptSequence: 1, ...(request.statusMessageId ? { statusMessageId: request.statusMessageId } : {}),
     ...(control && authority.provenance.kind === 'source_thread_control' ? { installationId: authority.provenance.installationId, runtimeGeneration: authority.provenance.runtimeGeneration } : {}) }); }

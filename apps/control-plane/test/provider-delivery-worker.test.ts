@@ -7,10 +7,11 @@ describe("provider delivery worker", () => {
     const kernel = { recoverStrandedBegun: vi.fn(async () => { calls.push("recover"); return 2; }),
       deliverNext: vi.fn(async () => { calls.push("deliver"); return null; }) };
     const worker = createProviderDeliveryWorker({ kernel,
-      preloadSourceApps: async () => { calls.push("preload"); },
+      preloadSourceApps: async () => { calls.push("preload"); return { registered: 0,
+        healthy: [], failures: [] }; },
       clock: { now: () => new Date("2026-08-30T00:00:00.000Z") } });
-    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 2 });
-    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0 });
+    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 2, failures: [] });
+    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0, failures: [] });
     expect(calls).toEqual(["recover", "preload", "deliver", "preload", "deliver"]);
   });
 
@@ -23,5 +24,20 @@ describe("provider delivery worker", () => {
       clock: { now: () => new Date("2026-08-30T00:00:00.000Z") } });
     await expect(worker.processNext()).resolves.toEqual({ kind: "preload_unavailable", recovered: 1 });
     expect(calls).toEqual(["recover", "preload"]);
+  });
+
+  it("returns deterministic partial preload failures and scopes claims to healthy authorities", async () => {
+    const healthy = [{ organizationId: "org_a", appId: "slack", appInstanceId: "A1",
+      bindingDigest: "sha256:" + "a".repeat(64), credentialGeneration: 2,
+      credentialGenerationDigest: "sha256:" + "b".repeat(64) }];
+    const failures = [{ organizationId: "org_b", installationId: "install_b",
+      errorCode: "slack_installation_preload_failed", evidenceDigest: "sha256:" + "c".repeat(64) }];
+    const deliverNext = vi.fn(async () => null);
+    const worker = createProviderDeliveryWorker({ kernel: {
+      recoverStrandedBegun: async () => 0, deliverNext },
+      preloadSourceApps: async () => ({ registered: 1, healthy, failures }),
+      clock: { now: () => new Date("2026-08-30T00:00:00.000Z") } });
+    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0, failures });
+    expect(deliverNext).toHaveBeenCalledWith({ authorities: healthy });
   });
 });

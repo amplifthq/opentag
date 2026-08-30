@@ -3,7 +3,7 @@ import { DELIVERY_ERROR_CODES, domainSeparatedCanonicalBytes, type DeliveryBegin
   type DeliveryClaim, type DeliveryErrorCode, type DeliveryIntentV2,
   type DeliverySettlement } from "@opentag/delivery-contract";
 import { ProviderAdapterRegistry, type ProviderDeliveryResult } from "./provider-registry.js";
-import type { DeliveryKernelRepository } from "./repository.js";
+import type { DeliveryClaimAuthority, DeliveryKernelRepository } from "./repository.js";
 
 const ATTENTION_EVIDENCE = {
   provider_adapter_not_registered: "sha256:f443f5a15f8ed4f358b38012507180672bf19df21b93c872091e323c4331716e",
@@ -28,9 +28,9 @@ export class ProviderSideEffectKernel<Request extends object> {
   async enqueue(intent: DeliveryIntentV2, payload: unknown) {
     await this.#options.repository.recordIntent(intent, payload); return { outcome: "queued" as const };
   }
-  async deliverNext(): Promise<DeliverySettlement | DeliveryBlocked | null> {
+  async deliverNext(input?: { authorities?: readonly DeliveryClaimAuthority[] }): Promise<DeliverySettlement | DeliveryBlocked | null> {
     const { repository, registry, prepareRequest } = this.#options;
-    const claimed = await repository.claimNext(); if (!claimed) return null;
+    const claimed = await repository.claimNext(input); if (!claimed) return null;
     const claim = await repository.renewLease(claimed);
     if (!claim) return { outcome: "blocked", reason: "delivery_begin_stale" };
     let stored;

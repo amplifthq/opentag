@@ -7,9 +7,12 @@ export type { DeliveryBegin, DeliveryClaim, DeliveryErrorCode, DeliveryOutcome,
   ExternalResourceObservation, StoredDeliveryIntent } from "@opentag/delivery-contract";
 
 export type Awaitable<T> = T | Promise<T>;
+export type DeliveryClaimAuthority = { organizationId: string; appId: string;
+  appInstanceId: string; bindingDigest: string; credentialGeneration: number;
+  credentialGenerationDigest: string };
 export interface DeliveryKernelRepository {
   recordIntent(intent: DeliveryIntentV2, payload: unknown): Awaitable<void>;
-  claimNext(): Awaitable<DeliveryClaim | null>;
+  claimNext(input?: { authorities?: readonly DeliveryClaimAuthority[] }): Awaitable<DeliveryClaim | null>;
   renewLease(claim: DeliveryClaim): Awaitable<DeliveryClaim | null>;
   getIntent(claim: DeliveryClaim): Awaitable<StoredDeliveryIntent | null>;
   releaseUnusedClaim(claim: DeliveryClaim): Awaitable<boolean>;

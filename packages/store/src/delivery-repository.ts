@@ -2,9 +2,9 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, domainSeparatedCanonicalBytes,
   type DeliveryBegin, type DeliveryClaim, type DeliveryErrorCode,
   type DeliveryExternalResourceLookupDescriptor, type DeliveryIntentV2,
-  type DeliveryOutcome, type DeliverySettlement,
+  type DeliveryOutcome, type DeliveryPayloadEnvelope, type DeliverySettlement,
   type ExpectedDeliveryOwner } from "@opentag/delivery-contract";
-import { and, asc, eq, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { deliveryAttempts } from "./delivery-schema.js";
 import type { DeliveryPayloadCustody, DeliveryPayloadCustodyDescriptor } from "./delivery-payload-custody.js";
@@ -18,6 +18,8 @@ type ImmutableAttempt = Omit<typeof deliveryAttempts.$inferInsert, "id" | "state
 export type { DeliveryBegin, DeliveryClaim, DeliveryErrorCode, DeliveryOutcome,
   DeliverySettlement, ExpectedDeliveryOwner } from "@opentag/delivery-contract";
 type DeliveryKernelRepositoryOptions = { database: BetterSQLite3Database; payloadCustody: DeliveryPayloadCustody; owner: ExpectedDeliveryOwner; leaseOwner: string; leaseSeconds: number; now?: () => Date };
+type DeliveryClaimAuthority = { organizationId: string; appId: string; appInstanceId: string;
+  bindingDigest: string; credentialGeneration: number; credentialGenerationDigest: string };
 export type DeliveryKernelRepository = ReturnType<typeof createDeliveryKernelRepository>;
 
 const sha256 = (bytes: string | Uint8Array) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
@@ -52,7 +54,8 @@ const OWNER_COLUMNS = { providerId: deliveryAttempts.providerId, providerInstanc
 const beginTuple = (input: DeliveryBegin) => [eq(deliveryAttempts.installationBeginMarkerId, input.installationBeginMarkerId), eq(deliveryAttempts.installationBeginMarkerDigest, input.installationBeginMarkerDigest),
   eq(deliveryAttempts.scopeBeginMarkerId, input.scopeBeginMarkerId), eq(deliveryAttempts.scopeBeginMarkerDigest, input.scopeBeginMarkerDigest)];
 
-function intentRow(intentInput: DeliveryIntentV2, owner: ExpectedDeliveryOwner): ImmutableAttempt {
+function intentRow(intentInput: DeliveryIntentV2, owner: ExpectedDeliveryOwner,
+  persistedPayload: unknown): ImmutableAttempt {
   const intent = DeliveryIntentV2Schema.parse(intentInput); const provenance = intent.provenance; const binding = intent.providerBinding;
   if (intent.organizationId !== owner.organizationId) throw new Error("delivery organization owner mismatch");
   return { organizationId: intent.organizationId, intentId: intent.sideEffectIntentId, sequence: intent.initialAttemptSequence, causalId: intent.causalId, operation: intent.operation, deliveryKind: intent.deliveryKind,
@@ -70,7 +73,12 @@ function intentRow(intentInput: DeliveryIntentV2, owner: ExpectedDeliveryOwner):
     providerConfigGeneration: binding.providerConfigGeneration,
     providerConfigGenerationDigest: binding.providerConfigGenerationDigest,
     runtimeOwnerId: owner.runtimeOwnerId, runtimeGeneration: owner.runtimeGeneration,
-    schemaGeneration: owner.schemaGeneration, createdAt: intent.createdAt };
+    schemaGeneration: owner.schemaGeneration,
+    deadlineAt: persistedPayload && typeof persistedPayload === "object"
+      && "frozenDeadline" in persistedPayload
+      ? new Date((persistedPayload as DeliveryPayloadEnvelope).frozenDeadline).toISOString()
+      : "9999-12-31T23:59:59.999Z",
+    createdAt: intent.createdAt };
 }
 
 export function createDeliveryKernelRepository(options: DeliveryKernelRepositoryOptions) {
@@ -78,7 +86,7 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
   payloadCustody.recoverJournaled(db.select().from(deliveryAttempts).all().map(descriptor));
   return {
     recordIntent(intent: DeliveryIntentV2, persistedPayload: unknown): void {
-      const row = intentRow(intent, owner); const stage = payloadCustody.stage({ ...descriptor(row), envelope: { intent, persistedPayload } });
+      const row = intentRow(intent, owner, persistedPayload); const stage = payloadCustody.stage({ ...descriptor(row), envelope: { intent, persistedPayload } });
       try { db.transaction((tx) => { const existing = tx.select().from(deliveryAttempts).where(eq(deliveryAttempts.intentId, row.intentId)).get();
         if (existing) { if (existing.journalIntentDigest !== row.journalIntentDigest || !sameOwner(existing, row)) throw new Error(`delivery intent ${row.intentId} conflict`); return; }
         const replay = tx.select().from(deliveryAttempts).where(and(
@@ -100,12 +108,25 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
         return { outcome: "hydrated" as const, intent, journalIntentDigest: row.journalIntentDigest, persistedPayload: envelope.persistedPayload };
       } catch { return { outcome: "custody_unavailable" as const, journalIntentDigest: row.journalIntentDigest }; }
     },
-    claimNext(input: { leaseOwner?: string; leaseSeconds?: number; now?: Date } = {}): DeliveryClaim | null {
+    claimNext(input: { leaseOwner?: string; leaseSeconds?: number; now?: Date;
+      authorities?: readonly DeliveryClaimAuthority[] } = {}): DeliveryClaim | null {
       const leaseOwner = input.leaseOwner ?? options.leaseOwner; const leaseSeconds = input.leaseSeconds ?? options.leaseSeconds;
       validOwner(leaseOwner, "leaseOwner"); validLease(leaseSeconds);
       const now = input.now ?? options.now?.() ?? new Date(); const nowIso = now.toISOString(); const expires = new Date(now.getTime() + leaseSeconds * 1_000).toISOString();
-      return db.transaction((tx) => { const candidates = tx.select().from(deliveryAttempts).where(or(eq(deliveryAttempts.state, "pending"), and(eq(deliveryAttempts.state, "leased"), lt(deliveryAttempts.leaseExpiresAt, nowIso)))).orderBy(asc(deliveryAttempts.createdAt), asc(deliveryAttempts.id)).all();
-        for (const row of candidates) { const leaseFence = randomBytes(32).toString("base64url"); const updated = tx.update(deliveryAttempts).set({ state: "leased", revision: row.revision + 1, leaseOwner,
+      return db.transaction((tx) => { tx.update(deliveryAttempts).set({ state: "attention", revision: sql`${deliveryAttempts.revision} + 1`,
+          leaseOwner: null, leaseExpiresAt: null, leaseFenceDigest: null,
+          evidenceDigest: sha256("opentag.delivery.deadline-exceeded.v1"),
+          errorCode: "delivery_deadline_exceeded", outcomeRecordedAt: nowIso, updatedAt: nowIso })
+        .where(and(or(eq(deliveryAttempts.state, "pending"), eq(deliveryAttempts.state, "leased")),
+          lt(deliveryAttempts.deadlineAt, nowIso))).run();
+        const candidates = tx.select().from(deliveryAttempts).where(or(eq(deliveryAttempts.state, "pending"), and(eq(deliveryAttempts.state, "leased"), lt(deliveryAttempts.leaseExpiresAt, nowIso)))).orderBy(asc(deliveryAttempts.createdAt), asc(deliveryAttempts.id)).all();
+        for (const row of candidates) { if (input.authorities && !input.authorities.some((authority) =>
+          authority.organizationId === row.organizationId && authority.appId === row.providerId
+          && authority.appInstanceId === row.providerInstanceId
+          && authority.bindingDigest === row.providerBindingDigest
+          && authority.credentialGeneration === row.providerConfigGeneration
+          && authority.credentialGenerationDigest === row.providerConfigGenerationDigest)) continue;
+          const leaseFence = randomBytes(32).toString("base64url"); const updated = tx.update(deliveryAttempts).set({ state: "leased", revision: row.revision + 1, leaseOwner,
           leaseExpiresAt: expires, leaseFenceDigest: sha256(leaseFence), updatedAt: nowIso }).where(and(eq(deliveryAttempts.id, row.id), eq(deliveryAttempts.revision, row.revision), eq(deliveryAttempts.state, row.state), isNull(deliveryAttempts.begunAt), row.state === "leased" ? lt(deliveryAttempts.leaseExpiresAt, nowIso) : undefined)).returning().get();
           if (updated) return claim(updated, leaseFence); }
         return null; });
@@ -122,7 +143,17 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
       leaseExpiresAt: null, leaseFenceDigest: null, updatedAt: new Date().toISOString() }).where(and(eq(deliveryAttempts.state, "leased"), ...claimTuple(input), isNull(deliveryAttempts.begunAt))).run().changes === 1; },
     markBegin(input: DeliveryBegin & { begunAt?: string }): DeliveryBegin | null {
       for (const [label, value] of [["authoritySnapshotDigest", input.authoritySnapshotDigest], ["journalIntentDigest", input.journalIntentDigest], ["installationBeginMarkerDigest", input.installationBeginMarkerDigest], ["scopeBeginMarkerDigest", input.scopeBeginMarkerDigest]] as const) validDigest(value, label);
-      const now = input.begunAt ?? options.now?.().toISOString() ?? new Date().toISOString(); const updated = db.update(deliveryAttempts).set({ state: "provider_io_begun", revision: input.revision + 1,
+      const now = input.begunAt ?? options.now?.().toISOString() ?? new Date().toISOString();
+      const current = db.select().from(deliveryAttempts).where(and(eq(deliveryAttempts.state, "leased"), ...claimTuple(input))).get();
+      if (current && current.deadlineAt <= now) {
+        db.update(deliveryAttempts).set({ state: "attention", revision: input.revision + 1,
+          leaseOwner: null, leaseExpiresAt: null, leaseFenceDigest: null,
+          evidenceDigest: sha256("opentag.delivery.deadline-exceeded.v1"),
+          errorCode: "delivery_deadline_exceeded", outcomeRecordedAt: now, updatedAt: now })
+          .where(and(eq(deliveryAttempts.state, "leased"), ...claimTuple(input))).run();
+        return null;
+      }
+      const updated = db.update(deliveryAttempts).set({ state: "provider_io_begun", revision: input.revision + 1,
         installationBeginMarkerId: input.installationBeginMarkerId, installationBeginMarkerDigest: input.installationBeginMarkerDigest, scopeBeginMarkerId: input.scopeBeginMarkerId,
         scopeBeginMarkerDigest: input.scopeBeginMarkerDigest, begunAt: now, updatedAt: now }).where(and(eq(deliveryAttempts.state, "leased"), ...claimTuple(input), isNull(deliveryAttempts.begunAt))).returning().get();
       return updated ? begun(updated, input.leaseFence) : null;

@@ -4,7 +4,7 @@ import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
   deliveryExternalResourceLookupDescriptor } from "@opentag/delivery-contract";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
-import { verifyDeliveryRepositoryContract } from "../../../packages/delivery-runtime/test/repository-contract.js";
+import { verifyDeliveryRepositoryContract, verifyExtendedDeliveryRepositoryContract } from "../../../packages/delivery-runtime/test/repository-contract.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_test", sideEffectIntentId: "intent-1",
@@ -48,6 +48,37 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
           providerId: "slack", providerInstanceId: "workspace-a",
           providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
           providerConfigGenerationDigest: digest("generation"), ...owner } }) });
+  });
+  it("satisfies extended deadline, restart, and authority-isolation repository behavior", async () => {
+    let now = "2026-08-30T00:00:00.000Z";
+    const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-extended", leaseSeconds: 30, now: () => new Date(now) });
+    const createCase = (name: string, deadline: string, binding: "healthy" | "broken" = "healthy") => {
+      const selectedBinding = binding === "healthy" ? intent.providerBinding : {
+        ...intent.providerBinding, providerInstanceId: "broken-instance",
+        bindingDigest: digest("broken-binding"), providerConfigGeneration: 9,
+        providerConfigGenerationDigest: digest("broken-generation") };
+      const statusMessageId = name.startsWith("lookup-") ? "lookup:status" : `${name}:status`;
+      const value = DeliveryIntentV2Schema.parse({ ...intent, sideEffectIntentId: `intent-${name}`,
+        idempotencyKey: `key-${name}`, createdAt: "2026-08-30T00:00:00.000Z",
+        statusMessageId, providerBinding: selectedBinding });
+      return { intent: value, payload: envelope(value, "running", {}),
+        lookup: deliveryExternalResourceLookupDescriptor({ intent: value,
+          statusMessageId, owner: { organizationId: value.organizationId,
+            providerId: selectedBinding.providerId, providerInstanceId: selectedBinding.providerInstanceId,
+            providerBindingDigest: selectedBinding.bindingDigest,
+            providerConfigGeneration: selectedBinding.providerConfigGeneration,
+            providerConfigGenerationDigest: selectedBinding.providerConfigGenerationDigest, ...owner } }) };
+    };
+    const originalEnvelope = envelope;
+    await verifyExtendedDeliveryRepositoryContract({ repository,
+      createCase(name, deadline, binding) {
+        const result = createCase(name, deadline, binding);
+        return { ...result, payload: { ...originalEnvelope(result.intent), frozenDeadline: deadline } };
+      }, setNow: (value) => { now = value; }, digest: digest("extended"),
+      healthyAuthority: { organizationId: "org_test", appId: "slack", appInstanceId: "workspace-a",
+        bindingDigest: digest("binding"), credentialGeneration: 1,
+        credentialGenerationDigest: digest("generation") } });
   });
   it("preserves immutable idempotency and exclusive fenced claims", async () => {
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool,

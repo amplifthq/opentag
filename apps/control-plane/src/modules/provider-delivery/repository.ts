@@ -154,7 +154,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
         }
       });
     },
-    async claimNext() {
+    async claimNext(input = {}) {
       return withTx(async (client) => {
         const at = now();
         await client.query(`UPDATE cp_provider_delivery_intent SET state='attention', revision=revision+1,
@@ -165,15 +165,28 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
         await client.query(`UPDATE cp_provider_delivery_intent SET state='pending',revision=revision+1,
           lease_owner=NULL,lease_expires_at=NULL,lease_fence=NULL,lease_fence_digest=NULL,updated_at=$1
           WHERE state='leased' AND lease_expires_at < $1`, [at]);
+        const authorities = input.authorities;
+        if (authorities?.length === 0) return null;
+        const authorityParams: unknown[] = [];
+        const authoritySql = authorities ? ` AND (${authorities.map((authority) => {
+          const offset = 6 + authorityParams.length;
+          authorityParams.push(authority.organizationId, authority.appId, authority.appInstanceId,
+            authority.bindingDigest, authority.credentialGeneration, authority.credentialGenerationDigest);
+          return `(organization_id=$${offset} AND provider_id=$${offset + 1}
+            AND provider_instance_id=$${offset + 2} AND provider_binding_digest=$${offset + 3}
+            AND provider_config_generation=$${offset + 4}
+            AND provider_config_generation_digest=$${offset + 5})`;
+        }).join(" OR ")})` : "";
         const fence = randomBytes(32).toString("base64url");
         const result = await client.query<Row>(`WITH candidate AS (
           SELECT intent_id FROM cp_provider_delivery_intent
-          WHERE state='pending'
+          WHERE state='pending'${authoritySql}
           ORDER BY created_at,intent_id FOR UPDATE SKIP LOCKED LIMIT 1)
           UPDATE cp_provider_delivery_intent delivery SET state='leased',revision=delivery.revision+1,
           lease_owner=$2,lease_expires_at=$3,lease_fence=$4,lease_fence_digest=$5,updated_at=$1
           FROM candidate WHERE delivery.intent_id=candidate.intent_id RETURNING delivery.*`,
-        [at, options.leaseOwner, new Date(at.getTime() + options.leaseSeconds * 1000), fence, sha256(fence)]);
+        [at, options.leaseOwner, new Date(at.getTime() + options.leaseSeconds * 1000), fence, sha256(fence),
+          ...authorityParams]);
         return result.rows[0] ? claim(result.rows[0], fence) : null;
       });
     },

@@ -121,7 +121,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       postgres: { pool: fixture.pool, async close() {} } });
     expect(runtime.providerDeliveryProducer).toBeDefined();
     expect(runtime.providerDeliveryWorker).toBeDefined();
-    await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0 });
+    await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0,
+      failures: [] });
     expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_slack_runtime",
       appId: "slack", appInstanceId: "A_RUNTIME",
       bindingDigest: digest("binding"), credentialGeneration: 1,

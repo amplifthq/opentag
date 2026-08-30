@@ -145,6 +145,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     }
     const runtime = productionComponents();
     await expect(runtime.ingress.preloadSourceApps()).resolves.toEqual({ registered: 1,
+      healthy: [{ organizationId: "org_a", appId: "slack", appInstanceId: "A1",
+        bindingDigest: digest("binding"), credentialGeneration: 1,
+        credentialGenerationDigest: digest("generation") }],
       failures: [{ organizationId: "org_a", installationId: "install_2",
         errorCode: "slack_installation_preload_failed",
         evidenceDigest: expect.stringMatching(/^sha256:/u) }] });
@@ -155,6 +158,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       organizationId: "org_a", appId: "slack", appInstanceId: `A${suffix}`,
       bindingDigest: digest(`binding_${suffix}`), credentialGeneration: 1,
       credentialGenerationDigest: digest(`generation_${suffix}`) })).toBeUndefined();
+    runtime.material.set("secret://missing", "recovered-signing-secret");
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 2,
+      failures: [] });
+    expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "A2", bindingDigest: digest("binding_2"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("generation_2") })).toBeDefined();
   });
 
   it("routes the same installation id independently across organizations", async () => {

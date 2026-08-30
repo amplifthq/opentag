@@ -6,7 +6,7 @@ import { DeliveryIntentV2Schema, deliveryExternalResourceLookupDescriptor } from
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { describe, expect, it } from 'vitest';
-import { verifyDeliveryRepositoryContract } from '../../delivery-runtime/test/repository-contract.js';
+import { verifyDeliveryRepositoryContract, verifyExtendedDeliveryRepositoryContract } from '../../delivery-runtime/test/repository-contract.js';
 import {
   createDeliveryKernelRepository,
   type DeliveryClaim,
@@ -104,6 +104,36 @@ describe('fresh delivery journal', () => {
       lookup: deliveryExternalResourceLookupDescriptor({ intent: shared,
         statusMessageId: 'shared:status', owner }) });
   });
+  it('satisfies extended deadline, restart, and authority-isolation repository behavior', async () => {
+    let now = '2026-08-30T00:00:00.000Z';
+    const sqlite = new Database(':memory:'); bootstrapDeliveryJournal(sqlite);
+    const repository = createDeliveryKernelRepository({ database: drizzle(sqlite),
+      payloadCustody: custody(), owner, leaseOwner: 'worker', leaseSeconds: 30,
+      now: () => new Date(now) });
+    const createCase = (name: string, deadline: string, binding: 'healthy' | 'broken' = 'healthy') => {
+      const selectedOwner = binding === 'healthy' ? owner : { ...owner,
+        providerInstanceId: 'broken-instance', providerBindingDigest: digest('broken-binding'),
+        providerConfigGeneration: 9, providerConfigGenerationDigest: digest('broken-generation') };
+      const statusMessageId = name.startsWith('lookup-') ? 'lookup:status' : `${name}:status`;
+      const value = intent({ sideEffectIntentId: `intent-${name}`, idempotencyKey: `key-${name}`,
+        statusMessageId,
+        createdAt: '2026-08-30T00:00:00.000Z', providerBinding: { ...intent().providerBinding,
+          providerInstanceId: selectedOwner.providerInstanceId,
+          bindingDigest: selectedOwner.providerBindingDigest,
+          providerConfigGeneration: selectedOwner.providerConfigGeneration,
+          providerConfigGenerationDigest: selectedOwner.providerConfigGenerationDigest } });
+      const payload = { envelopeVersion: 1, providerRequest: {}, phase: 'running', frozenDeadline: deadline,
+        currentTruth: {} };
+      return { intent: value, payload, lookup: deliveryExternalResourceLookupDescriptor({ intent: value,
+        statusMessageId, owner: selectedOwner }) };
+    };
+    await verifyExtendedDeliveryRepositoryContract({ repository, createCase,
+      setNow: (value) => { now = value; }, digest: stable,
+      healthyAuthority: { organizationId: owner.organizationId, appId: owner.providerId,
+        appInstanceId: owner.providerInstanceId, bindingDigest: owner.providerBindingDigest,
+        credentialGeneration: owner.providerConfigGeneration,
+        credentialGenerationDigest: owner.providerConfigGenerationDigest } });
+  });
   it('bootstraps one fresh-only journal table with no raw payload columns', () => {
     const { sqlite } = setup();
     expect(sqlite.prepare(
@@ -114,6 +144,67 @@ describe('fresh delivery journal', () => {
     expect(columns).not.toEqual(expect.arrayContaining([
       'canonical_intent_json', 'persisted_payload_json', 'persisted_payload_digest',
     ]));
+  });
+
+  it('rolls back a failed tenant-qualified legacy upgrade to the usable original table', () => {
+    const sqlite = new Database(':memory:');
+    sqlite.exec(`CREATE TABLE delivery_attempts (
+      id TEXT PRIMARY KEY, scope_kind TEXT NOT NULL, scope_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL, provider_instance_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key));
+      INSERT INTO delivery_attempts VALUES ('legacy-1','local_repository','repo-1','slack','A1','key-1');`);
+    expect(() => bootstrapDeliveryJournal(sqlite)).toThrow();
+    expect(sqlite.prepare("SELECT * FROM delivery_attempts").all()).toEqual([{
+      id: 'legacy-1', scope_kind: 'local_repository', scope_id: 'repo-1',
+      provider_id: 'slack', provider_instance_id: 'A1', idempotency_key: 'key-1',
+    }]);
+    expect(sqlite.prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name").all())
+      .toEqual([{ name: 'delivery_attempts' }]);
+    sqlite.close();
+  });
+
+  it('atomically upgrades a real legacy journal, preserves rows and states, and reopens', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'opentag-delivery-migration-'));
+    const path = join(directory, 'journal.sqlite');
+    try {
+      const current = setup(path);
+      current.repository.recordIntent(intent(), {});
+      current.repository.recordIntent(intent({ sideEffectIntentId: 'intent_2',
+        idempotencyKey: 'delivery_2' }), {});
+      const claim = current.repository.claimNext(); if (!claim) throw new Error('missing claim');
+      const begin = current.repository.markBegin(markers(claim)); if (!begin) throw new Error('missing begin');
+      current.repository.settleOrReadTerminal({ ...begin, outcome: 'accepted',
+        evidenceDigest: digest('accepted') });
+      const createSql = (current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
+        .get() as { sql: string }).sql;
+      current.sqlite.exec(`DROP TRIGGER delivery_attempts_identity_immutable;
+        DROP TRIGGER delivery_attempts_transition_guard;
+        DROP TRIGGER delivery_attempts_immutable_delete;
+        DROP INDEX delivery_attempts_claim_idx;
+        DROP INDEX delivery_attempts_idempotency_idx;
+        ALTER TABLE delivery_attempts RENAME TO delivery_attempts_current;`);
+      const legacySql = createSql
+        .replace('organization_id TEXT NOT NULL, ', '')
+        .replace('deadline_at TEXT NOT NULL, ', '')
+        .replace(/\)\s*$/u, ', UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key))');
+      current.sqlite.exec(legacySql);
+      const columns = (current.sqlite.prepare('PRAGMA table_info(delivery_attempts)').all() as Array<{ name: string }>)
+        .map(({ name }) => name);
+      current.sqlite.exec(`INSERT INTO delivery_attempts (${columns.map((name) => `"${name}"`).join(',')})
+        SELECT ${columns.map((name) => `"${name}"`).join(',')} FROM delivery_attempts_current;
+        DROP TABLE delivery_attempts_current;`);
+      bootstrapDeliveryJournal(current.sqlite);
+      expect(current.sqlite.prepare('SELECT organization_id,state FROM delivery_attempts ORDER BY state').all())
+        .toEqual([{ organization_id: 'local_direct', state: 'accepted' },
+          { organization_id: 'local_direct', state: 'pending' }]);
+      expect((current.sqlite.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='delivery_attempts'")
+        .get() as { sql: string }).sql).not.toContain('UNIQUE (scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key)');
+      current.sqlite.close();
+      const reopened = new Database(path); bootstrapDeliveryJournal(reopened);
+      expect(reopened.prepare('SELECT count(*) count FROM delivery_attempts').get()).toEqual({ count: 2 });
+      reopened.close();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('records exact replay idempotently and rejects conflicting identities', () => {

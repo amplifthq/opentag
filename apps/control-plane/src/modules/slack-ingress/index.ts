@@ -261,7 +261,13 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         }
       }
       input.sourceApps.replaceAppSnapshot("slack", healthy);
-      return { registered: healthy.length, failures };
+      return { registered: healthy.length, healthy: healthy.map((definition) => ({
+        organizationId: definition.installation.organizationId, appId: definition.appId,
+        appInstanceId: definition.installation.appInstanceId,
+        bindingDigest: definition.installation.bindingDigest,
+        credentialGeneration: definition.installation.credentialGeneration,
+        credentialGenerationDigest: definition.installation.credentialGenerationDigest,
+      })), failures };
     },
     async checkReadiness() {
       try {

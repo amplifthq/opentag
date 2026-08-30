@@ -40,6 +40,8 @@ function registrationSnapshot(definition: RegisteredSourceApp): RegisteredSource
 
 export class SourceAppRegistry {
   readonly #apps = new Map<string, RegisteredSourceAppDefinition>();
+  readonly #highWater = new Map<string, Readonly<Pick<SourceAppInstallation,
+    "bindingDigest" | "credentialGeneration" | "credentialGenerationDigest">>>();
 
   static #key(organizationId: string, appId: string, appInstanceId: string): string {
     return JSON.stringify([organizationId, appId, appInstanceId]);
@@ -52,8 +54,9 @@ export class SourceAppRegistry {
     const key = SourceAppRegistry.#key(definition.installation.organizationId,
       definition.appId, definition.installation.appInstanceId);
     const current = this.#apps.get(key);
-    if (current) {
-      const next = definition.installation; const previous = current.installation;
+    const previous = current?.installation ?? this.#highWater.get(key);
+    if (previous) {
+      const next = definition.installation;
       if (next.credentialGeneration < previous.credentialGeneration)
         throw new Error("Source App credential generation downgrade");
       if (next.credentialGeneration === previous.credentialGeneration) {
@@ -64,19 +67,23 @@ export class SourceAppRegistry {
       }
     }
     this.#apps.set(key, registrationSnapshot(definition as RegisteredSourceApp));
+    this.#highWater.set(key, Object.freeze({ bindingDigest: definition.installation.bindingDigest,
+      credentialGeneration: definition.installation.credentialGeneration,
+      credentialGenerationDigest: definition.installation.credentialGenerationDigest }));
     return this;
   }
 
   replaceAppSnapshot(appId: string,
     definitions: readonly SourceAppDefinition<unknown, unknown, unknown>[]): this {
     const replacement = new Map([...this.#apps].filter(([, value]) => value.appId !== appId));
+    const nextHighWater = new Map(this.#highWater);
     for (const definition of definitions) {
       assertSourceAppDefinition(definition);
       if (definition.appId !== appId) throw new Error("Source App snapshot appId mismatch");
       const key = SourceAppRegistry.#key(definition.installation.organizationId,
         definition.appId, definition.installation.appInstanceId);
       if (replacement.has(key)) throw new Error("Source App snapshot duplicate identity");
-      const previous = this.#apps.get(key)?.installation;
+      const previous = this.#apps.get(key)?.installation ?? this.#highWater.get(key);
       if (previous && definition.installation.credentialGeneration < previous.credentialGeneration)
         throw new Error("Source App credential generation downgrade");
       if (previous && definition.installation.credentialGeneration === previous.credentialGeneration
@@ -84,15 +91,30 @@ export class SourceAppRegistry {
           || definition.installation.credentialGenerationDigest !== previous.credentialGenerationDigest))
         throw new Error("Source App equal generation mismatch");
       replacement.set(key, registrationSnapshot(definition));
+      nextHighWater.set(key, Object.freeze({ bindingDigest: definition.installation.bindingDigest,
+        credentialGeneration: definition.installation.credentialGeneration,
+        credentialGenerationDigest: definition.installation.credentialGenerationDigest }));
     }
     this.#apps.clear();
     for (const [key, value] of replacement) this.#apps.set(key, value);
+    this.#highWater.clear();
+    for (const [key, value] of nextHighWater) this.#highWater.set(key, value);
     return this;
   }
 
   resolve(appId: string): RegisteredSourceAppDefinition | undefined {
     const matches = [...this.#apps.values()].filter((definition) => definition.appId === appId);
     return matches.length === 1 ? matches[0] : undefined;
+  }
+
+  deliveryAuthorities() {
+    return [...this.#apps.values()].map((definition) => ({
+      organizationId: definition.installation.organizationId, appId: definition.appId,
+      appInstanceId: definition.installation.appInstanceId,
+      bindingDigest: definition.installation.bindingDigest,
+      credentialGeneration: definition.installation.credentialGeneration,
+      credentialGenerationDigest: definition.installation.credentialGenerationDigest,
+    })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   }
 
   resolveDelivery(input: SourceAppInstallation & { appId: string }): RegisteredSourceAppDefinition | undefined {

@@ -320,7 +320,11 @@ export function createControlPlaneRuntime(input: {
     return { intent, persistedPayload };
   } });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
-    preloadSourceApps: async () => { await slack?.preloadSourceApps(); }, clock });
+    preloadSourceApps: async () => {
+      const preload = await slack?.preloadSourceApps();
+      return { registered: sourceApps.deliveryAuthorities().length,
+        healthy: sourceApps.deliveryAuthorities(), failures: preload?.failures ?? [] };
+    }, clock });
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
       const queued = await hosted.expireQueued(job.organizationId);

@@ -51,7 +51,8 @@ function open(path: string, requests: Array<{ method: string; body: Record<strin
   const database = drizzle(sqlite);
   const payloadCustody = path === ':memory:' ? createTestPayloadCustody() :
     createEncryptedFileDeliveryPayloadCustody({ directory: `${path}.payloads`, trustedBoundary: dirname(path), key: Buffer.alloc(32, 9) });
-  const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner, leaseOwner: 'worker', leaseSeconds: 30 });
+  const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner,
+    leaseOwner: 'worker', leaseSeconds: 30, now: () => new Date('2026-04-09T00:00:01.000Z') });
   const sourceApps = new SourceAppRegistry().register(createSlackSourceApp({ installation: {
     organizationId: expectedOwner.organizationId,
     appInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
@@ -86,6 +87,71 @@ describe('Slack lifecycle composition', () => {
     }
     expect(new Set(identities.map((value) => value.intent_id)).size).toBe(3);
     expect(new Set(identities.map((value) => value.idempotency_key)).size).toBe(3);
+  });
+
+  it('binds authority snapshot identity into both durable ID domains', async () => {
+    const presentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const identities: Array<{ intent_id: string; idempotency_key: string }> = [];
+    for (const authoritySnapshotIdentity of ['authority-v1', 'authority-v2']) {
+      const runtime = open(':memory:', [], async () => ({ ...authority(), authoritySnapshotIdentity }));
+      await runtime.composition.producer.enqueue(presentation);
+      identities.push(runtime.sqlite.prepare(
+        'SELECT intent_id,idempotency_key FROM delivery_attempts').get() as typeof identities[number]);
+      runtime.sqlite.close();
+    }
+    expect(new Set(identities.map((value) => value.intent_id)).size).toBe(2);
+    expect(new Set(identities.map((value) => value.idempotency_key)).size).toBe(2);
+  });
+
+  it('changes both durable IDs for every persisted authority descriptor field and replays exactly', async () => {
+    const basePresentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const derive = async (caseName: string, selectedOwner = owner,
+      selectedAuthority = authority(), presentation: typeof basePresentation = basePresentation) => {
+      const runtime = open(':memory:', [], async () => selectedAuthority, selectedOwner);
+      await runtime.composition.producer.enqueue(presentation);
+      const value = runtime.sqlite.prepare('SELECT intent_id,idempotency_key FROM delivery_attempts')
+        .get() as { intent_id: string; idempotency_key: string };
+      runtime.sqlite.close();
+      return [caseName, value] as const;
+    };
+    const base = await derive('base');
+    expect(await derive('exact-replay')).toEqual(['exact-replay', base[1]]);
+    expect(base[1].intent_id.replace(/^intent_/u, ''))
+      .not.toBe(base[1].idempotency_key.replace(/^delivery_/u, ''));
+    const cases = await Promise.all([
+      derive('organization', { ...owner, organizationId: 'org_other' }),
+      derive('provider-instance', { ...owner, providerInstanceId: 'install-2' },
+        { ...authority(), providerBinding: { ...authority().providerBinding, providerInstanceId: 'install-2' } }),
+      derive('binding', { ...owner, providerBindingDigest: digest('binding-2') },
+        { ...authority(), providerBinding: { ...authority().providerBinding, bindingDigest: digest('binding-2') } }),
+      derive('principal', owner, { ...authority(), providerBinding: {
+        ...authority().providerBinding, providerPrincipalDigest: digest('principal-2') } }),
+      derive('config-generation', { ...owner, providerConfigGeneration: 8 }, { ...authority(), providerBinding: {
+        ...authority().providerBinding, providerConfigGeneration: 8 } }),
+      derive('config-digest', { ...owner, providerConfigGenerationDigest: digest('config-2') },
+        { ...authority(), providerBinding: { ...authority().providerBinding,
+          providerConfigGenerationDigest: digest('config-2') } }),
+      derive('scope', owner, { ...authority(), provenance: { ...authority().provenance,
+        scopeId: 'repo-2' } }),
+      derive('target', owner, authority(), { ...basePresentation, threadKey: 'T1|C2|170.002' }),
+      derive('status', owner, authority(), { ...basePresentation, statusMessageKey: 'run-identity:other' }),
+      derive('repository', owner, { ...authority(), provenance: { ...authority().provenance,
+        repositoryIdentity: 'github:acme/other' } }),
+      derive('authority-lineage', owner, { ...authority(), provenance: { ...authority().provenance,
+        authorityLineageIdentity: 'run-authority-2' } }),
+      derive('authority-snapshot', owner, { ...authority(), authoritySnapshotIdentity: 'authority-2' }),
+      derive('runtime-owner', { ...owner, runtimeOwnerId: 'runtime-2' }),
+      derive('runtime-generation', { ...owner, runtimeGeneration: 4 }),
+      derive('schema-generation', { ...owner, schemaGeneration: 2 }),
+    ]);
+    for (const [caseName, value] of cases) {
+      expect(value.intent_id, caseName).not.toBe(base[1].intent_id);
+      expect(value.idempotency_key, caseName).not.toBe(base[1].idempotency_key);
+    }
   });
 
   it('authorizes self-service only through exact installation team, app, and channel scope', async () => {
