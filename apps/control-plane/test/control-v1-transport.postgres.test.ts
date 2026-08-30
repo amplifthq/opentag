@@ -645,6 +645,17 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
+    const workspaceAttestation = { workspaceId: "workspace_permission_http",
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`, baseRevision: "a".repeat(40),
+      currentRevision: "a".repeat(40), currentTree: "b".repeat(40),
+      workspaceStateDigest: `sha256:${"4".repeat(64)}`, attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [claim.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
     const digestInput = {
       schemaVersion: 1 as const,
       protocolVersion: "1.0" as const,
@@ -666,6 +677,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       targetFingerprint: `sha256:${"3".repeat(64)}`,
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest: await computeControlPayloadDigestV1(workspaceAttestation),
       requestedAt: now.toISOString(),
     };
     const request = RunnerPermissionRequestV1Schema.parse({

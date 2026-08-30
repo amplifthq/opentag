@@ -14,6 +14,7 @@ export type { SourceContentReadGrant } from "./grants.js";
 export type SourceContextEnvelopeRef = {
   contentId: string; sourceVersionRef: string; aadDigest: string; keyVersion: string;
   payloadDigest: string;
+  expiresAt?: string;
 };
 
 const boundedIdentity = z.string().min(1).max(512).refine((value) => value === value.trim());
@@ -212,15 +213,15 @@ export function createRelayContentCustody(input: {
         && row.source_version_ref === command.sourceVersionRef
         && row.purpose === command.purpose
         && row.payload_digest === payloadDigest
-        && row.key_version === input.key.keyVersion
-        && row.expires_at.getTime() === command.expiresAt.getTime();
+        && row.key_version === input.key.keyVersion;
       if (!exact) throw new Error("source_content_conflict");
       return { contentId: row.content_id, sourceVersionRef: row.source_version_ref,
         aadDigest: row.aad_digest, keyVersion: row.key_version,
-        payloadDigest: row.payload_digest };
+        payloadDigest: row.payload_digest, expiresAt: row.expires_at.toISOString() };
     }
     return { contentId: command.contentId, sourceVersionRef: command.sourceVersionRef,
-      aadDigest: encrypted.aadDigest, keyVersion: encrypted.keyVersion, payloadDigest };
+      aadDigest: encrypted.aadDigest, keyVersion: encrypted.keyVersion, payloadDigest,
+      expiresAt: command.expiresAt.toISOString() };
   };
   return {
     async checkReadiness() {

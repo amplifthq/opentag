@@ -13,9 +13,9 @@ import {
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerMaterialActionNonStartProofV1Schema,
-  RunnerMaterialActionBeginV1Schema,
+  HostedRunnerMaterialActionBeginV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
-  RunnerPermissionRequestV1Schema,
+  HostedRunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
   RunnerRegistrationRequestV1Schema,
@@ -513,9 +513,9 @@ export function createControlPlaneApplication(
           if (!principal) {
             return context.json(controlError("invalid_credential"), 401);
           }
-          let request: ReturnType<typeof RunnerPermissionRequestV1Schema.parse>;
+          let request: ReturnType<typeof HostedRunnerPermissionRequestV1Schema.parse>;
           try {
-            request = RunnerPermissionRequestV1Schema.parse(
+            request = HostedRunnerPermissionRequestV1Schema.parse(
               await context.req.json(),
             );
           } catch {
@@ -689,7 +689,7 @@ export function createControlPlaneApplication(
           const principal = await runtimePrincipal(context.req.raw);
           if (!principal) return context.json(controlError("invalid_credential"), 401);
           let begin;
-          try { begin = RunnerMaterialActionBeginV1Schema.parse(await context.req.json()); }
+          try { begin = HostedRunnerMaterialActionBeginV1Schema.parse(await context.req.json()); }
           catch { return context.json(controlError("invalid_request_body"), 400); }
           if (principal.runnerId !== context.req.param("runnerId")
             || begin.runnerId !== principal.runnerId

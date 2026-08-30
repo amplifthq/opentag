@@ -21,7 +21,7 @@ describe("createExecutorRunResult", () => {
         evidenceDigest: "sha256:23d93edb174445dae077e4a281d5ecedbf63a7b0e03df7903031e9e2b331b4e6" } });
     const proposal = result.artifacts?.find((artifact) => artifact.id === "run_proposal:proposal-evidence");
     expect(Object.keys(proposal?.metadata ?? {}).sort()).toEqual([
-      "evidenceDigest", "proposalEvidence", "readiness",
+      "artifactDigest", "evidenceDigest", "proposalEvidence", "readiness",
     ]);
     expect(proposal?.metadata).toMatchObject({ evidenceDigest: "sha256:23d93edb174445dae077e4a281d5ecedbf63a7b0e03df7903031e9e2b331b4e6",
       proposalEvidence: { attemptId: "attempt_2", workspaceId: "workspace_attempt_2",
@@ -36,6 +36,12 @@ describe("createExecutorRunResult", () => {
     const cloned = structuredClone(proposal!);
     (cloned.metadata!["proposalEvidence"] as any).baseToFinalBinaryDiff += "tampered";
     expect(() => validateProposalEvidenceArtifact(cloned)).toThrow("proposal_evidence_digest_mismatch");
+    for (const mutation of [
+      { ...structuredClone(proposal!), id: "renamed-artifact" },
+      { ...structuredClone(proposal!), id: undefined },
+      { ...structuredClone(proposal!), metadata: { ...structuredClone(proposal!.metadata!), extra: true } },
+    ]) expect(() => validateProposalEvidenceArtifact(mutation as any))
+      .toThrow(/proposal_evidence_(?:identity|invalid|digest_mismatch)/u);
   });
   it("renders user-visible summaries from the structured executor report when present", () => {
     const result = createExecutorRunResult({

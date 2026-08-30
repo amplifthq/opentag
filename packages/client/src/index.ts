@@ -2080,6 +2080,8 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         targetFingerprint: request.targetFingerprint,
         policySnapshotRef: request.policySnapshotRef,
         policySnapshotDigest: request.policySnapshotDigest,
+        ...(request.workspaceAttestationDigest
+          ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
         requestedAt: request.requestedAt,
       });
       if (request.permissionRequestDigest !== expectedPermissionRequestDigest) {

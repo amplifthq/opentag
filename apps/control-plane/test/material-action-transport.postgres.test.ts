@@ -275,6 +275,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
       targetFingerprint: recordPayload.targetFingerprint,
       policySnapshotRef: recordAdmission.policy.payload.snapshotId,
       policySnapshotDigest: recordAdmission.policy.receiptDigest,
+      workspaceAttestationDigest: authorization.authority.workspaceAttestationDigest!,
       authority: authorization.authority,
       idempotencyKey: recordPayload.idempotencyKey, begunAt: now.toISOString(),
     })).resolves.toMatchObject({ status: 201, replayed: false });

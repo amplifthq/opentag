@@ -221,7 +221,7 @@ export function createGithubIngress(input: {
     payloadDigest: string,
     eventName: string,
   ): Promise<
-    | { owner: true; processingToken: string }
+    | { owner: true; processingToken: string; receivedAt: Date }
     | { owner: false; outcome: GithubIngressOutcome }
   > => {
     const processingToken = randomBytes(24).toString("base64url");
@@ -250,15 +250,16 @@ export function createGithubIngress(input: {
           now,
         ],
       );
-      if (inserted.rows[0]) return { owner: true, processingToken };
+      if (inserted.rows[0]) return { owner: true, processingToken, receivedAt: now };
       const replay = await client.query<{
         payload_digest: string;
         event_name: string;
         normalized_outcome: unknown;
         processing_expires_at: Date | null;
+        received_at: Date;
       }>(
         `SELECT payload_digest, event_name, normalized_outcome,
-                processing_expires_at
+                processing_expires_at, received_at
          FROM cp_github_delivery
          WHERE organization_id = $1 AND binding_id = $2 AND delivery_id = $3
          FOR UPDATE`,
@@ -289,7 +290,7 @@ export function createGithubIngress(input: {
             processingExpiresAt,
           ],
         );
-        return { owner: true, processingToken };
+        return { owner: true, processingToken, receivedAt: row.received_at };
       }
       return { owner: false, outcome: replayOutcome(row.normalized_outcome) };
     });
@@ -576,7 +577,7 @@ export function createGithubIngress(input: {
         return finish({ kind: "runner_not_ready" } as const);
       }
 
-      const receivedAt = input.clock.now().toISOString();
+      const receivedAt = reservation.receivedAt.toISOString();
       const sourceIdentityDigest = await computeGitHubIssueCommentSourceIdentityDigestV1({
         provider: "github",
         repository: {
@@ -604,7 +605,7 @@ export function createGithubIngress(input: {
       const operationId = `operation_admit_${identitySuffix}`;
       const snapshotId = `policy_${identitySuffix}`;
       const authorizationRef = `github_${binding.binding_id}_${parsed.data.sender.id}`;
-      const queueClaimDeadline = new Date(
+      const proposedQueueClaimDeadline = new Date(
         new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
       ).toISOString();
       const executionBearingCommentBody = parsed.data.comment.body.trim();
@@ -637,11 +638,13 @@ export function createGithubIngress(input: {
         purpose: "source_context",
         contentId: `github_delivery_${identitySuffix}`,
         payload: executionPayload,
-        expiresAt: new Date(queueClaimDeadline),
+        expiresAt: new Date(proposedQueueClaimDeadline),
       });
+      if (!contentRef.expiresAt) throw new Error("source_content_expiry_missing");
+      const { expiresAt: queueClaimDeadline, ...sourceEnvelopeRef } = contentRef;
       const sourceContextEnvelope = {
-        ...contentRef,
-        envelopeDigest: await computeControlPayloadDigestV1(contentRef),
+        ...sourceEnvelopeRef,
+        envelopeDigest: await computeControlPayloadDigestV1(sourceEnvelopeRef),
       };
       const policyPayload = {
         snapshotId,

@@ -261,6 +261,25 @@ export async function authorizeHostedMaterialActionFixture(input: {
   workspaceAttestationDigest?: string;
   suffix: string;
 }) {
+  let workspaceAttestationDigest = input.workspaceAttestationDigest;
+  if (!workspaceAttestationDigest) {
+    const workspaceAttestation = { workspaceId: `workspace_${input.attempt.id}`,
+      workspacePathDigest: digest("1"), repositoryPathDigest: digest("2"),
+      worktreeIdentityDigest: digest("3"), baseRevision: "a".repeat(40),
+      currentRevision: "a".repeat(40), currentTree: "b".repeat(40),
+      workspaceStateDigest: digest("4"), attemptId: input.attempt.id,
+      attemptNumber: input.attempt.number,
+      fencingTokenDigest: input.attempt.fencingTokenDigest,
+      credentialId: input.principal.credentialId,
+      leaseExpiresAt: (await input.pool.query<{ lease_expires_at: Date }>(
+        "SELECT lease_expires_at FROM cp_hosted_attempt WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+        [input.principal.organizationId, input.runId, input.attempt.id])).rows[0]!.lease_expires_at.toISOString() };
+    await input.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [input.principal.organizationId, input.runId, input.attempt.id,
+        JSON.stringify(workspaceAttestation)]);
+    workspaceAttestationDigest = await computeControlPayloadDigestV1(workspaceAttestation);
+  }
   const actionDescriptorDigest = await computeControlPayloadDigestV1(
     input.actionDescriptor,
   );
@@ -286,8 +305,7 @@ export async function authorizeHostedMaterialActionFixture(input: {
     targetFingerprint: input.targetFingerprint,
     policySnapshotRef: input.policySnapshotRef,
     policySnapshotDigest: input.policySnapshotDigest,
-    ...(input.workspaceAttestationDigest
-      ? { workspaceAttestationDigest: input.workspaceAttestationDigest } : {}),
+    workspaceAttestationDigest,
     requestedAt: input.clock.now().toISOString(),
   };
   const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
@@ -344,8 +362,7 @@ export async function authorizeHostedMaterialActionFixture(input: {
       permissionRequestDigest,
       resolutionReceiptId: approved.receipt.receiptId,
       resolutionReceiptDigest: approved.receipt.receiptDigest,
-      ...(input.workspaceAttestationDigest
-        ? { workspaceAttestationDigest: input.workspaceAttestationDigest } : {}),
+      workspaceAttestationDigest,
     },
   };
 }

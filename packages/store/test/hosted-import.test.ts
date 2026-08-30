@@ -661,6 +661,59 @@ describe("hosted assigned Run import", () => {
     sqlite.close();
   });
 
+  it("keeps hosted cancel and reject-start reasons content-free and evicts their payloads", async () => {
+    for (const closure of ["cancel", "reject"] as const) {
+      const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      const secret = `HOSTED_${closure.toUpperCase()}_PLAINTEXT_419b`;
+      const value = await fixture({ body: secret }); await begin(repo, value);
+      await repo.importHostedAssignedRun(value);
+      if (closure === "cancel") {
+        await expect(repo.cancelRun({ runId: value.claim.runId, reason: secret,
+          requestedBy: secret })).resolves.toMatchObject({ outcome: "cancelled" });
+      } else {
+        const request = await buildHostedLifecycleRequestV1({ action: "reject-start",
+          organizationId: value.claim.organizationId, runnerId: value.claim.runnerId,
+          runId: value.claim.runId, attempt: { attemptId: value.claim.attempt.id,
+            attemptNumber: value.claim.attempt.number, epoch: value.claim.attempt.epoch,
+            fencingToken: value.claim.attempt.fencingToken,
+            fencingTokenDigest: value.claim.attempt.fencingTokenDigest },
+          occurredAt: observedAt, executorId: value.claim.executorId,
+          reasonCode: "unknown_safe_failure" });
+        await expect(repo.rejectHostedAttemptStartLocally({ runId: value.claim.runId,
+          runnerId: value.claim.runnerId, attemptId: value.claim.attempt.id,
+          fencingToken: value.claim.attempt.fencingToken, executorId: value.claim.executorId,
+          reason: secret, destinationId: "cloud-1", organizationId: value.claim.organizationId,
+          credentialId: value.claim.authority.credentialId, request }))
+          .resolves.toMatchObject({ outcome: "requeued" });
+      }
+      expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+      sqlite.prepare("UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=? WHERE id=?")
+        .run(value.claim.runnerId, value.claim.attempt.id, value.claim.runId);
+      sqlite.prepare("UPDATE attempts SET status='assigned', finished_at=NULL, lease_expires_at=? WHERE id=?")
+        .run("2099-08-10T00:02:00.000Z", value.claim.attempt.id);
+      await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+        organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+        .resolves.toBeNull();
+      sqlite.close();
+    }
+  });
+
+  it("evicts an expired hosted payload when recovery discovers the closed Attempt", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-08-10T00:03:00.000Z"));
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ leaseExpiresAt: "2026-08-10T00:02:00.000Z" });
+    await begin(repo, value); await repo.importHostedAssignedRun(value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })).resolves.toBeNull();
+    sqlite.prepare("UPDATE attempts SET lease_expires_at=? WHERE id=?")
+      .run("2099-08-10T00:02:00.000Z", value.claim.attempt.id);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })).resolves.toBeNull();
+    sqlite.close();
+  });
+
   it("rejects proposal evidence tampering at persistence and read boundaries", async () => {
     const sqlite = new Database(":memory:");
     migrateSchema(sqlite);
@@ -688,11 +741,11 @@ describe("hosted assigned Run import", () => {
         readiness: "not_assessed" } }] };
     await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
       attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
-      result })).rejects.toThrow("proposal_evidence_digest_mismatch");
+      result })).rejects.toThrow(/proposal_evidence_(?:invalid|digest_mismatch)/u);
     sqlite.prepare("UPDATE runs SET result_json = ? WHERE id = ?")
       .run(JSON.stringify(result), value.claim.runId);
     await expect(repo.getRun({ runId: value.claim.runId }))
-      .rejects.toThrow("proposal_evidence_digest_mismatch");
+      .rejects.toThrow(/proposal_evidence_(?:invalid|digest_mismatch)/u);
     sqlite.close();
   });
 

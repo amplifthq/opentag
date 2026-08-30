@@ -301,7 +301,8 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
 
   it("replays exact custody after a crash before Admission and completes the delivery retry", async () => {
     let failAdmission = true;
-    const retryIngress = createGithubIngress({ pool: fixture.pool, clock: { now: () => now },
+    let retryNow = new Date(now);
+    const retryIngress = createGithubIngress({ pool: fixture.pool, clock: { now: () => retryNow },
       masterSecret: "github-ingress-master-secret-with-32-bytes", sourceContent: custody,
       hosted: { ...hosted, async admit(input) {
         if (failAdmission) {
@@ -311,6 +312,16 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         return hosted.admit(input);
       } } });
     const bindingId = "binding_ingress";
+    const existingBinding = await fixture.pool.query(
+      "SELECT 1 FROM cp_github_binding WHERE organization_id=$1 AND binding_id=$2",
+      [owner.organizationId, bindingId]);
+    if (!existingBinding.rows[0]) {
+      const created = await retryIngress.createBinding(owner, { bindingId,
+        providerRepositoryId: "123", owner: "acme", repo: "demo",
+        runnerId: "runner_ingress", projectTargetId: "target_ingress",
+        allowedActorIds: ["1001"], enabled: true });
+      if (created.kind !== "created") throw new Error("binding missing");
+    }
     const secret = retryIngress.deriveBindingSecret(owner.organizationId, bindingId, "v1");
     const body = new TextEncoder().encode(JSON.stringify({ action: "created",
       repository: { id: 123, name: "demo", owner: { login: "acme" } },
@@ -321,6 +332,10 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
       signature: signature(secret, body), body };
     await expect(retryIngress.receive(delivery))
       .rejects.toThrow("injected_after_custody_before_admission");
+    const original = await fixture.pool.query<{ expires_at: Date }>(
+      "SELECT expires_at FROM cp_source_content WHERE source_delivery_id=$1",
+      ["delivery_custody_retry"]);
+    retryNow = new Date(now.getTime() + 2 * 60_000);
     await fixture.pool.query(
       `UPDATE cp_github_delivery SET processing_expires_at = $1
        WHERE organization_id = $2 AND binding_id = $3 AND delivery_id = $4`,
@@ -334,6 +349,10 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
        WHERE organization_id = $1 AND source_delivery_id = $2`,
       [owner.organizationId, "delivery_custody_retry"],
     )).rows).toEqual([{ count: 1 }]);
+    expect((await fixture.pool.query<{ queue_claim_deadline: Date }>(
+      "SELECT queue_claim_deadline FROM cp_hosted_run WHERE hosted_admission->>'deliveryId'=$1",
+      ["delivery_custody_retry"])).rows[0]?.queue_claim_deadline.toISOString())
+      .toBe(original.rows[0]?.expires_at.toISOString());
   });
 
   it("fails closed for a bad signature or non-allowlisted stable actor id", async () => {

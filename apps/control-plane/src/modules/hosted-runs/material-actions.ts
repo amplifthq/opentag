@@ -359,7 +359,9 @@ export function createMaterialActionCoordinator(input: {
         const currentWorkspaceAttestationDigest = current.workspace_attestation
           ? await computeControlPayloadDigestV1(current.workspace_attestation)
           : undefined;
-        if (command.workspaceAttestationDigest !== currentWorkspaceAttestationDigest
+        if (!currentWorkspaceAttestationDigest || !command.workspaceAttestationDigest
+          || !command.authority.workspaceAttestationDigest
+          || command.workspaceAttestationDigest !== currentWorkspaceAttestationDigest
           || command.authority.workspaceAttestationDigest !== currentWorkspaceAttestationDigest) {
           return { kind: "conflict" as const };
         }

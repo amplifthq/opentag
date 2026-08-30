@@ -494,6 +494,13 @@ export const RunnerMaterialActionBeginV1Schema = z.object({
   begunAt: ControlTimestampSchema,
 }).strict();
 
+export const HostedRunnerMaterialActionBeginV1Schema = RunnerMaterialActionBeginV1Schema
+  .refine((request) => request.workspaceAttestationDigest !== undefined
+    && request.authority.workspaceAttestationDigest !== undefined, {
+    path: ["workspaceAttestationDigest"],
+    message: "Hosted material begin requires accepted workspace attestation.",
+  });
+
 export const MaterialActionPayloadV1Schema = z
   .object({
     actionId: MaterialActionStableIdV1Schema,
@@ -641,6 +648,12 @@ export const RunnerPermissionRequestV1Schema = z
         message: "Permission capability is required.",
       });
     }
+  });
+
+export const HostedRunnerPermissionRequestV1Schema = RunnerPermissionRequestV1Schema
+  .refine((request) => request.workspaceAttestationDigest !== undefined, {
+    path: ["workspaceAttestationDigest"],
+    message: "Hosted permission requires accepted workspace attestation.",
   });
 
 export const PermissionRequestDigestInputV1Schema = z

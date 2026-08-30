@@ -1402,12 +1402,26 @@ function newFencingToken(): string {
 
 function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRunResult {
   for (const artifact of result.artifacts ?? []) {
-    if (!artifact.id?.endsWith(":proposal-evidence")) continue;
     const metadata = artifact.metadata;
+    const proposalLike = artifact.id?.endsWith(":proposal-evidence")
+      || artifact.title === "Immutable proposal evidence"
+      || artifact.uri?.endsWith("/proposal-evidence")
+      || Boolean(metadata?.["proposalEvidence"] || metadata?.["evidenceDigest"]);
+    if (!proposalLike) continue;
     if (!metadata || metadata["readiness"] !== "not_assessed"
       || typeof metadata["evidenceDigest"] !== "string"
+      || typeof metadata["artifactDigest"] !== "string"
       || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
       throw new Error("proposal_evidence_invalid");
+    }
+    if (!artifact.sourceRunId
+      || artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+      || artifact.type !== "patch_summary" || artifact.kind !== "patch"
+      || artifact.title !== "Immutable proposal evidence"
+      || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`
+      || canonicalJsonStringify(Object.keys(metadata).sort())
+        !== canonicalJsonStringify(["artifactDigest", "evidenceDigest", "proposalEvidence", "readiness"])) {
+      throw new Error("proposal_evidence_identity_mismatch");
     }
     const evidence = metadata["proposalEvidence"] as Record<string, unknown>;
     const binaryDiff = evidence["baseToFinalBinaryDiff"];
@@ -1420,12 +1434,16 @@ function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRun
     const computedChangedFilesDigest = Array.isArray(changedFiles)
       ? canonicalSha256Json(changedFiles) : null;
     const computedEvidenceDigest = canonicalSha256Json(digestInput);
+    const artifactDigestInput = { ...artifact, metadata: { ...metadata } };
+    delete (artifactDigestInput.metadata as Record<string, unknown>)["artifactDigest"];
+    const computedArtifactDigest = canonicalSha256Json(artifactDigestInput);
     if (evidence["schemaVersion"] !== 1
       || evidence["kind"] !== "attempt_proposal_evidence"
       || evidence["diffDigest"] !== computedDiffDigest
       || evidence["changedFilesDigest"] !== computedChangedFilesDigest
       || evidenceDigest !== computedEvidenceDigest
-      || metadata["evidenceDigest"] !== evidenceDigest) {
+      || metadata["evidenceDigest"] !== evidenceDigest
+      || metadata["artifactDigest"] !== computedArtifactDigest) {
       throw new Error("proposal_evidence_digest_mismatch");
     }
   }
@@ -7950,7 +7968,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
     async cancelRun(input: { runId: string; reason?: string; requestedBy?: string }): Promise<CancelRunOutcome> {
       const updatedAt = nowIso();
-      return db.transaction((tx) => {
+      const cancellation = db.transaction((tx) => {
         const current = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         if (!current) return { outcome: "not_found" as const };
         const event = OpenTagEventSchema.parse(JSON.parse(current.eventJson));
@@ -7963,7 +7981,11 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           .where(eq(attempts.runId, input.runId))
           .all()
           .map((attempt) => attempt.fencingToken);
-        const safeCancellation = sanitizeRunEventValue({
+        const hosted = tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
+          .where(eq(hostedRunImports.runId, input.runId)).limit(1).get();
+        const safeCancellation = hosted ? {
+          reason: "Hosted Run cancellation recorded.",
+        } : sanitizeRunEventValue({
           reason: input.reason ?? "Cancellation was requested by a human.",
           ...(input.requestedBy ? { requestedBy: input.requestedBy } : {})
         }, fencingTokens);
@@ -8037,7 +8059,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             previousRunnerId: current.assignedRunnerId,
             terminalReason: "cancelled_by_user",
             terminalSemantics: "A human stop request is not a successful completion and does not auto-promote queued follow-ups.",
-            ...(safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
+            ...(!hosted && safeCancellation.requestedBy ? { requestedBy: safeCancellation.requestedBy } : {}),
             reason: result.summary
           },
           visibility: "audit" as const,
@@ -8054,6 +8076,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
         return { outcome: "cancelled" as const, run: runFromRow(cancelled), event };
       });
+      if (cancellation.outcome === "cancelled" || cancellation.outcome === "already_terminal") {
+        for (const [attemptId, payload] of hostedExecutionPayloads) {
+          if (payload.runId === input.runId) hostedExecutionPayloads.delete(attemptId);
+        }
+      }
+      return cancellation;
     },
 
     async createFollowUpRequest(input: {
@@ -8990,7 +9018,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
-        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) continue;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) {
+          hostedExecutionPayloads.delete(attemptRow.id);
+          continue;
+        }
         const executionPayload = hostedExecutionPayloads.get(attemptRow.id);
         if (!executionPayload) return null;
         const hostedAuthority: HostedImportAuthority = {
@@ -9285,10 +9316,12 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || !hasActiveAttemptLease(attempt)
         ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         const rejections = routingRejectionsFromJson(run.routingRejectionsJson);
-        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: safeInput.reason });
+        const stableReason = "hosted_attempt_start_rejected";
+        rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: stableReason });
         tx.update(attempts).set({
           status: "interrupted", finishedAt: prepared.createdAt,
-          resultJson: JSON.stringify({ conclusion: "interrupted", summary: safeInput.reason }),
+          resultJson: JSON.stringify({ conclusion: "interrupted",
+            summary: "Hosted Attempt start rejected." }),
           updatedAt: prepared.createdAt
         }).where(eq(attempts.id, input.attemptId)).run();
         tx.update(runs).set({
@@ -9303,9 +9336,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           payload: {
             runnerId: input.runnerId, executorId: safeInput.executorId,
             attemptId: input.attemptId, routingDecisionId: attempt.routingDecisionId,
-            reason: safeInput.reason
+            reasonCode: stableReason
           },
-          visibility: "audit", importance: "blocking", message: safeInput.reason,
+          visibility: "audit", importance: "blocking",
+          message: "Hosted Attempt start rejected.",
           createdAt: prepared.createdAt
         })).run();
         return { outcome: "requeued" as const, operation: journal.operation };

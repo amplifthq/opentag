@@ -170,6 +170,23 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       idFactory: (kind) => `${kind}_1`,
     });
     const { workspaceAttestationDigest: _workspaceDigest, ...legacyDigestInput } = digestInput;
+    const missingWorkspaceRequest = RunnerPermissionRequestV1Schema.parse({
+      ...legacyDigestInput, permissionRequestId: "permission_missing_workspace",
+      actionId: "action_missing_workspace", requestId: "request_missing_workspace",
+      operationId: "operation_missing_workspace",
+      attempt: { ...legacyDigestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1({
+        ...legacyDigestInput, permissionRequestId: "permission_missing_workspace",
+        actionId: "action_missing_workspace" }),
+    });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=NULL WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id]);
+    await expect(permissions.request({ principal, request: missingWorkspaceRequest }))
+      .resolves.toEqual({ kind: "stale_fence" });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
     const wrongWorkspaceRequest = RunnerPermissionRequestV1Schema.parse({
       ...digestInput, workspaceAttestationDigest: `sha256:${"f".repeat(64)}`,
       permissionRequestId: "permission_wrong_workspace", actionId: "action_wrong_workspace",
@@ -488,6 +505,17 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       requestId: "request_claim_permission_deny", credentialId: "credential_permission" }) });
     if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
     const claim = claimOutcome.claim;
+    const denyWorkspaceAttestation = { workspaceId: "workspace_permission_deny",
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`, baseRevision: "a".repeat(40),
+      currentRevision: "a".repeat(40), currentTree: "b".repeat(40),
+      workspaceStateDigest: `sha256:${"4".repeat(64)}`, attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [claim.organizationId, claim.runId, claim.attempt.id, JSON.stringify(denyWorkspaceAttestation)]);
     const lifecycleAttempt = { attemptId: claim.attempt.id,
       attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
       fencingToken: claim.attempt.fencingToken,
@@ -503,7 +531,9 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       actionDescriptorDigest: await computeControlPayloadDigestV1("workspace.write"),
       riskTier: "high" as const, targetFingerprint: `sha256:${"5".repeat(64)}`,
       policySnapshotRef: admission.policy.payload.snapshotId,
-      policySnapshotDigest: admission.policy.receiptDigest, requestedAt: now.toISOString() };
+      policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest: await computeControlPayloadDigestV1(denyWorkspaceAttestation),
+      requestedAt: now.toISOString() };
     const request = RunnerPermissionRequestV1Schema.parse({ ...digestInput,
       requestId: "request_permission_deny", operationId: "operation_permission_deny",
       attempt: { ...digestInput.attempt, fencingToken: claim.attempt.fencingToken },
@@ -519,7 +549,8 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       artifactDigests: [], evidenceDigests: [], blockedPermission: {
         permissionRequestId: request.permissionRequestId,
         actionDescriptorDigest: request.actionDescriptorDigest,
-        policySnapshotDigest: request.policySnapshotDigest } });
+        policySnapshotDigest: request.policySnapshotDigest },
+      workspaceAttestation: denyWorkspaceAttestation });
     await hosted.lifecycle({ principal, runId: claim.runId,
       action: "complete", request: needsHuman });
     const deny = HumanPermissionDecisionRequestV1Schema.parse({ schemaVersion: 1,

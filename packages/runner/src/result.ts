@@ -8,12 +8,26 @@ const MAX_ARTIFACT_SUMMARY_LENGTH = 1200;
 type ResultArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
 
 export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void {
-  if (artifact.id === undefined || !artifact.id.endsWith(":proposal-evidence")) return;
   const metadata = artifact.metadata;
+  const proposalLike = artifact.id?.endsWith(":proposal-evidence")
+    || artifact.title === "Immutable proposal evidence"
+    || artifact.uri?.endsWith("/proposal-evidence")
+    || Boolean(metadata?.["proposalEvidence"] || metadata?.["evidenceDigest"]);
+  if (!proposalLike) return;
   if (!metadata || metadata["readiness"] !== "not_assessed"
     || typeof metadata["evidenceDigest"] !== "string"
+    || typeof metadata["artifactDigest"] !== "string"
     || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
     throw new Error("proposal_evidence_invalid");
+  }
+  if (!artifact.sourceRunId
+    || artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+    || artifact.type !== "patch_summary" || artifact.kind !== "patch"
+    || artifact.title !== "Immutable proposal evidence"
+    || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`
+    || canonicalJsonStringify(Object.keys(metadata).sort())
+      !== canonicalJsonStringify(["artifactDigest", "evidenceDigest", "proposalEvidence", "readiness"])) {
+    throw new Error("proposal_evidence_identity_mismatch");
   }
   const evidence = metadata["proposalEvidence"] as ProposalEvidence;
   const { evidenceDigest, ...digestInput } = evidence;
@@ -23,11 +37,16 @@ export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void
     .update(canonicalJsonStringify(evidence.changedFiles)).digest("hex")}`;
   const computedDigest = `sha256:${createHash("sha256")
     .update(canonicalJsonStringify(digestInput)).digest("hex")}`;
+  const artifactDigestInput = { ...artifact, metadata: { ...metadata } };
+  delete (artifactDigestInput.metadata as Record<string, unknown>)["artifactDigest"];
+  const computedArtifactDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(artifactDigestInput)).digest("hex")}`;
   if (evidence.schemaVersion !== 1 || evidence.kind !== "attempt_proposal_evidence"
     || evidence.diffDigest !== diffDigest
     || evidence.changedFilesDigest !== changedFilesDigest
     || evidenceDigest !== computedDigest
-    || metadata["evidenceDigest"] !== evidenceDigest) {
+    || metadata["evidenceDigest"] !== evidenceDigest
+    || metadata["artifactDigest"] !== computedArtifactDigest) {
     throw new Error("proposal_evidence_digest_mismatch");
   }
 }
@@ -192,7 +211,7 @@ function createRunArtifacts(input: {
       ]),
       limitations: Object.freeze([...input.proposalEvidence.limitations]),
     });
-    generated.push({
+    const proposalArtifact: ResultArtifact = {
       id: `${input.runId}:proposal-evidence`,
       type: "patch_summary",
       kind: "patch",
@@ -201,12 +220,19 @@ function createRunArtifacts(input: {
       summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
       sourceRunId: input.runId,
       createdAt,
-      metadata: Object.freeze({
+      metadata: {
         proposalEvidence: immutableProposalEvidence,
         evidenceDigest,
         readiness: "not_assessed",
-      }),
+      },
+    };
+    const artifactDigest = `sha256:${createHash("sha256")
+      .update(canonicalJsonStringify(proposalArtifact)).digest("hex")}`;
+    proposalArtifact.metadata = Object.freeze({
+      ...proposalArtifact.metadata,
+      artifactDigest,
     });
+    generated.push(proposalArtifact);
     validateProposalEvidenceArtifact(generated.at(-1)!);
   }
   generated.push({

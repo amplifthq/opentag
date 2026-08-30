@@ -9,6 +9,8 @@ import {
   HostedSourceContentRedeemResponseV1Schema,
   RunnerMaterialActionBeginV1Schema,
   RunnerPermissionRequestV1Schema,
+  HostedRunnerMaterialActionBeginV1Schema,
+  HostedRunnerPermissionRequestV1Schema,
   verifyHostedSourceContentRedeemPayloadV1,
 } from "../src/index.js";
 
@@ -186,5 +188,10 @@ describe("hosted source content redemption", () => {
       idempotencyKey: "material_1", begunAt: "2026-08-30T00:00:00.000Z" };
     expect(RunnerMaterialActionBeginV1Schema.parse(material).workspaceAttestationDigest)
       .toBe(workspaceAttestationDigest);
+    expect(() => HostedRunnerPermissionRequestV1Schema.parse({ ...permission,
+      workspaceAttestationDigest: undefined })).toThrow();
+    expect(() => HostedRunnerMaterialActionBeginV1Schema.parse({ ...material,
+      workspaceAttestationDigest: undefined,
+      authority: { ...material.authority, workspaceAttestationDigest: undefined } })).toThrow();
   });
 });

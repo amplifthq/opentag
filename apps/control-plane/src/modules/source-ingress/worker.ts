@@ -17,6 +17,7 @@ const JobPayloadSchema = z.object({
     aadDigest: hexDigest,
     keyVersion: identity,
     payloadDigest: digest,
+    expiresAt: z.iso.datetime({ offset: true }).optional(),
   }).strict(),
 }).strict();
 

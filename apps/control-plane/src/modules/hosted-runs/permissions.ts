@@ -281,11 +281,8 @@ async function currentAttemptMatches(
   ) as { rows: Array<{ workspace_attestation: unknown | null }> };
   const row = result.rows[0];
   if (!row) return false;
-  if (!input.workspaceAttestationDigest) {
-    return input.requireWorkspaceAttestationDigest
-      ? row.workspace_attestation === null
-      : true;
-  }
+  if (!input.workspaceAttestationDigest) return !input.requireWorkspaceAttestationDigest;
+  if (row.workspace_attestation === null) return false;
   return row.workspace_attestation !== null
     && await computeControlPayloadDigestV1(row.workspace_attestation)
       === input.workspaceAttestationDigest;

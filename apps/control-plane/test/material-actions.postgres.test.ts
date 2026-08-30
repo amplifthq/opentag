@@ -131,20 +131,40 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       "github.pull_request.merge",
     );
     const targetFingerprint = `sha256:${"4".repeat(64)}`;
-    const authorization = await authorizeHostedMaterialActionFixture({
-      pool: fixture.pool, clock: { now: () => now }, principal, runId: claim.runId,
-      attempt: claim.attempt, actionId: "action_material",
-      actionDescriptor: "github.pull_request.merge", targetFingerprint,
-      policySnapshotRef: admission.policy.payload.snapshotId,
-      policySnapshotDigest: admission.policy.receiptDigest,
-      suffix: "material",
-    });
     await fixture.pool.query(
       `UPDATE cp_hosted_attempt SET workspace_attestation = $4::jsonb
        WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
       [principal.organizationId, claim.runId, claim.attempt.id,
         JSON.stringify(workspaceAttestation)],
     );
+    const workspaceAttestationDigest = await computeControlPayloadDigestV1(workspaceAttestation);
+    const authorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock: { now: () => now }, principal, runId: claim.runId,
+      attempt: claim.attempt, actionId: "action_material",
+      actionDescriptor: "github.pull_request.merge", targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest,
+      suffix: "material",
+    });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=NULL WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id]);
+    const { workspaceAttestationDigest: _missingWorkspaceDigest,
+      ...missingWorkspaceAuthority } = authorization.authority;
+    await expect(coordinator.begin({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId: "action_material", actionDescriptor: "github.pull_request.merge",
+      actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      authority: missingWorkspaceAuthority,
+      idempotencyKey: "material_action_material" }))
+      .resolves.toEqual({ kind: "conflict" });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
     await expect(coordinator.begin({ principal,
       fencingToken: claim.attempt.fencingToken, runId: claim.runId,
       attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
@@ -157,11 +177,6 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
         workspaceAttestationDigest: `sha256:${"f".repeat(64)}` },
       idempotencyKey: "material_action_material" }))
       .resolves.toEqual({ kind: "conflict" });
-    await fixture.pool.query(
-      `UPDATE cp_hosted_attempt SET workspace_attestation = NULL
-       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
-      [principal.organizationId, claim.runId, claim.attempt.id],
-    );
     await expect(coordinator.begin({ principal,
       fencingToken: claim.attempt.fencingToken, runId: claim.runId,
       attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
@@ -170,6 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       actionDescriptorDigest, targetFingerprint,
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest,
       authority: authorization.authority,
       idempotencyKey: "material_action_material" }))
       .resolves.toEqual({ kind: "begun" });
@@ -447,6 +463,8 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     })).rejects.toThrow("permission request failed: conflict");
 
     const pushTarget = `sha256:${"6".repeat(64)}`;
+    const pushAuthority = await authorityFor("action_push", "git.push",
+      pushDescriptorDigest, pushTarget);
     const push = {
       principal,
       fencingToken: claimOutcome.claim.attempt.fencingToken,
@@ -459,8 +477,8 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       targetFingerprint: pushTarget,
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
-      authority: await authorityFor("action_push", "git.push",
-        pushDescriptorDigest, pushTarget),
+      workspaceAttestationDigest: pushAuthority.workspaceAttestationDigest!,
+      authority: pushAuthority,
       idempotencyKey: "material_begin_push",
     } as const;
     await expect(materials.begin({ ...push,
