@@ -505,24 +505,36 @@ export function createPermissionCoordinator(input: {
             blocked_permission_request_id: string | null;
             blocked_action_descriptor_digest: string | null;
             blocked_policy_snapshot_digest: string | null;
+            workspace_attestation: unknown | null;
           }>(
             `SELECT run.state AS run_state, attempt.state AS attempt_state,
                     attempt.material_start_state,
                     attempt.blocked_permission_request_id,
                     attempt.blocked_action_descriptor_digest,
-                    attempt.blocked_policy_snapshot_digest
+                    attempt.blocked_policy_snapshot_digest,
+                    attempt.workspace_attestation
              FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
                ON attempt.organization_id = run.organization_id
               AND attempt.run_id = run.run_id
+              AND attempt.attempt_number = run.current_attempt_number
              WHERE run.organization_id = $1 AND run.run_id = $2
-               AND attempt.attempt_id = $3 AND attempt.attempt_number = $4
-               AND attempt.fencing_token_digest = $5 FOR UPDATE OF run, attempt`,
-            [command.principal.organizationId, decision.runId,
+               AND run.runner_id = $3 AND run.terminal_kind IS NULL
+               AND attempt.attempt_id = $4 AND attempt.attempt_number = $5
+               AND attempt.fencing_token_digest = $6
+               AND attempt.lease_expires_at > $7
+               AND attempt.material_start_state IN ('open','started_or_ambiguous')
+               AND run.state IN ('assigned','running','needs_approval')
+               AND attempt.state IN ('claimed','running','needs_approval')
+             FOR UPDATE OF run, attempt`,
+            [command.principal.organizationId, decision.runId, command.runnerId,
               decision.attempt.attemptId, decision.attempt.attemptNumber,
-              decision.attempt.fencingTokenDigest],
+              decision.attempt.fencingTokenDigest, input.clock.now()],
           );
           const authority = replayAuthority.rows[0];
-          if (!authority || authority.material_start_state === "proven_not_started") {
+          if (!authority || !receipt.payload.workspaceAttestationDigest
+            || authority.workspace_attestation === null
+            || await computeControlPayloadDigestV1(authority.workspace_attestation)
+              !== receipt.payload.workspaceAttestationDigest) {
             return { kind: "stale_fence" } as const;
           }
           const approvalPending = authority.run_state === "needs_approval"
@@ -551,6 +563,9 @@ export function createPermissionCoordinator(input: {
         ) as { rows: StoredPermission[] };
         const stored = result.rows[0];
         const storedRequest = stored ? StoredPermissionRequestV1Schema.parse(stored.request) : null;
+        const waitingReceipt = stored
+          ? PermissionResolutionReceiptEnvelopeV1Schema.parse(stored.current_receipt)
+          : null;
         if (
           !stored
           || !storedRequest
@@ -566,6 +581,12 @@ export function createPermissionCoordinator(input: {
           || (command.authorityAttemptEpoch !== undefined
             && storedRequest.attempt.epoch !== command.authorityAttemptEpoch)
         ) return { kind: "conflict" } as const;
+        if (!storedRequest.workspaceAttestationDigest
+          || !waitingReceipt?.payload.workspaceAttestationDigest
+          || waitingReceipt.payload.workspaceAttestationDigest
+            !== storedRequest.workspaceAttestationDigest) {
+          return { kind: "stale_fence" } as const;
+        }
         if (!(await currentAttemptMatches(client, {
           organizationId: command.principal.organizationId,
           runnerId: command.runnerId,
@@ -577,8 +598,8 @@ export function createPermissionCoordinator(input: {
           policySnapshotDigest: stored.policy_snapshot_digest,
           allowNeedsApproval: true,
           permissionRequestId: decision.permissionRequestId,
-          ...(storedRequest.workspaceAttestationDigest
-            ? { workspaceAttestationDigest: storedRequest.workspaceAttestationDigest } : {}),
+          workspaceAttestationDigest: storedRequest.workspaceAttestationDigest,
+          requireWorkspaceAttestationDigest: true,
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
         const request = storedRequest;

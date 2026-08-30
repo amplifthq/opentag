@@ -2881,15 +2881,40 @@ function aggregateMetrics(input: {
 export function createOpenTagRepository(db: BetterSQLite3Database) {
   const hostedExecutionPayloads = new Map<string, {
     runId: string;
+    fencingToken: string;
     event: OpenTagEvent;
     contextPacket: ReturnType<typeof protocolRunFieldsFromEvent>["contextPacket"];
   }>();
+  function evictHostedExecutionPayload(input: {
+    attemptId?: string | undefined;
+    runId?: string | undefined;
+  }): void {
+    if (input.attemptId) hostedExecutionPayloads.delete(input.attemptId);
+    if (input.runId) {
+      for (const [attemptId, payload] of hostedExecutionPayloads) {
+        if (payload.runId === input.runId) hostedExecutionPayloads.delete(attemptId);
+      }
+    }
+  }
+  function evictHostedExecutionPayloadIfFenceChanged(
+    attemptId: string,
+    canonicalFencingToken: string,
+  ): void {
+    const payload = hostedExecutionPayloads.get(attemptId);
+    if (payload && payload.fencingToken !== canonicalFencingToken) {
+      hostedExecutionPayloads.delete(attemptId);
+    }
+  }
   function activeAttemptLease(input: AttemptLease):
     | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
     | { outcome: "stale_attempt" | "not_found" } {
     const run = db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-    if (!run) return { outcome: "not_found" };
+    if (!run) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId, runId: input.runId });
+      return { outcome: "not_found" };
+    }
     if (run.currentAttemptId !== input.attemptId || run.assignedRunnerId !== input.runnerId) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId });
       return { outcome: "stale_attempt" };
     }
     const attempt = db.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
@@ -2897,10 +2922,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       !attempt ||
       attempt.runId !== input.runId ||
       attempt.runnerId !== input.runnerId ||
-      attempt.fencingToken !== input.fencingToken ||
       (attempt.status !== "assigned" && attempt.status !== "running") ||
       !hasActiveAttemptLease(attempt)
     ) {
+      evictHostedExecutionPayload({ attemptId: input.attemptId });
+      return { outcome: "stale_attempt" };
+    }
+    if (attempt.fencingToken !== input.fencingToken) {
+      evictHostedExecutionPayloadIfFenceChanged(input.attemptId, attempt.fencingToken);
       return { outcome: "stale_attempt" };
     }
     return { outcome: "active", run, attempt };
@@ -8999,7 +9028,13 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           inArray(runs.status, ["assigned", "running"]),
           eq(runs.assignedRunnerId, input.runnerId)
         )).limit(1).get();
-        if (!runRow?.currentAttemptId) continue;
+        if (!runRow?.currentAttemptId) {
+          evictHostedExecutionPayload({
+            attemptId: operation.attemptId ?? undefined,
+            runId: operation.runId,
+          });
+          continue;
+        }
         const attemptRow = await db.select().from(attempts).where(and(
           eq(attempts.id, runRow.currentAttemptId),
           eq(attempts.runId, runRow.id),
@@ -9013,13 +9048,18 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           : undefined;
         if (
           !attemptRow || !importRow || !attemptImportRow || !attemptRow.selectedExecutorId
+          || attemptRow.number !== attemptImportRow.attemptNumber
           || operation.operationId !== attemptImportRow.claimOperationId
         ) {
+          evictHostedExecutionPayload({
+            attemptId: attemptRow?.id ?? operation.attemptId ?? undefined,
+            runId: runRow.id,
+          });
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
         if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) {
-          hostedExecutionPayloads.delete(attemptRow.id);
+          evictHostedExecutionPayload({ attemptId: attemptRow.id });
           continue;
         }
         const executionPayload = hostedExecutionPayloads.get(attemptRow.id);
@@ -9431,16 +9471,23 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         if (
           !importedRun || !importedAttempt || !run || !attempt || !operation
           || importedAttempt.runId !== input.runId
+          || attempt.number !== importedAttempt.attemptNumber
           || run.currentAttemptId !== input.attemptId
           || !["assigned", "running", "needs_approval"].includes(run.status)
           || attempt.runId !== input.runId
           || !["assigned", "running"].includes(attempt.status)
-          || attempt.fencingToken !== input.fencingToken
         ) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId });
+          return false;
+        }
+        if (attempt.fencingToken !== input.fencingToken) {
+          evictHostedExecutionPayloadIfFenceChanged(input.attemptId, attempt.fencingToken);
           return false;
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+        const current = Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt;
+        if (!current) evictHostedExecutionPayload({ attemptId: input.attemptId });
+        return current;
       });
     },
 
@@ -10609,6 +10656,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         && !terminalRunStatus(result.runRow.status)) {
         hostedExecutionPayloads.set(claim.attempt.id, {
           runId: claim.runId,
+          fencingToken: claim.attempt.fencingToken,
           event,
           contextPacket: protocolFields.contextPacket,
         });
@@ -11918,6 +11966,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                   : "failed";
       const runRow = await db.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
       if (!runRow) {
+        if (input.runnerId) evictHostedExecutionPayload({
+          attemptId: input.attemptId, runId: input.runId });
         if (input.runnerId) return "not_found";
         throw new Error(`Run not found: ${input.runId}`);
       }
@@ -12038,6 +12088,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
       }
       if (terminalRunStatus(runRow.status)) {
+        if (input.runnerId) evictHostedExecutionPayload({
+          attemptId: input.attemptId, runId: input.runId });
         if (hostedLifecycleOperation && !hasExactHostedLifecycleReplay) {
           throw new HostedLifecycleOperationConflictError(
             "HOSTED_LIFECYCLE_OPERATION_CONFLICT",
@@ -12134,16 +12186,25 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       ];
       const completionOutcome = db.transaction((tx) => {
         const currentRun = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
-        if (!currentRun) return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        if (!currentRun) {
+          if (input.runnerId) evictHostedExecutionPayload({
+            attemptId: input.attemptId, runId: input.runId });
+          return input.runnerId ? ("not_found" as const) : ("not_found" as const);
+        }
         let currentAttempt: typeof attempts.$inferSelect | undefined;
         if (input.runnerId && input.attemptId && input.fencingToken) {
           currentAttempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
           if (
             !currentAttempt ||
             currentAttempt.runId !== input.runId ||
-            currentAttempt.runnerId !== input.runnerId ||
-            currentAttempt.fencingToken !== input.fencingToken
+            currentAttempt.runnerId !== input.runnerId
           ) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
+          if (currentAttempt.fencingToken !== input.fencingToken) {
+            evictHostedExecutionPayloadIfFenceChanged(
+              input.attemptId, currentAttempt.fencingToken);
             return "stale_attempt" as const;
           }
           if (releasedTerminalAttemptMatchesRun(currentAttempt, currentRun)) {
@@ -12189,17 +12250,27 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 );
               }
             }
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return status === currentRun.status ? ("duplicate" as const) : ("stale_attempt" as const);
           }
           if (currentAttempt.status !== "assigned" && currentAttempt.status !== "running") {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return "stale_attempt" as const;
           }
-          if (!hasActiveAttemptLease(currentAttempt)) return "stale_attempt" as const;
+          if (!hasActiveAttemptLease(currentAttempt)) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
           if (currentRun.currentAttemptId !== input.attemptId || currentRun.assignedRunnerId !== input.runnerId) {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
             return "stale_attempt" as const;
           }
-          if (currentRun.status !== "assigned" && currentRun.status !== "running") return "stale_attempt" as const;
+          if (currentRun.status !== "assigned" && currentRun.status !== "running") {
+            evictHostedExecutionPayload({ attemptId: input.attemptId });
+            return "stale_attempt" as const;
+          }
         } else if (terminalRunStatus(currentRun.status)) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId, runId: input.runId });
           return "not_found" as const;
         }
         let completedResult = durableResult;

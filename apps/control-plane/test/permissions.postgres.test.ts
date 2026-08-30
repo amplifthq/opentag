@@ -324,6 +324,89 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       decision: unrelatedAllow })).resolves.toMatchObject({ kind: "resolved",
         receipt: { payload: { state: "authorized" } } });
 
+    const resolveWorkspaceCase = async (caseName: string, mutate: () => Promise<void>, valid = false) => {
+      const candidateInput = { ...digestInput,
+        permissionRequestId: `permission_resolution_workspace_${caseName}`,
+        actionId: `action_resolution_workspace_${caseName}` };
+      const candidate = RunnerPermissionRequestV1Schema.parse({ ...candidateInput,
+        requestId: `request_resolution_workspace_${caseName}`,
+        operationId: `operation_resolution_workspace_${caseName}`,
+        attempt: { ...candidateInput.attempt, fencingToken: claim.attempt.fencingToken },
+        permissionRequestDigest: await computePermissionRequestDigestV1(candidateInput) });
+      await expect(permissions.request({ principal, request: candidate }))
+        .resolves.toMatchObject({ kind: "waiting" });
+      const decision = HumanPermissionDecisionRequestV1Schema.parse({
+        schemaVersion: 1, protocolVersion: "1.0",
+        requiredCapabilities: ["relay.permission.v1"],
+        requestId: `decision_request_resolution_workspace_${caseName}`,
+        operationId: `decision_operation_resolution_workspace_${caseName}`,
+        organizationId: principal.organizationId, runId: candidate.runId,
+        attempt: digestInput.attempt, actionId: candidate.actionId,
+        permissionRequestId: candidate.permissionRequestId,
+        permissionRequestDigest: candidate.permissionRequestDigest,
+        policySnapshotDigest: candidate.policySnapshotDigest,
+        decisionId: `decision_resolution_workspace_${caseName}`,
+        decision: "allow_once", decidedAt: now.toISOString(),
+      });
+      await mutate();
+      const resolution = permissions.resolve({ principal: {
+        organizationId: principal.organizationId, actorId: "api_key_approver" },
+        runnerId: principal.runnerId, decision });
+      if (valid) {
+        await expect(resolution).resolves.toMatchObject({ kind: "resolved",
+          receipt: { payload: { state: "authorized", workspaceAttestationDigest } } });
+      } else {
+        await expect(resolution).resolves.toEqual({ kind: "stale_fence" });
+      }
+      await fixture.pool.query(
+        "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+        [principal.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
+      await fixture.pool.query(
+        "UPDATE cp_hosted_run SET current_attempt_number=$3, state='assigned' WHERE organization_id=$1 AND run_id=$2",
+        [principal.organizationId, claim.runId, claim.attempt.number]);
+      return { candidate, decision };
+    };
+    await resolveWorkspaceCase("missing_request", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_permission_request SET request=request-'workspaceAttestationDigest' WHERE organization_id=$1 AND permission_request_id=$2",
+        [principal.organizationId, "permission_resolution_workspace_missing_request"]);
+    });
+    await resolveWorkspaceCase("missing_receipt", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_permission_request SET current_receipt=jsonb_set(current_receipt, '{payload}', (current_receipt->'payload') - 'workspaceAttestationDigest'::text) WHERE organization_id=$1 AND permission_request_id=$2",
+        [principal.organizationId, "permission_resolution_workspace_missing_receipt"]);
+    });
+    await resolveWorkspaceCase("request_receipt_mismatch", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_permission_request SET current_receipt=jsonb_set(current_receipt, '{payload,workspaceAttestationDigest}', to_jsonb($3::text)) WHERE organization_id=$1 AND permission_request_id=$2",
+        [principal.organizationId, "permission_resolution_workspace_request_receipt_mismatch", `sha256:${"f".repeat(64)}`]);
+    });
+    await resolveWorkspaceCase("null_canonical", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_hosted_attempt SET workspace_attestation=NULL WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+        [principal.organizationId, claim.runId, claim.attempt.id]);
+    });
+    await resolveWorkspaceCase("mismatched_canonical", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_hosted_attempt SET workspace_attestation=jsonb_set(workspace_attestation, '{workspaceId}', '\"different_workspace\"') WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+        [principal.organizationId, claim.runId, claim.attempt.id]);
+    });
+    await resolveWorkspaceCase("non_current", async () => {
+      await fixture.pool.query(
+        "UPDATE cp_hosted_run SET current_attempt_number=$3 WHERE organization_id=$1 AND run_id=$2",
+        [principal.organizationId, claim.runId, claim.attempt.number + 1]);
+    });
+    const validResolution = await resolveWorkspaceCase("valid_control", async () => {}, true);
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=NULL WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id]);
+    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
+      actorId: "api_key_approver" }, runnerId: principal.runnerId,
+      decision: validResolution.decision })).resolves.toEqual({ kind: "stale_fence" });
+    await fixture.pool.query(
+      "UPDATE cp_hosted_attempt SET workspace_attestation=$4::jsonb WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3",
+      [principal.organizationId, claim.runId, claim.attempt.id, JSON.stringify(workspaceAttestation)]);
+
     const waiting = await permissions.request({ principal, request });
     expect(waiting.kind).toBe("waiting");
     if (waiting.kind !== "waiting") throw new Error("waiting receipt missing");
