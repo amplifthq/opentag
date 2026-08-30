@@ -99,10 +99,10 @@ export type ControlPlaneDependencies = {
   };
   github?: Pick<GithubIngress, "receive"> & Partial<Pick<GithubIngress, "createBinding">>;
   slack?: {
-    receiveEvents(installationId: string, request: {
+    receiveEvents(routeIdentity: string, request: {
       rawBody: Uint8Array; headers: Headers; receivedAt: string;
     }): Promise<{ status: number; body: unknown }>;
-    receiveInteractivity(installationId: string, request: {
+    receiveInteractivity(routeIdentity: string, request: {
       rawBody: Uint8Array; headers: Headers; receivedAt: string;
     }): Promise<{ status: number; body: unknown }>;
   };
@@ -221,14 +221,14 @@ export function createControlPlaneApplication(
       const request = { rawBody: new Uint8Array(await context.req.raw.arrayBuffer()),
         headers: context.req.raw.headers, receivedAt: new Date().toISOString() };
       const result = kind === "events"
-        ? await dependencies.slack!.receiveEvents(context.req.param("installationId"), request)
-        : await dependencies.slack!.receiveInteractivity(context.req.param("installationId"), request);
+        ? await dependencies.slack!.receiveEvents(context.req.param("routeIdentity"), request)
+        : await dependencies.slack!.receiveInteractivity(context.req.param("routeIdentity"), request);
       return typeof result.body === "string"
         ? context.body(result.body, result.status)
         : context.json(result.body, result.status);
     };
-    app.post("/v1/providers/slack/events/:installationId", slackRoute("events"));
-    app.post("/v1/providers/slack/interactivity/:installationId", slackRoute("interactivity"));
+    app.post("/v1/providers/slack/events/:routeIdentity", slackRoute("events"));
+    app.post("/v1/providers/slack/interactivity/:routeIdentity", slackRoute("interactivity"));
   }
 
   if (dependencies.github) {

@@ -14,13 +14,11 @@ export function createProviderDeliveryWorker(input: { kernel: Kernel;
       });
       startupRecovered = true;
     }
-    let preloadFailed = false;
-    try { await input.preloadSourceApps(); } catch { preloadFailed = true; }
+    try { await input.preloadSourceApps(); }
+    catch { return { kind: "preload_unavailable" as const, recovered }; }
     const result = await input.kernel.deliverNext();
-    return result === null ? { kind: "empty" as const, recovered,
-      ...(preloadFailed ? { preloadFailed: true as const } : {}) }
-      : { kind: "delivered" as const, recovered, result,
-        ...(preloadFailed ? { preloadFailed: true as const } : {}) };
+    return result === null ? { kind: "empty" as const, recovered }
+      : { kind: "delivered" as const, recovered, result };
   } };
 }
 

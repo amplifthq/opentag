@@ -68,6 +68,26 @@ function open(path: string, requests: Array<{ method: string; body: Record<strin
 }
 
 describe('Slack lifecycle composition', () => {
+  it('derives durable IDs across tenant and binding authority without collisions', async () => {
+    const presentation = { kind: 'business', runId: 'run-identity', phase: 'acknowledgement',
+      provider: 'slack', uri: 'ignored', body: 'started', threadKey: 'T1|C1|170.001',
+      statusMessageKey: 'run-identity:status' } as const;
+    const identities: Array<{ intent_id: string; idempotency_key: string }> = [];
+    for (const [organizationId, binding] of [['org_a', stable], ['org_b', stable],
+      ['org_a', digest('binding-other')]] as const) {
+      const selectedOwner = { ...owner, organizationId, providerBindingDigest: binding };
+      const selectedAuthority = async () => ({ ...authority(), providerBinding: {
+        ...authority().providerBinding, bindingDigest: binding } });
+      const runtime = open(':memory:', [], selectedAuthority, selectedOwner);
+      await runtime.composition.producer.enqueue(presentation);
+      identities.push(runtime.sqlite.prepare(
+        'SELECT intent_id,idempotency_key FROM delivery_attempts').get() as typeof identities[number]);
+      runtime.sqlite.close();
+    }
+    expect(new Set(identities.map((value) => value.intent_id)).size).toBe(3);
+    expect(new Set(identities.map((value) => value.idempotency_key)).size).toBe(3);
+  });
+
   it('authorizes self-service only through exact installation team, app, and channel scope', async () => {
     const registry = createSlackInstallationRegistry([{ recordVersion: 1, installationId: 'installation-record-1', teamId: 'T1', appId: 'A1', channelIds: ['C1'],
       providerInstanceId: 'provider-instance-1', bindingDigest: stable, principalDigest: stable, principalAssurance: 'provider_verified', lifecycle: 'active',

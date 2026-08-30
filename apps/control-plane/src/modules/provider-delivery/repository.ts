@@ -162,10 +162,13 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           evidence_digest=$1,error_code='delivery_deadline_exceeded',outcome_recorded_at=$2,updated_at=$2
           WHERE state IN ('pending','leased') AND deadline_at IS NOT NULL AND deadline_at <= $2`,
         [sha256("opentag.delivery.deadline-exceeded.v1"), at]);
+        await client.query(`UPDATE cp_provider_delivery_intent SET state='pending',revision=revision+1,
+          lease_owner=NULL,lease_expires_at=NULL,lease_fence=NULL,lease_fence_digest=NULL,updated_at=$1
+          WHERE state='leased' AND lease_expires_at < $1`, [at]);
         const fence = randomBytes(32).toString("base64url");
         const result = await client.query<Row>(`WITH candidate AS (
           SELECT intent_id FROM cp_provider_delivery_intent
-          WHERE state='pending' OR (state='leased' AND lease_expires_at < $1)
+          WHERE state='pending'
           ORDER BY created_at,intent_id FOR UPDATE SKIP LOCKED LIMIT 1)
           UPDATE cp_provider_delivery_intent delivery SET state='leased',revision=delivery.revision+1,
           lease_owner=$2,lease_expires_at=$3,lease_fence=$4,lease_fence_digest=$5,updated_at=$1
@@ -241,6 +244,11 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
         if (terminal.has(row.state)) {
           if (!claimTupleMatches(row, input, input.revision + 1))
             throw new Error(`delivery settlement tuple conflict for attempt ${input.attemptId}`);
+          if (row.state !== input.outcome || row.evidence_digest !== input.evidenceDigest
+            || (row.error_code ?? undefined) !== input.errorCode
+            || (row.external_resource_digest ?? undefined) !== input.externalResourceDigest
+            || (row.external_resource_id ?? undefined) !== input.externalResourceId)
+            throw new Error(`delivery terminal replay conflict for attempt ${input.attemptId}`);
           return settlement(row, input.leaseFence);
         }
         if (row.state !== "provider_io_begun" || !claimTupleMatches(row, input, input.revision))

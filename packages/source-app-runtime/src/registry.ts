@@ -67,6 +67,29 @@ export class SourceAppRegistry {
     return this;
   }
 
+  replaceAppSnapshot(appId: string,
+    definitions: readonly SourceAppDefinition<unknown, unknown, unknown>[]): this {
+    const replacement = new Map([...this.#apps].filter(([, value]) => value.appId !== appId));
+    for (const definition of definitions) {
+      assertSourceAppDefinition(definition);
+      if (definition.appId !== appId) throw new Error("Source App snapshot appId mismatch");
+      const key = SourceAppRegistry.#key(definition.installation.organizationId,
+        definition.appId, definition.installation.appInstanceId);
+      if (replacement.has(key)) throw new Error("Source App snapshot duplicate identity");
+      const previous = this.#apps.get(key)?.installation;
+      if (previous && definition.installation.credentialGeneration < previous.credentialGeneration)
+        throw new Error("Source App credential generation downgrade");
+      if (previous && definition.installation.credentialGeneration === previous.credentialGeneration
+        && (definition.installation.bindingDigest !== previous.bindingDigest
+          || definition.installation.credentialGenerationDigest !== previous.credentialGenerationDigest))
+        throw new Error("Source App equal generation mismatch");
+      replacement.set(key, registrationSnapshot(definition));
+    }
+    this.#apps.clear();
+    for (const [key, value] of replacement) this.#apps.set(key, value);
+    return this;
+  }
+
   resolve(appId: string): RegisteredSourceAppDefinition | undefined {
     const matches = [...this.#apps.values()].filter((definition) => definition.appId === appId);
     return matches.length === 1 ? matches[0] : undefined;

@@ -91,9 +91,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
 
   async function insertSlackInstallation() {
     await fixture.pool.query(`INSERT INTO cp_slack_installation(
-      organization_id, installation_id, binding_id, team_id, app_id, channel_id,
+      organization_id, installation_id, route_identity, binding_id, team_id, app_id, channel_id,
       bot_user_id, member_user_ids, signing_secret_ref, bot_token_ref, created_at, updated_at)
-      VALUES('org_a','install_1','binding_1','T1','A1','C1','U_APP',
+      VALUES('org_a','install_1','route_1','binding_1','T1','A1','C1','U_APP',
         ARRAY['U1','U_MEMBER','U_REQUESTER','U_OPERATOR','U_APPROVER','U_ADMIN'],
         'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
   }
@@ -138,13 +138,16 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         VALUES('org_a',$1,$2,$3,'active',$4,$4)`,
       [`binding_${suffix}`, `install_${suffix}`, digest(`binding_${suffix}`), now]);
       await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
-        binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,
-        bot_token_ref,created_at,updated_at) VALUES('org_a',$1,$2,$3,$4,$5,$6,ARRAY['U1'],$7,
-        'secret://slack/bot',$8,$8)`, [`install_${suffix}`, `binding_${suffix}`, `T${suffix}`,
+        route_identity,binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,
+        bot_token_ref,created_at,updated_at) VALUES('org_a',$1,$2,$3,$4,$5,$6,$7,ARRAY['U1'],$8,
+        'secret://slack/bot',$9,$9)`, [`install_${suffix}`, `route_${suffix}`, `binding_${suffix}`, `T${suffix}`,
           `A${suffix}`, `C${suffix}`, `U${suffix}`, secretRef, now]);
     }
     const runtime = productionComponents();
-    await expect(runtime.ingress.preloadSourceApps()).resolves.toEqual({ registered: 1, failed: 1 });
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toEqual({ registered: 1,
+      failures: [{ organizationId: "org_a", installationId: "install_2",
+        errorCode: "slack_installation_preload_failed",
+        evidenceDigest: expect.stringMatching(/^sha256:/u) }] });
     expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
       appInstanceId: "A1", bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") })).toBeDefined();
@@ -152,6 +155,36 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       organizationId: "org_a", appId: "slack", appInstanceId: `A${suffix}`,
       bindingDigest: digest(`binding_${suffix}`), credentialGeneration: 1,
       credentialGenerationDigest: digest(`generation_${suffix}`) })).toBeUndefined();
+  });
+
+  it("routes the same installation id independently across organizations", async () => {
+    await insertSlackInstallation();
+    await fixture.pool.query("INSERT INTO cp_organization(organization_id,display_name) VALUES('org_b','B')");
+    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
+      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
+      state,created_at,updated_at) VALUES('org_b','install_1','slack','A1',$1,1,$2,'active',$3,$3)`,
+    [digest("binding_b"), digest("generation_b"), now]);
+    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
+      binding_digest,state,created_at,updated_at) VALUES('org_b','binding_b','install_1',$1,'active',$2,$2)`,
+    [digest("binding_b"), now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
+      route_identity,binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,
+      signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_b','install_1','route_b','binding_b','TB','AB','CB','UB',ARRAY['U1'],
+        'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
+    const runtime = productionComponents();
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toMatchObject({ registered: 2, failures: [] });
+    await expect(runtime.ingress.receiveEvents("route_1", challengeRequest()))
+      .resolves.toMatchObject({ status: 200 });
+    await expect(runtime.ingress.receiveEvents("route_b",
+      challengeRequest("challenge_b", { teamId: "TB", appId: "AB" })))
+      .resolves.toEqual({ status: 200, body: "challenge_b" });
+    for (const organizationId of ["org_a", "org_b"]) expect(runtime.sourceApps.resolveDelivery({
+      organizationId, appId: "slack", appInstanceId: "A1",
+      bindingDigest: organizationId === "org_a" ? digest("binding") : digest("binding_b"),
+      credentialGeneration: 1,
+      credentialGenerationDigest: organizationId === "org_a" ? digest("generation") : digest("generation_b"),
+    })).toBeDefined();
   });
 
   it("acks only after reservation, encrypted content, and processing job commit", async () => {
@@ -223,13 +256,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await insertSlackInstallation();
     const { ingress } = productionComponents();
 
-    await expect(ingress.receiveEvents("install_1", request())).resolves.toMatchObject({ status: 200 });
+    await expect(ingress.receiveEvents("route_1", request())).resolves.toMatchObject({ status: 200 });
     await expect(ingress.receiveEvents("wrong_install", request("EvWrongInstall"))).resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveEvents("install_1", request("EvWrongTeam", undefined, { teamId: "T2" })))
+    await expect(ingress.receiveEvents("route_1", request("EvWrongTeam", undefined, { teamId: "T2" })))
       .resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveEvents("install_1", request("EvWrongApp", undefined, { appId: "A2" })))
+    await expect(ingress.receiveEvents("route_1", request("EvWrongApp", undefined, { appId: "A2" })))
       .resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveEvents("install_1", request("EvWrongChannel", {
+    await expect(ingress.receiveEvents("route_1", request("EvWrongChannel", {
       type: "app_mention", user: "U1", text: "<@U_APP> fix", ts: "1700000002.1", channel: "C2"
     }))).resolves.toMatchObject({ status: 404 });
   });
@@ -238,21 +271,21 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await insertSlackInstallation();
     const { ingress } = productionComponents();
 
-    await expect(ingress.receiveEvents("install_1", challengeRequest()))
+    await expect(ingress.receiveEvents("route_1", challengeRequest()))
       .resolves.toEqual({ status: 200, body: "challenge_abc123" });
 
     const invalidSignature = challengeRequest();
     invalidSignature.headers.set("x-slack-signature", "v0=invalid");
-    await expect(ingress.receiveEvents("install_1", invalidSignature))
+    await expect(ingress.receiveEvents("route_1", invalidSignature))
       .resolves.toMatchObject({ status: 401 });
     await expect(ingress.receiveEvents("wrong_install", challengeRequest()))
       .resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveEvents("install_1", challengeRequest("challenge_abc123", { teamId: "T2" })))
+    await expect(ingress.receiveEvents("route_1", challengeRequest("challenge_abc123", { teamId: "T2" })))
       .resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveEvents("install_1", challengeRequest("challenge_abc123", { appId: "A2" })))
+    await expect(ingress.receiveEvents("route_1", challengeRequest("challenge_abc123", { appId: "A2" })))
       .resolves.toMatchObject({ status: 404 });
     for (const malformed of [null, "", "x".repeat(4097)]) {
-      await expect(ingress.receiveEvents("install_1", challengeRequest(malformed)))
+      await expect(ingress.receiveEvents("route_1", challengeRequest(malformed)))
         .resolves.toEqual({ status: 400, body: { error: "invalid_slack_challenge" } });
     }
 
@@ -266,30 +299,30 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   it("maps signature, malformed payload, secret failure, and guest invocation to typed statuses", async () => {
     await insertSlackInstallation(); const { ingress, material } = productionComponents();
     const invalid = request(); invalid.headers.set("x-slack-signature", "v0=invalid");
-    await expect(ingress.receiveEvents("install_1", invalid)).resolves.toMatchObject({ status: 401 });
+    await expect(ingress.receiveEvents("route_1", invalid)).resolves.toMatchObject({ status: 401 });
     const timestamp = String(Math.floor(now.getTime() / 1000)); const malformedBody = "{";
     const malformed = { rawBody: new TextEncoder().encode(malformedBody), headers: new Headers({
       "content-type": "application/json", "x-slack-request-timestamp": timestamp,
       "x-slack-signature": computeSlackSignature({ signingSecret: "secret", timestamp, rawBody: malformedBody })
     }), receivedAt: now.toISOString() };
-    await expect(ingress.receiveEvents("install_1", malformed)).resolves.toMatchObject({ status: 400 });
-    await expect(ingress.receiveEvents("install_1", request("EvGuest", { type: "app_mention",
+    await expect(ingress.receiveEvents("route_1", malformed)).resolves.toMatchObject({ status: 400 });
+    await expect(ingress.receiveEvents("route_1", request("EvGuest", { type: "app_mention",
       user: "U_GUEST", text: "<@U_APP> fix", ts: "1700000004.1", channel: "C1" })))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveEvents("install_1", request("EvMalformedMention", {
+    await expect(ingress.receiveEvents("route_1", request("EvMalformedMention", {
       type: "app_mention", user: "U1", text: "<@U_APP> fix", channel: "C1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
-    await expect(ingress.receiveEvents("install_1", request("EvMissingUser", {
+    await expect(ingress.receiveEvents("route_1", request("EvMissingUser", {
       type: "app_mention", text: "<@U_APP> fix", ts: "1700000005.2", channel: "C1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
-    await expect(ingress.receiveEvents("install_1", request("EvMalformedDelete", {
+    await expect(ingress.receiveEvents("route_1", request("EvMalformedDelete", {
       type: "message", subtype: "message_deleted", channel: "C1", ts: "1700000005.1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_deletion_malformed" } });
-    await expect(ingress.receiveEvents("install_1", request("EvUnsupported", {
+    await expect(ingress.receiveEvents("route_1", request("EvUnsupported", {
       type: "reaction_added", user: "U1", reaction: "eyes", channel: "C1" })))
       .resolves.toMatchObject({ status: 200, body: { ignored: true } });
     material.delete("secret://slack/signing");
-    await expect(ingress.receiveEvents("install_1", request("EvSecret"))).resolves.toMatchObject({ status: 503 });
+    await expect(ingress.receiveEvents("route_1", request("EvSecret"))).resolves.toMatchObject({ status: 503 });
   });
 
   it("returns 400 for signed malformed interactivity rather than masking it as unavailable", async () => {
@@ -298,7 +331,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       async status() { return completed; }, async cancel() { return completed; },
       async approve() { return completed; }, async reject() { return completed; },
       async bind() { return completed; }, async unbind() { return completed; } } });
-    await expect(ingress.receiveInteractivity("install_1", actionRequest({ type: "block_actions",
+    await expect(ingress.receiveInteractivity("route_1", actionRequest({ type: "block_actions",
       api_app_id: "A1", team: { id: "T1" }, user: { id: "U1" }, channel: { id: "C1" },
       actions: [] }))).resolves.toMatchObject({ status: 400, body: { error: "invalid_slack_envelope" } });
   });
@@ -366,18 +399,18 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     const once = await issue("action_once", ["allow_once"]);
     await expect(ingress.receiveInteractivity("wrong_install", action(once, "allow_once")))
       .resolves.toMatchObject({ status: 404 });
-    await expect(ingress.receiveInteractivity("install_1", action(once, "allow_once", "U_GUEST")))
+    await expect(ingress.receiveInteractivity("route_1", action(once, "allow_once", "U_GUEST")))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("install_1", action(once, "allow_once", "U_APPROVER", "wrong")))
+    await expect(ingress.receiveInteractivity("route_1", action(once, "allow_once", "U_APPROVER", "wrong")))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("install_1", action(once, "allow_run")))
+    await expect(ingress.receiveInteractivity("route_1", action(once, "allow_run")))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("install_1", action(once, "allow_once")))
+    await expect(ingress.receiveInteractivity("route_1", action(once, "allow_once")))
       .resolves.toMatchObject({ status: 200 });
-    await expect(ingress.receiveInteractivity("install_1", action(once, "allow_once")))
+    await expect(ingress.receiveInteractivity("route_1", action(once, "allow_once")))
       .resolves.toMatchObject({ status: 403 });
     const run = await issue("action_run", ["allow_run"]);
-    await expect(ingress.receiveInteractivity("install_1", action(run, "allow_run")))
+    await expect(ingress.receiveInteractivity("route_1", action(run, "allow_run")))
       .resolves.toMatchObject({ status: 200 });
     for (const [name, override] of [
       ["cross_run", { runId: "run_other" }],
@@ -387,24 +420,24 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       ["policy_mismatch", { policyDigest: digest("other_policy") }]
     ] as const) {
       const stale = await issue(`action_${name}`, ["allow_once"], "approval", override);
-      await expect(ingress.receiveInteractivity("install_1", action(stale, "allow_once")))
+      await expect(ingress.receiveInteractivity("route_1", action(stale, "allow_once")))
         .resolves.toMatchObject({ status: 403, body: { error: "slack_action_authority_stale" } });
     }
     const status = await issue("action_status", ["status"], "status");
-    await expect(ingress.receiveInteractivity("install_1", action(status, "status", "U_GUEST")))
+    await expect(ingress.receiveInteractivity("route_1", action(status, "status", "U_GUEST")))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("install_1", action(status, "status", "U_MEMBER")))
+    await expect(ingress.receiveInteractivity("route_1", action(status, "status", "U_MEMBER")))
       .resolves.toMatchObject({ status: 200 });
     const requesterCancel = await issue("action_cancel_requester", ["cancel"], "cancel");
-    await expect(ingress.receiveInteractivity("install_1", action(requesterCancel, "cancel", "U_REQUESTER")))
+    await expect(ingress.receiveInteractivity("route_1", action(requesterCancel, "cancel", "U_REQUESTER")))
       .resolves.toMatchObject({ status: 200 });
     const operatorCancel = await issue("action_cancel_operator", ["cancel"], "cancel");
-    await expect(ingress.receiveInteractivity("install_1", action(operatorCancel, "cancel", "U_OPERATOR")))
+    await expect(ingress.receiveInteractivity("route_1", action(operatorCancel, "cancel", "U_OPERATOR")))
       .resolves.toMatchObject({ status: 200 });
     const bind = await issue("action_bind", ["bind"], "bind");
-    await expect(ingress.receiveInteractivity("install_1", action(bind, "bind", "U_MEMBER")))
+    await expect(ingress.receiveInteractivity("route_1", action(bind, "bind", "U_MEMBER")))
       .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("install_1", action(bind, "bind", "U_ADMIN")))
+    await expect(ingress.receiveInteractivity("route_1", action(bind, "bind", "U_ADMIN")))
       .resolves.toMatchObject({ status: 200 });
     expect(decisions).toEqual(["allow_once", "allow_run"]);
     expect(envelopes).toEqual(expect.arrayContaining([

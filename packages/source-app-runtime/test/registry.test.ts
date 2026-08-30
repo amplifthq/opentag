@@ -144,6 +144,22 @@ describe("SourceAppRegistry", () => {
       credentialGenerationDigest: digest("b") })).toBeUndefined();
   });
 
+  it("atomically replaces a complete app snapshot and evicts absent identities", () => {
+    const registry = new SourceAppRegistry()
+      .register(fakeSourceApp({ appId: "slack", organizationId: "org_a", responseId: "a-v3" }))
+      .register(fakeSourceApp({ appId: "slack", organizationId: "org_b", responseId: "b-v3" }));
+    expect(() => registry.replaceAppSnapshot("slack", [fakeSourceApp({ appId: "slack",
+      organizationId: "org_a", credentialGeneration: 2 })])).toThrow(/generation downgrade/u);
+    expect(registry.resolveDelivery({ organizationId: "org_b", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("a"), credentialGeneration: 3,
+      credentialGenerationDigest: digest("b") })).toBeDefined();
+    registry.replaceAppSnapshot("slack", [fakeSourceApp({ appId: "slack",
+      organizationId: "org_a", credentialGeneration: 4, bindingDigest: digest("d") })]);
+    expect(registry.resolveDelivery({ organizationId: "org_b", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("a"), credentialGeneration: 3,
+      credentialGenerationDigest: digest("b") })).toBeUndefined();
+  });
+
   it("uses one registry entry for inbound context, presentation, and delivery", async () => {
     const registry = new SourceAppRegistry();
     registry.register(fakeSourceApp({ appId: "second-app" }));

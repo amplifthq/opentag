@@ -99,8 +99,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       binding_digest,state,created_at,updated_at) VALUES('org_slack_runtime','binding_runtime',
       'install_runtime',$1,'active',$2,$2)`, [digest("binding"), now]);
     await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,binding_id,
-      team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,created_at,updated_at)
-      VALUES('org_slack_runtime','install_runtime','binding_runtime','T_RUNTIME','A_RUNTIME','C_RUNTIME',
+      route_identity,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,created_at,updated_at)
+      VALUES('org_slack_runtime','install_runtime','binding_runtime','route_runtime','T_RUNTIME','A_RUNTIME','C_RUNTIME',
       'U_APP',ARRAY['U_MEMBER'],'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
     const config = {
       bootstrapOrganizationId: "org_slack_runtime", bootstrapOrganizationName: "Slack",
@@ -131,7 +131,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         event_id: `Ev_${teamId}`, event_time: Math.floor(now.getTime() / 1000),
         authorizations: [{ user_id: "U_APP" }], event: { type: "app_mention", user: "U_MEMBER",
           text: "<@U_APP> fix", ts: "1700000000.000100", channel: "C_RUNTIME" } });
-      return runtime.application.fetch(new Request("http://control.test/v1/providers/slack/events/install_runtime",
+      return runtime.application.fetch(new Request("http://control.test/v1/providers/slack/events/route_runtime",
         { method: "POST", headers: { "content-type": "application/json",
           "x-slack-request-timestamp": timestamp,
           "x-slack-signature": computeSlackSignature({ signingSecret: "secret", timestamp, rawBody: body }) },

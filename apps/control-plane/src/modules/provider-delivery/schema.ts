@@ -44,17 +44,29 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
      'delivery_restart_after_begin','delivery_deadline_exceeded','delivery_superseded')`),
   check("cp_provider_delivery_intent_shape_check", sql`
     (${table.state} = 'pending' AND ${table.leaseOwner} IS NULL AND ${table.leaseExpiresAt} IS NULL
-      AND ${table.leaseFence} IS NULL AND ${table.leaseFenceDigest} IS NULL AND ${table.begunAt} IS NULL
-      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
+      AND ${table.leaseFence} IS NULL AND ${table.leaseFenceDigest} IS NULL
+      AND ${table.installationBeginMarkerId} IS NULL AND ${table.installationBeginMarkerDigest} IS NULL
+      AND ${table.scopeBeginMarkerId} IS NULL AND ${table.scopeBeginMarkerDigest} IS NULL
+      AND ${table.begunAt} IS NULL
+      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL
+      AND ${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL
+      AND ${table.supersededByIntentId} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
     OR (${table.state} = 'leased' AND ${table.leaseOwner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL
-      AND ${table.leaseFence} IS NOT NULL AND ${table.leaseFenceDigest} IS NOT NULL AND ${table.begunAt} IS NULL
-      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
+      AND ${table.leaseFence} IS NOT NULL AND ${table.leaseFenceDigest} IS NOT NULL
+      AND ${table.installationBeginMarkerId} IS NULL AND ${table.installationBeginMarkerDigest} IS NULL
+      AND ${table.scopeBeginMarkerId} IS NULL AND ${table.scopeBeginMarkerDigest} IS NULL
+      AND ${table.begunAt} IS NULL
+      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL
+      AND ${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL
+      AND ${table.supersededByIntentId} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
     OR (${table.state} = 'provider_io_begun' AND ${table.leaseOwner} IS NOT NULL
       AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.leaseFence} IS NOT NULL
       AND ${table.leaseFenceDigest} IS NOT NULL AND ${table.begunAt} IS NOT NULL
       AND ${table.installationBeginMarkerId} IS NOT NULL AND ${table.installationBeginMarkerDigest} IS NOT NULL
       AND ${table.scopeBeginMarkerId} IS NOT NULL AND ${table.scopeBeginMarkerDigest} IS NOT NULL
-      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
+      AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL
+      AND ${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL
+      AND ${table.supersededByIntentId} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
     OR (${table.state} IN ('accepted','rejected','outcome_unknown','attention')
       AND ${table.leaseOwner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL
       AND ${table.leaseFence} IS NOT NULL AND ${table.leaseFenceDigest} IS NOT NULL
@@ -62,15 +74,23 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
       AND ${table.scopeBeginMarkerId} IS NOT NULL AND ${table.scopeBeginMarkerDigest} IS NOT NULL
       AND ${table.begunAt} IS NOT NULL
       AND ${table.evidenceDigest} IS NOT NULL AND ${table.outcomeRecordedAt} IS NOT NULL
+      AND ${table.supersededByIntentId} IS NULL
       AND ((${table.state}='accepted' AND ${table.errorCode} IS NULL) OR (${table.state}<>'accepted' AND ${table.errorCode} IS NOT NULL))
       AND ((${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL)
         OR (${table.state}='accepted' AND ${table.externalResourceId} IS NOT NULL AND ${table.externalResourceDigest} IS NOT NULL)))
     OR (${table.state}='attention' AND ${table.begunAt} IS NULL AND ${table.leaseOwner} IS NULL
       AND ${table.leaseExpiresAt} IS NULL AND ${table.leaseFence} IS NULL AND ${table.leaseFenceDigest} IS NULL
+      AND ${table.installationBeginMarkerId} IS NULL AND ${table.installationBeginMarkerDigest} IS NULL
+      AND ${table.scopeBeginMarkerId} IS NULL AND ${table.scopeBeginMarkerDigest} IS NULL
+      AND ${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL
+      AND ${table.supersededByIntentId} IS NULL
       AND ${table.evidenceDigest} IS NOT NULL AND ${table.errorCode}='delivery_deadline_exceeded'
       AND ${table.outcomeRecordedAt} IS NOT NULL)
     OR (${table.state}='superseded' AND ${table.leaseOwner} IS NULL AND ${table.leaseExpiresAt} IS NULL
       AND ${table.leaseFence} IS NULL AND ${table.leaseFenceDigest} IS NULL AND ${table.begunAt} IS NULL
+      AND ${table.installationBeginMarkerId} IS NULL AND ${table.installationBeginMarkerDigest} IS NULL
+      AND ${table.scopeBeginMarkerId} IS NULL AND ${table.scopeBeginMarkerDigest} IS NULL
+      AND ${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL
       AND ${table.evidenceDigest} IS NOT NULL AND ${table.errorCode}='delivery_superseded'
       AND ${table.outcomeRecordedAt} IS NOT NULL AND ${table.supersededByIntentId} IS NOT NULL)`),
   index("cp_provider_delivery_claim_idx").on(table.state, table.leaseExpiresAt, table.createdAt, table.intentId),

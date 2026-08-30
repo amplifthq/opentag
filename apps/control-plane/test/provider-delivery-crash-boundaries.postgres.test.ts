@@ -40,6 +40,10 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
         runtimeGeneration: 1, schemaGeneration: 1 } }) });
     const claimed = (await repository.claimNext())!;
     const renewed = (await repository.renewLease(claimed))!;
+    await expect(fixture.pool.query(`UPDATE cp_provider_delivery_intent
+      SET revision=revision+1,lease_fence='tampered',lease_fence_digest=$1
+      WHERE intent_id='crash-intent'`, [digest("tampered")]))
+      .rejects.toThrow(/invalid transition|immutable/u);
     const marker = digest("marker");
     const begun = (await repository.markBegin({ ...renewed,
       installationBeginMarkerId: "installation-begin", installationBeginMarkerDigest: marker,
@@ -50,14 +54,16 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
     const durable = await fixture.pool.query("SELECT state,error_code FROM cp_provider_delivery_intent WHERE intent_id='crash-intent'");
     expect(durable.rows[0]).toEqual({ state: "outcome_unknown", error_code: "delivery_restart_after_begin" });
     await expect(repository.settleOrReadTerminal({ ...begun, outcome: "accepted",
-      evidenceDigest: digest("late-response") })).resolves.toMatchObject({
-        outcome: "outcome_unknown", errorCode: "delivery_restart_after_begin" });
+      evidenceDigest: digest("late-response") })).rejects.toThrow(/terminal replay conflict/u);
     await expect(repository.settleOrReadTerminal({ ...begun, runtimeGeneration: 99,
       outcome: "accepted", evidenceDigest: digest("late-response") }))
       .rejects.toThrow(/tuple conflict/u);
     await expect(fixture.pool.query(
       "DELETE FROM cp_provider_delivery_intent WHERE intent_id='crash-intent'"))
       .rejects.toThrow(/immutable/u);
+    await expect(fixture.pool.query(`UPDATE cp_provider_delivery_intent
+      SET revision=revision+1,evidence_digest=$1 WHERE intent_id='crash-intent'`,
+    [digest("terminal-drift")])).rejects.toThrow(/invalid transition|immutable/u);
   });
 
   it("rejects a direct pending-to-begun transition that violates state shape", async () => {

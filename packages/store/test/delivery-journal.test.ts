@@ -13,7 +13,7 @@ import {
   type DeliveryPayloadCustody,
 } from '../src/delivery-repository.js';
 import { createEncryptedFileDeliveryPayloadCustody } from '../src/delivery-payload-custody.js';
-import { bootstrapDeliveryJournal } from '../src/delivery-schema.js';
+import { bootstrapDeliveryJournal, deliveryAttempts } from '../src/delivery-schema.js';
 
 const digest = (value: string) =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -97,9 +97,12 @@ function row(sqlite: Database.Database) {
 describe('fresh delivery journal', () => {
   it('satisfies the shared delivery repository contract', async () => {
     const { repository } = setup();
+    const shared = intent({ sideEffectIntentId: 'intent_shared', idempotencyKey: 'delivery_shared',
+      statusMessageId: 'shared:status' });
     await verifyDeliveryRepositoryContract({ repository,
-      intent: intent({ sideEffectIntentId: 'intent_shared', idempotencyKey: 'delivery_shared' }),
-      payload: {}, digest: stable });
+      intent: shared, payload: {}, digest: stable,
+      lookup: deliveryExternalResourceLookupDescriptor({ intent: shared,
+        statusMessageId: 'shared:status', owner }) });
   });
   it('bootstraps one fresh-only journal table with no raw payload columns', () => {
     const { sqlite } = setup();
@@ -242,6 +245,7 @@ describe('fresh delivery journal', () => {
     expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'exact', externalResourceId: '171.002',
       externalResourceDigest: digest('resource') });
     for (const drifted of [{ ...descriptor, organizationId: 'org_other' },
+      { ...descriptor, runId: 'run_other' },
       { ...descriptor, providerId: 'teams' },
       { ...descriptor, providerBindingDigest: digest('binding-drift') },
       { ...descriptor, providerPrincipalDigest: digest('principal-drift') },
@@ -259,6 +263,18 @@ describe('fresh delivery journal', () => {
       evidenceDigest: digest('accepted_2'), externalResourceId: '172.003',
       externalResourceDigest: digest('resource_2') });
     expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'ambiguous' });
+  });
+
+  it('scopes idempotency independently by organization', () => {
+    const first = setup();
+    first.repository.recordIntent(intent(), {});
+    const secondOwner = { ...owner, organizationId: 'org_other' };
+    const database = drizzle(first.sqlite);
+    const second = createDeliveryKernelRepository({ database,
+      payloadCustody: custody(), owner: secondOwner, leaseOwner: 'worker-2', leaseSeconds: 30 });
+    expect(() => second.recordIntent(intent({ organizationId: 'org_other',
+      sideEffectIntentId: 'intent_other' }), {})).not.toThrow();
+    expect(database.select().from(deliveryAttempts).all()).toHaveLength(2);
   });
 
   it('persists provider-neutral canonical external resource identities', () => {

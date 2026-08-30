@@ -40,9 +40,14 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
       leaseOwner: "worker-shared", leaseSeconds: 30 });
     const shared = DeliveryIntentV2Schema.parse({ ...intent, sideEffectIntentId: "intent-shared",
-      idempotencyKey: "key-shared" });
+      idempotencyKey: "key-shared", statusMessageId: "shared:status" });
     await verifyDeliveryRepositoryContract({ repository, intent: shared,
-      payload: envelope(shared), digest: digest("shared") });
+      payload: envelope(shared), digest: digest("shared"),
+      lookup: deliveryExternalResourceLookupDescriptor({ intent: shared,
+        statusMessageId: "shared:status", owner: { organizationId: "org_test",
+          providerId: "slack", providerInstanceId: "workspace-a",
+          providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
+          providerConfigGenerationDigest: digest("generation"), ...owner } }) });
   });
   it("preserves immutable idempotency and exclusive fenced claims", async () => {
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool,
@@ -164,6 +169,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
     await expect(repository.findAcceptedExternalResource(descriptor)).resolves.toEqual({ outcome: "exact",
         externalResourceId: "native-1", externalResourceDigest: digest("resource-native-1") });
     for (const drifted of [{ ...descriptor, organizationId: "org_other" },
+      { ...descriptor, runId: "run-other" },
       { ...descriptor, providerId: "teams" },
       { ...descriptor, providerInstanceId: "workspace-b" },
       { ...descriptor, providerBindingDigest: digest("binding-drift") },

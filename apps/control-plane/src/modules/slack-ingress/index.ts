@@ -16,7 +16,7 @@ export type SlackSecretResolver = { resolve(reference: string): Promise<string> 
 const hashBytes = (bytes: Uint8Array | string) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 
 type SlackInstallation = {
-  organizationId: string; installationId: string; bindingId: string;
+  organizationId: string; installationId: string; routeIdentity: string; bindingId: string;
   teamId: string; appId: string; channelId: string; botUserId: string;
   memberUserIds: string[];
   signingSecretRef: string; botTokenRef: string; appInstanceId: string;
@@ -45,9 +45,11 @@ type ActionRow = { organization_id: string; action_id: string; installation_id: 
   approver_user_id: string | null; admin_user_ids: string[]; expires_at: Date;
   consumed_at: Date | null };
 
-async function resolveInstallation(pool: Pool, installationId: string): Promise<InstallationResolution> {
+async function resolveInstallation(pool: Pool, identity: { organizationId: string; installationId: string }
+  | { routeIdentity: string }): Promise<InstallationResolution> {
+  const route = "routeIdentity" in identity;
   const result = await pool.query<{
-    organization_id: string; installation_id: string; binding_id: string;
+    organization_id: string; installation_id: string; route_identity: string; binding_id: string;
     team_id: string; app_id: string; channel_id: string; bot_user_id: string;
     member_user_ids: string[];
     signing_secret_ref: string; bot_token_ref: string; app_instance_id: string;
@@ -62,14 +64,17 @@ async function resolveInstallation(pool: Pool, installationId: string): Promise<
       ON binding.organization_id = slack.organization_id
      AND binding.binding_id = slack.binding_id
      AND binding.installation_id = slack.installation_id
-    WHERE slack.installation_id = $1 AND installation.source_app_id = 'slack'
+    WHERE ${route ? "slack.route_identity = $1" : "slack.organization_id = $1 AND slack.installation_id = $2"}
+      AND installation.source_app_id = 'slack'
       AND installation.state = 'active' AND binding.state = 'active'
-      AND binding.binding_digest = installation.binding_digest LIMIT 2`, [installationId]);
+      AND binding.binding_digest = installation.binding_digest LIMIT 2`, route
+      ? [identity.routeIdentity] : [identity.organizationId, identity.installationId]);
   if (result.rows.length === 0) return { kind: "not_found" };
   if (result.rows.length > 1) return { kind: "ambiguous" };
   const row = result.rows[0]!;
   return { kind: "found", installation: {
     organizationId: row.organization_id, installationId: row.installation_id,
+    routeIdentity: row.route_identity,
     bindingId: row.binding_id, teamId: row.team_id, appId: row.app_id,
     channelId: row.channel_id, botUserId: row.bot_user_id,
     memberUserIds: row.member_user_ids,
@@ -130,17 +135,10 @@ function urlVerificationResult(payload: Record<string, any>): SlackUrlVerificati
     : { kind: "malformed" };
 }
 
-function createInstallationApp(input: { installation: SlackInstallation; signingSecret: string;
-  secrets: SlackSecretResolver; sourceApps: SourceAppRegistry;
+function buildInstallationApp(input: { installation: SlackInstallation; signingSecret: string;
+  secrets: SlackSecretResolver;
   fetchImpl?: typeof fetch; clock: { now(): Date } }) {
-  const identity = { organizationId: input.installation.organizationId,
-    appId: "slack", appInstanceId: input.installation.appInstanceId,
-    bindingDigest: input.installation.bindingDigest,
-    credentialGeneration: input.installation.credentialGeneration,
-    credentialGenerationDigest: input.installation.credentialGenerationDigest };
-  const existing = input.sourceApps.resolveDelivery(identity);
-  if (existing) return existing;
-  const sourceApp = createSlackSourceApp({ installation: {
+  return createSlackSourceApp({ installation: {
     organizationId: input.installation.organizationId,
     appInstanceId: input.installation.appInstanceId,
     bindingDigest: input.installation.bindingDigest,
@@ -150,8 +148,6 @@ function createInstallationApp(input: { installation: SlackInstallation; signing
   resolveCredential: () => input.secrets.resolve(input.installation.botTokenRef),
   ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
   clock: () => input.clock.now().getTime() });
-  input.sourceApps.register(sourceApp);
-  return input.sourceApps.resolveDelivery(identity)!;
 }
 
 function createBoundIngress(input: { sourceApp: SourceAppDefinition<unknown, unknown, unknown>;
@@ -220,20 +216,22 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
   fetchImpl?: typeof fetch; tokenFactory?: () => string }) {
   const sourceIngress = createSourceIngressService({ pool: input.pool, clock: input.clock,
     custody: input.custody, jobs: input.jobs });
-  const resolve = async (installationId: string) => {
-    const resolution = await resolveInstallation(input.pool, installationId);
+  const resolveRoute = async (routeIdentity: string) => {
+    const resolution = await resolveInstallation(input.pool, { routeIdentity });
     if (resolution.kind !== "found") return resolution;
     const signingSecret = await input.secrets.resolve(resolution.installation.signingSecretRef);
-    const sourceApp = createInstallationApp({ installation: resolution.installation,
-      signingSecret, secrets: input.secrets, sourceApps: input.sourceApps, clock: input.clock,
+    const definition = buildInstallationApp({ installation: resolution.installation,
+      signingSecret, secrets: input.secrets, clock: input.clock,
       ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
+    input.sourceApps.register(definition);
+    const sourceApp = input.sourceApps.resolveDelivery({ appId: "slack", ...definition.installation })!;
     return { kind: "found" as const, installation: resolution.installation, sourceApp };
   };
 
   return {
     async preloadSourceApps() {
-      const rows = await input.pool.query<{ installation_id: string }>(
-        `SELECT slack.installation_id FROM cp_slack_installation slack
+      const rows = await input.pool.query<{ organization_id: string; installation_id: string }>(
+        `SELECT slack.organization_id,slack.installation_id FROM cp_slack_installation slack
          JOIN cp_source_app_installation installation
            ON installation.organization_id=slack.organization_id
           AND installation.installation_id=slack.installation_id
@@ -244,21 +242,34 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
          WHERE installation.source_app_id='slack' AND installation.state='active'
            AND binding.state='active' AND binding.binding_digest=installation.binding_digest
          ORDER BY slack.organization_id, slack.installation_id`);
-      let registered = 0; let failed = 0;
+      const healthy: SourceAppDefinition<unknown, unknown, unknown>[] = [];
+      const failures: Array<{ organizationId: string; installationId: string;
+        errorCode: string; evidenceDigest: string }> = [];
       for (const row of rows.rows) {
         try {
-          const resolved = await resolve(row.installation_id);
-          if (resolved.kind !== "found") failed += 1; else registered += 1;
-        } catch { failed += 1; }
+          const resolution = await resolveInstallation(input.pool, {
+            organizationId: row.organization_id, installationId: row.installation_id });
+          if (resolution.kind !== "found") throw new Error("installation_unavailable");
+          const signingSecret = await input.secrets.resolve(resolution.installation.signingSecretRef);
+          healthy.push(buildInstallationApp({ installation: resolution.installation,
+            signingSecret, secrets: input.secrets, clock: input.clock,
+            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) }));
+        } catch {
+          failures.push({ organizationId: row.organization_id, installationId: row.installation_id,
+            errorCode: "slack_installation_preload_failed",
+            evidenceDigest: hashBytes(`${row.organization_id}\0${row.installation_id}\0preload_failed`) });
+        }
       }
-      return { registered, failed };
+      input.sourceApps.replaceAppSnapshot("slack", healthy);
+      return { registered: healthy.length, failures };
     },
     async checkReadiness() {
       try {
-        const rows = await input.pool.query<{ installation_id: string }>(
-          "SELECT installation_id FROM cp_slack_installation ORDER BY organization_id, installation_id");
+        const rows = await input.pool.query<{ organization_id: string; installation_id: string }>(
+          "SELECT organization_id,installation_id FROM cp_slack_installation ORDER BY organization_id, installation_id");
         for (const row of rows.rows) {
-          const resolved = await resolve(row.installation_id);
+          const resolved = await resolveInstallation(input.pool, {
+            organizationId: row.organization_id, installationId: row.installation_id });
           if (resolved.kind !== "found") return { ready: false, reason: "configuration_invalid" } as const;
           await input.secrets.resolve(resolved.installation.botTokenRef);
         }
@@ -298,9 +309,9 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
       return token;
     },
 
-    async receiveEvents(installationId: string, request: RawRequest): Promise<HttpResult> {
+    async receiveEvents(routeIdentity: string, request: RawRequest): Promise<HttpResult> {
       try {
-        const resolved = await resolve(installationId);
+        const resolved = await resolveRoute(routeIdentity);
         if (resolved.kind === "not_found") return { status: 404, body: { error: "slack_installation_not_found" } };
         if (resolved.kind === "ambiguous") return { status: 409, body: { error: "slack_installation_ambiguous" } };
         const trusted = await resolved.sourceApp.ingress.verify(request);
@@ -340,11 +351,11 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
       } catch (error) { return verificationFailure(error); }
     },
 
-    async receiveInteractivity(installationId: string, request: RawRequest): Promise<HttpResult> {
+    async receiveInteractivity(routeIdentity: string, request: RawRequest): Promise<HttpResult> {
       const commandAuthority = input.commandAuthority;
       if (!commandAuthority) return { status: 503, body: { error: "slack_command_authority_unavailable" } };
       try {
-        const resolved = await resolve(installationId);
+        const resolved = await resolveRoute(routeIdentity);
         if (resolved.kind === "not_found") return { status: 404, body: { error: "slack_installation_not_found" } };
         if (resolved.kind === "ambiguous") return { status: 409, body: { error: "slack_installation_ambiguous" } };
         const trusted = await resolved.sourceApp.ingress.verify(request);
@@ -480,6 +491,7 @@ export function createSlackIngressForTest(input: {
 }) {
   const installation: SlackInstallation = { organizationId: input.organizationId,
     installationId: input.installationId, bindingId: input.bindingId,
+    routeIdentity: "test-route",
     teamId: "test", appId: "test", channelId: "test", botUserId: "test",
     memberUserIds: ["test"],
     signingSecretRef: "test", botTokenRef: "test", appInstanceId: input.sourceApp.installation.appInstanceId,

@@ -11,12 +11,14 @@ export const slackInstallations = pgTable("cp_slack_installation", {
   botUserId: text("bot_user_id").notNull(), signingSecretRef: text("signing_secret_ref").notNull(),
   memberUserIds: text("member_user_ids").array().notNull(),
   botTokenRef: text("bot_token_ref").notNull(),
+  routeIdentity: text("route_identity").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, (table) => [
   primaryKey({ columns: [table.organizationId, table.installationId] }),
   unique("cp_slack_installation_team_id_app_id_channel_id_key").on(
     table.teamId, table.appId, table.channelId),
+  unique("cp_slack_installation_route_identity_key").on(table.routeIdentity),
   foreignKey({ columns: [table.organizationId, table.installationId], foreignColumns: [
     sourceAppInstallations.organizationId, sourceAppInstallations.installationId,
   ] }).onDelete("cascade"),
@@ -28,6 +30,7 @@ export const slackInstallations = pgTable("cp_slack_installation", {
   check("cp_slack_installation_secret_refs_check",
     sql`${table.signingSecretRef} <> '' AND ${table.botTokenRef} <> ''`),
   check("cp_slack_installation_members_check", sql`cardinality(${table.memberUserIds}) > 0`),
+  check("cp_slack_installation_route_identity_check", sql`${table.routeIdentity} <> ''`),
 ]);
 
 export const slackActionAuthorities = pgTable("cp_slack_action_authority", {

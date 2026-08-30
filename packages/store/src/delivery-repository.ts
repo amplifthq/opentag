@@ -81,7 +81,11 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
       const row = intentRow(intent, owner); const stage = payloadCustody.stage({ ...descriptor(row), envelope: { intent, persistedPayload } });
       try { db.transaction((tx) => { const existing = tx.select().from(deliveryAttempts).where(eq(deliveryAttempts.intentId, row.intentId)).get();
         if (existing) { if (existing.journalIntentDigest !== row.journalIntentDigest || !sameOwner(existing, row)) throw new Error(`delivery intent ${row.intentId} conflict`); return; }
-        const replay = tx.select().from(deliveryAttempts).where(and(eq(deliveryAttempts.scopeKind, row.scopeKind), eq(deliveryAttempts.scopeId, row.scopeId), eq(deliveryAttempts.providerId, row.providerId), eq(deliveryAttempts.providerInstanceId, row.providerInstanceId), eq(deliveryAttempts.idempotencyKey, row.idempotencyKey))).get();
+        const replay = tx.select().from(deliveryAttempts).where(and(
+          eq(deliveryAttempts.organizationId, row.organizationId),
+          eq(deliveryAttempts.scopeKind, row.scopeKind), eq(deliveryAttempts.scopeId, row.scopeId),
+          eq(deliveryAttempts.providerId, row.providerId), eq(deliveryAttempts.providerInstanceId, row.providerInstanceId),
+          eq(deliveryAttempts.idempotencyKey, row.idempotencyKey))).get();
         if (replay) throw new Error(`delivery idempotency conflict with ${replay.intentId}`);
         const digestOwner = tx.select().from(deliveryAttempts).where(eq(deliveryAttempts.journalIntentDigest, row.journalIntentDigest)).get();
         if (digestOwner) throw new Error(`delivery intent digest conflict with ${digestOwner.intentId}`);
@@ -130,11 +134,18 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
       const recordedAt = input.outcomeRecordedAt ?? new Date().toISOString(); return db.transaction((tx) => { const exact = (revision: number) => and(eq(deliveryAttempts.state, "provider_io_begun"), ...claimTuple({ ...input, revision }), ...beginTuple(input));
         const write = (revision: number, state: DeliveryOutcome, evidenceDigest: string, errorCode?: string) => tx.update(deliveryAttempts).set({ state, revision: revision + 1, evidenceDigest, errorCode: errorCode ?? null,
           externalResourceDigest: input.externalResourceDigest ?? null, externalResourceId: input.externalResourceId ?? null, outcomeRecordedAt: recordedAt, updatedAt: recordedAt }).where(exact(revision)).returning().get();
+        let terminalReplay = false;
         let row = write(input.revision, input.outcome, input.evidenceDigest, input.errorCode); if (!row) { const current = tx.select().from(deliveryAttempts).where(eq(deliveryAttempts.id, input.attemptId)).get();
           if (!current || current.leaseFenceDigest !== sha256(input.leaseFence) || !sameOwner(current, input) || current.authoritySnapshotDigest !== input.authoritySnapshotDigest || current.journalIntentDigest !== input.journalIntentDigest ||
             current.installationBeginMarkerId !== input.installationBeginMarkerId || current.installationBeginMarkerDigest !== input.installationBeginMarkerDigest || current.scopeBeginMarkerId !== input.scopeBeginMarkerId || current.scopeBeginMarkerDigest !== input.scopeBeginMarkerDigest) throw new Error(`delivery settlement tuple conflict for attempt ${input.attemptId}`);
-          if (terminal(current.state)) row = current; else if (current.state === "provider_io_begun") row = write(current.revision, "outcome_unknown", DELIVERY_SETTLEMENT_STALE_EVIDENCE_DIGEST, "delivery_settlement_stale");
+          if (terminal(current.state)) { row = current; terminalReplay = true; }
+          else if (current.state === "provider_io_begun") row = write(current.revision, "outcome_unknown", DELIVERY_SETTLEMENT_STALE_EVIDENCE_DIGEST, "delivery_settlement_stale");
           if (!row) throw new Error(`delivery settlement durable truth unavailable for attempt ${input.attemptId}`); }
+        if (terminalReplay && (row.state !== input.outcome || row.evidenceDigest !== input.evidenceDigest
+          || (row.errorCode ?? undefined) !== input.errorCode
+          || (row.externalResourceDigest ?? undefined) !== input.externalResourceDigest
+          || (row.externalResourceId ?? undefined) !== input.externalResourceId))
+          throw new Error(`delivery terminal replay conflict for attempt ${input.attemptId}`);
         return { ...begun(row, input.leaseFence), outcome: row.state as DeliveryOutcome, evidenceDigest: row.evidenceDigest!, ...(row.errorCode ? { errorCode: row.errorCode as DeliveryErrorCode } : {}),
           ...(row.externalResourceDigest ? { externalResourceDigest: row.externalResourceDigest } : {}), ...(row.externalResourceId ? { externalResourceId: row.externalResourceId } : {}) }; });
     },
@@ -146,6 +157,7 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
     findAcceptedExternalResource(input: DeliveryExternalResourceLookupDescriptor): { outcome: "none" | "ambiguous" } | { outcome: "exact"; externalResourceId: string; externalResourceDigest: string } {
       const rows = db.selectDistinct({ externalResourceId: deliveryAttempts.externalResourceId, externalResourceDigest: deliveryAttempts.externalResourceDigest }).from(deliveryAttempts).where(and(eq(deliveryAttempts.state, "accepted"),
         eq(deliveryAttempts.provenanceKind, "business"), eq(deliveryAttempts.operation, input.operation),
+        eq(deliveryAttempts.runId, input.runId),
         eq(deliveryAttempts.organizationId, input.organizationId),
         eq(deliveryAttempts.scopeKind, input.scopeKind), eq(deliveryAttempts.scopeId, input.scopeId),
         eq(deliveryAttempts.statusMessageId, input.statusMessageId), eq(deliveryAttempts.targetDigest, input.targetDigest),
