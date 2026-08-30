@@ -59,6 +59,7 @@ describe.skipIf(!TEST_DATABASE_URL)("material action Control V1 transport", () =
           "relay.lifecycle.v1",
           "relay.material-receipt.v1",
           "relay.readiness.v1",
+          "relay.source-content-redeem.v1",
         ],
       },
     });

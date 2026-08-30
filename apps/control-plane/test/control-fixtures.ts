@@ -22,6 +22,7 @@ export const HOSTED_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 export async function hostedGrantIssuerFixture(_client: PoolClient, input: {

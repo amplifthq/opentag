@@ -6,6 +6,8 @@ import {
   HostedProgressRequestV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedRunningRequestV1Schema,
+  HostedSourceContentRedeemRequestV1Schema,
+  HostedSourceContentRedeemResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   RelayCapabilitiesResponseV1Schema,
@@ -435,6 +437,69 @@ export function createControlPlaneApplication(
         409,
       );
     });
+
+    app.post(
+      "/v1/runners/:runnerId/runs/:runId/source-content/redeem",
+      async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) {
+          return context.json(controlError("invalid_credential"), 401);
+        }
+        let request: ReturnType<
+          typeof HostedSourceContentRedeemRequestV1Schema.parse
+        >;
+        try {
+          request = HostedSourceContentRedeemRequestV1Schema.parse(
+            await context.req.json(),
+          );
+        } catch {
+          return context.json(controlError("invalid_request_body"), 400);
+        }
+        if (!control.sourceContent
+          || principal.runnerId !== context.req.param("runnerId")
+          || request.runnerId !== context.req.param("runnerId")
+          || request.runId !== context.req.param("runId")
+          || !(await control.hosted.validateSourceContentRedemption({
+            principal, request,
+          }))) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        try {
+          const contents = await control.sourceContent.read({
+            grantId: request.grant.grantId,
+            token: request.grant.token,
+            organizationId: request.organizationId,
+            runId: request.runId,
+            attemptId: request.attempt.attemptId,
+            fenceDigest: request.attempt.fencingTokenDigest,
+            contentIds: request.grant.contentIds,
+            purpose: request.grant.purpose,
+          });
+          const content = contents[0];
+          if (!content || contents.length !== 1
+            || content.contentId !== request.contentEnvelope.contentId) {
+            return context.json(controlError("stale_attempt", request.requestId), 409);
+          }
+          return context.json(HostedSourceContentRedeemResponseV1Schema.parse({
+            kind: "hosted_source_content_redeemed",
+            schemaVersion: 1,
+            protocolVersion: "1.0",
+            requestId: request.requestId,
+            operationId: request.operationId,
+            organizationId: request.organizationId,
+            runnerId: request.runnerId,
+            runId: request.runId,
+            attempt: request.attempt,
+            admissionEnvelopeDigest: request.admissionEnvelopeDigest,
+            contentEnvelope: request.contentEnvelope,
+            content,
+            redeemedAt: new Date().toISOString(),
+          }), 200);
+        } catch {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+      },
+    );
 
     if (control.permissions) {
       const permissions = control.permissions;

@@ -6,11 +6,13 @@ import {
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
 import { createOpenTagClient } from "@opentag/client";
+import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import {
   HOSTED_CAPABILITIES,
   hostedAdmissionFixture,
@@ -57,7 +59,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
         schemaVersion: 1,
         protocolVersion: "1.0",
         registryVersion: "opentag.control.capabilities/v1",
-        capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"],
+        capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"].sort(),
         minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
         deployment: { environment: "local", releaseSha: "local" },
       },
@@ -307,6 +309,72 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     expect(await conflictResponse?.json()).toMatchObject({
       error: "idempotency_conflict",
     });
+  });
+
+  it("redeems one-time source content only across the exact authenticated Attempt boundary", async () => {
+    const runners = createRunnerDirectory({ pool: fixture.pool, clock: { now: () => now },
+      tokenFactory: () => "runtime_redeem_secret", idFactory: () => "credential_redeem" });
+    const registered = await runners.register({ organizationId: "org_redeem",
+      organizationName: "Redeem", request: { schemaVersion: 1, protocolVersion: "1.0",
+        requiredCapabilities: ["relay.registration.v1"], requestId: "request_register_redeem",
+        operationId: "operation_register_redeem", runnerId: "runner_redeem",
+        capabilities: [...HOSTED_CAPABILITIES] } });
+    if (registered.kind !== "created") throw new Error("registration failed");
+    await recordHostedReadiness({ pool: fixture.pool, organizationId: "org_redeem",
+      runnerId: "runner_redeem" });
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "relay-v1" } });
+    const admitted = await hostedAdmissionFixture({ runId: "run_redeem", suffix: "91",
+      organizationId: "org_redeem", runnerId: "runner_redeem", contentId: "content_redeem" });
+    await custody.store({ organizationId: "org_redeem", installationId: "install_redeem",
+      sourceAppId: "github", sourceDeliveryId: admitted.admission.deliveryId,
+      sourceMessageId: admitted.admission.sourceEvent.providerEventId,
+      sourceVersionRef: admitted.admission.sourceContextEnvelope.sourceVersionRef,
+      purpose: "source_context", contentId: "content_redeem",
+      payload: { text: "private source" }, expiresAt: new Date("2026-09-01T00:00:00.000Z") });
+    const hosted = createHostedRunCoordinator({ pool: fixture.pool, clock: { now: () => now },
+      leaseDurationMs: 60_000, idFactory: () => "attempt_redeem",
+      tokenFactory: () => "fence_redeem", issueSourceContentGrantInTransaction:
+        custody.issueReadGrantInTransaction });
+    await hosted.admit({ runId: "run_redeem", admission: admitted.admission, policy: admitted.policy });
+    const application = createControlPlaneApplication({ capabilities: {
+      schemaVersion: 1, protocolVersion: "1.0", registryVersion: "opentag.control.capabilities/v1",
+      capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"].sort() as any,
+      minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+      deployment: { environment: "local", releaseSha: "local" } },
+      readiness: { check: async () => ({ ready: true }) },
+      control: { bootstrap: { authenticate: () => null }, runners, hosted, sourceContent: custody } });
+    const fetchImpl: typeof fetch = async (url, init) => { const response = await application.fetch(
+      new Request(String(url), init)); Object.defineProperty(response, "url", { value: String(url) });
+      return response; };
+    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "runtime_redeem_secret" }, fetchImpl });
+    const claim = await client.claimHostedRunControlV1({ runnerId: "runner_redeem",
+      request: hostedClaimRequest({ operationId: "operation_claim_redeem",
+        requestId: "request_claim_redeem", credentialId: "credential_redeem" }) });
+    if (!claim) throw new Error("claim missing");
+    const request = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.source-content-redeem.v1"] as const,
+      requestId: "request_redeem", operationId: "operation_redeem",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      expectedAuthority: { credentialId: claim.authority.credentialId,
+        registrationGeneration: claim.authority.registrationGeneration,
+        credentialGeneration: claim.authority.credentialGeneration },
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+        leaseExpiresAt: claim.attempt.leaseExpiresAt }, grant: claim.sourceContentGrant,
+      admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+      contentEnvelope: claim.hostedAdmission.sourceContextEnvelope };
+    await expect(client.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId, request }))
+      .resolves.toMatchObject({ content: { contentId: "content_redeem",
+        payload: { text: "private source" } } });
+    await expect(client.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId, request }))
+      .rejects.toMatchObject({ status: 409 });
+    const wrongCredential = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "wrong" }, fetchImpl });
+    await expect(wrongCredential.redeemHostedSourceContentControlV1({ runnerId: claim.runnerId,
+      request: { ...request, operationId: "operation_wrong_credential" } }))
+      .rejects.toMatchObject({ status: 401 });
   });
 
   it("conceals runtime routes from invalid credentials", async () => {

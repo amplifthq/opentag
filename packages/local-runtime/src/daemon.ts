@@ -238,6 +238,10 @@ export type ClaimedRunExecutionInput = Omit<
   client: ClaimedRunExecutionClient;
   hostedExecutionAuthority?: {
     leaseExpiresAt: string;
+    credentialId?: string;
+    attemptNumber?: number;
+    fencingTokenDigest?: string;
+    workspaceAttestation?: import("@opentag/runner").AttemptWorkspaceAttestation;
     assertCurrent(): Promise<boolean>;
     readAcceptedLeaseExpiresAt?(): Promise<string | null>;
     now?: () => Date;
@@ -567,6 +571,18 @@ export async function executeClaimedRun(
       {
         runId,
         attemptId: claimed.attemptId,
+        ...(hostedAuthority?.credentialId && hostedAuthority.attemptNumber
+          && hostedAuthority.fencingTokenDigest
+          ? { attemptAuthority: {
+              attemptNumber: hostedAuthority.attemptNumber,
+              fencingTokenDigest: hostedAuthority.fencingTokenDigest,
+              credentialId: hostedAuthority.credentialId,
+              leaseExpiresAt: hostedAuthority.leaseExpiresAt,
+            } }
+          : {}),
+        ...(hostedAuthority?.workspaceAttestation
+          ? { workspaceAttestation: hostedAuthority.workspaceAttestation }
+          : {}),
         workspace,
         command: claimed.event.command,
         context: claimed.event.context,

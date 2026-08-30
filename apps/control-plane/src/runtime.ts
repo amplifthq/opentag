@@ -68,6 +68,7 @@ const BASE_CAPABILITIES = [
   "relay.permission.v1",
   "relay.readiness.v1",
   "relay.registration.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 type PostgresCapability = {

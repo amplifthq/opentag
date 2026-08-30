@@ -55,6 +55,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
           "relay.lifecycle.v1",
           "relay.permission.v1",
           "relay.readiness.v1",
+          "relay.source-content-redeem.v1",
         ],
       },
     });

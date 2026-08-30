@@ -32,7 +32,10 @@ import {
   computeMaterialActionPayloadDigestV1,
   computeMaterialActionReceiptDigestV1,
   computePermissionRequestDigestV1,
+  computeGitHubIssueCommentSourceIdentityDigestV1,
   verifyHostedAdmissionEnvelopeDigestV1,
+  HostedSourceContentRedeemRequestV1Schema,
+  OpenTagEventSchema,
   RunnerReadinessReceiptEnvelopeV1Schema,
 } from "@opentag/core";
 import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
@@ -67,6 +70,7 @@ const HOSTED_CLAIM_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 type CallbackObservationReceiptEnvelopeV1 = Parameters<
@@ -1062,6 +1066,95 @@ export async function buildHostedCompletionMetadataForControlV1(
   };
 }
 
+export async function redeemHostedClaimSourceContentV1(input: {
+  claim: HostedClaimV1;
+  client: Pick<OpenTagClient, "redeemHostedSourceContentControlV1">;
+  requestId: string;
+  operationId: string;
+  now?: () => Date;
+}): Promise<{
+  event: import("@opentag/core").OpenTagEvent;
+  receipt: GitHubIssueCommentRefetchReceipt;
+}> {
+  const { claim } = input;
+  if (!(await verifyHostedAdmissionEnvelopeDigestV1(claim.hostedAdmission))) {
+    throw new Error("hosted_source_admission_digest_invalid");
+  }
+  const request = HostedSourceContentRedeemRequestV1Schema.parse({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.source-content-redeem.v1"],
+    requestId: input.requestId,
+    operationId: input.operationId,
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    expectedAuthority: {
+      credentialId: claim.authority.credentialId,
+      registrationGeneration: claim.authority.registrationGeneration,
+      credentialGeneration: claim.authority.credentialGeneration,
+    },
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      leaseExpiresAt: claim.attempt.leaseExpiresAt,
+    },
+    grant: claim.sourceContentGrant,
+    admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+    contentEnvelope: claim.hostedAdmission.sourceContextEnvelope,
+  });
+  const response = await input.client.redeemHostedSourceContentControlV1({
+    runnerId: claim.runnerId,
+    request,
+  });
+  const payload = response.content.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("hosted_source_content_invalid");
+  }
+  const executionBearingCommentBody = (payload as Record<string, unknown>)
+    .executionBearingCommentBody;
+  const event = OpenTagEventSchema.parse((payload as Record<string, unknown>).event);
+  if (typeof executionBearingCommentBody !== "string"
+    || executionBearingCommentBody.length === 0) {
+    throw new Error("hosted_source_content_invalid");
+  }
+  const admission = claim.hostedAdmission;
+  const sourceIdentityDigest = await computeGitHubIssueCommentSourceIdentityDigestV1({
+    provider: "github",
+    repository: admission.repository,
+    sourceThread: admission.sourceThread,
+    sourceEvent: admission.sourceEvent,
+    actor: {
+      providerUserId: admission.verifiedActor.providerUserId,
+      login: admission.verifiedActor.login,
+    },
+    executionBearingCommentBody,
+  });
+  if (sourceIdentityDigest !== admission.sourceIdentityDigest) {
+    throw new Error("hosted_source_identity_mismatch");
+  }
+  return {
+    event,
+    receipt: {
+      provider: "github",
+      providerRepositoryId: admission.repository.providerRepositoryId,
+      owner: admission.repository.owner,
+      repo: admission.repository.repo,
+      sourceThread: admission.sourceThread,
+      sourceEvent: admission.sourceEvent,
+      actor: {
+        providerUserId: admission.verifiedActor.providerUserId,
+        login: admission.verifiedActor.login,
+      },
+      sourceIdentityDigest,
+      eventDigest: await computeControlPayloadDigestV1(event),
+      refetchedAt: (input.now?.() ?? new Date()).toISOString(),
+    },
+  };
+}
+
 async function createHostedExecutionClient(input: {
   client: OpenTagClient;
   repo: HostedExecutionRepository;
@@ -1988,19 +2081,30 @@ export function createHostedControlLoop(input: {
             now: clock(),
           });
           if (closed) return false;
-          if (!input.config.githubToken) {
-            throw new Error("hosted_github_token_unavailable");
-          }
-          const refetched = await (input.refetchGitHubIssueCommentImpl
-            ?? refetchGitHubIssueCommentForHostedAdmission)({
-            admission: claim.hostedAdmission,
-            token: input.config.githubToken,
-            ...(input.githubApiOrigin !== undefined
-              ? { apiOrigin: input.githubApiOrigin }
-              : {}),
-            ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-            now: clock,
-          });
+          const refetched = typeof client.redeemHostedSourceContentControlV1
+            === "function"
+            ? await redeemHostedClaimSourceContentV1({
+                claim,
+                client,
+                requestId: `request_redeem_${randomUUID()}`,
+                operationId: `operation_redeem_${randomUUID()}`,
+                now: clock,
+              })
+            : await (async () => {
+                if (!input.config.githubToken) {
+                  throw new Error("hosted_github_token_unavailable");
+                }
+                return (input.refetchGitHubIssueCommentImpl
+                  ?? refetchGitHubIssueCommentForHostedAdmission)({
+                  admission: claim.hostedAdmission,
+                  token: input.config.githubToken,
+                  ...(input.githubApiOrigin !== undefined
+                    ? { apiOrigin: input.githubApiOrigin }
+                    : {}),
+                  ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+                  now: clock,
+                });
+              })();
           if (closed) return false;
           if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
             throw new Error("hosted_claim_lease_expired");
@@ -2115,6 +2219,9 @@ export function createHostedControlLoop(input: {
           claimed: imported.claimed,
           hostedExecutionAuthority: {
             leaseExpiresAt: claim.attempt.leaseExpiresAt,
+            credentialId: claim.authority.credentialId,
+            attemptNumber: claim.attempt.number,
+            fencingTokenDigest: claim.attempt.fencingTokenDigest,
             now: clock,
             assertCurrent: async () => {
               if (closed) return false;

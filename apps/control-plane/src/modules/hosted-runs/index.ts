@@ -1,5 +1,6 @@
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  canonicalJsonStringify,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
   computeHostedClaimFencingTokenDigestV1,
@@ -15,6 +16,7 @@ import {
   HostedProgressRequestV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedRunningRequestV1Schema,
+  HostedSourceContentRedeemRequestV1Schema,
   verifyHostedAdmissionEnvelopeDigestV1,
   type AdmissionPolicySnapshotReceiptEnvelopeV1,
   type HostedAdmissionEnvelopeV1,
@@ -23,6 +25,7 @@ import {
   type HostedLifecycleActionV1,
   type HostedLifecycleReceiptEnvelopeV1,
   type HostedLifecycleRequestV1,
+  type HostedSourceContentRedeemRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
@@ -160,6 +163,10 @@ export type HostedRunCoordinator = {
     runId: string;
   }): Promise<(HostedRunProjection & { state: CanonicalRunStatus;
     terminalKind: TerminalKind | null; terminalReason: string | null }) | null>;
+  validateSourceContentRedemption(input: {
+    principal: RuntimePrincipal;
+    request: HostedSourceContentRedeemRequestV1;
+  }): Promise<boolean>;
 };
 
 async function verifyPolicyReceipt(
@@ -1174,6 +1181,56 @@ export function createHostedRunCoordinator(input: {
         );
         return { kind: "accepted", receipt } as const;
       });
+    },
+
+    async validateSourceContentRedemption(command) {
+      const request = HostedSourceContentRedeemRequestV1Schema.parse(command.request);
+      if (request.organizationId !== command.principal.organizationId
+        || request.runnerId !== command.principal.runnerId
+        || request.expectedAuthority.credentialId !== command.principal.credentialId
+        || request.expectedAuthority.registrationGeneration
+          !== command.principal.registrationGeneration
+        || request.expectedAuthority.credentialGeneration
+          !== command.principal.credentialGeneration) return false;
+      const result = await input.pool.query<{
+        hosted_admission: unknown;
+        current_attempt_number: number;
+        terminal_kind: string | null;
+        attempt_id: string;
+        attempt_number: number;
+        runner_id: string;
+        credential_id: string;
+        fencing_token_digest: string;
+        lease_expires_at: Date;
+        state: string;
+      }>(
+        `SELECT run.hosted_admission, run.current_attempt_number, run.terminal_kind,
+                attempt.attempt_id, attempt.attempt_number, attempt.runner_id,
+                attempt.credential_id, attempt.fencing_token_digest,
+                attempt.lease_expires_at, attempt.state
+         FROM cp_hosted_run run
+         JOIN cp_hosted_attempt attempt
+           ON attempt.organization_id = run.organization_id
+          AND attempt.run_id = run.run_id
+          AND attempt.attempt_number = run.current_attempt_number
+         WHERE run.organization_id = $1 AND run.run_id = $2`,
+        [request.organizationId, request.runId],
+      );
+      const row = result.rows[0];
+      if (!row || row.terminal_kind !== null
+        || row.attempt_id !== request.attempt.attemptId
+        || row.attempt_number !== request.attempt.attemptNumber
+        || row.current_attempt_number !== request.attempt.attemptNumber
+        || row.runner_id !== request.runnerId
+        || row.credential_id !== request.expectedAuthority.credentialId
+        || row.fencing_token_digest !== request.attempt.fencingTokenDigest
+        || row.lease_expires_at.toISOString() !== request.attempt.leaseExpiresAt
+        || row.lease_expires_at.getTime() <= input.clock.now().getTime()
+        || !["claimed", "running", "needs_approval"].includes(row.state)) return false;
+      const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
+      return admission.envelopeDigest === request.admissionEnvelopeDigest
+        && canonicalJsonStringify(admission.sourceContextEnvelope)
+          === canonicalJsonStringify(request.contentEnvelope);
     },
 
     async expireQueued(organizationId: string | null) {

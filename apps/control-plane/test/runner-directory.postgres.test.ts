@@ -30,6 +30,7 @@ function registrationRequest(
       "relay.hosted-claim.v1",
       "relay.lifecycle.v1",
       "relay.readiness.v1",
+      "relay.source-content-redeem.v1",
     ],
   });
 }
@@ -289,6 +290,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Runner Directory PostgreSQL module", () => 
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ],
       executors: [
         {

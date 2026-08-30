@@ -128,6 +128,7 @@ function createRunArtifacts(input: {
   changedFiles: string[];
   report?: NonNullable<ReturnType<typeof parseExecutorReport>>;
   extraArtifacts?: ResultArtifact[];
+  proposalEvidence?: ProposalEvidence;
 }): ResultArtifact[] {
   const generated: ResultArtifact[] = [];
   const createdAt = new Date().toISOString();
@@ -148,6 +149,23 @@ function createRunArtifacts(input: {
         baseBranch: input.baseBranch ?? "main",
         changedFiles: input.changedFiles
       }
+    });
+  }
+  if (input.proposalEvidence) {
+    generated.push({
+      id: `${input.runId}:proposal-evidence`,
+      type: "patch_summary",
+      kind: "patch",
+      title: "Immutable proposal evidence",
+      uri: runArtifactUri(input.runId, "proposal-evidence"),
+      summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+      sourceRunId: input.runId,
+      createdAt,
+      metadata: {
+        ...input.proposalEvidence,
+        changedFiles: input.changedFiles,
+        readiness: "not_assessed",
+      },
     });
   }
   generated.push({
@@ -186,6 +204,20 @@ function createRunArtifacts(input: {
   return dedupeArtifacts([...generated, ...(input.report?.artifacts ?? []), ...(input.extraArtifacts ?? [])]);
 }
 
+export type ProposalEvidence = {
+  attemptId: string;
+  attemptNumber: number;
+  workspaceId: string;
+  workspacePathDigest: string;
+  baseRevision: string;
+  finalRevision?: string;
+  finalTree: string;
+  diffDigest: string;
+  changedFilesDigest: string;
+  verificationEvidenceDigests: string[];
+  limitations: string[];
+};
+
 export function createExecutorRunResult(input: {
   executorName: string;
   runId: string;
@@ -194,6 +226,7 @@ export function createExecutorRunResult(input: {
   output: string;
   changedFiles: string[];
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
+  proposalEvidence?: ProposalEvidence;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
   const report = parseExecutorReport(input.output);

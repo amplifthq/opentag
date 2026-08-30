@@ -24,15 +24,17 @@ import {
 } from "./executor.js";
 import {
   branchNameForRun,
+  attestAttemptWorkspace,
   changedFiles,
   cleanupInternalArtifacts,
   commitRunChanges,
   createRunWorktree,
   deleteRunBranch,
   executionPathForAttempt,
-  removeRunWorktree
+  removeRunWorktree,
+  verifyAttemptWorkspaceAttestation
 } from "./git.js";
-import { createExecutorRunResult } from "./result.js";
+import { createExecutorRunResult, type ProposalEvidence } from "./result.js";
 import { scrubEnvironment, type RunnerSecurityPolicy } from "./security.js";
 
 const DEFAULT_CANCEL_GRACE_MS = 1_000;
@@ -674,6 +676,7 @@ function stopResult(input: {
   output: string;
   files: string[];
   cancelTerminationConfirmed: boolean;
+  proposalEvidence?: ProposalEvidence;
 }) {
   if (input.stopReason === "end_turn") {
     return createExecutorRunResult({
@@ -682,7 +685,8 @@ function stopResult(input: {
       branchName: input.branchName,
       baseBranch: input.baseBranch,
       output: input.output || `${input.manifest.label} completed without textual output.`,
-      changedFiles: input.files
+      changedFiles: input.files,
+      ...(input.proposalEvidence ? { proposalEvidence: input.proposalEvidence } : {})
     });
   }
   if (input.stopReason === "cancelled") {
@@ -816,6 +820,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       let repositoryCompleted = false;
       let worktreeCreated = false;
       let changedFileCount: number | undefined;
+      let workspaceAttestation: import("./git.js").AttemptWorkspaceAttestation | undefined;
       try {
         const preflight = await runPreflight();
         if (!preflight.ready) {
@@ -838,8 +843,36 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           if (active.cancelRequested) {
             return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
           }
-          await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
-          worktreeCreated = true;
+          if (input.workspaceAttestation) {
+            if (!input.attemptId || !input.attemptAuthority
+              || !(await verifyAttemptWorkspaceAttestation({ runner,
+                workspacePath: executionPath, repositoryPath: workspace.path,
+                workspaceId: input.workspaceAttestation.workspaceId,
+                baseRevision: input.workspaceAttestation.baseRevision,
+                attemptId: input.attemptId,
+                attemptNumber: input.attemptAuthority.attemptNumber,
+                fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+                credentialId: input.attemptAuthority.credentialId,
+                leaseExpiresAt: input.attemptAuthority.leaseExpiresAt,
+                attestation: input.workspaceAttestation, now: new Date() }))) {
+              throw new Error("attempt_workspace_attestation_mismatch");
+            }
+            workspaceAttestation = input.workspaceAttestation;
+            worktreeCreated = true;
+          } else {
+            await createRunWorktree({ runner, workspacePath: workspace.path, worktreePath: executionPath, branchName, baseBranch });
+            worktreeCreated = true;
+            if (input.attemptId && input.attemptAuthority) {
+              workspaceAttestation = await attestAttemptWorkspace({ runner,
+                workspacePath: executionPath, repositoryPath: workspace.path,
+                workspaceId: `workspace_${input.attemptId}`, baseRevision: baseBranch,
+                attemptId: input.attemptId,
+                attemptNumber: input.attemptAuthority.attemptNumber,
+                fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+                credentialId: input.attemptAuthority.credentialId,
+                leaseExpiresAt: input.attemptAuthority.leaseExpiresAt });
+            }
+          }
         } else {
           await sink.emit({
             type: "executor.started",
@@ -1064,6 +1097,29 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         if (workspace.kind === "repository" && stopReason === "end_turn" && files.length > 0) {
           await commitRunChanges({ runner, workspacePath: executionPath, message: `OpenTag run ${input.runId}` });
         }
+        let proposalEvidence: ProposalEvidence | undefined;
+        if (workspace.kind === "repository" && stopReason === "end_turn"
+          && workspaceAttestation && input.attemptId && input.attemptAuthority) {
+          const finalRevisionResult = await runner.run("git", ["rev-parse", "HEAD^{commit}"], { cwd: executionPath });
+          const finalTreeResult = await runner.run("git", ["rev-parse", "HEAD^{tree}"], { cwd: executionPath });
+          const diffResult = await runner.run("git", ["diff", "--binary",
+            `${workspaceAttestation.baseRevision}...HEAD`], { cwd: executionPath });
+          if (finalRevisionResult.exitCode !== 0 || finalTreeResult.exitCode !== 0
+            || diffResult.exitCode !== 0) throw new Error("proposal_evidence_git_read_failed");
+          proposalEvidence = {
+            attemptId: input.attemptId,
+            attemptNumber: input.attemptAuthority.attemptNumber,
+            workspaceId: workspaceAttestation.workspaceId,
+            workspacePathDigest: workspaceAttestation.workspacePathDigest,
+            baseRevision: workspaceAttestation.baseRevision,
+            finalRevision: finalRevisionResult.stdout.trim(),
+            finalTree: finalTreeResult.stdout.trim(),
+            diffDigest: `sha256:${createHash("sha256").update(diffResult.stdout).digest("hex")}`,
+            changedFilesDigest: `sha256:${createHash("sha256").update(JSON.stringify(files)).digest("hex")}`,
+            verificationEvidenceDigests: [],
+            limitations: ["Task 8 completion gates have not assessed proposal readiness."],
+          };
+        }
         repositoryCompleted = stopReason === "end_turn";
         const result = stopResult({
           stopReason,
@@ -1073,7 +1129,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           baseBranch,
           output: output.join("").trim(),
           files,
-          cancelTerminationConfirmed: supportsCancel && terminationObserved
+          cancelTerminationConfirmed: supportsCancel && terminationObserved,
+          ...(proposalEvidence ? { proposalEvidence } : {})
         });
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",

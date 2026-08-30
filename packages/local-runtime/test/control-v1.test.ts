@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildHostedLifecycleRequestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
 import { serveDaemon, type DaemonClient } from "../src/daemon.js";
-import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
+import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, redeemHostedClaimSourceContentV1, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
 const now = new Date("2026-08-09T00:00:00.000Z");
 
@@ -330,10 +330,11 @@ async function validHostedClaim(input: {
     requiredCapabilities: [
       "relay.claim-fence.v1",
       "relay.hosted-admission.v1",
-      "relay.hosted-claim.v1",
-      "relay.lifecycle.v1",
-      "relay.readiness.v1",
-    ] as const,
+        "relay.hosted-claim.v1",
+        "relay.lifecycle.v1",
+        "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
+      ] as const,
     requestId: input.request.requestId,
     operationId: input.request.operationId,
     organizationId: "org_1",
@@ -384,6 +385,61 @@ async function validHostedClaim(input: {
 }
 
 describe("Control V1 projection pump", () => {
+  it("redeems and verifies exact source content before returning an event for execution", async () => {
+    const request = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.claim-fence.v1", "relay.hosted-admission.v1",
+        "relay.hosted-claim.v1", "relay.lifecycle.v1", "relay.readiness.v1"] as const,
+      requestId: "request_claim", operationId: "operation_claim",
+      expectedAuthority: { credentialId: "credential_1", registrationGeneration: 1,
+        credentialGeneration: 1, runnerReadinessReceiptId: "readiness_1",
+        runnerReadinessReceiptDigest: `sha256:${"a".repeat(64)}` } };
+    const event = {
+      id: "789", source: "github", sourceEventId: "789", receivedAt: now.toISOString(),
+      actor: { provider: "github", providerUserId: "1001", handle: "octocat" },
+      target: { mention: "@opentag", agentId: "opentag" },
+      command: { rawText: "fix this", intent: "fix", args: {} }, context: [],
+      permissions: [{ scope: "repo:write", reason: "fix the repository" }],
+      callback: { provider: "github", uri: "https://api.github.com/repos/acme/widget/issues/42/comments" },
+      workItem: { provider: "github", kind: "issue", externalId: "acme/widget#42",
+        uri: "https://github.com/acme/widget/issues/42",
+        ownerContainer: { id: "github:acme/widget", provider: "github", kind: "repository", externalId: "acme/widget",
+          uri: "https://github.com/acme/widget" } },
+      metadata: { owner: "acme", repo: "widget", repoProvider: "github",
+        issueNumber: 42, deliveryId: "delivery_1" },
+    } as const;
+    const sourceIdentityDigest = await import("@opentag/core").then(({ computeGitHubIssueCommentSourceIdentityDigestV1 }) =>
+      computeGitHubIssueCommentSourceIdentityDigestV1({ provider: "github",
+        repository: { providerRepositoryId: "123", owner: "acme", repo: "widget" },
+        sourceThread: { kind: "issue", providerThreadId: "456", number: 42 },
+        sourceEvent: { providerEventId: "789", kind: "issue_comment" },
+        actor: { providerUserId: "1001", login: "octocat" },
+        executionBearingCommentBody: "@opentag fix this" }));
+    const baseClaim = await validHostedClaim({ request, executorCapabilityDigest: `sha256:${"b".repeat(64)}` });
+    const admissionSeed = { ...baseClaim.hostedAdmission, sourceIdentityDigest,
+      envelopeDigest: `sha256:${"0".repeat(64)}` };
+    const claim = { ...baseClaim, hostedAdmission: { ...admissionSeed,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(admissionSeed) },
+      sourceContentGrant: { ...baseClaim.sourceContentGrant, keyVersion: "v1" } };
+    const redeem = vi.fn(async ({ request: redeemRequest }) => ({
+      kind: "hosted_source_content_redeemed" as const, schemaVersion: 1 as const,
+      protocolVersion: "1.0" as const, requestId: redeemRequest.requestId,
+      operationId: redeemRequest.operationId, organizationId: claim.organizationId,
+      runnerId: claim.runnerId, runId: claim.runId,
+      attempt: redeemRequest.attempt,
+      admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+      contentEnvelope: claim.hostedAdmission.sourceContextEnvelope,
+      content: { contentId: "content_1", payload: {
+        executionBearingCommentBody: "@opentag fix this", event } },
+      redeemedAt: now.toISOString(),
+    }));
+
+    const redeemed = await redeemHostedClaimSourceContentV1({ claim: claim as never,
+      client: { redeemHostedSourceContentControlV1: redeem } as never,
+      requestId: "request_redeem", operationId: "operation_redeem", now: () => now });
+    expect(redeemed.event).toMatchObject({ id: "789", command: { rawText: "fix this" } });
+    expect(redeemed.receipt.eventDigest).toMatch(/^sha256:/u);
+    expect(redeem).toHaveBeenCalledOnce();
+  });
   it("keeps raw executor progress and completion evidence out of Cloud lifecycle metadata", async () => {
     const secret = "ghp_secret /Users/alice/private/repo/src/token.ts";
     const progress = await buildHostedProgressMetadataForControlV1({
@@ -780,6 +836,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1038,6 +1095,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -1185,6 +1243,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1280,6 +1339,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -1595,6 +1655,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-admission.v1",
         "relay.hosted-claim.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ],
     };
 
@@ -1682,6 +1743,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -1807,6 +1869,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -2051,6 +2114,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -2236,6 +2300,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3114,6 +3179,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -3203,6 +3269,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3353,6 +3420,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),
@@ -3446,6 +3514,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3603,6 +3672,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [{
         projectTargetId: "target_1",
@@ -3793,6 +3863,7 @@ describe("Control V1 projection pump", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ] as const,
       targets: [],
       observedAt: now.toISOString(),

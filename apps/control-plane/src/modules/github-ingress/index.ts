@@ -26,6 +26,7 @@ const HOSTED_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const DELIVERY_PROCESSING_LEASE_MS = 60_000;
 

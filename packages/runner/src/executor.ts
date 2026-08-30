@@ -61,6 +61,13 @@ export type ExecutorMaterialActionReport = {
 export type ExecutorRunInput = {
   runId: string;
   attemptId?: string;
+  attemptAuthority?: {
+    attemptNumber: number;
+    fencingTokenDigest: string;
+    credentialId: string;
+    leaseExpiresAt: string;
+  };
+  workspaceAttestation?: import("./git.js").AttemptWorkspaceAttestation;
   workspace: ExecutorWorkspace;
   command: OpenTagCommand;
   source?: OpenTagRunSourceRef;

@@ -3,6 +3,23 @@ import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-repo
 import { createExecutorRunResult } from "../src/result.js";
 
 describe("createExecutorRunResult", () => {
+  it("emits immutable proposal evidence without claiming Task 8 readiness", () => {
+    const result = createExecutorRunResult({ executorName: "Codex", runId: "run_proposal",
+      branchName: "opentag/run_proposal-attempt_2", baseBranch: "main",
+      output: "Implemented the requested change.", changedFiles: ["src/index.ts"],
+      proposalEvidence: { attemptId: "attempt_2", attemptNumber: 2,
+        workspaceId: "workspace_attempt_2", workspacePathDigest: `sha256:${"1".repeat(64)}`,
+        baseRevision: "a".repeat(40), finalRevision: "b".repeat(40),
+        finalTree: "c".repeat(40), diffDigest: `sha256:${"2".repeat(64)}`,
+        changedFilesDigest: `sha256:${"3".repeat(64)}`,
+        verificationEvidenceDigests: [`sha256:${"4".repeat(64)}`],
+        limitations: ["Task 8 completion gates have not run."] } });
+    const proposal = result.artifacts?.find((artifact) => artifact.id === "run_proposal:proposal-evidence");
+    expect(proposal?.metadata).toMatchObject({ attemptId: "attempt_2",
+      workspaceId: "workspace_attempt_2", finalTree: "c".repeat(40),
+      readiness: "not_assessed" });
+    expect(result.summary).not.toMatch(/proposal.ready|ready for review/iu);
+  });
   it("renders user-visible summaries from the structured executor report when present", () => {
     const result = createExecutorRunResult({
       executorName: "Claude Code",

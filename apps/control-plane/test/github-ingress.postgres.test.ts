@@ -61,6 +61,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ]), now],
     );
     await fixture.pool.query(
@@ -84,6 +85,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         "relay.hosted-claim.v1",
         "relay.lifecycle.v1",
         "relay.readiness.v1",
+        "relay.source-content-redeem.v1",
       ],
       executors: [{
         executorId: "executor_acp",

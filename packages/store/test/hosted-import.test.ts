@@ -32,7 +32,8 @@ const capabilities = [
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
-  "relay.readiness.v1"
+  "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const observedAt = "2026-08-10T00:00:00.000Z";
 const leaseExpiresAt = "2099-08-10T00:02:00.000Z";

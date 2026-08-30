@@ -32,6 +32,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.repository-binding.v1",
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
+  "relay.source-content-redeem.v1",
   "relay.claim-fence.v1",
   "relay.lifecycle.v1",
   "relay.permission.v1",
@@ -1892,6 +1893,7 @@ const HostedClaimRequiredCapabilitiesV1Schema = z.tuple([
   z.literal("relay.hosted-claim.v1"),
   z.literal("relay.lifecycle.v1"),
   z.literal("relay.readiness.v1"),
+  z.literal("relay.source-content-redeem.v1"),
 ]);
 
 export const HostedClaimExpectedAuthorityV1Schema = z
@@ -1941,6 +1943,75 @@ const HostedSourceContentGrantV1Schema = z.object({
   purpose: z.literal("source_context"),
   expiresAt: ControlTimestampSchema,
 }).strict();
+
+export const HostedSourceContentRedeemRequestV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.source-content-redeem.v1")]),
+  requestId: NonEmptyIdSchema,
+  operationId: NonEmptyIdSchema,
+  organizationId: NonEmptyIdSchema,
+  runnerId: NonEmptyIdSchema,
+  runId: NonEmptyIdSchema,
+  expectedAuthority: z.object({
+    credentialId: NonEmptyIdSchema,
+    registrationGeneration: z.number().int().positive(),
+    credentialGeneration: z.number().int().positive(),
+  }).strict(),
+  attempt: z.object({
+    attemptId: NonEmptyIdSchema,
+    attemptNumber: z.number().int().positive(),
+    epoch: z.number().int().positive(),
+    fencingTokenDigest: ReceiptDigestSchema,
+    leaseExpiresAt: ControlTimestampSchema,
+  }).strict(),
+  grant: HostedSourceContentGrantV1Schema,
+  admissionEnvelopeDigest: ReceiptDigestSchema,
+  contentEnvelope: HostedAdmissionEnvelopeV1Schema.shape.sourceContextEnvelope,
+}).strict().superRefine((request, ctx) => {
+  if (request.attempt.epoch !== request.attempt.attemptNumber) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["attempt", "epoch"],
+      message: "Attempt epoch must equal attempt number." });
+  }
+  if (request.grant.fenceDigest !== request.attempt.fencingTokenDigest) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "fenceDigest"],
+      message: "Grant fence must match the Attempt fence." });
+  }
+  if (request.grant.expiresAt !== request.attempt.leaseExpiresAt) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "expiresAt"],
+      message: "Grant expiry must match the Attempt lease." });
+  }
+  if (request.grant.contentIds.length !== 1
+    || request.grant.contentIds[0] !== request.contentEnvelope.contentId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "contentIds"],
+      message: "Grant content must match the Admission content envelope." });
+  }
+  if (request.grant.keyVersion !== request.contentEnvelope.keyVersion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["grant", "keyVersion"],
+      message: "Grant key version must match the Admission content envelope." });
+  }
+});
+
+export const HostedSourceContentRedeemResponseV1Schema = z.object({
+  kind: z.literal("hosted_source_content_redeemed"),
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requestId: NonEmptyIdSchema,
+  operationId: NonEmptyIdSchema,
+  organizationId: NonEmptyIdSchema,
+  runnerId: NonEmptyIdSchema,
+  runId: NonEmptyIdSchema,
+  attempt: HostedSourceContentRedeemRequestV1Schema.shape.attempt,
+  admissionEnvelopeDigest: ReceiptDigestSchema,
+  contentEnvelope: HostedAdmissionEnvelopeV1Schema.shape.sourceContextEnvelope,
+  content: z.object({ contentId: NonEmptyIdSchema, payload: z.unknown() }).strict(),
+  redeemedAt: ControlTimestampSchema,
+}).strict().superRefine((response, ctx) => {
+  if (response.content.contentId !== response.contentEnvelope.contentId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["content", "contentId"],
+      message: "Redeemed content must match the content envelope." });
+  }
+});
 
 const HostedClaimAuthorityV1Schema = z
   .object({
@@ -2113,6 +2184,34 @@ export const HostedLifecycleStableIdV1Schema = z
 export const HostedLifecycleRequiredCapabilitiesV1Schema = z.tuple([
   z.literal("relay.lifecycle.v1"),
 ]);
+export const AttemptWorkspaceAttestationV1Schema = z.object({
+  workspaceId: HostedLifecycleStableIdV1Schema,
+  workspacePathDigest: ReceiptDigestSchema,
+  repositoryPathDigest: ReceiptDigestSchema,
+  worktreeIdentityDigest: ReceiptDigestSchema,
+  baseRevision: z.string().regex(/^[a-f0-9]{40}$/u),
+  currentRevision: z.string().regex(/^[a-f0-9]{40}$/u),
+  currentTree: z.string().regex(/^[a-f0-9]{40}$/u),
+  workspaceStateDigest: ReceiptDigestSchema,
+  attemptId: HostedLifecycleStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  credentialId: HostedLifecycleStableIdV1Schema,
+  leaseExpiresAt: ControlTimestampSchema,
+}).strict();
+export const AttemptInterruptionEvidenceV1Schema = z.object({
+  state: z.literal("interrupted_evidence"),
+  runId: HostedLifecycleStableIdV1Schema,
+  attemptId: HostedLifecycleStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  workspaceId: HostedLifecycleStableIdV1Schema,
+  workspacePathDigest: ReceiptDigestSchema,
+  fencingTokenDigest: ReceiptDigestSchema,
+  reason: z.enum(["lease_expired", "stale_fence", "cancelled", "credential_stale"]),
+  observedAt: ControlTimestampSchema,
+  processStop: z.enum(["observed", "unconfirmed"]),
+  materialOutcome: z.literal("outcome_unknown"),
+}).strict();
 export const HostedLifecycleAttemptV1Schema = z
   .object({
     attemptId: HostedLifecycleStableIdV1Schema,
@@ -2330,6 +2429,8 @@ export const HostedLifecycleReceiptEnvelopeV1Schema = z.object({
 }).strict();
 
 export type HostedHeartbeatRequestV1 = z.infer<typeof HostedHeartbeatRequestV1Schema>;
+export type AttemptWorkspaceAttestationV1 = z.infer<typeof AttemptWorkspaceAttestationV1Schema>;
+export type AttemptInterruptionEvidenceV1 = z.infer<typeof AttemptInterruptionEvidenceV1Schema>;
 export type HostedRunningRequestV1 = z.infer<typeof HostedRunningRequestV1Schema>;
 export type HostedRejectStartRequestV1 = z.infer<typeof HostedRejectStartRequestV1Schema>;
 export type HostedProgressRequestV1 = z.infer<typeof HostedProgressRequestV1Schema>;
@@ -3622,6 +3723,12 @@ export type HostedClaimExpectedAuthorityV1 = z.infer<
   typeof HostedClaimExpectedAuthorityV1Schema
 >;
 export type HostedClaimV1 = z.infer<typeof HostedClaimV1Schema>;
+export type HostedSourceContentRedeemRequestV1 = z.infer<
+  typeof HostedSourceContentRedeemRequestV1Schema
+>;
+export type HostedSourceContentRedeemResponseV1 = z.infer<
+  typeof HostedSourceContentRedeemResponseV1Schema
+>;
 export type AdmissionPolicySnapshotReceiptEnvelopeV1 = z.infer<typeof AdmissionPolicySnapshotReceiptEnvelopeV1Schema>;
 export type GovernedProjectionAttemptRefV1 = z.infer<
   typeof GovernedProjectionAttemptRefV1Schema

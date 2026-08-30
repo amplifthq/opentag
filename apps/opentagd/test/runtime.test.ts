@@ -83,6 +83,7 @@ const hostedClaimCapabilities = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const controlDigest = `sha256:${"1".repeat(64)}`;
 
@@ -358,6 +359,7 @@ describe("opentagd runtime helpers", () => {
               "relay.hosted-claim.v1",
               "relay.lifecycle.v1",
               "relay.readiness.v1",
+              "relay.source-content-redeem.v1",
             ],
             targets: [],
             observedAt: new Date().toISOString(),

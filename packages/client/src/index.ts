@@ -96,6 +96,8 @@ import {
   HostedProgressRequestV1Schema,
   HostedRejectStartRequestV1Schema,
   HostedRunningRequestV1Schema,
+  HostedSourceContentRedeemRequestV1Schema,
+  HostedSourceContentRedeemResponseV1Schema,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
@@ -134,6 +136,8 @@ import {
   type HostedProgressRequestV1,
   type HostedRejectStartRequestV1,
   type HostedRunningRequestV1,
+  type HostedSourceContentRedeemRequestV1,
+  type HostedSourceContentRedeemResponseV1,
   type HumanPermissionDecisionRequestV1,
   type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
@@ -652,6 +656,10 @@ export type OpenTagClient = {
     runnerId: string;
     request: HostedClaimRequestV1;
   }): Promise<HostedClaimV1 | null>;
+  redeemHostedSourceContentControlV1(input: {
+    runnerId: string;
+    request: HostedSourceContentRedeemRequestV1;
+  }): Promise<HostedSourceContentRedeemResponseV1>;
   heartbeatHostedRunControlV1(input: {
     organizationId: string;
     credentialId: string;
@@ -1699,6 +1707,53 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         );
       }
       return claim;
+    },
+
+    async redeemHostedSourceContentControlV1(input) {
+      const request = HostedSourceContentRedeemRequestV1Schema.parse(input.request);
+      const runnerId = HostedClaimV1Schema.shape.runnerId.parse(input.runnerId);
+      const action = "redeemHostedSourceContentControlV1";
+      if (request.runnerId !== runnerId) {
+        throw new OpenTagClientHttpError(action, 0, "response_identity_mismatch");
+      }
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(request.runId)}/source-content/redeem`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200) {
+        const parsedError = ControlErrorHttpResponseV1Schema.safeParse({
+          status: response.status, body,
+        });
+        if (!parsedError.success) {
+          throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+        }
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+      const parsed = HostedSourceContentRedeemResponseV1Schema.safeParse(body);
+      if (!parsed.success) {
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      const redeemed = parsed.data;
+      if (redeemed.requestId !== request.requestId
+        || redeemed.operationId !== request.operationId
+        || redeemed.organizationId !== request.organizationId
+        || redeemed.runnerId !== runnerId
+        || redeemed.runId !== request.runId
+        || redeemed.attempt.attemptId !== request.attempt.attemptId
+        || redeemed.attempt.attemptNumber !== request.attempt.attemptNumber
+        || redeemed.attempt.epoch !== request.attempt.epoch
+        || redeemed.attempt.fencingTokenDigest !== request.attempt.fencingTokenDigest
+        || redeemed.attempt.leaseExpiresAt !== request.attempt.leaseExpiresAt
+        || redeemed.admissionEnvelopeDigest !== request.admissionEnvelopeDigest
+        || canonicalJsonStringify(redeemed.contentEnvelope)
+          !== canonicalJsonStringify(request.contentEnvelope)) {
+        throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+      }
+      return redeemed;
     },
 
     async heartbeatHostedRunControlV1(input) {
