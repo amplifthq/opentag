@@ -95,6 +95,7 @@ type ReservationRow = {
   content_id: string;
   content_aad_digest: string;
   content_key_version: string;
+  content_payload_digest: string;
   state: "pending" | "resolved";
   created_at: Date;
 };
@@ -114,6 +115,7 @@ const reservationFromRow = (row: ReservationRow): IngressReservation => Object.f
     sourceVersionRef: row.source_version_ref,
     aadDigest: row.content_aad_digest,
     keyVersion: row.content_key_version,
+    payloadDigest: row.content_payload_digest,
   }),
   state: row.state,
   createdAt: row.created_at.toISOString(),
@@ -216,8 +218,9 @@ export function createSourceIngressService(input: {
             `INSERT INTO cp_ingress_reservation(
               reservation_id, organization_id, installation_id, binding_id, source_app_id,
               source_delivery_id, source_message_id, source_version_ref, raw_digest,
-              content_id, content_aad_digest, content_key_version, state, created_at, updated_at
-            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',$13,$13)`,
+              content_id, content_aad_digest, content_key_version, content_payload_digest,
+              state, created_at, updated_at
+            ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$9,'pending',$13,$13)`,
             [reservationId, command.organizationId, command.installationId, command.bindingId,
               command.sourceApp.appId, command.sourceDeliveryId, command.sourceMessageId,
               command.sourceVersionRef, command.rawDigest, contentId, "pending", "pending", now],
@@ -231,9 +234,11 @@ export function createSourceIngressService(input: {
           });
           await client.query(
             `UPDATE cp_ingress_reservation
-             SET content_aad_digest = $2, content_key_version = $3
+             SET content_aad_digest = $2, content_key_version = $3,
+                 content_payload_digest = $4
              WHERE reservation_id = $1`,
-            [reservationId, contentRef.aadDigest, contentRef.keyVersion],
+            [reservationId, contentRef.aadDigest, contentRef.keyVersion,
+              contentRef.payloadDigest],
           );
           const payload = { reservationId, rawDigest: command.rawDigest, contentRef };
           const enqueue = await jobs.enqueueInTransaction(client, {

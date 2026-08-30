@@ -1,4 +1,4 @@
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
@@ -7,6 +7,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createGithubIngress } from "../src/modules/github-ingress/index.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { hostedGrantIssuerFixture } from "./control-fixtures.js";
 import {
   createIsolatedPostgres,
@@ -20,6 +21,7 @@ function signature(secret: string, body: Uint8Array): string {
 describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   let ingress: ReturnType<typeof createGithubIngress>;
+  let custody: ReturnType<typeof createRelayContentCustody>;
   const now = new Date("2026-08-15T13:00:00.000Z");
   const owner = {
     operatorId: "operator_ingress",
@@ -152,11 +154,14 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
       tokenFactory: () => "unused_fence",
       issueSourceContentGrantInTransaction: hostedGrantIssuerFixture,
     });
+    custody = createRelayContentCustody({ pool: fixture.pool, clock: { now: () => now },
+      key: { key: randomBytes(32), keyVersion: "github-ingress-v1" } });
     ingress = createGithubIngress({
       pool: fixture.pool,
       hosted,
       clock: { now: () => now },
       masterSecret: "github-ingress-master-secret-with-32-bytes",
+      sourceContent: custody,
     });
   });
 
@@ -224,6 +229,17 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         (SELECT count(*)::int FROM cp_hosted_run) AS runs`,
     );
     expect(counts.rows[0]).toEqual({ deliveries: 1, runs: 1 });
+    const encrypted = await fixture.pool.query<{ payload_digest: string; ciphertext: Buffer }>(
+      `SELECT content.payload_digest, content.ciphertext
+       FROM cp_source_content content
+       JOIN cp_hosted_run run
+         ON run.organization_id = content.organization_id
+        AND run.source_content_ids = ARRAY[content.content_id]
+       WHERE run.run_id = $1`,
+      [accepted.kind === "accepted" ? accepted.runId : "missing"],
+    );
+    expect(encrypted.rows).toEqual([{ payload_digest: expect.stringMatching(/^sha256:/u),
+      ciphertext: expect.any(Buffer) }]);
   });
 
   it("allows separate tenants to bind the same provider repository id", async () => {

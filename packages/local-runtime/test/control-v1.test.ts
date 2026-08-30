@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildHostedLifecycleRequestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
 import { serveDaemon, type DaemonClient } from "../src/daemon.js";
 import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, redeemHostedClaimSourceContentV1, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
@@ -307,7 +307,8 @@ async function validHostedClaim(input: {
     runnerId: "runner_1",
     sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
       aadDigest: "1".repeat(64), keyVersion: "v1",
-      envelopeDigest: `sha256:${"1".repeat(64)}` },
+      envelopeDigest: `sha256:${"1".repeat(64)}`,
+      payloadDigest: `sha256:${"1".repeat(64)}` },
     queueClaimDeadline: "2026-08-10T00:00:00.000Z",
     permissionCeiling: { allowedActionDescriptors: ["workspace.write"],
       digest: `sha256:${"2".repeat(64)}` },
@@ -417,8 +418,12 @@ describe("Control V1 projection pump", () => {
     const baseClaim = await validHostedClaim({ request, executorCapabilityDigest: `sha256:${"b".repeat(64)}` });
     const admissionSeed = { ...baseClaim.hostedAdmission, sourceIdentityDigest,
       envelopeDigest: `sha256:${"0".repeat(64)}` };
-    const claim = { ...baseClaim, hostedAdmission: { ...admissionSeed,
-      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(admissionSeed) },
+    const executionPayload = { executionBearingCommentBody: "@opentag fix this", event };
+    const payloadDigest = await computeControlPayloadDigestV1(executionPayload);
+    const digestBoundAdmissionSeed = { ...admissionSeed,
+      sourceContextEnvelope: { ...admissionSeed.sourceContextEnvelope, payloadDigest } };
+    const claim = { ...baseClaim, hostedAdmission: { ...digestBoundAdmissionSeed,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(digestBoundAdmissionSeed) },
       sourceContentGrant: { ...baseClaim.sourceContentGrant, keyVersion: "v1" } };
     const redeem = vi.fn(async ({ request: redeemRequest }) => ({
       kind: "hosted_source_content_redeemed" as const, schemaVersion: 1 as const,
@@ -428,8 +433,8 @@ describe("Control V1 projection pump", () => {
       attempt: redeemRequest.attempt,
       admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
       contentEnvelope: claim.hostedAdmission.sourceContextEnvelope,
-      content: { contentId: "content_1", payload: {
-        executionBearingCommentBody: "@opentag fix this", event } },
+      content: { contentId: "content_1", payload: executionPayload },
+      payloadDigest,
       redeemedAt: now.toISOString(),
     }));
 
@@ -1522,7 +1527,8 @@ describe("Control V1 projection pump", () => {
         runnerId: "runner_1",
         sourceContextEnvelope: { contentId: "content_1", sourceVersionRef: "source_1",
           aadDigest: "1".repeat(64), keyVersion: "v1",
-          envelopeDigest: `sha256:${"1".repeat(64)}` },
+          envelopeDigest: `sha256:${"1".repeat(64)}`,
+          payloadDigest: `sha256:${"1".repeat(64)}` },
         queueClaimDeadline: "2026-08-10T00:00:00.000Z",
         permissionCeiling: { allowedActionDescriptors: ["workspace.write"],
           digest: `sha256:${"2".repeat(64)}` },
@@ -3482,7 +3488,7 @@ describe("Control V1 projection pump", () => {
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
   });
 
-  it("does not reject or import a claim when close wins a delayed refetch", async () => {
+  it("requires one-time redemption and never falls back to a GitHub refetch", async () => {
     const repository = {
       provider: "github",
       owner: "acme",
@@ -3536,12 +3542,11 @@ describe("Control V1 projection pump", () => {
     const executorCapabilityDigest =
       readiness.payload.executors[0]?.capabilityDigest;
     expect(executorCapabilityDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    let rejectRefetch: ((reason: Error) => void) | undefined;
-    const delayedRefetch = new Promise<never>((_resolve, reject) => {
-      rejectRefetch = reject;
-    });
-    const refetchGitHubIssueCommentImpl = vi.fn(() => delayedRefetch);
-    const rejectHostedAttemptStartLocally = vi.fn();
+    const refetchGitHubIssueCommentImpl = vi.fn();
+    const rejectHostedAttemptStartLocally = vi.fn(async () => ({
+      outcome: "requeued" as const,
+      operation: { state: "acknowledged" as const },
+    }));
     const importHostedAssignedRun = vi.fn();
     const executeClaimedRunImpl = vi.fn();
     const closeStore = vi.fn();
@@ -3555,6 +3560,7 @@ describe("Control V1 projection pump", () => {
           operationId: request.operationId,
           requestId: request.requestId,
           request,
+          state: "pending" as const,
         },
       })),
       persistHostedClaimAuthorityShell: vi.fn(async () => ({
@@ -3616,28 +3622,13 @@ describe("Control V1 projection pump", () => {
       refetchGitHubIssueCommentImpl: refetchGitHubIssueCommentImpl as never,
       closeDrainTimeoutMs: 1,
     });
-    const iteration = loop!.beforeIteration();
-    await vi.waitFor(() => {
-      expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledTimes(1);
-    });
-    expect(refetchGitHubIssueCommentImpl).toHaveBeenCalledWith(
-      expect.objectContaining({
-        apiOrigin: "http://127.0.0.1:43123",
-        token: "github_secret",
-      }),
+    await expect(loop!.beforeIteration()).rejects.toThrow(
+      "hosted_source_content_redeem_unavailable",
     );
-
-    await loop!.close();
-    expect(closeStore).not.toHaveBeenCalled();
-    rejectRefetch?.(new Error("refetch failed after close"));
-    await expect(iteration).resolves.toBe(false);
-    await vi.waitFor(() => {
-      expect(closeStore).toHaveBeenCalledTimes(1);
-    });
-    expect(rejectHostedAttemptStartLocally).not.toHaveBeenCalled();
-    expect(rejectHostedAttemptStartControlV1).not.toHaveBeenCalled();
+    expect(refetchGitHubIssueCommentImpl).not.toHaveBeenCalled();
     expect(importHostedAssignedRun).not.toHaveBeenCalled();
     expect(executeClaimedRunImpl).not.toHaveBeenCalled();
+    await loop!.close();
   });
 
   it("does not journal rejection when close wins delayed reject request construction", async () => {

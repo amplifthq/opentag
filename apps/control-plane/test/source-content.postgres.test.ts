@@ -70,7 +70,8 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
       ...grant, organizationId: "org_a", runId: "run_1",
       attemptId: "attempt_1", fenceDigest: "fence_1",
       contentIds: ["content_1"], purpose: "source_context",
-    })).resolves.toEqual([{ contentId: "content_1", payload: content().payload }]);
+    })).resolves.toEqual([{ contentId: "content_1", payload: content().payload,
+      payloadDigest: "sha256:75cbaa9eb7b3e9244349b61c5ae88cbd871d38bcbdb019d43dc14aa3e1086a96" }]);
   });
 
   it("catches process-local encryption that cannot survive restart", async () => {
@@ -158,7 +159,7 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
         ["cp_source_content", ["organization_id", "content_id", "installation_id",
           "source_app_id", "source_delivery_id", "source_message_id", "source_version_ref",
           "purpose", "ciphertext", "content_nonce", "content_tag", "wrapped_dek",
-          "wrapping_nonce", "wrapping_tag", "aad_digest", "key_version", "expires_at",
+          "wrapping_nonce", "wrapping_tag", "aad_digest", "key_version", "payload_digest", "expires_at",
           "terminal_at", "deleted_at", "created_at"]],
         ["cp_source_content_read_grant", ["grant_id", "organization_id", "token_hash",
           "run_id", "attempt_id", "fence_digest", "content_ids", "purpose", "expires_at",

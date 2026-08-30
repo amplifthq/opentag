@@ -42,6 +42,7 @@ export const ingressReservations = pgTable("cp_ingress_reservation", {
   sourceMessageId: text("source_message_id").notNull(), sourceVersionRef: text("source_version_ref").notNull(),
   rawDigest: text("raw_digest").notNull(), contentId: text("content_id").notNull(),
   contentAadDigest: text("content_aad_digest").notNull(), contentKeyVersion: text("content_key_version").notNull(),
+  contentPayloadDigest: text("content_payload_digest").notNull(),
   state: text("state").notNull(), createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, (table) => [

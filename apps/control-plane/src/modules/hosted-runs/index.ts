@@ -114,6 +114,8 @@ type HostedAttemptRow = {
   lease_expires_at: Date;
   material_start_state: "open" | "proven_not_started" | "started_or_ambiguous";
   state: string;
+  workspace_attestation: unknown | null;
+  interruption_evidence: unknown | null;
 };
 
 export type HostedRunCoordinator = {
@@ -163,7 +165,7 @@ export type HostedRunCoordinator = {
     runId: string;
   }): Promise<(HostedRunProjection & { state: CanonicalRunStatus;
     terminalKind: TerminalKind | null; terminalReason: string | null }) | null>;
-  validateSourceContentRedemption(input: {
+  validateSourceContentRedemptionInTransaction(client: PoolClient, input: {
     principal: RuntimePrincipal;
     request: HostedSourceContentRedeemRequestV1;
   }): Promise<boolean>;
@@ -904,7 +906,8 @@ export function createHostedRunCoordinator(input: {
 
         const attemptResult = await client.query(
           `SELECT attempt_number, attempt_id, runner_id, credential_id,
-                  fencing_token_digest, lease_expires_at, material_start_state, state
+                  fencing_token_digest, lease_expires_at, material_start_state, state,
+                  workspace_attestation, interruption_evidence
            FROM cp_hosted_attempt
            WHERE organization_id = $1 AND run_id = $2
              AND attempt_number = $3
@@ -934,6 +937,32 @@ export function createHostedRunCoordinator(input: {
           && command.action !== "heartbeat" && command.action !== "cancel") {
           return { kind: "conflict", reason: "invalid_transition" } as const;
         }
+        const workspaceAttestation = request.workspaceAttestation;
+        const interruptionEvidence = request.interruptionEvidence;
+        if (workspaceAttestation && (
+          workspaceAttestation.attemptId !== attempt.attempt_id
+          || workspaceAttestation.attemptNumber !== attempt.attempt_number
+          || workspaceAttestation.fencingTokenDigest !== attempt.fencing_token_digest
+          || workspaceAttestation.credentialId !== attempt.credential_id
+          || workspaceAttestation.leaseExpiresAt !== attempt.lease_expires_at.toISOString()
+        )) return { kind: "conflict", reason: "invalid_request" } as const;
+        if (interruptionEvidence && (!workspaceAttestation
+          || interruptionEvidence.runId !== command.runId
+          || interruptionEvidence.attemptId !== attempt.attempt_id
+          || interruptionEvidence.attemptNumber !== attempt.attempt_number
+          || interruptionEvidence.workspaceId !== workspaceAttestation.workspaceId
+          || interruptionEvidence.workspacePathDigest !== workspaceAttestation.workspacePathDigest
+          || interruptionEvidence.fencingTokenDigest !== attempt.fencing_token_digest)) {
+          return { kind: "conflict", reason: "invalid_request" } as const;
+        }
+        if (attempt.workspace_attestation && !workspaceAttestation
+          && ["progress", "complete", "cancel"].includes(command.action)) {
+          return { kind: "conflict", reason: "invalid_request" } as const;
+        }
+        const lifecycleEvidence = {
+          ...(workspaceAttestation ? { workspaceAttestation } : {}),
+          ...(interruptionEvidence ? { interruptionEvidence } : {}),
+        };
         let leaseExpiresAt: string | undefined;
         let blockedPermission: { permissionRequestId: string;
           actionDescriptorDigest: string; policySnapshotDigest: string } | undefined;
@@ -953,6 +982,7 @@ export function createHostedRunCoordinator(input: {
             operation: "heartbeat",
             occurredAt: heartbeat.occurredAt,
             leaseExpiresAt,
+            ...lifecycleEvidence,
           };
         } else if (command.action === "running") {
           const running = HostedRunningRequestV1Schema.parse(request);
@@ -967,6 +997,7 @@ export function createHostedRunCoordinator(input: {
             ...(running.runTimeoutMs
               ? { runTimeoutMs: running.runTimeoutMs }
               : {}),
+            ...lifecycleEvidence,
           };
         } else if (command.action === "progress") {
           const progress = HostedProgressRequestV1Schema.parse(request);
@@ -975,6 +1006,7 @@ export function createHostedRunCoordinator(input: {
             occurredAt: progress.occurredAt,
             progressId: progress.progressId,
             progressDigest: progress.progressDigest,
+            ...lifecycleEvidence,
           };
         } else if (command.action === "reject-start") {
           const rejected = HostedRejectStartRequestV1Schema.parse(request);
@@ -983,6 +1015,7 @@ export function createHostedRunCoordinator(input: {
             occurredAt: rejected.occurredAt,
             executorId: rejected.executorId,
             reasonCode: rejected.reasonCode,
+            ...lifecycleEvidence,
           };
         } else if (command.action === "cancel") {
           const cancelled = HostedCancelRequestV1Schema.parse(request);
@@ -990,6 +1023,7 @@ export function createHostedRunCoordinator(input: {
             operation: "cancel",
             occurredAt: cancelled.occurredAt,
             reasonCode: cancelled.reasonCode,
+            ...lifecycleEvidence,
           };
         } else {
           const complete = HostedCompleteRequestV1Schema.parse(request);
@@ -1027,6 +1061,7 @@ export function createHostedRunCoordinator(input: {
             artifactDigests: complete.artifactDigests,
             evidenceDigests: complete.evidenceDigests,
             ...(blockedPermission ? { blockedPermission } : {}),
+            ...lifecycleEvidence,
           };
         }
 
@@ -1131,7 +1166,9 @@ export function createHostedRunCoordinator(input: {
                blocked_permission_request_id = $6,
                blocked_action_descriptor_digest = $7,
                blocked_policy_snapshot_digest = $8,
-               updated_at = $9
+               updated_at = $9,
+               workspace_attestation = COALESCE($10::jsonb, workspace_attestation),
+               interruption_evidence = COALESCE($11::jsonb, interruption_evidence)
            WHERE organization_id = $1 AND run_id = $2
              AND attempt_number = $3`,
           [
@@ -1144,6 +1181,8 @@ export function createHostedRunCoordinator(input: {
             blockedPermission?.actionDescriptorDigest ?? null,
             blockedPermission?.policySnapshotDigest ?? null,
             now.toISOString(),
+            workspaceAttestation ? JSON.stringify(workspaceAttestation) : null,
+            interruptionEvidence ? JSON.stringify(interruptionEvidence) : null,
           ],
         );
         await client.query(
@@ -1183,7 +1222,7 @@ export function createHostedRunCoordinator(input: {
       });
     },
 
-    async validateSourceContentRedemption(command) {
+    async validateSourceContentRedemptionInTransaction(client, command) {
       const request = HostedSourceContentRedeemRequestV1Schema.parse(command.request);
       if (request.organizationId !== command.principal.organizationId
         || request.runnerId !== command.principal.runnerId
@@ -1192,7 +1231,24 @@ export function createHostedRunCoordinator(input: {
           !== command.principal.registrationGeneration
         || request.expectedAuthority.credentialGeneration
           !== command.principal.credentialGeneration) return false;
-      const result = await input.pool.query<{
+      const runner = await client.query<{ registration_generation: number;
+        credential_generation: number; current_credential_id: string; revoked_at: Date | null }>(
+        `SELECT runner.registration_generation, runner.credential_generation,
+                runner.current_credential_id, credential.revoked_at
+         FROM cp_runner runner
+         JOIN cp_runner_credential credential
+           ON credential.organization_id = runner.organization_id
+          AND credential.credential_id = runner.current_credential_id
+         WHERE runner.organization_id = $1 AND runner.runner_id = $2
+         FOR UPDATE OF runner, credential`,
+        [request.organizationId, request.runnerId],
+      );
+      const currentRunner = runner.rows[0];
+      if (!currentRunner || currentRunner.revoked_at
+        || currentRunner.current_credential_id !== request.expectedAuthority.credentialId
+        || currentRunner.registration_generation !== request.expectedAuthority.registrationGeneration
+        || currentRunner.credential_generation !== request.expectedAuthority.credentialGeneration) return false;
+      const result = await client.query<{
         hosted_admission: unknown;
         current_attempt_number: number;
         terminal_kind: string | null;
@@ -1213,7 +1269,8 @@ export function createHostedRunCoordinator(input: {
            ON attempt.organization_id = run.organization_id
           AND attempt.run_id = run.run_id
           AND attempt.attempt_number = run.current_attempt_number
-         WHERE run.organization_id = $1 AND run.run_id = $2`,
+         WHERE run.organization_id = $1 AND run.run_id = $2
+         FOR UPDATE OF run, attempt`,
         [request.organizationId, request.runId],
       );
       const row = result.rows[0];

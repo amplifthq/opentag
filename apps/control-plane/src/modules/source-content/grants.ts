@@ -94,8 +94,13 @@ export function createSourceContentGrantStore(input: {
     async consume<T>(command: {
       grantId: string; token: string; organizationId: string; runId: string;
       attemptId: string; fenceDigest: string; contentIds: string[]; purpose: string;
+      authorizeInTransaction?: (client: PoolClient) => Promise<boolean>;
     }, operation: (client: PoolClient, contentIds: string[]) => Promise<T>): Promise<T> {
       return withPostgresTransaction(input.pool, async (client) => {
+        if (command.authorizeInTransaction
+          && !(await command.authorizeInTransaction(client as PoolClient))) {
+          throw new Error("source_content_grant_stale");
+        }
         const result = await client.query<GrantRow>(
           "SELECT * FROM cp_source_content_read_grant WHERE token_hash = $1 FOR UPDATE",
           [hashGrantToken(command.token)],

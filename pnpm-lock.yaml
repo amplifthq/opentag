@@ -47,6 +47,9 @@ importers:
       '@opentag/delivery-runtime':
         specifier: workspace:*
         version: link:../../packages/delivery-runtime
+      '@opentag/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@opentag/slack':
         specifier: workspace:*
         version: link:../../packages/slack

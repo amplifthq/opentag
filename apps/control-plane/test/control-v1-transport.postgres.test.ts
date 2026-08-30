@@ -2,6 +2,7 @@ import {
   buildHostedLifecycleRequestV1,
   computePermissionRequestDigestV1,
   computeControlPayloadDigestV1,
+  computeHostedAdmissionEnvelopeDigestV1,
   HumanPermissionDecisionRequestV1Schema,
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
@@ -326,17 +327,23 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
       key: { key: randomBytes(32), keyVersion: "relay-v1" } });
     const admitted = await hostedAdmissionFixture({ runId: "run_redeem", suffix: "91",
       organizationId: "org_redeem", runnerId: "runner_redeem", contentId: "content_redeem" });
-    await custody.store({ organizationId: "org_redeem", installationId: "install_redeem",
+    const contentRef = await custody.store({ organizationId: "org_redeem", installationId: "install_redeem",
       sourceAppId: "github", sourceDeliveryId: admitted.admission.deliveryId,
       sourceMessageId: admitted.admission.sourceEvent.providerEventId,
       sourceVersionRef: admitted.admission.sourceContextEnvelope.sourceVersionRef,
       purpose: "source_context", contentId: "content_redeem",
       payload: { text: "private source" }, expiresAt: new Date("2026-09-01T00:00:00.000Z") });
+    const admissionSeed = { ...admitted.admission,
+      sourceContextEnvelope: { ...admitted.admission.sourceContextEnvelope,
+        payloadDigest: contentRef.payloadDigest },
+      envelopeDigest: `sha256:${"0".repeat(64)}` };
+    const admission = { ...admissionSeed,
+      envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(admissionSeed) };
     const hosted = createHostedRunCoordinator({ pool: fixture.pool, clock: { now: () => now },
       leaseDurationMs: 60_000, idFactory: () => "attempt_redeem",
       tokenFactory: () => "fence_redeem", issueSourceContentGrantInTransaction:
         custody.issueReadGrantInTransaction });
-    await hosted.admit({ runId: "run_redeem", admission: admitted.admission, policy: admitted.policy });
+    await hosted.admit({ runId: "run_redeem", admission, policy: admitted.policy });
     const application = createControlPlaneApplication({ capabilities: {
       schemaVersion: 1, protocolVersion: "1.0", registryVersion: "opentag.control.capabilities/v1",
       capabilities: [...HOSTED_CAPABILITIES, "relay.registration.v1"].sort() as any,

@@ -16,6 +16,8 @@ export type ExecutorEvent = {
   type: "executor.started" | "executor.progress" | "executor.completed" | "executor.failed";
   message: string;
   at: string;
+  workspaceAttestation?: import("./git.js").AttemptWorkspaceAttestation;
+  interruptionEvidence?: import("@opentag/core").AttemptInterruptionEvidenceV1;
 };
 
 export type ExecutorEventSink = {

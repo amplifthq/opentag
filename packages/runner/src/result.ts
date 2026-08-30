@@ -1,4 +1,5 @@
-import type { OpenTagRunResult, WorkContextMutationRequest } from "@opentag/core";
+import { canonicalJsonStringify, type OpenTagRunResult, type WorkContextMutationRequest } from "@opentag/core";
+import { createHash } from "node:crypto";
 import { EXECUTOR_REPORT_START, parseExecutorReport, renderExecutorReportSummary } from "./executor-report.js";
 
 const MAX_EXECUTOR_SUMMARY_LENGTH = 4000;
@@ -152,6 +153,20 @@ function createRunArtifacts(input: {
     });
   }
   if (input.proposalEvidence) {
+    const { evidenceDigest, ...digestInput } = input.proposalEvidence;
+    const computedDigest = `sha256:${createHash("sha256")
+      .update(canonicalJsonStringify(digestInput)).digest("hex")}`;
+    if (computedDigest !== evidenceDigest) {
+      throw new Error("proposal_evidence_digest_mismatch");
+    }
+    const immutableProposalEvidence = Object.freeze({
+      ...input.proposalEvidence,
+      changedFiles: Object.freeze([...input.proposalEvidence.changedFiles]),
+      verificationEvidenceDigests: Object.freeze([
+        ...input.proposalEvidence.verificationEvidenceDigests,
+      ]),
+      limitations: Object.freeze([...input.proposalEvidence.limitations]),
+    });
     generated.push({
       id: `${input.runId}:proposal-evidence`,
       type: "patch_summary",
@@ -161,11 +176,11 @@ function createRunArtifacts(input: {
       summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
       sourceRunId: input.runId,
       createdAt,
-      metadata: {
-        ...input.proposalEvidence,
-        changedFiles: input.changedFiles,
+      metadata: Object.freeze({
+        proposalEvidence: immutableProposalEvidence,
+        evidenceDigest,
         readiness: "not_assessed",
-      },
+      }),
     });
   }
   generated.push({
@@ -205,6 +220,8 @@ function createRunArtifacts(input: {
 }
 
 export type ProposalEvidence = {
+  schemaVersion: 1;
+  kind: "attempt_proposal_evidence";
   attemptId: string;
   attemptNumber: number;
   workspaceId: string;
@@ -213,9 +230,12 @@ export type ProposalEvidence = {
   finalRevision?: string;
   finalTree: string;
   diffDigest: string;
+  baseToFinalBinaryDiff: string;
   changedFilesDigest: string;
+  changedFiles: string[];
   verificationEvidenceDigests: string[];
   limitations: string[];
+  evidenceDigest: string;
 };
 
 export function createExecutorRunResult(input: {

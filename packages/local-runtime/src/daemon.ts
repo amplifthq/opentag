@@ -13,7 +13,9 @@ import {
   type ActionPermissionResolution,
   type ApprovalMode,
   type MaterialActionReceipt,
-  type ProjectTargetRef
+  type ProjectTargetRef,
+  type AttemptWorkspaceAttestationV1,
+  type AttemptInterruptionEvidenceV1
 } from "@opentag/core";
 import {
   assessRunnerSecurity,
@@ -57,8 +59,13 @@ export type DaemonClient = {
   ): Promise<void>;
   rejectAttemptStart?(runId: string, executorId: string, reason: string, lease: AttemptLease): Promise<void>;
   heartbeat(runId: string, lease: AttemptLease): Promise<void>;
-  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string }): Promise<void>;
-  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult): Promise<void>;
+  progress(runId: string, lease: AttemptLease, input: { type: string; message: string; at: string;
+    workspaceAttestation?: AttemptWorkspaceAttestationV1;
+    interruptionEvidence?: AttemptInterruptionEvidenceV1 }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, evidence?: {
+    idempotencyKey?: string;
+    workspaceAttestation?: AttemptWorkspaceAttestationV1;
+    interruptionEvidence?: AttemptInterruptionEvidenceV1 }): Promise<void>;
   requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
@@ -540,6 +547,7 @@ export async function executeClaimedRun(
     if (cancelPromise) await cancelPromise;
     return true;
   }
+  let latestWorkspaceAttestation = hostedAuthority?.workspaceAttestation;
   if (heartbeatIntervalMs > 0) {
     heartbeatHandle = setInterval(() => {
       if (heartbeatInFlight) return;
@@ -548,6 +556,12 @@ export async function executeClaimedRun(
           const acceptedLeaseExpiresAt = await hostedAuthority
             ?.readAcceptedLeaseExpiresAt?.();
           if (!acceptedLeaseExpiresAt || hostedLeaseRevoked) return;
+          if (latestWorkspaceAttestation) {
+            latestWorkspaceAttestation = {
+              ...latestWorkspaceAttestation,
+              leaseExpiresAt: acceptedLeaseExpiresAt,
+            };
+          }
           const acceptedDeadline = Date.parse(acceptedLeaseExpiresAt);
           if (
             Number.isFinite(acceptedDeadline)
@@ -565,6 +579,27 @@ export async function executeClaimedRun(
     }, heartbeatIntervalMs);
   }
   const trustedReceiptsByActionId = new Map<string, Promise<MaterialActionReceipt | null>>();
+  const lifecycleEvidence = (conclusion?: OpenTagRunResult["conclusion"]) => {
+    if (!latestWorkspaceAttestation) return undefined;
+    const interruptionEvidence = conclusion && ["cancelled", "interrupted", "timed_out"].includes(conclusion)
+      ? {
+          state: "interrupted_evidence" as const,
+          runId,
+          attemptId: lease.attemptId,
+          attemptNumber: hostedAuthority?.attemptNumber ?? claimed.attemptNumber,
+          workspaceId: latestWorkspaceAttestation.workspaceId,
+          workspacePathDigest: latestWorkspaceAttestation.workspacePathDigest,
+          fencingTokenDigest: hostedAuthority?.fencingTokenDigest
+            ?? latestWorkspaceAttestation.fencingTokenDigest,
+          reason: conclusion === "interrupted" ? "stale_fence" as const : "cancelled" as const,
+          observedAt: new Date().toISOString(),
+          processStop: "unconfirmed" as const,
+          materialOutcome: "outcome_unknown" as const,
+        }
+      : undefined;
+    return { workspaceAttestation: latestWorkspaceAttestation,
+      ...(interruptionEvidence ? { interruptionEvidence } : {}) };
+  };
 
   const executorRunPromise: Promise<ExecutorRunOutcome> = activeExecutor
     .run(
@@ -680,12 +715,25 @@ export async function executeClaimedRun(
       {
         emit: async (event) => {
           const safeEvent = sanitizeCredentialLikeValue(event, { secrets: [lease.fencingToken] });
-          console.log(`[${safeEvent.type}] ${safeEvent.message}`);
+          if (safeEvent.workspaceAttestation) {
+            latestWorkspaceAttestation = {
+              ...safeEvent.workspaceAttestation,
+              leaseExpiresAt: latestWorkspaceAttestation?.leaseExpiresAt
+                ?? safeEvent.workspaceAttestation.leaseExpiresAt,
+            };
+          }
+          const progressMessage = hostedAuthority
+            ? "Hosted executor progress received."
+            : safeEvent.message;
+          console.log(`[${safeEvent.type}] ${progressMessage}`);
           try {
             await input.client.progress(runId, lease, {
               type: safeEvent.type,
-              message: safeEvent.message,
-              at: safeEvent.at
+              message: progressMessage,
+              at: safeEvent.at,
+              ...(latestWorkspaceAttestation ? { workspaceAttestation: latestWorkspaceAttestation } : {}),
+              ...(safeEvent.interruptionEvidence
+                ? { interruptionEvidence: safeEvent.interruptionEvidence } : {}),
             });
           } catch (error) {
             if (runNoLongerClaimed(error)) {
@@ -781,7 +829,8 @@ export async function executeClaimedRun(
         sanitizeCredentialLikeValue(
           timedOutRunResult({ executorName: activeExecutor.displayName, timeoutMs: runTimeoutMs ?? 0 }),
           { secrets: [lease.fencingToken] }
-        )
+        ),
+        lifecycleEvidence("timed_out"),
       );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
@@ -807,7 +856,8 @@ export async function executeClaimedRun(
         lease,
         sanitizeCredentialLikeValue(failedRunResult(activeExecutor.displayName, executorOutcome.error), {
           secrets: [lease.fencingToken]
-        })
+        }),
+        lifecycleEvidence("failure"),
       );
     } catch (completeError) {
       if (runNoLongerClaimed(completeError)) {
@@ -858,7 +908,7 @@ export async function executeClaimedRun(
     return true;
   }
   try {
-    await input.client.complete(runId, lease, result);
+    await input.client.complete(runId, lease, result, lifecycleEvidence(result.conclusion));
   } catch (error) {
     if (runNoLongerClaimed(error)) {
       return true;

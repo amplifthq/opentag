@@ -10,6 +10,7 @@
     { "path": "../../packages/core" },
     { "path": "../../packages/delivery-contract" },
     { "path": "../../packages/delivery-runtime" },
+    { "path": "../../packages/github" },
     { "path": "../../packages/source-app-runtime" }
     ,{ "path": "../../packages/slack" }
   ]

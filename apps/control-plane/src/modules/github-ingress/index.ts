@@ -15,10 +15,12 @@ import {
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
 import { z } from "zod";
+import { normalizeGitHubIssueComment } from "@opentag/github";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import { recordManagementAudit } from "../audit/index.js";
 import type { ConsolePrincipal } from "../identity/index.js";
 import type { HostedRunCoordinator } from "../hosted-runs/index.js";
+import type { RelayContentCustody } from "../source-content/index.js";
 
 const HOSTED_CAPABILITIES = [
   "relay.claim-fence.v1",
@@ -180,6 +182,7 @@ export function createGithubIngress(input: {
   hosted: HostedRunCoordinator;
   clock: { now(): Date };
   masterSecret: string;
+  sourceContent: Pick<RelayContentCustody, "store">;
 }) {
   if (Buffer.byteLength(input.masterSecret, "utf8") < 32) {
     throw new Error("invalid_github_ingress_master_secret");
@@ -601,6 +604,45 @@ export function createGithubIngress(input: {
       const operationId = `operation_admit_${identitySuffix}`;
       const snapshotId = `policy_${identitySuffix}`;
       const authorizationRef = `github_${binding.binding_id}_${parsed.data.sender.id}`;
+      const queueClaimDeadline = new Date(
+        new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
+      ).toISOString();
+      const executionBearingCommentBody = parsed.data.comment.body.trim();
+      const event = normalizeGitHubIssueComment({
+        id: parsed.data.comment.id,
+        commentBody: executionBearingCommentBody,
+        commentUrl: `https://github.com/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}#issuecomment-${parsed.data.comment.id}`,
+        apiCommentsUrl: `https://api.github.com/repos/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}/comments`,
+        issueUrl: `https://github.com/${binding.owner}/${binding.repo}/issues/${parsed.data.issue.number}`,
+        issueNumber: parsed.data.issue.number,
+        threadKind: parsed.data.issue.pull_request ? "pull_request" : "issue",
+        owner: binding.owner,
+        repo: binding.repo,
+        actorId: Number(parsed.data.sender.id),
+        actorLogin: parsed.data.sender.login,
+        private: parsed.data.repository.private === true,
+        receivedAt,
+        deliveryId: command.deliveryId,
+        signatureVerified: true,
+      });
+      if (!event) return finish({ kind: "invalid_payload" } as const);
+      const executionPayload = { executionBearingCommentBody, event };
+      const contentRef = await input.sourceContent.store({
+        organizationId: binding.organization_id,
+        installationId: binding.binding_id,
+        sourceAppId: "github",
+        sourceDeliveryId: command.deliveryId,
+        sourceMessageId: parsed.data.comment.id,
+        sourceVersionRef: `github_comment_${parsed.data.comment.id}`,
+        purpose: "source_context",
+        contentId: `github_delivery_${identitySuffix}`,
+        payload: executionPayload,
+        expiresAt: new Date(queueClaimDeadline),
+      });
+      const sourceContextEnvelope = {
+        ...contentRef,
+        envelopeDigest: await computeControlPayloadDigestV1(contentRef),
+      };
       const policyPayload = {
         snapshotId,
         capturedAt: receivedAt,
@@ -711,16 +753,8 @@ export function createGithubIngress(input: {
           digest: binding.binding_digest,
         },
         runnerId: binding.runner_id,
-        sourceContextEnvelope: {
-          contentId: `github_delivery_${identitySuffix}`,
-          sourceVersionRef: `github_comment_${parsed.data.comment.id}`,
-          aadDigest: payloadDigest.slice("sha256:".length),
-          keyVersion: "github-ingress-v1",
-          envelopeDigest: payloadDigest,
-        },
-        queueClaimDeadline: new Date(
-          new Date(receivedAt).getTime() + 8 * 60 * 60 * 1_000,
-        ).toISOString(),
+        sourceContextEnvelope,
+        queueClaimDeadline,
         permissionCeiling: {
           allowedActionDescriptors: ["workspace.write" as const],
           digest: await computeControlPayloadDigestV1(["workspace.write"]),

@@ -98,6 +98,7 @@ import {
   HostedRunningRequestV1Schema,
   HostedSourceContentRedeemRequestV1Schema,
   HostedSourceContentRedeemResponseV1Schema,
+  verifyHostedSourceContentRedeemPayloadV1,
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
@@ -837,7 +838,11 @@ export type DispatcherRunnerClient = {
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: MaterialActionReceipt): Promise<ActionPermissionResolution>;
   progress(runId: string, lease: AttemptLease, input: RunProgressInput & { type: string; at: string }): Promise<void>;
-  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, options?: { idempotencyKey?: string }): Promise<void>;
+  complete(runId: string, lease: AttemptLease, result: OpenTagRunResult, options?: {
+    idempotencyKey?: string;
+    workspaceAttestation?: import("@opentag/core").AttemptWorkspaceAttestationV1;
+    interruptionEvidence?: import("@opentag/core").AttemptInterruptionEvidenceV1;
+  }): Promise<void>;
 };
 
 export class OpenTagClientHttpError extends Error {
@@ -1752,6 +1757,9 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         || canonicalJsonStringify(redeemed.contentEnvelope)
           !== canonicalJsonStringify(request.contentEnvelope)) {
         throw new OpenTagClientHttpError(action, response.status, "response_identity_mismatch");
+      }
+      if (!(await verifyHostedSourceContentRedeemPayloadV1(redeemed))) {
+        throw new OpenTagClientHttpError(action, response.status, "response_payload_digest_mismatch");
       }
       return redeemed;
     },

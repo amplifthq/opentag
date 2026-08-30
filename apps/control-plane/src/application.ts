@@ -458,10 +458,7 @@ export function createControlPlaneApplication(
         if (!control.sourceContent
           || principal.runnerId !== context.req.param("runnerId")
           || request.runnerId !== context.req.param("runnerId")
-          || request.runId !== context.req.param("runId")
-          || !(await control.hosted.validateSourceContentRedemption({
-            principal, request,
-          }))) {
+          || request.runId !== context.req.param("runId")) {
           return context.json(controlError("stale_attempt", request.requestId), 409);
         }
         try {
@@ -474,6 +471,10 @@ export function createControlPlaneApplication(
             fenceDigest: request.attempt.fencingTokenDigest,
             contentIds: request.grant.contentIds,
             purpose: request.grant.purpose,
+            authorizeInTransaction: (client) =>
+              control.hosted.validateSourceContentRedemptionInTransaction(
+                client, { principal, request },
+              ),
           });
           const content = contents[0];
           if (!content || contents.length !== 1
@@ -492,7 +493,8 @@ export function createControlPlaneApplication(
             attempt: request.attempt,
             admissionEnvelopeDigest: request.admissionEnvelopeDigest,
             contentEnvelope: request.contentEnvelope,
-            content,
+            content: { contentId: content.contentId, payload: content.payload },
+            payloadDigest: content.payloadDigest,
             redeemedAt: new Date().toISOString(),
           }), 200);
         } catch {

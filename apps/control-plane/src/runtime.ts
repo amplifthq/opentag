@@ -281,12 +281,13 @@ export function createControlPlaneRuntime(input: {
     clock,
     includeSourceContentPurge: Boolean(sourceContent),
   });
-  const github = input.config.githubIngressMasterSecret
+  const github = input.config.githubIngressMasterSecret && sourceContent
     ? createGithubIngress({
         pool: postgres.pool,
         hosted,
         clock,
         masterSecret: input.config.githubIngressMasterSecret,
+        sourceContent,
       })
     : null;
   const slack = sourceContent && input.slackSecrets

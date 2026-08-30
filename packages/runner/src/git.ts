@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { CommandRunner } from "./command.js";
 import { assertCommandSucceeded } from "./command.js";
@@ -60,12 +60,19 @@ async function workspaceStateDigest(input: { runner: CommandRunner; workspacePat
     cwd: input.workspacePath,
   });
   await assertCommandSucceeded(diff, "read workspace diff");
-  const fileDigests: Array<[string, string]> = [];
+  const fileDigests: Array<[string, string, number, string]> = [];
   for (const path of parseChangedFiles(status.stdout).sort()) {
     const absolute = `${input.workspacePath.replace(/\/$/u, "")}/${path}`;
     const metadata = await lstat(absolute).catch(() => null);
-    if (!metadata?.isFile()) continue;
-    fileDigests.push([path, sha256(await readFile(absolute))]);
+    if (!metadata) continue;
+    const mode = metadata.mode & 0o7777;
+    if (metadata.isFile()) {
+      fileDigests.push([path, "file", mode, sha256(await readFile(absolute))]);
+    } else if (metadata.isSymbolicLink()) {
+      fileDigests.push([path, "symlink", mode, sha256(await readlink(absolute))]);
+    } else if (metadata.isDirectory()) {
+      fileDigests.push([path, "directory", mode, sha256("")]);
+    }
   }
   return sha256(JSON.stringify({ status: status.stdout, diff: diff.stdout, fileDigests }));
 }
@@ -149,7 +156,7 @@ export function branchNameForRun(runId: string): string {
 // spaces, quotes, newlines, or unicode survive parsing intact. `-z` also
 // disables the quoting/escaping that the default newline form applies, and
 // `core.quotePath=false` keeps unicode bytes verbatim rather than \NNN escapes.
-export const STATUS_PORCELAIN_Z_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain", "-z"];
+export const STATUS_PORCELAIN_Z_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all"];
 
 // Parses `git status --porcelain -z` output (NUL-delimited records).
 //

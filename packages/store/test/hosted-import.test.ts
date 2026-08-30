@@ -158,7 +158,8 @@ async function fixture(input: {
     projectTarget: { projectTargetId: "target-1", version: 1, digest: digestA },
     runnerId: "runner-1",
     sourceContextEnvelope: { contentId: "content-1", sourceVersionRef: "source-1",
-      aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digestA },
+      aadDigest: "1".repeat(64), keyVersion: "v1", envelopeDigest: digestA,
+      payloadDigest: digestA },
     queueClaimDeadline: "2026-08-11T00:00:00.000Z",
     permissionCeiling: { allowedActionDescriptors: ["workspace.write"], digest: digestA },
     publicationPolicy: { mode: "proposal_only" as const, digest: digestA },
@@ -586,6 +587,31 @@ describe("hosted assigned Run import", () => {
     });
   });
 
+  it("persists only a metadata shell and never stores redeemed execution plaintext", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-privacy-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "PRIVATE_REDEEMED_SOURCE_BODY_7f4c9d";
+    const value = await fixture({ body: secret });
+    await begin(repo, value);
+
+    const imported = await repo.importHostedAssignedRun(value);
+
+    expect(imported.claimed?.event.command.rawText).toBe(secret);
+    expect(imported.claimed?.run.contextPacket).toBeDefined();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+    const restartedSqlite = new Database(path);
+    migrateSchema(restartedSqlite);
+    const restarted = createOpenTagRepository(drizzle(restartedSqlite));
+    await expect(restarted.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: "org-1", runnerId: "runner-1" })).resolves.toBeNull();
+    restartedSqlite.close();
+  });
+
   it("replays after restart and preserves the durable journal request after response loss", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-import-"));
     tempDirs.push(directory);
@@ -736,7 +762,7 @@ describe("hosted assigned Run import", () => {
     });
   });
 
-  it("recovers a locally-running attempt before execution and acquires only after running is acknowledged", async () => {
+  it("fails closed after restart when a locally-running Attempt has no in-memory payload", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-10T00:01:00.000Z"));
     const directory = await mkdtemp(join(tmpdir(), "opentag-running-recovery-"));
@@ -784,18 +810,12 @@ describe("hosted assigned Run import", () => {
       destinationId: "cloud-1",
       organizationId: value.claim.organizationId,
       runnerId: value.claim.runnerId
-    })).resolves.toMatchObject({ claimed: { run: { status: "running" }, attemptId: value.claim.attempt.id } });
+    })).resolves.toBeNull();
     await expect(second.acquireHostedExecutionStart({
       runId: value.claim.runId,
       attemptId: value.claim.attempt.id,
       fencingToken: value.claim.attempt.fencingToken
     })).rejects.toMatchObject({ code: "HOSTED_IMPORT_AUTHORITY_CONFLICT" });
-    await expect(startHostedExecution(second, value.claim)).resolves.toBe(true);
-    await expect(second.acquireHostedExecutionStart({
-      runId: value.claim.runId,
-      attemptId: value.claim.attempt.id,
-      fencingToken: value.claim.attempt.fencingToken
-    })).resolves.toBe(false);
     secondSqlite.close();
   });
 

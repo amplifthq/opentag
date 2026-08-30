@@ -294,7 +294,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
             contentId, installationId: "runtime_installation", sourceAppId: sourceApp.appId,
             sourceDeliveryId: deliveryId, sourceMessageId: "runtime_message",
             sourceVersionRef, purpose: "source_context" })),
-          keyVersion: "v1", envelopeDigest: rawDigest },
+          keyVersion: "v1", envelopeDigest: rawDigest, payloadDigest: rawDigest },
       };
       const admission = HostedAdmissionEnvelopeV1Schema.parse({ ...unsignedAdmission,
         envelopeDigest: await computeHostedAdmissionEnvelopeDigestV1(unsignedAdmission) });

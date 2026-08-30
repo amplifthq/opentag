@@ -117,6 +117,37 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     await fixture.pool.query("DELETE FROM cp_hosted_run WHERE run_id = 'run_1'");
   });
 
+  it("validates and persists content-free workspace attestation through lifecycle receipts", async () => {
+    const service = coordinator();
+    const claim = await admitAndClaim("workspace_evidence");
+    const attestation = { workspaceId: `workspace_${claim.attempt.id}`,
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`,
+      baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+      currentTree: "b".repeat(40), workspaceStateDigest: `sha256:${"4".repeat(64)}`,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId,
+      leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    const running = await buildHostedLifecycleRequestV1({ action: "running",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest }, occurredAt: now.toISOString(),
+      executorId: claim.executorId,
+      executorCapabilityDigest: claim.authority.executorCapabilityDigest,
+      workspaceAttestation: attestation });
+    await expect(service.lifecycle({ principal, runId: claim.runId, action: "running",
+      request: running })).resolves.toMatchObject({ kind: "accepted",
+        receipt: { payload: { workspaceAttestation: attestation } } });
+    const persisted = await fixture.pool.query<{ workspace_attestation: unknown }>(
+      "SELECT workspace_attestation FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2",
+      [claim.organizationId, claim.runId]);
+    expect(persisted.rows[0]?.workspace_attestation).toEqual(attestation);
+    expect(JSON.stringify(persisted.rows[0])).not.toContain("/Users/");
+  });
+
   it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {
     const runners = createRunnerDirectory({
       pool: fixture.pool,

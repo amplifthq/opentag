@@ -8,17 +8,30 @@ describe("createExecutorRunResult", () => {
       branchName: "opentag/run_proposal-attempt_2", baseBranch: "main",
       output: "Implemented the requested change.", changedFiles: ["src/index.ts"],
       proposalEvidence: { attemptId: "attempt_2", attemptNumber: 2,
+        schemaVersion: 1, kind: "attempt_proposal_evidence",
         workspaceId: "workspace_attempt_2", workspacePathDigest: `sha256:${"1".repeat(64)}`,
         baseRevision: "a".repeat(40), finalRevision: "b".repeat(40),
         finalTree: "c".repeat(40), diffDigest: `sha256:${"2".repeat(64)}`,
+        baseToFinalBinaryDiff: "diff --git a/src/index.ts b/src/index.ts\n",
         changedFilesDigest: `sha256:${"3".repeat(64)}`,
+        changedFiles: ["src/index.ts"],
         verificationEvidenceDigests: [`sha256:${"4".repeat(64)}`],
-        limitations: ["Task 8 completion gates have not run."] } });
+        limitations: ["Task 8 completion gates have not run."],
+        evidenceDigest: "sha256:6e1cd01d0220357b01b729ede048299f075840fb91e813d88306f5d23591b004" } });
     const proposal = result.artifacts?.find((artifact) => artifact.id === "run_proposal:proposal-evidence");
-    expect(proposal?.metadata).toMatchObject({ attemptId: "attempt_2",
-      workspaceId: "workspace_attempt_2", finalTree: "c".repeat(40),
+    expect(Object.keys(proposal?.metadata ?? {}).sort()).toEqual([
+      "evidenceDigest", "proposalEvidence", "readiness",
+    ]);
+    expect(proposal?.metadata).toMatchObject({ evidenceDigest: "sha256:6e1cd01d0220357b01b729ede048299f075840fb91e813d88306f5d23591b004",
+      proposalEvidence: { attemptId: "attempt_2", workspaceId: "workspace_attempt_2",
+        finalTree: "c".repeat(40), changedFiles: ["src/index.ts"],
+        baseToFinalBinaryDiff: "diff --git a/src/index.ts b/src/index.ts\n" },
       readiness: "not_assessed" });
     expect(result.summary).not.toMatch(/proposal.ready|ready for review/iu);
+    expect(() => createExecutorRunResult({ executorName: "Codex", runId: "run_tampered",
+      branchName: "opentag/run_tampered", output: "done", changedFiles: ["src/index.ts"],
+      proposalEvidence: { ...(proposal?.metadata?.["proposalEvidence"] as any),
+        evidenceDigest: `sha256:${"0".repeat(64)}` } })).toThrow("proposal_evidence_digest_mismatch");
   });
   it("renders user-visible summaries from the structured executor report when present", () => {
     const result = createExecutorRunResult({

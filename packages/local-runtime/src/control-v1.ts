@@ -35,6 +35,7 @@ import {
   computeGitHubIssueCommentSourceIdentityDigestV1,
   verifyHostedAdmissionEnvelopeDigestV1,
   HostedSourceContentRedeemRequestV1Schema,
+  verifyHostedSourceContentRedeemPayloadV1,
   OpenTagEventSchema,
   RunnerReadinessReceiptEnvelopeV1Schema,
 } from "@opentag/core";
@@ -1109,6 +1110,9 @@ export async function redeemHostedClaimSourceContentV1(input: {
     runnerId: claim.runnerId,
     request,
   });
+  if (!(await verifyHostedSourceContentRedeemPayloadV1(response))) {
+    throw new Error("hosted_source_payload_digest_mismatch");
+  }
   const payload = response.content.payload;
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("hosted_source_content_invalid");
@@ -1369,6 +1373,10 @@ async function createHostedExecutionClient(input: {
         attempt,
         occurredAt: progress.at,
         ...progressMetadata,
+        ...(progress.workspaceAttestation
+          ? { workspaceAttestation: progress.workspaceAttestation } : {}),
+        ...(progress.interruptionEvidence
+          ? { interruptionEvidence: progress.interruptionEvidence } : {}),
         }),
       );
       assertNotCancelled();
@@ -1391,7 +1399,7 @@ async function createHostedExecutionClient(input: {
       if (local.operation.state !== "acknowledged") await pumpLifecycle();
       assertNotCancelled();
     },
-    async complete(runId, lease, result) {
+    async complete(runId, lease, result, evidence) {
       assertNotCancelled();
       if (!executionStarted) {
         const request = HostedRejectStartRequestV1Schema.parse(
@@ -1448,6 +1456,10 @@ async function createHostedExecutionClient(input: {
           occurredAt: executionOccurredAt,
           ...completionMetadata,
           ...(blockedPermission ? { blockedPermission } : {}),
+          ...(evidence?.workspaceAttestation
+            ? { workspaceAttestation: evidence.workspaceAttestation } : {}),
+          ...(evidence?.interruptionEvidence
+            ? { interruptionEvidence: evidence.interruptionEvidence } : {}),
         }),
       );
       assertNotCancelled();
@@ -2081,30 +2093,16 @@ export function createHostedControlLoop(input: {
             now: clock(),
           });
           if (closed) return false;
-          const refetched = typeof client.redeemHostedSourceContentControlV1
-            === "function"
-            ? await redeemHostedClaimSourceContentV1({
-                claim,
-                client,
-                requestId: `request_redeem_${randomUUID()}`,
-                operationId: `operation_redeem_${randomUUID()}`,
-                now: clock,
-              })
-            : await (async () => {
-                if (!input.config.githubToken) {
-                  throw new Error("hosted_github_token_unavailable");
-                }
-                return (input.refetchGitHubIssueCommentImpl
-                  ?? refetchGitHubIssueCommentForHostedAdmission)({
-                  admission: claim.hostedAdmission,
-                  token: input.config.githubToken,
-                  ...(input.githubApiOrigin !== undefined
-                    ? { apiOrigin: input.githubApiOrigin }
-                    : {}),
-                  ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
-                  now: clock,
-                });
-              })();
+          if (typeof client.redeemHostedSourceContentControlV1 !== "function") {
+            throw new Error("hosted_source_content_redeem_unavailable");
+          }
+          const refetched = await redeemHostedClaimSourceContentV1({
+            claim,
+            client,
+            requestId: `request_redeem_${randomUUID()}`,
+            operationId: `operation_redeem_${randomUUID()}`,
+            now: clock,
+          });
           if (closed) return false;
           if (Date.parse(claim.attempt.leaseExpiresAt) <= clock().getTime()) {
             throw new Error("hosted_claim_lease_expired");

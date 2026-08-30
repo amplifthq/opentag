@@ -67,6 +67,30 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     expect(first).not.toContain(keyBytes.toString("base64"));
   });
 
+  it("validates current Runner generation and Attempt authority inside grant consumption", async () => {
+    const custody = createRelayContentCustody({ pool: fixture.pool,
+      clock: { now: () => now }, key: { key: randomBytes(32), keyVersion: "v1" } });
+    await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "github",
+      sourceDeliveryId: "d", sourceMessageId: "m", sourceVersionRef: "s:v1",
+      purpose: "source_context", contentId: "content_atomic", payload: { text: "private" },
+      expiresAt: new Date("2026-09-01T00:00:00Z") });
+    const grant = await custody.issueReadGrant({ organizationId: "org_a", runId: "run_atomic",
+      attemptId: "attempt_atomic", fenceDigest: "fence_atomic", contentIds: ["content_atomic"],
+      purpose: "source_context", expiresAt: new Date("2026-08-28T00:01:00Z") });
+    const command = { ...grant, organizationId: "org_a", runId: "run_atomic",
+      attemptId: "attempt_atomic", fenceDigest: "fence_atomic", contentIds: ["content_atomic"],
+      purpose: "source_context" as const };
+    let authorizations = 0;
+    await expect(custody.read({ ...command, authorizeInTransaction: async () => {
+      authorizations += 1;
+      return false;
+    } } as never)).rejects.toThrow("source_content_grant_stale");
+    expect(authorizations).toBe(1);
+    await expect(custody.read({ ...command, authorizeInTransaction: async () => true } as never))
+      .resolves.toEqual([{ contentId: "content_atomic", payload: { text: "private" },
+        payloadDigest: "sha256:282ae7754c324606c1bc679b45b0429b475518dd51732d7787b83c0c1b714f3e" }]);
+  });
+
   it("catches denying nonterminal content only because its source retention hint elapsed", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool,
       clock: { now: () => now }, key: { key: randomBytes(32), keyVersion: "v1" } });
@@ -83,7 +107,8 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     await expect(custody.read({ ...grant, organizationId: "org_a", runId: "run_live",
       attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
       purpose: "source_context" })).resolves.toEqual([
-        { contentId: "content_live", payload: { text: "still required" } },
+        { contentId: "content_live", payload: { text: "still required" },
+          payloadDigest: "sha256:29471bc8c7db9d319ec49818ead3553e11b9c560b34686462db0543a677a656c" },
       ]);
   });
 

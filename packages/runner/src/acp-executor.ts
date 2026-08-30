@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import {
   containsCredentialLikeData,
+  canonicalJsonStringify,
   contextPointerLabel,
   isCredentialFieldName,
   isCredentialSafeText,
@@ -873,6 +874,14 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 leaseExpiresAt: input.attemptAuthority.leaseExpiresAt });
             }
           }
+          if (workspaceAttestation) {
+            await sink.emit({
+              type: "executor.started",
+              message: "Attempt workspace attestation captured.",
+              at: new Date().toISOString(),
+              workspaceAttestation,
+            });
+          }
         } else {
           await sink.emit({
             type: "executor.started",
@@ -887,6 +896,20 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
         const childCwd = await safeAcpCwd(executionPath, manifest.binding.cwd);
         if (active.cancelRequested) {
           return stopResult({ stopReason: "cancelled", manifest, run: input, branchName, baseBranch, output: "", files: [], cancelTerminationConfirmed: true });
+        }
+        if (workspace.kind === "repository" && workspaceAttestation
+          && input.attemptId && input.attemptAuthority
+          && !(await verifyAttemptWorkspaceAttestation({ runner,
+            workspacePath: executionPath, repositoryPath: workspace.path,
+            workspaceId: workspaceAttestation.workspaceId,
+            baseRevision: workspaceAttestation.baseRevision,
+            attemptId: input.attemptId,
+            attemptNumber: input.attemptAuthority.attemptNumber,
+            fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+            credentialId: input.attemptAuthority.credentialId,
+            leaseExpiresAt: input.attemptAuthority.leaseExpiresAt,
+            attestation: workspaceAttestation, now: new Date() }))) {
+          throw new Error("attempt_workspace_changed_before_spawn");
         }
         const child = spawnAcpChild(manifest, childCwd, options.security, launchEnvironment);
         active.child = child;
@@ -949,6 +972,32 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                 permissionScopes: input.permissions?.map((permission) => permission.scope) ?? []
               };
               if (governedResolver) {
+                if (workspace.kind === "repository" && workspaceAttestation
+                  && input.attemptId && input.attemptAuthority) {
+                  const refreshed = await attestAttemptWorkspace({ runner,
+                    workspacePath: executionPath, repositoryPath: workspace.path,
+                    workspaceId: workspaceAttestation.workspaceId,
+                    baseRevision: workspaceAttestation.baseRevision,
+                    attemptId: input.attemptId,
+                    attemptNumber: input.attemptAuthority.attemptNumber,
+                    fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+                    credentialId: input.attemptAuthority.credentialId,
+                    leaseExpiresAt: workspaceAttestation.leaseExpiresAt });
+                  if (refreshed.workspacePathDigest !== workspaceAttestation.workspacePathDigest
+                    || refreshed.repositoryPathDigest !== workspaceAttestation.repositoryPathDigest
+                    || refreshed.worktreeIdentityDigest !== workspaceAttestation.worktreeIdentityDigest
+                    || refreshed.baseRevision !== workspaceAttestation.baseRevision
+                    || refreshed.attemptId !== workspaceAttestation.attemptId
+                    || refreshed.attemptNumber !== workspaceAttestation.attemptNumber
+                    || refreshed.fencingTokenDigest !== workspaceAttestation.fencingTokenDigest
+                    || refreshed.credentialId !== workspaceAttestation.credentialId) {
+                    throw new Error("attempt_workspace_identity_changed_before_material_action");
+                  }
+                  workspaceAttestation = refreshed;
+                  await sink.emit({ type: "executor.progress",
+                    message: "Attempt workspace re-attested before material authorization.",
+                    at: new Date().toISOString(), workspaceAttestation });
+                }
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
@@ -1103,10 +1152,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           const finalRevisionResult = await runner.run("git", ["rev-parse", "HEAD^{commit}"], { cwd: executionPath });
           const finalTreeResult = await runner.run("git", ["rev-parse", "HEAD^{tree}"], { cwd: executionPath });
           const diffResult = await runner.run("git", ["diff", "--binary",
-            `${workspaceAttestation.baseRevision}...HEAD`], { cwd: executionPath });
+            workspaceAttestation.baseRevision, finalRevisionResult.stdout.trim(), "--"],
+          { cwd: executionPath });
           if (finalRevisionResult.exitCode !== 0 || finalTreeResult.exitCode !== 0
             || diffResult.exitCode !== 0) throw new Error("proposal_evidence_git_read_failed");
-          proposalEvidence = {
+          const baseToFinalBinaryDiff = diffResult.stdout;
+          const changedFilesEvidence = [...files].sort();
+          const evidenceSeed = {
+            schemaVersion: 1 as const,
+            kind: "attempt_proposal_evidence" as const,
             attemptId: input.attemptId,
             attemptNumber: input.attemptAuthority.attemptNumber,
             workspaceId: workspaceAttestation.workspaceId,
@@ -1114,10 +1168,18 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             baseRevision: workspaceAttestation.baseRevision,
             finalRevision: finalRevisionResult.stdout.trim(),
             finalTree: finalTreeResult.stdout.trim(),
-            diffDigest: `sha256:${createHash("sha256").update(diffResult.stdout).digest("hex")}`,
-            changedFilesDigest: `sha256:${createHash("sha256").update(JSON.stringify(files)).digest("hex")}`,
+            diffDigest: `sha256:${createHash("sha256").update(baseToFinalBinaryDiff).digest("hex")}`,
+            baseToFinalBinaryDiff,
+            changedFilesDigest: `sha256:${createHash("sha256")
+              .update(canonicalJsonStringify(changedFilesEvidence)).digest("hex")}`,
+            changedFiles: changedFilesEvidence,
             verificationEvidenceDigests: [],
             limitations: ["Task 8 completion gates have not assessed proposal readiness."],
+          };
+          proposalEvidence = {
+            ...evidenceSeed,
+            evidenceDigest: `sha256:${createHash("sha256")
+              .update(canonicalJsonStringify(evidenceSeed)).digest("hex")}`,
           };
         }
         repositoryCompleted = stopReason === "end_turn";

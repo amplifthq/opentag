@@ -20,6 +20,7 @@ export const sourceContents = pgTable("cp_source_content", {
   contentTag: bytea("content_tag"), wrappedDek: bytea("wrapped_dek"),
   wrappingNonce: bytea("wrapping_nonce"), wrappingTag: bytea("wrapping_tag"),
   aadDigest: text("aad_digest").notNull(), keyVersion: text("key_version").notNull(),
+  payloadDigest: text("payload_digest").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   terminalAt: timestamp("terminal_at", { withTimezone: true }),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
@@ -36,6 +37,8 @@ export const sourceContents = pgTable("cp_source_content", {
       AND ${table.wrappedDek} IS NULL AND ${table.wrappingNonce} IS NULL
       AND ${table.wrappingTag} IS NULL)
   )`),
+  check("cp_source_content_payload_digest_check",
+    sql`${table.payloadDigest} ~ '^sha256:[a-f0-9]{64}$'`),
   index("cp_source_content_source_version_idx").on(table.organizationId, table.sourceVersionRef, table.contentId),
   index("cp_source_content_purge_idx").on(table.terminalAt, table.expiresAt),
 ]);

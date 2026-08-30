@@ -16,6 +16,7 @@ const JobPayloadSchema = z.object({
     sourceVersionRef: identity,
     aadDigest: hexDigest,
     keyVersion: identity,
+    payloadDigest: digest,
   }).strict(),
 }).strict();
 
@@ -71,7 +72,8 @@ export function createSourceIngressWorker(input: {
           || reservation.contentRef.contentId !== payload.contentRef.contentId
           || reservation.contentRef.sourceVersionRef !== payload.contentRef.sourceVersionRef
           || reservation.contentRef.aadDigest !== payload.contentRef.aadDigest
-          || reservation.contentRef.keyVersion !== payload.contentRef.keyVersion) {
+          || reservation.contentRef.keyVersion !== payload.contentRef.keyVersion
+          || reservation.contentRef.payloadDigest !== payload.contentRef.payloadDigest) {
           throw new Error("source_ingress_job_context_mismatch");
         }
         const existing = await input.ingress.readResolution(reservation);

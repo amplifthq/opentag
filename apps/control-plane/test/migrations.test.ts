@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   checkMigrationReadiness,
+  loadSqlMigrations,
   runMigrations,
   type SqlMigration,
 } from "../src/database/migrations.js";
+import { join } from "node:path";
 
 type RecordedQuery = { text: string; values?: readonly unknown[] };
 
@@ -48,6 +50,13 @@ const migration = (name: string, sql: string): SqlMigration => ({
 });
 
 describe("checked-in PostgreSQL migrations", () => {
+  it("checks in the content-free Attempt workspace evidence migration", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const workspace = migrations.find(({ name }) => name === "0012_attempt_workspace_evidence.sql");
+    expect(workspace?.sql).toContain("workspace_attestation");
+    expect(workspace?.sql).toContain("interruption_evidence");
+    expect(workspace?.sql).not.toMatch(/workspace_path\s+text/iu);
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");

@@ -1721,6 +1721,7 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
     aadDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     keyVersion: NonEmptyIdSchema,
     envelopeDigest: ReceiptDigestSchema,
+    payloadDigest: ReceiptDigestSchema,
   }).strict(),
   queueClaimDeadline: ControlTimestampSchema,
   permissionCeiling: z.object({
@@ -2005,6 +2006,7 @@ export const HostedSourceContentRedeemResponseV1Schema = z.object({
   admissionEnvelopeDigest: ReceiptDigestSchema,
   contentEnvelope: HostedAdmissionEnvelopeV1Schema.shape.sourceContextEnvelope,
   content: z.object({ contentId: NonEmptyIdSchema, payload: z.unknown() }).strict(),
+  payloadDigest: ReceiptDigestSchema,
   redeemedAt: ControlTimestampSchema,
 }).strict().superRefine((response, ctx) => {
   if (response.content.contentId !== response.contentEnvelope.contentId) {
@@ -2012,6 +2014,15 @@ export const HostedSourceContentRedeemResponseV1Schema = z.object({
       message: "Redeemed content must match the content envelope." });
   }
 });
+
+export async function verifyHostedSourceContentRedeemPayloadV1(
+  response: z.input<typeof HostedSourceContentRedeemResponseV1Schema>,
+): Promise<boolean> {
+  const parsed = HostedSourceContentRedeemResponseV1Schema.parse(response);
+  const computed = await computeControlPayloadDigestV1(parsed.content.payload);
+  return parsed.payloadDigest === computed
+    && parsed.contentEnvelope.payloadDigest === computed;
+}
 
 const HostedClaimAuthorityV1Schema = z
   .object({
@@ -2234,6 +2245,8 @@ const HostedLifecycleRequestBaseV1Schema = z.object({
   attempt: HostedLifecycleAttemptV1Schema,
   requestDigest: ReceiptDigestSchema,
   occurredAt: ControlTimestampSchema,
+  workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+  interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
 });
 export const HostedHeartbeatRequestV1Schema = HostedLifecycleRequestBaseV1Schema
   .extend({ expectedLeaseExpiresAt: ControlTimestampSchema })
@@ -2335,6 +2348,8 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       operation: z.literal("heartbeat"),
       occurredAt: ControlTimestampSchema,
       leaseExpiresAt: ControlTimestampSchema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("running"),
@@ -2342,23 +2357,31 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       executorId: HostedLifecycleStableIdV1Schema,
       executorCapabilityDigest: ReceiptDigestSchema,
       runTimeoutMs: z.number().int().positive().max(86_400_000).optional(),
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("reject_start"),
       occurredAt: ControlTimestampSchema,
       executorId: HostedLifecycleStableIdV1Schema,
       reasonCode: HostedRejectStartReasonCodeV1Schema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("progress"),
       occurredAt: ControlTimestampSchema,
       progressId: z.string().regex(/^progress_[0-9a-f]{64}$/u),
       progressDigest: ReceiptDigestSchema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("cancel"),
       occurredAt: ControlTimestampSchema,
       reasonCode: HostedCancelReasonCodeV1Schema,
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
     z.object({
       operation: z.literal("executor_result"),
@@ -2369,6 +2392,8 @@ export const HostedLifecycleReceiptPayloadV1Schema = z.discriminatedUnion(
       artifactDigests: HostedLifecycleSortedDigestsV1Schema,
       evidenceDigests: HostedLifecycleSortedDigestsV1Schema,
       blockedPermission: HostedBlockedPermissionRefV1Schema.optional(),
+      workspaceAttestation: AttemptWorkspaceAttestationV1Schema.optional(),
+      interruptionEvidence: AttemptInterruptionEvidenceV1Schema.optional(),
     }).strict(),
   ],
 ).refine(
@@ -2473,6 +2498,10 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
       fencingTokenDigest: request.attempt.fencingTokenDigest,
     },
     occurredAt: request.occurredAt,
+    ...(request.workspaceAttestation
+      ? { workspaceAttestation: request.workspaceAttestation } : {}),
+    ...(request.interruptionEvidence
+      ? { interruptionEvidence: request.interruptionEvidence } : {}),
   };
   const actionFields = input.action === "heartbeat"
     ? {
@@ -2553,6 +2582,8 @@ export async function buildHostedLifecycleRequestV1(input: {
   runId: string;
   attempt: z.input<typeof HostedLifecycleAttemptV1Schema>;
   occurredAt: string;
+  workspaceAttestation?: z.input<typeof AttemptWorkspaceAttestationV1Schema>;
+  interruptionEvidence?: z.input<typeof AttemptInterruptionEvidenceV1Schema>;
 } & (
   | { action: "heartbeat"; expectedLeaseExpiresAt: string }
   | {
@@ -2594,6 +2625,10 @@ export async function buildHostedLifecycleRequestV1(input: {
     attempt: HostedLifecycleAttemptV1Schema.parse(input.attempt),
     requestDigest: `sha256:${"0".repeat(64)}`,
     occurredAt: ControlTimestampSchema.parse(input.occurredAt),
+    ...(input.workspaceAttestation
+      ? { workspaceAttestation: AttemptWorkspaceAttestationV1Schema.parse(input.workspaceAttestation) } : {}),
+    ...(input.interruptionEvidence
+      ? { interruptionEvidence: AttemptInterruptionEvidenceV1Schema.parse(input.interruptionEvidence) } : {}),
   };
   const actionFields = input.action === "heartbeat"
     ? { expectedLeaseExpiresAt: input.expectedLeaseExpiresAt }
@@ -2737,6 +2772,13 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                 };
               })();
   if (!expectedPayload) return false;
+  const expectedPayloadWithEvidence = {
+    ...expectedPayload,
+    ...(request.workspaceAttestation
+      ? { workspaceAttestation: request.workspaceAttestation } : {}),
+    ...(request.interruptionEvidence
+      ? { interruptionEvidence: request.interruptionEvidence } : {}),
+  };
   const { receiptDigest: _receiptDigest, ...receiptDigestInput } = receipt;
   return request.requestDigest === expectedRequestDigest
     && request.requestId === expectedRequestId
@@ -2764,7 +2806,7 @@ export async function verifyHostedLifecycleReceiptV1(input: {
       ])
     && receipt.payload.operation === operation
     && canonicalJsonStringify(receipt.payload)
-      === canonicalJsonStringify(expectedPayload)
+      === canonicalJsonStringify(expectedPayloadWithEvidence)
     && receipt.payloadDigest
       === await computeControlPayloadDigestV1(receipt.payload)
     && receipt.receiptDigest

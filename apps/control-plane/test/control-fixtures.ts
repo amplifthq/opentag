@@ -188,6 +188,7 @@ export async function hostedAdmissionFixture(input: {
       aadDigest: "a".repeat(64),
       keyVersion: "relay-v1",
       envelopeDigest: digest("f"),
+      payloadDigest: digest("f"),
     },
     queueClaimDeadline: input.queueClaimDeadline ?? "2026-08-29T00:00:00.000Z",
     permissionCeiling: {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -44,5 +44,26 @@ describe("attempt workspace recovery", () => {
     expect(recovered.oldWorkspace.state).toBe("interrupted_evidence");
     expect(recovered.newWorkspace.id).not.toBe(recovered.oldWorkspace.id);
     expect(recovered.newWorkspace.reuseOldWorkspace).toBe(false);
+  });
+
+  it("detects mutations inside already-untracked directories and symlinks", async () => {
+    const path = repository();
+    mkdirSync(join(path, "untracked"));
+    writeFileSync(join(path, "untracked", "payload.txt"), "first\n");
+    symlinkSync("payload.txt", join(path, "untracked", "latest"));
+    const input = { runner: nodeCommandRunner, workspacePath: path, repositoryPath: path,
+      workspaceId: "workspace_attempt_3", baseRevision: "HEAD", attemptId: "attempt_3",
+      attemptNumber: 3, fencingTokenDigest: `sha256:${"3".repeat(64)}`,
+      credentialId: "credential_1", leaseExpiresAt: "2026-08-30T01:00:00.000Z" };
+    const attestation = await attestAttemptWorkspace(input);
+    writeFileSync(join(path, "untracked", "payload.txt"), "second\n");
+    await expect(verifyAttemptWorkspaceAttestation({ ...input, attestation,
+      now: new Date("2026-08-30T00:00:00.000Z") })).resolves.toBe(false);
+
+    writeFileSync(join(path, "untracked", "payload.txt"), "first\n");
+    const modeAttestation = await attestAttemptWorkspace(input);
+    chmodSync(join(path, "untracked", "payload.txt"), 0o755);
+    await expect(verifyAttemptWorkspaceAttestation({ ...input, attestation: modeAttestation,
+      now: new Date("2026-08-30T00:00:00.000Z") })).resolves.toBe(false);
   });
 });

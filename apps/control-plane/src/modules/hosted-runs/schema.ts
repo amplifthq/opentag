@@ -121,6 +121,8 @@ export const hostedAttempts = pgTable(
     blockedPermissionRequestId: text("blocked_permission_request_id"),
     blockedActionDescriptorDigest: text("blocked_action_descriptor_digest"),
     blockedPolicySnapshotDigest: text("blocked_policy_snapshot_digest"),
+    workspaceAttestation: jsonb("workspace_attestation"),
+    interruptionEvidence: jsonb("interruption_evidence"),
     state: text("state").notNull(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
@@ -147,6 +149,29 @@ export const hostedAttempts = pgTable(
     ),
     check("cp_hosted_attempt_material_start_state_check",
       sql`${table.materialStartState} IN ('open','proven_not_started','started_or_ambiguous')`),
+    check("cp_hosted_attempt_workspace_attestation_content_free_check", sql`(
+      ${table.workspaceAttestation} IS NULL OR (
+        jsonb_typeof(${table.workspaceAttestation}) = 'object'
+        AND ${table.workspaceAttestation} ?& ARRAY[
+          'workspaceId', 'workspacePathDigest', 'repositoryPathDigest',
+          'worktreeIdentityDigest', 'baseRevision', 'currentRevision', 'currentTree',
+          'workspaceStateDigest', 'attemptId', 'attemptNumber', 'fencingTokenDigest',
+          'credentialId', 'leaseExpiresAt'
+        ]
+        AND NOT ${table.workspaceAttestation} ? 'workspacePath'
+      )
+    )`),
+    check("cp_hosted_attempt_interruption_evidence_content_free_check", sql`(
+      ${table.interruptionEvidence} IS NULL OR (
+        jsonb_typeof(${table.interruptionEvidence}) = 'object'
+        AND ${table.interruptionEvidence} ?& ARRAY[
+          'state', 'runId', 'attemptId', 'attemptNumber', 'workspaceId',
+          'workspacePathDigest', 'fencingTokenDigest', 'reason', 'observedAt',
+          'processStop', 'materialOutcome'
+        ]
+        AND NOT ${table.interruptionEvidence} ? 'workspacePath'
+      )
+    )`),
     check("cp_hosted_attempt_blocked_permission_check", sql`(
       (${table.state} = 'needs_approval' AND ${table.blockedPermissionRequestId} IS NOT NULL
         AND ${table.blockedActionDescriptorDigest} IS NOT NULL

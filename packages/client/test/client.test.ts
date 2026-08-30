@@ -790,7 +790,8 @@ describe("@opentag/client", () => {
         expiresAt: "2026-08-30T01:00:00.000Z" },
       admissionEnvelopeDigest: digest("2"),
       contentEnvelope: { contentId: "content_1", sourceVersionRef: "source_version_1",
-        aadDigest: "a".repeat(64), keyVersion: "relay-v1", envelopeDigest: digest("3") },
+        aadDigest: "a".repeat(64), keyVersion: "relay-v1", envelopeDigest: digest("3"),
+        payloadDigest: "sha256:282ae7754c324606c1bc679b45b0429b475518dd51732d7787b83c0c1b714f3e" },
     };
     const response = { kind: "hosted_source_content_redeemed" as const,
       schemaVersion: 1 as const, protocolVersion: "1.0" as const,
@@ -800,6 +801,7 @@ describe("@opentag/client", () => {
       admissionEnvelopeDigest: request.admissionEnvelopeDigest,
       contentEnvelope: request.contentEnvelope,
       content: { contentId: "content_1", payload: { text: "private" } },
+      payloadDigest: request.contentEnvelope.payloadDigest,
       redeemedAt: "2026-08-30T00:00:00.000Z" };
     const client = createOpenTagClient({ dispatcherUrl: "http://dispatcher.test",
       controlCredential: { kind: "runtime", token: "runtime_secret" },

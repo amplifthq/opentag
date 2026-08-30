@@ -2827,6 +2827,10 @@ function aggregateMetrics(input: {
 }
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
+  const hostedExecutionPayloads = new Map<string, {
+    event: OpenTagEvent;
+    contextPacket: ReturnType<typeof protocolRunFieldsFromEvent>["contextPacket"];
+  }>();
   function activeAttemptLease(input: AttemptLease):
     | { outcome: "active"; run: typeof runs.$inferSelect; attempt: typeof attempts.$inferSelect }
     | { outcome: "stale_attempt" | "not_found" } {
@@ -8952,6 +8956,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         }
         const leaseExpiresAt = Date.parse(attemptRow.leaseExpiresAt);
         if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= recoveredAt) continue;
+        const executionPayload = hostedExecutionPayloads.get(attemptRow.id);
+        if (!executionPayload) return null;
         const hostedAuthority: HostedImportAuthority = {
           ...(JSON.parse(attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
           admissionId: importRow.admissionId,
@@ -8973,8 +8979,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         };
         return {
           claimed: {
-            run: runFromRow(runRow),
-            event: OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)),
+            run: { ...runFromRow(runRow), contextPacket: executionPayload.contextPacket },
+            event: executionPayload.event,
             attemptId: attemptRow.id,
             attemptNumber: attemptRow.number,
             fencingToken: attemptRow.fencingToken,
@@ -10019,6 +10025,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
       const importedAt = nowIso();
       const protocolFields = protocolRunFieldsFromEvent(event, event.receivedAt);
+      const durableMetadata = Object.fromEntries(Object.entries(event.metadata ?? {})
+        .filter(([key, value]) => ["owner", "repo", "repoProvider", "issueNumber",
+          "pullRequestNumber", "deliveryId", "githubDeliveryId"].includes(key)
+          && (typeof value === "string" || typeof value === "number" || typeof value === "boolean")));
+      const durableEvent = OpenTagEventSchema.parse({
+        ...event,
+        command: { rawText: "[redeemed source omitted]", intent: event.command.intent, args: {} },
+        context: [],
+        permissions: [],
+        metadata: durableMetadata,
+        ...(event.callback ? { callback: { provider: event.callback.provider,
+          uri: "opentag://hosted-source-callback-omitted" } } : {}),
+      });
       const eventDigest = canonicalSha256Json(event);
       const contextPacketDigest = canonicalSha256Json(protocolFields.contextPacket);
       const incomingWorkThreadDigest = protocolFields.thread
@@ -10376,8 +10395,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           id: claim.runId,
           eventId: event.id,
           status: "assigned",
-          eventJson: JSON.stringify(event),
-          contextPacketJson: JSON.stringify(protocolFields.contextPacket),
+          eventJson: JSON.stringify(durableEvent),
+          contextPacketJson: null,
           assignedRunnerId: claim.runnerId,
           executor: claim.executorId,
           repoProvider: projectTarget.provider,
@@ -10488,10 +10507,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           runEventValues({
             runId: claim.runId,
             type: "context_packet.generated",
-            payload: { contextPacket: protocolFields.contextPacket, ...(durableThread ? { thread: durableThread } : {}) },
+            payload: { contextPacketDigest, ...(durableThread ? { thread: durableThread } : {}) },
             visibility: "audit",
             importance: "normal",
-            message: protocolFields.contextPacket.summary,
+            message: "Hosted execution context accepted in memory.",
             createdAt: importedAt
           })
         ]).run();
@@ -10508,7 +10527,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         };
       });
 
-      const storedEvent = OpenTagEventSchema.parse(JSON.parse(result.runRow.eventJson));
+      hostedExecutionPayloads.set(claim.attempt.id, {
+        event,
+        contextPacket: protocolFields.contextPacket,
+      });
       const hostedAuthority: HostedImportAuthority = {
         ...(JSON.parse(result.attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
         admissionId: result.importRow.admissionId,
@@ -10539,8 +10561,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             : "ready_to_start",
         executionMayStart: false,
         claimed: result.superseded || result.executionStartedAt || terminalRunStatus(result.runRow.status) ? null : {
-          run: runFromRow(result.runRow),
-          event: storedEvent,
+          run: { ...runFromRow(result.runRow), contextPacket: protocolFields.contextPacket },
+          event,
           attemptId: claim.attempt.id,
           attemptNumber: claim.attempt.number,
           fencingToken: claim.attempt.fencingToken,
