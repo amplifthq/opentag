@@ -21,6 +21,7 @@ function fakeSourceApp(capabilities: { interactiveActions?: boolean; threads?: b
       stableSourceVersions: true
     },
     installation: {
+      organizationId: "org_test",
       appInstanceId: "chat_installation_1",
       bindingDigest: digest,
       credentialGeneration: 1,

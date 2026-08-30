@@ -21,8 +21,10 @@ export class ProviderAdapterRegistry<Request extends object = object> {
     this.#sources = sources;
   }
 
-  resolve(binding: EstablishedProviderBindingV1): ResolvedProviderAdapter<Request> | undefined {
-    const definition = this.#sources.resolveDelivery({ appId: binding.providerId,
+  resolve(input: { organizationId: string; binding: EstablishedProviderBindingV1 }): ResolvedProviderAdapter<Request> | undefined {
+    const { binding } = input;
+    const definition = this.#sources.resolveDelivery({ organizationId: input.organizationId,
+      appId: binding.providerId,
       appInstanceId: binding.providerInstanceId, bindingDigest: binding.bindingDigest,
       credentialGeneration: binding.providerConfigGeneration,
       credentialGenerationDigest: binding.providerConfigGenerationDigest });

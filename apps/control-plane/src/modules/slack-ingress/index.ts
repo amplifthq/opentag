@@ -133,13 +133,15 @@ function urlVerificationResult(payload: Record<string, any>): SlackUrlVerificati
 function createInstallationApp(input: { installation: SlackInstallation; signingSecret: string;
   secrets: SlackSecretResolver; sourceApps: SourceAppRegistry;
   fetchImpl?: typeof fetch; clock: { now(): Date } }) {
-  const identity = { appId: "slack", appInstanceId: input.installation.appInstanceId,
+  const identity = { organizationId: input.installation.organizationId,
+    appId: "slack", appInstanceId: input.installation.appInstanceId,
     bindingDigest: input.installation.bindingDigest,
     credentialGeneration: input.installation.credentialGeneration,
     credentialGenerationDigest: input.installation.credentialGenerationDigest };
   const existing = input.sourceApps.resolveDelivery(identity);
   if (existing) return existing;
   const sourceApp = createSlackSourceApp({ installation: {
+    organizationId: input.installation.organizationId,
     appInstanceId: input.installation.appInstanceId,
     bindingDigest: input.installation.bindingDigest,
     credentialGeneration: input.installation.credentialGeneration,
@@ -231,12 +233,25 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
   return {
     async preloadSourceApps() {
       const rows = await input.pool.query<{ installation_id: string }>(
-        `SELECT installation_id FROM cp_slack_installation
-         ORDER BY organization_id, installation_id`);
+        `SELECT slack.installation_id FROM cp_slack_installation slack
+         JOIN cp_source_app_installation installation
+           ON installation.organization_id=slack.organization_id
+          AND installation.installation_id=slack.installation_id
+         JOIN cp_source_binding binding
+           ON binding.organization_id=slack.organization_id
+          AND binding.binding_id=slack.binding_id
+          AND binding.installation_id=slack.installation_id
+         WHERE installation.source_app_id='slack' AND installation.state='active'
+           AND binding.state='active' AND binding.binding_digest=installation.binding_digest
+         ORDER BY slack.organization_id, slack.installation_id`);
+      let registered = 0; let failed = 0;
       for (const row of rows.rows) {
-        const resolved = await resolve(row.installation_id);
-        if (resolved.kind !== "found") throw new Error("slack_installation_resolution_failed");
+        try {
+          const resolved = await resolve(row.installation_id);
+          if (resolved.kind !== "found") failed += 1; else registered += 1;
+        } catch { failed += 1; }
       }
+      return { registered, failed };
     },
     async checkReadiness() {
       try {

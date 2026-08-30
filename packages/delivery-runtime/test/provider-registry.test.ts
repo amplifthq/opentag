@@ -9,7 +9,7 @@ function sourceApp(): SourceAppDefinition<unknown, unknown, { text: string }> {
     capabilities: { threads: true, messageUpdate: true, reactions: true,
       interactiveActions: false, attachments: "metadata", authenticatedDeletion: true,
       stableSourceVersions: true },
-    installation: { appInstanceId: "workspace-a", bindingDigest: digest("binding"),
+    installation: { organizationId: "org_test", appInstanceId: "workspace-a", bindingDigest: digest("binding"),
       credentialGeneration: 7, credentialGenerationDigest: digest("generation") },
     ingress: { verify: async (input) => input, normalize: () => null },
     context: { readThread: async () => ({ messages: [], truncated: false, decodedBytes: 0 }) },
@@ -37,10 +37,11 @@ describe("ProviderAdapterRegistry", () => {
       providerPrincipalDigest: digest("principal"), principalAssurance: "provider_verified" as const,
       providerConfigGeneration: 7, providerConfigGenerationDigest: digest("generation"),
       lifecycle: "active" as const };
-    const adapter = registry.resolve(binding);
+    const adapter = registry.resolve({ organizationId: "org_test", binding });
     expect(adapter).toBeDefined();
     await expect(adapter!.deliver({ request: { text: "hello" }, intent: {} as never }))
       .resolves.toMatchObject({ outcome: "accepted", externalResourceId: "1712345678.000001" });
-    expect(registry.resolve({ ...binding, providerConfigGeneration: 8 })).toBeUndefined();
+    expect(registry.resolve({ organizationId: "org_test",
+      binding: { ...binding, providerConfigGeneration: 8 } })).toBeUndefined();
   });
 });

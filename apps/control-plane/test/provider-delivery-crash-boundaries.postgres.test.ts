@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { DeliveryIntentV2Schema } from "@opentag/delivery-contract";
+import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor } from "@opentag/delivery-contract";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
@@ -16,7 +16,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
 
   it("finalizes begin-before-side-effect restart as outcome_unknown", async () => {
     const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-    const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: "crash-intent",
+    const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_test", sideEffectIntentId: "crash-intent",
       causalId: "cause", intentKind: "delivery", operation: "create", deliveryKind: "message",
       presentationDigest: digest("presentation"), provenance: { kind: "business",
         repositoryIdentityDigest: digest("repo"), runId: "run", authorityLineageDigest: digest("authority") },
@@ -32,11 +32,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
       owner: { runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1 },
       leaseOwner: "worker", leaseSeconds: 30, now: () => time });
     await repository.recordIntent(intent, { envelopeVersion: 1, providerRequest: { text: "hello" },
-      phase: "running", frozenDeadline: "2030-08-29T00:00:00.000Z", currentTruth: {
-        runId: "run", scopeKind: "local_repository", scopeId: "repo",
-        targetDigest: intent.targetDigest, providerInstanceId: "workspace", statusMessageId: null,
-        runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1,
-        providerConfigGeneration: 1, providerConfigGenerationDigest: digest("generation") } });
+      phase: "running", frozenDeadline: "2030-08-29T00:00:00.000Z",
+      currentTruth: deliveryCurrentTruthDescriptor({ intent, owner: {
+        organizationId: "org_test", providerId: "slack", providerInstanceId: "workspace",
+        providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), runtimeOwnerId: "relay",
+        runtimeGeneration: 1, schemaGeneration: 1 } }) });
     const claimed = (await repository.claimNext())!;
     const renewed = (await repository.renewLease(claimed))!;
     const marker = digest("marker");
@@ -64,7 +65,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool,
       owner: { runtimeOwnerId: "relay", runtimeGeneration: 1, schemaGeneration: 1 },
       leaseOwner: "worker", leaseSeconds: 30 });
-    const value = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: "shape-intent",
+    const value = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_test", sideEffectIntentId: "shape-intent",
       causalId: "cause", intentKind: "delivery", operation: "create", deliveryKind: "message",
       presentationDigest: digest("presentation"), provenance: { kind: "business",
         repositoryIdentityDigest: digest("repo"), runId: "run", authorityLineageDigest: digest("authority") },
@@ -76,11 +77,12 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
       scope: { kind: "local_repository", id: "repo" }, createdAt: "2026-08-28T00:00:00.000Z",
       initialAttemptSequence: 1 });
     await repository.recordIntent(value, { envelopeVersion: 1, providerRequest: {}, phase: "running",
-      frozenDeadline: "2026-08-29T00:00:00.000Z", currentTruth: { runId: "run",
-        scopeKind: "local_repository", scopeId: "repo", targetDigest: value.targetDigest,
-        providerInstanceId: "workspace", statusMessageId: null, runtimeOwnerId: "relay",
-        runtimeGeneration: 1, schemaGeneration: 1, providerConfigGeneration: 1,
-        providerConfigGenerationDigest: digest("generation") } });
+      frozenDeadline: "2026-08-29T00:00:00.000Z",
+      currentTruth: deliveryCurrentTruthDescriptor({ intent: value, owner: {
+        organizationId: "org_test", providerId: "slack", providerInstanceId: "workspace",
+        providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), runtimeOwnerId: "relay",
+        runtimeGeneration: 1, schemaGeneration: 1 } }) });
     await expect(fixture.pool.query(`UPDATE cp_provider_delivery_intent
       SET state='provider_io_begun',revision=revision+1 WHERE intent_id='shape-intent'`))
       .rejects.toThrow(/transition|shape/u);

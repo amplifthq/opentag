@@ -8,6 +8,7 @@ const digest = (value: string) => `sha256:${createHash("sha256").update(value).d
 function app() {
   return createSlackSourceApp({
     installation: {
+      organizationId: "org_test",
       appInstanceId: "A1", bindingDigest: digest("binding"),
       credentialGeneration: 2, credentialGenerationDigest: digest("generation")
     },

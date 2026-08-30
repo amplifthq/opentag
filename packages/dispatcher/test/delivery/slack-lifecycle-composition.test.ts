@@ -13,7 +13,7 @@ import { createSlackLifecycleComposition, createSlackSelfServiceAuthorityResolve
 
 const digest = (value: string) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
-const owner = { providerId: 'slack', providerInstanceId: 'install-1', providerBindingDigest: stable,
+const owner = { organizationId: 'org_test', providerId: 'slack', providerInstanceId: 'install-1', providerBindingDigest: stable,
   providerConfigGeneration: 7, providerConfigGenerationDigest: stable, runtimeOwnerId: 'runtime-1',
   runtimeGeneration: 3, schemaGeneration: 1 } as const;
 const authority = () => ({ providerBinding: {
@@ -53,6 +53,7 @@ function open(path: string, requests: Array<{ method: string; body: Record<strin
     createEncryptedFileDeliveryPayloadCustody({ directory: `${path}.payloads`, trustedBoundary: dirname(path), key: Buffer.alloc(32, 9) });
   const repository = createDeliveryKernelRepository({ database, payloadCustody, owner: expectedOwner, leaseOwner: 'worker', leaseSeconds: 30 });
   const sourceApps = new SourceAppRegistry().register(createSlackSourceApp({ installation: {
+    organizationId: expectedOwner.organizationId,
     appInstanceId: expectedOwner.providerInstanceId, bindingDigest: expectedOwner.providerBindingDigest,
     credentialGeneration: 7, credentialGenerationDigest: stable }, signingSecret: 'test-signing',
     botUserId: 'stable', resolveCredential: async () => 'test-token', fetchImpl: async (url, init) => {

@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DeliveryIntentV2Schema } from '@opentag/delivery-contract';
+import { DeliveryIntentV2Schema, deliveryExternalResourceLookupDescriptor } from '@opentag/delivery-contract';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { describe, expect, it } from 'vitest';
+import { verifyDeliveryRepositoryContract } from '../../delivery-runtime/test/repository-contract.js';
 import {
   createDeliveryKernelRepository,
   type DeliveryClaim,
@@ -18,6 +19,7 @@ const digest = (value: string) =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
 const owner = {
+  organizationId: 'org_test',
   providerId: 'slack', providerInstanceId: 'instance_1',
   providerBindingDigest: stable, providerConfigGeneration: 7,
   providerConfigGenerationDigest: stable, runtimeOwnerId: 'installation_1',
@@ -58,7 +60,7 @@ function setup(path = ':memory:') {
 
 function intent(overrides: Record<string, unknown> = {}) {
   return DeliveryIntentV2Schema.parse({
-    contractVersion: 2, sideEffectIntentId: 'intent_1', causalId: 'cause_1',
+    contractVersion: 2, organizationId: "org_test", sideEffectIntentId: 'intent_1', causalId: 'cause_1',
     intentKind: 'delivery', operation: 'create', deliveryKind: 'message',
     presentationDigest: stable,
     provenance: { kind: 'business', repositoryIdentityDigest: stable,
@@ -93,6 +95,12 @@ function row(sqlite: Database.Database) {
 }
 
 describe('fresh delivery journal', () => {
+  it('satisfies the shared delivery repository contract', async () => {
+    const { repository } = setup();
+    await verifyDeliveryRepositoryContract({ repository,
+      intent: intent({ sideEffectIntentId: 'intent_shared', idempotencyKey: 'delivery_shared' }),
+      payload: {}, digest: stable });
+  });
   it('bootstraps one fresh-only journal table with no raw payload columns', () => {
     const { sqlite } = setup();
     expect(sqlite.prepare(
@@ -228,10 +236,29 @@ describe('fresh delivery journal', () => {
       ...begun, outcome: 'accepted', evidenceDigest: digest('accepted'),
       externalResourceDigest: digest('resource'), externalResourceId: '171.002',
     })).toMatchObject({ externalResourceId: '171.002' });
-    expect(repository.findAcceptedExternalResource({
-      intent: accepted, statusMessageId: 'run_1:status',
-    })).toEqual({ outcome: 'exact', externalResourceId: '171.002',
+    const descriptor = deliveryExternalResourceLookupDescriptor({
+      intent: accepted, statusMessageId: 'run_1:status', owner,
+    });
+    expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'exact', externalResourceId: '171.002',
       externalResourceDigest: digest('resource') });
+    for (const drifted of [{ ...descriptor, organizationId: 'org_other' },
+      { ...descriptor, providerId: 'teams' },
+      { ...descriptor, providerBindingDigest: digest('binding-drift') },
+      { ...descriptor, providerPrincipalDigest: digest('principal-drift') },
+      { ...descriptor, authoritySnapshotDigest: digest('authority-drift') },
+      { ...descriptor, repositoryIdentityDigest: digest('repo-drift') }]) {
+      expect(repository.findAcceptedExternalResource(drifted)).toEqual({ outcome: 'none' });
+    }
+    const duplicate = intent({ sideEffectIntentId: 'intent_2', idempotencyKey: 'delivery_2',
+      presentationDigest: digest('presentation_2'), statusMessageId: 'run_1:status' });
+    repository.recordIntent(duplicate, {});
+    const duplicateClaim = repository.claimNext(); if (!duplicateClaim) throw new Error('missing duplicate claim');
+    const duplicateBegin = repository.markBegin(markers(duplicateClaim));
+    if (!duplicateBegin) throw new Error('missing duplicate begin');
+    repository.settleOrReadTerminal({ ...duplicateBegin, outcome: 'accepted',
+      evidenceDigest: digest('accepted_2'), externalResourceId: '172.003',
+      externalResourceDigest: digest('resource_2') });
+    expect(repository.findAcceptedExternalResource(descriptor)).toEqual({ outcome: 'ambiguous' });
   });
 
   it('persists provider-neutral canonical external resource identities', () => {

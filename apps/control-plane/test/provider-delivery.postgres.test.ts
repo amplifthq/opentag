@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DeliveryIntentV2Schema } from "@opentag/delivery-contract";
+import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
+  deliveryExternalResourceLookupDescriptor } from "@opentag/delivery-contract";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
+import { verifyDeliveryRepositoryContract } from "../../../packages/delivery-runtime/test/repository-contract.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: "intent-1",
+const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_test", sideEffectIntentId: "intent-1",
   causalId: "cause-1", intentKind: "delivery", operation: "create", deliveryKind: "message",
   presentationDigest: digest("presentation"), provenance: { kind: "business",
     repositoryIdentityDigest: digest("repo"), runId: "run-1", authorityLineageDigest: digest("authority") },
@@ -20,19 +22,28 @@ const owner = { runtimeOwnerId: "relay-1", runtimeGeneration: 1, schemaGeneratio
 function envelope(value = intent, phase: "received" | "running" | "terminal" = "running",
   request: unknown = { text: "hello" }) {
   return { envelopeVersion: 1 as const, providerRequest: request, phase,
-    frozenDeadline: "2030-08-29T00:00:00.000Z", currentTruth: {
-      runId: value.provenance.kind === "business" ? value.provenance.runId : "",
-      scopeKind: value.scope.kind, scopeId: value.scope.id, targetDigest: value.targetDigest,
+    frozenDeadline: "2030-08-29T00:00:00.000Z",
+    currentTruth: deliveryCurrentTruthDescriptor({ intent: value, owner: {
+      organizationId: value.organizationId, providerId: value.providerBinding.providerId,
       providerInstanceId: value.providerBinding.providerInstanceId,
-      statusMessageId: "statusMessageId" in value ? value.statusMessageId ?? null : null,
-      ...owner, providerConfigGeneration: value.providerBinding.providerConfigGeneration,
-      providerConfigGenerationDigest: value.providerBinding.providerConfigGenerationDigest } };
+      providerBindingDigest: value.providerBinding.bindingDigest,
+      providerConfigGeneration: value.providerBinding.providerConfigGeneration,
+      providerConfigGenerationDigest: value.providerBinding.providerConfigGenerationDigest,
+      ...owner } }) };
 }
 
 describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   beforeEach(async () => { fixture = await createIsolatedPostgres(); await fixture.migrate(); });
   afterEach(async () => fixture.close());
+  it("satisfies the shared delivery repository contract", async () => {
+    const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-shared", leaseSeconds: 30 });
+    const shared = DeliveryIntentV2Schema.parse({ ...intent, sideEffectIntentId: "intent-shared",
+      idempotencyKey: "key-shared" });
+    await verifyDeliveryRepositoryContract({ repository, intent: shared,
+      payload: envelope(shared), digest: digest("shared") });
+  });
   it("preserves immutable idempotency and exclusive fenced claims", async () => {
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool,
       owner,
@@ -100,6 +111,34 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
       { intent_id: "intent-terminal", state: "pending" }]);
   });
 
+  it.each([
+    ["organization", (value: typeof intent) => ({ ...value, organizationId: "org_other" })],
+    ["provider", (value: typeof intent) => ({ ...value, providerBinding: {
+      ...value.providerBinding, providerId: "teams", providerInstanceId: "workspace-teams" } })],
+    ["binding", (value: typeof intent) => ({ ...value, providerBinding: {
+      ...value.providerBinding, bindingDigest: digest("binding-drift") } })],
+    ["principal", (value: typeof intent) => ({ ...value, providerBinding: {
+      ...value.providerBinding, providerPrincipalDigest: digest("principal-drift") } })],
+    ["authority", (value: typeof intent) => ({ ...value,
+      authoritySnapshotDigest: digest("snapshot-drift") })],
+    ["repository", (value: typeof intent) => ({ ...value, provenance: {
+      ...value.provenance, repositoryIdentityDigest: digest("repo-drift") } })],
+  ] as const)("does not coalesce across %s authority drift", async (_field, mutate) => {
+    const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-1", leaseSeconds: 30 });
+    await repository.recordIntent(intent, envelope(intent, "running"));
+    const drifted = DeliveryIntentV2Schema.parse({ ...mutate(intent),
+      sideEffectIntentId: "intent-drift", idempotencyKey: "key-drift" });
+    await repository.recordIntent(drifted, envelope(drifted, "running"));
+    const terminal = DeliveryIntentV2Schema.parse({ ...intent, sideEffectIntentId: "intent-terminal",
+      idempotencyKey: "key-terminal", presentationDigest: digest("terminal") });
+    await repository.recordIntent(terminal, envelope(terminal, "terminal"));
+    expect((await fixture.pool.query(`SELECT intent_id,state FROM cp_provider_delivery_intent
+      WHERE intent_id IN ('intent-1','intent-drift') ORDER BY intent_id`)).rows)
+      .toEqual([{ intent_id: "intent-1", state: "superseded" },
+        { intent_id: "intent-drift", state: "pending" }]);
+  });
+
   it("looks up accepted external resources only across the complete SQLite identity", async () => {
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
       leaseOwner: "worker-1", leaseSeconds: 30 });
@@ -117,9 +156,40 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
         evidenceDigest: digest(`evidence-${resource}`), externalResourceId: resource,
         externalResourceDigest: digest(`resource-${resource}`) });
     }
-    await expect(repository.findAcceptedExternalResource({ intent: accepted,
-      statusMessageId: "run-1:status" })).resolves.toEqual({ outcome: "exact",
+    const descriptor = deliveryExternalResourceLookupDescriptor({
+      intent: accepted, statusMessageId: "run-1:status", owner: {
+        organizationId: "org_test", providerId: "slack", providerInstanceId: "workspace-a",
+        providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), ...owner } });
+    await expect(repository.findAcceptedExternalResource(descriptor)).resolves.toEqual({ outcome: "exact",
         externalResourceId: "native-1", externalResourceDigest: digest("resource-native-1") });
+    for (const drifted of [{ ...descriptor, organizationId: "org_other" },
+      { ...descriptor, providerId: "teams" },
+      { ...descriptor, providerInstanceId: "workspace-b" },
+      { ...descriptor, providerBindingDigest: digest("binding-drift") },
+      { ...descriptor, providerPrincipalDigest: digest("principal-drift") },
+      { ...descriptor, providerConfigGeneration: 2 },
+      { ...descriptor, authoritySnapshotDigest: digest("snapshot-drift") },
+      { ...descriptor, authorityLineageDigest: digest("authority-drift") },
+      { ...descriptor, repositoryIdentityDigest: digest("repo-drift") },
+      { ...descriptor, connectionId: "other", connectionIdDigest: digest("connection") }]) {
+      await expect(repository.findAcceptedExternalResource(drifted)).resolves.toEqual({ outcome: "none" });
+    }
+    const duplicate = DeliveryIntentV2Schema.parse({ ...accepted,
+      sideEffectIntentId: "accepted-3", idempotencyKey: "accepted-key-3",
+      presentationDigest: digest("accepted-3") });
+    await repository.recordIntent(duplicate, envelope(duplicate, "running"));
+    const duplicateClaim = (await repository.claimNext())!;
+    const duplicateRenewed = (await repository.renewLease(duplicateClaim))!;
+    const duplicateMarker = digest("marker-native-3");
+    const duplicateBegin = (await repository.markBegin({ ...duplicateRenewed,
+      installationBeginMarkerId: "installation-native-3",
+      installationBeginMarkerDigest: duplicateMarker, scopeBeginMarkerId: "scope-native-3",
+      scopeBeginMarkerDigest: duplicateMarker }))!;
+    await repository.settleOrReadTerminal({ ...duplicateBegin, outcome: "accepted",
+      evidenceDigest: digest("evidence-native-3"), externalResourceId: "native-3",
+      externalResourceDigest: digest("resource-native-3") });
+    await expect(repository.findAcceptedExternalResource(descriptor)).resolves.toEqual({ outcome: "ambiguous" });
   });
 
   it("abandons at the frozen deadline and never begins provider I/O", async () => {

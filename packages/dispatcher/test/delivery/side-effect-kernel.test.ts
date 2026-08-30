@@ -15,6 +15,7 @@ type Request = { presentation: string };
 const digest = `sha256:${'1'.repeat(64)}`;
 const intent = DeliveryIntentV2Schema.parse({
   contractVersion: 2,
+organizationId: "org_test",
   sideEffectIntentId: 'intent-1', causalId: 'cause-1', intentKind: 'delivery',
   operation: 'create', deliveryKind: 'message', presentationDigest: digest,
   provenance: { kind: 'business', repositoryIdentityDigest: digest,
@@ -31,6 +32,7 @@ const intent = DeliveryIntentV2Schema.parse({
   createdAt: '2026-08-13T00:00:00.000Z', initialAttemptSequence: 1,
 });
 const claim: DeliveryClaim = {
+  organizationId: 'org_test',
   attemptId: 'attempt-1', intentId: 'intent-1', sequence: 1,
   leaseFence: 'fence-1', revision: 2,
   providerId: 'slack', providerInstanceId: 'workspace-a',

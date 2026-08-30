@@ -11,6 +11,7 @@ import {
 type Request = { operation: 'create'; presentation: string };
 const digest = `sha256:${'2'.repeat(64)}`;
 const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
+organizationId: "org_test",
   sideEffectIntentId: 'slack-intent-1', causalId: 'cause-1', intentKind: 'delivery',
   operation: 'create', deliveryKind: 'message', presentationDigest: digest,
   provenance: { kind: 'business', repositoryIdentityDigest: digest,
@@ -45,7 +46,7 @@ function harness(finalizeStrandedBegun = async () => 0) {
     getIntent: async () => ({ outcome: 'hydrated' as const, intent, persistedPayload: {},
       journalIntentDigest: digest }),
     claimNext: async () => ({
-      attemptId: 'attempt-1', intentId: 'slack-intent-1', sequence: 1,
+      organizationId: 'org_test', attemptId: 'attempt-1', intentId: 'slack-intent-1', sequence: 1,
       leaseFence: 'fence-1', revision: 2, providerId: 'slack',
       providerInstanceId: 'team-1', providerBindingDigest: digest,
       providerConfigGeneration: 1, providerConfigGenerationDigest: digest,

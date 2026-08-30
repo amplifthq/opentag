@@ -21,13 +21,14 @@ const digest = (value: string) =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
 const stable = digest('stable');
 const owner = {
+  organizationId: 'org_test',
   providerId: 'slack', providerInstanceId: 'instance-1',
   providerBindingDigest: stable, providerConfigGeneration: 7,
   providerConfigGenerationDigest: stable, runtimeOwnerId: 'installation-1',
   runtimeGeneration: 3, schemaGeneration: 1,
 };
 const intent = DeliveryIntentV2Schema.parse({
-  contractVersion: 2, sideEffectIntentId: 'intent-1', causalId: 'cause-1',
+  contractVersion: 2, organizationId: "org_test", sideEffectIntentId: 'intent-1', causalId: 'cause-1',
   intentKind: 'delivery', operation: 'create', deliveryKind: 'message',
   presentationDigest: stable, provenance: { kind: 'business',
     repositoryIdentityDigest: stable, runId: 'run-1',

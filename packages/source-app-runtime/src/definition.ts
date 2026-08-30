@@ -9,6 +9,7 @@ import type {
 } from "@opentag/delivery-contract";
 
 export type SourceAppInstallation = {
+  organizationId: string;
   appInstanceId: string;
   bindingDigest: string;
   credentialGeneration: number;
@@ -61,6 +62,9 @@ export function assertSourceAppDefinition(
   SourceAppCapabilitiesSchema.parse(definition.capabilities);
   const installation = definition.installation;
   if (!isRecord(installation)) throw new Error("Source App installation must be an object.");
+  if (typeof installation.organizationId !== "string" || installation.organizationId.trim().length === 0) {
+    throw new Error("Source App organizationId must be a non-empty string.");
+  }
   if (typeof installation.appInstanceId !== "string" || installation.appInstanceId.trim().length === 0) {
     throw new Error("Source App appInstanceId must be a non-empty string.");
   }

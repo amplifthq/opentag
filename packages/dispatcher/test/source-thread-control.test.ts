@@ -65,6 +65,7 @@ function repository(active?: { run: OpenTagRun; event: OpenTagEvent }) {
 function validRunlessIntent(): DeliveryIntentV2 {
   return DeliveryIntentV2Schema.parse({
     contractVersion: 2,
+organizationId: "org_test",
     sideEffectIntentId: 'intent-source-thread-1',
     causalId: 'thread-action-1',
     intentKind: 'delivery',

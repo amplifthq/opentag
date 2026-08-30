@@ -41,17 +41,27 @@ function registrationSnapshot(definition: RegisteredSourceApp): RegisteredSource
 export class SourceAppRegistry {
   readonly #apps = new Map<string, RegisteredSourceAppDefinition>();
 
-  static #key(appId: string, appInstanceId: string): string {
-    return `${appId}\0${appInstanceId}`;
+  static #key(organizationId: string, appId: string, appInstanceId: string): string {
+    return JSON.stringify([organizationId, appId, appInstanceId]);
   }
 
   register<RawDelivery, NativePresentation, NativeRequest>(
     definition: SourceAppDefinition<RawDelivery, NativePresentation, NativeRequest>
   ): this {
     assertSourceAppDefinition(definition);
-    const key = SourceAppRegistry.#key(definition.appId, definition.installation.appInstanceId);
-    if (this.#apps.has(key)) {
-      throw new Error(`Source App already registered: ${definition.appId}/${definition.installation.appInstanceId}`);
+    const key = SourceAppRegistry.#key(definition.installation.organizationId,
+      definition.appId, definition.installation.appInstanceId);
+    const current = this.#apps.get(key);
+    if (current) {
+      const next = definition.installation; const previous = current.installation;
+      if (next.credentialGeneration < previous.credentialGeneration)
+        throw new Error("Source App credential generation downgrade");
+      if (next.credentialGeneration === previous.credentialGeneration) {
+        if (next.bindingDigest !== previous.bindingDigest
+          || next.credentialGenerationDigest !== previous.credentialGenerationDigest)
+          throw new Error("Source App equal generation mismatch");
+        return this;
+      }
     }
     this.#apps.set(key, registrationSnapshot(definition as RegisteredSourceApp));
     return this;
@@ -63,7 +73,8 @@ export class SourceAppRegistry {
   }
 
   resolveDelivery(input: SourceAppInstallation & { appId: string }): RegisteredSourceAppDefinition | undefined {
-    const definition = this.#apps.get(SourceAppRegistry.#key(input.appId, input.appInstanceId));
+    const definition = this.#apps.get(SourceAppRegistry.#key(input.organizationId,
+      input.appId, input.appInstanceId));
     if (!definition) return undefined;
     const installation = definition.installation;
     return installation.appInstanceId === input.appInstanceId

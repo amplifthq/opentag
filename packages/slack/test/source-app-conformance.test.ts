@@ -8,7 +8,7 @@ const digest = (value: string) => `sha256:${createHash("sha256").update(value).d
 describe("Slack Source App conformance", () => {
   it("uses one composite registry identity for ingress and delivery", () => {
     const sourceApp = createSlackSourceApp({
-      installation: { appInstanceId: "A1", bindingDigest: digest("binding"),
+      installation: { organizationId: "org_test", appInstanceId: "A1", bindingDigest: digest("binding"),
         credentialGeneration: 4, credentialGenerationDigest: digest("generation") },
       signingSecret: "secret", botUserId: "U_APP",
       resolveCredential: async () => "token",
@@ -21,7 +21,7 @@ describe("Slack Source App conformance", () => {
   });
 
   it("does not emit client-authoritative JSON action values on the certified adapter", () => {
-    const sourceApp = createSlackSourceApp({ installation: { appInstanceId: "A1",
+    const sourceApp = createSlackSourceApp({ installation: { organizationId: "org_test", appInstanceId: "A1",
       bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") }, signingSecret: "secret",
       botUserId: "U_APP", resolveCredential: async () => "token",
@@ -53,7 +53,7 @@ describe("Slack Source App conformance", () => {
         response_metadata: { next_cursor: cursor ? "" : "page-2" } }));
     }) as typeof fetch;
     const sourceApp = createSlackSourceApp({
-      installation: { appInstanceId: "A1", bindingDigest: digest("binding"),
+      installation: { organizationId: "org_test", appInstanceId: "A1", bindingDigest: digest("binding"),
         credentialGeneration: 1, credentialGenerationDigest: digest("generation") },
       signingSecret: "secret", botUserId: "U_APP", resolveCredential: async () => "token",
       fetchImpl
@@ -75,7 +75,7 @@ describe("Slack Source App conformance", () => {
   it("preserves the trigger under byte truncation and drops older context first", async () => {
     const messages = [{ ts: "1700000000.000100", text: "x".repeat(65_500) },
       { ts: "1700000000.000200", thread_ts: "1700000000.000100", text: "trigger" }];
-    const sourceApp = createSlackSourceApp({ installation: { appInstanceId: "A1",
+    const sourceApp = createSlackSourceApp({ installation: { organizationId: "org_test", appInstanceId: "A1",
       bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") }, signingSecret: "secret",
       botUserId: "U_APP", resolveCredential: async () => "token",

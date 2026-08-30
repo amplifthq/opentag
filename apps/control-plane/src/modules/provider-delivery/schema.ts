@@ -3,7 +3,8 @@ import { check, index, integer, jsonb, pgTable, text, timestamp, unique,
   uniqueIndex } from "drizzle-orm/pg-core";
 
 export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
-  intentId: text("intent_id").primaryKey(), journalIntentDigest: text("journal_intent_digest").notNull(),
+  intentId: text("intent_id").primaryKey(), organizationId: text("organization_id").notNull(),
+  journalIntentDigest: text("journal_intent_digest").notNull(),
   intent: jsonb("intent").notNull(), payload: jsonb("payload").notNull(),
   payloadDigest: text("payload_digest").notNull(), payloadCustodyRef: text("payload_custody_ref").notNull(),
   presentationPhase: text("presentation_phase").notNull(), currentTruthKey: text("current_truth_key").notNull(),
@@ -23,12 +24,12 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   scopeBeginMarkerDigest: text("scope_begin_marker_digest"), begunAt: timestamp("begun_at", { withTimezone: true }),
   evidenceDigest: text("evidence_digest"), errorCode: text("error_code"),
   externalResourceDigest: text("external_resource_digest"), externalResourceId: text("external_resource_id"),
-  outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true }), deadlineAt: timestamp("deadline_at", { withTimezone: true }),
+  outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true }), deadlineAt: timestamp("deadline_at", { withTimezone: true }).notNull(),
   supersededByIntentId: text("superseded_by_intent_id"), createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, (table) => [
   unique("cp_provider_delivery_intent_journal_digest_key").on(table.journalIntentDigest),
-  unique("cp_provider_delivery_intent_idempotency_key").on(table.scopeKind, table.scopeId,
+  unique("cp_provider_delivery_intent_idempotency_key").on(table.organizationId, table.scopeKind, table.scopeId,
     table.providerId, table.providerInstanceId, table.idempotencyKey),
   check("cp_provider_delivery_intent_revision_check", sql`${table.revision} > 0 AND ${table.sequence} > 0
     AND ${table.providerConfigGeneration} > 0 AND ${table.runtimeGeneration} > 0 AND ${table.schemaGeneration} > 0`),
@@ -51,9 +52,15 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
     OR (${table.state} = 'provider_io_begun' AND ${table.leaseOwner} IS NOT NULL
       AND ${table.leaseExpiresAt} IS NOT NULL AND ${table.leaseFence} IS NOT NULL
       AND ${table.leaseFenceDigest} IS NOT NULL AND ${table.begunAt} IS NOT NULL
-      AND ${table.installationBeginMarkerId} IS NOT NULL AND ${table.scopeBeginMarkerId} IS NOT NULL
+      AND ${table.installationBeginMarkerId} IS NOT NULL AND ${table.installationBeginMarkerDigest} IS NOT NULL
+      AND ${table.scopeBeginMarkerId} IS NOT NULL AND ${table.scopeBeginMarkerDigest} IS NOT NULL
       AND ${table.evidenceDigest} IS NULL AND ${table.errorCode} IS NULL AND ${table.outcomeRecordedAt} IS NULL)
-    OR (${table.state} IN ('accepted','rejected','outcome_unknown','attention') AND ${table.begunAt} IS NOT NULL
+    OR (${table.state} IN ('accepted','rejected','outcome_unknown','attention')
+      AND ${table.leaseOwner} IS NOT NULL AND ${table.leaseExpiresAt} IS NOT NULL
+      AND ${table.leaseFence} IS NOT NULL AND ${table.leaseFenceDigest} IS NOT NULL
+      AND ${table.installationBeginMarkerId} IS NOT NULL AND ${table.installationBeginMarkerDigest} IS NOT NULL
+      AND ${table.scopeBeginMarkerId} IS NOT NULL AND ${table.scopeBeginMarkerDigest} IS NOT NULL
+      AND ${table.begunAt} IS NOT NULL
       AND ${table.evidenceDigest} IS NOT NULL AND ${table.outcomeRecordedAt} IS NOT NULL
       AND ((${table.state}='accepted' AND ${table.errorCode} IS NULL) OR (${table.state}<>'accepted' AND ${table.errorCode} IS NOT NULL))
       AND ((${table.externalResourceId} IS NULL AND ${table.externalResourceDigest} IS NULL)

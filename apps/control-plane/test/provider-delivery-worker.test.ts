@@ -11,6 +11,18 @@ describe("provider delivery worker", () => {
       clock: { now: () => new Date("2026-08-30T00:00:00.000Z") } });
     await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 2 });
     await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0 });
-    expect(calls).toEqual(["preload", "recover", "deliver", "preload", "deliver"]);
+    expect(calls).toEqual(["recover", "preload", "deliver", "preload", "deliver"]);
+  });
+
+  it("recovers and continues unrelated claims when one preload is broken", async () => {
+    const calls: string[] = [];
+    const worker = createProviderDeliveryWorker({ kernel: {
+      recoverStrandedBegun: async () => { calls.push("recover"); return 1; },
+      deliverNext: async () => { calls.push("deliver"); return null; } },
+      preloadSourceApps: async () => { calls.push("preload"); throw new Error("broken secret"); },
+      clock: { now: () => new Date("2026-08-30T00:00:00.000Z") } });
+    await expect(worker.processNext()).resolves.toEqual({ kind: "empty", recovered: 1,
+      preloadFailed: true });
+    expect(calls).toEqual(["recover", "preload", "deliver"]);
   });
 });

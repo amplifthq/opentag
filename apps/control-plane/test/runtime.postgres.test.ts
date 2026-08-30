@@ -10,6 +10,7 @@ import { computeHostedAdmissionEnvelopeDigestV1,
   HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
 import { digest as contentDigest, sourceContentAad } from "../src/modules/source-content/crypto.js";
 import { createControlPlaneRuntime } from "../src/runtime.js";
+import { runOneJob } from "../src/modules/jobs/worker.js";
 import { createProductionControlPlaneRuntime } from "../src/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture } from "./control-fixtures.js";
 import {
@@ -121,30 +122,10 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     expect(runtime.providerDeliveryProducer).toBeDefined();
     expect(runtime.providerDeliveryWorker).toBeDefined();
     await expect(runtime.providerDeliveryWorker.processNext()).resolves.toEqual({ kind: "empty", recovered: 0 });
-    expect(runtime.sourceApps.resolveDelivery({ appId: "slack", appInstanceId: "A_RUNTIME",
+    expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_slack_runtime",
+      appId: "slack", appInstanceId: "A_RUNTIME",
       bindingDigest: digest("binding"), credentialGeneration: 1,
       credentialGenerationDigest: digest("generation") })).toBeDefined();
-    const deliveryIntent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
-      sideEffectIntentId: "runtime-delivery-intent", causalId: "runtime-cause",
-      intentKind: "delivery", operation: "create", deliveryKind: "message",
-      presentationDigest: digest("runtime-presentation"), provenance: { kind: "business",
-        repositoryIdentityDigest: digest("runtime-repo"), runId: "runtime-run",
-        authorityLineageDigest: digest("runtime-authority") }, providerBinding: {
-        bindingKind: "established", providerId: "slack", providerInstanceId: "A_RUNTIME",
-        providerPrincipalDigest: digest("U_APP"), principalAssurance: "provider_verified",
-        bindingDigest: digest("binding"), providerConfigGeneration: 1,
-        providerConfigGenerationDigest: digest("generation"), lifecycle: "active" },
-      targetDigest: digest("runtime-target"), authorityKind: "run_authority",
-      authoritySnapshotDigest: digest("runtime-snapshot"), evidencePolicy: "local_audit",
-      idempotencyKey: "runtime-delivery-key", scope: { kind: "local_repository", id: "runtime-repo" },
-      createdAt: now.toISOString(), initialAttemptSequence: 1 });
-    await expect(runtime.providerDeliveryProducer.enqueue({ intent: deliveryIntent,
-      providerRequest: { operation: { kind: "create_message", channelId: "C_RUNTIME" },
-        presentation: { kind: "message", text: "runtime" } }, phase: "running",
-      frozenDeadline: "2030-08-30T00:00:00.000Z" })).resolves.toMatchObject({ outcome: "queued" });
-    expect((await fixture.pool.query(`SELECT presentation_phase,payload->'currentTruth'->>'runId' AS run_id
-      FROM cp_provider_delivery_intent WHERE intent_id='runtime-delivery-intent'`)).rows)
-      .toEqual([{ presentation_phase: "running", run_id: "runtime-run" }]);
     const send = (teamId: string) => { const timestamp = String(Math.floor(Date.now() / 1000));
       const body = JSON.stringify({ type: "event_callback", team_id: teamId, api_app_id: "A_RUNTIME",
         event_id: `Ev_${teamId}`, event_time: Math.floor(now.getTime() / 1000),
@@ -166,6 +147,62 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       await fixture.pool.query("DELETE FROM cp_source_app_installation WHERE organization_id='org_slack_runtime'");
       await fixture.pool.query("DELETE FROM cp_organization WHERE organization_id='org_slack_runtime'");
       await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("claims a scheduled delivery job and reconciles through the real kernel once", async () => {
+    await fixture.migrate();
+    const config = { bootstrapOrganizationId: "org_delivery", bootstrapOrganizationName: "Delivery",
+      bootstrapPairingToken: "bootstrap_delivery_secret", databaseUrl: TEST_DATABASE_URL!,
+      environment: "local", fencingTokenSecret: "f".repeat(32), githubIngressMasterSecret: null,
+      host: "127.0.0.1", jobLeaseDurationMs: 30_000, jobPollIntervalMs: 1_000,
+      jobRetryDelayMs: 30_000, loginRateLimit: { secret: "l".repeat(32), networkMode: "direct-peer",
+        maxFailures: 5, networkMaxFailures: 50, windowMs: 300_000, lockoutMs: 900_000 },
+      poolMax: 4, port: 3000, publicOrigin: "http://127.0.0.1:3000",
+      recoveryPairingToken: null, releaseSha: "local" } as const;
+    const runtime = createControlPlaneRuntime({ config,
+      postgres: { pool: fixture.pool, async close() {} }, migrations: fixture.migrations });
+    const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
+    let deliveries = 0; let reconciliations = 0;
+    runtime.sourceApps.register({ appId: "fixture", protocol: "opentag.channel.v1",
+      capabilities: { threads: true, messageUpdate: true, reactions: false,
+        interactiveActions: false, attachments: "metadata", authenticatedDeletion: false,
+        stableSourceVersions: true }, installation: { organizationId: "org_delivery",
+        appInstanceId: "fixture-instance", bindingDigest: digest("binding"),
+        credentialGeneration: 1, credentialGenerationDigest: digest("generation") },
+      ingress: { verify: async (value) => value, normalize: () => null },
+      context: { readThread: async () => ({ messages: [], truncated: false, decodedBytes: 0 }) },
+      presentation: { render: () => ({}) }, delivery: { prepare: () => ({ text: "fixture" }),
+        async deliver() { deliveries += 1; return { outcome: "outcome_unknown",
+          evidenceDigest: digest("ambiguous"), errorCode: "ambiguous_response" }; },
+        async reconcile() { reconciliations += 1; return { outcome: "accepted",
+          evidenceDigest: digest("reconciled"), externalResourceId: "fixture-resource",
+          externalResourceDigest: digest("resource") }; } } });
+    const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2,
+      organizationId: "org_delivery", sideEffectIntentId: "scheduled-delivery",
+      causalId: "scheduled-cause", intentKind: "delivery", operation: "create",
+      deliveryKind: "message", presentationDigest: digest("presentation"),
+      provenance: { kind: "business", repositoryIdentityDigest: digest("repo"),
+        runId: "scheduled-run", authorityLineageDigest: digest("authority") },
+      providerBinding: { bindingKind: "established", providerId: "fixture",
+        providerInstanceId: "fixture-instance", providerPrincipalDigest: digest("principal"),
+        principalAssurance: "provider_verified", bindingDigest: digest("binding"),
+        providerConfigGeneration: 1, providerConfigGenerationDigest: digest("generation"),
+        lifecycle: "active" }, targetDigest: digest("target"), authorityKind: "run_authority",
+      authoritySnapshotDigest: digest("snapshot"), evidencePolicy: "local_audit",
+      idempotencyKey: "scheduled-key", scope: { kind: "local_repository", id: "repo" },
+      createdAt: "2026-08-30T00:00:00.000Z", initialAttemptSequence: 1 });
+    await runtime.providerDeliveryProducer.enqueue({ intent, providerRequest: { text: "fixture" },
+      phase: "terminal", frozenDeadline: "2030-08-30T00:00:00.000Z" });
+    await runtime.jobs.enqueue({ jobId: "provider-delivery:scheduled", organizationId: null,
+      kind: "provider-delivery", payload: {}, maxAttempts: 1 });
+    await expect(runOneJob({ queue: runtime.jobs, workerId: "worker-delivery",
+      handlers: runtime.jobHandlers, retryDelayMs: 30_000, clock: { now: () => new Date() } }))
+      .resolves.toEqual({ kind: "settled", jobId: "provider-delivery:scheduled" });
+    expect({ deliveries, reconciliations }).toEqual({ deliveries: 1, reconciliations: 1 });
+    expect((await fixture.pool.query(`SELECT state,external_resource_id FROM cp_provider_delivery_intent
+      WHERE intent_id='scheduled-delivery'`)).rows).toEqual([
+        { state: "accepted", external_resource_id: "fixture-resource" }]);
+    await runtime.close();
   });
 
   it("wires the restart-safe Source worker to the coordinator resolver by default", async () => {
@@ -213,7 +250,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         capabilities: { threads: true, messageUpdate: true, reactions: false,
           interactiveActions: false, attachments: "metadata",
           authenticatedDeletion: true, stableSourceVersions: true },
-        installation: { appInstanceId: "runtime-instance", bindingDigest,
+        installation: { organizationId: "org_runtime_source", appInstanceId: "runtime-instance", bindingDigest,
           credentialGeneration: 1, credentialGenerationDigest: generationDigest },
         ingress: { verify: async (value) => value, normalize: () => null },
         context: { readThread: async () => ({ messages: [], truncated: false,

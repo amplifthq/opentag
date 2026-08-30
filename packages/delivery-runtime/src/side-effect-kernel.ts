@@ -41,13 +41,14 @@ export class ProviderSideEffectKernel<Request extends object> {
     const binding = stored.intent.providerBinding;
     if (stored.journalIntentDigest !== claim.journalIntentDigest)
       return this.#attention(claim, stored.intent, "delivery_request_digest_mismatch");
-    if (binding.providerId !== claim.providerId || binding.providerInstanceId !== claim.providerInstanceId
+    if (stored.intent.organizationId !== claim.organizationId
+      || binding.providerId !== claim.providerId || binding.providerInstanceId !== claim.providerInstanceId
       || binding.bindingDigest !== claim.providerBindingDigest
       || binding.providerConfigGeneration !== claim.providerConfigGeneration
       || binding.providerConfigGenerationDigest !== claim.providerConfigGenerationDigest
       || stored.intent.authoritySnapshotDigest !== claim.authoritySnapshotDigest)
       return this.#attention(claim, stored.intent, "provider_binding_mismatch");
-    const adapter = registry.resolve(binding);
+    const adapter = registry.resolve({ organizationId: stored.intent.organizationId, binding });
     if (!adapter) return this.#attention(claim, stored.intent, "provider_adapter_not_registered");
     let prepared: Awaited<ReturnType<Options<Request>["prepareRequest"]>>;
     try { prepared = await prepareRequest(stored.intent, stored.persistedPayload); }

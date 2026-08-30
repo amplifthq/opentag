@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { DeliveryIntentV2Schema, domainSeparatedCanonicalBytes, type DeliveryIntentV2,
+import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
+  deliveryExternalResourceLookupDescriptor,
+  domainSeparatedCanonicalBytes, type DeliveryIntentV2,
   type DeliveryPayloadEnvelope, type EstablishedProviderBindingV1,
   type ExpectedDeliveryOwner } from '@opentag/delivery-contract';
 import { parseSlackThreadKey, slackSourceReceiptReactionName, type SlackDeliveryOperation, type SlackDeliveryPresentation } from '@opentag/slack';
@@ -49,7 +51,8 @@ function requestFor(presentation: DispatcherDeliveryPresentation): SlackRequest 
 const hash = (domain: string, value: unknown) => `sha256:${createHash('sha256').update(domainSeparatedCanonicalBytes(domain, value)).digest('hex')}`; const stableId = (prefix: string, value: unknown) => `${prefix}_${hash('opentag.delivery.slack-id.v1', value).slice(7, 31)}`;
 const requestDigests = (request: SlackRequest) => ({ presentationDigest: hash('opentag.delivery.slack-presentation.v1', request.presentation),
   targetDigest: hash('opentag.delivery.slack-target.v1', request.operation.kind === 'add_reaction' ? request.operation : { channelId: request.operation.channelId, threadTs: 'threadTs' in request.operation ? request.operation.threadTs : undefined }) });
-function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDeliveryPresentation, request: SlackRequest, operation: DeliveryIntentV2['operation']): DeliveryIntentV2 { const control = presentation.kind === 'source_thread_control';
+function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDeliveryPresentation,
+  request: SlackRequest, operation: DeliveryIntentV2['operation'], organizationId: string): DeliveryIntentV2 { const control = presentation.kind === 'source_thread_control';
   const { presentationDigest, targetDigest } = requestDigests(request);
   const identity = { causalId: authority.causalId, operation, presentationDigest, targetDigest, statusMessageId: request.statusMessageId ?? null };
   const provenance = control && authority.provenance.kind === 'source_thread_control' ? { kind: 'source_thread_control' as const, providerInstanceId: authority.providerBinding.providerInstanceId,
@@ -58,7 +61,8 @@ function intentFor(authority: SlackDeliveryAuthority, presentation: DispatcherDe
     : !control && authority.provenance.kind === 'business' ? { kind: 'business' as const, repositoryIdentityDigest: hash('opentag.delivery.repository.v1', authority.provenance.repositoryIdentity),
       runId: presentation.runId, authorityLineageDigest: hash('opentag.delivery.authority-lineage.v1', authority.provenance.authorityLineageIdentity) } : null;
   if (!provenance || (provenance.kind === 'business' && !provenance.runId)) throw new Error('Slack authority provenance mismatch.');
-  return DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: stableId('intent', identity), causalId: authority.causalId, intentKind: 'delivery', operation, deliveryKind: request.presentation.kind === 'reaction' ? 'reaction' : 'message',
+  return DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId,
+    sideEffectIntentId: stableId('intent', identity), causalId: authority.causalId, intentKind: 'delivery', operation, deliveryKind: request.presentation.kind === 'reaction' ? 'reaction' : 'message',
     presentationDigest, provenance, providerBinding: authority.providerBinding, targetDigest, authorityKind: control ? 'local_source_thread_control' : 'run_authority', authoritySnapshotDigest: hash('opentag.delivery.authority-snapshot.v1', authority.authoritySnapshotIdentity),
     evidencePolicy: 'local_audit', idempotencyKey: stableId('delivery', identity), scope: control ? { kind: 'provider_instance', id: authority.providerBinding.providerInstanceId } : { kind: 'local_repository', id: authority.provenance.scopeId }, createdAt: authority.createdAt,
     initialAttemptSequence: 1, ...(request.statusMessageId ? { statusMessageId: request.statusMessageId } : {}),
@@ -68,7 +72,11 @@ export function createSlackLifecycleComposition(options: SlackLifecycleCompositi
   const kernel = new ProviderSideEffectKernel<SlackRequest>({ repository: options.repository,
     registry: new ProviderAdapterRegistry<SlackRequest>(options.sourceApps),
     prepareRequest: async (intent, payload) => { const stored = (payload as DeliveryPayloadEnvelope<SlackRequest>).providerRequest; let operation = stored.operation;
-      if (intent.operation === 'update' && stored.statusMessageId) { const prior = await options.repository.findAcceptedExternalResource({ intent, statusMessageId: stored.statusMessageId });
+      if (intent.operation === 'update' && stored.statusMessageId) {
+        const createIntent = { ...intent, operation: 'create' as const };
+        const prior = await options.repository.findAcceptedExternalResource(
+          deliveryExternalResourceLookupDescriptor({ intent: createIntent,
+            statusMessageId: stored.statusMessageId, owner: options.deliveryOwner }));
         if (prior.outcome !== 'exact' || prior.externalResourceDigest !== stored.expectedResourceDigest || operation.kind !== 'create_message') throw new Error('Exact accepted Slack lifecycle resource unavailable.');
         operation = { kind: 'update_message', channelId: operation.channelId, messageTs: prior.externalResourceId }; } return { request: { ...stored, operation }, operation: intent.operation, ...requestDigests(stored) }; } });
   const producer = new UnifiedDeliveryProducer<DispatcherDeliveryPresentation>({ submitter: kernel,
@@ -77,27 +85,23 @@ export function createSlackLifecycleComposition(options: SlackLifecycleCompositi
       const authority = await options.resolveAuthority(presentation); if (!authority || authority.providerBinding.providerId !== 'slack') return null;
       const request = requestFor(presentation); if (!request) return null;
       let operation: DeliveryIntentV2['operation'] = presentation.kind === 'source_thread_control' ? 'control_reply' : 'create';
-      if (request.statusMessageId) { const prior = await options.repository.findAcceptedExternalResource({ intent: intentFor(authority, presentation, request, 'create'),
-          statusMessageId: request.statusMessageId });
+      if (request.statusMessageId) { const lookupIntent = intentFor(authority, presentation, request,
+          'create', options.deliveryOwner.organizationId);
+        const prior = await options.repository.findAcceptedExternalResource(
+          deliveryExternalResourceLookupDescriptor({ intent: lookupIntent,
+            statusMessageId: request.statusMessageId, owner: options.deliveryOwner }));
         if (prior.outcome === 'ambiguous' || (prior.outcome === 'none' && presentation.kind === 'business' && presentation.phase !== 'acknowledgement')) return null;
         if (prior.outcome === 'exact') { operation = 'update'; request.expectedResourceDigest = prior.externalResourceDigest; }
       }
-      const intent = intentFor(authority, presentation, request, operation);
+      const intent = intentFor(authority, presentation, request, operation,
+        options.deliveryOwner.organizationId);
       const phase = presentation.kind !== 'source_thread_control'
         && (presentation.phase === 'received' || presentation.phase === 'running')
         ? presentation.phase : 'terminal';
       const persistedPayload: DeliveryPayloadEnvelope<SlackRequest> = { envelopeVersion: 1,
         providerRequest: request, phase,
         frozenDeadline: new Date(new Date(intent.createdAt).getTime() + 86_400_000).toISOString(),
-        currentTruth: { runId: intent.provenance.kind === 'business' ? intent.provenance.runId : '',
-          scopeKind: intent.scope.kind, scopeId: intent.scope.id, targetDigest: intent.targetDigest,
-          providerInstanceId: intent.providerBinding.providerInstanceId,
-          statusMessageId: 'statusMessageId' in intent ? intent.statusMessageId ?? null : null,
-          runtimeOwnerId: options.deliveryOwner.runtimeOwnerId,
-          runtimeGeneration: options.deliveryOwner.runtimeGeneration,
-          schemaGeneration: options.deliveryOwner.schemaGeneration,
-          providerConfigGeneration: intent.providerBinding.providerConfigGeneration,
-          providerConfigGenerationDigest: intent.providerBinding.providerConfigGenerationDigest } };
+        currentTruth: deliveryCurrentTruthDescriptor({ intent, owner: options.deliveryOwner }) };
       return { intent, persistedPayload };
     } });
   return { producer, kernel };

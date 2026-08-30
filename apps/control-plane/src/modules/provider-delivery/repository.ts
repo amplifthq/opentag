@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, domainSeparatedCanonicalBytes, type DeliveryBegin,
+import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
+  domainSeparatedCanonicalBytes, type DeliveryBegin,
   type DeliveryClaim, type DeliveryErrorCode, type DeliveryIntentV2,
   type DeliveryPayloadEnvelope, type DeliverySettlement, type DeliverySettlementInput,
   type ExpectedDeliveryOwner, type StoredDeliveryIntent } from "@opentag/delivery-contract";
@@ -8,6 +9,7 @@ import type { Pool, PoolClient } from "pg";
 
 type RelayOwner = Pick<ExpectedDeliveryOwner, "runtimeOwnerId" | "runtimeGeneration" | "schemaGeneration">;
 type Row = { intent_id: string; journal_intent_digest: string; intent: unknown; payload: unknown;
+  organization_id: string;
   payload_digest: string; presentation_phase: string; current_truth_key: string;
   state: string; revision: number; sequence: number; provider_id: string; provider_instance_id: string;
   provider_binding_digest: string; provider_config_generation: number;
@@ -28,16 +30,15 @@ function payloadEnvelope(value: unknown, intent: DeliveryIntentV2, owner: RelayO
   if (!value || typeof value !== "object") throw new Error("delivery payload envelope invalid");
   const envelope = value as DeliveryPayloadEnvelope;
   const truth = envelope.currentTruth; const binding = intent.providerBinding;
+  const expectedTruth = deliveryCurrentTruthDescriptor({ intent, owner: {
+    organizationId: intent.organizationId, providerId: binding.providerId,
+    providerInstanceId: binding.providerInstanceId, providerBindingDigest: binding.bindingDigest,
+    providerConfigGeneration: binding.providerConfigGeneration,
+    providerConfigGenerationDigest: binding.providerConfigGenerationDigest, ...owner } });
   if (envelope.envelopeVersion !== 1 || !["received", "running", "terminal"].includes(envelope.phase)
     || !truth || Number.isNaN(new Date(envelope.frozenDeadline).valueOf())
-    || truth.runId !== (intent.provenance.kind === "business" ? intent.provenance.runId : "")
-    || truth.scopeKind !== intent.scope.kind || truth.scopeId !== intent.scope.id
-    || truth.targetDigest !== intent.targetDigest || truth.providerInstanceId !== binding.providerInstanceId
-    || truth.statusMessageId !== ("statusMessageId" in intent ? intent.statusMessageId ?? null : null)
-    || truth.runtimeOwnerId !== owner.runtimeOwnerId || truth.runtimeGeneration !== owner.runtimeGeneration
-    || truth.schemaGeneration !== owner.schemaGeneration
-    || truth.providerConfigGeneration !== binding.providerConfigGeneration
-    || truth.providerConfigGenerationDigest !== binding.providerConfigGenerationDigest) {
+    || Buffer.compare(Buffer.from(domainSeparatedCanonicalBytes("opentag.delivery.current-truth.v1", truth)),
+      Buffer.from(domainSeparatedCanonicalBytes("opentag.delivery.current-truth.v1", expectedTruth))) !== 0) {
     throw new Error("delivery payload envelope identity conflict");
   }
   return jsonValue(envelope) as DeliveryPayloadEnvelope;
@@ -48,7 +49,7 @@ const currentTruthKey = (payload: DeliveryPayloadEnvelope) => sha256(domainSepar
   "opentag.delivery.current-truth.v1", payload.currentTruth));
 
 function claim(row: Row, leaseFence: string): DeliveryClaim {
-  return { attemptId: row.intent_id, intentId: row.intent_id, sequence: row.sequence,
+  return { organizationId: row.organization_id, attemptId: row.intent_id, intentId: row.intent_id, sequence: row.sequence,
     leaseFence, revision: row.revision, providerId: row.provider_id,
     providerInstanceId: row.provider_instance_id, providerBindingDigest: row.provider_binding_digest,
     providerConfigGeneration: row.provider_config_generation,
@@ -64,6 +65,7 @@ function begun(row: Row, leaseFence: string): DeliveryBegin {
 }
 function claimTupleMatches(row: Row, input: DeliveryClaim, revision: number): boolean {
   return row.intent_id === input.intentId && row.intent_id === input.attemptId
+    && row.organization_id === input.organizationId
     && row.sequence === input.sequence && row.revision === revision
     && row.provider_id === input.providerId && row.provider_instance_id === input.providerInstanceId
     && row.provider_binding_digest === input.providerBindingDigest
@@ -106,15 +108,15 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       const deadline = new Date(payload.frozenDeadline);
       await withTx(async (client) => {
         const inserted = await client.query(`INSERT INTO cp_provider_delivery_intent(
-            intent_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
+            intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
             presentation_phase,current_truth_key,state,revision,sequence,
             scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
             provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
             schema_generation,authority_snapshot_digest,status_message_id,run_id,deadline_at,created_at,updated_at)
-            VALUES($1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8,'pending',1,$9,$10,$11,$12,$13,$14,
-              $15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25)
+            VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,'pending',1,$10,$11,$12,$13,$14,$15,
+              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$26)
             ON CONFLICT DO NOTHING RETURNING intent_id`,
-          [intent.sideEffectIntentId, digest, JSON.stringify(intent), JSON.stringify(payload),
+          [intent.sideEffectIntentId, intent.organizationId, digest, JSON.stringify(intent), JSON.stringify(payload),
             providerPayloadDigest, `postgres-jsonb:${intent.sideEffectIntentId}:${providerPayloadDigest}`,
             payload.phase, truthKey, intent.initialAttemptSequence,
             intent.scope.kind, intent.scope.id, intent.idempotencyKey, binding.providerId,
@@ -128,7 +130,8 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE",
           [intent.sideEffectIntentId]);
         const row = existing.rows[0];
-        if (!row || row.journal_intent_digest !== digest || row.payload_digest !== providerPayloadDigest
+        if (!row || row.organization_id !== intent.organizationId
+          || row.journal_intent_digest !== digest || row.payload_digest !== providerPayloadDigest
           || row.provider_id !== binding.providerId || row.provider_instance_id !== binding.providerInstanceId
           || row.provider_binding_digest !== binding.bindingDigest
           || row.provider_config_generation !== binding.providerConfigGeneration
@@ -264,21 +267,26 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       const result = await options.pool.query<{ external_resource_id: string; external_resource_digest: string }>(
         `SELECT DISTINCT external_resource_id,external_resource_digest FROM cp_provider_delivery_intent
          WHERE state='accepted' AND intent->'provenance'->>'kind'='business'
-         AND intent->>'operation'='create' AND run_id=$1 AND status_message_id=$2
-         AND scope_kind=$3 AND scope_id=$4 AND intent->>'targetDigest'=$5
-         AND provider_id=$6 AND provider_instance_id=$7 AND provider_binding_digest=$8
-         AND provider_config_generation=$9 AND provider_config_generation_digest=$10
-         AND runtime_owner_id=$11 AND runtime_generation=$12 AND schema_generation=$13
-         AND authority_snapshot_digest=$14
+         AND organization_id=$1 AND intent->>'operation'=$2 AND run_id=$3 AND status_message_id=$4
+         AND scope_kind=$5 AND scope_id=$6 AND intent->>'targetDigest'=$7
+         AND provider_id=$8 AND provider_instance_id=$9 AND provider_binding_digest=$10
+         AND intent->'providerBinding'->>'providerPrincipalDigest'=$11
+         AND intent->'providerBinding'->>'principalAssurance'=$12
+         AND provider_config_generation=$13 AND provider_config_generation_digest=$14
+         AND runtime_owner_id=$15 AND runtime_generation=$16 AND schema_generation=$17
+         AND authority_snapshot_digest=$18
+         AND intent->'provenance'->>'repositoryIdentityDigest'=$19
+         AND intent->'provenance'->>'authorityLineageDigest'=$20
+         AND COALESCE(intent->'providerBinding'->>'connectionId','')=COALESCE($21,'')
+         AND COALESCE(intent->'providerBinding'->>'connectionIdDigest','')=COALESCE($22,'')
          AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL LIMIT 2`,
-      [input.intent.provenance.kind === "business" ? input.intent.provenance.runId : null,
-        input.statusMessageId, input.intent.scope.kind, input.intent.scope.id,
-        input.intent.targetDigest, input.intent.providerBinding.providerId,
-        input.intent.providerBinding.providerInstanceId, input.intent.providerBinding.bindingDigest,
-        input.intent.providerBinding.providerConfigGeneration,
-        input.intent.providerBinding.providerConfigGenerationDigest,
-        options.owner.runtimeOwnerId, options.owner.runtimeGeneration, options.owner.schemaGeneration,
-        input.intent.authoritySnapshotDigest]);
+      [input.organizationId, input.operation, input.runId, input.statusMessageId,
+        input.scopeKind, input.scopeId, input.targetDigest, input.providerId,
+        input.providerInstanceId, input.providerBindingDigest, input.providerPrincipalDigest,
+        input.principalAssurance, input.providerConfigGeneration,
+        input.providerConfigGenerationDigest, input.runtimeOwnerId, input.runtimeGeneration,
+        input.schemaGeneration, input.authoritySnapshotDigest, input.repositoryIdentityDigest,
+        input.authorityLineageDigest, input.connectionId, input.connectionIdDigest]);
       return result.rows.length === 0 ? { outcome: "none" } : result.rows.length > 1
         ? { outcome: "ambiguous" }
         : { outcome: "exact", externalResourceId: result.rows[0]!.external_resource_id,

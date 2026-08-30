@@ -24,6 +24,7 @@ function sourceApp(): SourceAppDefinition<unknown, unknown, unknown> {
       authenticatedDeletion: true, stableSourceVersions: true,
     },
     installation: {
+      organizationId: "org_a",
       appInstanceId: "instance_1", bindingDigest,
       credentialGeneration: 1, credentialGenerationDigest: generationDigest,
     },

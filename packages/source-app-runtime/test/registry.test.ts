@@ -14,6 +14,8 @@ function fakeSourceApp(input: {
   bindingDigest?: string;
   credentialGeneration?: number;
   appInstanceId?: string;
+  organizationId?: string;
+  responseId?: string;
 } = {}): SourceAppDefinition<unknown, { text: string }, { text: string }> {
   return {
     appId: input.appId ?? "chat",
@@ -28,6 +30,7 @@ function fakeSourceApp(input: {
       stableSourceVersions: true
     },
     installation: {
+      organizationId: input.organizationId ?? "org_1",
       appInstanceId: input.appInstanceId ?? "chat_installation_1",
       bindingDigest: input.bindingDigest ?? digest("a"),
       credentialGeneration: input.credentialGeneration ?? 3,
@@ -72,10 +75,14 @@ function fakeSourceApp(input: {
         return { text: command.presentation.kind };
       },
       async deliver() {
-        return { outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1" };
+        return { outcome: "accepted", evidenceDigest: digest("c"),
+          externalResourceId: input.responseId ?? "message_1",
+          externalResourceDigest: digest("e") };
       },
       async reconcile() {
-        return { outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1" };
+        return { outcome: "accepted", evidenceDigest: digest("c"),
+          externalResourceId: input.responseId ?? "message_1",
+          externalResourceDigest: digest("e") };
       }
     }
   };
@@ -95,16 +102,46 @@ function presentationCommand(): OpenTagChannelPresentationCommand {
 }
 
 describe("SourceAppRegistry", () => {
-  it("registers multiple installations for one app and rejects only an exact duplicate", () => {
+  it("registers multiple installations for one app and replays an exact duplicate", () => {
     const registry = new SourceAppRegistry();
     registry.register(fakeSourceApp({ appId: "slack" }));
     registry.register(fakeSourceApp({ appId: "slack", appInstanceId: "chat_installation_2" }));
-    expect(() => registry.register(fakeSourceApp({ appId: "slack" })))
-      .toThrow("Source App already registered: slack/chat_installation_1");
+    expect(() => registry.register(fakeSourceApp({ appId: "slack" }))).not.toThrow();
     expect(registry.resolve("slack")).toBeUndefined();
-    expect(registry.resolveDelivery({ appId: "slack", appInstanceId: "chat_installation_2",
+    expect(registry.resolveDelivery({ organizationId: "org_1", appId: "slack",
+      appInstanceId: "chat_installation_2",
       bindingDigest: digest("a"), credentialGeneration: 3,
       credentialGenerationDigest: digest("b") })).toBeDefined();
+  });
+
+  it("isolates identical app installations and closures by organization", async () => {
+    const registry = new SourceAppRegistry()
+      .register(fakeSourceApp({ appId: "slack", organizationId: "org_a", responseId: "message_a" }))
+      .register(fakeSourceApp({ appId: "slack", organizationId: "org_b", responseId: "message_b" }));
+    for (const [organizationId, externalResourceId] of [["org_a", "message_a"], ["org_b", "message_b"]]) {
+      const app = registry.resolveDelivery({ organizationId, appId: "slack",
+        appInstanceId: "chat_installation_1", bindingDigest: digest("a"),
+        credentialGeneration: 3, credentialGenerationDigest: digest("b") });
+      await expect(app!.delivery.deliver({ request: { text: "hello" }, intent: {} as DeliveryIntentV2 }))
+        .resolves.toMatchObject({ externalResourceId });
+    }
+  });
+
+  it("atomically replaces only a monotonic installation generation", () => {
+    const registry = new SourceAppRegistry().register(fakeSourceApp({ appId: "slack",
+      organizationId: "org_a", credentialGeneration: 3, responseId: "message_v3" }));
+    expect(() => registry.register(fakeSourceApp({ appId: "slack", organizationId: "org_a",
+      credentialGeneration: 2 }))).toThrow(/generation downgrade/u);
+    expect(() => registry.register(fakeSourceApp({ appId: "slack", organizationId: "org_a",
+      credentialGeneration: 3, bindingDigest: digest("d") }))).toThrow(/equal generation mismatch/u);
+    registry.register(fakeSourceApp({ appId: "slack", organizationId: "org_a",
+      credentialGeneration: 4, bindingDigest: digest("d"), responseId: "message_v4" }));
+    expect(registry.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("d"), credentialGeneration: 4,
+      credentialGenerationDigest: digest("b") })).toBeDefined();
+    expect(registry.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "chat_installation_1", bindingDigest: digest("a"), credentialGeneration: 3,
+      credentialGenerationDigest: digest("b") })).toBeUndefined();
   });
 
   it("uses one registry entry for inbound context, presentation, and delivery", async () => {
@@ -138,7 +175,8 @@ describe("SourceAppRegistry", () => {
     const request = app!.delivery.prepare(command);
     expect(request).toEqual({ text: "final_summary" });
     expect(await app!.delivery.deliver({ request, intent: {} as DeliveryIntentV2 }))
-      .toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1" });
+      .toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1",
+        externalResourceDigest: digest("e") });
   });
 
   it("rejects delivery resolution when installation authority drifts", () => {
@@ -146,6 +184,7 @@ describe("SourceAppRegistry", () => {
     registry.register(fakeSourceApp({ appId: "chat" }));
 
     expect(registry.resolveDelivery({
+      organizationId: "org_1",
       appId: "chat",
       appInstanceId: "chat_installation_1",
       bindingDigest: digest("d"),
@@ -153,6 +192,7 @@ describe("SourceAppRegistry", () => {
       credentialGenerationDigest: digest("b")
     })).toBeUndefined();
     expect(registry.resolveDelivery({
+      organizationId: "org_1",
       appId: "chat",
       appInstanceId: "chat_installation_1",
       bindingDigest: digest("a"),
@@ -178,6 +218,7 @@ describe("SourceAppRegistry", () => {
     callerOwned.delivery.reconcile = async () => ({ outcome: "rejected", evidenceDigest: digest("d") });
 
     const registered = registry.resolveDelivery({
+      organizationId: "org_1",
       appId: "chat",
       appInstanceId: "chat_installation_1",
       bindingDigest: digest("a"),
@@ -223,9 +264,11 @@ describe("SourceAppRegistry", () => {
     const request = registered!.delivery.prepare(command);
     expect(request).toEqual({ text: "final_summary" });
     await expect(registered!.delivery.deliver({ request, intent: {} as DeliveryIntentV2 }))
-      .resolves.toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1" });
+      .resolves.toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1",
+        externalResourceDigest: digest("e") });
     await expect(registered!.delivery.reconcile({ request, intent: {} as DeliveryIntentV2 }))
-      .resolves.toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1" });
+      .resolves.toEqual({ outcome: "accepted", evidenceDigest: digest("c"), externalResourceId: "message_1",
+        externalResourceDigest: digest("e") });
   });
 
   it("does not expose mutable registry authority or port records", () => {
@@ -238,6 +281,7 @@ describe("SourceAppRegistry", () => {
     expect(() => { registered.delivery.deliver = async () => ({ outcome: "rejected", evidenceDigest: digest("d") }); })
       .toThrow(TypeError);
     expect(registry.resolveDelivery({
+      organizationId: "org_1",
       appId: "chat",
       appInstanceId: "chat_installation_1",
       bindingDigest: digest("a"),

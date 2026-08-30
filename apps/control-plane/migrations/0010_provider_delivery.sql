@@ -1,5 +1,6 @@
 CREATE TABLE cp_provider_delivery_intent (
   intent_id text PRIMARY KEY,
+  organization_id text NOT NULL,
   journal_intent_digest text NOT NULL,
   intent jsonb NOT NULL,
   payload jsonb NOT NULL,
@@ -38,12 +39,12 @@ CREATE TABLE cp_provider_delivery_intent (
   external_resource_digest text,
   external_resource_id text,
   outcome_recorded_at timestamptz,
-  deadline_at timestamptz,
+  deadline_at timestamptz NOT NULL,
   superseded_by_intent_id text,
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   CONSTRAINT cp_provider_delivery_intent_journal_digest_key UNIQUE(journal_intent_digest),
-  CONSTRAINT cp_provider_delivery_intent_idempotency_key UNIQUE(scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key),
+  CONSTRAINT cp_provider_delivery_intent_idempotency_key UNIQUE(organization_id, scope_kind, scope_id, provider_id, provider_instance_id, idempotency_key),
   CONSTRAINT cp_provider_delivery_intent_revision_check CHECK(revision > 0 AND sequence > 0 AND provider_config_generation > 0 AND runtime_generation > 0 AND schema_generation > 0),
   CONSTRAINT cp_provider_delivery_intent_state_check CHECK(state IN ('pending','leased','provider_io_begun','accepted','rejected','outcome_unknown','attention','superseded')),
   CONSTRAINT cp_provider_delivery_intent_phase_check CHECK(presentation_phase IN ('received','running','terminal')),
@@ -56,8 +57,8 @@ CREATE TABLE cp_provider_delivery_intent (
   CONSTRAINT cp_provider_delivery_intent_shape_check CHECK(
     (state='pending' AND lease_owner IS NULL AND lease_expires_at IS NULL AND lease_fence IS NULL AND lease_fence_digest IS NULL AND begun_at IS NULL AND evidence_digest IS NULL AND error_code IS NULL AND outcome_recorded_at IS NULL)
     OR (state='leased' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_fence IS NOT NULL AND lease_fence_digest IS NOT NULL AND begun_at IS NULL AND evidence_digest IS NULL AND error_code IS NULL AND outcome_recorded_at IS NULL)
-    OR (state='provider_io_begun' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_fence IS NOT NULL AND lease_fence_digest IS NOT NULL AND begun_at IS NOT NULL AND installation_begin_marker_id IS NOT NULL AND scope_begin_marker_id IS NOT NULL AND evidence_digest IS NULL AND error_code IS NULL AND outcome_recorded_at IS NULL)
-    OR (state IN ('accepted','rejected','outcome_unknown','attention') AND begun_at IS NOT NULL AND evidence_digest IS NOT NULL AND outcome_recorded_at IS NOT NULL AND ((state='accepted' AND error_code IS NULL) OR (state<>'accepted' AND error_code IS NOT NULL)) AND ((external_resource_id IS NULL AND external_resource_digest IS NULL) OR (state='accepted' AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL)))
+    OR (state='provider_io_begun' AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_fence IS NOT NULL AND lease_fence_digest IS NOT NULL AND begun_at IS NOT NULL AND installation_begin_marker_id IS NOT NULL AND installation_begin_marker_digest IS NOT NULL AND scope_begin_marker_id IS NOT NULL AND scope_begin_marker_digest IS NOT NULL AND evidence_digest IS NULL AND error_code IS NULL AND outcome_recorded_at IS NULL)
+    OR (state IN ('accepted','rejected','outcome_unknown','attention') AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_fence IS NOT NULL AND lease_fence_digest IS NOT NULL AND installation_begin_marker_id IS NOT NULL AND installation_begin_marker_digest IS NOT NULL AND scope_begin_marker_id IS NOT NULL AND scope_begin_marker_digest IS NOT NULL AND begun_at IS NOT NULL AND evidence_digest IS NOT NULL AND outcome_recorded_at IS NOT NULL AND ((state='accepted' AND error_code IS NULL) OR (state<>'accepted' AND error_code IS NOT NULL)) AND ((external_resource_id IS NULL AND external_resource_digest IS NULL) OR (state='accepted' AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL)))
     OR (state='attention' AND begun_at IS NULL AND lease_owner IS NULL AND lease_expires_at IS NULL AND lease_fence IS NULL AND lease_fence_digest IS NULL AND evidence_digest IS NOT NULL AND error_code='delivery_deadline_exceeded' AND outcome_recorded_at IS NOT NULL)
     OR (state='superseded' AND lease_owner IS NULL AND lease_expires_at IS NULL AND lease_fence IS NULL AND lease_fence_digest IS NULL AND begun_at IS NULL AND evidence_digest IS NOT NULL AND error_code='delivery_superseded' AND outcome_recorded_at IS NOT NULL AND superseded_by_intent_id IS NOT NULL))
 );
@@ -70,7 +71,7 @@ CREATE FUNCTION cp_provider_delivery_guard() RETURNS trigger LANGUAGE plpgsql AS
 BEGIN
   IF OLD.state IN ('accepted','rejected','outcome_unknown','attention','superseded')
      OR NEW.revision <> OLD.revision + 1
-     OR NEW.intent_id <> OLD.intent_id OR NEW.journal_intent_digest <> OLD.journal_intent_digest
+     OR NEW.intent_id <> OLD.intent_id OR NEW.organization_id <> OLD.organization_id OR NEW.journal_intent_digest <> OLD.journal_intent_digest
      OR NEW.intent <> OLD.intent OR NEW.payload <> OLD.payload OR NEW.payload_digest <> OLD.payload_digest OR NEW.payload_custody_ref <> OLD.payload_custody_ref
      OR NEW.presentation_phase <> OLD.presentation_phase OR NEW.current_truth_key <> OLD.current_truth_key
      OR NEW.scope_kind <> OLD.scope_kind OR NEW.scope_id <> OLD.scope_id OR NEW.idempotency_key <> OLD.idempotency_key
@@ -85,6 +86,10 @@ BEGIN
      OR (OLD.scope_begin_marker_id IS NOT NULL AND NEW.scope_begin_marker_id IS DISTINCT FROM OLD.scope_begin_marker_id)
      OR (OLD.scope_begin_marker_digest IS NOT NULL AND NEW.scope_begin_marker_digest IS DISTINCT FROM OLD.scope_begin_marker_digest)
      OR (OLD.begun_at IS NOT NULL AND NEW.begun_at IS DISTINCT FROM OLD.begun_at)
+     OR (OLD.begun_at IS NOT NULL AND (NEW.lease_owner IS DISTINCT FROM OLD.lease_owner
+       OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
+       OR NEW.lease_fence IS DISTINCT FROM OLD.lease_fence
+       OR NEW.lease_fence_digest IS DISTINCT FROM OLD.lease_fence_digest))
      OR NEW.created_at <> OLD.created_at OR NEW.deadline_at IS DISTINCT FROM OLD.deadline_at
      OR NOT ((OLD.state='pending' AND NEW.state IN ('leased','superseded','attention'))
        OR (OLD.state='leased' AND NEW.state IN ('pending','leased','provider_io_begun','superseded','attention'))

@@ -6,7 +6,7 @@ export function providerRegistry<Request extends object>(adapter?: RegisteredPro
   if (adapter) sources.register({ appId: adapter.providerId, protocol: "opentag.channel.v1",
     capabilities: { threads: true, messageUpdate: true, reactions: true,
       interactiveActions: false, attachments: "metadata", authenticatedDeletion: false,
-      stableSourceVersions: false }, installation: { appInstanceId: adapter.providerInstanceId,
+      stableSourceVersions: false }, installation: { organizationId: "org_test", appInstanceId: adapter.providerInstanceId,
       bindingDigest: adapter.bindingDigest, credentialGeneration: adapter.providerConfigGeneration,
       credentialGenerationDigest: adapter.providerConfigGenerationDigest },
     ingress: { verify: async (input) => input, normalize: () => null },

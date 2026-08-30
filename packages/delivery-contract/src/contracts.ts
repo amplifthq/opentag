@@ -182,6 +182,7 @@ function assertBusinessEnvelope(
 const BusinessDeliveryIntentV2Schema = z
   .object({
     ...businessEnvelope,
+    organizationId: safeId,
     intentKind: z.literal('delivery'),
     operation: z.enum(['create', 'update']),
     deliveryKind: z.enum(['message', 'reaction']),
@@ -194,6 +195,7 @@ const BusinessDeliveryIntentV2Schema = z
 const SourceThreadControlDeliveryIntentV2Schema = z
   .object({
     contractVersion: z.literal(2), sideEffectIntentId: safeId, causalId: safeId,
+    organizationId: safeId,
     intentKind: z.literal('delivery'),
     operation: z.literal('control_reply'),
     deliveryKind: z.literal('message'), presentationDigest: digest,

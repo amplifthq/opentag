@@ -14,7 +14,7 @@ const sourceApp = (): SourceAppDefinition<unknown, unknown, unknown> => ({
   capabilities: { threads: true, messageUpdate: true, reactions: false,
     interactiveActions: false, attachments: "metadata", authenticatedDeletion: true,
     stableSourceVersions: true },
-  installation: { appInstanceId: "instance_1", bindingDigest,
+  installation: { organizationId: "org_a", appInstanceId: "instance_1", bindingDigest,
     credentialGeneration: 1, credentialGenerationDigest: generationDigest },
   ingress: { verify: async (input) => input, normalize: () => null },
   context: { readThread: async () => ({ messages: [], truncated: false, decodedBytes: 0 }) },

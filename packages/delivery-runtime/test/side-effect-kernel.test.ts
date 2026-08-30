@@ -7,7 +7,7 @@ import { ProviderAdapterRegistry, ProviderSideEffectKernel,
   type DeliveryKernelRepository } from "../src/index.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectIntentId: "intent-1",
+const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_test", sideEffectIntentId: "intent-1",
   causalId: "cause-1", intentKind: "delivery", operation: "create", deliveryKind: "message",
   presentationDigest: digest("presentation"), provenance: { kind: "business",
     repositoryIdentityDigest: digest("repo"), runId: "run-1", authorityLineageDigest: digest("authority") },
@@ -18,7 +18,7 @@ const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, sideEffectInte
   authoritySnapshotDigest: digest("snapshot"), evidencePolicy: "local_audit", idempotencyKey: "key-1",
   scope: { kind: "local_repository", id: "repo-1" }, createdAt: "2026-08-28T00:00:00.000Z",
   initialAttemptSequence: 1 });
-const claim: DeliveryClaim = { attemptId: "attempt-1", intentId: intent.sideEffectIntentId,
+const claim: DeliveryClaim = { organizationId: "org_test", attemptId: "attempt-1", intentId: intent.sideEffectIntentId,
   sequence: 1, leaseFence: "fence", revision: 2, providerId: "slack",
   providerInstanceId: "workspace-a", providerBindingDigest: digest("binding"),
   providerConfigGeneration: 1, providerConfigGenerationDigest: digest("generation"),
@@ -44,7 +44,7 @@ function sourceApp(deliver: SourceAppDefinition<unknown, unknown, { text: string
   return { appId: "slack", protocol: "opentag.channel.v1",
     capabilities: { threads: true, messageUpdate: true, reactions: true, interactiveActions: false,
       attachments: "metadata", authenticatedDeletion: true, stableSourceVersions: true },
-    installation: { appInstanceId: "workspace-a", bindingDigest: digest("binding"),
+    installation: { organizationId: "org_test", appInstanceId: "workspace-a", bindingDigest: digest("binding"),
       credentialGeneration: 1, credentialGenerationDigest: digest("generation") },
     ingress: { verify: async (input) => input, normalize: () => null },
     context: { readThread: async () => ({ messages: [], truncated: false, decodedBytes: 0 }) },

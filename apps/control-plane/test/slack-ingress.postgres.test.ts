@@ -14,7 +14,7 @@ const now = new Date("2026-08-30T00:00:00.000Z");
 
 describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
-  const installation = { appInstanceId: "A1", bindingDigest: digest("binding"),
+  const installation = { organizationId: "org_a", appInstanceId: "A1", bindingDigest: digest("binding"),
     credentialGeneration: 1, credentialGenerationDigest: digest("generation") };
 
   beforeEach(async () => {
@@ -112,8 +112,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
           sourceVersionRef: command.sourceVersionRef, reason: "source_content_deleted" as const,
           recordedAt: now.toISOString(), authorityReceiptDigest: digest(command.commandId) };
       } } });
-    return { material, ingress: createPostgresSlackIngress({ pool: fixture.pool, clock, custody,
-      sourceApps: new SourceAppRegistry(),
+    const sourceApps = new SourceAppRegistry();
+    return { material, sourceApps, ingress: createPostgresSlackIngress({ pool: fixture.pool, clock, custody,
+      sourceApps,
       jobs, secrets: { async resolve(reference) {
         const value = material.get(reference); if (!value) throw new Error("secret_unavailable");
         return value;
@@ -121,6 +122,37 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       ...(input.tokenFactory ? { tokenFactory: input.tokenFactory } : {}),
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
+
+  it("preloads healthy active installations while isolating broken and disabled rows", async () => {
+    await insertSlackInstallation();
+    for (const [suffix, state, secretRef] of [["2", "active", "secret://missing"],
+      ["3", "disabled", "secret://slack/signing"]] as const) {
+      await fixture.pool.query(`INSERT INTO cp_source_app_installation(
+        organization_id,installation_id,source_app_id,app_instance_id,binding_digest,
+        credential_generation,credential_generation_digest,state,created_at,updated_at)
+        VALUES('org_a',$1,'slack',$2,$3,1,$4,$5,$6,$6)`,
+      [`install_${suffix}`, `A${suffix}`, digest(`binding_${suffix}`),
+        digest(`generation_${suffix}`), state, now]);
+      await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,
+        installation_id,binding_digest,state,created_at,updated_at)
+        VALUES('org_a',$1,$2,$3,'active',$4,$4)`,
+      [`binding_${suffix}`, `install_${suffix}`, digest(`binding_${suffix}`), now]);
+      await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,
+        binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,
+        bot_token_ref,created_at,updated_at) VALUES('org_a',$1,$2,$3,$4,$5,$6,ARRAY['U1'],$7,
+        'secret://slack/bot',$8,$8)`, [`install_${suffix}`, `binding_${suffix}`, `T${suffix}`,
+          `A${suffix}`, `C${suffix}`, `U${suffix}`, secretRef, now]);
+    }
+    const runtime = productionComponents();
+    await expect(runtime.ingress.preloadSourceApps()).resolves.toEqual({ registered: 1, failed: 1 });
+    expect(runtime.sourceApps.resolveDelivery({ organizationId: "org_a", appId: "slack",
+      appInstanceId: "A1", bindingDigest: digest("binding"), credentialGeneration: 1,
+      credentialGenerationDigest: digest("generation") })).toBeDefined();
+    for (const suffix of ["2", "3"]) expect(runtime.sourceApps.resolveDelivery({
+      organizationId: "org_a", appId: "slack", appInstanceId: `A${suffix}`,
+      bindingDigest: digest(`binding_${suffix}`), credentialGeneration: 1,
+      credentialGenerationDigest: digest(`generation_${suffix}`) })).toBeUndefined();
+  });
 
   it("acks only after reservation, encrypted content, and processing job commit", async () => {
     await expect(components().ingress.receiveEvents(request())).resolves.toMatchObject({

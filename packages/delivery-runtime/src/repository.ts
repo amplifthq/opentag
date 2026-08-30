@@ -1,5 +1,5 @@
 import type { DeliveryIntentV2, DeliveryBegin, DeliveryClaim,
-  DeliverySettlement, DeliverySettlementInput, ExternalResourceObservation,
+  DeliveryExternalResourceLookupDescriptor, DeliverySettlement, DeliverySettlementInput, ExternalResourceObservation,
   StoredDeliveryIntent } from "@opentag/delivery-contract";
 export { DELIVERY_ERROR_CODES } from "@opentag/delivery-contract";
 export type { DeliveryBegin, DeliveryClaim, DeliveryErrorCode, DeliveryOutcome,
@@ -17,5 +17,5 @@ export interface DeliveryKernelRepository {
   settleOrReadTerminal(input: DeliverySettlementInput): Awaitable<DeliverySettlement>;
   finalizeStrandedBegun(input: { before: string; evidenceDigest: string;
     outcomeRecordedAt?: string }): Awaitable<number>;
-  findAcceptedExternalResource(input: { intent: DeliveryIntentV2; statusMessageId: string }): Awaitable<ExternalResourceObservation>;
+  findAcceptedExternalResource(input: DeliveryExternalResourceLookupDescriptor): Awaitable<ExternalResourceObservation>;
 }

@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, domainSeparatedCanonicalBytes,
   type DeliveryBegin, type DeliveryClaim, type DeliveryErrorCode,
-  type DeliveryIntentV2, type DeliveryOutcome, type DeliverySettlement,
+  type DeliveryExternalResourceLookupDescriptor, type DeliveryIntentV2,
+  type DeliveryOutcome, type DeliverySettlement,
   type ExpectedDeliveryOwner } from "@opentag/delivery-contract";
 import { and, asc, eq, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
@@ -34,7 +35,8 @@ const descriptor = (row: ImmutableAttempt | DeliveryAttemptRecord): DeliveryPayl
   providerId: row.providerId, providerInstanceId: row.providerInstanceId, providerBindingDigest: row.providerBindingDigest,
   providerConfigGeneration: row.providerConfigGeneration, providerConfigGenerationDigest: row.providerConfigGenerationDigest,
   runtimeOwnerId: row.runtimeOwnerId, runtimeGeneration: row.runtimeGeneration, schemaGeneration: row.schemaGeneration });
-const claim = (row: DeliveryAttemptRecord, leaseFence: string): DeliveryClaim => ({ ...descriptor(row), attemptId: row.id, sequence: row.sequence,
+const claim = (row: DeliveryAttemptRecord, leaseFence: string): DeliveryClaim => ({ ...descriptor(row),
+  organizationId: row.organizationId, attemptId: row.id, sequence: row.sequence,
   leaseFence, revision: row.revision, authoritySnapshotDigest: row.authoritySnapshotDigest });
 const begun = (row: DeliveryAttemptRecord, leaseFence: string): DeliveryBegin => ({ ...claim(row, leaseFence), installationBeginMarkerId: row.installationBeginMarkerId!,
   installationBeginMarkerDigest: row.installationBeginMarkerDigest!, scopeBeginMarkerId: row.scopeBeginMarkerId!, scopeBeginMarkerDigest: row.scopeBeginMarkerDigest! });
@@ -43,6 +45,7 @@ function claimTuple(input: DeliveryClaim, fence = sha256(input.leaseFence)): SQL
   ...Object.entries(input).flatMap(([key, value]) => key in OWNER_COLUMNS ? [eq(OWNER_COLUMNS[key as keyof ExpectedDeliveryOwner], value)] : []),
   eq(deliveryAttempts.authoritySnapshotDigest, input.authoritySnapshotDigest), eq(deliveryAttempts.journalIntentDigest, input.journalIntentDigest)]; }
 const OWNER_COLUMNS = { providerId: deliveryAttempts.providerId, providerInstanceId: deliveryAttempts.providerInstanceId,
+  organizationId: deliveryAttempts.organizationId,
   providerBindingDigest: deliveryAttempts.providerBindingDigest, providerConfigGeneration: deliveryAttempts.providerConfigGeneration,
   providerConfigGenerationDigest: deliveryAttempts.providerConfigGenerationDigest, runtimeOwnerId: deliveryAttempts.runtimeOwnerId,
   runtimeGeneration: deliveryAttempts.runtimeGeneration, schemaGeneration: deliveryAttempts.schemaGeneration } as const;
@@ -51,7 +54,8 @@ const beginTuple = (input: DeliveryBegin) => [eq(deliveryAttempts.installationBe
 
 function intentRow(intentInput: DeliveryIntentV2, owner: ExpectedDeliveryOwner): ImmutableAttempt {
   const intent = DeliveryIntentV2Schema.parse(intentInput); const provenance = intent.provenance; const binding = intent.providerBinding;
-  return { intentId: intent.sideEffectIntentId, sequence: intent.initialAttemptSequence, causalId: intent.causalId, operation: intent.operation, deliveryKind: intent.deliveryKind,
+  if (intent.organizationId !== owner.organizationId) throw new Error("delivery organization owner mismatch");
+  return { organizationId: intent.organizationId, intentId: intent.sideEffectIntentId, sequence: intent.initialAttemptSequence, causalId: intent.causalId, operation: intent.operation, deliveryKind: intent.deliveryKind,
     presentationDigest: intent.presentationDigest, targetDigest: intent.targetDigest, authorityKind: intent.authorityKind, evidencePolicy: intent.evidencePolicy,
     provenanceKind: provenance.kind, repositoryIdentityDigest: provenance.kind === "business" ? provenance.repositoryIdentityDigest : null, runId: provenance.kind === "business" ? provenance.runId : null,
     authorityLineageDigest: provenance.kind === "business" ? provenance.authorityLineageDigest : null, inboundEventDigest: provenance.kind === "source_thread_control" ? provenance.inboundEventDigest : null,
@@ -139,10 +143,25 @@ export function createDeliveryKernelRepository(options: DeliveryKernelRepository
       return rows.reduce((count, row) => count + db.update(deliveryAttempts).set({ state: "outcome_unknown", evidenceDigest: input.evidenceDigest, errorCode: "delivery_restart_after_begin", externalResourceDigest: null, externalResourceId: null,
         outcomeRecordedAt: at, updatedAt: at, revision: row.revision + 1 }).where(and(eq(deliveryAttempts.state, "provider_io_begun"), ...claimTuple({ ...claim(row, "unused"), leaseFence: "unused" }, row.leaseFenceDigest!), ...beginTuple(begun(row, "unused")), eq(deliveryAttempts.begunAt, row.begunAt!))).run().changes, 0);
     },
-    findAcceptedExternalResource(input: { intent: DeliveryIntentV2; statusMessageId: string }): { outcome: "none" | "ambiguous" } | { outcome: "exact"; externalResourceId: string; externalResourceDigest: string } {
+    findAcceptedExternalResource(input: DeliveryExternalResourceLookupDescriptor): { outcome: "none" | "ambiguous" } | { outcome: "exact"; externalResourceId: string; externalResourceDigest: string } {
       const rows = db.selectDistinct({ externalResourceId: deliveryAttempts.externalResourceId, externalResourceDigest: deliveryAttempts.externalResourceDigest }).from(deliveryAttempts).where(and(eq(deliveryAttempts.state, "accepted"),
-        eq(deliveryAttempts.provenanceKind, "business"), eq(deliveryAttempts.operation, "create"), eq(deliveryAttempts.scopeKind, input.intent.scope.kind), eq(deliveryAttempts.scopeId, input.intent.scope.id),
-        eq(deliveryAttempts.statusMessageId, input.statusMessageId), eq(deliveryAttempts.targetDigest, input.intent.targetDigest), ...Object.entries(owner).map(([key, value]) => eq(OWNER_COLUMNS[key as keyof ExpectedDeliveryOwner], value)),
+        eq(deliveryAttempts.provenanceKind, "business"), eq(deliveryAttempts.operation, input.operation),
+        eq(deliveryAttempts.organizationId, input.organizationId),
+        eq(deliveryAttempts.scopeKind, input.scopeKind), eq(deliveryAttempts.scopeId, input.scopeId),
+        eq(deliveryAttempts.statusMessageId, input.statusMessageId), eq(deliveryAttempts.targetDigest, input.targetDigest),
+        eq(deliveryAttempts.providerId, input.providerId), eq(deliveryAttempts.providerInstanceId, input.providerInstanceId),
+        eq(deliveryAttempts.providerBindingDigest, input.providerBindingDigest),
+        eq(deliveryAttempts.providerPrincipalDigest, input.providerPrincipalDigest),
+        eq(deliveryAttempts.principalAssurance, input.principalAssurance),
+        eq(deliveryAttempts.providerConfigGeneration, input.providerConfigGeneration),
+        eq(deliveryAttempts.providerConfigGenerationDigest, input.providerConfigGenerationDigest),
+        eq(deliveryAttempts.runtimeOwnerId, input.runtimeOwnerId), eq(deliveryAttempts.runtimeGeneration, input.runtimeGeneration),
+        eq(deliveryAttempts.schemaGeneration, input.schemaGeneration),
+        eq(deliveryAttempts.authoritySnapshotDigest, input.authoritySnapshotDigest),
+        eq(deliveryAttempts.repositoryIdentityDigest, input.repositoryIdentityDigest),
+        eq(deliveryAttempts.authorityLineageDigest, input.authorityLineageDigest),
+        input.connectionId === null ? isNull(deliveryAttempts.connectionId) : eq(deliveryAttempts.connectionId, input.connectionId),
+        input.connectionIdDigest === null ? isNull(deliveryAttempts.connectionIdDigest) : eq(deliveryAttempts.connectionIdDigest, input.connectionIdDigest),
         isNotNull(deliveryAttempts.externalResourceId), isNotNull(deliveryAttempts.externalResourceDigest))).limit(2).all();
       return rows.length === 0 ? { outcome: "none" } : rows.length > 1 ? { outcome: "ambiguous" } : { outcome: "exact", externalResourceId: rows[0]!.externalResourceId!, externalResourceDigest: rows[0]!.externalResourceDigest! };
     },

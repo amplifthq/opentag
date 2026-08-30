@@ -46,7 +46,8 @@ import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress
 import { SourceAppRegistry, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import { ProviderAdapterRegistry, ProviderSideEffectKernel,
   UnifiedDeliveryProducer } from "@opentag/delivery-runtime";
-import type { DeliveryIntentV2, DeliveryPayloadEnvelope } from "@opentag/delivery-contract";
+import { deliveryCurrentTruthDescriptor,
+  type DeliveryIntentV2, type DeliveryPayloadEnvelope } from "@opentag/delivery-contract";
 import {
   createSourceIngressWorker,
   type SourceResolutionPort,
@@ -308,13 +309,14 @@ export function createControlPlaneRuntime(input: {
     const intent = presentation.intent; const binding = intent.providerBinding;
     const persistedPayload: DeliveryPayloadEnvelope<object> = { envelopeVersion: 1,
       providerRequest: presentation.providerRequest, phase: presentation.phase,
-      frozenDeadline: presentation.frozenDeadline, currentTruth: {
-        runId: intent.provenance.kind === "business" ? intent.provenance.runId : "",
-        scopeKind: intent.scope.kind, scopeId: intent.scope.id, targetDigest: intent.targetDigest,
+      frozenDeadline: presentation.frozenDeadline,
+      currentTruth: deliveryCurrentTruthDescriptor({ intent, owner: {
+        organizationId: intent.organizationId, providerId: binding.providerId,
         providerInstanceId: binding.providerInstanceId,
-        statusMessageId: "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
-        ...deliveryRuntimeOwner, providerConfigGeneration: binding.providerConfigGeneration,
-        providerConfigGenerationDigest: binding.providerConfigGenerationDigest } };
+        providerBindingDigest: binding.bindingDigest,
+        providerConfigGeneration: binding.providerConfigGeneration,
+        providerConfigGenerationDigest: binding.providerConfigGenerationDigest,
+        ...deliveryRuntimeOwner } }) };
     return { intent, persistedPayload };
   } });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
