@@ -998,6 +998,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                     message: "Attempt workspace re-attested before material authorization.",
                     at: new Date().toISOString(), workspaceAttestation });
                 }
+                const permissionWorkspaceAttestation = workspaceAttestation;
                 const resolution = await governedResolver({
                   toolCallId: request.toolCall.toolCallId,
                   title: request.toolCall.title,
@@ -1011,6 +1012,26 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
                   ...(request.toolCall.targetFingerprint ? { targetFingerprint: request.toolCall.targetFingerprint } : {}),
                   permissionScopes: request.permissionScopes
                 });
+                if (resolution.decision !== "deny" && workspace.kind === "repository"
+                  && permissionWorkspaceAttestation && input.attemptId && input.attemptAuthority) {
+                  const beforeAllow = await attestAttemptWorkspace({ runner,
+                    workspacePath: executionPath, repositoryPath: workspace.path,
+                    workspaceId: permissionWorkspaceAttestation.workspaceId,
+                    baseRevision: permissionWorkspaceAttestation.baseRevision,
+                    attemptId: input.attemptId,
+                    attemptNumber: input.attemptAuthority.attemptNumber,
+                    fencingTokenDigest: input.attemptAuthority.fencingTokenDigest,
+                    credentialId: input.attemptAuthority.credentialId,
+                    leaseExpiresAt: permissionWorkspaceAttestation.leaseExpiresAt });
+                  if (JSON.stringify(beforeAllow) !== JSON.stringify(permissionWorkspaceAttestation)) {
+                    return permissionResponseForDecision({ decision: "deny" }, requestOptions);
+                  }
+                }
+                if (resolution.decision !== "deny"
+                  && resolution.confirmMaterialAuthorization
+                  && !(await resolution.confirmMaterialAuthorization())) {
+                  return permissionResponseForDecision({ decision: "deny" }, requestOptions);
+                }
                 if (resolution.decision !== "deny" && !resolution.reconciled && resolution.material) {
                   governedActions.set(request.toolCall.toolCallId, { resolution, reported: false });
                 }

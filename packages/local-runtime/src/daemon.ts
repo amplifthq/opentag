@@ -6,6 +6,7 @@ import {
   parseWorkContextMutationCommand,
   projectTargetRefFromEvent,
   sanitizeCredentialLikeValue,
+  computeControlPayloadDigestV1,
   type OpenTagEvent,
   type OpenTagRun,
   type OpenTagRunResult,
@@ -68,6 +69,7 @@ export type DaemonClient = {
     interruptionEvidence?: AttemptInterruptionEvidenceV1 }): Promise<void>;
   requestActionPermission(runId: string, lease: AttemptLease, request: ActionPermissionRequest): Promise<ActionPermissionResolution>;
   resolveActionPermission(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
+  confirmActionPermission?(runId: string, lease: AttemptLease, actionId: string): Promise<ActionPermissionResolution>;
   recordMaterialActionReceipt(runId: string, lease: AttemptLease, actionId: string, receipt: import("@opentag/core").MaterialActionReceipt): Promise<ActionPermissionResolution>;
 };
 
@@ -644,7 +646,11 @@ export async function executeClaimedRun(
             ...(request.grantScope ? { grantScope: request.grantScope } : {}),
             permissionScopes: request.permissionScopes,
             mode: input.approvalMode ?? "auto",
-            provider: request.provider
+            provider: request.provider,
+            ...(latestWorkspaceAttestation
+              ? { workspaceAttestationDigest:
+                  await computeControlPayloadDigestV1(latestWorkspaceAttestation) }
+              : {})
           });
           while (resolution.state === "waiting") {
             await new Promise((resolveWait) => setTimeout(resolveWait, 250));
@@ -665,7 +671,14 @@ export async function executeClaimedRun(
             return {
               actionId: resolution.action.id,
               decision: resolution.decision === "allow_run" ? "allow_run" as const : "allow_once" as const,
-              material: resolution.action.riskTier !== "low"
+              material: resolution.action.riskTier !== "low",
+              ...(resolution.action.riskTier !== "low" && input.client.confirmActionPermission
+                ? { confirmMaterialAuthorization: async () => {
+                    const confirmed = await input.client.confirmActionPermission!(
+                      runId, lease, resolution.action.id);
+                    return confirmed.state === "authorized";
+                  } }
+                : {})
             };
           }
           if (resolution.state === "reconciled") {

@@ -146,6 +146,27 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       [claim.organizationId, claim.runId]);
     expect(persisted.rows[0]?.workspace_attestation).toEqual(attestation);
     expect(JSON.stringify(persisted.rows[0])).not.toContain("/Users/");
+    const wrong = { ...attestation, workspaceId: "workspace_wrong",
+      workspacePathDigest: `sha256:${"9".repeat(64)}` };
+    const progress = await buildHostedLifecycleRequestV1({ action: "progress",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest }, occurredAt: now.toISOString(),
+      progressId: `progress_${"5".repeat(64)}`, progressDigest: `sha256:${"6".repeat(64)}`,
+      workspaceAttestation: wrong });
+    await expect(service.lifecycle({ principal, runId: claim.runId, action: "progress",
+      request: progress })).resolves.toEqual({ kind: "conflict", reason: "invalid_request" });
+    const complete = await buildHostedLifecycleRequestV1({ action: "complete",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest }, occurredAt: now.toISOString(),
+      conclusion: "success", reasonCode: "executor_success",
+      resultDigest: `sha256:${"7".repeat(64)}`, artifactDigests: [], evidenceDigests: [],
+      workspaceAttestation: wrong });
+    await expect(service.lifecycle({ principal, runId: claim.runId, action: "complete",
+      request: complete })).resolves.toEqual({ kind: "conflict", reason: "invalid_request" });
   });
 
   it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {

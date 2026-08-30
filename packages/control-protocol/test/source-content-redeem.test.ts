@@ -7,6 +7,8 @@ import {
   HostedRunningRequestV1Schema,
   HostedSourceContentRedeemRequestV1Schema,
   HostedSourceContentRedeemResponseV1Schema,
+  RunnerMaterialActionBeginV1Schema,
+  RunnerPermissionRequestV1Schema,
   verifyHostedSourceContentRedeemPayloadV1,
 } from "../src/index.js";
 
@@ -153,5 +155,36 @@ describe("hosted source content redemption", () => {
         interruptionEvidence: interruption } };
     expect(HostedLifecycleReceiptEnvelopeV1Schema.parse(receipt).payload)
       .toMatchObject({ workspaceAttestation: attestation, interruptionEvidence: interruption });
+  });
+
+  it("binds permission and material-begin authority to the accepted workspace attestation digest", () => {
+    const workspaceAttestationDigest = digest("d");
+    const permission = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.permission.v1"] as const, requestId: "request_permission",
+      operationId: "operation_permission", organizationId: "org_1", runnerId: "runner_1",
+      runId: "run_1", attempt: { attemptId: "attempt_1", attemptNumber: 1, epoch: 1,
+        fencingToken: "fence_1", fencingTokenDigest: digest("1") },
+      permissionRequestId: "permission_1", actionId: "action_1",
+      actionDescriptor: "workspace.write" as const, actionDescriptorDigest: digest("2"),
+      riskTier: "high" as const, targetFingerprint: digest("3"),
+      policySnapshotRef: "policy_1", policySnapshotDigest: digest("4"),
+      workspaceAttestationDigest, permissionRequestDigest: digest("5"),
+      requestedAt: "2026-08-30T00:00:00.000Z" };
+    expect(RunnerPermissionRequestV1Schema.parse(permission).workspaceAttestationDigest)
+      .toBe(workspaceAttestationDigest);
+    const material = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.material-receipt.v1"] as const,
+      requestId: "material_1", operationId: "material_1", organizationId: "org_1",
+      runnerId: "runner_1", runId: "run_1", attempt: permission.attempt,
+      actionId: "action_1", actionDescriptor: "workspace.write" as const,
+      actionDescriptorDigest: digest("2"), targetFingerprint: digest("3"),
+      policySnapshotRef: "policy_1", policySnapshotDigest: digest("4"),
+      workspaceAttestationDigest,
+      authority: { kind: "permission_resolution" as const, permissionRequestId: "permission_1",
+        permissionRequestDigest: digest("5"), resolutionReceiptId: "receipt_1",
+        resolutionReceiptDigest: digest("6"), workspaceAttestationDigest },
+      idempotencyKey: "material_1", begunAt: "2026-08-30T00:00:00.000Z" };
+    expect(RunnerMaterialActionBeginV1Schema.parse(material).workspaceAttestationDigest)
+      .toBe(workspaceAttestationDigest);
   });
 });

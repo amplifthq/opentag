@@ -467,6 +467,7 @@ export const MaterialActionBeginAuthorityV1Schema = z.object({
   permissionRequestDigest: ReceiptDigestSchema,
   resolutionReceiptId: PermissionStableIdV1Schema,
   resolutionReceiptDigest: ReceiptDigestSchema,
+  workspaceAttestationDigest: ReceiptDigestSchema.optional(),
 }).strict();
 
 export const RunnerMaterialActionBeginV1Schema = z.object({
@@ -487,6 +488,7 @@ export const RunnerMaterialActionBeginV1Schema = z.object({
   targetFingerprint: ReceiptDigestSchema,
   policySnapshotRef: MaterialActionStableIdV1Schema,
   policySnapshotDigest: ReceiptDigestSchema,
+  workspaceAttestationDigest: ReceiptDigestSchema.optional(),
   authority: MaterialActionBeginAuthorityV1Schema,
   idempotencyKey: MaterialActionStableIdV1Schema,
   begunAt: ControlTimestampSchema,
@@ -626,6 +628,7 @@ export const RunnerPermissionRequestV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     permissionRequestDigest: ReceiptDigestSchema,
     requestedAt: ControlTimestampSchema,
   })
@@ -653,6 +656,7 @@ export const PermissionRequestDigestInputV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     requestedAt: ControlTimestampSchema,
   })
   .strict();
@@ -1522,6 +1526,7 @@ export const PermissionResolutionPayloadV1Schema = z
     ...PermissionActionSummaryV1Shape,
     policySnapshotRef: PermissionStableIdV1Schema,
     policySnapshotDigest: ReceiptDigestSchema,
+    workspaceAttestationDigest: ReceiptDigestSchema.optional(),
     state: PermissionResolutionStateV1Schema,
     decision: PermissionDecisionV1Schema.optional(),
     decisionRef: PermissionStableIdV1Schema.optional(),

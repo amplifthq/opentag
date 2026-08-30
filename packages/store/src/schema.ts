@@ -2045,6 +2045,48 @@ function migrateControlPlaneProjectionEvidenceKindSchema(
   })();
 }
 
+function migrateHostedPlaintextScrubSchema(sqlite: Database.Database): void {
+  const migrationId = "2026-08-31-hosted-plaintext-scrub-v1";
+  if (sqlite.prepare("SELECT id FROM opentag_schema_migrations WHERE id = ?").get(migrationId)) return;
+  const hostedRuns = sqlite.prepare("SELECT run_id AS runId FROM hosted_run_imports").all() as Array<{ runId: string }>;
+  if (hostedRuns.length > 0) {
+    const scrub = sqlite.transaction(() => {
+      sqlite.exec(`
+        UPDATE runs
+        SET event_json = json_set(
+              event_json,
+              '$.command.rawText', '[redeemed source omitted]',
+              '$.command.args', json('{}'),
+              '$.context', json('[]'),
+              '$.permissions', json('[]'),
+              '$.metadata', json('{}'),
+              '$.callback.uri', 'opentag://hosted-source-callback-omitted'
+            ),
+            context_packet_json = NULL,
+            result_json = NULL
+        WHERE id IN (SELECT run_id FROM hosted_run_imports);
+
+        UPDATE attempts
+        SET result_json = NULL
+        WHERE run_id IN (SELECT run_id FROM hosted_run_imports);
+
+        DELETE FROM run_events
+        WHERE run_id IN (SELECT run_id FROM hosted_run_imports);
+
+        DELETE FROM suggested_changes
+        WHERE run_id IN (SELECT run_id FROM hosted_run_imports);
+      `);
+      sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)")
+        .run(migrationId, new Date().toISOString());
+    });
+    scrub();
+    sqlite.exec("VACUUM");
+    return;
+  }
+  sqlite.prepare("INSERT INTO opentag_schema_migrations (id, applied_at) VALUES (?, ?)")
+    .run(migrationId, new Date().toISOString());
+}
+
 export function migrateSchema(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS runs (
@@ -2619,4 +2661,5 @@ export function migrateSchema(sqlite: Database.Database): void {
   migrateHostedAttemptImportSchema(sqlite);
   migrateHostedHeartbeatOperationSchema(sqlite);
   migrateHostedLifecycleOperationSchema(sqlite);
+  migrateHostedPlaintextScrubSchema(sqlite);
 }

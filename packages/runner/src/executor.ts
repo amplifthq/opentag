@@ -49,6 +49,7 @@ export type ExecutorPermissionResolution = {
   reconciled?: boolean;
   receipt?: { receiptRef: string; outcome: "succeeded" | "failed" | "unknown" };
   material?: boolean;
+  confirmMaterialAuthorization?: () => Promise<boolean>;
 };
 
 export type ExecutorMaterialActionReport = {

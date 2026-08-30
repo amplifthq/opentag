@@ -344,6 +344,7 @@ describe("ACP executor", () => {
   it("pauses on the governed resolver and records an unverified ACP material outcome as unknown", async () => {
     const scratch = tempDir("governed");
     const reports: Array<{ actionId: string; outcome: string; receiptRef: string }> = [];
+    let confirmations = 0;
     const executor = createAcpExecutor({ manifest: manifest("permission") });
 
     await executor.run({
@@ -356,7 +357,8 @@ describe("ACP executor", () => {
           targetFingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u)
         });
         expect(JSON.stringify(request)).not.toContain("fixture-secret-token");
-        return { actionId: "action_publish", decision: "allow_once", material: true };
+        return { actionId: "action_publish", decision: "allow_once", material: true,
+          confirmMaterialAuthorization: async () => { confirmations += 1; return true; } };
       },
       materialActionReporter: async (report) => void reports.push(report)
     }, { emit: async () => undefined });
@@ -367,6 +369,7 @@ describe("ACP executor", () => {
     expect(reports).toEqual([
       expect.objectContaining({ actionId: "action_publish", outcome: "unknown", receiptRef: expect.stringContaining("material-1") })
     ]);
+    expect(confirmations).toBe(1);
   }, 15_000);
 
   it("removes credential values from ACP target identity while retaining structured resource changes", async () => {

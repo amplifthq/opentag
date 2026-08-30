@@ -258,6 +258,7 @@ export async function authorizeHostedMaterialActionFixture(input: {
   targetFingerprint: string;
   policySnapshotRef: string;
   policySnapshotDigest: string;
+  workspaceAttestationDigest?: string;
   suffix: string;
 }) {
   const actionDescriptorDigest = await computeControlPayloadDigestV1(
@@ -285,6 +286,8 @@ export async function authorizeHostedMaterialActionFixture(input: {
     targetFingerprint: input.targetFingerprint,
     policySnapshotRef: input.policySnapshotRef,
     policySnapshotDigest: input.policySnapshotDigest,
+    ...(input.workspaceAttestationDigest
+      ? { workspaceAttestationDigest: input.workspaceAttestationDigest } : {}),
     requestedAt: input.clock.now().toISOString(),
   };
   const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
@@ -341,6 +344,8 @@ export async function authorizeHostedMaterialActionFixture(input: {
       permissionRequestDigest,
       resolutionReceiptId: approved.receipt.receiptId,
       resolutionReceiptDigest: approved.receipt.receiptDigest,
+      ...(input.workspaceAttestationDigest
+        ? { workspaceAttestationDigest: input.workspaceAttestationDigest } : {}),
     },
   };
 }

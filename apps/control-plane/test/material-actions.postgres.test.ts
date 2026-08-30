@@ -114,6 +114,15 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     });
     if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
     const claim = claimOutcome.claim;
+    const workspaceAttestation = { workspaceId: "workspace_material",
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`,
+      baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+      currentTree: "b".repeat(40), workspaceStateDigest: `sha256:${"7".repeat(64)}`,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
     const coordinator = createMaterialActionCoordinator({
       pool: fixture.pool,
       clock: { now: () => now },
@@ -130,6 +139,29 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
       policySnapshotDigest: admission.policy.receiptDigest,
       suffix: "material",
     });
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET workspace_attestation = $4::jsonb
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+      [principal.organizationId, claim.runId, claim.attempt.id,
+        JSON.stringify(workspaceAttestation)],
+    );
+    await expect(coordinator.begin({ principal,
+      fencingToken: claim.attempt.fencingToken, runId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId: "action_material", actionDescriptor: "github.pull_request.merge",
+      actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: admission.policy.payload.snapshotId,
+      policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest: `sha256:${"f".repeat(64)}`,
+      authority: { ...authorization.authority,
+        workspaceAttestationDigest: `sha256:${"f".repeat(64)}` },
+      idempotencyKey: "material_action_material" }))
+      .resolves.toEqual({ kind: "conflict" });
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET workspace_attestation = NULL
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+      [principal.organizationId, claim.runId, claim.attempt.id],
+    );
     await expect(coordinator.begin({ principal,
       fencingToken: claim.attempt.fencingToken, runId: claim.runId,
       attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,

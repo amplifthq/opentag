@@ -51,6 +51,20 @@ describe.skipIf(!TEST_DATABASE_URL)("relay source content envelope custody", () 
     expect(stored.rows).toEqual([]);
   });
 
+  it("replays exact encrypted ingress content but rejects payload or metadata conflicts", async () => {
+    const custody = createRelayContentCustody({ pool: fixture.pool, clock,
+      key: { key, keyVersion: "v1" } });
+    const first = await custody.store(content());
+    await expect(custody.store(content())).resolves.toEqual(first);
+    await expect(custody.store({ ...content(), payload: { ...content().payload,
+      text: "tampered" } })).rejects.toThrow("source_content_conflict");
+    await expect(custody.store({ ...content(), sourceMessageId: "message_other" }))
+      .rejects.toThrow("source_content_conflict");
+    expect((await fixture.pool.query(
+      "SELECT count(*)::int AS count FROM cp_source_content WHERE content_id = 'content_1'",
+    )).rows).toEqual([{ count: 1 }]);
+  });
+
   it("catches tenant, source-version, or purpose substitution during decryption", async () => {
     const custody = createRelayContentCustody({
       pool: fixture.pool, clock, key: { key, keyVersion: "v1" },

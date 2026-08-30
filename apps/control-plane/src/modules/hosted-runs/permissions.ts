@@ -124,6 +124,8 @@ function permissionDigestInput(request: RunnerPermissionRequestV1) {
     targetFingerprint: request.targetFingerprint,
     policySnapshotRef: request.policySnapshotRef,
     policySnapshotDigest: request.policySnapshotDigest,
+    ...(request.workspaceAttestationDigest
+      ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
     requestedAt: request.requestedAt,
   };
 }
@@ -165,6 +167,8 @@ async function buildReceipt(input: {
     targetFingerprint: input.request.targetFingerprint,
     policySnapshotRef: input.request.policySnapshotRef,
     policySnapshotDigest: input.request.policySnapshotDigest,
+    ...(input.request.workspaceAttestationDigest
+      ? { workspaceAttestationDigest: input.request.workspaceAttestationDigest } : {}),
     state: input.state,
     ...(input.decision
       ? {
@@ -230,11 +234,13 @@ async function currentAttemptMatches(
     policySnapshotDigest?: string;
     allowNeedsApproval?: boolean;
     permissionRequestId?: string;
+    workspaceAttestationDigest?: string;
+    requireWorkspaceAttestationDigest?: boolean;
     now: Date;
   },
 ): Promise<boolean> {
   const result = await client.query(
-    `SELECT 1
+    `SELECT attempt.workspace_attestation
      FROM cp_hosted_run run
      JOIN cp_hosted_attempt attempt
        ON attempt.organization_id = run.organization_id
@@ -272,8 +278,17 @@ async function currentAttemptMatches(
       input.allowNeedsApproval ?? false,
       input.permissionRequestId ?? null,
     ],
-  ) as { rows: unknown[] };
-  return result.rows.length === 1;
+  ) as { rows: Array<{ workspace_attestation: unknown | null }> };
+  const row = result.rows[0];
+  if (!row) return false;
+  if (!input.workspaceAttestationDigest) {
+    return input.requireWorkspaceAttestationDigest
+      ? row.workspace_attestation === null
+      : true;
+  }
+  return row.workspace_attestation !== null
+    && await computeControlPayloadDigestV1(row.workspace_attestation)
+      === input.workspaceAttestationDigest;
 }
 
 export function createPermissionCoordinator(input: {
@@ -330,6 +345,9 @@ export function createPermissionCoordinator(input: {
             policySnapshotDigest: request.policySnapshotDigest,
             allowNeedsApproval: true,
             permissionRequestId: request.permissionRequestId,
+            ...(request.workspaceAttestationDigest
+              ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
+            requireWorkspaceAttestationDigest: true,
             now: input.clock.now(),
           }))) return { kind: "stale_fence" } as const;
           return {
@@ -349,6 +367,9 @@ export function createPermissionCoordinator(input: {
           fencingTokenDigest: request.attempt.fencingTokenDigest,
           policySnapshotRef: request.policySnapshotRef,
           policySnapshotDigest: request.policySnapshotDigest,
+          ...(request.workspaceAttestationDigest
+            ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
+          requireWorkspaceAttestationDigest: true,
           now: input.clock.now(),
         }))) {
           return { kind: "stale_fence" } as const;
@@ -559,6 +580,8 @@ export function createPermissionCoordinator(input: {
           policySnapshotDigest: stored.policy_snapshot_digest,
           allowNeedsApproval: true,
           permissionRequestId: decision.permissionRequestId,
+          ...(storedRequest.workspaceAttestationDigest
+            ? { workspaceAttestationDigest: storedRequest.workspaceAttestationDigest } : {}),
           now: input.clock.now(),
         }))) return { kind: "stale_fence" } as const;
         const request = storedRequest;

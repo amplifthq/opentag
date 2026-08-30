@@ -22,6 +22,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   let ingress: ReturnType<typeof createGithubIngress>;
   let custody: ReturnType<typeof createRelayContentCustody>;
+  let hosted: ReturnType<typeof createHostedRunCoordinator>;
   const now = new Date("2026-08-15T13:00:00.000Z");
   const owner = {
     operatorId: "operator_ingress",
@@ -146,7 +147,7 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
         readiness,
       ],
     );
-    const hosted = createHostedRunCoordinator({
+    hosted = createHostedRunCoordinator({
       pool: fixture.pool,
       clock: { now: () => now },
       leaseDurationMs: 60_000,
@@ -296,6 +297,43 @@ describe.skipIf(!TEST_DATABASE_URL)("signed GitHub ingress", () => {
     });
 
     expect(outcome.kind).toBe("created");
+  });
+
+  it("replays exact custody after a crash before Admission and completes the delivery retry", async () => {
+    let failAdmission = true;
+    const retryIngress = createGithubIngress({ pool: fixture.pool, clock: { now: () => now },
+      masterSecret: "github-ingress-master-secret-with-32-bytes", sourceContent: custody,
+      hosted: { ...hosted, async admit(input) {
+        if (failAdmission) {
+          failAdmission = false;
+          throw new Error("injected_after_custody_before_admission");
+        }
+        return hosted.admit(input);
+      } } });
+    const bindingId = "binding_ingress";
+    const secret = retryIngress.deriveBindingSecret(owner.organizationId, bindingId, "v1");
+    const body = new TextEncoder().encode(JSON.stringify({ action: "created",
+      repository: { id: 123, name: "demo", owner: { login: "acme" } },
+      sender: { id: 1001, login: "octocat" }, issue: { id: 991, number: 91 },
+      comment: { id: 991, body: "@opentag fix retry custody" } }));
+    const delivery = { bindingId,
+      deliveryId: "delivery_custody_retry", eventName: "issue_comment",
+      signature: signature(secret, body), body };
+    await expect(retryIngress.receive(delivery))
+      .rejects.toThrow("injected_after_custody_before_admission");
+    await fixture.pool.query(
+      `UPDATE cp_github_delivery SET processing_expires_at = $1
+       WHERE organization_id = $2 AND binding_id = $3 AND delivery_id = $4`,
+      [new Date(now.getTime() - 1), owner.organizationId,
+        bindingId, "delivery_custody_retry"],
+    );
+    await expect(retryIngress.receive(delivery)).resolves.toMatchObject({
+      kind: "accepted", runId: expect.any(String) });
+    expect((await fixture.pool.query(
+      `SELECT count(*)::int AS count FROM cp_source_content
+       WHERE organization_id = $1 AND source_delivery_id = $2`,
+      [owner.organizationId, "delivery_custody_retry"],
+    )).rows).toEqual([{ count: 1 }]);
   });
 
   it("fails closed for a bad signature or non-allowlisted stable actor id", async () => {

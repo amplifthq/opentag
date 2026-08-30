@@ -7,6 +7,31 @@ const MAX_ARTIFACT_SUMMARY_LENGTH = 1200;
 
 type ResultArtifact = NonNullable<OpenTagRunResult["artifacts"]>[number];
 
+export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void {
+  if (artifact.id === undefined || !artifact.id.endsWith(":proposal-evidence")) return;
+  const metadata = artifact.metadata;
+  if (!metadata || metadata["readiness"] !== "not_assessed"
+    || typeof metadata["evidenceDigest"] !== "string"
+    || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
+    throw new Error("proposal_evidence_invalid");
+  }
+  const evidence = metadata["proposalEvidence"] as ProposalEvidence;
+  const { evidenceDigest, ...digestInput } = evidence;
+  const diffDigest = `sha256:${createHash("sha256")
+    .update(evidence.baseToFinalBinaryDiff).digest("hex")}`;
+  const changedFilesDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(evidence.changedFiles)).digest("hex")}`;
+  const computedDigest = `sha256:${createHash("sha256")
+    .update(canonicalJsonStringify(digestInput)).digest("hex")}`;
+  if (evidence.schemaVersion !== 1 || evidence.kind !== "attempt_proposal_evidence"
+    || evidence.diffDigest !== diffDigest
+    || evidence.changedFilesDigest !== changedFilesDigest
+    || evidenceDigest !== computedDigest
+    || metadata["evidenceDigest"] !== evidenceDigest) {
+    throw new Error("proposal_evidence_digest_mismatch");
+  }
+}
+
 const DIRECT_SOURCE_CONTROL_COMMAND_PATTERN = /^\s*(?:[-*]\s*)?(?:`{1,3})?\s*(?:git\s+(?:add|commit|push|checkout)|gh\s+pr\s+create)\b/i;
 
 const GIT_HANDOFF_PATTERNS = [
@@ -182,6 +207,7 @@ function createRunArtifacts(input: {
         readiness: "not_assessed",
       }),
     });
+    validateProposalEvidenceArtifact(generated.at(-1)!);
   }
   generated.push({
     id: `${input.runId}:diagnosis-report`,

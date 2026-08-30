@@ -108,6 +108,22 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     });
     if (claimOutcome.kind !== "claimed") throw new Error("claim failed");
     const claim = claimOutcome.claim;
+    const workspaceAttestation = { workspaceId: "workspace_permission",
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`,
+      baseRevision: "a".repeat(40), currentRevision: "a".repeat(40),
+      currentTree: "b".repeat(40), workspaceStateDigest: `sha256:${"4".repeat(64)}`,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET workspace_attestation = $4::jsonb
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
+      [principal.organizationId, claim.runId, claim.attempt.id,
+        JSON.stringify(workspaceAttestation)],
+    );
+    const workspaceAttestationDigest = await computeControlPayloadDigestV1(workspaceAttestation);
     const lifecycleAttempt = { attemptId: claim.attempt.id,
       attemptNumber: claim.attempt.number, epoch: claim.attempt.epoch,
       fencingToken: claim.attempt.fencingToken,
@@ -133,6 +149,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       targetFingerprint: `sha256:${"1".repeat(64)}`,
       policySnapshotRef: admission.policy.payload.snapshotId,
       policySnapshotDigest: admission.policy.receiptDigest,
+      workspaceAttestationDigest,
       requestedAt: now.toISOString(),
     };
     const request = RunnerPermissionRequestV1Schema.parse({
@@ -152,6 +169,18 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       clock: { now: () => now },
       idFactory: (kind) => `${kind}_1`,
     });
+    const { workspaceAttestationDigest: _workspaceDigest, ...legacyDigestInput } = digestInput;
+    const wrongWorkspaceRequest = RunnerPermissionRequestV1Schema.parse({
+      ...digestInput, workspaceAttestationDigest: `sha256:${"f".repeat(64)}`,
+      permissionRequestId: "permission_wrong_workspace", actionId: "action_wrong_workspace",
+      requestId: "request_wrong_workspace", operationId: "operation_wrong_workspace",
+      attempt: { ...digestInput.attempt, fencingToken: claim.attempt.fencingToken },
+      permissionRequestDigest: await computePermissionRequestDigestV1({
+        ...legacyDigestInput, permissionRequestId: "permission_wrong_workspace",
+        actionId: "action_wrong_workspace" }),
+    });
+    await expect(permissions.request({ principal, request: wrongWorkspaceRequest }))
+      .resolves.toEqual({ kind: "conflict" });
     const publicationDigestInput = {
       ...digestInput,
       permissionRequestId: "permission_request_publication_denied",
@@ -289,6 +318,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       runId: claim.runId, action: "complete", attempt: lifecycleAttempt,
       occurredAt: now.toISOString(), conclusion: "needs_human",
       reasonCode: "executor_needs_human", resultDigest: `sha256:${"0".repeat(64)}`,
+      workspaceAttestation,
       artifactDigests: [], evidenceDigests: [], blockedPermission: {
         permissionRequestId: request.permissionRequestId,
         actionDescriptorDigest: request.actionDescriptorDigest,
@@ -334,6 +364,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       targetFingerprint: request.targetFingerprint,
       policySnapshotRef: request.policySnapshotRef,
       policySnapshotDigest: request.policySnapshotDigest,
+      workspaceAttestationDigest,
       authority: { kind: "permission_resolution",
         permissionRequestId: request.permissionRequestId,
         permissionRequestDigest: request.permissionRequestDigest,
@@ -419,11 +450,13 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       targetFingerprint: request.targetFingerprint,
       policySnapshotRef: request.policySnapshotRef,
       policySnapshotDigest: request.policySnapshotDigest,
+      workspaceAttestationDigest,
       authority: { kind: "permission_resolution",
         permissionRequestId: request.permissionRequestId,
         permissionRequestDigest: request.permissionRequestDigest,
         resolutionReceiptId: approved.receipt.receiptId,
-        resolutionReceiptDigest: approved.receipt.receiptDigest },
+        resolutionReceiptDigest: approved.receipt.receiptDigest,
+        workspaceAttestationDigest },
       idempotencyKey: "material_begin_exact_approval",
     })).resolves.toEqual({ kind: "begun" });
     const success = await buildHostedLifecycleRequestV1({
@@ -432,6 +465,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       occurredAt: now.toISOString(), conclusion: "success",
       reasonCode: "executor_success", resultDigest: `sha256:${"2".repeat(64)}`,
       artifactDigests: [], evidenceDigests: [],
+      workspaceAttestation,
     });
     await expect(hosted.lifecycle({ principal, runId: claim.runId,
       action: "complete", request: success })).resolves.toMatchObject({ kind: "accepted" });

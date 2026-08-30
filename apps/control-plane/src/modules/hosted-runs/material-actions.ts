@@ -84,6 +84,7 @@ export type MaterialActionCoordinator = {
     actionDescriptor: RunnerMaterialActionBeginV1["actionDescriptor"];
     actionDescriptorDigest: string;
     targetFingerprint: string; policySnapshotRef: string; policySnapshotDigest: string;
+    workspaceAttestationDigest?: string;
     authority: MaterialActionBeginAuthorityV1;
     idempotencyKey: string }): Promise<
       { kind: "begun" | "replayed" } | { kind: "stale_fence" | "conflict" }
@@ -327,12 +328,13 @@ export function createMaterialActionCoordinator(input: {
           publication_mode: string; run_state: string; terminal_kind: string | null;
           attempt_state: string; material_start_state: string; credential_id: string;
           fencing_token_digest: string; lease_expires_at: Date;
+          workspace_attestation: unknown | null;
         }>(
           `SELECT run.hosted_admission, run.admission_policy_snapshot,
                   run.publication_mode, run.state AS run_state, run.terminal_kind,
                   attempt.state AS attempt_state, attempt.material_start_state,
                   attempt.credential_id, attempt.fencing_token_digest,
-                  attempt.lease_expires_at
+                  attempt.lease_expires_at, attempt.workspace_attestation
            FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
              ON attempt.organization_id = run.organization_id
             AND attempt.run_id = run.run_id
@@ -353,6 +355,13 @@ export function createMaterialActionCoordinator(input: {
           || !["claimed", "running"].includes(current.attempt_state)
           || !["open", "started_or_ambiguous"].includes(current.material_start_state)) {
           return { kind: "stale_fence" as const };
+        }
+        const currentWorkspaceAttestationDigest = current.workspace_attestation
+          ? await computeControlPayloadDigestV1(current.workspace_attestation)
+          : undefined;
+        if (command.workspaceAttestationDigest !== currentWorkspaceAttestationDigest
+          || command.authority.workspaceAttestationDigest !== currentWorkspaceAttestationDigest) {
+          return { kind: "conflict" as const };
         }
         const admission = HostedAdmissionEnvelopeV1Schema.parse(current.hosted_admission);
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
@@ -377,7 +386,6 @@ export function createMaterialActionCoordinator(input: {
             && publicationCapabilities.has(command.actionDescriptor))) {
           return { kind: "conflict" as const };
         }
-
         const permission = await client.query<{ permission_request_digest: string;
           state: string; request: unknown; current_receipt: unknown }>(
             `SELECT permission_request_digest, state, current_receipt
@@ -416,6 +424,9 @@ export function createMaterialActionCoordinator(input: {
           || storedRequest.policySnapshotDigest !== command.policySnapshotDigest) {
           return { kind: "conflict" as const };
         }
+        if (storedRequest.workspaceAttestationDigest !== currentWorkspaceAttestationDigest) {
+          return { kind: "conflict" as const };
+        }
         const resolution = PermissionResolutionReceiptEnvelopeV1Schema.parse(
           permissionRow.current_receipt,
         );
@@ -442,6 +453,7 @@ export function createMaterialActionCoordinator(input: {
           || resolution.payload.targetFingerprint !== command.targetFingerprint
           || resolution.payload.policySnapshotRef !== command.policySnapshotRef
           || resolution.payload.policySnapshotDigest !== command.policySnapshotDigest
+          || resolution.payload.workspaceAttestationDigest !== currentWorkspaceAttestationDigest
           || resolution.attempt.attemptId !== command.attemptId
           || resolution.attempt.attemptNumber !== command.attemptNumber
           || resolution.attempt.fencingTokenDigest !== fencingTokenDigest) {

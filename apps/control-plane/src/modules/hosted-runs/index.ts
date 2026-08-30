@@ -1,5 +1,6 @@
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  AttemptWorkspaceAttestationV1Schema,
   canonicalJsonStringify,
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
@@ -939,12 +940,22 @@ export function createHostedRunCoordinator(input: {
         }
         const workspaceAttestation = request.workspaceAttestation;
         const interruptionEvidence = request.interruptionEvidence;
+        const acceptedWorkspaceAttestation = attempt.workspace_attestation
+          ? AttemptWorkspaceAttestationV1Schema.parse(attempt.workspace_attestation)
+          : null;
         if (workspaceAttestation && (
           workspaceAttestation.attemptId !== attempt.attempt_id
           || workspaceAttestation.attemptNumber !== attempt.attempt_number
           || workspaceAttestation.fencingTokenDigest !== attempt.fencing_token_digest
           || workspaceAttestation.credentialId !== attempt.credential_id
           || workspaceAttestation.leaseExpiresAt !== attempt.lease_expires_at.toISOString()
+        )) return { kind: "conflict", reason: "invalid_request" } as const;
+        if (acceptedWorkspaceAttestation && workspaceAttestation && (
+          workspaceAttestation.workspaceId !== acceptedWorkspaceAttestation.workspaceId
+          || workspaceAttestation.workspacePathDigest !== acceptedWorkspaceAttestation.workspacePathDigest
+          || workspaceAttestation.repositoryPathDigest !== acceptedWorkspaceAttestation.repositoryPathDigest
+          || workspaceAttestation.worktreeIdentityDigest !== acceptedWorkspaceAttestation.worktreeIdentityDigest
+          || workspaceAttestation.baseRevision !== acceptedWorkspaceAttestation.baseRevision
         )) return { kind: "conflict", reason: "invalid_request" } as const;
         if (interruptionEvidence && (!workspaceAttestation
           || interruptionEvidence.runId !== command.runId

@@ -181,23 +181,43 @@ export function createRelayContentCustody(input: {
         input.clock.now()],
     );
     if (tombstone.rows[0]) throw new Error("source_content_replayed");
-    try {
-      await client.query(
+    const inserted = await client.query<{ content_id: string }>(
         `INSERT INTO cp_source_content(
           organization_id, content_id, installation_id, source_app_id,
           source_delivery_id, source_message_id, source_version_ref, purpose,
           ciphertext, content_nonce, content_tag, wrapped_dek, wrapping_nonce,
           wrapping_tag, aad_digest, key_version, payload_digest, expires_at, created_at
-        ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+        ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+        ON CONFLICT DO NOTHING RETURNING content_id`,
         [command.organizationId, command.contentId, command.installationId,
           command.sourceAppId, command.sourceDeliveryId, command.sourceMessageId,
           command.sourceVersionRef, command.purpose, encrypted.ciphertext,
           encrypted.contentNonce, encrypted.contentTag, encrypted.wrappedDek,
           encrypted.wrappingNonce, encrypted.wrappingTag, encrypted.aadDigest,
           encrypted.keyVersion, payloadDigest, command.expiresAt, input.clock.now()],
+    );
+    if (!inserted.rows[0]) {
+      const replay = await client.query<ContentRow>(
+        `SELECT * FROM cp_source_content
+         WHERE organization_id = $1 AND content_id = $2 FOR UPDATE`,
+        [command.organizationId, command.contentId],
       );
-    } catch {
-      throw new Error("source_content_conflict");
+      const row = replay.rows[0];
+      const exact = row
+        && row.deleted_at === null
+        && row.installation_id === command.installationId
+        && row.source_app_id === command.sourceAppId
+        && row.source_delivery_id === command.sourceDeliveryId
+        && row.source_message_id === command.sourceMessageId
+        && row.source_version_ref === command.sourceVersionRef
+        && row.purpose === command.purpose
+        && row.payload_digest === payloadDigest
+        && row.key_version === input.key.keyVersion
+        && row.expires_at.getTime() === command.expiresAt.getTime();
+      if (!exact) throw new Error("source_content_conflict");
+      return { contentId: row.content_id, sourceVersionRef: row.source_version_ref,
+        aadDigest: row.aad_digest, keyVersion: row.key_version,
+        payloadDigest: row.payload_digest };
     }
     return { contentId: command.contentId, sourceVersionRef: command.sourceVersionRef,
       aadDigest: encrypted.aadDigest, keyVersion: encrypted.keyVersion, payloadDigest };

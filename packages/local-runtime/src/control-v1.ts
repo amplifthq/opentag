@@ -1199,6 +1199,7 @@ async function createHostedExecutionClient(input: {
     actionDescriptorDigest: string;
     targetFingerprint: string;
     materialIdempotencyKey: string;
+    workspaceAttestationDigest?: string;
   }>();
   const attempt = {
     attemptId: authority.attemptId,
@@ -1551,6 +1552,8 @@ async function createHostedExecutionClient(input: {
         targetFingerprint,
         policySnapshotRef: authority.policySnapshotRef,
         policySnapshotDigest: authority.policySnapshotDigest,
+        ...(request.workspaceAttestationDigest
+          ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}),
         requestedAt,
       };
       const permissionRequestDigest = await computePermissionRequestDigestV1(digestInput);
@@ -1565,22 +1568,10 @@ async function createHostedExecutionClient(input: {
       assertNotCancelled();
       const pending = { request, permissionRequestId, permissionRequestDigest,
         actionDescriptor, actionDescriptorDigest, targetFingerprint,
-        materialIdempotencyKey };
+        materialIdempotencyKey,
+        ...(request.workspaceAttestationDigest
+          ? { workspaceAttestationDigest: request.workspaceAttestationDigest } : {}) };
       permissionRequests.set(actionId, pending);
-      if (result.receipt.payload.state === "authorized") {
-        await client.beginMaterialActionControlV1({ schemaVersion: 1,
-          protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
-          requestId: materialIdempotencyKey, operationId: materialIdempotencyKey,
-          organizationId: authority.organizationId, runnerId: authority.runnerId,
-          runId, attempt, actionId, actionDescriptor, actionDescriptorDigest,
-          targetFingerprint, policySnapshotRef: authority.policySnapshotRef,
-          policySnapshotDigest: authority.policySnapshotDigest,
-          authority: { kind: "permission_resolution",
-            permissionRequestId, permissionRequestDigest,
-            resolutionReceiptId: result.receipt.receiptId,
-            resolutionReceiptDigest: result.receipt.receiptDigest },
-          idempotencyKey: materialIdempotencyKey, begunAt: clock().toISOString() });
-      }
       return permissionResolutionFromReceipt({ receipt: result.receipt, request });
     },
     async resolveActionPermission(runId, _lease, actionId) {
@@ -1602,6 +1593,21 @@ async function createHostedExecutionClient(input: {
         permissionRequestDigest: pending.permissionRequestDigest,
       });
       assertNotCancelled();
+      return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
+    },
+    async confirmActionPermission(runId, _lease, actionId) {
+      assertNotCancelled();
+      const pending = permissionRequests.get(actionId);
+      if (!pending) throw new Error("hosted_permission_request_unknown");
+      const result = await client.getActionPermissionCurrentControlV1({
+        organizationId: authority.organizationId, runnerId: authority.runnerId,
+        runId, actionId, attempt: { attemptId: attempt.attemptId,
+          attemptNumber: attempt.attemptNumber, epoch: attempt.epoch,
+          fencingTokenDigest: attempt.fencingTokenDigest },
+        permissionRequestId: pending.permissionRequestId,
+        permissionRequestDigest: pending.permissionRequestDigest,
+      });
+      assertNotCancelled();
       if (result.receipt.payload.state === "authorized") {
         await client.beginMaterialActionControlV1({ schemaVersion: 1,
           protocolVersion: "1.0", requiredCapabilities: ["relay.material-receipt.v1"],
@@ -1613,14 +1619,19 @@ async function createHostedExecutionClient(input: {
           targetFingerprint: pending.targetFingerprint,
           policySnapshotRef: authority.policySnapshotRef,
           policySnapshotDigest: authority.policySnapshotDigest,
+          ...(pending.workspaceAttestationDigest
+            ? { workspaceAttestationDigest: pending.workspaceAttestationDigest } : {}),
           authority: { kind: "permission_resolution",
             permissionRequestId: pending.permissionRequestId,
             permissionRequestDigest: pending.permissionRequestDigest,
             resolutionReceiptId: result.receipt.receiptId,
-            resolutionReceiptDigest: result.receipt.receiptDigest },
+            resolutionReceiptDigest: result.receipt.receiptDigest,
+            ...(pending.workspaceAttestationDigest
+              ? { workspaceAttestationDigest: pending.workspaceAttestationDigest } : {}) },
           idempotencyKey: pending.materialIdempotencyKey, begunAt: clock().toISOString() });
       }
-      return permissionResolutionFromReceipt({ receipt: result.receipt, request: pending.request });
+      return permissionResolutionFromReceipt({ receipt: result.receipt,
+        request: pending.request });
     },
     async recordMaterialActionReceipt(runId, _lease, actionId, receipt: MaterialActionReceipt) {
       assertNotCancelled();

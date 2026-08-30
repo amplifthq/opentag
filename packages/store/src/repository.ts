@@ -1400,6 +1400,38 @@ function newFencingToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRunResult {
+  for (const artifact of result.artifacts ?? []) {
+    if (!artifact.id?.endsWith(":proposal-evidence")) continue;
+    const metadata = artifact.metadata;
+    if (!metadata || metadata["readiness"] !== "not_assessed"
+      || typeof metadata["evidenceDigest"] !== "string"
+      || !metadata["proposalEvidence"] || typeof metadata["proposalEvidence"] !== "object") {
+      throw new Error("proposal_evidence_invalid");
+    }
+    const evidence = metadata["proposalEvidence"] as Record<string, unknown>;
+    const binaryDiff = evidence["baseToFinalBinaryDiff"];
+    const changedFiles = evidence["changedFiles"];
+    const evidenceDigest = evidence["evidenceDigest"];
+    const digestInput = { ...evidence };
+    delete digestInput["evidenceDigest"];
+    const computedDiffDigest = typeof binaryDiff === "string"
+      ? `sha256:${sha256(binaryDiff)}` : null;
+    const computedChangedFilesDigest = Array.isArray(changedFiles)
+      ? canonicalSha256Json(changedFiles) : null;
+    const computedEvidenceDigest = canonicalSha256Json(digestInput);
+    if (evidence["schemaVersion"] !== 1
+      || evidence["kind"] !== "attempt_proposal_evidence"
+      || evidence["diffDigest"] !== computedDiffDigest
+      || evidence["changedFilesDigest"] !== computedChangedFilesDigest
+      || evidenceDigest !== computedEvidenceDigest
+      || metadata["evidenceDigest"] !== evidenceDigest) {
+      throw new Error("proposal_evidence_digest_mismatch");
+    }
+  }
+  return result;
+}
+
 function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
   return {
     id: row.id,
@@ -1411,7 +1443,8 @@ function attemptFromRow(row: typeof attempts.$inferSelect): Attempt {
     heartbeatAt: row.heartbeatAt,
     leaseExpiresAt: row.leaseExpiresAt,
     ...(row.finishedAt ? { finishedAt: row.finishedAt } : {}),
-    ...(row.resultJson ? { result: OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) } : {}),
+    ...(row.resultJson ? { result: validatePersistedProposalEvidence(
+      OpenTagRunResultSchema.parse(JSON.parse(row.resultJson))) } : {}),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -2012,7 +2045,8 @@ class StaleActionTransitionError extends Error {}
 
 function runFromRow(row: typeof runs.$inferSelect): OpenTagRun {
   const event = OpenTagEventSchema.parse(JSON.parse(row.eventJson));
-  const result = row.resultJson ? OpenTagRunResultSchema.parse(JSON.parse(row.resultJson)) : undefined;
+  const result = row.resultJson ? validatePersistedProposalEvidence(
+    OpenTagRunResultSchema.parse(JSON.parse(row.resultJson))) : undefined;
   const triggeredByAction = row.triggeredByActionJson ? ActionHintSchema.parse(JSON.parse(row.triggeredByActionJson)) : undefined;
   const protocolFields = protocolRunFieldsFromEvent(event, row.createdAt);
   const durableThread = protocolFields.thread && row.workThreadId
@@ -2828,6 +2862,7 @@ function aggregateMetrics(input: {
 
 export function createOpenTagRepository(db: BetterSQLite3Database) {
   const hostedExecutionPayloads = new Map<string, {
+    runId: string;
     event: OpenTagEvent;
     contextPacket: ReturnType<typeof protocolRunFieldsFromEvent>["contextPacket"];
   }>();
@@ -9202,7 +9237,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         action: "reject-start",
         request
       });
-      return db.transaction((tx) => {
+      const rejection = db.transaction((tx) => {
         const run = tx.select().from(runs).where(eq(runs.id, input.runId)).limit(1).get();
         const attempt = tx.select().from(attempts).where(eq(attempts.id, input.attemptId)).limit(1).get();
         const claim = tx.select().from(hostedClaimOperations).where(and(
@@ -9275,6 +9310,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         })).run();
         return { outcome: "requeued" as const, operation: journal.operation };
       }, { behavior: "immediate" });
+      if (["requeued", "duplicate", "journaled"].includes(rejection.outcome)) {
+        hostedExecutionPayloads.delete(input.attemptId);
+      }
+      return rejection;
     },
 
     async acquireHostedExecutionStart(input: {
@@ -10527,10 +10566,21 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         };
       });
 
-      hostedExecutionPayloads.set(claim.attempt.id, {
-        event,
-        contextPacket: protocolFields.contextPacket,
-      });
+      for (const [attemptId, payload] of hostedExecutionPayloads) {
+        if (payload.runId === claim.runId && attemptId !== claim.attempt.id) {
+          hostedExecutionPayloads.delete(attemptId);
+        }
+      }
+      if (!result.superseded && !result.executionStartedAt
+        && !terminalRunStatus(result.runRow.status)) {
+        hostedExecutionPayloads.set(claim.attempt.id, {
+          runId: claim.runId,
+          event,
+          contextPacket: protocolFields.contextPacket,
+        });
+      } else {
+        hostedExecutionPayloads.delete(claim.attempt.id);
+      }
       const hostedAuthority: HostedImportAuthority = {
         ...(JSON.parse(result.attemptImportRow.authorityJson) as HostedClaimV1["authority"]),
         admissionId: result.importRow.admissionId,
@@ -11772,7 +11822,8 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       ): Promise<CompleteRunOutcome> => {
       const safeInput = await sanitizeRunnerControlledInputForRun(input.runId, input);
       const safeIdempotencyKey = safeInput.idempotencyKey;
-      const parsedResult = OpenTagRunResultSchema.parse(safeInput.result);
+      const parsedResult = validatePersistedProposalEvidence(
+        OpenTagRunResultSchema.parse(safeInput.result));
       const humanEscalation = input.humanEscalation
         ? HumanEscalationSchema.parse(input.humanEscalation)
         : undefined;
@@ -11962,6 +12013,19 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       }
       const runThread = runRow ? protocolRunFieldsFromEvent(OpenTagEventSchema.parse(JSON.parse(runRow.eventJson)), runRow.createdAt).thread : undefined;
       const attemptId = input.attemptId ?? runRow.currentAttemptId ?? undefined;
+      const hostedAttempt = attemptId
+        ? await db.select({ attemptId: hostedAttemptImports.attemptId })
+            .from(hostedAttemptImports).where(eq(hostedAttemptImports.attemptId, attemptId)).limit(1).get()
+        : undefined;
+      const durableResult = hostedAttempt
+        ? OpenTagRunResultSchema.parse({
+            conclusion: result.conclusion,
+            summary: "Hosted executor result accepted; execution details were not retained locally.",
+            nextAction: result.conclusion === "success"
+              ? "Use authoritative hosted receipts and proposal evidence for follow-up."
+              : "Reconcile the hosted Attempt before issuing fresh authority.",
+          })
+        : result;
       const attemptStatus =
         result.conclusion === "success"
           ? "succeeded"
@@ -11974,7 +12038,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
                 : result.conclusion === "needs_human"
                   ? "needs_human"
                   : "failed";
-      const parsedSnapshots = (result.suggestedChanges ?? []).map((snapshot) =>
+      const parsedSnapshots = (durableResult.suggestedChanges ?? []).map((snapshot) =>
         SuggestedChangesSnapshotSchema.parse({
           ...snapshot,
           sourceRunId: snapshot.sourceRunId ?? input.runId,
@@ -12104,7 +12168,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         } else if (terminalRunStatus(currentRun.status)) {
           return "not_found" as const;
         }
-        let completedResult = result;
+        let completedResult = durableResult;
         if (humanEscalation) {
           const activeDedupeKey = humanEscalation.dedupeKey
             ? `${humanEscalation.runId ?? "thread"}:${humanEscalation.dedupeKey}`
@@ -12157,7 +12221,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
             }
           }
           completedResult = OpenTagRunResultSchema.parse({
-            ...result,
+            ...durableResult,
             humanEscalationId: effectiveEscalation.id
           });
           tx.insert(reassessmentObligations)
@@ -12303,6 +12367,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         return "completed" as const;
       });
       if (completionOutcome !== "completed") return completionOutcome;
+      if (attemptId) hostedExecutionPayloads.delete(attemptId);
       return "completed";
       };
       completeRunWithHostedLifecycle = (input, lifecycle) =>

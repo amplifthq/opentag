@@ -707,6 +707,8 @@ export function createControlPlaneApplication(
             targetFingerprint: begin.targetFingerprint,
             policySnapshotRef: begin.policySnapshotRef,
             policySnapshotDigest: begin.policySnapshotDigest,
+            ...(begin.workspaceAttestationDigest
+              ? { workspaceAttestationDigest: begin.workspaceAttestationDigest } : {}),
             authority: begin.authority,
             idempotencyKey: begin.idempotencyKey });
           if (outcome.kind === "begun" || outcome.kind === "replayed") {

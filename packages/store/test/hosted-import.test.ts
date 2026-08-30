@@ -612,6 +612,90 @@ describe("hosted assigned Run import", () => {
     restartedSqlite.close();
   });
 
+  it("scrubs pre-fix hosted plaintext during schema upgrade and vacuums raw bytes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-upgrade-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ body: "LEGACY_HOSTED_PLAINTEXT_82f90a" });
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare("UPDATE runs SET event_json = ?, context_packet_json = ?, result_json = ? WHERE id = ?")
+      .run(JSON.stringify(value.event), "LEGACY_HOSTED_PLAINTEXT_82f90a",
+        JSON.stringify({ conclusion: "success", summary: "LEGACY_HOSTED_PLAINTEXT_82f90a" }),
+        value.claim.runId);
+    sqlite.prepare("INSERT INTO run_events(run_id,type,visibility,importance,message,payload_json,created_at) VALUES(?,?,?,?,?,?,?)")
+      .run(value.claim.runId, "artifact.created", "audit", "normal",
+        "LEGACY_HOSTED_PLAINTEXT_82f90a", JSON.stringify({ summary: "LEGACY_HOSTED_PLAINTEXT_82f90a" }), observedAt);
+    sqlite.prepare("DELETE FROM opentag_schema_migrations WHERE id = ?")
+      .run("2026-08-31-hosted-plaintext-scrub-v1");
+    migrateSchema(sqlite);
+    expect(sqlite.serialize().includes(Buffer.from("LEGACY_HOSTED_PLAINTEXT_82f90a"))).toBe(false);
+    sqlite.close();
+  });
+
+  it("keeps hosted completion echoes out of result, artifact, and audit persistence and evicts memory", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture({ body: "ECHOED_HOSTED_PLAINTEXT_c191" });
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result: { conclusion: "success", summary: "ECHOED_HOSTED_PLAINTEXT_c191",
+        artifacts: [{ kind: "patch", title: "ECHOED_HOSTED_PLAINTEXT_c191",
+          uri: "opentag://echo", summary: "ECHOED_HOSTED_PLAINTEXT_c191" }] } }))
+      .resolves.toBe("completed");
+    expect(sqlite.serialize().includes(Buffer.from("ECHOED_HOSTED_PLAINTEXT_c191"))).toBe(false);
+    sqlite.prepare("UPDATE runs SET status = 'assigned', assigned_runner_id = ?, current_attempt_id = ? WHERE id = ?")
+      .run(value.claim.runnerId, value.claim.attempt.id, value.claim.runId);
+    sqlite.prepare("UPDATE attempts SET status = 'assigned', finished_at = NULL WHERE id = ?")
+      .run(value.claim.attempt.id);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    sqlite.close();
+  });
+
+  it("rejects proposal evidence tampering at persistence and read boundaries", async () => {
+    const sqlite = new Database(":memory:");
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture();
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    const proposalEvidence = { schemaVersion: 1, kind: "attempt_proposal_evidence",
+      attemptId: value.claim.attempt.id, attemptNumber: value.claim.attempt.number,
+      workspaceId: "workspace_attempt", workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      baseRevision: "a".repeat(40), finalRevision: "b".repeat(40), finalTree: "c".repeat(40),
+      diffDigest: "sha256:1bf4fcc26d8874b8c276b08749bf22799ae398f9f1681bb02d3dd828cef8df3e",
+      baseToFinalBinaryDiff: "diff --git a/src/index.ts b/src/index.ts\n",
+      changedFilesDigest: "sha256:7054d00b268c67236e86fd5fafb9dbdae2efdbf5901516aecbcd3d9a4b5ee850",
+      changedFiles: ["src/index.ts"], verificationEvidenceDigests: [],
+      limitations: ["Task 8 completion gates have not run."],
+      evidenceDigest: "sha256:badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadb" };
+    const result = { conclusion: "success" as const, summary: "done", artifacts: [{
+      id: `${value.claim.runId}:proposal-evidence`, type: "patch_summary", kind: "patch",
+      title: "Immutable proposal evidence", uri: `opentag://run/${value.claim.runId}/proposal-evidence`,
+      summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+      sourceRunId: value.claim.runId, createdAt: observedAt,
+      metadata: { proposalEvidence, evidenceDigest: proposalEvidence.evidenceDigest,
+        readiness: "not_assessed" } }] };
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result })).rejects.toThrow("proposal_evidence_digest_mismatch");
+    sqlite.prepare("UPDATE runs SET result_json = ? WHERE id = ?")
+      .run(JSON.stringify(result), value.claim.runId);
+    await expect(repo.getRun({ runId: value.claim.runId }))
+      .rejects.toThrow("proposal_evidence_digest_mismatch");
+    sqlite.close();
+  });
+
   it("replays after restart and preserves the durable journal request after response loss", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-import-"));
     tempDirs.push(directory);
@@ -1407,7 +1491,9 @@ describe("hosted heartbeat lease authority", () => {
     })).resolves.toBe("completed");
     const stored = sqlite.prepare("SELECT result_json AS resultJson FROM runs WHERE id = ?")
       .get(value.claim.runId) as { resultJson: string };
-    expect(JSON.parse(stored.resultJson)).toEqual(persistedResult);
+    expect(JSON.parse(stored.resultJson)).toEqual({ conclusion: "success",
+      summary: "Hosted executor result accepted; execution details were not retained locally.",
+      nextAction: "Use authoritative hosted receipts and proposal evidence for follow-up." });
     expect(stored.resultJson).not.toContain(value.claim.attempt.fencingToken);
   });
 

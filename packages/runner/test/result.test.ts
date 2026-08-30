@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EXECUTOR_REPORT_END, EXECUTOR_REPORT_START } from "../src/executor-report.js";
-import { createExecutorRunResult } from "../src/result.js";
+import { createExecutorRunResult, validateProposalEvidenceArtifact } from "../src/result.js";
 
 describe("createExecutorRunResult", () => {
   it("emits immutable proposal evidence without claiming Task 8 readiness", () => {
@@ -11,18 +11,19 @@ describe("createExecutorRunResult", () => {
         schemaVersion: 1, kind: "attempt_proposal_evidence",
         workspaceId: "workspace_attempt_2", workspacePathDigest: `sha256:${"1".repeat(64)}`,
         baseRevision: "a".repeat(40), finalRevision: "b".repeat(40),
-        finalTree: "c".repeat(40), diffDigest: `sha256:${"2".repeat(64)}`,
+        finalTree: "c".repeat(40),
+        diffDigest: "sha256:1bf4fcc26d8874b8c276b08749bf22799ae398f9f1681bb02d3dd828cef8df3e",
         baseToFinalBinaryDiff: "diff --git a/src/index.ts b/src/index.ts\n",
-        changedFilesDigest: `sha256:${"3".repeat(64)}`,
+        changedFilesDigest: "sha256:7054d00b268c67236e86fd5fafb9dbdae2efdbf5901516aecbcd3d9a4b5ee850",
         changedFiles: ["src/index.ts"],
         verificationEvidenceDigests: [`sha256:${"4".repeat(64)}`],
         limitations: ["Task 8 completion gates have not run."],
-        evidenceDigest: "sha256:6e1cd01d0220357b01b729ede048299f075840fb91e813d88306f5d23591b004" } });
+        evidenceDigest: "sha256:23d93edb174445dae077e4a281d5ecedbf63a7b0e03df7903031e9e2b331b4e6" } });
     const proposal = result.artifacts?.find((artifact) => artifact.id === "run_proposal:proposal-evidence");
     expect(Object.keys(proposal?.metadata ?? {}).sort()).toEqual([
       "evidenceDigest", "proposalEvidence", "readiness",
     ]);
-    expect(proposal?.metadata).toMatchObject({ evidenceDigest: "sha256:6e1cd01d0220357b01b729ede048299f075840fb91e813d88306f5d23591b004",
+    expect(proposal?.metadata).toMatchObject({ evidenceDigest: "sha256:23d93edb174445dae077e4a281d5ecedbf63a7b0e03df7903031e9e2b331b4e6",
       proposalEvidence: { attemptId: "attempt_2", workspaceId: "workspace_attempt_2",
         finalTree: "c".repeat(40), changedFiles: ["src/index.ts"],
         baseToFinalBinaryDiff: "diff --git a/src/index.ts b/src/index.ts\n" },
@@ -32,6 +33,9 @@ describe("createExecutorRunResult", () => {
       branchName: "opentag/run_tampered", output: "done", changedFiles: ["src/index.ts"],
       proposalEvidence: { ...(proposal?.metadata?.["proposalEvidence"] as any),
         evidenceDigest: `sha256:${"0".repeat(64)}` } })).toThrow("proposal_evidence_digest_mismatch");
+    const cloned = structuredClone(proposal!);
+    (cloned.metadata!["proposalEvidence"] as any).baseToFinalBinaryDiff += "tampered";
+    expect(() => validateProposalEvidenceArtifact(cloned)).toThrow("proposal_evidence_digest_mismatch");
   });
   it("renders user-visible summaries from the structured executor report when present", () => {
     const result = createExecutorRunResult({
