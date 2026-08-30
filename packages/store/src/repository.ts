@@ -3631,6 +3631,53 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
 
   type ProjectionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
+  function evictHostedExecutionPayloadIfDurablyUnrecoverable(
+    tx: ProjectionTransaction,
+    attemptId: string,
+    callerFencingToken: string,
+  ): void {
+    const payload = hostedExecutionPayloads.get(attemptId);
+    if (!payload) return;
+    const importedRun = tx.select().from(hostedRunImports)
+      .where(eq(hostedRunImports.runId, payload.runId)).limit(1).get();
+    const importedAttempt = tx.select().from(hostedAttemptImports)
+      .where(eq(hostedAttemptImports.attemptId, attemptId)).limit(1).get();
+    const run = tx.select().from(runs).where(eq(runs.id, payload.runId)).limit(1).get();
+    const attempt = tx.select().from(attempts).where(eq(attempts.id, attemptId)).limit(1).get();
+    if (
+      attempt
+      && attempt.fencingToken !== callerFencingToken
+      && attempt.fencingToken === payload.fencingToken
+    ) return;
+    const claim = importedAttempt
+      ? tx.select().from(hostedClaimOperations)
+          .where(eq(hostedClaimOperations.operationId, importedAttempt.claimOperationId))
+          .limit(1).get()
+      : undefined;
+    const leaseExpiresAt = Date.parse(attempt?.leaseExpiresAt ?? "");
+    const recoverable = Boolean(
+      importedRun && importedAttempt && run && attempt && claim
+      && importedAttempt.runId === payload.runId
+      && importedAttempt.attemptNumber === attempt.number
+      && run.currentAttemptId === attemptId
+      && run.assignedRunnerId === attempt.runnerId
+      && ["assigned", "running", "needs_approval"].includes(run.status)
+      && run.leaseExpiresAt === attempt.leaseExpiresAt
+      && attempt.runId === payload.runId
+      && ["assigned", "running"].includes(attempt.status)
+      && attempt.fencingToken === payload.fencingToken
+      && Number.isFinite(leaseExpiresAt)
+      && leaseExpiresAt > Date.now()
+      && claim.state === "claimed"
+      && claim.runId === payload.runId
+      && claim.attemptId === attemptId
+      && claim.attemptNumber === importedAttempt.attemptNumber
+      && claim.fencingTokenDigest === importedAttempt.fencingTokenDigest
+      && claim.terminalReasonCode === null
+    );
+    if (!recoverable) hostedExecutionPayloads.delete(attemptId);
+  }
+
   type PreparedHostedLifecycleOperation = {
     destinationId: string;
     organizationId: string;
@@ -5629,7 +5676,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         || !Number.isFinite(oldExpiry) || !Number.isFinite(newExpiry)
         || oldExpiry <= Date.parse(acknowledgedAt)
         || newExpiry <= oldExpiry || newExpiry <= Date.parse(acknowledgedAt)
-      ) return false;
+      ) {
+        evictHostedExecutionPayloadIfDurablyUnrecoverable(
+          tx,
+          row.attemptId,
+          request.attempt.fencingToken,
+        );
+        return false;
+      }
       const attemptUpdated = tx.update(attempts).set({
         heartbeatAt: acknowledgedAt,
         leaseExpiresAt: receipt.payload.leaseExpiresAt,
@@ -9149,6 +9203,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           ? JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]
           : undefined;
         if (!run || !attempt || !importedAttempt || !claim || authority?.credentialId !== input.credentialId) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         if (
@@ -9161,7 +9216,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || !["assigned", "running"].includes(attempt.status)
           || (attempt.selectedExecutorId !== null && attempt.selectedExecutorId !== safeInput.executor)
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
         const duplicate = run.status === "running" && attempt.status === "running";
         if (!duplicate) {
@@ -9257,7 +9315,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.runId !== input.runId || attempt.runnerId !== input.runnerId
           || attempt.fencingToken !== input.fencingToken || attempt.status !== "running"
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
         const digest = progressIdempotencyDigest(input.idempotencyKey);
         const inserted = tx.insert(runEvents).values({
@@ -9337,7 +9398,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           && Date.parse(claim.leaseExpiresAt ?? "") > Date.parse(prepared.createdAt)
         );
         if (!run || !attempt) {
-          if (!validShell) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          if (!validShell) {
+            evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+            throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+          }
           const journal = enqueueHostedLifecycleOperationTx(tx, prepared);
           return { outcome: "journaled" as const, operation: journal.operation };
         }
@@ -9354,7 +9418,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.runnerId !== input.runnerId || attempt.fencingToken !== input.fencingToken
           || attempt.status !== "assigned" || attempt.selectedExecutorId !== safeInput.executorId
           || !hasActiveAttemptLease(attempt)
-        ) throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+        }
         const rejections = routingRejectionsFromJson(run.routingRejectionsJson);
         const stableReason = "hosted_attempt_start_rejected";
         rejections.push({ runnerId: input.runnerId, executorId: safeInput.executorId, reason: stableReason });
@@ -9433,10 +9500,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || attempt.fencingToken !== input.fencingToken
           || !validAcknowledgedLifecycleDependency(runningOperation)
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) return false;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.parse(startedAt)) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          return false;
+        }
         if (operation.executionStartedAt) return false;
         const acquired = tx.update(hostedClaimOperations).set({
           executionStartedAt: startedAt,
@@ -9532,12 +9603,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || importedAttempt.attemptNumber !== attempt.number
           || (JSON.parse(importedAttempt.authorityJson) as HostedClaimV1["authority"]).credentialId !== input.credentialId
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           return null;
         }
         const leaseExpiresAt = Date.parse(attempt.leaseExpiresAt);
-        return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > checkedAt
-          ? { leaseExpiresAt: attempt.leaseExpiresAt }
-          : null;
+        if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= checkedAt) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
+          return null;
+        }
+        return { leaseExpiresAt: attempt.leaseExpiresAt };
       });
     },
 
@@ -9867,6 +9941,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           || !Number.isFinite(Date.parse(attempt.leaseExpiresAt))
           || Date.parse(attempt.leaseExpiresAt) <= Date.parse(prepared.createdAt)
         ) {
+          evictHostedExecutionPayloadIfDurablyUnrecoverable(tx, input.attemptId, input.fencingToken);
           throw new HostedImportConflictError("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
         }
         const result = enqueueHostedLifecycleOperationTx(tx, prepared);

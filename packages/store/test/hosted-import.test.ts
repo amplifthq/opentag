@@ -10,6 +10,7 @@ import {
   type HostedClaimRequestV1,
   type HostedClaimV1,
   type HostedHeartbeatRequestV1,
+  type HostedProgressRequestV1,
   type HostedRejectStartRequestV1,
   type HostedRunningRequestV1,
   type HostedLifecycleReceiptEnvelopeV1,
@@ -412,22 +413,7 @@ async function startHostedExecution(
   repo: ReturnType<typeof createOpenTagRepository>,
   claim: HostedClaimV1,
 ): Promise<boolean> {
-  const request = await buildHostedLifecycleRequestV1({
-    action: "running",
-    organizationId: claim.organizationId,
-    runnerId: claim.runnerId,
-    runId: claim.runId,
-    attempt: {
-      attemptId: claim.attempt.id,
-      attemptNumber: claim.attempt.number,
-      epoch: claim.attempt.epoch,
-      fencingToken: claim.attempt.fencingToken,
-      fencingTokenDigest: claim.attempt.fencingTokenDigest
-    },
-    occurredAt: observedAt,
-    executorId: claim.executorId,
-    executorCapabilityDigest: claim.authority.executorCapabilityDigest
-  }) as HostedRunningRequestV1;
+  const request = await runningRequest(claim);
   const local = await repo.markHostedRunRunningLocally({
     destinationId: "cloud-1",
     organizationId: claim.organizationId,
@@ -498,6 +484,59 @@ async function startHostedExecution(
     attemptId: claim.attempt.id,
     fencingToken: claim.attempt.fencingToken
   });
+}
+
+async function runningRequest(claim: HostedClaimV1): Promise<HostedRunningRequestV1> {
+  return await buildHostedLifecycleRequestV1({
+    action: "running",
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest
+    },
+    occurredAt: observedAt,
+    executorId: claim.executorId,
+    executorCapabilityDigest: claim.authority.executorCapabilityDigest
+  }) as HostedRunningRequestV1;
+}
+
+async function progressRequest(claim: HostedClaimV1): Promise<HostedProgressRequestV1> {
+  const progressDigest = await computeControlPayloadDigestV1({ type: "status", occurredAt: observedAt });
+  return await buildHostedLifecycleRequestV1({
+    action: "progress",
+    organizationId: claim.organizationId,
+    runnerId: claim.runnerId,
+    runId: claim.runId,
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest
+    },
+    occurredAt: observedAt,
+    progressId: `progress_${progressDigest.slice("sha256:".length)}`,
+    progressDigest
+  }) as HostedProgressRequestV1;
+}
+
+function restoreRecoverableHostedAssignment(
+  sqlite: Database.Database,
+  value: Awaited<ReturnType<typeof fixture>>,
+): void {
+  sqlite.prepare(`UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=?,
+    lease_expires_at=? WHERE id=?`).run(value.claim.runnerId, value.claim.attempt.id,
+      value.claim.attempt.leaseExpiresAt, value.claim.runId);
+  sqlite.prepare(`UPDATE attempts SET status='assigned', runner_id=?, fencing_token=?,
+    lease_expires_at=? WHERE id=?`).run(value.claim.runnerId, value.claim.attempt.fencingToken,
+      value.claim.attempt.leaseExpiresAt, value.claim.attempt.id);
+  sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed', terminal_reason_code=NULL,
+    execution_started_at=NULL WHERE operation_id=?`).run(value.request.operationId);
 }
 
 describe("hosted assigned Run import", () => {
@@ -795,6 +834,138 @@ describe("hosted assigned Run import", () => {
     await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
       organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
       .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id } });
+    sqlite.close();
+  });
+
+  it("evicts hosted payloads when active execution APIs prove durable authority loss", async () => {
+    const recoveredPayloads: string[] = [];
+    const cases = [
+      {
+        name: "execution lease terminal run",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET status='failed' WHERE id=?").run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.getHostedExecutionLease({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+            .resolves.toBeNull(),
+      },
+      {
+        name: "execution start failed attempt",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE attempts SET status='failed' WHERE id=?").run(value.claim.attempt.id),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.acquireHostedExecutionStart({ runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "mark running superseded attempt",
+        prepare: async () => true,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET current_attempt_id='superseding-attempt' WHERE id=?")
+            .run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.markHostedRunRunningLocally({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            executor: value.claim.executorId, request: await runningRequest(value.claim) }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "progress non-current attempt",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE runs SET current_attempt_id='superseding-attempt' WHERE id=?")
+            .run(value.claim.runId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.recordHostedProgressLocally({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            message: "content-free", idempotencyKey: "progress-authority-loss",
+            request: await progressRequest(value.claim) }))
+            .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT"),
+      },
+      {
+        name: "heartbeat abandoned claim",
+        prepare: startHostedExecution,
+        mutate: (sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>) =>
+          sqlite.prepare("UPDATE hosted_claim_operations SET terminal_reason_code='stale_control_authority' WHERE operation_id=?")
+            .run(value.request.operationId),
+        probe: async (repo: ReturnType<typeof createOpenTagRepository>, value: Awaited<ReturnType<typeof fixture>>) =>
+          expect(repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+            attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+            request: await heartbeatRequest({ claim: value.claim,
+              expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) }))
+            .rejects.toThrow("HOSTED_HEARTBEAT_OPERATION_CONFLICT"),
+      },
+    ] as const;
+    for (const testCase of cases) {
+      const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+      const repo = createOpenTagRepository(drizzle(sqlite));
+      const secret = `HOSTED_ACTIVE_API_EVICTION_${testCase.name.replaceAll(" ", "_")}_f91d`;
+      const value = await fixture({ body: secret }); await begin(repo, value);
+      await repo.importHostedAssignedRun(value); await testCase.prepare(repo, value.claim);
+      testCase.mutate(sqlite, value); await testCase.probe(repo, value);
+      restoreRecoverableHostedAssignment(sqlite, value);
+      if (await repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+        organizationId: value.claim.organizationId, runnerId: value.claim.runnerId })) {
+        recoveredPayloads.push(testCase.name);
+      }
+      expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+      sqlite.close();
+    }
+    expect(recoveredPayloads).toEqual([]);
+  });
+
+  it("retains an exact active payload across wrong-caller fences on execution APIs", async () => {
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_WRONG_CALLER_FENCE_CONTROL_86e2";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    await expect(repo.acquireHostedExecutionStart({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence" }))
+      .rejects.toThrow("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+    await expect(repo.getHostedExecutionLease({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence" })).resolves.toBeNull();
+    await expect(repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: "wrong-caller-fence",
+      request: await heartbeatRequest({ claim: value.claim,
+        expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt }) }))
+      .rejects.toThrow("HOSTED_HEARTBEAT_OPERATION_CONFLICT");
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toMatchObject({ claimed: { event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("evicts a hosted payload when heartbeat receipt handling proves the claim abandoned", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-08-10T00:01:00.000Z"));
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_HEARTBEAT_RECEIPT_EVICTION_18c4";
+    const value = await fixture({ body: secret, leaseExpiresAt: "2026-08-10T00:02:00.000Z" });
+    await begin(repo, value); await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    const request = await heartbeatRequest({ claim: value.claim,
+      expectedLeaseExpiresAt: value.claim.attempt.leaseExpiresAt });
+    await repo.beginHostedHeartbeatOperation({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken, request });
+    const receipt = await heartbeatReceipt({ claim: value.claim, request,
+      leaseExpiresAt: "2026-08-10T00:04:00.000Z" });
+    sqlite.prepare("UPDATE hosted_claim_operations SET terminal_reason_code='stale_control_authority' WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(repo.applyHostedHeartbeatReceipt({ ...heartbeatAuthority, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      operationId: request.operationId, requestId: request.requestId, receipt }))
+      .resolves.toBe("rejected");
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
     sqlite.close();
   });
 
