@@ -23,6 +23,16 @@ import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "intent" | "ownership" | "capability" | "operation" | "completion") => string;
+type PublicationLifecycleResource = "run" | "attempt" | "runner" | "intent";
+type PublicationPublisherTestHooks = {
+  onLifecycleLock?(event: {
+    phase: "before" | "acquired";
+    resource: PublicationLifecycleResource;
+    organizationId: string;
+    intentId: string;
+    runId: string;
+  }): void | Promise<void>;
+};
 
 function digest(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJsonStringify(value)).digest("hex")}`;
@@ -124,40 +134,126 @@ async function readPublicationOperationState(client: any, input: {
   return { records, state: reducePublicationOperation(records) };
 }
 
-async function readLockedPublicationOperationState(client: any, input: {
-  organizationId: string; intentId: string; step: PublicationOperationStepV1;
-}): Promise<{ records: PublicationOperationRecord[]; state: PublicationOperationState } | null> {
-  // Discover immutable identity without a lock, then take every higher-level
-  // authority row in one global order before the operation parent and facts.
-  // This is deliberately valid for late observation after terminal settlement:
-  // no active lease, current generation, or nonterminal Run predicate appears.
+type PublicationLifecycleIdentity = {
+  run_id: string;
+  attempt_id: string;
+  attempt_number: number;
+  runner_id: string;
+};
+
+type LockedPublicationLifecycle = {
+  run: any;
+  attempt: any;
+  runner: any;
+  intent: any;
+};
+
+async function discoverPublicationLifecycle(client: any, input: {
+  organizationId: string;
+  intentId: string;
+}): Promise<PublicationLifecycleIdentity | null> {
   const discovered = await client.query(
     `SELECT run_id,attempt_id,attempt_number,runner_id FROM cp_publication_intent
-    WHERE organization_id=$1 AND intent_id=$2`, [input.organizationId, input.intentId],
+     WHERE organization_id=$1 AND intent_id=$2`, [input.organizationId, input.intentId],
   );
-  const identity = discovered.rows[0] as { run_id: string; attempt_id: string; attempt_number: number; runner_id: string } | undefined;
-  if (!identity) return null;
+  return discovered.rows[0] ?? null;
+}
+
+async function lockPublicationLifecycle(client: any, input: {
+  organizationId: string;
+  intentId: string;
+  identity: PublicationLifecycleIdentity;
+  skipLockedRun?: boolean;
+  testHooks?: PublicationPublisherTestHooks | undefined;
+}): Promise<LockedPublicationLifecycle | null> {
+  const identity = input.identity;
+  const lockEvent = async (phase: "before" | "acquired", resource: PublicationLifecycleResource) => {
+    await input.testHooks?.onLifecycleLock?.({ phase, resource,
+      organizationId: input.organizationId, intentId: input.intentId, runId: identity.run_id });
+  };
+  await lockEvent("before", "run");
   const run = await client.query(
-    `SELECT 1 FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
+    `SELECT * FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE${input.skipLockedRun ? " SKIP LOCKED" : ""}`,
     [input.organizationId, identity.run_id],
   );
   if (run.rowCount !== 1) return null;
+  await lockEvent("acquired", "run");
+  await lockEvent("before", "attempt");
   const attempt = await client.query(
-    `SELECT 1 FROM cp_hosted_attempt
+    `SELECT * FROM cp_hosted_attempt
      WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3 AND attempt_number=$4 FOR UPDATE`,
     [input.organizationId, identity.run_id, identity.attempt_id, identity.attempt_number],
   );
   if (attempt.rowCount !== 1) return null;
+  await lockEvent("acquired", "attempt");
+  await lockEvent("before", "runner");
   const runner = await client.query(
-    `SELECT 1 FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
+    `SELECT * FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
     [input.organizationId, identity.runner_id],
   );
   if (runner.rowCount !== 1) return null;
+  await lockEvent("acquired", "runner");
+  await lockEvent("before", "intent");
   const intent = await client.query(
-    `SELECT 1 FROM cp_publication_intent WHERE organization_id=$1 AND intent_id=$2 FOR UPDATE`,
+    `SELECT * FROM cp_publication_intent WHERE organization_id=$1 AND intent_id=$2 FOR UPDATE`,
     [input.organizationId, input.intentId],
   );
   if (intent.rowCount !== 1) return null;
+  await lockEvent("acquired", "intent");
+  const lockedIntent = intent.rows[0];
+  if (lockedIntent.run_id !== identity.run_id || lockedIntent.attempt_id !== identity.attempt_id
+    || lockedIntent.attempt_number !== identity.attempt_number || lockedIntent.runner_id !== identity.runner_id) {
+    return null;
+  }
+  return { run: run.rows[0], attempt: attempt.rows[0], runner: runner.rows[0], intent: lockedIntent };
+}
+
+async function lockPublicationCandidateAndOwnership(client: any, input: {
+  organizationId: string;
+  lifecycle: LockedPublicationLifecycle;
+}): Promise<{ candidate: any; ownership: any } | null> {
+  const candidate = await client.query(
+    `SELECT * FROM cp_publication_candidate
+     WHERE organization_id=$1 AND candidate_id=$2 AND run_id=$3 AND attempt_id=$4 FOR UPDATE`,
+    [input.organizationId, input.lifecycle.intent.candidate_id, input.lifecycle.intent.run_id,
+      input.lifecycle.intent.attempt_id],
+  );
+  if (candidate.rowCount !== 1) return null;
+  const ownership = await client.query(
+    `SELECT * FROM cp_publication_branch_ownership
+     WHERE organization_id=$1 AND ownership_id=$2 FOR UPDATE`,
+    [input.organizationId, input.lifecycle.intent.ownership_id],
+  );
+  if (ownership.rowCount !== 1) return null;
+  const candidateRow = candidate.rows[0];
+  const ownershipRow = ownership.rows[0];
+  if (candidateRow.attempt_number !== input.lifecycle.intent.attempt_number
+    || digest(candidateRow.candidate) !== input.lifecycle.intent.candidate_digest
+    || ownershipRow.run_id !== input.lifecycle.intent.run_id
+    || ownershipRow.attempt_id !== input.lifecycle.intent.attempt_id
+    || ownershipRow.attempt_number !== input.lifecycle.intent.attempt_number
+    || ownershipRow.runner_id !== input.lifecycle.intent.runner_id
+    || ownershipRow.runner_generation !== input.lifecycle.intent.runner_generation
+    || ownershipRow.candidate_id !== input.lifecycle.intent.candidate_id
+    || ownershipRow.candidate_digest !== input.lifecycle.intent.candidate_digest
+    || ownershipRow.attestation_digest !== input.lifecycle.intent.ownership_digest) return null;
+  return { candidate: candidateRow, ownership: ownershipRow };
+}
+
+async function readLockedPublicationOperationState(client: any, input: {
+  organizationId: string; intentId: string; step: PublicationOperationStepV1;
+  testHooks?: PublicationPublisherTestHooks | undefined;
+}): Promise<{ records: PublicationOperationRecord[]; state: PublicationOperationState } | null> {
+  // Identity discovery is non-locking. Every authority path then takes the
+  // same Run -> exact Attempt -> Runner -> Intent -> Candidate -> Ownership
+  // order before any operation capability or fact row.
+  const identity = await discoverPublicationLifecycle(client, input);
+  if (!identity) return null;
+  const lifecycle = await lockPublicationLifecycle(client, { ...input, identity });
+  if (!lifecycle) return null;
+  if (!await lockPublicationCandidateAndOwnership(client, { organizationId: input.organizationId, lifecycle })) {
+    return null;
+  }
   return readPublicationOperationState(client, { ...input, lock: true });
 }
 
@@ -187,7 +283,8 @@ export type PublicationApprovalInput = {
 };
 
 export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
-  idFactory: IdFactory; capabilityTtlMs?: number }) {
+  idFactory: IdFactory; capabilityTtlMs?: number;
+  testHooks?: PublicationPublisherTestHooks | undefined }) {
   const ttl = Math.min(input.capabilityTtlMs ?? 60_000, 5 * 60_000);
   return {
     async attestOwnership(command: { principal: RuntimePrincipal;
@@ -416,42 +513,45 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       const fenceDigest = await computeMaterialActionFencingTokenDigestV1(command.fencingToken);
       return withPostgresTransaction(input.pool, async (client) => {
         const now = (await client.query<{ now: Date }>("SELECT CURRENT_TIMESTAMP AS now")).rows[0]!.now;
-        const result = await client.query<any>(
-          `SELECT intent.*, run.publication_mode, run.terminal_kind,
-             run.current_attempt_number, attempt.fencing_token_digest,
-             attempt.lease_expires_at, attempt.state,
-             runner.credential_generation
-           FROM cp_publication_intent intent
-           JOIN cp_hosted_run run ON run.organization_id = intent.organization_id
-             AND run.run_id = intent.run_id
-           JOIN cp_hosted_attempt attempt ON attempt.organization_id = intent.organization_id
-             AND attempt.run_id = intent.run_id AND attempt.attempt_id = intent.attempt_id
-           JOIN cp_runner runner ON runner.organization_id = intent.organization_id
-             AND runner.runner_id = intent.runner_id
-           WHERE intent.organization_id = $1 AND intent.run_id = $2
-             AND intent.candidate_id = $3 FOR UPDATE OF intent, run, attempt, runner`,
+        const discovered = await client.query<{ intent_id: string }>(
+          `SELECT intent_id FROM cp_publication_intent
+           WHERE organization_id=$1 AND run_id=$2 AND candidate_id=$3`,
           [command.principal.organizationId, command.runId, command.candidateId]);
-        const row = result.rows[0];
-        if (!row || row.publication_mode !== "pull_request" || row.terminal_kind !== null
-          || row.attempt_id !== command.attemptId || row.attempt_number !== command.attemptNumber
-          || row.current_attempt_number !== command.attemptNumber
-          || row.candidate_digest !== command.candidateDigest
-          || row.fencing_token_digest !== fenceDigest || row.lease_expires_at <= now
-          || row.expires_at <= now || row.runner_id !== command.principal.runnerId
-          || row.runner_generation !== command.runnerGeneration
-          || row.credential_generation !== command.runnerGeneration) {
+        const intentId = discovered.rows[0]?.intent_id;
+        const identity = intentId ? await discoverPublicationLifecycle(client, {
+          organizationId: command.principal.organizationId, intentId }) : null;
+        const lifecycle = identity ? await lockPublicationLifecycle(client, {
+          organizationId: command.principal.organizationId, intentId: intentId!, identity,
+          testHooks: input.testHooks }) : null;
+        const evidence = lifecycle ? await lockPublicationCandidateAndOwnership(client, {
+          organizationId: command.principal.organizationId, lifecycle }) : null;
+        if (!lifecycle || !evidence
+          || lifecycle.run.publication_mode !== "pull_request" || lifecycle.run.terminal_kind !== null
+          || lifecycle.intent.run_id !== command.runId
+          || lifecycle.intent.attempt_id !== command.attemptId
+          || lifecycle.intent.attempt_number !== command.attemptNumber
+          || lifecycle.run.current_attempt_number !== command.attemptNumber
+          || lifecycle.intent.candidate_id !== command.candidateId
+          || lifecycle.intent.candidate_digest !== command.candidateDigest
+          || lifecycle.attempt.fencing_token_digest !== fenceDigest
+          || lifecycle.attempt.lease_expires_at <= now
+          || lifecycle.intent.expires_at <= now
+          || lifecycle.intent.runner_id !== command.principal.runnerId
+          || lifecycle.intent.runner_generation !== command.runnerGeneration
+          || lifecycle.runner.credential_generation !== command.runnerGeneration
+          || evidence.candidate.candidate_id !== command.candidateId
+          || evidence.ownership.ownership_id !== lifecycle.intent.ownership_id) {
           return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
         }
+        const row = lifecycle.intent;
         if (command.step === "create_draft_pull_request") {
-          const push = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
-            intentId: row.intent_id, step: "push_owned_branch" });
-          if (!push) return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
+          const push = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+            intentId: row.intent_id, step: "push_owned_branch", lock: true });
           if (push.state.kind !== "settled") return { kind: "unavailable" as const,
             reason: "owned_branch_not_pushed" };
         }
-        const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
-          intentId: row.intent_id, step: command.step });
-        if (!operation) return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
+        const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+          intentId: row.intent_id, step: command.step, lock: true });
         if (operation.state.kind === "settled") {
           return { kind: "unavailable" as const, reason: "operation_already_settled" };
         }
@@ -524,16 +624,23 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             command.principal.credentialGeneration],
         );
         for (const candidate of recovery.rows) {
-          const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
-            intentId: candidate.intent_id, step: candidate.step });
-          if (!operation) continue;
+          const identity = await discoverPublicationLifecycle(client, {
+            organizationId: command.principal.organizationId, intentId: candidate.intent_id });
+          const lifecycle = identity ? await lockPublicationLifecycle(client, {
+            organizationId: command.principal.organizationId, intentId: candidate.intent_id,
+            identity, skipLockedRun: true, testHooks: input.testHooks }) : null;
+          if (!lifecycle || lifecycle.intent.runner_id !== command.principal.runnerId
+            || lifecycle.runner.credential_generation !== command.principal.credentialGeneration) continue;
+          if (!await lockPublicationCandidateAndOwnership(client, {
+            organizationId: command.principal.organizationId, lifecycle })) continue;
+          const operation = await readPublicationOperationState(client, {
+            organizationId: command.principal.organizationId, intentId: candidate.intent_id,
+            step: candidate.step, lock: true });
           if (operation.state.kind === "reconciliation_pending") return { kind: "reconciliation_pending" as const,
             capability: operation.state.record.capability };
         }
-        const selected = await client.query<any>(
-          `SELECT intent.*, attempt.fencing_token_digest, attempt.state AS attempt_state,
-             attempt.lease_expires_at, run.current_attempt_number, run.terminal_kind,
-             run.publication_mode, runner.credential_generation
+        const selected = await client.query<{ intent_id: string }>(
+          `SELECT intent.intent_id
            FROM cp_publication_intent intent
            JOIN cp_hosted_run run ON run.organization_id = intent.organization_id AND run.run_id = intent.run_id
            JOIN cp_hosted_attempt attempt ON attempt.organization_id = intent.organization_id
@@ -548,16 +655,33 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              AND intent.expires_at > $4
              AND (attempt.state = 'succeeded' OR (attempt.state IN ('claimed','running') AND attempt.lease_expires_at > $4))
            ORDER BY intent.created_at ASC, intent.intent_id ASC
-           FOR UPDATE OF intent, run, attempt, runner SKIP LOCKED LIMIT 1`,
+          `,
           [command.principal.organizationId, command.principal.runnerId,
             command.principal.credentialGeneration, now],
         );
-        const row = selected.rows[0];
-        if (!row) return { kind: "empty" as const };
-        const operation = (step: PublicationOperationStepV1) => readLockedPublicationOperationState(client,
-          { organizationId: command.principal.organizationId, intentId: row.intent_id, step });
-        const push = await operation("push_owned_branch");
-        if (!push) return { kind: "empty" as const };
+        for (const selectedIntent of selected.rows) {
+          const identity = await discoverPublicationLifecycle(client, {
+            organizationId: command.principal.organizationId, intentId: selectedIntent.intent_id });
+          const lifecycle = identity ? await lockPublicationLifecycle(client, {
+            organizationId: command.principal.organizationId, intentId: selectedIntent.intent_id,
+            identity, skipLockedRun: true, testHooks: input.testHooks }) : null;
+          if (!lifecycle) continue;
+          const evidence = await lockPublicationCandidateAndOwnership(client, {
+            organizationId: command.principal.organizationId, lifecycle });
+          if (!evidence || lifecycle.run.terminal_kind !== null
+            || lifecycle.run.publication_mode !== "pull_request"
+            || lifecycle.run.current_attempt_number !== lifecycle.intent.attempt_number
+            || lifecycle.intent.runner_id !== command.principal.runnerId
+            || lifecycle.runner.credential_generation !== lifecycle.intent.runner_generation
+            || lifecycle.runner.credential_generation !== command.principal.credentialGeneration
+            || lifecycle.intent.expires_at <= now
+            || !(lifecycle.attempt.state === "succeeded"
+              || (["claimed", "running"].includes(lifecycle.attempt.state)
+                && lifecycle.attempt.lease_expires_at > now))) continue;
+          const row = lifecycle.intent;
+          const operation = (step: PublicationOperationStepV1) => readPublicationOperationState(client,
+            { organizationId: command.principal.organizationId, intentId: row.intent_id, step, lock: true });
+          const push = await operation("push_owned_branch");
         let step: PublicationOperationStepV1;
         if (push.state.kind === "issuable" && !push.state.latest) {
           step = "push_owned_branch";
@@ -589,7 +713,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           schemaVersion: 1, protocolVersion: "1.0", capabilityId: input.idFactory("capability"),
           organizationId: command.principal.organizationId, runId: row.run_id,
           attemptId: row.attempt_id, attemptNumber: row.attempt_number, epoch: row.attempt_number,
-          fencingTokenDigest: row.fencing_token_digest, candidateId: row.candidate_id,
+          fencingTokenDigest: lifecycle.attempt.fencing_token_digest, candidateId: row.candidate_id,
           candidateDigest: row.candidate_digest, approvalId: row.approval_id, approverId: row.approver_id,
           repository: row.repository, branch: row.branch, expectedHeadSha: row.expected_head_sha,
           step, operationId: `${row.intent_id}:${step}`, idempotencyKey: `${row.intent_id}:${step}`,
@@ -610,6 +734,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             capability.issuedAt, capability.expiresAt],
         );
         return { kind: "issued" as const, capability };
+        }
+        return { kind: "empty" as const };
       });
     },
 
@@ -628,7 +754,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           );
           const operation = discovered.rows[0]
             ? await readLockedPublicationOperationState(client, { organizationId: parsed.organizationId,
-              intentId: discovered.rows[0].intent_id, step: parsed.step })
+              intentId: discovered.rows[0].intent_id, step: parsed.step, testHooks: input.testHooks })
             : null;
           const exact = operation?.records.find((record) => record.capability.capabilityId === parsed.capabilityId);
           if (!exact || canonicalJsonStringify(exact.capability) !== canonicalJsonStringify(parsed)) {
@@ -696,7 +822,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       // deciding the winner or appending a receipt.  `claim`, `record`, and
       // `reconcile` therefore serialize on the same capability ledger.
       const operation = await readLockedPublicationOperationState(client, { organizationId: receipt.organizationId,
-        intentId: issued.rows[0]!.intent_id, step: capability.step });
+        intentId: issued.rows[0]!.intent_id, step: capability.step, testHooks: input.testHooks });
       if (!operation) return { kind: "conflict" as const };
       const exactRecord = operation.records.find((record) => record.capability.capabilityId === capability.capabilityId);
       const existing = exactRecord?.receipt;
@@ -757,7 +883,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         if (!exact || exact.runnerId !== command.principal.runnerId
           || !exactReceiptObservation(exact, observation)) return { kind: "conflict" as const };
         const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
-          intentId: capability.rows[0]!.intent_id, step: exact.step });
+          intentId: capability.rows[0]!.intent_id, step: exact.step, testHooks: input.testHooks });
         if (!operation) return { kind: "conflict" as const };
         const record = operation.records.find((candidate) => candidate.capability.capabilityId === exact.capabilityId);
         if (!record || record.begunAt === null) return { kind: "conflict" as const };
@@ -799,31 +925,42 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       const now = input.clock.now();
       const fenceDigest = await computeMaterialActionFencingTokenDigestV1(completion.fencingToken);
       return withPostgresTransaction(input.pool, async (client) => {
-        const current = await client.query<any>(
-          `SELECT run.*, attempt.attempt_id, attempt.attempt_number, attempt.state AS attempt_state,
-             attempt.fencing_token_digest, candidate.candidate_id, candidate.candidate, intent.intent_id,
-             intent.candidate_digest AS intent_candidate_digest, intent.repository AS intent_repository,
-             intent.branch AS intent_branch, intent.expected_head_sha, intent.runner_generation,
-             ownership.ownership_id, ownership.provider AS ownership_provider,
-             ownership.owner AS ownership_owner, ownership.repo AS ownership_repo,
-             ownership.remote AS ownership_remote, ownership.base_branch AS ownership_base_branch,
-             ownership.branch AS ownership_branch, ownership.expected_head_sha AS ownership_head
-           FROM cp_hosted_run run
-           JOIN cp_hosted_attempt attempt ON attempt.organization_id = run.organization_id
-             AND attempt.run_id = run.run_id AND attempt.attempt_number = run.current_attempt_number
-           JOIN cp_publication_candidate candidate ON candidate.organization_id = run.organization_id
-             AND candidate.run_id = run.run_id AND candidate.attempt_id = attempt.attempt_id
-           JOIN cp_publication_intent intent ON intent.organization_id = run.organization_id
-             AND intent.run_id = run.run_id AND intent.attempt_id = attempt.attempt_id
-             AND intent.candidate_id = candidate.candidate_id
-           JOIN cp_publication_branch_ownership ownership ON ownership.organization_id = intent.organization_id
-             AND ownership.ownership_id = intent.ownership_id
-           WHERE run.organization_id = $1 AND run.run_id = $2
-           FOR UPDATE OF run, attempt, candidate, intent, ownership`,
-          [completion.organizationId, completion.runId],
-        );
-        const row = current.rows[0];
-        if (!row) return { kind: "stale_fence" as const };
+        const discovered = await client.query<{ intent_id: string }>(
+          `SELECT intent_id FROM cp_publication_intent
+           WHERE organization_id=$1 AND run_id=$2 AND candidate_id=$3`,
+          [completion.organizationId, completion.runId, completion.candidateId]);
+        const intentId = discovered.rows[0]?.intent_id;
+        const identity = intentId ? await discoverPublicationLifecycle(client, {
+          organizationId: completion.organizationId, intentId }) : null;
+        const lifecycle = identity ? await lockPublicationLifecycle(client, {
+          organizationId: completion.organizationId, intentId: intentId!, identity,
+          testHooks: input.testHooks }) : null;
+        const evidence = lifecycle ? await lockPublicationCandidateAndOwnership(client, {
+          organizationId: completion.organizationId, lifecycle }) : null;
+        if (!lifecycle || !evidence) return { kind: "stale_fence" as const };
+        const row = {
+          ...lifecycle.run,
+          attempt_id: lifecycle.attempt.attempt_id,
+          attempt_number: lifecycle.attempt.attempt_number,
+          attempt_state: lifecycle.attempt.state,
+          fencing_token_digest: lifecycle.attempt.fencing_token_digest,
+          candidate_id: evidence.candidate.candidate_id,
+          candidate: evidence.candidate.candidate,
+          intent_id: lifecycle.intent.intent_id,
+          intent_candidate_digest: lifecycle.intent.candidate_digest,
+          intent_repository: lifecycle.intent.repository,
+          intent_branch: lifecycle.intent.branch,
+          expected_head_sha: lifecycle.intent.expected_head_sha,
+          runner_generation: lifecycle.intent.runner_generation,
+          ownership_id: evidence.ownership.ownership_id,
+          ownership_provider: evidence.ownership.provider,
+          ownership_owner: evidence.ownership.owner,
+          ownership_repo: evidence.ownership.repo,
+          ownership_remote: evidence.ownership.remote,
+          ownership_base_branch: evidence.ownership.base_branch,
+          ownership_branch: evidence.ownership.branch,
+          ownership_head: evidence.ownership.expected_head_sha,
+        };
 
         const already = await client.query<{ completion_decision: unknown }>(
           `SELECT completion_decision FROM cp_publication_completion
@@ -863,11 +1000,10 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
 
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(row.admission_policy_snapshot);
         const requiredChecks = policy.payload.admissionRules.requiredCheckNames;
-        const pushOperation = await readLockedPublicationOperationState(client, { organizationId: completion.organizationId,
-          intentId: row.intent_id, step: "push_owned_branch" });
-        const pullRequestOperation = await readLockedPublicationOperationState(client, { organizationId: completion.organizationId,
-          intentId: row.intent_id, step: "create_draft_pull_request" });
-        if (!pushOperation || !pullRequestOperation) return { kind: "stale_fence" as const };
+        const pushOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "push_owned_branch", lock: true });
+        const pullRequestOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "create_draft_pull_request", lock: true });
         if (pushOperation.state.kind === "reconciliation_pending"
           || pullRequestOperation.state.kind === "reconciliation_pending") {
           return { kind: "outcome_unknown" as const, reason: "publication_outcome_unknown" };

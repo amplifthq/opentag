@@ -111,6 +111,23 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     fencingToken: claim.attempt.fencingToken, candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
     runnerGeneration: 1, step });
 
+  const completion = (fencingToken = claim.attempt.fencingToken) => ({
+    schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+    requiredCapabilities: ["relay.publication.v1"] as ["relay.publication.v1"],
+    requestId: "request_complete_publication", organizationId: principal.organizationId,
+    runnerId: principal.runnerId, runnerGeneration: 1, runId: candidate.runId,
+    attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+    fencingToken, candidateId: candidate.candidateId,
+    candidateDigest: sha256(candidate), observation: { provider: "github" as const,
+      repository: { owner: "acme", repo: "demo" }, remote: "origin",
+      branch: "opentag/run_publication", baseBranch: "main", pullRequestNumber: 7,
+      pullRequestResourceRef: "github:acme/demo:pull_request:7",
+      pullRequestUrl: "https://github.com/acme/demo/pull/7", draft: true as const,
+      state: "open" as const, headSha: "c".repeat(40), headBranch: "opentag/run_publication",
+      headRepository: { owner: "AcMe", repo: "DeMo" }, baseSha: "d".repeat(40),
+      checks: { test: "passed" as const }, checksComplete: true,
+      observedAt: now.toISOString() } });
+
   it("freezes exact Runner-owned branch authority before human approval and conflicts on any replay change", async () => {
     await expect(publisher.attestOwnership({ principal, attestation: ownership({
       candidateDigest: sha256("wrong") }) as never })).resolves.toMatchObject({ kind: "rejected" });
@@ -274,27 +291,82 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       ] });
   });
 
-  it("serializes a delayed attempt-one receipt and attempt-two reconciliation in canonical operation order", async () => {
-    const intentId = "publication_intent_lock_race";
+  it.each(["record", "reconcile"] as const)(
+  "serializes attempt-one receipt and attempt-two reconciliation when %s starts first",
+  async (firstKind) => {
+    const suffix = firstKind === "record" ? "receipt_first" : "reconcile_first";
+    const runId = `run_publication_lock_race_${suffix}`;
+    const attemptId = `attempt_publication_lock_race_${suffix}`;
+    const candidateId = `candidate_publication_lock_race_${suffix}`;
+    const ownershipId = `ownership_publication_lock_race_${suffix}`;
+    const intentId = `publication_intent_lock_race_${suffix}`;
     const operationId = `${intentId}:create_draft_pull_request`;
+    const raceCandidate = { ...candidate, runId, attemptId, candidateId };
+    const raceCandidateDigest = sha256(raceCandidate);
+    await fixture.pool.query(
+       `INSERT INTO cp_hosted_run
+       SELECT (jsonb_populate_record(NULL::cp_hosted_run, to_jsonb(source) || jsonb_build_object(
+         'run_id',$2::text,'admission_id',$3::text,'source_identity_digest',$4::text,'state','running',
+         'terminal_kind',NULL,'terminal_receipt',NULL))).*
+       FROM cp_hosted_run source WHERE organization_id=$1 AND run_id=$5`,
+      [principal.organizationId, runId, `admission_publication_lock_race_${suffix}`,
+        sha256(`source_lock_race_${suffix}`), candidate.runId],
+    );
+    await fixture.pool.query(
+       `INSERT INTO cp_hosted_attempt
+       SELECT (jsonb_populate_record(NULL::cp_hosted_attempt, to_jsonb(source) || jsonb_build_object(
+         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz))).*
+       FROM cp_hosted_attempt source WHERE organization_id=$1 AND run_id=$5 AND attempt_id=$6`,
+      [principal.organizationId, runId, attemptId, new Date(now.getTime() + 60_000), candidate.runId, claim.attempt.id],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_candidate(organization_id,candidate_id,run_id,attempt_id,attempt_number,
+       project_target_id,frozen_base_revision,workspace_tree_digest,patch_digest,changed_files,
+       verification_evidence_ids,publication_policy_digest,candidate,completion_assessment,created_at)
+       SELECT organization_id,$2,$3,$4,attempt_number,project_target_id,frozen_base_revision,
+       workspace_tree_digest,patch_digest,changed_files,verification_evidence_ids,publication_policy_digest,
+       $5::jsonb,completion_assessment,created_at FROM cp_publication_candidate
+       WHERE organization_id=$1 AND candidate_id=$6`,
+      [principal.organizationId, candidateId, runId, attemptId, JSON.stringify(raceCandidate), candidate.candidateId],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,run_id,attempt_id,
+       attempt_number,fencing_token_digest,runner_id,runner_generation,candidate_id,candidate_digest,
+       project_target_id,target_binding_digest,provider,owner,repo,remote,base_branch,frozen_base_revision,
+       workspace_tree_digest,branch,expected_head_sha,attestation_digest,attested_at,created_at)
+       SELECT organization_id,$2,$3,$4,attempt_number,fencing_token_digest,runner_id,runner_generation,
+       $5,$6,project_target_id,target_binding_digest,provider,owner,repo,remote,base_branch,
+       frozen_base_revision,workspace_tree_digest,$7,expected_head_sha,$8,attested_at,created_at
+       FROM cp_publication_branch_ownership WHERE organization_id=$1 AND candidate_id=$9`,
+      [principal.organizationId, ownershipId, runId, attemptId, candidateId, raceCandidateDigest,
+        `opentag/run_publication_lock_race_${suffix}`, sha256(`ownership_lock_race_${suffix}`), candidate.candidateId],
+    );
     await fixture.pool.query(
       `INSERT INTO cp_publication_intent(organization_id,intent_id,run_id,attempt_id,attempt_number,
        candidate_id,candidate_digest,ownership_id,ownership_digest,approval_id,approver_id,approval_digest,
        repository,branch,expected_head_sha,runner_id,runner_generation,approved_at,expires_at,created_at)
-       SELECT organization_id,$2,run_id,attempt_id,attempt_number,$3,candidate_digest,ownership_id,
-       ownership_digest,$4,approver_id,approval_digest,repository,branch,expected_head_sha,runner_id,
+       SELECT organization_id,$2,$3,$4,attempt_number,$5,$6,$7,
+       $10,$8,approver_id,approval_digest,repository,$9,expected_head_sha,runner_id,
        runner_generation,approved_at,expires_at,created_at
        FROM cp_publication_intent WHERE organization_id=$1 LIMIT 1`,
-      [principal.organizationId, intentId, "candidate_lock_race", "approval_lock_race"],
+      [principal.organizationId, intentId, runId, attemptId, candidateId, raceCandidateDigest,
+        ownershipId, `approval_lock_race_${suffix}`, `opentag/run_publication_lock_race_${suffix}`,
+        sha256(`ownership_lock_race_${suffix}`)],
     );
     const source = (await fixture.pool.query<{ capability: unknown }>(
-      `SELECT capability FROM cp_publication_capability WHERE organization_id=$1
-       AND step='create_draft_pull_request' ORDER BY attempt_number DESC LIMIT 1`,
-      [principal.organizationId],
+      `SELECT capability.capability FROM cp_publication_capability capability
+       JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
+         AND intent.intent_id=capability.intent_id
+       WHERE capability.organization_id=$1 AND intent.run_id=$2
+         AND capability.step='create_draft_pull_request'
+       ORDER BY capability.attempt_number DESC LIMIT 1`,
+      [principal.organizationId, candidate.runId],
     )).rows[0]!.capability as Record<string, unknown>;
     const makeCapability = (number: number) => ({ ...source,
-      capabilityId: `publication_capability_lock_race_${number}`,
-      operationId, idempotencyKey: operationId, issuedAt: now.toISOString(),
+      capabilityId: `publication_capability_lock_race_${suffix}_${number}`,
+      operationId, idempotencyKey: operationId, runId, attemptId, candidateId,
+      candidateDigest: raceCandidateDigest, branch: `opentag/run_publication_lock_race_${suffix}`,
+      issuedAt: now.toISOString(),
       expiresAt: new Date(now.getTime() + 60_000).toISOString() });
     const first = makeCapability(1);
     const second = makeCapability(2);
@@ -313,30 +385,8 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       );
     }
 
-    let arrivals = 0;
-    let releaseBarrier: () => void = () => {};
-    const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
-    const barrierPool = {
-      connect: async () => {
-        const client = await fixture.pool.connect();
-        return {
-          query: async (query: string, values?: unknown[]) => {
-            const result = await client.query(query, values);
-            if (query.includes("FROM cp_publication_capability") && query.includes("FOR UPDATE")
-              && (query.includes("SELECT capability") || query.includes("SELECT intent_id,capability"))) {
-              arrivals += 1;
-              if (arrivals === 2) releaseBarrier(); else await barrier;
-            }
-            return result;
-          },
-          release: () => client.release(),
-        };
-      },
-    };
-    const racePublisher = createPublicationPublisher({ pool: barrierPool as never,
-      clock: { now: () => now }, idFactory: () => "unused_lock_race" });
     const receiptSeed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-      receiptId: "receipt_lock_race_one", capabilityId: first.capabilityId as string, operationId,
+      receiptId: `receipt_lock_race_one_${suffix}`, capabilityId: first.capabilityId as string, operationId,
       organizationId: principal.organizationId, runId: first.runId as string, attemptId: first.attemptId as string,
       candidateId: first.candidateId as string, candidateDigest: first.candidateDigest as string,
       step: "create_draft_pull_request" as const, runnerId: principal.runnerId,
@@ -344,33 +394,71 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       observation: { kind: "present" as const, headSha: first.expectedHeadSha as string,
         externalId: "github_pr_71", externalUri: "https://github.com/acme/demo/pull/71",
         draft: true as const, provider: "github" as const, repository: { owner: "acme", repo: "demo" },
-        baseBranch: "main", state: "open" as const, headBranch: "opentag/run_publication",
+        baseBranch: "main", state: "open" as const, headBranch: `opentag/run_publication_lock_race_${suffix}`,
         headRepository: { owner: "AcMe", repo: "DeMo" } }, outcome: "succeeded" as const,
       observedAt: now.toISOString() };
     const receipt = { ...receiptSeed,
       receiptDigest: await computePublicationOperationReceiptDigestV1(receiptSeed) };
-    const outcomesPromise = Promise.allSettled([
-      racePublisher.record({ principal, receipt }),
-      racePublisher.reconcile({ principal, capabilityId: second.capabilityId as string, operationId,
-        reconciliationId: "reconcile_lock_race_two", observation: { kind: "absent" }, observedAt: now.toISOString() }),
-    ]);
-    // The row barrier is released by the second caller.  This fallback makes
-    // an assertion failure diagnostic rather than leaving a broken lock order
-    // holding a test connection indefinitely.
-    const fallback = setTimeout(releaseBarrier, 250);
-    const outcomes = await outcomesPromise;
-    clearTimeout(fallback);
-    expect(outcomes).toSatisfy((values) => JSON.stringify(values) === JSON.stringify([
-      { status: "fulfilled", value: { kind: "recorded", receipt } },
-      { status: "fulfilled", value: { kind: "conflict" } },
-    ]) || JSON.stringify(values) === JSON.stringify([
-      { status: "fulfilled", value: { kind: "conflict" } },
-      { status: "fulfilled", value: { kind: "retry_authorized" } },
-    ]));
+    const firstRunLock = Promise.withResolvers<void>();
+    const secondRunLockRequest = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const firstPublisher = createPublicationPublisher({ pool: fixture.pool,
+      clock: { now: () => now }, idFactory: () => "unused_lock_race_first",
+      testHooks: { onLifecycleLock: async (event) => {
+        if (event.resource === "run" && event.phase === "acquired") {
+          firstRunLock.resolve();
+          await releaseFirst.promise;
+        }
+      } } });
+    const secondPublisher = createPublicationPublisher({ pool: fixture.pool,
+      clock: { now: () => now }, idFactory: () => "unused_lock_race_second",
+      testHooks: { onLifecycleLock: (event) => {
+        if (event.resource === "run" && event.phase === "before") secondRunLockRequest.resolve();
+      } } });
+    const record = () => firstKind === "record"
+      ? firstPublisher.record({ principal, receipt })
+      : secondPublisher.record({ principal, receipt });
+    const reconcile = () => (firstKind === "reconcile" ? firstPublisher : secondPublisher).reconcile({
+      principal, capabilityId: second.capabilityId as string, operationId,
+      reconciliationId: `reconcile_lock_race_two_${suffix}`, observation: { kind: "absent" },
+      observedAt: now.toISOString() });
+    const firstOutcome = firstKind === "record" ? record() : reconcile();
+    await firstRunLock.promise;
+    const secondOutcome = firstKind === "record" ? reconcile() : record();
+    await secondRunLockRequest.promise;
+    releaseFirst.resolve();
+    await expect(Promise.allSettled([firstOutcome, secondOutcome])).resolves.toEqual(firstKind === "record"
+      ? [{ status: "fulfilled", value: { kind: "recorded", receipt } },
+          { status: "fulfilled", value: { kind: "conflict" } }]
+      : [{ status: "fulfilled", value: { kind: "retry_authorized" } },
+          { status: "fulfilled", value: { kind: "conflict" } }]);
     await expect(fixture.pool.query<{ attempt_number: number }>(
       `SELECT attempt_number FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2`,
       [principal.organizationId, intentId],
     )).resolves.toMatchObject({ rows: [{ attempt_number: 1 }, { attempt_number: 2 }] });
+    await expect(fixture.pool.query<{
+      capabilities: number; begins: number; receipts: number; reconciliations: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2) capabilities,
+         (SELECT count(*)::int FROM cp_publication_begin begin
+           JOIN cp_publication_capability capability USING (organization_id,capability_id)
+           WHERE begin.organization_id=$1 AND capability.intent_id=$2) begins,
+         (SELECT count(*)::int FROM cp_publication_receipt receipt
+           JOIN cp_publication_capability capability USING (organization_id,capability_id)
+           WHERE receipt.organization_id=$1 AND capability.intent_id=$2) receipts,
+         (SELECT count(*)::int FROM cp_publication_reconciliation reconciliation
+           JOIN cp_publication_capability capability USING (organization_id,capability_id)
+           WHERE reconciliation.organization_id=$1 AND capability.intent_id=$2) reconciliations`,
+      [principal.organizationId, intentId],
+    )).resolves.toMatchObject({ rows: [{ capabilities: 2, begins: 2,
+      receipts: firstKind === "record" ? 1 : 0,
+      reconciliations: firstKind === "reconcile" ? 1 : 0 }] });
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run SET state='succeeded',terminal_kind='succeeded',terminal_receipt=$3::jsonb
+       WHERE organization_id=$1 AND run_id=$2`,
+      [principal.organizationId, runId, JSON.stringify({ kind: "lock_race_fixture_complete" })],
+    );
   });
 
   it("normalizes canonical repository identity and rejects casing, remote, and base variants for the owned branch", async () => {
@@ -394,6 +482,88 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       .rejects.toMatchObject({ code: "23505" });
   });
 
+  it.each(["claim_next", "complete"] as const)(
+    "starts %s before the competing publication lifecycle at the canonical Run lock",
+    async (firstKind) => {
+      const before = (await fixture.pool.query<{ capabilities: number; begins: number; completions: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1) capabilities,
+           (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1) begins,
+           (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1) completions`,
+        [principal.organizationId],
+      )).rows[0]!;
+      const canonicalFirstLockPool = {
+        connect: async () => {
+          const client = await fixture.pool.connect();
+          let sawCanonicalRunLock = false;
+          return {
+            query: async (query: string, values?: unknown[]) => {
+              if (query.includes("FOR UPDATE")) {
+                const canonicalRunLock = query.includes("FROM cp_hosted_run")
+                  && !query.includes("JOIN") && !query.includes("cp_publication_");
+                if (!sawCanonicalRunLock && !canonicalRunLock) {
+                  throw new Error("publication_lock_before_canonical_run");
+                }
+                sawCanonicalRunLock ||= canonicalRunLock;
+              }
+              return client.query(query, values);
+            },
+            release: () => client.release(),
+          };
+        },
+      };
+      const firstRunLock = Promise.withResolvers<void>();
+      const secondRunLockRequest = Promise.withResolvers<void>();
+      const releaseFirst = Promise.withResolvers<void>();
+      const firstPublisher = createPublicationPublisher({ pool: canonicalFirstLockPool as never,
+        clock: { now: () => now }, idFactory: () => "unused_claim_complete_first",
+        testHooks: { onLifecycleLock: async (event) => {
+          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "acquired") {
+            firstRunLock.resolve();
+            await releaseFirst.promise;
+          }
+        } } });
+      const secondPublisher = createPublicationPublisher({ pool: canonicalFirstLockPool as never,
+        clock: { now: () => now }, idFactory: () => "unused_claim_complete_second",
+        testHooks: { onLifecycleLock: (event) => {
+          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "before") {
+            secondRunLockRequest.resolve();
+          }
+        } } });
+      const run = (subject: typeof firstPublisher, kind: typeof firstKind) => kind === "claim_next"
+        ? subject.claimNextForRunner({ principal })
+        : subject.complete({ principal, completion: completion("wrong_fence_publication") });
+      const secondKind = firstKind === "claim_next" ? "complete" : "claim_next";
+      const firstOutcome = run(firstPublisher, firstKind);
+      await Promise.race([
+        firstRunLock.promise,
+        firstOutcome.then(() => { throw new Error("first_operation_returned_before_run_lock"); }),
+      ]);
+      const secondOutcome = run(secondPublisher, secondKind);
+      await Promise.race([
+        secondRunLockRequest.promise,
+        secondOutcome.then(() => { throw new Error("second_operation_returned_before_requesting_run_lock"); }),
+      ]);
+      releaseFirst.resolve();
+      const outcomes = await Promise.allSettled([firstOutcome, secondOutcome]);
+      expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
+      expect(outcomes).not.toSatisfy((values) => values.some((outcome) => outcome.status === "rejected"
+        && ["40P01", "55P03", "57014"].includes(String((outcome.reason as { code?: string }).code))));
+      const values = outcomes.map((outcome) => outcome.status === "fulfilled" ? outcome.value : null);
+      expect(values).toContainEqual({ kind: "stale_fence" });
+      expect(values).toContainEqual(firstKind === "claim_next"
+        ? expect.objectContaining({ kind: "completion_pending" })
+        : { kind: "empty" });
+      await expect(fixture.pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1) capabilities,
+           (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1) begins,
+           (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1) completions`,
+        [principal.organizationId],
+      )).resolves.toMatchObject({ rows: [before] });
+    },
+  );
+
   it("settles exactly once only after successful receipts and frozen checks prove exact-head readiness", async () => {
     // Candidate settlement is intentionally non-terminal for pull_request,
     // while Executor completion has already made this attempt successful.
@@ -407,25 +577,11 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
        WHERE organization_id = $1 AND run_id = $2`,
       [principal.organizationId, candidate.runId],
     );
-    const completion = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-      requiredCapabilities: ["relay.publication.v1"] as ["relay.publication.v1"],
-      requestId: "request_complete_publication", organizationId: principal.organizationId,
-      runnerId: principal.runnerId, runnerGeneration: 1, runId: candidate.runId,
-      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
-      fencingToken: claim.attempt.fencingToken, candidateId: candidate.candidateId,
-      candidateDigest: sha256(candidate), observation: { provider: "github" as const,
-        repository: { owner: "acme", repo: "demo" }, remote: "origin",
-        branch: "opentag/run_publication", baseBranch: "main", pullRequestNumber: 7,
-        pullRequestResourceRef: "github:acme/demo:pull_request:7",
-        pullRequestUrl: "https://github.com/acme/demo/pull/7", draft: true as const,
-        state: "open" as const, headSha: "c".repeat(40), headBranch: "opentag/run_publication",
-        headRepository: { owner: "AcMe", repo: "DeMo" }, baseSha: "d".repeat(40),
-        checks: { test: "passed" as const }, checksComplete: true,
-        observedAt: now.toISOString() } };
-    await expect(publisher.complete({ principal, completion })).resolves.toEqual({ kind: "ready", projection: "ready_for_review" });
-    await expect(publisher.complete({ principal, completion })).resolves.toEqual({ kind: "replayed" });
-    await expect(publisher.complete({ principal, completion: { ...completion,
-      observation: { ...completion.observation, checks: { test: "pending" as const } } } }))
+    const exactCompletion = completion();
+    await expect(publisher.complete({ principal, completion: exactCompletion })).resolves.toEqual({ kind: "ready", projection: "ready_for_review" });
+    await expect(publisher.complete({ principal, completion: exactCompletion })).resolves.toEqual({ kind: "replayed" });
+    await expect(publisher.complete({ principal, completion: { ...exactCompletion,
+      observation: { ...exactCompletion.observation, checks: { test: "pending" as const } } } }))
       .resolves.toEqual({ kind: "conflict", reason: "completion_replay_mismatch" });
     // Reconnecting or restarting the same Runner only consults the immutable
     // coordinator ledger; a terminal completion never causes a blind write.
