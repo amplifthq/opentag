@@ -9076,7 +9076,15 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eq(hostedClaimOperations.state, "claimed")
       )).orderBy(desc(hostedClaimOperations.acknowledgedAt), desc(hostedClaimOperations.operationId));
       for (const operation of operations) {
-        if (!operation.runId || operation.executionStartedAt) continue;
+        if (!operation.runId) continue;
+        if (operation.terminalReasonCode !== null) {
+          evictHostedExecutionPayload({
+            attemptId: operation.attemptId ?? undefined,
+            runId: operation.runId,
+          });
+          continue;
+        }
+        if (operation.executionStartedAt) continue;
         const runRow = await db.select().from(runs).where(and(
           eq(runs.id, operation.runId),
           inArray(runs.status, ["assigned", "running"]),
@@ -9539,6 +9547,10 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
           eq(hostedClaimOperations.runId, input.runId),
           isNotNull(hostedClaimOperations.executionStartedAt)
         )).limit(1).get();
+        if (operation && operation.terminalReasonCode !== null) {
+          evictHostedExecutionPayload({ attemptId: input.attemptId });
+          return false;
+        }
         if (
           !importedRun || !importedAttempt || !run || !attempt || !operation
           || importedAttempt.runId !== input.runId

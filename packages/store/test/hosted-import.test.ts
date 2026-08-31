@@ -824,16 +824,71 @@ describe("hosted assigned Run import", () => {
   it("retains the exact active hosted payload after a caller presents a wrong fence", async () => {
     const sqlite = new Database(":memory:"); migrateSchema(sqlite);
     const repo = createOpenTagRepository(drizzle(sqlite));
-    const value = await fixture(); await begin(repo, value);
+    const secret = "HOSTED_ACTIVE_TERMINAL_NULL_CONTROL_4de7";
+    const value = await fixture({ body: secret }); await begin(repo, value);
     await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(true);
     await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
       attemptId: value.claim.attempt.id, fencingToken: "caller-wrong-fence" }))
       .resolves.toBe(false);
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(true);
     sqlite.prepare("UPDATE hosted_claim_operations SET execution_started_at=NULL WHERE operation_id=?")
       .run(value.request.operationId);
     await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
       organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
-      .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id } });
+      .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id,
+        event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("rejects and evicts recovery payloads for terminal claimed operations", async () => {
+    // Catches removing the terminalReasonCode rejection from getHostedAssignedRunForRecovery().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_RECOVERY_EVICTION_829f";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed',
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.request.operationId);
+
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("rejects and evicts current execution payloads for terminal claimed operations", async () => {
+    // Catches removing terminal claim rejection and eviction from isHostedExecutionCurrent().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_CURRENT_EVICTION_16ac";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed',
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.request.operationId);
+
+    await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
+      .resolves.toBe(false);
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
     sqlite.close();
   });
 
