@@ -176,6 +176,142 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     throw new Error("publication_backend_did_not_wait_on_lock");
   };
 
+  const expectBackendWaitingOnAdvisoryLock = async (backendPid: Promise<number>) => {
+    const pid = await backendPid;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const waiting = await fixture.pool.query(
+        `SELECT 1 FROM pg_stat_activity activity
+         WHERE activity.pid=$1 AND activity.wait_event_type='Lock'
+           AND EXISTS (SELECT 1 FROM pg_locks lock WHERE lock.pid=activity.pid
+             AND lock.locktype='advisory' AND NOT lock.granted)`,
+        [pid],
+      );
+      if (waiting.rowCount === 1) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("publication_backend_did_not_wait_on_advisory_lock");
+  };
+
+  const createFreshApprovalAuthority = async (suffix: string, runnerId = principal.runnerId) => {
+    const runId = `run_publication_approval_${suffix}`;
+    const attemptId = `attempt_publication_approval_${suffix}`;
+    const candidateId = `candidate_publication_approval_${suffix}`;
+    const ownershipId = `ownership_publication_approval_${suffix}`;
+    const branch = `opentag/run_publication_approval_${suffix}`;
+    const freshCandidate = { ...candidate, runId, attemptId, candidateId };
+    const candidateDigest = sha256(freshCandidate);
+    const ownershipDigest = sha256(`ownership_publication_approval_${suffix}`);
+    const sourceOwnership = await fixture.pool.query<{ ownership_id: string }>(
+      `SELECT ownership_id FROM cp_publication_branch_ownership
+       WHERE organization_id=$1 AND candidate_id=$2`,
+      [principal.organizationId, candidate.candidateId],
+    );
+    if (sourceOwnership.rowCount === 0) {
+      const recorded = await publisher.attestOwnership({ principal, attestation: ownership() as never });
+      if (recorded.kind === "rejected") throw new Error(`approval_fixture_ownership_${recorded.reason}`);
+    }
+    if (runnerId !== principal.runnerId) {
+      await fixture.pool.query(
+        `INSERT INTO cp_runner
+         SELECT (jsonb_populate_record(NULL::cp_runner, to_jsonb(source) || jsonb_build_object(
+           'runner_id',$2::text,'current_credential_id',$3::text,'display_name',$2::text))).*
+         FROM cp_runner source WHERE organization_id=$1 AND runner_id=$4`,
+        [principal.organizationId, runnerId, `credential_publication_approval_${suffix}`, principal.runnerId],
+      );
+    }
+    await fixture.pool.query(
+      `INSERT INTO cp_hosted_run
+       SELECT (jsonb_populate_record(NULL::cp_hosted_run, to_jsonb(source) || jsonb_build_object(
+         'run_id',$2::text,'admission_id',$3::text,'source_identity_digest',$4::text,'state','running',
+         'terminal_kind',NULL,'terminal_receipt',NULL,'runner_id',$5::text))).*
+       FROM cp_hosted_run source WHERE organization_id=$1 AND run_id=$6`,
+      [principal.organizationId, runId, `admission_publication_approval_${suffix}`,
+        sha256(`source_publication_approval_${suffix}`), runnerId, candidate.runId],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_hosted_attempt
+       SELECT (jsonb_populate_record(NULL::cp_hosted_attempt, to_jsonb(source) || jsonb_build_object(
+         'run_id',$2::text,'attempt_id',$3::text,'lease_expires_at',$4::timestamptz,'runner_id',$5::text))).*
+       FROM cp_hosted_attempt source WHERE organization_id=$1 AND run_id=$6 AND attempt_id=$7`,
+      [principal.organizationId, runId, attemptId, new Date(now.getTime() + 60_000), runnerId,
+        candidate.runId, claim.attempt.id],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_candidate(organization_id,candidate_id,run_id,attempt_id,attempt_number,
+       project_target_id,frozen_base_revision,workspace_tree_digest,patch_digest,changed_files,
+       verification_evidence_ids,publication_policy_digest,candidate,completion_assessment,created_at)
+       SELECT organization_id,$2,$3,$4,attempt_number,project_target_id,frozen_base_revision,
+       workspace_tree_digest,patch_digest,changed_files,verification_evidence_ids,publication_policy_digest,
+       $5::jsonb,completion_assessment,created_at FROM cp_publication_candidate
+       WHERE organization_id=$1 AND candidate_id=$6`,
+      [principal.organizationId, candidateId, runId, attemptId, JSON.stringify(freshCandidate), candidate.candidateId],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,run_id,attempt_id,
+       attempt_number,fencing_token_digest,runner_id,runner_generation,candidate_id,candidate_digest,
+       project_target_id,target_binding_digest,provider,owner,repo,remote,base_branch,frozen_base_revision,
+       workspace_tree_digest,branch,expected_head_sha,attestation_digest,attested_at,created_at)
+       SELECT organization_id,$2,$3,$4,attempt_number,fencing_token_digest,$10,runner_generation,
+       $5,$6,project_target_id,target_binding_digest,provider,owner,repo,remote,base_branch,
+       frozen_base_revision,workspace_tree_digest,$7,expected_head_sha,$8,attested_at,created_at
+       FROM cp_publication_branch_ownership WHERE organization_id=$1 AND candidate_id=$9`,
+      [principal.organizationId, ownershipId, runId, attemptId, candidateId, candidateDigest,
+        branch, ownershipDigest, candidate.candidateId, runnerId],
+    );
+    return { runId, attemptId, candidateId, candidateDigest, ownershipId, ownershipDigest, runnerId };
+  };
+
+  const freshApproval = (authority: Awaited<ReturnType<typeof createFreshApprovalAuthority>>,
+    overrides: Partial<Record<string, unknown>> = {}) => ({
+    organizationId: principal.organizationId, runnerId: authority.runnerId, runId: authority.runId,
+    ownershipId: authority.ownershipId, ownershipDigest: authority.ownershipDigest,
+    candidateId: authority.candidateId, candidateDigest: authority.candidateDigest,
+    approvalId: `approval_publication_${authority.candidateId}`, approverId: "operator_publication",
+    approvedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(), ...overrides });
+
+  const closeFreshApprovalRuns = async (...runIds: string[]) => {
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run
+       SET state='succeeded',terminal_kind='succeeded',terminal_receipt=$3::jsonb
+       WHERE organization_id=$1 AND run_id=ANY($2::text[])`,
+      [principal.organizationId, runIds, JSON.stringify({ kind: "approval_fixture_complete" })],
+    );
+  };
+
+  const createAdvisoryGatePool = () => {
+    const backendPid = Promise.withResolvers<number>();
+    const advisoryAcquired = Promise.withResolvers<void>();
+    const releaseAdvisory = Promise.withResolvers<void>();
+    let gateFirstAdvisoryLock = true;
+    return {
+      backendPid: backendPid.promise,
+      advisoryAcquired: advisoryAcquired.promise,
+      releaseAdvisory: releaseAdvisory.resolve,
+      pool: {
+        connect: async () => {
+          const client = await fixture.pool.connect();
+          backendPid.resolve((await client.query<{ pid: number }>("SELECT pg_backend_pid() pid")).rows[0]!.pid);
+          return {
+            query: async (query: string, values?: unknown[]) => {
+              const result = await client.query(query, values);
+              if (query === "BEGIN") {
+                await client.query("SET LOCAL lock_timeout = '3s'");
+                await client.query("SET LOCAL statement_timeout = '5s'");
+              }
+              if (gateFirstAdvisoryLock && query.includes("pg_advisory_xact_lock")) {
+                gateFirstAdvisoryLock = false;
+                advisoryAcquired.resolve();
+                await releaseAdvisory.promise;
+              }
+              return result;
+            },
+            release: () => client.release(),
+          };
+        },
+      },
+    };
+  };
+
   it("freezes exact Runner-owned branch authority before human approval and conflicts on any replay change", async () => {
     await expect(publisher.attestOwnership({ principal, attestation: ownership({
       candidateDigest: sha256("wrong") }) as never })).resolves.toMatchObject({ kind: "rejected" });
@@ -206,6 +342,147 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
       { expiresAt: new Date(now.getTime() + 29 * 60_000).toISOString() }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
   });
+
+  it("treats approvalId as immutable approval authority across fresh candidates", async () => {
+    const first = await createFreshApprovalAuthority("approval_id_sequential_first");
+    const second = await createFreshApprovalAuthority("approval_id_sequential_second");
+    const firstApproval = freshApproval(first, { approvalId: "approval_publication_sequential" });
+    await expect(publisher.approve(firstApproval)).resolves.toEqual({
+      kind: "approved", intentId: expect.any(String),
+    });
+    await expect(publisher.approve(firstApproval)).resolves.toEqual({
+      kind: "replayed", intentId: expect.any(String),
+    });
+    await expect(publisher.approve(freshApproval(first, { approvalId: "approval_publication_new" })))
+      .resolves.toEqual({ kind: "rejected", reason: "approval_replay_conflict" });
+    await expect(publisher.approve(freshApproval(first, { approverId: "operator_changed" })))
+      .resolves.toEqual({ kind: "rejected", reason: "approval_replay_conflict" });
+    await expect(publisher.approve(freshApproval(first, {
+      expiresAt: new Date(now.getTime() + 29 * 60_000).toISOString(),
+    }))).resolves.toEqual({ kind: "rejected", reason: "approval_replay_conflict" });
+    await expect(publisher.approve(freshApproval(second, { approvalId: firstApproval.approvalId }))).resolves.toEqual({
+      kind: "rejected", reason: "approval_replay_conflict",
+    });
+    await expect(fixture.pool.query<{ intents: number; capabilities: number; begins: number; completions: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM cp_publication_intent WHERE organization_id=$1
+           AND approval_id=$2) intents,
+         (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1
+           AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2)) capabilities,
+         (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1
+           AND capability_id IN (SELECT capability_id FROM cp_publication_capability WHERE organization_id=$1
+             AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2))) begins,
+         (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1
+           AND run_id IN ($3,$4)) completions`,
+      [principal.organizationId, firstApproval.approvalId, first.runId, second.runId],
+    )).resolves.toMatchObject({ rows: [{ intents: 1, capabilities: 0, begins: 0, completions: 0 }], rowCount: 1 });
+    await closeFreshApprovalRuns(first.runId, second.runId);
+  });
+
+  it("serializes concurrent first approval for one fresh candidate at its Run lock", async () => {
+    const authority = await createFreshApprovalAuthority("approval_same_candidate");
+    const firstRunLock = Promise.withResolvers<void>();
+    const secondRunLockRequest = Promise.withResolvers<void>();
+    const releaseFirst = Promise.withResolvers<void>();
+    const firstLockPool = createLockTestPool(true);
+    const secondLockPool = createLockTestPool(true);
+    const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
+      clock: { now: () => now }, idFactory: () => "approval_same_candidate_first",
+      testHooks: { onLifecycleLock: async (event) => {
+        if (event.runId === authority.runId && event.resource === "run" && event.phase === "after") {
+          firstRunLock.resolve();
+          await releaseFirst.promise;
+        }
+      } } });
+    const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
+      clock: { now: () => now }, idFactory: () => "approval_same_candidate_second",
+      testHooks: { onLifecycleLock: (event) => {
+        if (event.runId === authority.runId && event.resource === "run" && event.phase === "before") {
+          secondRunLockRequest.resolve();
+        }
+      } } });
+    const first = firstPublisher.approve(freshApproval(authority));
+    await firstRunLock.promise;
+    const second = secondPublisher.approve(freshApproval(authority));
+    await secondRunLockRequest.promise;
+    await expectBackendWaitingOnLock(secondLockPool.backendPid);
+    releaseFirst.resolve();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { kind: "approved", intentId: expect.any(String) },
+      { kind: "replayed", intentId: expect.any(String) },
+    ]);
+    await expect(fixture.pool.query<{ candidates: number; ownerships: number; intents: number; capabilities: number; begins: number; completions: number }>(
+      `SELECT
+         (SELECT count(*)::int FROM cp_publication_candidate WHERE organization_id=$1 AND candidate_id=$2) candidates,
+         (SELECT count(*)::int FROM cp_publication_branch_ownership WHERE organization_id=$1 AND ownership_id=$3) ownerships,
+         (SELECT count(*)::int FROM cp_publication_intent WHERE organization_id=$1 AND candidate_id=$2) intents,
+         (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1
+           AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND candidate_id=$2)) capabilities,
+         (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1
+           AND capability_id IN (SELECT capability_id FROM cp_publication_capability WHERE organization_id=$1
+             AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND candidate_id=$2))) begins,
+         (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1 AND run_id=$4) completions`,
+      [principal.organizationId, authority.candidateId, authority.ownershipId, authority.runId],
+    )).resolves.toMatchObject({ rows: [{ candidates: 1, ownerships: 1, intents: 1, capabilities: 0, begins: 0, completions: 0 }], rowCount: 1 });
+    await closeFreshApprovalRuns(authority.runId);
+  });
+
+  it.each(["left", "right"] as const)(
+    "serializes concurrent first approval by approvalId when %s candidate starts first",
+    async (firstCandidate) => {
+      const left = await createFreshApprovalAuthority(`approval_id_race_left_${firstCandidate}`,
+        `runner_publication_approval_left_${firstCandidate}`);
+      const right = await createFreshApprovalAuthority(`approval_id_race_right_${firstCandidate}`,
+        `runner_publication_approval_right_${firstCandidate}`);
+      const firstAuthority = firstCandidate === "left" ? left : right;
+      const secondAuthority = firstCandidate === "left" ? right : left;
+      const firstRunLock = Promise.withResolvers<void>();
+      const secondRunLock = Promise.withResolvers<void>();
+      const firstLockPool = createAdvisoryGatePool();
+      const secondLockPool = createLockTestPool(true);
+      const approvalId = `approval_publication_race_${firstCandidate}`;
+      const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
+        clock: { now: () => now }, idFactory: () => `approval_id_race_${firstCandidate}_winner`,
+        testHooks: { onLifecycleLock: (event) => {
+          if (event.runId === firstAuthority.runId && event.resource === "run" && event.phase === "after") {
+            firstRunLock.resolve();
+          }
+        } } });
+      const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
+        clock: { now: () => now }, idFactory: () => `approval_id_race_${firstCandidate}_loser`,
+        testHooks: { onLifecycleLock: (event) => {
+          if (event.runId === secondAuthority.runId && event.resource === "run" && event.phase === "after") {
+            secondRunLock.resolve();
+          }
+        } } });
+      const first = firstPublisher.approve(freshApproval(firstAuthority, { approvalId }));
+      await firstRunLock.promise;
+      await firstLockPool.advisoryAcquired;
+      const second = secondPublisher.approve(freshApproval(secondAuthority, { approvalId }));
+      await secondRunLock.promise;
+      try {
+        await expectBackendWaitingOnAdvisoryLock(secondLockPool.backendPid);
+      } finally {
+        firstLockPool.releaseAdvisory();
+      }
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        { kind: "approved", intentId: expect.any(String) },
+        { kind: "rejected", reason: "approval_replay_conflict" },
+      ]);
+      await expect(fixture.pool.query<{ intents: number; capabilities: number; begins: number; completions: number }>(
+        `SELECT
+           (SELECT count(*)::int FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2) intents,
+           (SELECT count(*)::int FROM cp_publication_capability WHERE organization_id=$1
+             AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2)) capabilities,
+           (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1
+             AND capability_id IN (SELECT capability_id FROM cp_publication_capability WHERE organization_id=$1
+               AND intent_id IN (SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND approval_id=$2))) begins,
+           (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1 AND run_id IN ($3,$4)) completions`,
+        [principal.organizationId, approvalId, left.runId, right.runId],
+      )).resolves.toMatchObject({ rows: [{ intents: 1, capabilities: 0, begins: 0, completions: 0 }], rowCount: 1 });
+      await closeFreshApprovalRuns(left.runId, right.runId);
+    },
+  );
 
   it.each(["approve", "claim"] as const)(
     "serializes approval replay and operation claim when %s starts first",

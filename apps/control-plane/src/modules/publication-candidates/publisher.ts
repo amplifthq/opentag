@@ -436,26 +436,24 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             [command.organizationId, command.runId, command.candidateId, command.ownershipId]);
           const identity = discovered.rows[0] as PublicationLifecycleIdentity | undefined;
           if (!identity) return { kind: "rejected" as const, reason: "stale_publication_authority" };
-          let existingIntent = (await client.query<{ intent_id: string }>(
-            `SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND candidate_id=$2`,
-            [command.organizationId, command.candidateId])).rows[0]?.intent_id;
           const locked = await lockPublicationRunAttemptRunner(client, {
-            organizationId: command.organizationId, intentId: existingIntent ?? `pending:${command.candidateId}`,
+            organizationId: command.organizationId, intentId: `pending:${command.candidateId}`,
             identity, testHooks: input.testHooks });
           if (!locked) return { kind: "rejected" as const, reason: "stale_publication_authority" };
-          let intent: any = null;
-          if (!existingIntent) {
-            await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
-              [`publication-approval:${command.organizationId}:${command.candidateId}`]);
-            existingIntent = (await client.query<{ intent_id: string }>(
-              `SELECT intent_id FROM cp_publication_intent WHERE organization_id=$1 AND candidate_id=$2`,
-              [command.organizationId, command.candidateId])).rows[0]?.intent_id;
-          }
-          if (existingIntent) {
-            const result = await client.query(`SELECT * FROM cp_publication_intent
-              WHERE organization_id=$1 AND intent_id=$2 FOR UPDATE`, [command.organizationId, existingIntent]);
-            intent = result.rows[0] ?? null;
-          }
+          // Candidate/run first approvals are already serialized by the
+          // canonical Run lock. `approval_id` is separately authoritative,
+          // however: it can be presented for another candidate/run. Take one
+          // transaction lock for that identity before looking for either
+          // unique intent key, so a uniqueness violation is never used as a
+          // control-flow or ownership decision.
+          await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`,
+            [`publication-approval:${command.organizationId}:${command.approvalId}`]);
+          const existing = await client.query<any>(
+            `SELECT * FROM cp_publication_intent
+             WHERE organization_id=$1 AND (candidate_id=$2 OR approval_id=$3)
+             ORDER BY intent_id FOR UPDATE`,
+            [command.organizationId, command.candidateId, command.approvalId],
+          );
           const candidateResult = await client.query(`SELECT * FROM cp_publication_candidate
             WHERE organization_id=$1 AND candidate_id=$2 AND run_id=$3 AND attempt_id=$4 FOR UPDATE`,
           [command.organizationId, command.candidateId, command.runId, identity.attempt_id]);
@@ -520,9 +518,24 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             attemptId: row.ownership_attempt_id, attemptNumber: row.ownership_attempt_number,
             fencingTokenDigest: row.ownership_fencing_token_digest, runnerId: row.ownership_runner_id,
             runnerGeneration: row.ownership_runner_generation });
-          if (intent) return intent.approval_digest === approvalDigest
-            ? { kind: "replayed" as const, intentId: intent.intent_id }
-            : { kind: "rejected" as const, reason: "approval_replay_conflict" };
+          const intent = existing.rows[0];
+          if (existing.rowCount !== 0) {
+            const exactReplay = existing.rowCount === 1
+              && intent.approval_digest === approvalDigest
+              && intent.run_id === command.runId
+              && intent.attempt_id === row.ownership_attempt_id
+              && intent.attempt_number === row.ownership_attempt_number
+              && intent.candidate_id === command.candidateId
+              && intent.candidate_digest === command.candidateDigest
+              && intent.ownership_id === command.ownershipId
+              && intent.ownership_digest === command.ownershipDigest
+              && intent.approval_id === command.approvalId
+              && intent.approver_id === command.approverId
+              && intent.runner_id === command.runnerId
+              && intent.runner_generation === row.ownership_runner_generation;
+            return exactReplay ? { kind: "replayed" as const, intentId: intent.intent_id }
+              : { kind: "rejected" as const, reason: "approval_replay_conflict" };
+          }
           const intentId = input.idFactory("intent");
           const repository = { provider: "github" as const, owner: row.owner, repo: row.repo,
             remote: row.remote, baseBranch: row.base_branch };
@@ -540,9 +553,11 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           return { kind: "approved" as const, intentId };
         });
       } catch (error) {
-        if ((error as { code?: string }).code === "23505") {
-          return { kind: "rejected", reason: "branch_not_owned_by_run" };
-        }
+        // The approval path does not write branch ownership. In particular,
+        // the `approval_id` unique constraint is authority replay, never a
+        // `branch_not_owned_by_run` result. With the advisory recheck above,
+        // an unexpected uniqueness error is an infrastructure invariant
+        // failure and must retain its actual database identity.
         throw error;
       }
     },
