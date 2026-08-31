@@ -58,7 +58,7 @@ export type GitHubCompletionApi = {
     merged: boolean;
     draft?: boolean;
     htmlUrl?: string;
-    head: { sha: string };
+    head: { sha: string; ref?: string; repo?: { full_name?: string } | null };
     base: { ref: string; sha: string; repo?: { full_name?: string } | null };
   }>;
   listCheckRunsForRef(input: { owner: string; repo: string; ref: string }): Promise<{
@@ -307,13 +307,16 @@ export function createGitHubCompletionApi(input: {
         throw new Error("GitHub pull request reconciliation returned an invalid response.");
       }
       const baseRepo = isRecord(value["base"]["repo"]) ? nonEmptyString(value["base"]["repo"]["full_name"]) : null;
+      const headRepo = isRecord(value["head"]["repo"]) ? nonEmptyString(value["head"]["repo"]["full_name"]) : null;
       return {
         number: value["number"] as number,
         state: value["state"],
         merged: value["merged"],
         ...(typeof value["draft"] === "boolean" ? { draft: value["draft"] } : {}),
         ...(typeof value["html_url"] === "string" ? { htmlUrl: value["html_url"] } : {}),
-        head: { sha: value["head"]["sha"] as string },
+        head: { sha: value["head"]["sha"] as string,
+          ...(typeof value["head"]["ref"] === "string" ? { ref: value["head"]["ref"] } : {}),
+          ...(headRepo ? { repo: { full_name: headRepo } } : {}) },
         base: {
           ref: value["base"]["ref"] as string,
           sha: value["base"]["sha"] as string,

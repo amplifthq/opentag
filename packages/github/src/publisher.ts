@@ -11,6 +11,8 @@ export type DraftPullRequestPresence = {
   repository?: { owner: string; repo: string };
   baseBranch?: string;
   state?: "open";
+  headBranch?: string;
+  headRepository?: { owner: string; repo: string };
 };
 
 export type OwnedBranchPresence = {

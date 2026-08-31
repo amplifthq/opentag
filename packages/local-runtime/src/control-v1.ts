@@ -1056,22 +1056,28 @@ async function observeDraftPullRequest(input: {
       owner: input.capability.repository.owner, repo: input.capability.repository.repo,
       ref: input.capability.expectedHeadSha,
     });
+    let sawCandidate = false;
     for (const candidate of candidates) {
+      sawCandidate = true;
       const pullRequest = await api.getPullRequest({ owner: input.capability.repository.owner,
         repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
       const expectedRepository = `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase();
+      const observedHeadRepository = pullRequest.head.repo?.full_name?.toLowerCase();
       const exactUrl = `https://github.com/${input.capability.repository.owner}/${input.capability.repository.repo}/pull/${pullRequest.number}`;
       if (pullRequest.state === "open" && pullRequest.head.sha === input.capability.expectedHeadSha
+        && pullRequest.head.ref === input.capability.branch && observedHeadRepository === expectedRepository
         && pullRequest.base.ref === input.capability.repository.baseBranch
         && pullRequest.base.repo?.full_name?.toLowerCase() === expectedRepository
         && pullRequest.draft === true && pullRequest.htmlUrl === exactUrl) {
         return { kind: "present", pullRequestNumber: pullRequest.number,
           pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true,
           provider: "github", repository: { owner: input.capability.repository.owner,
-            repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open" };
+            repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open",
+          headBranch: pullRequest.head.ref, headRepository: { owner: input.capability.repository.owner,
+            repo: input.capability.repository.repo } };
       }
     }
-    return { kind: "absent" };
+    return sawCandidate ? { kind: "ambiguous" } : { kind: "absent" };
   } catch {
     return { kind: "ambiguous" };
   }
