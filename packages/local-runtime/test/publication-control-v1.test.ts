@@ -23,7 +23,7 @@ describe("publication Control V1 local execution", () => {
     ["exact owned pull request", [{ number: 7 }], {
       number: 7, state: "open", merged: false, draft: true,
       html_url: "https://github.com/acme/widget/pull/7",
-      head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "acme/widget" } },
+      head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "AcMe/WiDgEt" } },
       base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
     }, "present"],
     ["wrong branch at the same SHA", [{ number: 7 }], {
@@ -44,6 +44,12 @@ describe("publication Control V1 local execution", () => {
       head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "acme/widget" } },
       base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
     }, "present"],
+    ["missing head repository provenance", [{ number: 7 }], {
+      number: 7, state: "open", merged: false, draft: true,
+      html_url: "https://github.com/acme/widget/pull/7",
+      head: { sha: "a".repeat(40), ref: "opentag/run_1" },
+      base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+    }, "ambiguous"],
     ["no candidate", [], null, "absent"],
   ] as const)("reconciles %s from real GitHub payload fields", async (_label, candidates, exact, kind) => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
@@ -57,8 +63,10 @@ describe("publication Control V1 local execution", () => {
     const observation = await observeDraftPullRequest({ capability, token: "local_only",
       fetchImpl, apiOrigin: "https://github.test" });
     expect(observation.kind).toBe(kind);
-    if (kind === "present") expect(observation).toMatchObject({ headBranch: capability.branch,
-      headRepository: { owner: capability.repository.owner, repo: capability.repository.repo } });
+    if (kind === "present") {
+      const [owner, repo] = exact!.head.repo!.full_name!.split("/");
+      expect(observation).toMatchObject({ headBranch: capability.branch, headRepository: { owner, repo } });
+    }
   });
 
   it("fails closed before provider or relay mutation when the exact local fence is absent", async () => {

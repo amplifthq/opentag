@@ -44,8 +44,8 @@ function exactReceiptObservation(capability: PublicationOperationCapabilityV1,
     && observation.repository?.repo === capability.repository.repo
     && observation.baseBranch === capability.repository.baseBranch && observation.state === "open"
     && observation.headBranch === capability.branch
-    && observation.headRepository?.owner === capability.repository.owner
-    && observation.headRepository.repo === capability.repository.repo);
+    && observation.headRepository?.owner.toLowerCase() === capability.repository.owner.toLowerCase()
+    && observation.headRepository.repo.toLowerCase() === capability.repository.repo.toLowerCase());
 }
 
 type PublicationOperationRecord = {
@@ -122,6 +122,17 @@ async function readPublicationOperationState(client: any, input: {
     } : null,
   }));
   return { records, state: reducePublicationOperation(records) };
+}
+
+async function readLockedPublicationOperationState(client: any, input: {
+  organizationId: string; intentId: string; step: PublicationOperationStepV1;
+}): Promise<{ records: PublicationOperationRecord[]; state: PublicationOperationState } | null> {
+  const intent = await client.query(
+    `SELECT 1 FROM cp_publication_intent WHERE organization_id=$1 AND intent_id=$2 FOR UPDATE`,
+    [input.organizationId, input.intentId],
+  );
+  if (intent.rowCount !== 1) return null;
+  return readPublicationOperationState(client, { ...input, lock: true });
 }
 
 async function canonicalSettledReceipt(record: PublicationOperationRecord): Promise<PublicationOperationReceiptV1> {
@@ -406,13 +417,15 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
         }
         if (command.step === "create_draft_pull_request") {
-          const push = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
-            intentId: row.intent_id, step: "push_owned_branch", lock: true });
+          const push = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
+            intentId: row.intent_id, step: "push_owned_branch" });
+          if (!push) return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
           if (push.state.kind !== "settled") return { kind: "unavailable" as const,
             reason: "owned_branch_not_pushed" };
         }
-        const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
-          intentId: row.intent_id, step: command.step, lock: true });
+        const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
+          intentId: row.intent_id, step: command.step });
+        if (!operation) return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
         if (operation.state.kind === "settled") {
           return { kind: "unavailable" as const, reason: "operation_already_settled" };
         }
@@ -485,8 +498,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             command.principal.credentialGeneration],
         );
         for (const candidate of recovery.rows) {
-          const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
-            intentId: candidate.intent_id, step: candidate.step, lock: true });
+          const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
+            intentId: candidate.intent_id, step: candidate.step });
+          if (!operation) continue;
           if (operation.state.kind === "reconciliation_pending") return { kind: "reconciliation_pending" as const,
             capability: operation.state.record.capability };
         }
@@ -514,14 +528,16 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         );
         const row = selected.rows[0];
         if (!row) return { kind: "empty" as const };
-        const operation = (step: PublicationOperationStepV1) => readPublicationOperationState(client,
-          { organizationId: command.principal.organizationId, intentId: row.intent_id, step, lock: true });
+        const operation = (step: PublicationOperationStepV1) => readLockedPublicationOperationState(client,
+          { organizationId: command.principal.organizationId, intentId: row.intent_id, step });
         const push = await operation("push_owned_branch");
+        if (!push) return { kind: "empty" as const };
         let step: PublicationOperationStepV1;
         if (push.state.kind === "issuable" && !push.state.latest) {
           step = "push_owned_branch";
         } else if (push.state.kind === "settled") {
           const pullRequest = await operation("create_draft_pull_request");
+          if (!pullRequest) return { kind: "empty" as const };
           if (pullRequest.state.kind === "settled") {
             return { kind: "completion_pending" as const,
               capability: pullRequest.state.record.capability,
@@ -578,7 +594,21 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       if (fence !== parsed.fencingTokenDigest || parsed.runnerId !== command.principal.runnerId
         || parsed.organizationId !== command.principal.organizationId) return { kind: "stale_fence" as const };
       try {
-        const result = await input.pool.query(
+        return await withPostgresTransaction(input.pool, async (client) => {
+          const discovered = await client.query<{ intent_id: string }>(
+            `SELECT intent_id FROM cp_publication_capability
+             WHERE organization_id=$1 AND capability_id=$2 AND operation_id=$3`,
+            [parsed.organizationId, parsed.capabilityId, parsed.operationId],
+          );
+          const operation = discovered.rows[0]
+            ? await readLockedPublicationOperationState(client, { organizationId: parsed.organizationId,
+              intentId: discovered.rows[0].intent_id, step: parsed.step })
+            : null;
+          const exact = operation?.records.find((record) => record.capability.capabilityId === parsed.capabilityId);
+          if (!exact || canonicalJsonStringify(exact.capability) !== canonicalJsonStringify(parsed)) {
+            return { kind: "stale_fence" as const };
+          }
+          const result = await client.query(
           `INSERT INTO cp_publication_begin(organization_id,capability_id,operation_id,begun_at)
            SELECT capability.organization_id, capability.capability_id, capability.operation_id, CURRENT_TIMESTAMP
            FROM cp_publication_capability capability
@@ -600,8 +630,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              AND attempt.lease_expires_at > CURRENT_TIMESTAMP
              AND runner.credential_generation = intent.runner_generation`,
           [parsed.organizationId, parsed.capabilityId, await computePublicationCapabilityDigestV1(parsed)]);
-        if (result.rowCount !== 1) return { kind: "stale_fence" as const };
-        return { kind: "begun" as const };
+          if (result.rowCount !== 1) return { kind: "stale_fence" as const };
+          return { kind: "begun" as const };
+        });
       } catch (error) {
         if ((error as { code?: string }).code === "23505") return { kind: "replayed" as const };
         throw error;
@@ -618,8 +649,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       }
       return withPostgresTransaction(input.pool, async (client) => {
       const issued = await client.query<{ intent_id: string; capability: unknown }>(
-        `SELECT capability FROM cp_publication_capability
-         WHERE organization_id = $1 AND capability_id = $2 AND operation_id = $3 FOR UPDATE`,
+        `SELECT intent_id,capability FROM cp_publication_capability
+         WHERE organization_id = $1 AND capability_id = $2 AND operation_id = $3`,
         [receipt.organizationId, receipt.capabilityId, receipt.operationId],
       );
       const capability = issued.rows[0]
@@ -638,8 +669,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       // Lock every capability/fact row for this immutable operation before
       // deciding the winner or appending a receipt.  `claim`, `record`, and
       // `reconcile` therefore serialize on the same capability ledger.
-      const operation = await readPublicationOperationState(client, { organizationId: receipt.organizationId,
-        intentId: issued.rows[0]!.intent_id, step: capability.step, lock: true });
+      const operation = await readLockedPublicationOperationState(client, { organizationId: receipt.organizationId,
+        intentId: issued.rows[0]!.intent_id, step: capability.step });
+      if (!operation) return { kind: "conflict" as const };
       const exactRecord = operation.records.find((record) => record.capability.capabilityId === capability.capabilityId);
       const existing = exactRecord?.receipt;
       if (existing) return existing.receiptDigest === receipt.receiptDigest
@@ -653,7 +685,12 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         [receipt.organizationId, receipt.capabilityId],
       );
       if (exactRecord?.reconciliation || reconciliation.rowCount !== 0) return { kind: "conflict" as const };
-      if (operation.state.kind === "settled") return { kind: "conflict" as const };
+      // Once a later attempt has durably observed absence, an older receipt
+      // cannot be appended behind it.  It would create two incompatible facts
+      // for one operation; only the authorized successor may settle next.
+      if (operation.state.kind === "settled" || operation.state.kind === "retryable") {
+        return { kind: "conflict" as const };
+      }
       try {
         const result = await client.query(
           `INSERT INTO cp_publication_receipt(organization_id,receipt_id,capability_id,
@@ -687,14 +724,15 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       return withPostgresTransaction(input.pool, async (client) => {
         const capability = await client.query<{ intent_id: string; capability: unknown }>(
           `SELECT intent_id,capability FROM cp_publication_capability
-           WHERE organization_id=$1 AND capability_id=$2 AND operation_id=$3 FOR UPDATE`,
+           WHERE organization_id=$1 AND capability_id=$2 AND operation_id=$3`,
           [command.principal.organizationId, command.capabilityId, command.operationId]);
         const exact = capability.rows[0]
           ? PublicationOperationCapabilityV1Schema.parse(capability.rows[0].capability) : null;
         if (!exact || exact.runnerId !== command.principal.runnerId
           || !exactReceiptObservation(exact, observation)) return { kind: "conflict" as const };
-        const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
-          intentId: capability.rows[0]!.intent_id, step: exact.step, lock: true });
+        const operation = await readLockedPublicationOperationState(client, { organizationId: command.principal.organizationId,
+          intentId: capability.rows[0]!.intent_id, step: exact.step });
+        if (!operation) return { kind: "conflict" as const };
         const record = operation.records.find((candidate) => candidate.capability.capabilityId === exact.capabilityId);
         if (!record || record.begunAt === null) return { kind: "conflict" as const };
         const resultFor = (value: PublicationOperationReceiptV1["observation"]) => value.kind === "present"
@@ -787,8 +825,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           })
           || row.intent_branch !== completion.observation.branch
           || completion.observation.headBranch !== row.intent_branch
-          || completion.observation.headRepository.owner !== row.intent_repository.owner
-          || completion.observation.headRepository.repo !== row.intent_repository.repo
+          || completion.observation.headRepository.owner.toLowerCase() !== row.intent_repository.owner.toLowerCase()
+          || completion.observation.headRepository.repo.toLowerCase() !== row.intent_repository.repo.toLowerCase()
           || row.expected_head_sha !== completion.observation.headSha
           || canonicalJsonStringify({ provider: row.ownership_provider, owner: row.ownership_owner,
             repo: row.ownership_repo, remote: row.ownership_remote,
@@ -799,10 +837,11 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
 
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(row.admission_policy_snapshot);
         const requiredChecks = policy.payload.admissionRules.requiredCheckNames;
-        const pushOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
-          intentId: row.intent_id, step: "push_owned_branch", lock: true });
-        const pullRequestOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
-          intentId: row.intent_id, step: "create_draft_pull_request", lock: true });
+        const pushOperation = await readLockedPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "push_owned_branch" });
+        const pullRequestOperation = await readLockedPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "create_draft_pull_request" });
+        if (!pushOperation || !pullRequestOperation) return { kind: "stale_fence" as const };
         if (pushOperation.state.kind === "reconciliation_pending"
           || pullRequestOperation.state.kind === "reconciliation_pending") {
           return { kind: "outcome_unknown" as const, reason: "publication_outcome_unknown" };

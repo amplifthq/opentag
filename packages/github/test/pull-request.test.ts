@@ -71,7 +71,7 @@ describe("pull request helpers", () => {
         if (init?.method === "POST") return Response.json({ html_url: "https://github.com/acme/demo/pull/7" });
         return Response.json({ number: 7, html_url: "https://github.com/acme/demo/pull/7", draft: true,
           state: "open", merged: false, head: { sha: "a".repeat(40), ref: "opentag/run_1",
-            repo: { full_name: "acme/demo" } },
+            repo: { full_name: "AcMe/DeMo" } },
           base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/demo" } } });
       }) as typeof fetch,
     });
@@ -80,6 +80,6 @@ describe("pull request helpers", () => {
       "GET https://api.github.com/repos/acme/demo/pulls/7",
     ]);
     expect(observation).toEqual(expect.objectContaining({ kind: "present", headBranch: "opentag/run_1",
-      headRepository: { owner: "acme", repo: "demo" } }));
+      headRepository: { owner: "AcMe", repo: "DeMo" } }));
   });
 });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   canonicalJsonStringify,
   computeMaterialActionFencingTokenDigestV1,
+  computePublicationCapabilityDigestV1,
   computePublicationOperationReceiptDigestV1,
 } from "@opentag/control-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -211,7 +212,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         headSha: "c".repeat(40), externalId: "github_pr_7", externalUri: "https://github.com/acme/demo/pull/7",
         draft: true as const, provider: "github" as const, repository: { owner: "acme", repo: "demo" },
         baseBranch: "main", state: "open" as const, headBranch: "opentag/run_publication",
-        headRepository: { owner: "acme", repo: "demo" } }, outcome: "succeeded" as const });
+        headRepository: { owner: "AcMe", repo: "DeMo" } }, outcome: "succeeded" as const });
     // Two independently pooled writer transactions.  With reconciliation
     // first, absence wins only before a receipt exists; the delayed receipt is
     // rejected, leaving no contradictory fact or additional begin window.
@@ -257,6 +258,12 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
       kind: "completion_pending", capability: { capabilityId: retried.capability.capabilityId },
     });
+    await expect(fixture.pool.query<{ receipt: { observation: { headRepository: unknown } } }>(
+      `SELECT receipt FROM cp_publication_receipt WHERE organization_id=$1 AND capability_id=$2`,
+      [principal.organizationId, retried.capability.capabilityId],
+    )).resolves.toMatchObject({ rows: [{ receipt: { observation: {
+      headRepository: { owner: "AcMe", repo: "DeMo" },
+    } } }] });
     await expect(fixture.pool.query<{ step: string; attempt_number: number }>(
       `SELECT step,attempt_number FROM cp_publication_capability
        WHERE organization_id=$1 ORDER BY step,attempt_number`, [principal.organizationId]))
@@ -265,6 +272,105 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         { step: "create_draft_pull_request", attempt_number: 2 },
         { step: "push_owned_branch", attempt_number: 1 },
       ] });
+  });
+
+  it("serializes a delayed attempt-one receipt and attempt-two reconciliation in canonical operation order", async () => {
+    const intentId = "publication_intent_lock_race";
+    const operationId = `${intentId}:create_draft_pull_request`;
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_intent(organization_id,intent_id,run_id,attempt_id,attempt_number,
+       candidate_id,candidate_digest,ownership_id,ownership_digest,approval_id,approver_id,approval_digest,
+       repository,branch,expected_head_sha,runner_id,runner_generation,approved_at,expires_at,created_at)
+       SELECT organization_id,$2,run_id,attempt_id,attempt_number,$3,candidate_digest,ownership_id,
+       ownership_digest,$4,approver_id,approval_digest,repository,branch,expected_head_sha,runner_id,
+       runner_generation,approved_at,expires_at,created_at
+       FROM cp_publication_intent WHERE organization_id=$1 LIMIT 1`,
+      [principal.organizationId, intentId, "candidate_lock_race", "approval_lock_race"],
+    );
+    const source = (await fixture.pool.query<{ capability: unknown }>(
+      `SELECT capability FROM cp_publication_capability WHERE organization_id=$1
+       AND step='create_draft_pull_request' ORDER BY attempt_number DESC LIMIT 1`,
+      [principal.organizationId],
+    )).rows[0]!.capability as Record<string, unknown>;
+    const makeCapability = (number: number) => ({ ...source,
+      capabilityId: `publication_capability_lock_race_${number}`,
+      operationId, idempotencyKey: operationId, issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString() });
+    const first = makeCapability(1);
+    const second = makeCapability(2);
+    for (const [number, capability] of [[1, first], [2, second]] as const) {
+      await fixture.pool.query(
+        `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,operation_id,
+         idempotency_key,step,attempt_number,capability_digest,capability,issued_at,expires_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,
+        [principal.organizationId, capability.capabilityId, intentId, operationId, operationId,
+          capability.step, number, await computePublicationCapabilityDigestV1(capability as never),
+          JSON.stringify(capability), capability.issuedAt, capability.expiresAt],
+      );
+      await fixture.pool.query(
+        `INSERT INTO cp_publication_begin(organization_id,capability_id,operation_id,begun_at)
+         VALUES($1,$2,$3,$4)`, [principal.organizationId, capability.capabilityId, operationId, now],
+      );
+    }
+
+    let arrivals = 0;
+    let releaseBarrier: () => void = () => {};
+    const barrier = new Promise<void>((resolve) => { releaseBarrier = resolve; });
+    const barrierPool = {
+      connect: async () => {
+        const client = await fixture.pool.connect();
+        return {
+          query: async (query: string, values?: unknown[]) => {
+            const result = await client.query(query, values);
+            if (query.includes("FROM cp_publication_capability") && query.includes("FOR UPDATE")
+              && (query.includes("SELECT capability") || query.includes("SELECT intent_id,capability"))) {
+              arrivals += 1;
+              if (arrivals === 2) releaseBarrier(); else await barrier;
+            }
+            return result;
+          },
+          release: () => client.release(),
+        };
+      },
+    };
+    const racePublisher = createPublicationPublisher({ pool: barrierPool as never,
+      clock: { now: () => now }, idFactory: () => "unused_lock_race" });
+    const receiptSeed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      receiptId: "receipt_lock_race_one", capabilityId: first.capabilityId as string, operationId,
+      organizationId: principal.organizationId, runId: first.runId as string, attemptId: first.attemptId as string,
+      candidateId: first.candidateId as string, candidateDigest: first.candidateDigest as string,
+      step: "create_draft_pull_request" as const, runnerId: principal.runnerId,
+      runnerGeneration: first.runnerGeneration as number, fencingTokenDigest: first.fencingTokenDigest as string,
+      observation: { kind: "present" as const, headSha: first.expectedHeadSha as string,
+        externalId: "github_pr_71", externalUri: "https://github.com/acme/demo/pull/71",
+        draft: true as const, provider: "github" as const, repository: { owner: "acme", repo: "demo" },
+        baseBranch: "main", state: "open" as const, headBranch: "opentag/run_publication",
+        headRepository: { owner: "AcMe", repo: "DeMo" } }, outcome: "succeeded" as const,
+      observedAt: now.toISOString() };
+    const receipt = { ...receiptSeed,
+      receiptDigest: await computePublicationOperationReceiptDigestV1(receiptSeed) };
+    const outcomesPromise = Promise.allSettled([
+      racePublisher.record({ principal, receipt }),
+      racePublisher.reconcile({ principal, capabilityId: second.capabilityId as string, operationId,
+        reconciliationId: "reconcile_lock_race_two", observation: { kind: "absent" }, observedAt: now.toISOString() }),
+    ]);
+    // The row barrier is released by the second caller.  This fallback makes
+    // an assertion failure diagnostic rather than leaving a broken lock order
+    // holding a test connection indefinitely.
+    const fallback = setTimeout(releaseBarrier, 250);
+    const outcomes = await outcomesPromise;
+    clearTimeout(fallback);
+    expect(outcomes).toSatisfy((values) => JSON.stringify(values) === JSON.stringify([
+      { status: "fulfilled", value: { kind: "recorded", receipt } },
+      { status: "fulfilled", value: { kind: "conflict" } },
+    ]) || JSON.stringify(values) === JSON.stringify([
+      { status: "fulfilled", value: { kind: "conflict" } },
+      { status: "fulfilled", value: { kind: "retry_authorized" } },
+    ]));
+    await expect(fixture.pool.query<{ attempt_number: number }>(
+      `SELECT attempt_number FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2`,
+      [principal.organizationId, intentId],
+    )).resolves.toMatchObject({ rows: [{ attempt_number: 1 }, { attempt_number: 2 }] });
   });
 
   it("normalizes canonical repository identity and rejects casing, remote, and base variants for the owned branch", async () => {
@@ -313,7 +419,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         pullRequestResourceRef: "github:acme/demo:pull_request:7",
         pullRequestUrl: "https://github.com/acme/demo/pull/7", draft: true as const,
         state: "open" as const, headSha: "c".repeat(40), headBranch: "opentag/run_publication",
-        headRepository: { owner: "acme", repo: "demo" }, baseSha: "d".repeat(40),
+        headRepository: { owner: "AcMe", repo: "DeMo" }, baseSha: "d".repeat(40),
         checks: { test: "passed" as const }, checksComplete: true,
         observedAt: now.toISOString() } };
     await expect(publisher.complete({ principal, completion })).resolves.toEqual({ kind: "ready", projection: "ready_for_review" });
@@ -329,6 +435,12 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       [principal.organizationId, candidate.runId],
     )).resolves.toMatchObject({ rows: [{ state: "succeeded", terminal_kind: "succeeded",
       terminal_receipt: { kind: "ready_for_review" } }] });
+    await expect(fixture.pool.query<{ observation: { headRepository: unknown } }>(
+      `SELECT observation FROM cp_publication_completion WHERE organization_id=$1 AND run_id=$2`,
+      [principal.organizationId, candidate.runId],
+    )).resolves.toMatchObject({ rows: [{ observation: {
+      headRepository: { owner: "AcMe", repo: "DeMo" },
+    } }] });
     await expect(fixture.pool.query(
       `UPDATE cp_publication_completion SET branch = 'other' WHERE organization_id=$1 AND run_id=$2`,
       [principal.organizationId, candidate.runId],

@@ -1047,6 +1047,13 @@ function githubPublicationApi(input: {
     ...(input.apiOrigin ? { apiBaseUrl: input.apiOrigin } : {}) });
 }
 
+function providerRepository(fullName: string | undefined): { owner: string; repo: string } | null {
+  const parts = fullName?.split("/");
+  return parts?.length === 2 && parts[0] && parts[1]
+    ? { owner: parts[0], repo: parts[1] }
+    : null;
+}
+
 export async function observeDraftPullRequest(input: {
   capability: PublicationOperationCapabilityV1;
   token: string;
@@ -1066,9 +1073,11 @@ export async function observeDraftPullRequest(input: {
         repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
       const expectedRepository = `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase();
       const observedHeadRepository = pullRequest.head.repo?.full_name?.toLowerCase();
+      const providerHeadRepository = providerRepository(pullRequest.head.repo?.full_name);
       const exactUrl = `https://github.com/${input.capability.repository.owner}/${input.capability.repository.repo}/pull/${pullRequest.number}`;
       if (pullRequest.state === "open" && pullRequest.head.sha === input.capability.expectedHeadSha
         && pullRequest.head.ref === input.capability.branch && observedHeadRepository === expectedRepository
+        && providerHeadRepository
         && pullRequest.base.ref === input.capability.repository.baseBranch
         && pullRequest.base.repo?.full_name?.toLowerCase() === expectedRepository
         && pullRequest.draft === true && pullRequest.htmlUrl === exactUrl) {
@@ -1076,8 +1085,7 @@ export async function observeDraftPullRequest(input: {
           pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true,
           provider: "github", repository: { owner: input.capability.repository.owner,
             repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open",
-          headBranch: pullRequest.head.ref, headRepository: { owner: input.capability.repository.owner,
-            repo: input.capability.repository.repo } };
+          headBranch: pullRequest.head.ref, headRepository: providerHeadRepository };
       }
     }
     return sawCandidate ? { kind: "ambiguous" } : { kind: "absent" };
@@ -1104,10 +1112,11 @@ async function observePublicationCompletion(input: {
   const api = githubPublicationApi(input);
   const current = await api.getPullRequest({ owner: input.capability.repository.owner,
     repo: input.capability.repository.repo, pullRequestNumber });
+  const providerHeadRepository = providerRepository(current.head.repo?.full_name);
   if (current.number !== pullRequestNumber || current.head.sha !== input.capability.expectedHeadSha
     || current.base.ref !== input.capability.repository.baseBranch || current.draft !== true
     || current.htmlUrl !== input.receipt.observation.externalUri
-    || current.head.ref !== input.capability.branch
+    || current.head.ref !== input.capability.branch || !providerHeadRepository
     || current.head.repo?.full_name?.toLowerCase() !== `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase()) {
     throw new Error("publication_completion_observation_mismatch");
   }
@@ -1128,8 +1137,7 @@ async function observePublicationCompletion(input: {
     pullRequestResourceRef: snapshot.pullRequest.resourceRef,
     pullRequestUrl: input.receipt.observation.externalUri, draft: true,
     state: snapshot.pullRequest.state, headSha: snapshot.pullRequest.headSha,
-    headBranch: current.head.ref, headRepository: { owner: input.capability.repository.owner,
-      repo: input.capability.repository.repo },
+    headBranch: current.head.ref, headRepository: providerHeadRepository,
     baseSha: snapshot.pullRequest.baseSha, checks: snapshot.checks,
     checksComplete: snapshot.checksComplete, observedAt: snapshot.observedAt,
   };
