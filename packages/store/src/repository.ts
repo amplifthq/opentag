@@ -9076,14 +9076,14 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         eq(hostedClaimOperations.state, "claimed")
       )).orderBy(desc(hostedClaimOperations.acknowledgedAt), desc(hostedClaimOperations.operationId));
       for (const operation of operations) {
-        if (!operation.runId) continue;
         if (operation.terminalReasonCode !== null) {
           evictHostedExecutionPayload({
             attemptId: operation.attemptId ?? undefined,
-            runId: operation.runId,
+            ...(operation.runId ? { runId: operation.runId } : {}),
           });
           continue;
         }
+        if (!operation.runId) continue;
         if (operation.executionStartedAt) continue;
         const runRow = await db.select().from(runs).where(and(
           eq(runs.id, operation.runId),

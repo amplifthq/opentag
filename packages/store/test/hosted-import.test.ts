@@ -885,6 +885,35 @@ describe("hosted assigned Run import", () => {
     sqlite.close();
   });
 
+  it("evicts terminal recovery payloads when the claimed operation run id is null", async () => {
+    // Catches checking nullable runId before terminalReasonCode in getHostedAssignedRunForRecovery().
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_TERMINAL_NULL_RUN_EVICTION_c5a1";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    sqlite.prepare(`UPDATE hosted_claim_operations SET state='claimed', run_id=NULL, attempt_id=?,
+      terminal_reason_code='stale_control_authority' WHERE operation_id=?`)
+      .run(value.claim.attempt.id, value.request.operationId);
+    expect(sqlite.prepare(`SELECT run_id, attempt_id, terminal_reason_code
+      FROM hosted_claim_operations WHERE operation_id=?`).get(value.request.operationId))
+      .toEqual({ run_id: null, attempt_id: value.claim.attempt.id,
+        terminal_reason_code: "stale_control_authority" });
+
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+
+    restoreRecoverableHostedAssignment(sqlite, value);
+    sqlite.prepare("UPDATE hosted_claim_operations SET run_id=? WHERE operation_id=?")
+      .run(value.claim.runId, value.request.operationId);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toBeNull();
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
   it("rejects and evicts current execution payloads for terminal claimed operations", async () => {
     // Catches removing terminal claim rejection and eviction from isHostedExecutionCurrent().
     const sqlite = new Database(":memory:"); migrateSchema(sqlite);
