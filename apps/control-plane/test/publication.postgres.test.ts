@@ -128,6 +128,54 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       checks: { test: "passed" as const }, checksComplete: true,
       observedAt: now.toISOString() } });
 
+  const createLockTestPool = (guardCanonicalFirstLock = false) => {
+    const backendPid = Promise.withResolvers<number>();
+    return {
+      backendPid: backendPid.promise,
+      pool: {
+        connect: async () => {
+          const client = await fixture.pool.connect();
+          backendPid.resolve((await client.query<{ pid: number }>("SELECT pg_backend_pid() pid")).rows[0]!.pid);
+          let sawCanonicalRunLock = false;
+          return {
+            query: async (query: string, values?: unknown[]) => {
+              if (query.includes("FOR UPDATE")) {
+                const canonicalRunLock = query.includes("FROM cp_hosted_run")
+                  && !query.includes("JOIN") && !query.includes("cp_publication_");
+                if (guardCanonicalFirstLock && !sawCanonicalRunLock && !canonicalRunLock) {
+                  throw new Error("publication_lock_before_canonical_run");
+                }
+                sawCanonicalRunLock ||= canonicalRunLock;
+              }
+              const result = await client.query(query, values);
+              if (query === "BEGIN") {
+                await client.query("SET LOCAL lock_timeout = '3s'");
+                await client.query("SET LOCAL statement_timeout = '5s'");
+              }
+              return result;
+            },
+            release: () => client.release(),
+          };
+        },
+      },
+    };
+  };
+
+  const expectBackendWaitingOnLock = async (backendPid: Promise<number>) => {
+    const pid = await backendPid;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const waiting = await fixture.pool.query(
+        `SELECT 1 FROM pg_stat_activity activity
+         WHERE activity.pid=$1 AND activity.wait_event_type='Lock'
+           AND EXISTS (SELECT 1 FROM pg_locks lock WHERE lock.pid=activity.pid AND NOT lock.granted)`,
+        [pid],
+      );
+      if (waiting.rowCount === 1) return;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("publication_backend_did_not_wait_on_lock");
+  };
+
   it("freezes exact Runner-owned branch authority before human approval and conflicts on any replay change", async () => {
     await expect(publisher.attestOwnership({ principal, attestation: ownership({
       candidateDigest: sha256("wrong") }) as never })).resolves.toMatchObject({ kind: "rejected" });
@@ -158,6 +206,55 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
       { expiresAt: new Date(now.getTime() + 29 * 60_000).toISOString() }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
   });
+
+  it.each(["approve", "claim"] as const)(
+    "serializes approval replay and operation claim when %s starts first",
+    async (firstKind) => {
+      const owned = (await fixture.pool.query<{ ownership_id: string; attestation_digest: string }>(
+        `SELECT ownership_id,attestation_digest FROM cp_publication_branch_ownership
+         WHERE organization_id=$1 AND candidate_id=$2`,
+        [principal.organizationId, candidate.candidateId],
+      )).rows[0]!;
+      const firstRunLock = Promise.withResolvers<void>();
+      const secondRunLockRequest = Promise.withResolvers<void>();
+      const releaseFirst = Promise.withResolvers<void>();
+      const firstLockPool = createLockTestPool(true);
+      const secondLockPool = createLockTestPool(true);
+      const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
+        clock: { now: () => now }, idFactory: () => "unused_approval_claim_first",
+        testHooks: { onLifecycleLock: async (event) => {
+          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "after") {
+            firstRunLock.resolve();
+            await releaseFirst.promise;
+          }
+        } } });
+      const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
+        clock: { now: () => now }, idFactory: () => "unused_approval_claim_second",
+        testHooks: { onLifecycleLock: (event) => {
+          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "before") {
+            secondRunLockRequest.resolve();
+          }
+        } } });
+      const run = (subject: typeof publisher, kind: typeof firstKind) => kind === "approve"
+        ? subject.approve(approval(owned.ownership_id, owned.attestation_digest))
+        : subject.claim({ principal, runId: candidate.runId, attemptId: claim.attempt.id,
+            attemptNumber: claim.attempt.number, fencingToken: "wrong_approval_race_fence",
+            candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
+            runnerGeneration: 1, step: "push_owned_branch" });
+      const secondKind = firstKind === "approve" ? "claim" : "approve";
+      const firstOutcome = run(firstPublisher, firstKind);
+      await firstRunLock.promise;
+      const secondOutcome = run(secondPublisher, secondKind);
+      await secondRunLockRequest.promise;
+      await expectBackendWaitingOnLock(secondLockPool.backendPid);
+      releaseFirst.resolve();
+      const outcomes = await Promise.allSettled([firstOutcome, secondOutcome]);
+      expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
+      const values = outcomes.map((outcome) => outcome.status === "fulfilled" ? outcome.value : null);
+      expect(values).toContainEqual(expect.objectContaining({ kind: "replayed" }));
+      expect(values).toContainEqual({ kind: "unavailable", reason: "exact_publication_authority_missing" });
+    },
+  );
 
   it("serializes publication, records start before effects, and authorizes retry only after durable authoritative absence", async () => {
     const pushRace = await Promise.all([
@@ -291,6 +388,24 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       ] });
   });
 
+  it("begins only after the canonical Run, Attempt, Runner, and Intent locks", async () => {
+    const capability = (await fixture.pool.query<{ capability: unknown }>(
+      `SELECT capability FROM cp_publication_capability
+       WHERE organization_id=$1 AND step='push_owned_branch' ORDER BY attempt_number LIMIT 1`,
+      [principal.organizationId],
+    )).rows[0]!.capability as never;
+    const lockPool = createLockTestPool(true);
+    const acquired: string[] = [];
+    const guarded = createPublicationPublisher({ pool: lockPool.pool as never,
+      clock: { now: () => now }, idFactory: () => "unused_begin_lock_order",
+      testHooks: { onLifecycleLock: (event) => {
+        if (event.phase === "after") acquired.push(event.resource);
+      } } });
+    await expect(guarded.begin({ principal, fencingToken: claim.attempt.fencingToken,
+      capability, begunAt: now.toISOString() })).resolves.toEqual({ kind: "replayed" });
+    expect(acquired.slice(0, 4)).toEqual(["run", "attempt", "runner", "intent"]);
+  });
+
   it.each(["record", "reconcile"] as const)(
   "serializes attempt-one receipt and attempt-two reconciliation when %s starts first",
   async (firstKind) => {
@@ -402,15 +517,17 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     const firstRunLock = Promise.withResolvers<void>();
     const secondRunLockRequest = Promise.withResolvers<void>();
     const releaseFirst = Promise.withResolvers<void>();
-    const firstPublisher = createPublicationPublisher({ pool: fixture.pool,
+    const firstLockPool = createLockTestPool(true);
+    const secondLockPool = createLockTestPool(true);
+    const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
       clock: { now: () => now }, idFactory: () => "unused_lock_race_first",
       testHooks: { onLifecycleLock: async (event) => {
-        if (event.resource === "run" && event.phase === "acquired") {
+        if (event.resource === "run" && event.phase === "after") {
           firstRunLock.resolve();
           await releaseFirst.promise;
         }
       } } });
-    const secondPublisher = createPublicationPublisher({ pool: fixture.pool,
+    const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
       clock: { now: () => now }, idFactory: () => "unused_lock_race_second",
       testHooks: { onLifecycleLock: (event) => {
         if (event.resource === "run" && event.phase === "before") secondRunLockRequest.resolve();
@@ -426,6 +543,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await firstRunLock.promise;
     const secondOutcome = firstKind === "record" ? reconcile() : record();
     await secondRunLockRequest.promise;
+    await expectBackendWaitingOnLock(secondLockPool.backendPid);
     releaseFirst.resolve();
     await expect(Promise.allSettled([firstOutcome, secondOutcome])).resolves.toEqual(firstKind === "record"
       ? [{ status: "fulfilled", value: { kind: "recorded", receipt } },
@@ -461,6 +579,67 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     );
   });
 
+  it("locks only bounded plausible recovery candidates across settled history", async () => {
+    const settledIntentId = "publication_intent_lock_race_receipt_first";
+    const pendingIntentId = "publication_intent_lock_race_reconcile_first";
+    const settledSource = (await fixture.pool.query<{ capability: Record<string, unknown> }>(
+      `SELECT capability FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2
+       ORDER BY attempt_number DESC LIMIT 1`, [principal.organizationId, settledIntentId],
+    )).rows[0]!.capability;
+    for (let attemptNumber = 3; attemptNumber <= 22; attemptNumber += 1) {
+      const capability = { ...settledSource,
+        capabilityId: `publication_settled_history_${attemptNumber}`,
+        issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+      await fixture.pool.query(
+        `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,operation_id,
+         idempotency_key,step,attempt_number,capability_digest,capability,issued_at,expires_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,
+        [principal.organizationId, capability.capabilityId, settledIntentId, capability.operationId,
+          capability.idempotencyKey, capability.step, attemptNumber,
+          await computePublicationCapabilityDigestV1(capability as never), JSON.stringify(capability),
+          capability.issuedAt, capability.expiresAt],
+      );
+      await fixture.pool.query(
+        `INSERT INTO cp_publication_begin(organization_id,capability_id,operation_id,begun_at)
+         VALUES($1,$2,$3,$4)`,
+        [principal.organizationId, capability.capabilityId, capability.operationId, now],
+      );
+    }
+    const pendingSource = (await fixture.pool.query<{ capability: Record<string, unknown> }>(
+      `SELECT capability FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2
+       ORDER BY attempt_number DESC LIMIT 1`, [principal.organizationId, pendingIntentId],
+    )).rows[0]!.capability;
+    const pending = { ...pendingSource, capabilityId: "publication_bounded_pending_3",
+      issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,operation_id,
+       idempotency_key,step,attempt_number,capability_digest,capability,issued_at,expires_at)
+       VALUES($1,$2,$3,$4,$5,$6,3,$7,$8::jsonb,$9,$10)`,
+      [principal.organizationId, pending.capabilityId, pendingIntentId, pending.operationId,
+        pending.idempotencyKey, pending.step, await computePublicationCapabilityDigestV1(pending as never),
+        JSON.stringify(pending), pending.issuedAt, pending.expiresAt],
+    );
+    await fixture.pool.query(
+      `INSERT INTO cp_publication_begin(organization_id,capability_id,operation_id,begun_at)
+       VALUES($1,$2,$3,$4)`,
+      [principal.organizationId, pending.capabilityId, pending.operationId, now],
+    );
+    const lockedIntentIds = new Set<string>();
+    const guarded = createPublicationPublisher({ pool: fixture.pool,
+      clock: { now: () => now }, idFactory: () => "unused_bounded_recovery",
+      testHooks: { onLifecycleLock: (event) => {
+        if (event.phase === "after" && event.resource === "run") lockedIntentIds.add(event.intentId);
+      } } });
+    await expect(guarded.claimNextForRunner({ principal })).resolves.toMatchObject({
+      kind: "reconciliation_pending", capability: { capabilityId: pending.capabilityId },
+    });
+    expect([...lockedIntentIds]).toEqual([pendingIntentId]);
+    await expect(publisher.reconcile({ principal, capabilityId: pending.capabilityId as string,
+      operationId: pending.operationId as string, reconciliationId: "reconcile_bounded_pending_absent",
+      observation: { kind: "absent" }, observedAt: now.toISOString() }))
+      .resolves.toEqual({ kind: "retry_authorized" });
+  });
+
   it("normalizes canonical repository identity and rejects casing, remote, and base variants for the owned branch", async () => {
     const stored = (await fixture.pool.query<any>(
       `SELECT * FROM cp_publication_branch_ownership WHERE organization_id=$1`,
@@ -492,38 +671,20 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
            (SELECT count(*)::int FROM cp_publication_completion WHERE organization_id=$1) completions`,
         [principal.organizationId],
       )).rows[0]!;
-      const canonicalFirstLockPool = {
-        connect: async () => {
-          const client = await fixture.pool.connect();
-          let sawCanonicalRunLock = false;
-          return {
-            query: async (query: string, values?: unknown[]) => {
-              if (query.includes("FOR UPDATE")) {
-                const canonicalRunLock = query.includes("FROM cp_hosted_run")
-                  && !query.includes("JOIN") && !query.includes("cp_publication_");
-                if (!sawCanonicalRunLock && !canonicalRunLock) {
-                  throw new Error("publication_lock_before_canonical_run");
-                }
-                sawCanonicalRunLock ||= canonicalRunLock;
-              }
-              return client.query(query, values);
-            },
-            release: () => client.release(),
-          };
-        },
-      };
       const firstRunLock = Promise.withResolvers<void>();
       const secondRunLockRequest = Promise.withResolvers<void>();
       const releaseFirst = Promise.withResolvers<void>();
-      const firstPublisher = createPublicationPublisher({ pool: canonicalFirstLockPool as never,
+      const firstLockPool = createLockTestPool(true);
+      const secondLockPool = createLockTestPool(true);
+      const firstPublisher = createPublicationPublisher({ pool: firstLockPool.pool as never,
         clock: { now: () => now }, idFactory: () => "unused_claim_complete_first",
         testHooks: { onLifecycleLock: async (event) => {
-          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "acquired") {
+          if (event.runId === candidate.runId && event.resource === "run" && event.phase === "after") {
             firstRunLock.resolve();
             await releaseFirst.promise;
           }
         } } });
-      const secondPublisher = createPublicationPublisher({ pool: canonicalFirstLockPool as never,
+      const secondPublisher = createPublicationPublisher({ pool: secondLockPool.pool as never,
         clock: { now: () => now }, idFactory: () => "unused_claim_complete_second",
         testHooks: { onLifecycleLock: (event) => {
           if (event.runId === candidate.runId && event.resource === "run" && event.phase === "before") {
@@ -544,7 +705,11 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         secondRunLockRequest.promise,
         secondOutcome.then(() => { throw new Error("second_operation_returned_before_requesting_run_lock"); }),
       ]);
-      releaseFirst.resolve();
+      try {
+        if (secondKind !== "claim_next") await expectBackendWaitingOnLock(secondLockPool.backendPid);
+      } finally {
+        releaseFirst.resolve();
+      }
       const outcomes = await Promise.allSettled([firstOutcome, secondOutcome]);
       expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
       expect(outcomes).not.toSatisfy((values) => values.some((outcome) => outcome.status === "rejected"
