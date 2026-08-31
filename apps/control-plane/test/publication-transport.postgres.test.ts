@@ -97,7 +97,8 @@ describe.skipIf(!TEST_DATABASE_URL)("publication Control V1 transport", () => {
         baseBranch: "main", pullRequestNumber: 7,
         pullRequestResourceRef: "github:acme/demo:pull_request:7",
         pullRequestUrl: "https://github.com/acme/demo/pull/7", draft: true, state: "open",
-        headSha: "c".repeat(40), baseSha: "d".repeat(40), checks: {}, checksComplete: true,
+        headSha: "c".repeat(40), headBranch: "opentag/run_transport",
+        headRepository: { owner: "acme", repo: "demo" }, baseSha: "d".repeat(40), checks: {}, checksComplete: true,
         observedAt: "2026-08-15T12:00:00.000Z" } })).resolves.toEqual({ status: 200, outcome: "ready" });
     expect(approve).toHaveBeenCalledWith(expect.objectContaining({ approverId: "operator_injected" }));
     expect(attestOwnership).toHaveBeenCalledWith(expect.objectContaining({ principal: expect.objectContaining({

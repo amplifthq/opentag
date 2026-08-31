@@ -288,6 +288,119 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     } finally { await tampered.close(); }
   });
 
+  it.each([
+    ["branch ownership head type", "ALTER TABLE cp_publication_branch_ownership ALTER COLUMN expected_head_sha TYPE varchar(64)"],
+    ["intent repository type", "ALTER TABLE cp_publication_intent ALTER COLUMN repository TYPE text USING repository::text"],
+    ["capability payload type", "ALTER TABLE cp_publication_capability ALTER COLUMN capability TYPE text USING capability::text"],
+    ["begin timestamp type", "ALTER TABLE cp_publication_begin ALTER COLUMN begun_at TYPE text USING begun_at::text"],
+    ["receipt payload type", "ALTER TABLE cp_publication_receipt ALTER COLUMN receipt TYPE text USING receipt::text"],
+    ["reconciliation payload type", "ALTER TABLE cp_publication_reconciliation ALTER COLUMN observation TYPE text USING observation::text"],
+    ["completion payload type", "ALTER TABLE cp_publication_completion ALTER COLUMN observation TYPE text USING observation::text"],
+    ["permissive immutable function body", `CREATE OR REPLACE FUNCTION cp_reject_publication_authority_mutation()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+  ] as const)("fails readiness closed for every 0014 descriptor tamper: %s", async (_label, tamperSql) => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(tamperSql);
+      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
+        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    } finally { await tampered.close(); }
+  });
+
+  it.each([
+    ["retargeted intent ownership FK", `ALTER TABLE cp_publication_intent
+      DROP CONSTRAINT cp_publication_intent_organization_id_ownership_id_fkey;
+      ALTER TABLE cp_publication_intent
+      ADD CONSTRAINT cp_publication_intent_organization_id_ownership_id_fkey
+      FOREIGN KEY (organization_id,ownership_id)
+      REFERENCES cp_publication_branch_ownership(organization_id,candidate_id)`],
+    ["dropped receipt FK", `ALTER TABLE cp_publication_receipt
+      DROP CONSTRAINT cp_publication_receipt_organization_id_capability_id_fkey`],
+    ["not-valid ownership attempt FK", `ALTER TABLE cp_publication_branch_ownership
+      DROP CONSTRAINT cp_publication_branch_ownersh_organization_id_run_id_attem_fkey;
+      ALTER TABLE cp_publication_branch_ownership
+      ADD CONSTRAINT cp_publication_branch_ownersh_organization_id_run_id_attem_fkey
+      FOREIGN KEY (organization_id,run_id,attempt_number,attempt_id)
+      REFERENCES cp_hosted_attempt(organization_id,run_id,attempt_number,attempt_id) NOT VALID`],
+    ["changed FK actions and deferrability", `ALTER TABLE cp_publication_begin
+      DROP CONSTRAINT cp_publication_begin_organization_id_capability_id_fkey;
+      ALTER TABLE cp_publication_begin
+      ADD CONSTRAINT cp_publication_begin_organization_id_capability_id_fkey
+      FOREIGN KEY (organization_id,capability_id)
+      REFERENCES cp_publication_capability(organization_id,capability_id)
+      MATCH FULL ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED`],
+    ["weakened ownership digest CHECK", `ALTER TABLE cp_publication_branch_ownership
+      DROP CONSTRAINT cp_publication_branch_ownership_attestation_digest_check;
+      ALTER TABLE cp_publication_branch_ownership
+      ADD CONSTRAINT cp_publication_branch_ownership_attestation_digest_check
+      CHECK (attestation_digest <> '')`],
+    ["dropped capability expiry CHECK", `ALTER TABLE cp_publication_capability
+      DROP CONSTRAINT cp_publication_capability_check`],
+    ["no-inherit receipt outcome CHECK", `ALTER TABLE cp_publication_receipt
+      DROP CONSTRAINT cp_publication_receipt_outcome_check;
+      ALTER TABLE cp_publication_receipt
+      ADD CONSTRAINT cp_publication_receipt_outcome_check
+      CHECK (outcome IN ('succeeded','failed','outcome_unknown')) NO INHERIT`],
+    ["changed capability primary key", `ALTER TABLE cp_publication_capability
+      DROP CONSTRAINT cp_publication_capability_pkey CASCADE;
+      ALTER TABLE cp_publication_capability
+      ADD CONSTRAINT cp_publication_capability_pkey
+      PRIMARY KEY (organization_id,capability_id,operation_id)`],
+    ["changed ownership candidate uniqueness", `ALTER TABLE cp_publication_branch_ownership
+      DROP CONSTRAINT cp_publication_branch_ownershi_organization_id_candidate_id_key CASCADE;
+      ALTER TABLE cp_publication_branch_ownership
+      ADD CONSTRAINT cp_publication_branch_ownershi_organization_id_candidate_id_key
+      UNIQUE (organization_id,candidate_id,ownership_id)`],
+    ["changed intent candidate uniqueness", `ALTER TABLE cp_publication_intent
+      DROP CONSTRAINT cp_publication_intent_organization_id_candidate_id_key;
+      ALTER TABLE cp_publication_intent
+      ADD CONSTRAINT cp_publication_intent_organization_id_candidate_id_key
+      UNIQUE (organization_id,candidate_id,intent_id)`],
+    ["dropped intent approval uniqueness", `ALTER TABLE cp_publication_intent
+      DROP CONSTRAINT cp_publication_intent_organization_id_approval_id_key`],
+    ["changed capability attempt uniqueness", `ALTER TABLE cp_publication_capability
+      DROP CONSTRAINT cp_publication_capability_organization_id_intent_id_step_at_key;
+      ALTER TABLE cp_publication_capability
+      ADD CONSTRAINT cp_publication_capability_organization_id_intent_id_step_at_key
+      UNIQUE (organization_id,intent_id,step,attempt_number,capability_id)`],
+    ["changed begin uniqueness", `ALTER TABLE cp_publication_begin
+      DROP CONSTRAINT cp_publication_begin_pkey;
+      ALTER TABLE cp_publication_begin
+      ADD CONSTRAINT cp_publication_begin_pkey
+      PRIMARY KEY (organization_id,capability_id,operation_id)`],
+    ["dropped receipt capability uniqueness", `ALTER TABLE cp_publication_receipt
+      DROP CONSTRAINT cp_publication_receipt_organization_id_capability_id_key`],
+    ["changed reconciliation capability uniqueness", `ALTER TABLE cp_publication_reconciliation
+      DROP CONSTRAINT cp_publication_reconciliation_organization_id_capability_id_key;
+      ALTER TABLE cp_publication_reconciliation
+      ADD CONSTRAINT cp_publication_reconciliation_organization_id_capability_id_key
+      UNIQUE (organization_id,capability_id,reconciliation_id)`],
+    ["changed completion run uniqueness", `ALTER TABLE cp_publication_completion
+      DROP CONSTRAINT cp_publication_completion_organization_id_run_id_key;
+      ALTER TABLE cp_publication_completion
+      ADD CONSTRAINT cp_publication_completion_organization_id_run_id_key
+      UNIQUE (organization_id,run_id,completion_id)`],
+    ["changed ownership expression index expression", `DROP INDEX cp_publication_branch_owner_key;
+      CREATE UNIQUE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
+        organization_id,lower(provider),lower(owner),lower(repo),branch)`],
+    ["changed ownership expression index uniqueness", `DROP INDEX cp_publication_branch_owner_key;
+      CREATE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
+        organization_id,lower(provider),lower(owner),lower(repo),lower(branch))`],
+    ["changed ownership expression index predicate", `DROP INDEX cp_publication_branch_owner_key;
+      CREATE UNIQUE INDEX cp_publication_branch_owner_key ON cp_publication_branch_ownership(
+        organization_id,lower(provider),lower(owner),lower(repo),lower(branch))
+      WHERE organization_id <> ''`],
+  ] as const)("fails readiness closed for exact 0014 catalog tamper: %s", async (_label, tamperSql) => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(tamperSql);
+      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
+        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    } finally { await tampered.close(); }
+  });
+
   it("matches the shared Unicode scalar sorter with real C-collated PostgreSQL text", async () => {
     const values = ["😀", "é", "e\u0301", "ab", "a", "Z", "A"];
     const expected = ["A", "Z", "a", "ab", "e\u0301", "é", "😀"];

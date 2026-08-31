@@ -165,7 +165,8 @@ describe("publication Control V1 local execution", () => {
         branch: "opentag/run_1", baseBranch: "main", pullRequestNumber: 7,
         pullRequestResourceRef: "github://acme/widget/pull/7",
         pullRequestUrl: "https://github.com/acme/widget/pull/7", draft: true as const,
-        state: "open" as const, headSha: "a".repeat(40), baseSha: "b".repeat(40),
+        state: "open" as const, headSha: "a".repeat(40), headBranch: "opentag/run_1",
+        headRepository: { owner: "acme", repo: "widget" }, baseSha: "b".repeat(40),
         checks: { test: "passed" as const }, checksComplete: true,
         observedAt: "2026-08-10T00:00:30.000Z" })),
     });
@@ -258,7 +259,8 @@ describe("publication Control V1 local execution", () => {
         branch: "opentag/run_1", baseBranch: "main", pullRequestNumber: 7,
         pullRequestResourceRef: "github:acme/widget:pull_request:7",
         pullRequestUrl: "https://github.com/acme/widget/pull/7", draft: true as const,
-        state: "open" as const, headSha: "a".repeat(40), baseSha: "b".repeat(40),
+        state: "open" as const, headSha: "a".repeat(40), headBranch: "opentag/run_1",
+        headRepository: { owner: "acme", repo: "widget" }, baseSha: "b".repeat(40),
         checks: { test: "passed" as const }, checksComplete: true,
         observedAt: "2026-08-10T00:00:30.000Z" })),
     });

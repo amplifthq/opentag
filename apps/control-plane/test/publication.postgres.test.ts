@@ -198,89 +198,62 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       operationId: pr.capability.operationId, step: "create_draft_pull_request" as const,
       observation: { kind: "present" as const, headSha: "d".repeat(40), externalId: "github_pr_8",
         externalUri: "https://github.com/evil/repo/pull/8", draft: true as const, provider: "github" as const,
-        repository: { owner: "evil", repo: "repo" }, baseBranch: "other", state: "open" as const },
+        repository: { owner: "evil", repo: "repo" }, baseBranch: "other", state: "open" as const,
+        headBranch: "opentag/wrong", headRepository: { owner: "evil", repo: "repo" } },
       outcome: "succeeded" as const };
     await expect(publisher.record({ principal, receipt: { ...forgedPr,
       receiptDigest: await computePublicationOperationReceiptDigestV1(forgedPr) } })).resolves.toEqual({ kind: "conflict" });
     await expect(fixture.pool.query(`SELECT 1 FROM cp_publication_receipt WHERE organization_id=$1 AND capability_id=$2`,
       [principal.organizationId, pr.capability.capabilityId])).resolves.toMatchObject({ rows: [] });
-    const unknownSeed = { ...receiptSeed, receiptId: "receipt_pr_unknown", capabilityId: pr.capability.capabilityId,
-      operationId: pr.capability.operationId, step: "create_draft_pull_request" as const,
-      observation: { kind: "ambiguous" as const }, outcome: "outcome_unknown" as const };
-    await publisher.record({ principal, receipt: { ...unknownSeed, receiptDigest: await computePublicationOperationReceiptDigestV1(unknownSeed) } });
-    // RED before Slice B: this became `{ kind: "blocked" }`, which the HTTP
-    // handler collapsed into 204 and stranded the exact begun operation.
-    await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
-      kind: "reconciliation_pending", capability: { capabilityId: pr.capability.capabilityId,
-        operationId: pr.capability.operationId },
+    const exactPresent = (capability: typeof pr.capability, receiptId: string) => ({ ...receiptSeed, receiptId,
+      capabilityId: capability.capabilityId, operationId: capability.operationId,
+      step: "create_draft_pull_request" as const, observation: { kind: "present" as const,
+        headSha: "c".repeat(40), externalId: "github_pr_7", externalUri: "https://github.com/acme/demo/pull/7",
+        draft: true as const, provider: "github" as const, repository: { owner: "acme", repo: "demo" },
+        baseBranch: "main", state: "open" as const, headBranch: "opentag/run_publication",
+        headRepository: { owner: "acme", repo: "demo" } }, outcome: "succeeded" as const });
+    // Two independently pooled writer transactions.  With reconciliation
+    // first, absence wins only before a receipt exists; the delayed receipt is
+    // rejected, leaving no contradictory fact or additional begin window.
+    const absentFirst = publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId,
+      operationId: pr.capability.operationId, reconciliationId: "reconcile_pr_absent",
+      observation: { kind: "absent" }, observedAt: now.toISOString() });
+    const delayedReceipt = new Promise<Awaited<ReturnType<typeof publisher.record>>>((resolve) => {
+      setTimeout(() => { void (async () => {
+        const seed = exactPresent(pr.capability, "receipt_pr_late_success");
+        resolve(await publisher.record({ principal, receipt: { ...seed,
+          receiptDigest: await computePublicationOperationReceiptDigestV1(seed) } }));
+      })(); }, 10);
     });
-    // A started external effect is observation-only recovery work even after
-    // every issuance gate changes; a restart must not turn it into a 204.
-    await fixture.pool.query("ALTER TABLE cp_publication_intent DISABLE TRIGGER cp_publication_intent_immutable");
-    await fixture.pool.query(
-      `UPDATE cp_publication_intent SET expires_at=CURRENT_TIMESTAMP - interval '1 millisecond'
-       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
-    await fixture.pool.query("ALTER TABLE cp_publication_intent ENABLE TRIGGER cp_publication_intent_immutable");
-    await fixture.pool.query(
-      `UPDATE cp_hosted_run SET state='cancelled', terminal_kind='cancelled', terminal_receipt='{"kind":"cancelled"}'::jsonb WHERE organization_id=$1 AND run_id=$2`,
-      [principal.organizationId, candidate.runId]);
-    await fixture.pool.query(
-      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
-       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
-    await fixture.pool.query(
-      `UPDATE cp_runner SET credential_generation=2 WHERE organization_id=$1 AND runner_id=$2`,
-      [principal.organizationId, principal.runnerId]);
-    const rotatedPrincipal = { ...principal, credentialGeneration: 2 };
-    await expect(publisher.claimNextForRunner({ principal: rotatedPrincipal })).resolves.toMatchObject({
-      kind: "reconciliation_pending", capability: { capabilityId: pr.capability.capabilityId,
-        operationId: pr.capability.operationId },
-    });
-    await fixture.pool.query("ALTER TABLE cp_publication_intent DISABLE TRIGGER cp_publication_intent_immutable");
-    await fixture.pool.query(
-      `UPDATE cp_publication_intent SET expires_at=CURRENT_TIMESTAMP + interval '1 minute'
-       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
-    await fixture.pool.query("ALTER TABLE cp_publication_intent ENABLE TRIGGER cp_publication_intent_immutable");
-    await fixture.pool.query(`UPDATE cp_hosted_run SET state='running', terminal_kind=NULL, terminal_receipt=NULL WHERE organization_id=$1 AND run_id=$2`,
-      [principal.organizationId, candidate.runId]);
-    await fixture.pool.query(
-      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP + interval '1 minute'
-       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
-    await fixture.pool.query(
-      `UPDATE cp_runner SET credential_generation=1 WHERE organization_id=$1 AND runner_id=$2`,
-      [principal.organizationId, principal.runnerId]);
-    await expect(claimOperation("create_draft_pull_request")).resolves.toMatchObject({ kind: "unavailable", reason: "reconciliation_required" });
-    await expect(publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId, operationId: pr.capability.operationId,
-      reconciliationId: "reconcile_pr_absent", observation: { kind: "absent" }, observedAt: now.toISOString() })).resolves.toEqual({ kind: "retry_authorized" });
+    await expect(Promise.all([absentFirst, delayedReceipt])).resolves.toEqual([
+      { kind: "retry_authorized" }, { kind: "conflict" },
+    ]);
     const retried = await claimOperation("create_draft_pull_request");
     expect(retried.kind).toBe("issued");
     if (retried.kind !== "issued") return;
+    // An older authoritative absence authorizes this one successor only.  It
+    // cannot remain a permanent retry token after the latest attempt exists.
+    await expect(claimOperation("create_draft_pull_request")).resolves.toMatchObject({
+      kind: "unavailable", reason: "capability_nonrenewable",
+    });
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken,
       capability: retried.capability, begunAt: now.toISOString() })).resolves.toEqual({ kind: "begun" });
-    const presentSeed = { ...receiptSeed, receiptId: "receipt_pr_present",
-      capabilityId: retried.capability.capabilityId, operationId: retried.capability.operationId,
-      step: "create_draft_pull_request" as const,
-      observation: { kind: "ambiguous" as const }, outcome: "outcome_unknown" as const };
-    await expect(publisher.record({ principal, receipt: { ...presentSeed,
-      receiptDigest: await computePublicationOperationReceiptDigestV1(presentSeed) } }))
-      .resolves.toMatchObject({ kind: "recorded" });
-    // RED before Slice B: an exact provider presence observation remained
-    // blocked behind the old unknown receipt rather than settling this step.
-    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
-      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
-      observation: { kind: "present", headSha: "c".repeat(40), externalId: "github_pr_7",
-        externalUri: "https://github.com/acme/demo/pull/7", draft: true, provider: "github",
-        repository: { owner: "acme", repo: "demo" }, baseBranch: "main", state: "open" },
-      observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
-    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
-      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
-      observation: { kind: "present", headSha: "c".repeat(40), externalId: "github_pr_7",
-        externalUri: "https://github.com/acme/demo/pull/7", draft: true, provider: "github",
-        repository: { owner: "acme", repo: "demo" }, baseBranch: "main", state: "open" },
-      observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
-    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
-      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
-      observation: { kind: "absent" }, observedAt: now.toISOString() }))
-      .resolves.toEqual({ kind: "conflict" });
+    // Reverse lock ordering: a succeeded receipt commits first, then a delayed
+    // absence loses.  The reducer must leave the operation settled and never
+    // issue a second capability that could begin an effect.
+    const receiptFirst = (async () => {
+      const seed = exactPresent(retried.capability, "receipt_pr_success");
+      return publisher.record({ principal, receipt: { ...seed,
+        receiptDigest: await computePublicationOperationReceiptDigestV1(seed) } });
+    })();
+    const delayedAbsent = new Promise<Awaited<ReturnType<typeof publisher.reconcile>>>((resolve) => {
+      setTimeout(() => { void publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
+        operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_late_absent",
+        observation: { kind: "absent" }, observedAt: now.toISOString() }).then(resolve); }, 10);
+    });
+    await expect(Promise.all([receiptFirst, delayedAbsent])).resolves.toMatchObject([
+      { kind: "recorded" }, { kind: "conflict" },
+    ]);
     await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
       kind: "completion_pending", capability: { capabilityId: retried.capability.capabilityId },
     });
@@ -339,7 +312,8 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         branch: "opentag/run_publication", baseBranch: "main", pullRequestNumber: 7,
         pullRequestResourceRef: "github:acme/demo:pull_request:7",
         pullRequestUrl: "https://github.com/acme/demo/pull/7", draft: true as const,
-        state: "open" as const, headSha: "c".repeat(40), baseSha: "d".repeat(40),
+        state: "open" as const, headSha: "c".repeat(40), headBranch: "opentag/run_publication",
+        headRepository: { owner: "acme", repo: "demo" }, baseSha: "d".repeat(40),
         checks: { test: "passed" as const }, checksComplete: true,
         observedAt: now.toISOString() } };
     await expect(publisher.complete({ principal, completion })).resolves.toEqual({ kind: "ready", projection: "ready_for_review" });

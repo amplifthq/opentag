@@ -534,6 +534,11 @@ export const PublicationOperationReceiptV1Schema =
     : receipt.observation.kind === "absent" ? "failed" : "outcome_unknown";
   if (receipt.outcome !== expected) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ["outcome"], message: "Publication outcome must match the observation." });
+  if (receipt.step === "create_draft_pull_request" && receipt.observation.kind === "present"
+    && (!receipt.observation.headBranch || !receipt.observation.headRepository)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["observation"],
+      message: "Succeeded draft-PR receipts require provider-observed head provenance." });
+  }
   });
 
 export const RunnerPublicationReceiptV1Schema = z.object({
@@ -589,6 +594,8 @@ export const PublicationCompletionObservationV1Schema = z.object({
   draft: z.literal(true),
   state: z.enum(["open", "closed", "merged"]),
   headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  headBranch: z.string().min(1).max(255),
+  headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
   baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
   checks: z.record(z.string().min(1).max(256), z.enum(["passed", "failed", "pending"])),
   checksComplete: z.boolean(),

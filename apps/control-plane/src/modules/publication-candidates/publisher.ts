@@ -43,9 +43,9 @@ function exactReceiptObservation(capability: PublicationOperationCapabilityV1,
     && observation.repository?.owner === capability.repository.owner
     && observation.repository?.repo === capability.repository.repo
     && observation.baseBranch === capability.repository.baseBranch && observation.state === "open"
-    && (observation.headBranch === undefined || observation.headBranch === capability.branch)
-    && (observation.headRepository === undefined || (observation.headRepository.owner === capability.repository.owner
-      && observation.headRepository.repo === capability.repository.repo)));
+    && observation.headBranch === capability.branch
+    && observation.headRepository?.owner === capability.repository.owner
+    && observation.headRepository.repo === capability.repository.repo);
 }
 
 type PublicationOperationRecord = {
@@ -71,12 +71,16 @@ function reducePublicationOperation(records: PublicationOperationRecord[]): Publ
   const settled = records.find((record) => record.receipt?.outcome === "succeeded")
     ?? records.find((record) => record.reconciliation?.observation.kind === "present");
   if (settled) return { kind: "settled", record: settled };
-  const absent = records.find((record) => record.reconciliation?.observation.kind === "absent");
-  if (absent) return { kind: "retryable", record: absent };
-  const pending = records.find((record) => record.begunAt !== null || record.receipt !== null
-    || record.reconciliation !== null);
-  if (pending) return { kind: "reconciliation_pending", record: pending };
-  return { kind: "issuable", latest: records[0] ?? null };
+  const latest = records[0] ?? null;
+  if (!latest) return { kind: "issuable", latest: null };
+  // An absence authorizes exactly one append-only successor.  Once that
+  // successor exists, only its durable state decides whether anything else is
+  // allowed; an older absence must never become a permanent issuance token.
+  if (latest.reconciliation?.observation.kind === "absent") return { kind: "retryable", record: latest };
+  if (latest.begunAt !== null || latest.receipt !== null || latest.reconciliation !== null) {
+    return { kind: "reconciliation_pending", record: latest };
+  }
+  return { kind: "issuable", latest };
 }
 
 async function readPublicationOperationState(client: any, input: {
@@ -612,9 +616,10 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       if (await computePublicationOperationReceiptDigestV1(digestInput) !== receipt.receiptDigest) {
         return { kind: "conflict" as const };
       }
-      const issued = await input.pool.query<{ capability: unknown }>(
+      return withPostgresTransaction(input.pool, async (client) => {
+      const issued = await client.query<{ intent_id: string; capability: unknown }>(
         `SELECT capability FROM cp_publication_capability
-         WHERE organization_id = $1 AND capability_id = $2 AND operation_id = $3`,
+         WHERE organization_id = $1 AND capability_id = $2 AND operation_id = $3 FOR UPDATE`,
         [receipt.organizationId, receipt.capabilityId, receipt.operationId],
       );
       const capability = issued.rows[0]
@@ -630,8 +635,27 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         return { kind: "conflict" as const };
       }
       if (!exactReceiptObservation(capability, receipt.observation)) return { kind: "conflict" as const };
+      // Lock every capability/fact row for this immutable operation before
+      // deciding the winner or appending a receipt.  `claim`, `record`, and
+      // `reconcile` therefore serialize on the same capability ledger.
+      const operation = await readPublicationOperationState(client, { organizationId: receipt.organizationId,
+        intentId: issued.rows[0]!.intent_id, step: capability.step, lock: true });
+      const exactRecord = operation.records.find((record) => record.capability.capabilityId === capability.capabilityId);
+      const existing = exactRecord?.receipt;
+      if (existing) return existing.receiptDigest === receipt.receiptDigest
+        ? { kind: "replayed" as const, receipt: existing } : { kind: "conflict" as const };
+      // A reconciliation is one immutable provider observation for this
+      // capability.  Once absence won the serialized operation, a late receipt
+      // cannot append contradictory history; it must reconcile the successor.
+      const reconciliation = await client.query(
+        `SELECT 1 FROM cp_publication_reconciliation
+         WHERE organization_id=$1 AND capability_id=$2 FOR UPDATE`,
+        [receipt.organizationId, receipt.capabilityId],
+      );
+      if (exactRecord?.reconciliation || reconciliation.rowCount !== 0) return { kind: "conflict" as const };
+      if (operation.state.kind === "settled") return { kind: "conflict" as const };
       try {
-        const result = await input.pool.query(
+        const result = await client.query(
           `INSERT INTO cp_publication_receipt(organization_id,receipt_id,capability_id,
            operation_id,outcome,receipt_digest,receipt,observed_at)
            SELECT $1,$2,$3,$4,$5,$6,$7,$8 FROM cp_publication_begin begin
@@ -644,7 +668,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           : { kind: "conflict" as const };
       } catch (error) {
         if ((error as { code?: string }).code === "23505") {
-          const existing = await input.pool.query<{ receipt_digest: string; receipt: unknown }>(
+          const existing = await client.query<{ receipt_digest: string; receipt: unknown }>(
             `SELECT receipt_digest,receipt FROM cp_publication_receipt
              WHERE organization_id=$1 AND capability_id=$2`,
             [receipt.organizationId, receipt.capabilityId]);
@@ -654,6 +678,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         }
         throw error;
       }
+      });
     },
 
     async reconcile(command: { principal: RuntimePrincipal; capabilityId: string;
@@ -761,6 +786,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             baseBranch: completion.observation.baseBranch,
           })
           || row.intent_branch !== completion.observation.branch
+          || completion.observation.headBranch !== row.intent_branch
+          || completion.observation.headRepository.owner !== row.intent_repository.owner
+          || completion.observation.headRepository.repo !== row.intent_repository.repo
           || row.expected_head_sha !== completion.observation.headSha
           || canonicalJsonStringify({ provider: row.ownership_provider, owner: row.ownership_owner,
             repo: row.ownership_repo, remote: row.ownership_remote,

@@ -1106,7 +1106,9 @@ async function observePublicationCompletion(input: {
     repo: input.capability.repository.repo, pullRequestNumber });
   if (current.number !== pullRequestNumber || current.head.sha !== input.capability.expectedHeadSha
     || current.base.ref !== input.capability.repository.baseBranch || current.draft !== true
-    || current.htmlUrl !== input.receipt.observation.externalUri) {
+    || current.htmlUrl !== input.receipt.observation.externalUri
+    || current.head.ref !== input.capability.branch
+    || current.head.repo?.full_name?.toLowerCase() !== `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase()) {
     throw new Error("publication_completion_observation_mismatch");
   }
   const snapshots = await reconcileGitHubCompletionEvidence({
@@ -1126,6 +1128,8 @@ async function observePublicationCompletion(input: {
     pullRequestResourceRef: snapshot.pullRequest.resourceRef,
     pullRequestUrl: input.receipt.observation.externalUri, draft: true,
     state: snapshot.pullRequest.state, headSha: snapshot.pullRequest.headSha,
+    headBranch: current.head.ref, headRepository: { owner: input.capability.repository.owner,
+      repo: input.capability.repository.repo },
     baseSha: snapshot.pullRequest.baseSha, checks: snapshot.checks,
     checksComplete: snapshot.checksComplete, observedAt: snapshot.observedAt,
   };
