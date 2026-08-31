@@ -53,6 +53,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.lifecycle.v1",
   "relay.permission.v1",
   "relay.material-receipt.v1",
+  "relay.publication.v1",
   "relay.cancel-resume.v1",
   "relay.follow-up.v1",
   "relay.work-thread-ref.v1",
@@ -346,6 +347,246 @@ export const MaterialActionNormalizedNameV1Schema = z
   .string()
   .regex(/^[a-z][a-z0-9._-]{0,63}$/u)
   .refine(isCredentialSafeText, "Normalized name must not contain credential-like data.");
+
+export const PublicationOperationStepV1Schema = z.enum([
+  "push_owned_branch",
+  "create_draft_pull_request",
+]);
+
+export const PublicationRepositoryV1Schema = z.object({
+  provider: z.literal("github"),
+  owner: z.string().min(1).max(100).regex(/^[a-z0-9](?:[a-z0-9-]{0,38})$/u),
+  repo: z.string().min(1).max(100).regex(/^[A-Za-z0-9._-]+$/u),
+  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
+  baseBranch: z.string().min(1).max(255),
+}).strict();
+
+export const PublicationOperationCapabilityV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  epoch: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  approvalId: MaterialActionStableIdV1Schema,
+  approverId: MaterialActionStableIdV1Schema,
+  repository: PublicationRepositoryV1Schema,
+  branch: z.string().min(1).max(255),
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  step: PublicationOperationStepV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  idempotencyKey: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  issuedAt: ControlTimestampSchema,
+  expiresAt: ControlTimestampSchema,
+}).strict().superRefine((capability, ctx) => {
+  if (capability.epoch !== capability.attemptNumber) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["epoch"],
+      message: "Publication Attempt epoch must equal attempt number." });
+  }
+  if (capability.branch === capability.repository.baseBranch) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must not be the target branch." });
+  }
+  const issued = Date.parse(capability.issuedAt);
+  const expires = Date.parse(capability.expiresAt);
+  if (!(expires > issued) || expires - issued > 5 * 60_000) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expiresAt"],
+      message: "Publication capability must be short-lived." });
+  }
+});
+
+export const RunnerPublicationClaimV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  step: PublicationOperationStepV1Schema,
+}).strict();
+
+/** Credential-free Runner poll for the next coordinator-owned publication operation. */
+export const RunnerPublicationClaimNextV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+}).strict();
+
+export const HumanPublicationApprovalV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  approvalId: MaterialActionStableIdV1Schema,
+  repository: PublicationRepositoryV1Schema,
+  branch: z.string().min(1).max(255),
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  runnerGeneration: z.number().int().positive(),
+  approvedAt: ControlTimestampSchema,
+  expiresAt: ControlTimestampSchema,
+}).strict();
+
+export const RunnerPublicationBeginV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  fencingToken: z.string().min(1).max(4096),
+  capability: PublicationOperationCapabilityV1Schema,
+  begunAt: ControlTimestampSchema,
+}).strict();
+
+export const PublicationOperationObservationV1Schema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("present"), headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+    externalId: MaterialActionStableIdV1Schema.optional(),
+    externalUri: z.string().url().max(2048).refine(isCredentialSafeText).optional(),
+    draft: z.literal(true).optional() }).strict(),
+  z.object({ kind: z.literal("absent") }).strict(),
+  z.object({ kind: z.literal("ambiguous"), reason: z.string().min(1).max(256).optional() }).strict(),
+]);
+
+const PublicationOperationReceiptBaseV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  receiptId: MaterialActionStableIdV1Schema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  step: PublicationOperationStepV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  fencingTokenDigest: ReceiptDigestSchema,
+  observation: PublicationOperationObservationV1Schema,
+  outcome: z.enum(["succeeded", "failed", "outcome_unknown"]),
+  observedAt: ControlTimestampSchema,
+  receiptDigest: ReceiptDigestSchema,
+}).strict();
+
+export const PublicationOperationReceiptDigestInputV1Schema =
+  PublicationOperationReceiptBaseV1Schema.omit({ receiptDigest: true });
+
+export const PublicationOperationReceiptV1Schema =
+  PublicationOperationReceiptBaseV1Schema.superRefine((receipt, ctx) => {
+  const expected = receipt.observation.kind === "present" ? "succeeded"
+    : receipt.observation.kind === "absent" ? "failed" : "outcome_unknown";
+  if (receipt.outcome !== expected) ctx.addIssue({ code: z.ZodIssueCode.custom,
+    path: ["outcome"], message: "Publication outcome must match the observation." });
+  });
+
+export const RunnerPublicationReceiptV1Schema = z.object({
+  fencingToken: z.string().min(1).max(4096),
+  receipt: PublicationOperationReceiptV1Schema,
+}).strict();
+
+export const RunnerPublicationCompletionPendingV1Schema = z.object({
+  capability: PublicationOperationCapabilityV1Schema,
+  completionReceipt: PublicationOperationReceiptV1Schema,
+}).strict().superRefine((value, ctx) => {
+  if (value.capability.step !== "create_draft_pull_request"
+    || value.completionReceipt.step !== "create_draft_pull_request"
+    || value.capability.capabilityId !== value.completionReceipt.capabilityId
+    || value.capability.operationId !== value.completionReceipt.operationId
+    || value.completionReceipt.outcome !== "succeeded"
+    || value.completionReceipt.observation.kind !== "present"
+    || value.completionReceipt.observation.draft !== true
+    || !value.completionReceipt.observation.externalId
+    || !value.completionReceipt.observation.externalUri) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom,
+      message: "Publication completion dispatch requires the exact succeeded draft PR receipt." });
+  }
+});
+
+export const RunnerPublicationReconcileV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  capabilityId: MaterialActionStableIdV1Schema,
+  operationId: MaterialActionStableIdV1Schema,
+  observation: PublicationOperationObservationV1Schema,
+  observedAt: ControlTimestampSchema,
+}).strict();
+
+export const PublicationCompletionObservationV1Schema = z.object({
+  provider: z.literal("github"),
+  repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) }).strict(),
+  remote: z.string().min(1).max(128),
+  branch: z.string().min(1).max(255),
+  baseBranch: z.string().min(1).max(255),
+  pullRequestNumber: z.number().int().positive(),
+  pullRequestResourceRef: z.string().min(1).max(512),
+  pullRequestUrl: z.string().url().max(2048).refine(isCredentialSafeText),
+  draft: z.literal(true),
+  state: z.enum(["open", "closed", "merged"]),
+  headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  baseSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  checks: z.record(z.string().min(1).max(256), z.enum(["passed", "failed", "pending"])),
+  checksComplete: z.boolean(),
+  observedAt: ControlTimestampSchema,
+}).strict();
+
+export const RunnerPublicationCompletionV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  observation: PublicationCompletionObservationV1Schema,
+}).strict();
+
+export function computePublicationCapabilityDigestV1(
+  capability: z.input<typeof PublicationOperationCapabilityV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    PublicationOperationCapabilityV1Schema.parse(capability)));
+}
+
+export function computePublicationOperationReceiptDigestV1(
+  receipt: z.input<typeof PublicationOperationReceiptDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    PublicationOperationReceiptDigestInputV1Schema.parse(receipt)));
+}
 
 export const MaterialActionExternalUriV1Schema = z
   .string()
@@ -3731,6 +3972,18 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type RunnerControlContextResponseV1 = z.infer<typeof RunnerControlContextResponseV1Schema>;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
+export type PublicationOperationStepV1 = z.infer<typeof PublicationOperationStepV1Schema>;
+export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Schema>;
+export type PublicationOperationCapabilityV1 = z.infer<typeof PublicationOperationCapabilityV1Schema>;
+export type RunnerPublicationClaimV1 = z.infer<typeof RunnerPublicationClaimV1Schema>;
+export type RunnerPublicationClaimNextV1 = z.infer<typeof RunnerPublicationClaimNextV1Schema>;
+export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApprovalV1Schema>;
+export type RunnerPublicationBeginV1 = z.infer<typeof RunnerPublicationBeginV1Schema>;
+export type PublicationOperationReceiptV1 = z.infer<typeof PublicationOperationReceiptV1Schema>;
+export type RunnerPublicationCompletionPendingV1 = z.infer<typeof RunnerPublicationCompletionPendingV1Schema>;
+export type RunnerPublicationReconcileV1 = z.infer<typeof RunnerPublicationReconcileV1Schema>;
+export type PublicationCompletionObservationV1 = z.infer<typeof PublicationCompletionObservationV1Schema>;
+export type RunnerPublicationCompletionV1 = z.infer<typeof RunnerPublicationCompletionV1Schema>;
 export type RunnerMaterialActionReconcileAttemptV1 = z.infer<
   typeof RunnerMaterialActionReconcileAttemptV1Schema
 >;

@@ -1,5 +1,5 @@
 import type { AdapterMutationCompiler, AdapterMutationMapping, ApplyIntentOutcome, MutationIntent } from "@opentag/core";
-import { createPullRequestViaFetch, type FetchLike } from "./pull-request.js";
+import type { FetchLike } from "./pull-request.js";
 
 export type GitHubIssueMutationTarget = {
   token: string;
@@ -255,28 +255,13 @@ export function compileGitHubIssueMutationIntent(
   options: { mappings?: AdapterMutationMapping[]; targetKind?: "issue" | "pull_request" } = {}
 ): GitHubIssueMutationCompilation {
   if (intent.action === "create_pull_request") {
-    const head = stringParam(intent, "head", "branch");
-    if (!head) {
-      return {
-        ok: false,
-        outcome: {
-          intentId: intent.intentId,
-          outcome: "failed",
-          message: "create_pull_request requires params.head or params.branch."
-        }
-      };
-    }
     return {
-      ok: true,
-      intentId: intent.intentId,
-      operation: {
-        kind: "create_pull_request",
+      ok: false,
+      outcome: {
         intentId: intent.intentId,
-        title: stringParam(intent, "title") ?? intent.summary,
-        body: pullRequestBodyFromIntent(intent),
-        head,
-        base: stringParam(intent, "base", "baseBranch") ?? "main"
-      }
+        outcome: "unsupported",
+        message: "Draft pull requests require exact coordinator publication approval."
+      },
     };
   }
 
@@ -458,19 +443,8 @@ export async function applyGitHubIssueMutationOperation(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
   try {
     if (input.operation.kind === "create_pull_request") {
-      const externalUri = await createPullRequestViaFetch(
-        {
-          token: input.target.token,
-          owner: input.target.owner,
-          repo: input.target.repo,
-          title: input.operation.title,
-          body: input.operation.body,
-          head: input.operation.head,
-          base: input.operation.base
-        },
-        fetchImpl
-      );
-      return { intentId: input.operation.intentId, outcome: "applied", externalUri };
+      return { intentId: input.operation.intentId, outcome: "unsupported",
+        message: "Draft pull requests require exact coordinator publication approval." };
     }
 
     if (input.operation.kind === "request_review") {

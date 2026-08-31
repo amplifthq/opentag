@@ -23,7 +23,8 @@ describe("pull request helpers", () => {
         title: "OpenTag run run_1",
         body: "body",
         head: "opentag/run_1",
-        base: "main"
+        base: "main",
+        draft: true,
       },
       (async (url, init) => {
         requests.push({
@@ -44,9 +45,18 @@ describe("pull request helpers", () => {
           title: "OpenTag run run_1",
           body: "body",
           head: "opentag/run_1",
-          base: "main"
+          base: "main",
+          draft: true,
         }
       }
     ]);
+  });
+
+  it("rejects non-draft pull request creation", async () => {
+    await expect(createPullRequestViaFetch({
+      token: "ghs_test", owner: "acme", repo: "demo", title: "title",
+      body: "body", head: "opentag/run_1", base: "main", draft: false,
+    }, async () => { throw new Error("provider must not be called"); }))
+      .rejects.toThrow("draft_pull_request_required");
   });
 });

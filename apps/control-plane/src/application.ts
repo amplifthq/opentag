@@ -9,11 +9,18 @@ import {
   HostedSourceContentRedeemRequestV1Schema,
   HostedSourceContentRedeemResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
+  HumanPublicationApprovalV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerMaterialActionNonStartProofV1Schema,
   HostedRunnerMaterialActionBeginV1Schema,
+  RunnerPublicationBeginV1Schema,
+  RunnerPublicationClaimV1Schema,
+  RunnerPublicationClaimNextV1Schema,
+  RunnerPublicationCompletionV1Schema,
+  RunnerPublicationReceiptV1Schema,
+  RunnerPublicationReconcileV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   HostedRunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
@@ -31,6 +38,7 @@ import type { ConsoleReadModel } from "./modules/console-reads/index.js";
 import type { HostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import type { PermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import type { MaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
+import type { PublicationPublisher } from "./modules/publication-candidates/publisher.js";
 import type { GithubIngress } from "./modules/github-ingress/index.js";
 import type {
   ConsolePrincipal,
@@ -78,12 +86,13 @@ export type ControlPlaneDependencies = {
     runners: RunnerDirectory;
     hosted: HostedRunCoordinator;
     materials?: MaterialActionCoordinator;
+    publisher?: PublicationPublisher;
     permissions?: PermissionCoordinator;
     approver?: {
       authenticate(token: string): Promise<
         | {
             kind: "authenticated";
-            principal: { organizationId: string; actorId: string };
+            principal: { organizationId: string; actorId: string; scopes: readonly string[] };
           }
         | { kind: "invalid_credential" }
         | { kind: "insufficient_scope" }
@@ -827,6 +836,140 @@ export function createControlPlaneApplication(
           ),
           409,
         );
+      });
+    }
+
+    if (control.publisher) {
+      const publisher = control.publisher;
+
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", async (context) => {
+        let request: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>;
+        try { request = HumanPublicationApprovalV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        const token = bearerToken(context.req.raw);
+        const authentication = token && control.approver
+          ? await control.approver.authenticate(token) : { kind: "invalid_credential" as const };
+        if (authentication.kind === "invalid_credential") return context.json(controlError("invalid_credential", request.requestId), 401);
+        if (authentication.kind === "insufficient_scope") return context.json(controlError("insufficient_scope", request.requestId), 403);
+        if (!authentication.principal.scopes.includes("publication:approve")) {
+          return context.json(controlError("insufficient_scope", request.requestId), 403);
+        }
+        if (authentication.principal.organizationId !== request.organizationId
+          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.approve({ ...request,
+          approverId: authentication.principal.actorId });
+        if (outcome.kind === "approved" || outcome.kind === "replayed") return context.json(outcome, 200);
+        return context.json(controlError("idempotency_conflict", request.requestId), 409);
+      });
+
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/claim", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let request: ReturnType<typeof RunnerPublicationClaimV1Schema.parse>;
+        try { request = RunnerPublicationClaimV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== request.organizationId || principal.runnerId !== request.runnerId
+          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.claim({ principal, runId: request.runId,
+          attemptId: request.attemptId, attemptNumber: request.attemptNumber,
+          fencingToken: request.fencingToken, candidateId: request.candidateId,
+          candidateDigest: request.candidateDigest, runnerGeneration: request.runnerGeneration,
+          step: request.step });
+        if (outcome.kind === "issued") return context.json(outcome.capability, 201);
+        return context.json(controlError("stale_attempt", request.requestId), 409);
+      });
+
+      app.post("/v1/runners/:runnerId/publication/claim-next", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let request: ReturnType<typeof RunnerPublicationClaimNextV1Schema.parse>;
+        try { request = RunnerPublicationClaimNextV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== request.organizationId || principal.runnerId !== request.runnerId
+          || request.runnerId !== context.req.param("runnerId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.claimNextForRunner({ principal });
+        if (outcome.kind === "issued") return context.json(outcome.capability, 201);
+        if (outcome.kind === "completion_pending") return context.json({
+          capability: outcome.capability, completionReceipt: outcome.completionReceipt,
+        }, 200);
+        // Empty and blocked are intentionally indistinguishable to a polling
+        // Runner: the relay remains the only authority for retry/reconcile.
+        return context.body(null, 204);
+      });
+
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/begin", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let request: ReturnType<typeof RunnerPublicationBeginV1Schema.parse>;
+        try { request = RunnerPublicationBeginV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        const capability = request.capability;
+        if (principal.organizationId !== capability.organizationId || principal.runnerId !== capability.runnerId
+          || capability.runnerId !== context.req.param("runnerId") || capability.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.begin({ principal, fencingToken: request.fencingToken,
+          capability, begunAt: request.begunAt });
+        if (outcome.kind === "begun" || outcome.kind === "replayed") {
+          return context.json({ outcome: outcome.kind, operationId: capability.operationId },
+            outcome.kind === "begun" ? 201 : 200);
+        }
+        return context.json(controlError("stale_attempt", request.requestId), 409);
+      });
+
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/receipt", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let body: ReturnType<typeof RunnerPublicationReceiptV1Schema.parse>;
+        try { body = RunnerPublicationReceiptV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== body.receipt.organizationId || principal.runnerId !== body.receipt.runnerId
+          || body.receipt.runnerId !== context.req.param("runnerId") || body.receipt.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", body.receipt.operationId), 409);
+        }
+        const outcome = await publisher.record({ principal, receipt: body.receipt });
+        if (outcome.kind === "recorded" || outcome.kind === "replayed") {
+          return context.json(outcome.receipt, outcome.kind === "recorded" ? 201 : 200);
+        }
+        return context.json(controlError("idempotency_conflict", body.receipt.operationId), 409);
+      });
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/reconcile", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let request: ReturnType<typeof RunnerPublicationReconcileV1Schema.parse>;
+        try { request = RunnerPublicationReconcileV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== request.organizationId || principal.runnerId !== request.runnerId
+          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.reconcile({ principal, capabilityId: request.capabilityId,
+          operationId: request.operationId, reconciliationId: request.requestId,
+          observation: request.observation, observedAt: request.observedAt });
+        return context.json(outcome, outcome.kind === "outcome_unknown" ? 202 : 200);
+      });
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/complete", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let completion: ReturnType<typeof RunnerPublicationCompletionV1Schema.parse>;
+        try { completion = RunnerPublicationCompletionV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== completion.organizationId || principal.runnerId !== completion.runnerId
+          || completion.runnerId !== context.req.param("runnerId") || completion.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", completion.requestId), 409);
+        }
+        const outcome = await publisher.complete({ principal, completion });
+        if (outcome.kind === "ready" || outcome.kind === "replayed") return context.json(outcome, 200);
+        if (outcome.kind === "nonterminal" || outcome.kind === "outcome_unknown") {
+          return context.json(outcome, 202);
+        }
+        return context.json(controlError(outcome.kind === "stale_fence" ? "stale_attempt" : "idempotency_conflict", completion.requestId), 409);
       });
     }
 

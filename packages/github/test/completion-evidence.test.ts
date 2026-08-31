@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  assessExactPullRequestReadiness,
   createGitHubCompletionApi,
   reconcileGitHubCompletionEvidence,
   type GitHubCheckState,
@@ -44,6 +45,29 @@ function completionApi(overrides: Partial<GitHubCompletionApi> = {}): GitHubComp
 }
 
 describe("GitHub completion evidence", () => {
+  it("requires the exact approved head and every configured check", () => {
+    const snapshot = {
+      provider: "github" as const, deliveryId: "delivery_ready", eventName: "pull_request" as const,
+      repository: { owner: "acme", repo: "demo" }, pullRequest: { number: 7,
+        resourceRef: "github:acme/demo:pull_request:7", headSha: HEAD_CURRENT,
+        baseSha: BASE_SHA, baseBranch: "main", state: "open" as const },
+      checks: { build: "passed" as const, test: "passed" as const }, checksComplete: true,
+      observedAt: "2026-07-21T10:00:00.000Z", payloadDigest: `sha256:${"1".repeat(64)}`,
+    };
+    expect(assessExactPullRequestReadiness({ snapshot, expectedRepository: {
+      owner: "acme", repo: "demo" }, expectedHeadSha: HEAD_CURRENT,
+      expectedBaseBranch: "main", requiredChecks: ["build", "test"] }))
+      .toEqual({ ready: true, reasonCodes: [] });
+    expect(assessExactPullRequestReadiness({ snapshot, expectedRepository: {
+      owner: "acme", repo: "demo" }, expectedHeadSha: HEAD_OLD,
+      expectedBaseBranch: "main", requiredChecks: ["build", "test"] }))
+      .toEqual({ ready: false, reasonCodes: ["head_mismatch"] });
+    expect(assessExactPullRequestReadiness({ snapshot: { ...snapshot,
+      checks: { build: "passed" } }, expectedRepository: { owner: "acme", repo: "demo" },
+      expectedHeadSha: HEAD_CURRENT, expectedBaseBranch: "main",
+      requiredChecks: ["build", "test"] })).toEqual({ ready: false,
+        reasonCodes: ["configured_check_missing"] });
+  });
   it("reconciles a PR event against the authoritative current head", async () => {
     const api = completionApi();
     const snapshot = await reconcileGitHubCompletionEvidence({

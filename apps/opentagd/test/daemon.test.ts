@@ -524,7 +524,7 @@ describe("opentagd", () => {
     });
 
     expect(didWork).toBe(true);
-    expect(commands).toEqual(["/tmp/demo: git push -u origin opentag/run_1"]);
+    expect(commands).toEqual([]);
     expect(completed).toMatchObject({ conclusion: "success", changedFiles: ["README.md"] });
   });
 
@@ -615,15 +615,13 @@ describe("opentagd", () => {
     });
 
     expect(didWork).toBe(true);
-    expect(commands).toEqual(["git add -- README.md", "git commit -m OpenTag run run_1", "git push -u origin opentag/run_1"]);
+    expect(commands).toEqual([]);
     expect(completed).toMatchObject({
-      conclusion: "needs_human",
+      conclusion: "success",
       changedFiles: ["README.md"],
-      nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
     });
-    expect(completed?.summary).toContain("could not prepare the pull request action");
-    expect(completed?.summary).toContain("network unavailable");
-    expect(completed?.suggestedChanges).toBeUndefined();
+    expect(completed?.summary).toBe("Changed README.md.");
+    expect(completed?.suggestedChanges).toEqual(executorResult.suggestedChanges);
   });
 
   it("logs and continues the daemon loop after an iteration-level failure", async () => {

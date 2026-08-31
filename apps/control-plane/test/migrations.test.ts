@@ -68,6 +68,17 @@ describe("checked-in PostgreSQL migrations", () => {
     expect(candidate?.sql).toContain("cp_publication_candidate_immutable");
     expect(candidate?.sql).toContain("CREATE TRIGGER");
   });
+  it("checks in immutable publication operation authority as a distinct migration", async () => {
+    const migrations = await loadSqlMigrations(join(process.cwd(), "apps/control-plane/migrations"));
+    const publication = migrations.find(({ name }) => name === "0014_publication_operations.sql");
+    expect(publication?.sql).toContain("CREATE TABLE cp_publication_intent");
+    expect(publication?.sql).toContain("cp_publication_capability");
+    expect(publication?.sql).toContain("push_owned_branch");
+    expect(publication?.sql).toContain("create_draft_pull_request");
+    expect(publication?.sql).toContain("CREATE TABLE cp_publication_completion");
+    expect(publication?.sql).toContain("cp_publication_completion_immutable");
+    expect(publication?.sql).toContain("cp_publication_receipt_immutable");
+  });
   it("serializes migration application and records the reviewed checksum", async () => {
     const harness = migrationHarness();
     const first = migration("0000_control_plane.sql", "CREATE TABLE example(id text)");

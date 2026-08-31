@@ -651,6 +651,9 @@ importers:
       '@opentag/client':
         specifier: workspace:*
         version: link:../client
+      '@opentag/control-protocol':
+        specifier: workspace:*
+        version: link:../control-protocol
       '@opentag/core':
         specifier: workspace:*
         version: link:../core

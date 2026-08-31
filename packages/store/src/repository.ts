@@ -10169,6 +10169,44 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async getHostedSucceededPublicationAuthority(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+      runId: string;
+      attemptId: string;
+      fencingTokenDigest: string;
+    }): Promise<{ fencingToken: string; attemptNumber: number } | null> {
+      const run = await db.select().from(runs).where(and(
+        eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+      )).limit(1).get();
+      const attempt = run ? await db.select().from(attempts).where(and(
+        eq(attempts.id, input.attemptId), eq(attempts.runId, input.runId),
+        eq(attempts.runnerId, input.runnerId), eq(attempts.status, "succeeded"),
+      )).limit(1).get() : undefined;
+      const runImport = attempt ? await db.select().from(hostedRunImports)
+        .where(and(eq(hostedRunImports.runId, input.runId),
+          eq(hostedRunImports.attemptId, input.attemptId),
+          eq(hostedRunImports.fencingTokenDigest, input.fencingTokenDigest)))
+        .limit(1).get() : undefined;
+      const attemptImport = runImport ? await db.select().from(hostedAttemptImports)
+        .where(and(eq(hostedAttemptImports.attemptId, input.attemptId),
+          eq(hostedAttemptImports.runId, input.runId),
+          eq(hostedAttemptImports.attemptNumber, attempt!.number),
+          eq(hostedAttemptImports.fencingTokenDigest, input.fencingTokenDigest)))
+        .limit(1).get() : undefined;
+      const claim = attemptImport ? await db.select().from(hostedClaimOperations)
+        .where(and(eq(hostedClaimOperations.operationId, attemptImport.claimOperationId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.state, "claimed")))
+        .limit(1).get() : undefined;
+      if (!attempt || !runImport || !attemptImport || !claim
+        || attempt.fencingToken === "" || attempt.number !== attemptImport.attemptNumber) return null;
+      return { fencingToken: attempt.fencingToken, attemptNumber: attempt.number };
+    },
+
     async importHostedAssignedRun(input: {
       event: OpenTagEvent;
       claim: HostedClaimV1;

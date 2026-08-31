@@ -41,10 +41,25 @@ import {
 } from "@opentag/core";
 import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
 import {
+  createExactDraftPullRequest,
+  createGitHubCompletionApi,
+  reconcileGitHubCompletionEvidence,
   refetchGitHubIssueCommentForHostedAdmission,
+  type PublicationProviderObservation,
   type GitHubIssueCommentRefetchReceipt,
 } from "@opentag/github";
-import type { ExecutorAdapter, RunnerSecurityPolicy } from "@opentag/runner";
+import type {
+  PublicationCompletionObservationV1,
+  PublicationOperationCapabilityV1,
+  PublicationOperationReceiptV1,
+} from "@opentag/control-protocol";
+import {
+  assertCommandSucceeded,
+  nodeCommandRunner,
+  pushBranch,
+  type ExecutorAdapter,
+  type RunnerSecurityPolicy,
+} from "@opentag/runner";
 import {
   canonicalRepositoryIdentity,
   type OpenTagDaemonConfig,
@@ -55,7 +70,7 @@ import {
   type ClaimedRun,
   type ClaimedRunExecutionClient,
 } from "./daemon.js";
-import type { PullRequestOptions } from "./pr.js";
+import { executePublicationControlV1, type PullRequestOptions } from "./pr.js";
 
 const require = createRequire(import.meta.url);
 const LOCAL_RUNTIME_VERSION = (require("../package.json") as { version: string }).version;
@@ -866,6 +881,223 @@ export type HostedControlLoop = {
   close(): Promise<void>;
 };
 
+type PublicationControlClient = Pick<OpenTagClient,
+  "claimNextPublicationOperationControlV1" | "beginPublicationOperationControlV1"
+  | "recordPublicationOperationReceiptControlV1" | "reconcilePublicationOperationControlV1"
+  | "completePublicationControlV1">;
+
+export async function runPublicationControlV1Iteration(input: {
+  organizationId: string;
+  runnerId: string;
+  runnerGeneration: number;
+  now: () => Date;
+  client: PublicationControlClient;
+  getLocalAuthority(capability: PublicationOperationCapabilityV1): Promise<{
+    fencingToken: string;
+    attemptNumber: number;
+  } | null>;
+  pushOwnedBranch(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  createDraftPullRequest(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  reconcileOperation(capability: PublicationOperationCapabilityV1): Promise<PublicationProviderObservation>;
+  observeCompletion(capability: PublicationOperationCapabilityV1,
+    receipt: PublicationOperationReceiptV1): Promise<PublicationCompletionObservationV1>;
+}): Promise<boolean> {
+  const claimed = await input.client.claimNextPublicationOperationControlV1({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.publication.v1"],
+    requestId: `request_publication_poll_${randomUUID()}`,
+    organizationId: input.organizationId,
+    runnerId: input.runnerId,
+  });
+  if (!claimed) return false;
+  const capability = claimed.capability;
+  const authority = await input.getLocalAuthority(capability);
+  if (!authority || authority.attemptNumber !== capability.attemptNumber) return false;
+  if (claimed.completionPending) {
+    const observation = await input.observeCompletion(capability, claimed.completionReceipt);
+    await input.client.completePublicationControlV1({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_complete_${randomUUID()}`,
+      organizationId: capability.organizationId,
+      runnerId: capability.runnerId,
+      runnerGeneration: capability.runnerGeneration,
+      runId: capability.runId,
+      attemptId: capability.attemptId,
+      attemptNumber: authority.attemptNumber,
+      fencingToken: authority.fencingToken,
+      candidateId: capability.candidateId,
+      candidateDigest: capability.candidateDigest,
+      observation,
+    });
+    return true;
+  }
+  const receipt = await executePublicationControlV1({
+    client: input.client,
+    capability,
+    fencingToken: authority.fencingToken,
+    now: () => input.now().toISOString(),
+    pushOwnedBranch: () => input.pushOwnedBranch(capability),
+    createDraftPullRequest: () => input.createDraftPullRequest(capability),
+  });
+  if (receipt.outcome === "outcome_unknown") {
+    const provider = await input.reconcileOperation(capability);
+    const observation = provider.kind !== "present" ? provider : {
+      kind: "present" as const,
+      headSha: provider.headSha,
+      ...("pullRequestNumber" in provider ? {
+        externalId: `github_pr_${provider.pullRequestNumber}`,
+        externalUri: provider.pullRequestUrl,
+        draft: true as const,
+      } : {}),
+    };
+    await input.client.reconcilePublicationOperationControlV1({
+      schemaVersion: 1,
+      protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_reconcile_${randomUUID()}`,
+      organizationId: capability.organizationId,
+      runnerId: capability.runnerId,
+      runId: capability.runId,
+      capabilityId: capability.capabilityId,
+      operationId: capability.operationId,
+      observation,
+      observedAt: input.now().toISOString(),
+    });
+  }
+  return true;
+}
+
+function publicationBinding(input: {
+  capability: PublicationOperationCapabilityV1;
+  repositories: RepositoryBindingConfig[];
+}): RepositoryBindingConfig | null {
+  const expected = canonicalRepositoryIdentity(input.capability.repository);
+  return input.repositories.find((candidate) => {
+    const actual = canonicalRepositoryIdentity(candidate);
+    return actual.provider === expected.provider && actual.owner === expected.owner
+      && actual.repo === expected.repo && candidate.pushRemote === input.capability.repository.remote
+      && candidate.baseBranch === input.capability.repository.baseBranch;
+  }) ?? null;
+}
+
+async function localBranchHead(input: {
+  binding: RepositoryBindingConfig;
+  capability: PublicationOperationCapabilityV1;
+}): Promise<string | null> {
+  const result = await nodeCommandRunner.run("git", ["rev-parse", `${input.capability.branch}^{commit}`], {
+    cwd: input.binding.checkoutPath,
+  });
+  if (result.exitCode !== 0) return null;
+  const head = result.stdout.trim();
+  return /^[a-f0-9]{40,64}$/u.test(head) ? head : null;
+}
+
+async function observeRemoteBranch(input: {
+  binding: RepositoryBindingConfig;
+  capability: PublicationOperationCapabilityV1;
+}): Promise<PublicationProviderObservation> {
+  try {
+    const result = await nodeCommandRunner.run("git", ["ls-remote", "--heads",
+      input.capability.repository.remote, `refs/heads/${input.capability.branch}`], {
+      cwd: input.binding.checkoutPath,
+    });
+    await assertCommandSucceeded(result, "observe owned publication branch");
+    if (!result.stdout.trim()) return { kind: "absent" };
+    const headSha = result.stdout.trim().split(/\s+/u)[0];
+    return headSha === input.capability.expectedHeadSha
+      ? { kind: "present", headSha }
+      : { kind: "ambiguous" };
+  } catch {
+    return { kind: "ambiguous" };
+  }
+}
+
+function githubPublicationApi(input: {
+  token: string;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}) {
+  return createGitHubCompletionApi({ token: input.token,
+    ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+    ...(input.apiOrigin ? { apiBaseUrl: input.apiOrigin } : {}) });
+}
+
+async function observeDraftPullRequest(input: {
+  capability: PublicationOperationCapabilityV1;
+  token: string;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}): Promise<PublicationProviderObservation> {
+  try {
+    const api = githubPublicationApi(input);
+    const candidates = await api.listPullRequestsForCommit({
+      owner: input.capability.repository.owner, repo: input.capability.repository.repo,
+      ref: input.capability.expectedHeadSha,
+    });
+    for (const candidate of candidates) {
+      const pullRequest = await api.getPullRequest({ owner: input.capability.repository.owner,
+        repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
+      if (pullRequest.head.sha === input.capability.expectedHeadSha
+        && pullRequest.base.ref === input.capability.repository.baseBranch
+        && pullRequest.draft === true && pullRequest.htmlUrl) {
+        return { kind: "present", pullRequestNumber: pullRequest.number,
+          pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true };
+      }
+    }
+    return { kind: "absent" };
+  } catch {
+    return { kind: "ambiguous" };
+  }
+}
+
+async function observePublicationCompletion(input: {
+  capability: PublicationOperationCapabilityV1;
+  receipt: PublicationOperationReceiptV1;
+  token: string;
+  now: () => Date;
+  fetchImpl?: typeof fetch;
+  apiOrigin?: string;
+}): Promise<PublicationCompletionObservationV1> {
+  if (input.receipt.observation.kind !== "present"
+    || !input.receipt.observation.externalId || !input.receipt.observation.externalUri
+    || input.receipt.observation.draft !== true) throw new Error("publication_completion_receipt_invalid");
+  const pullRequestNumber = Number(input.receipt.observation.externalId.match(/(\d+)$/u)?.[1]);
+  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber <= 0) {
+    throw new Error("publication_completion_receipt_invalid");
+  }
+  const api = githubPublicationApi(input);
+  const current = await api.getPullRequest({ owner: input.capability.repository.owner,
+    repo: input.capability.repository.repo, pullRequestNumber });
+  if (current.number !== pullRequestNumber || current.head.sha !== input.capability.expectedHeadSha
+    || current.base.ref !== input.capability.repository.baseBranch || current.draft !== true
+    || current.htmlUrl !== input.receipt.observation.externalUri) {
+    throw new Error("publication_completion_observation_mismatch");
+  }
+  const snapshots = await reconcileGitHubCompletionEvidence({
+    eventName: "pull_request", deliveryId: `runner:${input.capability.capabilityId}`,
+    payload: { number: pullRequestNumber, repository: { name: input.capability.repository.repo,
+      owner: { login: input.capability.repository.owner } } }, api,
+    now: () => input.now().toISOString(),
+  });
+  const snapshot = snapshots.find((candidate) => candidate.pullRequest.number === pullRequestNumber);
+  if (!snapshot || snapshot.pullRequest.headSha !== input.capability.expectedHeadSha) {
+    throw new Error("publication_completion_observation_mismatch");
+  }
+  return {
+    provider: "github", repository: snapshot.repository,
+    remote: input.capability.repository.remote, branch: input.capability.branch,
+    baseBranch: snapshot.pullRequest.baseBranch, pullRequestNumber,
+    pullRequestResourceRef: snapshot.pullRequest.resourceRef,
+    pullRequestUrl: input.receipt.observation.externalUri, draft: true,
+    state: snapshot.pullRequest.state, headSha: snapshot.pullRequest.headSha,
+    baseSha: snapshot.pullRequest.baseSha, checks: snapshot.checks,
+    checksComplete: snapshot.checksComplete, observedAt: snapshot.observedAt,
+  };
+}
+
 type HostedExecutionRepository = Omit<
   ReturnType<typeof openDispatcherGovernanceStore>["repo"],
   "getHostedAssignedRunForRecovery" | "isHostedExecutionCurrent"
@@ -970,6 +1202,14 @@ type HostedExecutionRepository = Omit<
       importedAt: string;
     };
   } | null>;
+  getHostedSucceededPublicationAuthority(input: {
+    destinationId: string;
+    organizationId: string;
+    runnerId: string;
+    runId: string;
+    attemptId: string;
+    fencingTokenDigest: string;
+  }): Promise<{ fencingToken: string; attemptNumber: number } | null>;
   isHostedExecutionCurrent(input: {
     runId: string;
     attemptId: string;
@@ -1808,6 +2048,69 @@ export function createHostedControlLoop(input: {
           throw new Error("runner_control_context_stale");
         }
         context = nextContext;
+        const publicationDidWork = typeof client.claimNextPublicationOperationControlV1 === "function"
+          ? await runPublicationControlV1Iteration({
+          organizationId: context.organizationId,
+          runnerId: context.runnerId,
+          runnerGeneration: context.credentialGeneration,
+          now: clock,
+          client,
+          getLocalAuthority: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding || (capability.step === "create_draft_pull_request"
+              && !input.config.githubToken)) return null;
+            return repo.getHostedSucceededPublicationAuthority({
+              destinationId: "cloud", organizationId: capability.organizationId,
+              runnerId: capability.runnerId, runId: capability.runId,
+              attemptId: capability.attemptId,
+              fencingTokenDigest: capability.fencingTokenDigest,
+            });
+          },
+          pushOwnedBranch: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding || await localBranchHead({ binding, capability })
+              !== capability.expectedHeadSha) return { kind: "absent" };
+            try {
+              await pushBranch({ runner: nodeCommandRunner, workspacePath: binding.checkoutPath,
+                remote: capability.repository.remote, branchName: capability.branch });
+            } catch {
+              return { kind: "ambiguous" };
+            }
+            return observeRemoteBranch({ binding, capability });
+          },
+          createDraftPullRequest: async (capability) => {
+            if (!input.config.githubToken) return { kind: "ambiguous" };
+            return createExactDraftPullRequest({ token: input.config.githubToken,
+              owner: capability.repository.owner, repo: capability.repository.repo,
+              title: `OpenTag run ${capability.runId}`,
+              body: `Approved OpenTag publication candidate ${capability.candidateId}.`,
+              head: capability.branch, base: capability.repository.baseBranch,
+              expectedHeadSha: capability.expectedHeadSha,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}) });
+          },
+          reconcileOperation: async (capability) => {
+            const binding = publicationBinding({ capability,
+              repositories: input.config.repositories });
+            if (!binding) return { kind: "ambiguous" };
+            if (capability.step === "push_owned_branch") {
+              return observeRemoteBranch({ binding, capability });
+            }
+            if (!input.config.githubToken) return { kind: "ambiguous" };
+            return observeDraftPullRequest({ capability, token: input.config.githubToken,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+          },
+          observeCompletion: (capability, receipt) => {
+            if (!input.config.githubToken) throw new Error("publication_github_credential_unavailable");
+            return observePublicationCompletion({ capability, receipt,
+              token: input.config.githubToken, now: clock,
+              ...(input.fetchImpl ? { fetchImpl: input.fetchImpl } : {}),
+              ...(input.githubApiOrigin ? { apiOrigin: input.githubApiOrigin } : {}) });
+          },
+          }) : false;
+        if (closed || publicationDidWork) return publicationDidWork;
         const preImportRecovery =
           await repo.getHostedPreImportAuthorityRecovery({
             destinationId: "cloud",

@@ -8,6 +8,7 @@ export type CreatePullRequestInput = {
   body: string;
   head: string;
   base: string;
+  draft: true | false;
 };
 
 export type FetchLike = typeof fetch;
@@ -33,6 +34,7 @@ export function buildPullRequestBody(result: OpenTagRunResult): string {
 }
 
 export async function createPullRequestViaFetch(input: CreatePullRequestInput, fetchImpl: FetchLike = fetch): Promise<string> {
+  if (input.draft !== true) throw new Error("draft_pull_request_required");
   const response = await fetchImpl(`https://api.github.com/repos/${input.owner}/${input.repo}/pulls`, {
     method: "POST",
     headers: {
@@ -45,7 +47,8 @@ export async function createPullRequestViaFetch(input: CreatePullRequestInput, f
       title: input.title,
       body: input.body,
       head: input.head,
-      base: input.base
+      base: input.base,
+      draft: true,
     })
   });
 

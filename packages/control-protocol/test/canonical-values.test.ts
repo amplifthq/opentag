@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  RunnerPublicationCompletionV1Schema,
+  PublicationOperationReceiptDigestInputV1Schema,
+} from "../src/index.js";
+import {
   compareWellFormedUnicodeStrings,
   ProposalReadinessAssessmentSchema,
   sortWellFormedUnicodeStrings,
@@ -65,5 +69,40 @@ describe("Task 8 Unicode scalar contract", () => {
     expect(values).toEqual(["😀", "é", "e\u0301", "a", "ab"]);
     expect(compareWellFormedUnicodeStrings("é", "e\u0301")).toBeGreaterThan(0);
     expect(() => sortWellFormedUnicodeStrings([high])).toThrow(TypeError);
+  });
+});
+
+describe("Task 9 publication receipt digest schema", () => {
+  it("loads a digest input schema without receiptDigest", () => {
+    expect(PublicationOperationReceiptDigestInputV1Schema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("Task 9 publication completion observation", () => {
+  it("accepts exact credential-free PR and check evidence", () => {
+    const parsed = RunnerPublicationCompletionV1Schema.parse({
+      schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"],
+      requestId: "request_complete_publication", organizationId: "org_1",
+      runnerId: "runner_1", runnerGeneration: 2, runId: "run_1",
+      attemptId: "attempt_1", attemptNumber: 1, fencingToken: "local_fence",
+      candidateId: "candidate_1", candidateDigest: `sha256:${"a".repeat(64)}`,
+      observation: {
+        provider: "github", repository: { owner: "acme", repo: "widget" },
+        remote: "origin", branch: "opentag/run_1", baseBranch: "main",
+        pullRequestNumber: 7,
+        pullRequestResourceRef: "github:acme/widget:pull_request:7",
+        pullRequestUrl: "https://github.com/acme/widget/pull/7", draft: true,
+        state: "open", headSha: "b".repeat(40), baseSha: "c".repeat(40),
+        checks: { test: "passed" }, checksComplete: true,
+        observedAt: "2026-08-31T01:02:03.004Z",
+      },
+    });
+    // The fencing token is an opaque control-plane authority and is expected
+    // in this Runner-authenticated message.  What must never cross this
+    // protocol boundary is a provider credential.
+    expect(parsed).not.toHaveProperty("githubToken");
+    expect(parsed).not.toHaveProperty("credential");
+    expect(JSON.stringify(parsed)).not.toMatch(/ghp_|github_token|authorization: bearer/iu);
   });
 });

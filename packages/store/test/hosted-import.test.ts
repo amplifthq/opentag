@@ -626,6 +626,40 @@ describe("hosted assigned Run import", () => {
     });
   });
 
+  it("recovers only the exact succeeded publication fence across Store restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opentag-publication-authority-"));
+    tempDirs.push(directory);
+    const path = join(directory, "store.sqlite");
+    const sqlite = new Database(path);
+    migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const value = await fixture();
+    await begin(repo, value);
+    await repo.importHostedAssignedRun(value);
+    await startHostedExecution(repo, value.claim);
+    await expect(repo.completeRun({ runId: value.claim.runId, runnerId: value.claim.runnerId,
+      attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken,
+      result: { conclusion: "success", summary: "content-free" } })).resolves.toBe("completed");
+    sqlite.close();
+
+    const restartedSqlite = new Database(path);
+    migrateSchema(restartedSqlite);
+    const restarted = createOpenTagRepository(drizzle(restartedSqlite));
+    const exact = { destinationId: "cloud-1", organizationId: value.claim.organizationId,
+      runnerId: value.claim.runnerId, runId: value.claim.runId,
+      attemptId: value.claim.attempt.id,
+      fencingTokenDigest: value.claim.attempt.fencingTokenDigest };
+    await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toEqual({
+      fencingToken: value.claim.attempt.fencingToken, attemptNumber: value.claim.attempt.number,
+    });
+    await expect(restarted.getHostedSucceededPublicationAuthority({ ...exact,
+      fencingTokenDigest: digestA })).resolves.toBeNull();
+    restartedSqlite.prepare("UPDATE hosted_claim_operations SET state='empty' WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toBeNull();
+    restartedSqlite.close();
+  });
+
   it("persists only a metadata shell and never stores redeemed execution plaintext", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opentag-hosted-privacy-"));
     tempDirs.push(directory);

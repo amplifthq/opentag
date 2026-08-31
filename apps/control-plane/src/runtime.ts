@@ -21,6 +21,7 @@ import {
 import { createHostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import { createMaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
+import { createPublicationPublisher } from "./modules/publication-candidates/publisher.js";
 import { createConsoleReadModel } from "./modules/console-reads/index.js";
 import {
   createIdentityModule,
@@ -65,6 +66,7 @@ const BASE_CAPABILITIES = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.material-receipt.v1",
+  "relay.publication.v1",
   "relay.permission.v1",
   "relay.readiness.v1",
   "relay.registration.v1",
@@ -165,6 +167,11 @@ export function createControlPlaneRuntime(input: {
   const materials = createMaterialActionCoordinator({
     pool: postgres.pool,
     clock,
+  });
+  const publisher = createPublicationPublisher({
+    pool: postgres.pool,
+    clock,
+    idFactory: (kind) => `publication_${kind}_${randomBytes(16).toString("hex")}`,
   });
   const reads = createConsoleReadModel({ pool: postgres.pool });
   const slackCommandAuthority = input.slackCommandAuthority
@@ -421,12 +428,14 @@ export function createControlPlaneRuntime(input: {
       runners,
       hosted,
       materials,
+      publisher,
       permissions,
       approver: {
         async authenticate(token) {
           const outcome = await identity.authenticateApiKey(token);
           if (outcome.kind !== "authenticated") return outcome;
-          if (!outcome.principal.scopes.includes("permission:resolve")) {
+          if (!outcome.principal.scopes.includes("permission:resolve")
+            && !outcome.principal.scopes.includes("publication:approve")) {
             return { kind: "insufficient_scope" as const };
           }
           return {
@@ -434,6 +443,7 @@ export function createControlPlaneRuntime(input: {
             principal: {
               organizationId: outcome.principal.organizationId,
               actorId: outcome.principal.apiKeyId,
+              scopes: outcome.principal.scopes,
             },
           };
         },

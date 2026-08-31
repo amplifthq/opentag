@@ -267,6 +267,22 @@ export async function checkMigrationReadiness(
             AND regexp_replace(pg_get_triggerdef(trigger_row.oid),
               '[[:space:]]+', '', 'g') LIKE
               'CREATETRIGGERcp_publication_candidate_immutableBEFOREDELETEORUPDATEON%FOREACHROWEXECUTEFUNCTION%cp_reject_publication_candidate_mutation()')
+        AND (SELECT count(*) FROM pg_class table_row
+          WHERE table_row.relnamespace = current_schema()::regnamespace
+            AND table_row.relkind = 'r'
+            AND table_row.relname = ANY(ARRAY[
+              'cp_publication_intent', 'cp_publication_branch_ownership',
+              'cp_publication_capability', 'cp_publication_begin',
+              'cp_publication_receipt', 'cp_publication_reconciliation',
+              'cp_publication_completion'
+            ])) = 7
+        AND EXISTS (SELECT 1 FROM pg_trigger trigger_row
+          JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
+          WHERE trigger_row.tgrelid = 'cp_publication_completion'::regclass
+            AND trigger_row.tgname = 'cp_publication_completion_immutable'
+            AND trigger_row.tgenabled = 'O' AND NOT trigger_row.tgisinternal
+            AND function_row.proname = 'cp_reject_publication_authority_mutation'
+            AND function_row.pronamespace = current_schema()::regnamespace)
       ) AS schema_ready`,
     );
     const current = schema.rows[0]?.schema_ready === true

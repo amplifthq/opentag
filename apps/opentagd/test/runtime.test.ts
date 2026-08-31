@@ -365,6 +365,11 @@ describe("opentagd runtime helpers", () => {
             targets: [],
             observedAt: new Date().toISOString(),
           };
+      if (pathname.endsWith("/publication/claim-next")) {
+        const response = new Response(null, { status: 204 });
+        Object.defineProperty(response, "url", { value: requestUrl });
+        return response;
+      }
       const response = new Response(JSON.stringify(body), {
         status: pathname.endsWith("/hosted-claims")
           ? 200
@@ -389,6 +394,7 @@ describe("opentagd runtime helpers", () => {
       );
       expect(requests).toEqual([
         "GET /v1/runners/runner_hosted/control-context",
+        "POST /v1/runners/runner_hosted/publication/claim-next",
         "POST /v1/runners/runner_hosted/readiness",
         "POST /v1/runners/runner_hosted/hosted-claims",
         "POST /v1/runners/runner_hosted/runs/run_1/reject-start",
