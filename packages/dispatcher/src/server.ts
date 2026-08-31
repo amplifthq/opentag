@@ -10,6 +10,7 @@ import {
   MaterialActionReceiptSchema,
   HumanEscalationSchema,
   VerificationEvidenceSchema,
+  WellFormedNonEmptyStringSchema,
   capabilityForMutationIntent,
   channelProgressVisibility,
   conversationKeysFromCallback,
@@ -707,7 +708,7 @@ const RecordControlPlaneEventSchema = z.object({
 
 const GitHubCompletionEvidenceSchema = z.object({
   provider: z.literal("github"),
-  deliveryId: z.string().min(1).max(256),
+  deliveryId: WellFormedNonEmptyStringSchema.max(256),
   eventName: z.enum(["pull_request", "check_run", "check_suite", "status"]),
   repository: z.object({ owner: z.string().min(1), repo: z.string().min(1) }).strict(),
   pullRequest: z.object({
@@ -733,7 +734,7 @@ const CompletionWaiverInputSchema = z.object({
   reason: z.string().min(1).max(2_000),
   scope: z.literal("selected_gates"),
   policyScope: PolicyScopeSchema,
-  gateIds: z.array(z.string().min(1)).min(1).max(50),
+  gateIds: z.array(WellFormedNonEmptyStringSchema).min(1).max(50),
   waivedAt: z.string().datetime(),
   expiresAt: z.string().datetime().optional()
 }).strict();

@@ -9,6 +9,7 @@ import {
   ProposalReadinessAssessmentSchema,
   PublicationCandidateSchema,
   reduceCompletionGateStates,
+  WellFormedNonEmptyStringSchema,
   type CompletionAssessment,
   type CompletionGate,
   type CompletionGateResult,
@@ -24,6 +25,19 @@ import type {
   WorkLoopCause,
   WorkLoopView
 } from "./types.js";
+
+function assertWellFormedSortableIdentifiers(input: CompletionEvaluationInput): void {
+  for (const value of [
+    ...input.runResults.map((result) => result.runId),
+    ...input.artifacts.map((artifact) => artifact.id),
+    ...input.evidence.map((fact) => fact.id),
+    ...input.materialActionReceipts.map((receipt) => receipt.id),
+    ...input.waivers.map((waiver) => waiver.id),
+    ...(input.blockingEscalations ?? []).map((escalation) => escalation.id),
+  ]) {
+    WellFormedNonEmptyStringSchema.parse(value);
+  }
+}
 
 export type ProposalReadinessEvaluationInput = {
   executorConclusion: "success" | "failure" | "cancelled" | "interrupted" | "timed_out" | "needs_human";
@@ -482,6 +496,7 @@ function compatibilityAssessment(
 }
 
 export function evaluateCompletion(inputValue: CompletionEvaluationInput): CompletionAssessment {
+  assertWellFormedSortableIdentifiers(inputValue);
   const input = { ...inputValue, contract: CompletionContractSchema.parse(inputValue.contract) };
   const evaluationTime = input.evaluatedAt ?? latestTimestamp(input);
   const evaluatedAt = assessmentTimestamp(input, evaluationTime);

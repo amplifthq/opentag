@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sortCanonicalUnicodeStrings } from "@opentag/core";
 import { checkMigrationReadiness, runMigrations } from "../src/database/migrations.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
@@ -26,6 +27,24 @@ type HistoricalCandidateMutation = {
   mutateCandidate?: (candidate: Record<string, unknown>) => void;
   mutateAssessment?: (assessment: Record<string, unknown>) => unknown;
 };
+
+const timestampParityCases = [
+  ["year zero", "0000-01-01T00:00:00.000Z", false],
+  ["minimum year", "0001-01-01T00:00:00.000Z", true],
+  ["maximum year", "9999-12-31T23:59:59.999Z", true],
+  ["extended year", "+010000-01-01T00:00:00.000Z", false],
+  ["valid leap day", "2024-02-29T00:00:00.000Z", true],
+  ["invalid leap day", "2025-02-29T00:00:00.000Z", false],
+  ["leap second", "2024-12-31T23:59:60.000Z", false],
+  ["24:00", "2024-01-01T24:00:00.000Z", false],
+  ["offset", "2026-08-31T09:02:03.004+08:00", false],
+  ["no fraction", "2026-08-31T01:02:03Z", false],
+  ["one fraction digit", "2026-08-31T01:02:03.0Z", false],
+  ["two fraction digits", "2026-08-31T01:02:03.00Z", false],
+  ["three fraction digits", "2026-08-31T01:02:03.004Z", true],
+  ["four fraction digits", "2026-08-31T01:02:03.0000Z", false],
+  ["five fraction digits", "2026-08-31T01:02:03.00000Z", false],
+] as const;
 
 async function createActualUnversionedFixture(
   mutation: HistoricalCandidateMutation = {},
@@ -209,6 +228,52 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       { constraint_name: "cp_session_membership_fk" },
     ]);
   });
+
+  it("matches the shared Unicode scalar sorter with real C-collated PostgreSQL text", async () => {
+    const values = ["😀", "é", "e\u0301", "ab", "a", "Z", "A"];
+    const expected = ["A", "Z", "a", "ab", "e\u0301", "é", "😀"];
+    await fixture.pool.query("CREATE TEMP TABLE task8_unicode_order(value text NOT NULL)");
+    for (const value of values) {
+      await fixture.pool.query("INSERT INTO task8_unicode_order(value) VALUES($1)", [value]);
+    }
+    const rows = await fixture.pool.query<{ value: string }>(
+      'SELECT value FROM task8_unicode_order ORDER BY value COLLATE "C"',
+    );
+    expect(rows.rows.map((row) => row.value)).toEqual(expected);
+    expect(sortCanonicalUnicodeStrings(values)).toEqual(expected);
+  });
+
+  it.each(timestampParityCases)("reconciles historical Candidate timestamps exactly: %s", async (_label, createdAt, accepted) => {
+    const historical = await createActualUnversionedFixture(accepted
+      ? { prepareCandidate: (candidate) => { candidate.createdAt = createdAt; } }
+      : { mutateCandidate: (candidate) => { candidate["createdAt"] = createdAt; } });
+    try {
+      const migration = runMigrations(historical.fixture.pool, historical.fixture.migrations);
+      if (accepted) {
+        await expect(migration).resolves.toBeUndefined();
+      } else {
+        await expect(migration).rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
+      }
+    } finally {
+      await historical.fixture.close();
+    }
+  }, 30_000);
+
+  it.each(timestampParityCases)("reconciles historical proposal assessment timestamps exactly: %s", async (_label, assessedAt, accepted) => {
+    const historical = await createActualUnversionedFixture({
+      mutateAssessment: (assessment) => ({ ...assessment, assessedAt }),
+    });
+    try {
+      const migration = runMigrations(historical.fixture.pool, historical.fixture.migrations);
+      if (accepted) {
+        await expect(migration).resolves.toBeUndefined();
+      } else {
+        await expect(migration).rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
+      }
+    } finally {
+      await historical.fixture.close();
+    }
+  }, 30_000);
 
   it("fails readiness closed for a partial PublicationCandidate schema", async () => {
     await fixture.migrate();

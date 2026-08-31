@@ -398,6 +398,14 @@ describe("completion governance persistence", () => {
       payloadDigest: `sha256:${"f".repeat(64)}`
     })).rejects.toThrow(/conflicts/u);
     await expect(repo.listVerificationEvidence({ workThreadId: thread.id })).resolves.toHaveLength(1);
+
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      await expect(repo.recordVerificationEvidence({
+        ...evidenceInput,
+        deliveryId: `delivery-malformed-${malformed.charCodeAt(0)}`,
+        evidence: { ...evidenceInput.evidence, id: malformed },
+      })).rejects.toThrow(/well-formed Unicode/u);
+    }
   });
 
   it("records a reconciled evidence batch atomically and idempotently", async () => {

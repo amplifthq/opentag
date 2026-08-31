@@ -24,6 +24,11 @@ export {
   reduceCompletionGateStates,
 };
 
+export const WellFormedNonEmptyStringSchema = z.string().min(1).refine(
+  (value) => WellFormedUnicodeStringSchema.safeParse(value).success,
+  "Value must be a well-formed Unicode string.",
+);
+
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
 export const ContextPointerKindSchema = z.string().min(1).refine((kind) => !kind.includes("."), {
@@ -172,7 +177,7 @@ export const ConnectionRefSchema = z
 
 export const VerificationEvidenceSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     kind: z.string().min(1),
     assurance: z.enum(["verified", "reported", "unverifiable"]),
     subjectRef: z.string().min(1),
@@ -249,7 +254,7 @@ export const NormalizedMaterialActionSchema = z
 
 export const MaterialActionReceiptSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     actionId: z.string().min(1),
     provider: ProviderSchema,
     connectionId: z.string().min(1).max(128).optional(),
@@ -649,8 +654,9 @@ export const CompletionGateKindSchema = z.enum([
 
 export const CompletionEvidenceAssuranceSchema = VerificationEvidenceSchema.shape.assurance.exclude(["unverifiable"]);
 
-const CompletionGateIdSchema = z.string().min(1);
-const CompletionTargetKeySchema = z.string().min(1);
+const WellFormedCompletionStringSchema = WellFormedNonEmptyStringSchema;
+const CompletionGateIdSchema = WellFormedCompletionStringSchema;
+const CompletionTargetKeySchema = WellFormedCompletionStringSchema;
 
 export const CompletionTargetSelectorSchema = z
   .object({
@@ -988,7 +994,7 @@ export const CompletionGateResultSchema = z
 
 export const CompletionWaiverSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     runId: z.string().min(1).optional(),
     contractId: z.string().min(1),
     contractVersion: z.number().int().positive(),
@@ -1205,10 +1211,6 @@ export const CompletionAssessmentSchema = z
 
 export { isCanonicalUtcMillisTimestamp };
 
-const WellFormedNonEmptyStringSchema = z.string().min(1).refine(
-  (value) => WellFormedUnicodeStringSchema.safeParse(value).success,
-  "Value must be a well-formed Unicode string.",
-);
 const WellFormedPublicationCandidateDigestSchema = z.string()
   .regex(/^sha256:[a-f0-9]{64}$/u)
   .refine((value) => WellFormedUnicodeStringSchema.safeParse(value).success);
@@ -1276,9 +1278,10 @@ export const AttemptProposalEvidenceSchema = z.object({
 });
 
 export const AttemptProposalEvidenceArtifactSchema = z.object({
-  id: z.string().min(1), type: z.literal("patch_summary"), kind: z.literal("patch"),
+  id: WellFormedCompletionStringSchema, type: z.literal("patch_summary"), kind: z.literal("patch"),
   title: z.literal("Immutable proposal evidence"),
-  uri: z.string().min(1), summary: z.string().min(1), sourceRunId: z.string().min(1),
+  uri: WellFormedCompletionStringSchema, summary: WellFormedCompletionStringSchema,
+  sourceRunId: WellFormedCompletionStringSchema,
   createdAt: z.string().datetime(),
   metadata: z.object({
     proposalEvidence: AttemptProposalEvidenceSchema,
@@ -1507,7 +1510,7 @@ export const HumanEscalationRequestSchema = z
 
 export const HumanEscalationSchema = z
   .object({
-    id: z.string().min(1),
+    id: WellFormedNonEmptyStringSchema,
     workThreadId: z.string().min(1),
     runId: z.string().min(1).optional(),
     attemptId: z.string().min(1).optional(),
@@ -1961,13 +1964,13 @@ export function runResultArtifactId(runId: string, artifactIndex: number): strin
 }
 
 export const ResultArtifactSchema = z.object({
-  id: z.string().min(1).optional(),
+  id: WellFormedNonEmptyStringSchema.optional(),
   type: RunArtifactTypeSchema.optional(),
   kind: ArtifactKindSchema.optional(),
   title: z.string(),
   uri: z.string(),
   summary: z.string().min(1).optional(),
-  sourceRunId: z.string().min(1).optional(),
+  sourceRunId: WellFormedNonEmptyStringSchema.optional(),
   createdAt: z.string().datetime().optional(),
   relatedIds: z.array(z.string().min(1)).optional(),
   metadata: z.record(z.string(), z.unknown()).optional()
@@ -1998,7 +2001,7 @@ export const OpenTagRunResultSchema = z.object({
 });
 
 export const OpenTagRunSchema = z.object({
-  id: z.string().min(1),
+  id: WellFormedNonEmptyStringSchema,
   eventId: z.string().min(1),
   status: z.enum(["queued", "assigned", "running", "needs_approval", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
   thread: WorkThreadSchema.optional(),

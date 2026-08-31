@@ -149,6 +149,46 @@ function baseInput() {
 }
 
 describe("evaluateCompletion", () => {
+  it.each([
+    ["run result id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.runResults[0] = { ...input.runResults[0]!, runId: malformed };
+    }],
+    ["artifact id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.artifacts[0] = { ...input.artifacts[0]!, id: malformed };
+    }],
+    ["evidence id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.evidence = [evidence({ id: malformed, kind: "source_control.required_checks",
+        predicate: "checks", outcome: "passed" })];
+    }],
+    ["material receipt id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.materialActionReceipts = [{ id: malformed, actionId: "action-1", provider: "github",
+        receiptRef: "receipt:1", outcome: "unknown", observedAt: t2 }];
+    }],
+    ["waiver id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.waivers = [{ id: malformed, contractId: "contract-github-1", contractVersion: 1,
+        cycle: 1, actor: { provider: "github", providerUserId: "owner-1" }, reason: "Bounded waiver.",
+        scope: "selected_gates", policyScope: "work_context_owner_container", gateIds: ["checks"], waivedAt: t2 }];
+    }],
+    ["escalation id", (input: ReturnType<typeof baseInput>, malformed: string) => {
+      input.blockingEscalations = [{ id: malformed, workThreadId: "thread-1", class: "verification",
+        audience: "repo_owner", subjectRef: "github:acme/demo:pull_request:7", state: "open",
+        blocking: true, summary: "Review required.", reason: "Missing evidence.", openedAt: t2 }];
+    }],
+  ] as const)("rejects a malformed sortable %s without comparator throws", (_label, mutate) => {
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      const input = baseInput();
+      mutate(input, malformed);
+      expect(() => evaluateCompletion(input)).toThrow(/well-formed Unicode/u);
+    }
+  });
+
+  it("accepts supplementary scalar values in sortable identifiers", () => {
+    const input = baseInput();
+    input.runResults[0] = { ...input.runResults[0]!, runId: "run-😀" };
+    input.artifacts[0] = { ...input.artifacts[0]!, id: "artifact-😀" };
+    expect(evaluateCompletion(input).triggeredByRunId).toBe("run-😀");
+  });
+
   it("requires immutable verified proposal evidence beyond executor success", () => {
     const base = {
       executorConclusion: "success" as const,

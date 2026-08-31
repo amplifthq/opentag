@@ -190,6 +190,21 @@ async function completeRun(input: {
 }
 
 describe("dispatcher completion governance", () => {
+  it("rejects malformed GitHub delivery identifiers before canonical tie-breaking", async () => {
+    const setup = await startRun({ runId: "run_malformed_delivery", completionPolicies: [strictPolicy] });
+    await completeRun({ setup, runId: "run_malformed_delivery", conclusion: "success" });
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      const response = await setup.app.request(
+        "/v1/completion-evidence/github/batch",
+        jsonRequest({ snapshots: [
+          githubSnapshot({ deliveryId: malformed, pullRequestNumber: 7 }),
+          githubSnapshot({ deliveryId: malformed, pullRequestNumber: 8 }),
+        ] }),
+      );
+      expect(response.status).toBe(400);
+    }
+  });
+
   it("uses SQLite binary run-id authority when creation timestamps tie", () => {
     const createdAt = "2026-07-21T10:00:00.000Z";
 
