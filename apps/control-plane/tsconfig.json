@@ -11,6 +11,7 @@
     { "path": "../../packages/delivery-contract" },
     { "path": "../../packages/delivery-runtime" },
     { "path": "../../packages/github" },
+    { "path": "../../packages/governance" },
     { "path": "../../packages/source-app-runtime" }
     ,{ "path": "../../packages/slack" }
   ]

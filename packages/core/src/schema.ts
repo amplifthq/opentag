@@ -8,6 +8,7 @@ import {
 } from "@opentag/control-protocol";
 import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 import { FrozenRoutingPolicySchema } from "./routing.js";
+import { canonicalJsonStringify } from "./canonical-json.js";
 
 export {
   COMPLETION_REASON_ALLOWED_GATE_STATES,
@@ -1242,6 +1243,68 @@ export const ProposalReadinessAssessmentSchema = z.object({
   }
 });
 
+export const AttemptProposalEvidenceSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: z.literal("attempt_proposal_evidence"),
+  attemptId: z.string().min(1),
+  attemptNumber: z.number().int().positive(),
+  workspaceId: z.string().min(1),
+  workspacePathDigest: PublicationCandidateDigestSchema,
+  baseRevision: PublicationCandidateRevisionSchema,
+  finalRevision: PublicationCandidateRevisionSchema.optional(),
+  finalTree: PublicationCandidateRevisionSchema,
+  diffDigest: PublicationCandidateDigestSchema,
+  baseToFinalBinaryDiff: z.string(),
+  changedFilesDigest: PublicationCandidateDigestSchema,
+  changedFiles: z.array(z.string().min(1)).min(1),
+  verificationEvidenceDigests: z.array(PublicationCandidateDigestSchema).min(1),
+  limitations: z.array(z.string()),
+  evidenceDigest: PublicationCandidateDigestSchema,
+}).strict();
+
+export const AttemptProposalEvidenceArtifactSchema = z.object({
+  id: z.string().min(1), type: z.literal("patch_summary"), kind: z.literal("patch"),
+  title: z.literal("Immutable proposal evidence"),
+  uri: z.string().min(1), summary: z.string().min(1), sourceRunId: z.string().min(1),
+  createdAt: z.string().datetime(),
+  metadata: z.object({
+    proposalEvidence: AttemptProposalEvidenceSchema,
+    evidenceDigest: PublicationCandidateDigestSchema,
+    artifactDigest: PublicationCandidateDigestSchema,
+    readiness: z.literal("not_assessed"),
+  }).strict(),
+}).strict();
+
+async function sha256Utf8(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `sha256:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export async function validateAttemptProposalEvidenceArtifact(value: unknown) {
+  const artifact = AttemptProposalEvidenceArtifactSchema.parse(value);
+  if (artifact.id !== `${artifact.sourceRunId}:proposal-evidence`
+    || artifact.uri !== `opentag://run/${encodeURIComponent(artifact.sourceRunId)}/proposal-evidence`) {
+    throw new Error("proposal_evidence_identity_mismatch");
+  }
+  const evidence = artifact.metadata.proposalEvidence;
+  const { evidenceDigest: _evidenceDigest, ...evidenceInput } = evidence;
+  const artifactInput = { ...artifact, metadata: { ...artifact.metadata } };
+  delete (artifactInput.metadata as Partial<typeof artifact.metadata>).artifactDigest;
+  const [diffDigest, changedFilesDigest, evidenceDigest, artifactDigest] = await Promise.all([
+    sha256Utf8(evidence.baseToFinalBinaryDiff),
+    sha256Utf8(canonicalJsonStringify(evidence.changedFiles)),
+    sha256Utf8(canonicalJsonStringify(evidenceInput)),
+    sha256Utf8(canonicalJsonStringify(artifactInput)),
+  ]);
+  if (evidence.diffDigest !== diffDigest || evidence.changedFilesDigest !== changedFilesDigest
+    || evidence.evidenceDigest !== evidenceDigest
+    || artifact.metadata.evidenceDigest !== evidenceDigest
+    || artifact.metadata.artifactDigest !== artifactDigest) {
+    throw new Error("proposal_evidence_digest_mismatch");
+  }
+  return artifact;
+}
+
 export const ReassessmentObligationSourceKindSchema = z.enum([
   "run_result_recorded",
   "verification_evidence_attached",
@@ -2028,6 +2091,8 @@ export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
 export type PublicationCandidate = z.infer<typeof PublicationCandidateSchema>;
 export type ProposalReadinessAssessment = z.infer<typeof ProposalReadinessAssessmentSchema>;
+export type AttemptProposalEvidence = z.infer<typeof AttemptProposalEvidenceSchema>;
+export type AttemptProposalEvidenceArtifact = z.infer<typeof AttemptProposalEvidenceArtifactSchema>;
 export type ReassessmentObligationSourceKind = z.infer<typeof ReassessmentObligationSourceKindSchema>;
 export type ReassessmentObligationState = z.infer<typeof ReassessmentObligationStateSchema>;
 export type ReassessmentObligationReasonCode = z.infer<typeof ReassessmentObligationReasonCodeSchema>;

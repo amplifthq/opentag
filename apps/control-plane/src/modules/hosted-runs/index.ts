@@ -28,13 +28,15 @@ import {
   type HostedLifecycleRequestV1,
   type HostedSourceContentRedeemRequestV1,
 } from "@opentag/control-protocol";
-import { ProposalReadinessAssessmentSchema, PublicationCandidateSchema,
+import { PublicationCandidateSchema, validateAttemptProposalEvidenceArtifact,
   type PublicationCandidate } from "@opentag/core";
+import { evaluateProposalReadiness } from "@opentag/governance";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
-import { createPublicationCandidateRepository } from "../publication-candidates/index.js";
+import { persistPublicationCandidateInTransaction,
+  readPublicationCandidateInTransaction } from "../publication-candidates/index.js";
 import { classifyAttemptMaterialActionTruth } from "./material-actions.js";
 
 type Clock = { now(): Date };
@@ -161,17 +163,12 @@ export type HostedRunCoordinator = {
     attempt: { attemptId: string; attemptNumber: number; fencingToken: string;
       fencingTokenDigest: string };
     candidateId: string;
-    proposalEvidence: {
-      sourceRunId: string; attemptId: string; attemptNumber: number;
-      workspaceId: string; workspacePathDigest: string; baseRevision: string;
-      finalTree: string; diffDigest: string; changedFiles: string[];
-      verificationEvidenceDigests: string[]; evidenceDigest: string;
-    };
-    assessment: unknown;
+    proposalArtifact: unknown;
   }): Promise<
     | { kind: "created" | "replayed"; candidate: PublicationCandidate; view: HostedRunProjection }
     | { kind: "stale_fence" }
-    | { kind: "conflict"; reason: "candidate_mismatch" | "invalid_assessment" | "invalid_request" }
+    | { kind: "conflict"; reason: "candidate_mismatch" | "invalid_evidence"
+        | "invalid_request" | "completion_contract_mismatch" | "material_outcome_unknown" }
   >;
   reconcileExpiredAttempts(
     organizationId: string | null,
@@ -273,7 +270,6 @@ export function createHostedRunCoordinator(input: {
     contentIds: string[]; purpose: "source_context"; expiresAt: Date;
   }) => Promise<HostedClaimV1["sourceContentGrant"]>;
 }): HostedRunCoordinator {
-  const publicationCandidates = createPublicationCandidateRepository({ pool: input.pool });
   async function hydrateStoredClaim(client: PoolClient, value: unknown): Promise<HostedClaimV1 | null> {
     const stored = StoredHostedClaimV1Schema.parse(value);
     const fencingToken = input.tokenFactory({
@@ -1268,11 +1264,6 @@ export function createHostedRunCoordinator(input: {
         !== await computeHostedClaimFencingTokenDigestV1(command.attempt.fencingToken)) {
         return { kind: "conflict", reason: "invalid_request" } as const;
       }
-      const assessmentResult = ProposalReadinessAssessmentSchema.safeParse(command.assessment);
-      if (!assessmentResult.success) {
-        return { kind: "conflict", reason: "invalid_assessment" } as const;
-      }
-      const assessment = assessmentResult.data;
       return withPostgresTransaction(input.pool, async (client) => {
         const runResult = await client.query<HostedRunRow>(
           `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2 FOR UPDATE`,
@@ -1292,6 +1283,11 @@ export function createHostedRunCoordinator(input: {
         );
         const attempt = attemptResult.rows[0];
         const admission = HostedAdmissionEnvelopeV1Schema.parse(run.hosted_admission);
+        if (admission.publicationPolicy.mode !== run.publication_mode
+          || admission.completionContract.mode !== run.completion_mode
+          || admission.publicationPolicy.digest !== run.publication_policy_digest) {
+          return { kind: "conflict", reason: "completion_contract_mismatch" } as const;
+        }
         const attestation = attempt?.workspace_attestation
           ? AttemptWorkspaceAttestationV1Schema.parse(attempt.workspace_attestation) : null;
         if (!attempt || attempt.attempt_id !== command.attempt.attemptId
@@ -1300,8 +1296,14 @@ export function createHostedRunCoordinator(input: {
           || attempt.credential_id !== command.principal.credentialId
           || attempt.fencing_token_digest !== command.attempt.fencingTokenDigest
           || attempt.state !== "succeeded") return { kind: "stale_fence" } as const;
-        const evidence = command.proposalEvidence;
-        if (!attestation || evidence.sourceRunId !== command.runId
+        let artifact;
+        try {
+          artifact = await validateAttemptProposalEvidenceArtifact(command.proposalArtifact);
+        } catch {
+          return { kind: "conflict", reason: "invalid_evidence" } as const;
+        }
+        const evidence = artifact.metadata.proposalEvidence;
+        if (!attestation || artifact.sourceRunId !== command.runId
           || evidence.attemptId !== attempt.attempt_id
           || evidence.attemptNumber !== attempt.attempt_number
           || evidence.workspaceId !== attestation.workspaceId
@@ -1310,6 +1312,30 @@ export function createHostedRunCoordinator(input: {
           || evidence.finalTree !== attestation.currentTree) {
           return { kind: "conflict", reason: "candidate_mismatch" } as const;
         }
+        const executorResult = await client.query<{ receipt: unknown }>(
+          `SELECT receipt FROM cp_hosted_lifecycle_receipt
+           WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+             AND action = 'executor_result' ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+          [command.principal.organizationId, command.runId, attempt.attempt_id],
+        );
+        const executorReceipt = executorResult.rows[0]
+          ? HostedLifecycleReceiptEnvelopeV1Schema.parse(executorResult.rows[0].receipt) : null;
+        if (!executorReceipt || executorReceipt.payload.operation !== "executor_result"
+          || executorReceipt.payload.conclusion !== "success"
+          || !executorReceipt.payload.artifactDigests.includes(artifact.metadata.artifactDigest)
+          || canonicalJsonStringify(executorReceipt.payload.evidenceDigests)
+            !== canonicalJsonStringify(evidence.verificationEvidenceDigests)) {
+          return { kind: "conflict", reason: "invalid_evidence" } as const;
+        }
+        const materialTruth = await classifyAttemptMaterialActionTruth(client, {
+          organizationId: command.principal.organizationId, runId: command.runId,
+          attemptId: attempt.attempt_id,
+        });
+        const existing = await readPublicationCandidateInTransaction(client, {
+          organizationId: command.principal.organizationId, runId: command.runId,
+          attemptId: attempt.attempt_id,
+        });
+        const evaluatedAt = existing?.assessment.assessedAt ?? input.clock.now().toISOString();
         const candidateResult = PublicationCandidateSchema.safeParse({
           candidateId: command.candidateId, runId: command.runId,
           attemptId: attempt.attempt_id,
@@ -1320,20 +1346,43 @@ export function createHostedRunCoordinator(input: {
           changedFiles: evidence.changedFiles,
           verificationEvidenceIds: evidence.verificationEvidenceDigests,
           publicationPolicyDigest: run.publication_policy_digest,
-          createdAt: assessment.assessedAt,
+          createdAt: existing?.candidate.createdAt ?? input.clock.now().toISOString(),
         });
-        if (!candidateResult.success || assessment.candidateId !== command.candidateId) {
+        if (!candidateResult.success) {
           return { kind: "conflict", reason: "candidate_mismatch" } as const;
         }
         const candidate = candidateResult.data;
-        const expectedState = run.publication_mode === "proposal_only"
-          ? "proposal_ready" : "publication_pending";
-        if (assessment.state !== expectedState
-          || assessment.accepted !== (run.publication_mode === "proposal_only")) {
-          return { kind: "conflict", reason: "invalid_assessment" } as const;
+        const assessment = evaluateProposalReadiness({
+          executorConclusion: executorReceipt.payload.conclusion,
+          publicationMode: run.publication_mode,
+          completionMode: run.completion_mode,
+          publicationPolicyDigest: run.publication_policy_digest,
+          candidate,
+          unresolvedMaterialOutcomes: [
+            ...(materialTruth.kind === "proven_not_started"
+              ? [] : [materialTruth.reconciliationIdentity]),
+            ...(run.outcome_state === "outcome_unknown" ? [`${run.run_id}:outcome_unknown`] : []),
+          ],
+          assessedAt: evaluatedAt,
+        });
+        if (assessment.reasonCodes.includes("completion_contract_mismatch")) {
+          return { kind: "conflict", reason: "completion_contract_mismatch" } as const;
         }
-        const persisted = await publicationCandidates.putInTransaction(client, {
-          organizationId: command.principal.organizationId, candidate,
+        if (assessment.reasonCodes.includes("material_action_unknown")) {
+          return { kind: "conflict", reason: "material_outcome_unknown" } as const;
+        }
+        if (existing) {
+          if (canonicalJsonStringify(existing.candidate) !== canonicalJsonStringify(candidate)
+            || canonicalJsonStringify(existing.assessment) !== canonicalJsonStringify(assessment)) {
+            return { kind: "conflict", reason: "candidate_mismatch" } as const;
+          }
+          return { kind: "replayed", candidate: existing.candidate,
+            view: projectRun({ ...run, publication_mode: run.publication_mode,
+              has_candidate: true }) } as const;
+        }
+        const persisted = await persistPublicationCandidateInTransaction(client, {
+          organizationId: command.principal.organizationId,
+          attemptNumber: attempt.attempt_number, candidate, assessment,
         });
         if (persisted.kind === "conflict") return persisted;
         const nextState: CanonicalRunStatus = assessment.accepted ? "succeeded" : "running";

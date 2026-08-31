@@ -32,29 +32,41 @@ export async function classifyAttemptMaterialActionTruth(
     values?: readonly unknown[]): Promise<{ rows: Row[] }> },
   input: { organizationId: string; runId: string; attemptId: string },
 ): Promise<AttemptMaterialActionTruth> {
-  const attempt = await client.query<{ material_start_state: string;
+  const attempt = await client.query<{ material_start_state: string; state: string;
     fencing_token_digest: string }>(
-    `SELECT material_start_state, fencing_token_digest FROM cp_hosted_attempt
+    `SELECT material_start_state, state, fencing_token_digest FROM cp_hosted_attempt
      WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3`,
     [input.organizationId, input.runId, input.attemptId],
   );
   const attemptRow = attempt.rows[0];
-  if (!attemptRow || attemptRow.material_start_state === "open") {
+  if (!attemptRow) {
     return { kind: "started_or_ambiguous",
       reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
   }
-  const result = await client.query<{ receipt_id: string }>(
-    `SELECT receipt_id FROM cp_material_action_receipt
-     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
-     ORDER BY created_at, receipt_id LIMIT 1`,
+  const result = await client.query<{ receipt_id: string | null; has_evidence: boolean }>(
+    `SELECT (SELECT receipt_id FROM cp_material_action_receipt
+       WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+       ORDER BY created_at, receipt_id LIMIT 1) AS receipt_id,
+      (EXISTS (SELECT 1 FROM cp_material_action_receipt
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3)
+       OR EXISTS (SELECT 1 FROM cp_material_action_begin_intent
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3)) AS has_evidence`,
     [input.organizationId, input.runId, input.attemptId],
   );
-  if (attemptRow.material_start_state === "started_or_ambiguous" || result.rows[0]) {
+  if (attemptRow.material_start_state === "started_or_ambiguous"
+    || result.rows[0]?.has_evidence) {
     return { kind: "started_or_ambiguous",
-      reconciliationIdentity: result.rows[0]
+      reconciliationIdentity: result.rows[0]?.receipt_id
         ? `${input.organizationId}:${input.runId}:${result.rows[0].receipt_id}`
         : `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown` };
   }
+  if (attemptRow.material_start_state === "open" && attemptRow.state === "succeeded") {
+    return { kind: "proven_not_started" };
+  }
+  if (attemptRow.material_start_state === "open") return {
+    kind: "started_or_ambiguous",
+    reconciliationIdentity: `${input.organizationId}:${input.runId}:${input.attemptId}:material_start_unknown`,
+  };
   const proof = await client.query<{ proof_id: string }>(
     `SELECT proof_id FROM cp_material_action_non_start_proof
      WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3

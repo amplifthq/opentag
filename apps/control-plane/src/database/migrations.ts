@@ -5,35 +5,6 @@ import type { ReadinessResult } from "../application.js";
 
 const MIGRATION_LOCK_KEY = 7_118_403_982;
 const MIGRATION_NAME = /^[0-9]{4}_[a-z0-9_]+\.sql$/u;
-const PUBLICATION_CANDIDATE_MIGRATION_SQL = `
-CREATE TABLE cp_publication_candidate (
-  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
-  candidate_id text NOT NULL,
-  run_id text NOT NULL,
-  attempt_id text NOT NULL,
-  project_target_id text NOT NULL,
-  frozen_base_revision text NOT NULL CHECK (frozen_base_revision ~ '^[a-f0-9]{40,64}$'),
-  workspace_tree_digest text NOT NULL CHECK (workspace_tree_digest ~ '^[a-f0-9]{40,64}$'),
-  patch_digest text NOT NULL CHECK (patch_digest ~ '^sha256:[a-f0-9]{64}$'),
-  changed_files text[] NOT NULL CHECK (cardinality(changed_files) > 0),
-  verification_evidence_ids text[] NOT NULL CHECK (cardinality(verification_evidence_ids) > 0),
-  publication_policy_digest text NOT NULL CHECK (publication_policy_digest ~ '^sha256:[a-f0-9]{64}$'),
-  candidate jsonb NOT NULL CHECK (
-    jsonb_typeof(candidate) = 'object'
-    AND NOT candidate ?| ARRAY['baseToFinalBinaryDiff','limitations','workspacePath','logs','output','secret']
-  ),
-  created_at timestamptz NOT NULL,
-  PRIMARY KEY (organization_id, candidate_id),
-  UNIQUE (organization_id, run_id, attempt_id)
-);
-CREATE INDEX cp_publication_candidate_run_idx
-  ON cp_publication_candidate(organization_id, run_id);
-CREATE FUNCTION cp_reject_publication_candidate_mutation() RETURNS trigger
-LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publication_candidate_immutable'; END $$;
-CREATE TRIGGER cp_publication_candidate_immutable
-BEFORE UPDATE OR DELETE ON cp_publication_candidate
-FOR EACH ROW EXECUTE FUNCTION cp_reject_publication_candidate_mutation();
-`;
 
 export type SqlMigration = {
   name: string;
@@ -131,19 +102,6 @@ export async function runMigrations(
         throw error;
       }
     }
-    await client.query(PUBLICATION_CANDIDATE_MIGRATION_SQL.replace(
-      "CREATE TABLE cp_publication_candidate",
-      "CREATE TABLE IF NOT EXISTS cp_publication_candidate",
-    ).replace(
-      "CREATE INDEX cp_publication_candidate_run_idx",
-      "CREATE INDEX IF NOT EXISTS cp_publication_candidate_run_idx",
-    ).replace(
-      "CREATE FUNCTION cp_reject_publication_candidate_mutation()",
-      "CREATE OR REPLACE FUNCTION cp_reject_publication_candidate_mutation()",
-    ).replace(
-      "CREATE TRIGGER cp_publication_candidate_immutable\nBEFORE",
-      "DROP TRIGGER IF EXISTS cp_publication_candidate_immutable ON cp_publication_candidate;\nCREATE TRIGGER cp_publication_candidate_immutable\nBEFORE",
-    ));
   } finally {
     try {
       if (locked) {
@@ -164,10 +122,36 @@ export async function checkMigrationReadiness(
       "SELECT name, checksum FROM control_plane_migrations ORDER BY name",
     );
     const applied = new Map(result.rows.map((row) => [row.name, row.checksum]));
-    const schema = await pool.query<{ present: boolean }>(
-      "SELECT to_regclass('cp_publication_candidate') IS NOT NULL AS present",
+    const schema = await pool.query<{ schema_ready: boolean }>(
+      `SELECT (
+        to_regclass('cp_publication_candidate') IS NOT NULL
+        AND (SELECT count(*) = 15 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'cp_publication_candidate'
+          AND column_name = ANY(ARRAY['organization_id','candidate_id','run_id','attempt_id',
+            'attempt_number','project_target_id','frozen_base_revision','workspace_tree_digest',
+            'patch_digest','changed_files','verification_evidence_ids',
+            'publication_policy_digest','candidate','completion_assessment','created_at']))
+        AND (SELECT count(*) = 10 FROM pg_constraint
+          WHERE conrelid = 'cp_publication_candidate'::regclass
+          AND conname = ANY(ARRAY['cp_publication_candidate_pkey',
+            'cp_publication_candidate_organization_run_attempt_key',
+            'cp_publication_candidate_attempt_fk','cp_publication_candidate_changed_files_check',
+            'cp_publication_candidate_verification_check',
+            'cp_publication_candidate_base_revision_check','cp_publication_candidate_tree_digest_check',
+            'cp_publication_candidate_patch_digest_check','cp_publication_candidate_policy_digest_check',
+            'cp_publication_candidate_content_free_check']))
+        AND to_regclass('cp_publication_candidate_run_idx') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM pg_proc
+          WHERE proname = 'cp_reject_publication_candidate_mutation'
+            AND pronamespace = current_schema()::regnamespace
+            AND prosrc LIKE '%publication_candidate_immutable%')
+        AND EXISTS (SELECT 1 FROM pg_trigger
+          WHERE tgrelid = 'cp_publication_candidate'::regclass
+            AND tgname = 'cp_publication_candidate_immutable'
+            AND tgenabled = 'O' AND NOT tgisinternal)
+      ) AS schema_ready`,
     );
-    const current = schema.rows[0]?.present === true
+    const current = schema.rows[0]?.schema_ready === true
       && applied.size === migrations.length
       && migrations.every(
         (migration) => applied.get(migration.name) === migration.checksum,

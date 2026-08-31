@@ -50,6 +50,9 @@ importers:
       '@opentag/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@opentag/governance':
+        specifier: workspace:*
+        version: link:../../packages/governance
       '@opentag/slack':
         specifier: workspace:*
         version: link:../../packages/slack

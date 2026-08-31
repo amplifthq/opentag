@@ -24,6 +24,7 @@
     "@opentag/delivery-contract": "workspace:*",
     "@opentag/delivery-runtime": "workspace:*",
     "@opentag/github": "workspace:*",
+    "@opentag/governance": "workspace:*",
     "@opentag/source-app-runtime": "workspace:*",
     "@opentag/slack": "workspace:*",
     "@tanstack/react-query": "^5.101.4",

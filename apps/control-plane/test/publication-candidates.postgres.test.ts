@@ -33,37 +33,29 @@ describe.skipIf(!TEST_DATABASE_URL)("PublicationCandidate PostgreSQL repository"
     createdAt: "2026-08-15T07:00:00.000Z",
   } as const;
 
-  it("persists one immutable content-free candidate and replays only its exact identity", async () => {
+  it("exposes no out-of-transaction Candidate write and rejects orphan persistence", async () => {
     const repository = createPublicationCandidateRepository({ pool: fixture.pool });
-    await expect(repository.put({ organizationId: "org_candidate", candidate }))
-      .resolves.toEqual({ kind: "created", candidate });
-    await expect(repository.put({ organizationId: "org_candidate", candidate }))
-      .resolves.toEqual({ kind: "replayed", candidate });
-    await expect(repository.put({
-      organizationId: "org_candidate",
-      candidate: { ...candidate, patchDigest: sha256("different-patch") },
-    })).resolves.toEqual({ kind: "conflict", reason: "candidate_mismatch" });
-
-    const row = await fixture.pool.query<{ candidate: unknown }>(
-      "SELECT candidate FROM cp_publication_candidate WHERE organization_id = $1 AND candidate_id = $2",
-      ["org_candidate", candidate.candidateId],
-    );
-    expect(row.rows[0]?.candidate).toEqual(candidate);
-    expect(JSON.stringify(row.rows[0])).not.toMatch(/binary-patch|xoxb-|\/Users\//u);
+    expect("put" in repository).toBe(false);
+    await expect(fixture.pool.query(
+      `INSERT INTO cp_publication_candidate(
+         organization_id, candidate_id, run_id, attempt_id, attempt_number,
+         project_target_id, frozen_base_revision, workspace_tree_digest,
+         patch_digest, changed_files, verification_evidence_ids,
+         publication_policy_digest, candidate, completion_assessment, created_at)
+       VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14)`,
+      ["org_candidate", candidate.candidateId, candidate.runId, candidate.attemptId,
+        candidate.projectTargetId, candidate.frozenBaseRevision,
+        candidate.workspaceTreeDigest, candidate.patchDigest, candidate.changedFiles,
+        candidate.verificationEvidenceIds, candidate.publicationPolicyDigest,
+        JSON.stringify(candidate), JSON.stringify({ state: "proposal_ready", accepted: true,
+          candidateId: candidate.candidateId, reasonCodes: ["proposal_ready"],
+          assessedAt: candidate.createdAt }), candidate.createdAt],
+    )).rejects.toThrow(/foreign key|cp_publication_candidate_attempt_fk/iu);
   });
 
-  it("rejects wrong run, attempt, base, policy, unsorted files, and missing verification", async () => {
+  it("keeps the public repository read-only", async () => {
     const repository = createPublicationCandidateRepository({ pool: fixture.pool });
-    for (const malformed of [
-      { ...candidate, candidateId: "candidate_wrong_run", runId: "" },
-      { ...candidate, candidateId: "candidate_wrong_attempt", attemptId: "" },
-      { ...candidate, candidateId: "candidate_wrong_base", frozenBaseRevision: "mutable" },
-      { ...candidate, candidateId: "candidate_wrong_policy", publicationPolicyDigest: "policy" },
-      { ...candidate, candidateId: "candidate_unsorted", changedFiles: ["z.ts", "a.ts"] },
-      { ...candidate, candidateId: "candidate_unverified", verificationEvidenceIds: [] },
-    ]) {
-      await expect(repository.put({ organizationId: "org_candidate", candidate: malformed }))
-        .rejects.toThrow(/PublicationCandidate/u);
-    }
+    await expect(repository.get({ organizationId: "org_candidate", candidateId: "missing" }))
+      .resolves.toBeNull();
   });
 });

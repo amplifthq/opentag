@@ -4,7 +4,8 @@ import type {
   HumanEscalation,
   OpenTagRunResult
 } from "@opentag/core";
-import { buildProposalReadyPresentation, renderOpenTagPresentationPlainText } from "@opentag/core";
+import { buildPublicationCandidatePresentation, presentationDeliveryTier,
+  renderOpenTagPresentationPlainText } from "@opentag/core";
 import { describe, expect, it } from "vitest";
 import {
   completionInputDigest,
@@ -218,7 +219,8 @@ describe("evaluateCompletion", () => {
   });
 
   it("renders candidate, verification, limitations, and exact next action without publication claims", () => {
-    const presentation = buildProposalReadyPresentation({
+    const presentation = buildPublicationCandidatePresentation({
+      state: "proposal_ready",
       candidate: proposalCandidate,
       summary: "A verified local proposal is ready for inspection.",
       verification: ["governance tests passed"],
@@ -232,6 +234,21 @@ describe("evaluateCompletion", () => {
     expect(rendered).toContain("No provider publication was attempted.");
     expect(rendered).toContain("Next action: Review the local candidate.");
     expect(rendered).toContain("No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.");
+    expect(presentation).toMatchObject({ kind: "publication_candidate", state: "proposal_ready" });
+    expect(presentationDeliveryTier(presentation)).toBe("terminal");
+
+    const pending = buildPublicationCandidatePresentation({
+      state: "publication_pending",
+      candidate: proposalCandidate,
+      summary: "A verified local proposal awaits exact publication approval.",
+      verification: ["governance tests passed"],
+      limitations: ["No provider publication was attempted."],
+      nextAction: "Approve the exact Candidate for publication.",
+    });
+    expect(pending).toMatchObject({ kind: "publication_candidate", state: "publication_pending" });
+    expect(presentationDeliveryTier(pending)).toBe("attention_required");
+    expect(renderOpenTagPresentationPlainText(pending)).toContain(
+      "Exact approval and publication evidence are still required.");
   });
 
   it("fails closed on policy mismatch and rejects malformed mutable candidate identities", () => {

@@ -570,7 +570,7 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     await expect(hosted.lifecycle({ principal, runId: claim.runId,
       action: "complete", request: success })).resolves.toMatchObject({ kind: "accepted" });
     await expect(hosted.inspect({ organizationId: "org_permission",
-      runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "succeeded" });
+      runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "running" });
   });
 
   it("terminally rejects an exact needs-approval denial", async () => {

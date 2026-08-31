@@ -31,6 +31,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0010_provider_delivery.sql",
       "0011_slack_route_identity.sql",
       "0012_attempt_workspace_evidence.sql",
+      "0013_publication_candidates.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -96,6 +97,28 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     expect(sessionTenantForeignKey.rows).toEqual([
       { constraint_name: "cp_session_membership_fk" },
     ]);
+  });
+
+  it("fails readiness closed for a partial PublicationCandidate schema", async () => {
+    await fixture.migrate();
+    await fixture.pool.query("DROP TRIGGER cp_publication_candidate_immutable ON cp_publication_candidate");
+    await expect(checkMigrationReadiness(fixture.pool, fixture.migrations))
+      .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+  });
+
+  it("upgrades a fully applied 0012 schema through checked-in 0013", async () => {
+    const upgrade = await createIsolatedPostgres();
+    try {
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -1));
+      expect((await upgrade.pool.query(
+        "SELECT to_regclass('cp_publication_candidate') AS relation",
+      )).rows).toEqual([{ relation: null }]);
+      await runMigrations(upgrade.pool, upgrade.migrations);
+      await expect(checkMigrationReadiness(upgrade.pool, upgrade.migrations))
+        .resolves.toEqual({ ready: true });
+    } finally {
+      await upgrade.close();
+    }
   });
 
   it("carries legacy hosted rows into the canonical immutable lifecycle", async () => {
