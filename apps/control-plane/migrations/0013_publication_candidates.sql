@@ -45,6 +45,117 @@ EXCEPTION WHEN others THEN
   RETURN false;
 END $$;
 
+CREATE OR REPLACE FUNCTION cp_is_strict_historical_identity_array(
+  value jsonb, require_digest boolean
+) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE
+  item jsonb;
+  item_text text;
+  previous text;
+BEGIN
+  IF jsonb_typeof(value) IS DISTINCT FROM 'array' OR jsonb_array_length(value) = 0 THEN
+    RETURN false;
+  END IF;
+  FOR item IN SELECT element FROM jsonb_array_elements(value) AS elements(element) LOOP
+    IF jsonb_typeof(item) IS DISTINCT FROM 'string' THEN
+      RETURN false;
+    END IF;
+    item_text := item #>> '{}';
+    IF item_text = ''
+      OR (require_digest AND item_text !~ '^sha256:[a-f0-9]{64}$')
+      OR (previous IS NOT NULL AND previous COLLATE "C" >= item_text COLLATE "C") THEN
+      RETURN false;
+    END IF;
+    previous := item_text;
+  END LOOP;
+  RETURN true;
+EXCEPTION WHEN others THEN
+  RETURN false;
+END $$;
+
+CREATE OR REPLACE FUNCTION cp_is_strict_historical_candidate(
+  value jsonb, durable_candidate_id text, durable_run_id text, durable_attempt_id text,
+  durable_project_target_id text, durable_frozen_base_revision text,
+  durable_workspace_tree_digest text, durable_patch_digest text,
+  durable_changed_files text[], durable_verification_evidence_ids text[],
+  durable_publication_policy_digest text, durable_created_at timestamptz
+) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE
+  exact_keys boolean;
+BEGIN
+  IF jsonb_typeof(value) IS DISTINCT FROM 'object' THEN
+    RETURN false;
+  END IF;
+  SELECT count(*) = 11
+      AND bool_and(key = ANY(ARRAY['candidateId','runId','attemptId','projectTargetId',
+        'frozenBaseRevision','workspaceTreeDigest','patchDigest','changedFiles',
+        'verificationEvidenceIds','publicationPolicyDigest','createdAt']))
+    INTO exact_keys
+    FROM jsonb_object_keys(value) AS keys(key);
+  IF exact_keys IS DISTINCT FROM true
+    OR jsonb_typeof(value->'candidateId') IS DISTINCT FROM 'string'
+    OR value->>'candidateId' = '' OR value->>'candidateId' <> durable_candidate_id
+    OR jsonb_typeof(value->'runId') IS DISTINCT FROM 'string'
+    OR value->>'runId' = '' OR value->>'runId' <> durable_run_id
+    OR jsonb_typeof(value->'attemptId') IS DISTINCT FROM 'string'
+    OR value->>'attemptId' = '' OR value->>'attemptId' <> durable_attempt_id
+    OR jsonb_typeof(value->'projectTargetId') IS DISTINCT FROM 'string'
+    OR value->>'projectTargetId' = '' OR value->>'projectTargetId' <> durable_project_target_id
+    OR jsonb_typeof(value->'frozenBaseRevision') IS DISTINCT FROM 'string'
+    OR value->>'frozenBaseRevision' !~ '^[a-f0-9]{40,64}$'
+    OR value->>'frozenBaseRevision' <> durable_frozen_base_revision
+    OR jsonb_typeof(value->'workspaceTreeDigest') IS DISTINCT FROM 'string'
+    OR value->>'workspaceTreeDigest' !~ '^[a-f0-9]{40,64}$'
+    OR value->>'workspaceTreeDigest' <> durable_workspace_tree_digest
+    OR jsonb_typeof(value->'patchDigest') IS DISTINCT FROM 'string'
+    OR value->>'patchDigest' !~ '^sha256:[a-f0-9]{64}$'
+    OR value->>'patchDigest' <> durable_patch_digest
+    OR NOT cp_is_strict_historical_identity_array(value->'changedFiles', false)
+    OR value->'changedFiles' <> to_jsonb(durable_changed_files)
+    OR NOT cp_is_strict_historical_identity_array(value->'verificationEvidenceIds', true)
+    OR value->'verificationEvidenceIds' <> to_jsonb(durable_verification_evidence_ids)
+    OR jsonb_typeof(value->'publicationPolicyDigest') IS DISTINCT FROM 'string'
+    OR value->>'publicationPolicyDigest' !~ '^sha256:[a-f0-9]{64}$'
+    OR value->>'publicationPolicyDigest' <> durable_publication_policy_digest
+    OR jsonb_typeof(value->'createdAt') IS DISTINCT FROM 'string'
+    OR NOT cp_is_canonical_utc_millis(value->>'createdAt')
+    OR value->>'createdAt' <> to_char(durable_created_at AT TIME ZONE 'UTC',
+      'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') THEN
+    RETURN false;
+  END IF;
+  RETURN true;
+EXCEPTION WHEN others THEN
+  RETURN false;
+END $$;
+
+CREATE OR REPLACE FUNCTION cp_is_strict_historical_proposal_assessment(
+  value jsonb, durable_candidate_id text
+) RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE
+  exact_keys boolean;
+BEGIN
+  IF jsonb_typeof(value) IS DISTINCT FROM 'object' THEN
+    RETURN false;
+  END IF;
+  SELECT count(*) = 5
+      AND bool_and(key = ANY(ARRAY['state','accepted','candidateId','reasonCodes','assessedAt']))
+    INTO exact_keys
+    FROM jsonb_object_keys(value) AS keys(key);
+  RETURN exact_keys IS TRUE
+    AND jsonb_typeof(value->'state') = 'string'
+    AND value->>'state' = 'proposal_ready'
+    AND jsonb_typeof(value->'accepted') = 'boolean'
+    AND value->'accepted' = 'true'::jsonb
+    AND jsonb_typeof(value->'candidateId') = 'string'
+    AND value->>'candidateId' = durable_candidate_id
+    AND jsonb_typeof(value->'reasonCodes') = 'array'
+    AND value->'reasonCodes' = '["proposal_ready"]'::jsonb
+    AND jsonb_typeof(value->'assessedAt') = 'string'
+    AND cp_is_canonical_utc_millis(value->>'assessedAt');
+EXCEPTION WHEN others THEN
+  RETURN false;
+END $$;
+
 UPDATE cp_publication_candidate candidate
 SET completion_assessment = run.terminal_receipt->'assessment'
 FROM cp_hosted_run run
@@ -58,41 +169,18 @@ WHERE candidate.organization_id = run.organization_id
   AND run.terminal_kind = 'succeeded'
   AND run.terminal_receipt->>'kind' = 'proposal_ready'
   AND run.terminal_receipt->>'candidateId' = candidate.candidate_id
-  AND run.terminal_receipt->'assessment'->>'candidateId' = candidate.candidate_id
-  AND run.terminal_receipt->'assessment'->>'state' = 'proposal_ready'
-  AND jsonb_typeof(run.terminal_receipt->'assessment') = 'object'
-  AND (SELECT count(*) FROM jsonb_object_keys(run.terminal_receipt->'assessment')) = 5
-  AND run.terminal_receipt->'assessment' ?&
-    ARRAY['state','accepted','candidateId','reasonCodes','assessedAt']
-  AND jsonb_typeof(run.terminal_receipt->'assessment'->'state') = 'string'
-  AND jsonb_typeof(run.terminal_receipt->'assessment'->'accepted') = 'boolean'
-  AND run.terminal_receipt->'assessment'->'accepted' = 'true'::jsonb
-  AND jsonb_typeof(run.terminal_receipt->'assessment'->'candidateId') = 'string'
-  AND jsonb_typeof(run.terminal_receipt->'assessment'->'reasonCodes') = 'array'
-  AND run.terminal_receipt->'assessment'->'reasonCodes' = '["proposal_ready"]'::jsonb
-  AND jsonb_typeof(run.terminal_receipt->'assessment'->'assessedAt') = 'string'
-  AND cp_is_canonical_utc_millis(
-    run.terminal_receipt->'assessment'->>'assessedAt')
-  AND jsonb_typeof(candidate.candidate) = 'object'
-  AND (SELECT count(*) FROM jsonb_object_keys(candidate.candidate)) = 11
-  AND candidate.candidate ?& ARRAY['candidateId','runId','attemptId','projectTargetId',
-    'frozenBaseRevision','workspaceTreeDigest','patchDigest','changedFiles',
-    'verificationEvidenceIds','publicationPolicyDigest','createdAt']
-  AND candidate.candidate->>'candidateId' = candidate.candidate_id
-  AND candidate.candidate->>'runId' = candidate.run_id
-  AND candidate.candidate->>'attemptId' = candidate.attempt_id
-  AND candidate.candidate->>'projectTargetId' = candidate.project_target_id
-  AND candidate.candidate->>'frozenBaseRevision' = candidate.frozen_base_revision
-  AND candidate.candidate->>'workspaceTreeDigest' = candidate.workspace_tree_digest
-  AND candidate.candidate->>'patchDigest' = candidate.patch_digest
-  AND candidate.candidate->'changedFiles' = to_jsonb(candidate.changed_files)
-  AND candidate.candidate->'verificationEvidenceIds' =
-    to_jsonb(candidate.verification_evidence_ids)
-  AND candidate.candidate->>'publicationPolicyDigest' = candidate.publication_policy_digest
-  AND jsonb_typeof(candidate.candidate->'createdAt') = 'string'
-  AND candidate.candidate->>'createdAt' = to_char(candidate.created_at AT TIME ZONE 'UTC',
-    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+  AND cp_is_strict_historical_proposal_assessment(
+    run.terminal_receipt->'assessment', candidate.candidate_id)
+  AND cp_is_strict_historical_candidate(candidate.candidate, candidate.candidate_id,
+    candidate.run_id, candidate.attempt_id, candidate.project_target_id,
+    candidate.frozen_base_revision, candidate.workspace_tree_digest, candidate.patch_digest,
+    candidate.changed_files, candidate.verification_evidence_ids,
+    candidate.publication_policy_digest, candidate.created_at);
 
+DROP FUNCTION cp_is_strict_historical_proposal_assessment(jsonb, text);
+DROP FUNCTION cp_is_strict_historical_candidate(jsonb, text, text, text, text, text, text,
+  text, text[], text[], text, timestamptz);
+DROP FUNCTION cp_is_strict_historical_identity_array(jsonb, boolean);
 DROP FUNCTION cp_is_canonical_utc_millis(text);
 
 DO $$ BEGIN

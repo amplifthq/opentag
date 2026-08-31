@@ -9,8 +9,26 @@ import {
   TEST_DATABASE_URL,
 } from "./postgres-fixture.js";
 
+type HistoricalCandidateMutation = {
+  prepareCandidate?: (candidate: {
+    candidateId: string;
+    runId: string;
+    attemptId: string;
+    projectTargetId: string;
+    frozenBaseRevision: string;
+    workspaceTreeDigest: string;
+    patchDigest: string;
+    changedFiles: string[];
+    verificationEvidenceIds: string[];
+    publicationPolicyDigest: string;
+    createdAt: string;
+  }) => void;
+  mutateCandidate?: (candidate: Record<string, unknown>) => void;
+  mutateAssessment?: (assessment: Record<string, unknown>) => unknown;
+};
+
 async function createActualUnversionedFixture(
-  mutateAssessment: (assessment: Record<string, unknown>) => void,
+  mutation: HistoricalCandidateMutation = {},
 ) {
   const fixture = await createIsolatedPostgres();
   await runMigrations(fixture.pool, fixture.migrations.slice(0, -1));
@@ -43,15 +61,6 @@ async function createActualUnversionedFixture(
   const candidateId = "candidate_malformed";
   const assessment: Record<string, unknown> = { state: "proposal_ready", accepted: true,
     candidateId, reasonCodes: ["proposal_ready"], assessedAt: now.toISOString() };
-  mutateAssessment(assessment);
-  await fixture.pool.query(
-    "UPDATE cp_hosted_attempt SET state = 'succeeded' WHERE organization_id = $1 AND run_id = $2",
-    ["org_malformed", "run_malformed"]);
-  await fixture.pool.query(
-    `UPDATE cp_hosted_run SET state = 'succeeded', terminal_kind = 'succeeded',
-       terminal_receipt = $3::jsonb WHERE organization_id = $1 AND run_id = $2`,
-    ["org_malformed", "run_malformed", JSON.stringify({ kind: "proposal_ready",
-      candidateId, assessment })]);
   await fixture.pool.query(`
     CREATE TABLE cp_publication_candidate (
       organization_id text NOT NULL REFERENCES cp_organization(organization_id),
@@ -77,6 +86,22 @@ async function createActualUnversionedFixture(
     verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
     publicationPolicyDigest: admission.admission.publicationPolicy.digest,
     createdAt: now.toISOString() };
+  mutation.prepareCandidate?.(candidate);
+  const durableCandidate = { ...candidate, changedFiles: [...candidate.changedFiles],
+    verificationEvidenceIds: [...candidate.verificationEvidenceIds] };
+  const candidateJson = JSON.parse(JSON.stringify(candidate)) as Record<string, unknown>;
+  mutation.mutateCandidate?.(candidateJson);
+  const assessmentJson = mutation.mutateAssessment
+    ? mutation.mutateAssessment(assessment)
+    : assessment;
+  await fixture.pool.query(
+    "UPDATE cp_hosted_attempt SET state = 'succeeded' WHERE organization_id = $1 AND run_id = $2",
+    ["org_malformed", "run_malformed"]);
+  await fixture.pool.query(
+    `UPDATE cp_hosted_run SET state = 'succeeded', terminal_kind = 'succeeded',
+       terminal_receipt = $3::jsonb WHERE organization_id = $1 AND run_id = $2`,
+    ["org_malformed", "run_malformed", JSON.stringify({ kind: "proposal_ready",
+      candidateId, assessment: assessmentJson })]);
   await fixture.pool.query(
     `INSERT INTO cp_publication_candidate(organization_id, candidate_id, run_id,
        attempt_id, project_target_id, frozen_base_revision, workspace_tree_digest,
@@ -84,10 +109,10 @@ async function createActualUnversionedFixture(
        publication_policy_digest, candidate, created_at)
      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
     ["org_malformed", candidateId, "run_malformed", claimed.claim.attempt.id,
-      candidate.projectTargetId, candidate.frozenBaseRevision,
-      candidate.workspaceTreeDigest, candidate.patchDigest, candidate.changedFiles,
-      candidate.verificationEvidenceIds, candidate.publicationPolicyDigest,
-      JSON.stringify(candidate), now]);
+      durableCandidate.projectTargetId, durableCandidate.frozenBaseRevision,
+      durableCandidate.workspaceTreeDigest, durableCandidate.patchDigest,
+      durableCandidate.changedFiles, durableCandidate.verificationEvidenceIds,
+      durableCandidate.publicationPolicyDigest, JSON.stringify(candidateJson), now]);
   return { fixture, candidateId };
 }
 
@@ -347,29 +372,81 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   });
 
   it.each([
-    ["missing assessedAt", (assessment: Record<string, unknown>) => {
+    ["missing assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
       delete assessment["assessedAt"];
-    }],
-    ["invalid assessedAt", (assessment: Record<string, unknown>) => {
+    }}],
+    ["invalid assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["assessedAt"] = "not-a-timestamp";
-    }],
-    ["extra key", (assessment: Record<string, unknown>) => {
+    }}],
+    ["extra key", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["unexpected"] = true;
-    }],
-    ["wrong accepted type", (assessment: Record<string, unknown>) => {
+    }}],
+    ["wrong accepted type", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["accepted"] = "true";
-    }],
-    ["duplicate reason codes", (assessment: Record<string, unknown>) => {
+    }}],
+    ["duplicate reason codes", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["reasonCodes"] = ["proposal_ready", "proposal_ready"];
-    }],
-    ["noncanonical reason codes", (assessment: Record<string, unknown>) => {
+    }}],
+    ["noncanonical reason codes", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["reasonCodes"] = ["proposal_ready", "material_action_unknown"];
-    }],
-    ["Candidate mismatch", (assessment: Record<string, unknown>) => {
+    }}],
+    ["Candidate mismatch", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["candidateId"] = "candidate_other";
+    }}],
+    ["scalar", { mutateAssessment: () => "proposal_ready" }],
+    ["array", { mutateAssessment: () => ["proposal_ready"] }],
+    ["JSON null", { mutateAssessment: () => null }],
+    ["wrong keys", { mutateAssessment: () => ({ unexpected: true }) }],
+  ] as const)("refuses malformed historical assessment: %s", async (_label, mutation) => {
+    const malformed = await createActualUnversionedFixture(mutation);
+    try {
+      await expect(runMigrations(malformed.fixture.pool, malformed.fixture.migrations))
+        .rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
+    } finally {
+      await malformed.fixture.close();
+    }
+  });
+
+  it.each([
+    ["numeric scalar identity", {
+      prepareCandidate: (candidate) => { candidate.projectTargetId = "123"; },
+      mutateCandidate: (candidate: Record<string, unknown>) => { candidate["projectTargetId"] = 123; },
     }],
-  ] as const)("refuses malformed historical assessment: %s", async (_label, mutate) => {
-    const malformed = await createActualUnversionedFixture(mutate);
+    ["boolean scalar identity", {
+      prepareCandidate: (candidate) => { candidate.projectTargetId = "true"; },
+      mutateCandidate: (candidate: Record<string, unknown>) => { candidate["projectTargetId"] = true; },
+    }],
+    ["empty changed-file string", {
+      prepareCandidate: (candidate) => { candidate.changedFiles = [""]; },
+    }],
+    ["invalid verification evidence digest", {
+      prepareCandidate: (candidate) => { candidate.verificationEvidenceIds = ["not-a-digest"]; },
+    }],
+    ["unsorted changed files", {
+      prepareCandidate: (candidate) => { candidate.changedFiles = ["z.ts", "a.ts"]; },
+    }],
+    ["duplicate changed files", {
+      prepareCandidate: (candidate) => { candidate.changedFiles = ["a.ts", "a.ts"]; },
+    }],
+    ["unsorted verification evidence", {
+      prepareCandidate: (candidate) => { candidate.verificationEvidenceIds = [
+        `sha256:${"b".repeat(64)}`, `sha256:${"a".repeat(64)}`]; },
+    }],
+    ["duplicate verification evidence", {
+      prepareCandidate: (candidate) => { candidate.verificationEvidenceIds = [
+        `sha256:${"a".repeat(64)}`, `sha256:${"a".repeat(64)}`]; },
+    }],
+    ["extra Candidate key", {
+      mutateCandidate: (candidate: Record<string, unknown>) => { candidate["unexpected"] = true; },
+    }],
+    ["missing Candidate key", {
+      mutateCandidate: (candidate: Record<string, unknown>) => { delete candidate["createdAt"]; },
+    }],
+    ["wrong Candidate value type", {
+      mutateCandidate: (candidate: Record<string, unknown>) => { candidate["createdAt"] = null; },
+    }],
+  ] as const)("refuses malformed historical Candidate: %s", async (_label, mutation) => {
+    const malformed = await createActualUnversionedFixture(mutation);
     try {
       await expect(runMigrations(malformed.fixture.pool, malformed.fixture.migrations))
         .rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
@@ -383,6 +460,18 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_attempt_fk
       FOREIGN KEY (organization_id, run_id, attempt_number)
       REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number)`],
+    ["organization FK alternate target", `ALTER TABLE cp_organization
+      ADD COLUMN alternate_organization_id text;
+      UPDATE cp_organization SET alternate_organization_id = organization_id || '_alternate';
+      ALTER TABLE cp_organization ALTER COLUMN alternate_organization_id SET NOT NULL;
+      ALTER TABLE cp_organization
+      ADD CONSTRAINT cp_organization_alternate_organization_key UNIQUE (alternate_organization_id);
+      ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_organization_id_fkey;
+      ALTER TABLE cp_publication_candidate
+      ADD CONSTRAINT cp_publication_candidate_organization_id_fkey
+      FOREIGN KEY (organization_id)
+      REFERENCES cp_organization(alternate_organization_id)`],
     ["check definition", `ALTER TABLE cp_publication_candidate DROP CONSTRAINT cp_publication_candidate_patch_digest_check;
       ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_patch_digest_check CHECK (patch_digest <> '')`],
     ["column nullability", "ALTER TABLE cp_publication_candidate ALTER COLUMN completion_assessment DROP NOT NULL"],

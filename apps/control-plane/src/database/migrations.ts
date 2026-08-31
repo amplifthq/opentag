@@ -220,6 +220,11 @@ export async function checkMigrationReadiness(
               WITH ORDINALITY key(attnum, ordinal)
               JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
                 AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id']
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.confkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.confrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
               = ARRAY['organization_id'])
         AND NOT EXISTS (SELECT 1 FROM expected_checks expected
           LEFT JOIN pg_constraint constraint_row
