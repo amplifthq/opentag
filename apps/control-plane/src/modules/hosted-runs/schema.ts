@@ -42,6 +42,7 @@ export const hostedRuns = pgTable(
     terminalReason: text("terminal_reason"),
     state: text("state").notNull(),
     currentAttemptNumber: integer("current_attempt_number").notNull().default(0),
+    projectionRevision: integer("projection_revision").notNull().default(1),
     terminalKind: text("terminal_kind"),
     terminalReceipt: jsonb("terminal_receipt"),
     hostedAdmission: jsonb("hosted_admission").notNull(),

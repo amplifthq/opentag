@@ -18,6 +18,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   runtimeOwnerId: text("runtime_owner_id").notNull(), runtimeGeneration: integer("runtime_generation").notNull(),
   schemaGeneration: integer("schema_generation").notNull(), authoritySnapshotDigest: text("authority_snapshot_digest").notNull(),
   statusMessageId: text("status_message_id"), runId: text("run_id"),
+  projectionRevision: integer("projection_revision"),
   leaseOwner: text("lease_owner"), leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   leaseFence: text("lease_fence"), leaseFenceDigest: text("lease_fence_digest"), installationBeginMarkerId: text("installation_begin_marker_id"),
   installationBeginMarkerDigest: text("installation_begin_marker_digest"), scopeBeginMarkerId: text("scope_begin_marker_id"),

@@ -99,7 +99,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
   }
 
   function productionComponents(input: { commandAuthority?: any; publicationAuthority?: any;
-    tokenFactory?: () => string } = {}) {
+    tokenFactory?: () => string; testHooks?: any } = {}) {
     const material = new Map([
       ["secret://slack/signing", "secret"], ["secret://slack/bot", "bot-token"]
     ]);
@@ -121,6 +121,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         return value;
       } }, ...(input.commandAuthority ? { commandAuthority: input.commandAuthority } : {}),
       ...(input.publicationAuthority ? { publicationAuthority: input.publicationAuthority } : {}),
+      ...(input.testHooks ? { testHooks: input.testHooks } : {}),
       ...(input.tokenFactory ? { tokenFactory: input.tokenFactory } : {}),
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
@@ -499,7 +500,15 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     const projectedControls = await ingress.issueProjectionControls({
       organizationId: "org_a", runId: "run_1", generation: 1 });
     expect(projectedControls.map((control) => control.kind)).toEqual(expect.arrayContaining([
-      "status", "cancel", "publication_approve", "publication_reject"]));
+      "status", "cancel", "publication_approve"]));
+    expect(projectedControls.map((control) => control.kind)).not.toContain("publication_reject");
+    const familyStatus = projectedControls.find((control) => control.kind === "status")!;
+    const familyCancel = projectedControls.find((control) => control.kind === "cancel")!;
+    await expect(ingress.receiveInteractivity("route_1",
+      action(familyCancel.actionId, "cancel", "U_REQUESTER"))).resolves.toMatchObject({ status: 200 });
+    await expect(ingress.receiveInteractivity("route_1",
+      action(familyStatus.actionId, "status", "U_MEMBER")))
+      .resolves.toMatchObject({ status: 403, body: { error: "slack_action_not_authorized" } });
     const staleControls = [
       [await issue("stale_status", ["status"], "status"), "status", "U_MEMBER"],
       [await issue("stale_cancel", ["cancel"], "cancel"), "cancel", "U_REQUESTER"],
@@ -520,6 +529,55 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       await expect(ingress.receiveInteractivity("route_1", action(token, decision, actorId)))
         .resolves.toMatchObject({ status: 403, body: { error: "slack_action_authority_stale" } });
     }
+    let crash = true; let crashToken = 0;
+    const cancelCalls: string[] = [];
+    const crashRuntime = productionComponents({ commandAuthority: {
+      ...authority, async cancel(command: any) { cancelCalls.push(command.commandId); return completed; } },
+      tokenFactory: () => `opaque_crash_token_${++crashToken}_abcdefghijklmnopqrstuvwxyz`,
+      testHooks: { async afterServiceBeforeFinalize() { if (crash) { crash = false;
+        throw new Error("crash_after_service"); } } } });
+    const issueCrash = (actionId: string, decision: "status" | "cancel") =>
+      crashRuntime.ingress.issueAction({ organizationId: "org_a", actionId,
+        installationId: "install_1", bindingId: "binding_1", teamId: "T1", appId: "A1",
+        channelId: "C1", threadRootMessageId: "1700000000.000100", runId: "run_1",
+        pendingRequestId: "permission_1", actionKind: decision, actionDescriptor: { kind: decision },
+        approvalEpoch: "2", frozenCeiling, policyDigest, runnerId: "runner_1",
+        attemptId: "attempt_2", attemptNumber: 2, attemptEpoch: 2,
+        projectionGeneration: 2, authorityEpoch: 2, authorityFamilyId: "family_crash",
+        fencingTokenDigest: digest("fence_2"), permissionRequestDigest,
+        pendingActionId: "pending_action_1", allowedDecisions: [decision],
+        memberUserIds: ["U_MEMBER"], requesterUserId: "U_REQUESTER",
+        operatorUserIds: ["U_OPERATOR"], approverUserId: "U_APPROVER",
+        adminUserIds: ["U_ADMIN"], expiresAt: new Date(now.getTime()+60_000) });
+    const crashStatus = await issueCrash("crash_status", "status");
+    const crashCancel = await issueCrash("crash_cancel", "cancel");
+    await expect(crashRuntime.ingress.receiveInteractivity("route_1",
+      action(crashCancel, "cancel", "U_REQUESTER"))).resolves.toMatchObject({ status: 503 });
+    await expect(crashRuntime.ingress.receiveInteractivity("route_1",
+      action(crashCancel, "cancel", "U_REQUESTER"))).resolves.toMatchObject({ status: 200 });
+    await expect(crashRuntime.ingress.receiveInteractivity("route_1",
+      action(crashStatus, "status", "U_MEMBER"))).resolves.toMatchObject({ status: 403 });
+    expect(cancelCalls).toEqual(["crash_cancel", "crash_cancel"]);
+    let poolToken = 0;
+    const poolRuntime = productionComponents({ commandAuthority: { ...authority,
+      async status() { await fixture.pool.query("SELECT 1"); return completed; } },
+      tokenFactory: () => `opaque_pool_token_${++poolToken}_abcdefghijklmnopqrstuvwxyz` });
+    const poolActions = await Promise.all(Array.from({ length: 8 }, async (_, index) =>
+      poolRuntime.ingress.issueAction({ organizationId: "org_a", actionId: `pool_status_${index}`,
+        installationId: "install_1", bindingId: "binding_1", teamId: "T1", appId: "A1",
+        channelId: "C1", threadRootMessageId: "1700000000.000100", runId: "run_1",
+        pendingRequestId: "permission_1", actionKind: "status", actionDescriptor: { kind: "status" },
+        approvalEpoch: "2", frozenCeiling, policyDigest, runnerId: "runner_1",
+        attemptId: "attempt_2", attemptNumber: 2, attemptEpoch: 2, projectionGeneration: 2,
+        authorityEpoch: 2, authorityFamilyId: `pool_family_${index}`,
+        fencingTokenDigest: digest("fence_2"), permissionRequestDigest,
+        pendingActionId: "pending_action_1", allowedDecisions: ["status"],
+        memberUserIds: ["U_MEMBER"], requesterUserId: "U_REQUESTER",
+        operatorUserIds: ["U_OPERATOR"], approverUserId: "U_APPROVER",
+        adminUserIds: ["U_ADMIN"], expiresAt: new Date(now.getTime()+60_000) })));
+    const poolResults = await Promise.all(poolActions.map((token) =>
+      poolRuntime.ingress.receiveInteractivity("route_1", action(token, "status", "U_MEMBER"))));
+    expect(poolResults.map((result) => result.status)).toEqual(Array(8).fill(200));
     expect(decisions).toEqual(["allow_once", "allow_run"]);
     expect(envelopes).toEqual(expect.arrayContaining([
       expect.objectContaining({ selectedDecision: "allow_once", allowedDecisions: ["allow_once"] }),

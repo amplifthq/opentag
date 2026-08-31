@@ -533,10 +533,18 @@ export async function checkSlackIngressSchemaReadiness(
         AND attname='projection_generation' AND attnotnull AND NOT attisdropped)
       AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
         AND attname='publication_approval' AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
+        AND attname='authority_family_id' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
+        AND attname='authority_epoch' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
+        AND attname='claim_state' AND attnotnull AND NOT attisdropped)
       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_projection_generation_check' AND convalidated)
       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_publication_shape_check' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated)
       AS present`);
     return result.rows[0]?.present
       ? { ready: true }

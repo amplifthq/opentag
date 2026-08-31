@@ -14,10 +14,10 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
   controls?: { issueProjectionControls(input: { organizationId: string; runId: string;
     generation: number }): Promise<any[]> } }) {
   const service = { async projectRun(command: { organizationId: string; runId: string;
-    includeControls?: boolean }) {
+    projectionRevision?: number; includeControls?: boolean }) {
     const run = await input.hosted.inspect(command); if (!run) return { kind: "missing" as const };
-    const current = await input.pool.query<{ current_attempt_number: number }>(
-      "SELECT current_attempt_number FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2",
+    const current = await input.pool.query<{ current_attempt_number: number; projection_revision: string }>(
+      "SELECT current_attempt_number,projection_revision::text FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2",
       [command.organizationId, command.runId]);
     const baseline = await input.pool.query<{ intent: unknown; payload: any; state: string;
       error_code: string | null; deadline_at: Date }>(`SELECT intent,payload,state,error_code,deadline_at
@@ -25,7 +25,11 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
         AND provider_id='slack' AND state <> 'superseded' ORDER BY created_at DESC,intent_id DESC LIMIT 1`,
       [command.organizationId, command.runId]);
     const row = baseline.rows[0]; const generation = current.rows[0]?.current_attempt_number;
+    const projectionRevision = Number(current.rows[0]?.projection_revision ?? 0);
     if (!row || !generation) return { kind: "not_projectable" as const };
+    if (command.projectionRevision !== undefined && command.projectionRevision !== projectionRevision) {
+      return { kind: "superseded" as const, projectionRevision };
+    }
     const state = run.status;
     if (!(["waiting_for_runner", "assigned", "running", "waiting_for_approval",
       "publication_pending", "proposal_ready", "ready_for_review", "failed", "cancelled",
@@ -45,15 +49,29 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const text = renderSlackTeamRelayProjection(presentation);
     const blocks = createSlackTeamRelayProjectionBlocks(presentation);
     const base = DeliveryIntentV2Schema.parse(row.intent);
-    const identity = { runId: command.runId, generation, state, deliveryState,
+    const identity = { runId: command.runId, generation, projectionRevision, state, deliveryState,
       errorCode: row.error_code, presentation };
     const suffix = hash(identity).slice(7, 31);
+    const anchor = await input.pool.query<{ external_resource_id: string; external_resource_digest: string }>(
+      `SELECT DISTINCT external_resource_id,external_resource_digest FROM cp_provider_delivery_intent
+       WHERE organization_id=$1 AND run_id=$2 AND status_message_id=$3 AND state='accepted'
+         AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL LIMIT 2`,
+      [command.organizationId, command.runId,
+        "statusMessageId" in base ? base.statusMessageId ?? null : null]);
+    if (anchor.rows.length > 1) return { kind: "anchor_ambiguous" as const };
+    const acceptedAnchor = anchor.rows[0];
     const intent = DeliveryIntentV2Schema.parse({ ...base,
       sideEffectIntentId: `intent_projection_${suffix}`,
       idempotencyKey: `delivery_projection_${suffix}`,
-      operation: "create", presentationDigest: hash({ text, blocks }),
+      operation: acceptedAnchor ? "update" : "create", projectionRevision,
+      presentationDigest: hash({ text, blocks }),
       createdAt: input.clock.now().toISOString() });
-    const providerRequest = { ...(row.payload?.providerRequest ?? {}),
+    const priorRequest = row.payload?.providerRequest ?? {};
+    const priorOperation = priorRequest.operation ?? {};
+    const providerRequest = { ...priorRequest,
+      operation: acceptedAnchor ? { kind: "update_message",
+        channelId: priorOperation.channelId, messageTs: acceptedAnchor.external_resource_id }
+        : priorOperation,
       presentation: { kind: "message", text, textFormat: "mrkdwn", blocks } };
     const terminal = ["proposal_ready", "ready_for_review", "failed", "cancelled",
       "interrupted", "timed_out"].includes(state);

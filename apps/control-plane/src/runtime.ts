@@ -217,7 +217,6 @@ export function createControlPlaneRuntime(input: {
         jobs,
       })
     : null;
-  let teamRelayProjection: ReturnType<typeof createTeamRelayProjectionService> | null = null;
   const sourceResolutionPort = input.sourceResolutionPort ?? {
     async resolve(command) {
       const context = z.object({
@@ -272,8 +271,6 @@ export function createControlPlaneRuntime(input: {
          WHERE idempotency_key = $1 AND request_digest = $3 AND run_id = $4`,
         [command.idempotencyKey, JSON.stringify(resolution), requestDigest, context.runId],
       );
-      await teamRelayProjection?.projectRun({ organizationId: context.hostedAdmission.organizationId,
-        runId: context.runId });
       return resolution;
     },
   } satisfies SourceResolutionPort;
@@ -333,7 +330,7 @@ export function createControlPlaneRuntime(input: {
         ...deliveryRuntimeOwner } }) };
     return { intent, persistedPayload };
   } });
-  teamRelayProjection = createTeamRelayProjectionService({ pool: postgres.pool,
+  const teamRelayProjection = createTeamRelayProjectionService({ pool: postgres.pool,
     hosted, producer: providerDeliveryProducer, clock,
     ...(slack ? { controls: slack } : {}) });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
@@ -341,7 +338,7 @@ export function createControlPlaneRuntime(input: {
       const preload = await slack?.preloadSourceApps();
       return { registered: sourceApps.deliveryAuthorities().length,
         healthy: sourceApps.deliveryAuthorities(), failures: preload?.failures ?? [] };
-    }, clock, onDeliveryResult: (intentId) => teamRelayProjection!.projectDeliveryIntent(intentId) });
+    }, clock });
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
       const queued = await hosted.expireQueued(job.organizationId);
@@ -351,6 +348,11 @@ export function createControlPlaneRuntime(input: {
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
     "provider-delivery": async () => providerDeliveryWorker.processNext(),
+    "team-relay.project": async (job: { payload: unknown }) => {
+      const payload = z.object({ organizationId: z.string().min(1), runId: z.string().min(1),
+        projectionRevision: z.number().int().positive() }).strict().parse(job.payload);
+      return teamRelayProjection.projectRun(payload);
+    },
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };
   const application = createControlPlaneApplication({
@@ -438,7 +440,6 @@ export function createControlPlaneRuntime(input: {
       materials,
       publisher,
       permissions,
-      projections: teamRelayProjection,
       sourceThreadReads: { async authorize(command) {
         const result = await postgres.pool.query(`SELECT 1 FROM cp_hosted_run run
           JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id

@@ -11,6 +11,7 @@ type RelayOwner = Pick<ExpectedDeliveryOwner, "runtimeOwnerId" | "runtimeGenerat
 type Row = { intent_id: string; journal_intent_digest: string; intent: unknown; payload: unknown;
   organization_id: string;
   payload_digest: string; presentation_phase: string; current_truth_key: string;
+  projection_revision: number | null;
   state: string; revision: number; sequence: number; provider_id: string; provider_instance_id: string;
   provider_binding_digest: string; provider_config_generation: number;
   provider_config_generation_digest: string; runtime_owner_id: string; runtime_generation: number;
@@ -45,8 +46,10 @@ function payloadEnvelope(value: unknown, intent: DeliveryIntentV2, owner: RelayO
 }
 const payloadDigest = (payload: DeliveryPayloadEnvelope) => sha256(domainSeparatedCanonicalBytes(
   "opentag.delivery.provider-payload.v1", payload));
-const currentTruthKey = (payload: DeliveryPayloadEnvelope) => sha256(domainSeparatedCanonicalBytes(
-  "opentag.delivery.current-truth.v1", payload.currentTruth));
+const currentTruthKey = (payload: DeliveryPayloadEnvelope) => {
+  const { projectionRevision: _revision, ...identity } = payload.currentTruth;
+  return sha256(domainSeparatedCanonicalBytes("opentag.delivery.current-truth.v1", identity));
+};
 
 function claim(row: Row, leaseFence: string): DeliveryClaim {
   return { organizationId: row.organization_id, attemptId: row.intent_id, intentId: row.intent_id, sequence: row.sequence,
@@ -107,14 +110,28 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       const providerPayloadDigest = payloadDigest(payload); const truthKey = currentTruthKey(payload);
       const deadline = new Date(payload.frozenDeadline);
       await withTx(async (client) => {
+        const projectionRevision = "projectionRevision" in intent ? intent.projectionRevision ?? null : null;
+        if (projectionRevision !== null) {
+          await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [truthKey]);
+          const same = await client.query("SELECT 1 FROM cp_provider_delivery_intent WHERE intent_id=$1",
+            [intent.sideEffectIntentId]);
+          if (!same.rows[0]) {
+            const latest = await client.query<{ projection_revision: string | null }>(
+              `SELECT max(projection_revision)::text projection_revision
+               FROM cp_provider_delivery_intent WHERE current_truth_key=$1`, [truthKey]);
+            const latestRevision = Number(latest.rows[0]?.projection_revision ?? 0);
+            if (latestRevision >= projectionRevision) throw new Error("delivery_projection_revision_stale");
+          }
+        }
         const inserted = await client.query(`INSERT INTO cp_provider_delivery_intent(
             intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
             presentation_phase,current_truth_key,state,revision,sequence,
             scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
             provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
-            schema_generation,authority_snapshot_digest,status_message_id,run_id,deadline_at,created_at,updated_at)
+            schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
+            deadline_at,created_at,updated_at)
             VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,'pending',1,$10,$11,$12,$13,$14,$15,
-              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$26)
+              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
             ON CONFLICT DO NOTHING RETURNING intent_id`,
           [intent.sideEffectIntentId, intent.organizationId, digest, JSON.stringify(intent), JSON.stringify(payload),
             providerPayloadDigest, `postgres-jsonb:${intent.sideEffectIntentId}:${providerPayloadDigest}`,
@@ -125,7 +142,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             options.owner.runtimeGeneration, options.owner.schemaGeneration, intent.authoritySnapshotDigest,
             "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
             intent.provenance.kind === "business" ? intent.provenance.runId : null,
-            deadline, new Date(intent.createdAt)]);
+            projectionRevision, deadline, new Date(intent.createdAt)]);
         const existing = await client.query<Row>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE",
           [intent.sideEffectIntentId]);

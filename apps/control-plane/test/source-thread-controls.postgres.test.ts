@@ -75,7 +75,7 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
     const now = new Date("2026-08-30T00:00:00.000Z");
     const token = "source_thread_read_token".padEnd(48, "_");
     const identity = createIdentityModule({ pool: fixture.pool, clock: { now: () => now },
-      idFactory: (kind) => `${kind}_source_read`, opaqueBearerFactory: () => token,
+      idFactory: (kind) => kind === "api_key" ? "U_MEMBER" : `${kind}_source_read`, opaqueBearerFactory: () => token,
       sessionDurationMs: 60_000,
       throttleKeyFactory: createLoginThrottleKeyFactory("r".repeat(32)) });
     await identity.provisionOwner({ organizationId: "org_read", organizationName: "Read",
@@ -142,7 +142,7 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
         approver: { authenticate: async () => { throw new Error("mutation_authenticator_called"); } } },
     });
     const response = await application.fetch(new Request(
-      "http://control.test/v1/source-thread-controls/runs/run_read/status?organizationId=org_read&installationId=install_read&actorId=U_MEMBER",
+      "http://control.test/v1/source-thread-controls/runs/run_read/status?organizationId=org_read&installationId=install_read",
       { headers: { authorization: `Bearer ${apiKey.token}` } }));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: "waiting_for_runner",
@@ -152,6 +152,17 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
       FROM cp_hosted_run run JOIN cp_hosted_attempt attempt USING(organization_id,run_id)
       WHERE run.organization_id='org_read' AND run.run_id='run_read'`)).rows;
     expect(after).toEqual(before);
+
+    const borrowedToken = "source_thread_owner_token".padEnd(48, "_");
+    const otherIdentity = createIdentityModule({ pool: fixture.pool, clock: { now: () => now },
+      idFactory: (kind) => kind === "api_key" ? "U_OWNER" : `${kind}_owner_read`,
+      opaqueBearerFactory: () => borrowedToken, sessionDurationMs: 60_000,
+      throttleKeyFactory: createLoginThrottleKeyFactory("o".repeat(32)) });
+    const otherKey = await otherIdentity.createApiKey(owner, { label: "owner status", scopes: ["run:read"] });
+    const borrowed = await application.fetch(new Request(
+      "http://control.test/v1/source-thread-controls/runs/run_read/status?organizationId=org_read&installationId=install_read&actorId=U_MEMBER",
+      { headers: { authorization: `Bearer ${otherKey.token}` } }));
+    expect(borrowed.status).toBe(404);
   });
 
   it("reports provider delivery failure as a sibling projection", async () => {

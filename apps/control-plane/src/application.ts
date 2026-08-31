@@ -86,7 +86,6 @@ export type ControlPlaneDependencies = {
     };
     runners: RunnerDirectory;
     hosted: HostedRunCoordinator;
-    projections?: { projectRun(input: { organizationId: string; runId: string }): Promise<unknown> };
     sourceThreadReads?: { authorize(input: { organizationId: string; runId: string;
       installationId: string; actorId: string }): Promise<boolean> };
     materials?: MaterialActionCoordinator;
@@ -312,13 +311,13 @@ export function createControlPlaneApplication(
       }
       const organizationId = context.req.query("organizationId");
       const installationId = context.req.query("installationId");
-      const actorId = context.req.query("actorId");
       if (!organizationId || organizationId !== authentication.principal.organizationId) {
         return context.json(controlError("missing_or_concealed"), 404);
       }
-      if (!installationId || !actorId || !control.sourceThreadReads
+      if (!installationId || !control.sourceThreadReads
         || !await control.sourceThreadReads.authorize({ organizationId,
-          runId: context.req.param("runId"), installationId, actorId })) {
+          runId: context.req.param("runId"), installationId,
+          actorId: authentication.principal.actorId })) {
         return context.json(controlError("missing_or_concealed"), 404);
       }
       const projection = await control.hosted.inspect({ organizationId,
@@ -914,10 +913,7 @@ export function createControlPlaneApplication(
         }
         const outcome = await publisher.approve({ ...request,
           approverId: authentication.principal.actorId });
-        if (outcome.kind === "approved" || outcome.kind === "replayed") {
-          await control.projections?.projectRun({ organizationId: request.organizationId, runId: request.runId });
-          return context.json(outcome, 200);
-        }
+        if (outcome.kind === "approved" || outcome.kind === "replayed") return context.json(outcome, 200);
         return context.json(controlError("idempotency_conflict", request.requestId), 409);
       };
       app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", publicationApprovalHandler);
@@ -1071,13 +1067,9 @@ export function createControlPlaneApplication(
             request,
           });
           if (outcome.kind === "accepted") {
-            await control.projections?.projectRun({ organizationId: principal.organizationId,
-              runId: context.req.param("runId") });
             return context.json(outcome.receipt, 201);
           }
           if (outcome.kind === "replayed") {
-            await control.projections?.projectRun({ organizationId: principal.organizationId,
-              runId: context.req.param("runId") });
             return context.json(outcome.receipt, 200);
           }
           return context.json(

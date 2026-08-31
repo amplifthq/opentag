@@ -43,7 +43,8 @@ export type DeliveryExternalResourceLookupDescriptor = {
 export type DeliveryCurrentTruthDescriptor = Omit<DeliveryExternalResourceLookupDescriptor,
   "operation" | "statusMessageId" | "authorityLineageDigest" | "repositoryIdentityDigest"> & {
     operation: "create" | "update" | "control_reply"; statusMessageId: string | null;
-    authorityLineageDigest: string | null; repositoryIdentityDigest: string | null };
+    authorityLineageDigest: string | null; repositoryIdentityDigest: string | null;
+    projectionRevision: number | null };
 export type DeliveryPayloadEnvelope<Request = unknown> = { envelopeVersion: 1;
   providerRequest: Request; phase: "received" | "running" | "terminal";
   frozenDeadline: string; currentTruth: DeliveryCurrentTruthDescriptor };
@@ -75,7 +76,8 @@ export function deliveryCurrentTruthDescriptor(input: {
       ? intent.provenance.repositoryIdentityDigest : null,
     connectionId: binding.connectionId ?? null, connectionIdDigest: binding.connectionIdDigest ?? null,
     runtimeOwnerId: owner.runtimeOwnerId, runtimeGeneration: owner.runtimeGeneration,
-    schemaGeneration: owner.schemaGeneration };
+    schemaGeneration: owner.schemaGeneration,
+    projectionRevision: "projectionRevision" in intent ? intent.projectionRevision ?? null : null };
 }
 
 export function deliveryExternalResourceLookupDescriptor(input: {

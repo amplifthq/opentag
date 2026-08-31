@@ -188,6 +188,7 @@ const BusinessDeliveryIntentV2Schema = z
     deliveryKind: z.enum(['message', 'reaction']),
     presentationDigest: digest,
     statusMessageId: safeId.optional(),
+    projectionRevision: positiveInteger.optional(),
   })
   .strict()
   .superRefine(assertBusinessEnvelope);

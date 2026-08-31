@@ -47,6 +47,8 @@ export const slackActionAuthorities = pgTable("cp_slack_action_authority", {
   policyDigest: text("policy_digest").notNull(), runnerId: text("runner_id").notNull(),
   attemptId: text("attempt_id").notNull(), attemptNumber: integer("attempt_number").notNull(),
   projectionGeneration: integer("projection_generation").notNull(),
+  authorityFamilyId: text("authority_family_id").notNull(), authorityEpoch: integer("authority_epoch").notNull(),
+  claimState: text("claim_state").notNull(), claimedAt: timestamp("claimed_at", { withTimezone: true }),
   attemptEpoch: integer("attempt_epoch").notNull(), fencingTokenDigest: text("fencing_token_digest").notNull(),
   permissionRequestDigest: text("permission_request_digest").notNull(),
   pendingActionId: text("pending_action_id").notNull(),
@@ -75,8 +77,16 @@ export const slackActionAuthorities = pgTable("cp_slack_action_authority", {
   check("cp_slack_action_authority_expiry_check", sql`${table.expiresAt} > ${table.createdAt}`),
   check("cp_slack_action_authority_attempt_number_check", sql`${table.attemptNumber} > 0`),
   check("cp_slack_action_authority_projection_generation_check", sql`${table.projectionGeneration} > 0`),
+  check("cp_slack_action_authority_epoch_check", sql`${table.authorityEpoch} > 0`),
+  check("cp_slack_action_authority_claim_state_check", sql`${table.claimState} IN ('available','claimed','consumed')`),
+  check("cp_slack_action_authority_claim_shape_check", sql`
+    (${table.claimState}='available' AND ${table.claimedAt} IS NULL AND ${table.consumedAt} IS NULL)
+    OR (${table.claimState}='claimed' AND ${table.claimedAt} IS NOT NULL AND ${table.consumedAt} IS NULL)
+    OR (${table.claimState}='consumed' AND ${table.consumedAt} IS NOT NULL)`),
   check("cp_slack_action_authority_publication_shape_check",
     sql`(${table.actionKind} = 'publication') = (${table.publicationApproval} IS NOT NULL)`),
   index("cp_slack_action_authority_lookup_idx").on(table.organizationId,
     table.installationId, table.channelId, table.threadRootMessageId),
+  index("cp_slack_action_authority_family_idx").on(table.organizationId,
+    table.authorityFamilyId, table.claimState),
 ]);
