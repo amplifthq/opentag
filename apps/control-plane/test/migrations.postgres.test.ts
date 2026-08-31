@@ -235,6 +235,37 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     ]);
   });
 
+  it("keeps every 0014 publication authority family fail-closed in the schema catalog", async () => {
+    await fixture.migrate();
+    const tables = ["cp_publication_branch_ownership", "cp_publication_intent",
+      "cp_publication_capability", "cp_publication_begin", "cp_publication_receipt",
+      "cp_publication_reconciliation", "cp_publication_completion"];
+    for (const table of tables) {
+      const columns = await fixture.pool.query<{ column_name: string; is_nullable: string; column_default: string | null }>(
+        `SELECT column_name,is_nullable,column_default FROM information_schema.columns
+         WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`, [fixture.schema, table]);
+      expect(columns.rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({ column_name: "organization_id", is_nullable: "NO" }),
+      ]));
+      const constraints = await fixture.pool.query<{ constraint_type: string }>(
+        `SELECT constraint_type FROM information_schema.table_constraints WHERE table_schema=$1 AND table_name=$2`,
+        [fixture.schema, table]);
+      expect(constraints.rows.map((row) => row.constraint_type)).toContain("PRIMARY KEY");
+      const trigger = await fixture.pool.query<{ trigger_name: string }>(
+        `SELECT DISTINCT trigger_name FROM information_schema.triggers
+         WHERE event_object_schema=$1 AND event_object_table=$2
+           AND trigger_name=${"'"}cp_publication_${"'"} || regexp_replace($2, '^cp_publication_', '') || '_immutable'`,
+        [fixture.schema, table]);
+      expect(trigger.rows).toHaveLength(1);
+    }
+    const capability = await fixture.pool.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name,is_nullable FROM information_schema.columns WHERE table_schema=$1
+       AND table_name='cp_publication_capability' AND column_name IN ('attempt_number','capability_digest','capability')`,
+      [fixture.schema]);
+    expect(capability.rows).toHaveLength(3);
+    expect(capability.rows.every((column) => column.is_nullable === "NO")).toBe(true);
+  });
+
   it("matches the shared Unicode scalar sorter with real C-collated PostgreSQL text", async () => {
     const values = ["😀", "é", "e\u0301", "ab", "a", "Z", "A"];
     const expected = ["A", "Z", "a", "ab", "e\u0301", "é", "😀"];

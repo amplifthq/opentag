@@ -914,6 +914,7 @@ export function createControlPlaneApplication(
         if (outcome.kind === "completion_pending") return context.json({
           capability: outcome.capability, completionReceipt: outcome.completionReceipt,
         }, 200);
+        if (outcome.kind === "reconciliation_pending") return context.json({ capability: outcome.capability }, 200);
         // Empty and blocked are intentionally indistinguishable to a polling
         // Runner: the relay remains the only authority for retry/reconcile.
         return context.body(null, 204);

@@ -494,7 +494,10 @@ export const PublicationOperationObservationV1Schema = z.discriminatedUnion("kin
   z.object({ kind: z.literal("present"), headSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
     externalId: MaterialActionStableIdV1Schema.optional(),
     externalUri: z.string().url().max(2048).refine(isCredentialSafeText).optional(),
-    draft: z.literal(true).optional() }).strict(),
+    draft: z.literal(true).optional(), provider: z.literal("github").optional(),
+    repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
+      .strict().optional(), baseBranch: z.string().min(1).max(255).optional(),
+    state: z.literal("open").optional() }).strict(),
   z.object({ kind: z.literal("absent") }).strict(),
   z.object({ kind: z.literal("ambiguous"), reason: z.string().min(1).max(256).optional() }).strict(),
 ]);
@@ -553,6 +556,10 @@ export const RunnerPublicationCompletionPendingV1Schema = z.object({
       message: "Publication completion dispatch requires the exact succeeded draft PR receipt." });
   }
 });
+
+export const RunnerPublicationReconciliationPendingV1Schema = z.object({
+  capability: PublicationOperationCapabilityV1Schema,
+}).strict();
 
 export const RunnerPublicationReconcileV1Schema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
@@ -4018,6 +4025,7 @@ export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApproval
 export type RunnerPublicationBeginV1 = z.infer<typeof RunnerPublicationBeginV1Schema>;
 export type PublicationOperationReceiptV1 = z.infer<typeof PublicationOperationReceiptV1Schema>;
 export type RunnerPublicationCompletionPendingV1 = z.infer<typeof RunnerPublicationCompletionPendingV1Schema>;
+export type RunnerPublicationReconciliationPendingV1 = z.infer<typeof RunnerPublicationReconciliationPendingV1Schema>;
 export type RunnerPublicationReconcileV1 = z.infer<typeof RunnerPublicationReconcileV1Schema>;
 export type PublicationCompletionObservationV1 = z.infer<typeof PublicationCompletionObservationV1Schema>;
 export type RunnerPublicationCompletionV1 = z.infer<typeof RunnerPublicationCompletionV1Schema>;

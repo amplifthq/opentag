@@ -164,7 +164,7 @@ export async function executePublicationOperation(input: {
 
 function controlObservation(input: {
   observation: PublicationProviderObservation;
-  expectedHeadSha: string;
+  capability: PublicationOperationCapabilityV1;
 }) {
   if (input.observation.kind !== "present") return input.observation;
   return {
@@ -172,7 +172,10 @@ function controlObservation(input: {
     headSha: input.observation.headSha,
     ...("pullRequestNumber" in input.observation
       ? { externalId: `github_pr_${input.observation.pullRequestNumber}`,
-          externalUri: input.observation.pullRequestUrl, draft: true as const }
+          externalUri: input.observation.pullRequestUrl, draft: true as const,
+          provider: "github" as const,
+          repository: { owner: input.capability.repository.owner, repo: input.capability.repository.repo },
+          baseBranch: input.capability.repository.baseBranch, state: "open" as const }
       : {}),
   };
 }
@@ -205,8 +208,7 @@ export async function executePublicationControlV1(input: {
   } catch {
     provider = { kind: "ambiguous" };
   }
-  const observation = controlObservation({ observation: provider,
-    expectedHeadSha: capability.expectedHeadSha });
+  const observation = controlObservation({ observation: provider, capability });
   const receiptSeed = {
     schemaVersion: 1 as const, protocolVersion: "1.0" as const,
     receiptId: `receipt_${capability.capabilityId}`, capabilityId: capability.capabilityId,

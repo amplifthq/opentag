@@ -914,7 +914,19 @@ export async function runPublicationControlV1Iteration(input: {
   const capability = claimed.capability;
   const authority = await input.getLocalAuthority(capability);
   if (!authority || authority.attemptNumber !== capability.attemptNumber) return false;
-  if (claimed.completionPending) {
+  if ("reconciliationPending" in claimed && claimed.reconciliationPending) {
+    const provider = await input.reconcileOperation(capability);
+    await input.client.reconcilePublicationOperationControlV1({
+      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
+      requestId: `request_publication_reconcile_${randomUUID()}`,
+      organizationId: capability.organizationId, runnerId: capability.runnerId, runId: capability.runId,
+      capabilityId: capability.capabilityId, operationId: capability.operationId,
+      observation: publicationReconciliationObservation(capability, provider),
+      observedAt: input.now().toISOString(),
+    });
+    return true;
+  }
+  if ("completionPending" in claimed && claimed.completionPending) {
     const observation = await input.observeCompletion(capability, claimed.completionReceipt);
     await input.client.completePublicationControlV1({
       schemaVersion: 1,
@@ -944,15 +956,7 @@ export async function runPublicationControlV1Iteration(input: {
   });
   if (receipt.outcome === "outcome_unknown") {
     const provider = await input.reconcileOperation(capability);
-    const observation = provider.kind !== "present" ? provider : {
-      kind: "present" as const,
-      headSha: provider.headSha,
-      ...("pullRequestNumber" in provider ? {
-        externalId: `github_pr_${provider.pullRequestNumber}`,
-        externalUri: provider.pullRequestUrl,
-        draft: true as const,
-      } : {}),
-    };
+    const observation = publicationReconciliationObservation(capability, provider);
     await input.client.reconcilePublicationOperationControlV1({
       schemaVersion: 1,
       protocolVersion: "1.0",
@@ -968,6 +972,19 @@ export async function runPublicationControlV1Iteration(input: {
     });
   }
   return true;
+}
+
+function publicationReconciliationObservation(capability: PublicationOperationCapabilityV1,
+  provider: PublicationProviderObservation) {
+  if (provider.kind !== "present") return provider;
+  return { kind: "present" as const, headSha: provider.headSha,
+    ...("pullRequestNumber" in provider ? {
+      externalId: `github_pr_${provider.pullRequestNumber}`,
+      externalUri: provider.pullRequestUrl, draft: true as const, provider: "github" as const,
+      repository: { owner: capability.repository.owner, repo: capability.repository.repo },
+      baseBranch: capability.repository.baseBranch, state: "open" as const,
+    } : {}),
+  };
 }
 
 function publicationBinding(input: {

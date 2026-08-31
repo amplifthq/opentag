@@ -121,6 +121,7 @@ import {
   RunnerPublicationClaimNextV1Schema,
   RunnerPublicationCompletionV1Schema,
   RunnerPublicationCompletionPendingV1Schema,
+  RunnerPublicationReconciliationPendingV1Schema,
   RunnerPublicationReceiptV1Schema,
   RunnerPublicationReconcileV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
@@ -167,6 +168,7 @@ import {
   type RunnerPublicationClaimNextV1,
   type RunnerPublicationCompletionV1,
   type RunnerPublicationCompletionPendingV1,
+  type RunnerPublicationReconciliationPendingV1,
   type RunnerPublicationReconcileV1,
   type RunnerPermissionCurrentQueryV1,
   type RunnerPermissionRequestV1,
@@ -738,7 +740,8 @@ export type OpenTagClient = {
   claimPublicationOperationControlV1(input: RunnerPublicationClaimV1): Promise<PublicationOperationCapabilityV1>;
   claimNextPublicationOperationControlV1(input: RunnerPublicationClaimNextV1): Promise<{
     capability: PublicationOperationCapabilityV1; completionPending: false; completionReceipt?: never
-  } | ({ completionPending: true } & RunnerPublicationCompletionPendingV1) | null>;
+  } | ({ completionPending: true } & RunnerPublicationCompletionPendingV1)
+    | ({ reconciliationPending: true } & RunnerPublicationReconciliationPendingV1) | null>;
   beginPublicationOperationControlV1(input: RunnerPublicationBeginV1): Promise<{
     status: 200 | 201; replayed: boolean; outcome: "accepted" }>;
   recordPublicationOperationReceiptControlV1(input: {
@@ -2307,7 +2310,10 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       const body = await parseControlJson(response, action, trustedControlOrigin);
       if (response.status !== 200 && response.status !== 201) throwControlV1Error(response, body, action, request.requestId);
       if (response.status === 200) {
-        return { ...RunnerPublicationCompletionPendingV1Schema.parse(body), completionPending: true as const };
+        if (typeof body === "object" && body !== null && "completionReceipt" in body) {
+          return { ...RunnerPublicationCompletionPendingV1Schema.parse(body), completionPending: true as const };
+        }
+        return { ...RunnerPublicationReconciliationPendingV1Schema.parse(body), reconciliationPending: true as const };
       }
       return { capability: PublicationOperationCapabilityV1Schema.parse(body), completionPending: false as const };
     },

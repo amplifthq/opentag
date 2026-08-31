@@ -28,6 +28,23 @@ function digest(value: unknown): string {
   return `sha256:${createHash("sha256").update(canonicalJsonStringify(value)).digest("hex")}`;
 }
 
+function exactReceiptObservation(capability: PublicationOperationCapabilityV1,
+  observation: PublicationOperationReceiptV1["observation"]): boolean {
+  if (observation.kind !== "present") return true;
+  if (observation.headSha !== capability.expectedHeadSha) return false;
+  if (capability.step === "push_owned_branch") return observation.externalId === undefined
+    && observation.externalUri === undefined && observation.draft === undefined
+    && observation.provider === undefined && observation.repository === undefined
+    && observation.baseBranch === undefined && observation.state === undefined;
+  const match = /^github_pr_([1-9][0-9]*)$/u.exec(observation.externalId ?? "");
+  return Boolean(match
+    && observation.externalUri === `https://github.com/${capability.repository.owner}/${capability.repository.repo}/pull/${match[1]}`
+    && observation.draft === true && observation.provider === "github"
+    && observation.repository?.owner === capability.repository.owner
+    && observation.repository?.repo === capability.repository.repo
+    && observation.baseBranch === capability.repository.baseBranch && observation.state === "open");
+}
+
 export type PublicationApprovalInput = {
   organizationId: string; runnerId: string; runId: string;
   ownershipId: string; ownershipDigest: string;
@@ -262,9 +279,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       candidateDigest: string; runnerGeneration: number; step: PublicationOperationStepV1 }):
       Promise<{ kind: "issued"; capability: PublicationOperationCapabilityV1 }
         | { kind: "unavailable"; reason: string }> {
-      const now = input.clock.now();
       const fenceDigest = await computeMaterialActionFencingTokenDigestV1(command.fencingToken);
       return withPostgresTransaction(input.pool, async (client) => {
+        const now = (await client.query<{ now: Date }>("SELECT CURRENT_TIMESTAMP AS now")).rows[0]!.now;
         const result = await client.query<any>(
           `SELECT intent.*, run.publication_mode, run.terminal_kind,
              run.current_attempt_number, attempt.fencing_token_digest,
@@ -362,10 +379,11 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       { kind: "issued"; capability: PublicationOperationCapabilityV1 }
       | { kind: "completion_pending"; capability: PublicationOperationCapabilityV1;
           completionReceipt: PublicationOperationReceiptV1 }
+      | { kind: "reconciliation_pending"; capability: PublicationOperationCapabilityV1 }
       | { kind: "empty" } | { kind: "blocked"; reason: string }
     > {
-      const now = input.clock.now();
       return withPostgresTransaction(input.pool, async (client) => {
+        const now = (await client.query<{ now: Date }>("SELECT CURRENT_TIMESTAMP AS now")).rows[0]!.now;
         const selected = await client.query<any>(
           `SELECT intent.*, attempt.fencing_token_digest, attempt.state AS attempt_state,
              attempt.lease_expires_at, run.current_attempt_number, run.terminal_kind,
@@ -392,7 +410,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         if (!row) return { kind: "empty" as const };
         const latest = async (step: PublicationOperationStepV1) => {
           const result = await client.query<any>(
-            `SELECT capability.*, begin.begun_at, receipt.outcome, receipt.receipt, reconciliation.observation
+            `SELECT capability.*, begin.begun_at, receipt.outcome, receipt.receipt,
+                    reconciliation.observation, reconciliation.observed_at AS reconciliation_observed_at
              FROM cp_publication_capability capability
              LEFT JOIN cp_publication_begin begin ON begin.organization_id = capability.organization_id
                AND begin.capability_id = capability.capability_id
@@ -405,6 +424,23 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             [command.principal.organizationId, row.intent_id, step],
           );
           return result.rows[0] ?? null;
+        };
+        const isSettled = (prior: any) => prior?.outcome === "succeeded" || (prior?.observation
+          && PublicationOperationObservationV1Schema.parse(prior.observation).kind === "present");
+        const settledReceipt = async (prior: any): Promise<PublicationOperationReceiptV1> => {
+          if (prior.receipt && prior.outcome === "succeeded") return PublicationOperationReceiptV1Schema.parse(prior.receipt);
+          const capability = PublicationOperationCapabilityV1Schema.parse(prior.capability);
+          const observation = PublicationOperationObservationV1Schema.parse(prior.observation);
+          const seed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+            receiptId: `reconciled_${capability.capabilityId}`, capabilityId: capability.capabilityId,
+            operationId: capability.operationId, organizationId: capability.organizationId,
+            runId: capability.runId, attemptId: capability.attemptId, candidateId: capability.candidateId,
+            candidateDigest: capability.candidateDigest, step: capability.step, runnerId: capability.runnerId,
+            runnerGeneration: capability.runnerGeneration, fencingTokenDigest: capability.fencingTokenDigest,
+            observation, outcome: "succeeded" as const,
+            observedAt: new Date(prior.reconciliation_observed_at).toISOString() };
+          return PublicationOperationReceiptV1Schema.parse({ ...seed,
+            receiptDigest: await computePublicationOperationReceiptDigestV1(seed) });
         };
         const retryable = async (step: PublicationOperationStepV1) => {
           const prior = await latest(step);
@@ -421,19 +457,29 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         let step: PublicationOperationStepV1;
         if (!push) {
           step = "push_owned_branch";
-        } else if (push.outcome === "succeeded") {
+        } else if (isSettled(push)) {
           const pullRequest = await latest("create_draft_pull_request");
-          if (pullRequest?.outcome === "succeeded") {
+          if (isSettled(pullRequest)) {
             return { kind: "completion_pending" as const,
               capability: PublicationOperationCapabilityV1Schema.parse(pullRequest.capability),
-              completionReceipt: PublicationOperationReceiptV1Schema.parse(pullRequest.receipt) };
+              completionReceipt: await settledReceipt(pullRequest) };
           }
           const ready = await retryable("create_draft_pull_request");
-          if (!ready.retry) return { kind: "blocked" as const, reason: ready.reason };
+          if (!ready.retry) {
+            const original = await latest("create_draft_pull_request");
+            if (original?.begun_at) return { kind: "reconciliation_pending" as const,
+              capability: PublicationOperationCapabilityV1Schema.parse(original.capability) };
+            return { kind: "blocked" as const, reason: ready.reason };
+          }
           step = "create_draft_pull_request";
         } else {
           const ready = await retryable("push_owned_branch");
-          if (!ready.retry) return { kind: "blocked" as const, reason: ready.reason };
+          if (!ready.retry) {
+            const original = await latest("push_owned_branch");
+            if (original?.begun_at) return { kind: "reconciliation_pending" as const,
+              capability: PublicationOperationCapabilityV1Schema.parse(original.capability) };
+            return { kind: "blocked" as const, reason: ready.reason };
+          }
           step = "push_owned_branch";
         }
         const capability = PublicationOperationCapabilityV1Schema.parse({
@@ -469,12 +515,11 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       const parsed = PublicationOperationCapabilityV1Schema.parse(command.capability);
       const fence = await computeMaterialActionFencingTokenDigestV1(command.fencingToken);
       if (fence !== parsed.fencingTokenDigest || parsed.runnerId !== command.principal.runnerId
-        || parsed.organizationId !== command.principal.organizationId
-        || Date.parse(parsed.expiresAt) <= input.clock.now().getTime()) return { kind: "stale_fence" as const };
+        || parsed.organizationId !== command.principal.organizationId) return { kind: "stale_fence" as const };
       try {
         const result = await input.pool.query(
           `INSERT INTO cp_publication_begin(organization_id,capability_id,operation_id,begun_at)
-           SELECT capability.organization_id, capability.capability_id, capability.operation_id, $3
+           SELECT capability.organization_id, capability.capability_id, capability.operation_id, CURRENT_TIMESTAMP
            FROM cp_publication_capability capability
            JOIN cp_publication_intent intent
              ON intent.organization_id = capability.organization_id
@@ -488,13 +533,12 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
            JOIN cp_runner runner
              ON runner.organization_id = intent.organization_id AND runner.runner_id = intent.runner_id
            WHERE capability.organization_id=$1 AND capability.capability_id=$2
-             AND capability.capability_digest=$4 AND capability.expires_at > $3
+             AND capability.capability_digest=$3 AND capability.expires_at > CURRENT_TIMESTAMP
              AND run.terminal_kind IS NULL AND run.current_attempt_number = intent.attempt_number
-             AND (attempt.state = 'succeeded'
-               OR (attempt.state IN ('claimed','running') AND attempt.lease_expires_at > $3))
+             AND attempt.state IN ('succeeded','claimed','running')
+             AND attempt.lease_expires_at > CURRENT_TIMESTAMP
              AND runner.credential_generation = intent.runner_generation`,
-          [parsed.organizationId, parsed.capabilityId, command.begunAt,
-            await computePublicationCapabilityDigestV1(parsed)]);
+          [parsed.organizationId, parsed.capabilityId, await computePublicationCapabilityDigestV1(parsed)]);
         if (result.rowCount !== 1) return { kind: "stale_fence" as const };
         return { kind: "begun" as const };
       } catch (error) {
@@ -528,6 +572,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         || capability.fencingTokenDigest !== receipt.fencingTokenDigest) {
         return { kind: "conflict" as const };
       }
+      if (!exactReceiptObservation(capability, receipt.observation)) return { kind: "conflict" as const };
       try {
         const result = await input.pool.query(
           `INSERT INTO cp_publication_receipt(organization_id,receipt_id,capability_id,
@@ -570,7 +615,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       const exact = capability.rows[0]
         ? PublicationOperationCapabilityV1Schema.parse(capability.rows[0].capability) : null;
       if (!exact || !capability.rows[0]?.begun
-        || exact.runnerId !== command.principal.runnerId) return { kind: "conflict" as const };
+        || exact.runnerId !== command.principal.runnerId
+        || !exactReceiptObservation(exact, observation)) return { kind: "conflict" as const };
       try {
         await input.pool.query(
           `INSERT INTO cp_publication_reconciliation(organization_id,reconciliation_id,
@@ -663,10 +709,15 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(row.admission_policy_snapshot);
         const requiredChecks = policy.payload.admissionRules.requiredCheckNames;
         const operations = await client.query<any>(
-          `SELECT capability.step, capability.operation_id, receipt.outcome, receipt.receipt_digest, receipt.receipt
+          `SELECT capability.step, capability.operation_id, capability.capability, receipt.outcome,
+                  receipt.receipt_digest, receipt.receipt, reconciliation.observation,
+                  reconciliation.observed_at AS reconciliation_observed_at
            FROM cp_publication_capability capability
-           JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
+           LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
              AND receipt.capability_id = capability.capability_id
+           LEFT JOIN cp_publication_reconciliation reconciliation
+             ON reconciliation.organization_id = capability.organization_id
+            AND reconciliation.capability_id = capability.capability_id
            WHERE capability.organization_id = $1 AND capability.intent_id = $2
            ORDER BY capability.attempt_number DESC`,
           [completion.organizationId, row.intent_id],
@@ -677,19 +728,44 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         }
         const push = latestByStep.get("push_owned_branch");
         const pullRequest = latestByStep.get("create_draft_pull_request");
-        if ([push, pullRequest].some((operation) => operation?.outcome === "outcome_unknown")) {
+        const observation = (operation: any) => operation?.observation
+          ? PublicationOperationObservationV1Schema.parse(operation.observation) : null;
+        const succeeded = (operation: any) => operation?.outcome === "succeeded"
+          || observation(operation)?.kind === "present";
+        if ([push, pullRequest].some((operation) => operation?.outcome === "outcome_unknown"
+          && observation(operation)?.kind !== "present")) {
           return { kind: "outcome_unknown" as const, reason: "publication_outcome_unknown" };
         }
-        if (push?.outcome !== "succeeded" || pullRequest?.outcome !== "succeeded") {
+        if (!succeeded(push) || !succeeded(pullRequest)) {
           return { kind: "nonterminal" as const, reason: "publication_receipt_missing" };
         }
-        const pullRequestReceipt = PublicationOperationReceiptV1Schema.parse(pullRequest.receipt);
+        const receipt = async (operation: any): Promise<PublicationOperationReceiptV1> => {
+          if (operation.receipt && operation.outcome === "succeeded") return PublicationOperationReceiptV1Schema.parse(operation.receipt);
+          const capability = PublicationOperationCapabilityV1Schema.parse(operation.capability);
+          const observed = PublicationOperationObservationV1Schema.parse(operation.observation);
+          const seed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+            receiptId: `reconciled_${capability.capabilityId}`, capabilityId: capability.capabilityId,
+            operationId: capability.operationId, organizationId: capability.organizationId,
+            runId: capability.runId, attemptId: capability.attemptId, candidateId: capability.candidateId,
+            candidateDigest: capability.candidateDigest, step: capability.step, runnerId: capability.runnerId,
+            runnerGeneration: capability.runnerGeneration, fencingTokenDigest: capability.fencingTokenDigest,
+            observation: observed, outcome: "succeeded" as const,
+            observedAt: new Date(operation.reconciliation_observed_at).toISOString() };
+          return PublicationOperationReceiptV1Schema.parse({ ...seed,
+            receiptDigest: await computePublicationOperationReceiptDigestV1(seed) });
+        };
+        const pushReceipt = await receipt(push);
+        const pullRequestReceipt = await receipt(pullRequest);
+        if (!exactReceiptObservation(PublicationOperationCapabilityV1Schema.parse(push.capability), pushReceipt.observation)
+          || !exactReceiptObservation(PublicationOperationCapabilityV1Schema.parse(pullRequest.capability), pullRequestReceipt.observation)) {
+          return { kind: "nonterminal" as const, reason: "publication_receipt_mismatch" };
+        }
         if (pullRequestReceipt.observation.kind !== "present"
           || !pullRequestReceipt.observation.externalId || !pullRequestReceipt.observation.externalUri
           || pullRequestReceipt.observation.draft !== true
           || pullRequestReceipt.observation.headSha !== completion.observation.headSha
           || pullRequestReceipt.observation.externalUri !== completion.observation.pullRequestUrl
-          || !pullRequestReceipt.observation.externalId.endsWith(String(completion.observation.pullRequestNumber))) {
+          || pullRequestReceipt.observation.externalId !== `github_pr_${completion.observation.pullRequestNumber}`) {
           return { kind: "nonterminal" as const, reason: "pull_request_receipt_mismatch" };
         }
         const readiness = assessExactPullRequestReadiness({
@@ -721,8 +797,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26::jsonb,$27)`,
           [completion.organizationId, input.idFactory("completion"), completion.runId, completion.attemptId,
             completion.attemptNumber, fenceDigest, completion.candidateId, completion.candidateDigest,
-            row.intent_id, row.ownership_id, push.operation_id, push.receipt_digest,
-            pullRequest.operation_id, pullRequest.receipt_digest, pullRequestReceipt.observation.externalId,
+            row.intent_id, row.ownership_id, push.operation_id, pushReceipt.receiptDigest,
+            pullRequest.operation_id, pullRequestReceipt.receiptDigest, pullRequestReceipt.observation.externalId,
             digest({ externalId: pullRequestReceipt.observation.externalId, externalUri: pullRequestReceipt.observation.externalUri }),
             row.intent_repository, completion.observation.remote, completion.observation.baseBranch,
             completion.observation.branch, row.expected_head_sha, completion.observation.headSha,

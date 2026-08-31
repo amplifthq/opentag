@@ -50,6 +50,29 @@ describe("publication Control V1 local execution", () => {
     expect(createDraftPullRequest).not.toHaveBeenCalled();
   });
 
+  it("restarts a begun operation as reconciliation-only work without replaying its effect", async () => {
+    const push = vi.fn();
+    const createDraftPullRequest = vi.fn();
+    const reconcileOperation = vi.fn(async () => ({ kind: "present" as const,
+      headSha: capability.expectedHeadSha }));
+    const reconcile = vi.fn(async () => ({ status: 200 as const, outcome: "settled" as const }));
+    await expect(runPublicationControlV1Iteration({
+      organizationId: "org_1", runnerId: "runner_1", runnerGeneration: 3,
+      now: () => new Date("2026-08-10T00:00:30.000Z"),
+      client: { claimNextPublicationOperationControlV1: vi.fn(async () => ({
+        reconciliationPending: true as const, capability: { ...capability, step: "push_owned_branch" as const },
+      })), beginPublicationOperationControlV1: vi.fn(), recordPublicationOperationReceiptControlV1: vi.fn(),
+      reconcilePublicationOperationControlV1: reconcile, completePublicationControlV1: vi.fn() },
+      getLocalAuthority: vi.fn(async () => ({ fencingToken: "fence_local_only", attemptNumber: 1 })),
+      pushOwnedBranch: push, createDraftPullRequest, reconcileOperation, observeCompletion: vi.fn(),
+    })).resolves.toBe(true);
+    expect(push).not.toHaveBeenCalled();
+    expect(createDraftPullRequest).not.toHaveBeenCalled();
+    expect(reconcileOperation).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: capability.capabilityId }));
+    expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: capability.capabilityId,
+      operationId: capability.operationId, observation: { kind: "present", headSha: capability.expectedHeadSha } }));
+  });
+
   it("completes from the immutable prior PR receipt without replaying either publication effect", async () => {
     const priorReceipt = {
       schemaVersion: 1 as const, protocolVersion: "1.0" as const,

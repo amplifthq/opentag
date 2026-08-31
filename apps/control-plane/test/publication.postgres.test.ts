@@ -11,7 +11,7 @@ import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/run
 import { hostedAdmissionFixture, hostedClaimRequest, hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
-const now = new Date("2026-08-15T12:00:00.000Z");
+const now = new Date();
 const sha256 = (value: unknown) => `sha256:${createHash("sha256")
   .update(canonicalJsonStringify(value)).digest("hex")}`;
 
@@ -41,10 +41,16 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     if (authenticated.kind !== "authenticated") throw new Error("authentication failed");
     principal = authenticated.principal;
     await recordHostedReadiness({ pool: fixture.pool, organizationId: principal.organizationId, runnerId: principal.runnerId });
+    await fixture.pool.query(
+      `UPDATE cp_runner_readiness SET observed_at=$3, expires_at=$4
+       WHERE organization_id=$1 AND runner_id=$2`,
+      [principal.organizationId, principal.runnerId, now, new Date(now.getTime() + 60 * 60_000)],
+    );
     const hosted = createHostedRunCoordinator({ pool: fixture.pool, clock: { now: () => now }, leaseDurationMs: 60_000,
       idFactory: () => "attempt_publication", tokenFactory: () => "fence_publication", issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
     const admission = await hostedAdmissionFixture({ runId: candidate.runId, suffix: "publication", organizationId: principal.organizationId,
-      runnerId: principal.runnerId, publicationMode: "pull_request" });
+      runnerId: principal.runnerId, publicationMode: "pull_request",
+      queueClaimDeadline: new Date(now.getTime() + 60 * 60_000).toISOString() });
     await hosted.admit({ runId: candidate.runId, admission: admission.admission, policy: admission.policy });
     const outcome = await hosted.claim({ principal, request: hostedClaimRequest({ operationId: "operation_claim_publication", requestId: "request_claim_publication", credentialId: "credential_publication" }) });
     if (outcome.kind !== "claimed") throw new Error("claim failed");
@@ -97,7 +103,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     runnerId: principal.runnerId, runId: candidate.runId, ownershipId, ownershipDigest,
     candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
     approvalId: "approval_publication", approverId: "operator_publication",
-    approvedAt: now.toISOString(), expiresAt: "2026-08-15T12:30:00.000Z", ...overrides });
+    approvedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(), ...overrides });
 
   const claimOperation = (step: "push_owned_branch" | "create_draft_pull_request") => publisher.claim({ principal,
     runId: candidate.runId, attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
@@ -123,7 +129,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.approve(approval(owned.ownershipId, sha256("wrong"))))
       .resolves.toMatchObject({ kind: "rejected", reason: "stale_publication_authority" });
     await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
-      { expiresAt: "2026-08-15T11:59:59.000Z" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_expired" });
+      { expiresAt: new Date(now.getTime() - 1).toISOString() }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_expired" });
     const approvalRace = await Promise.all([
       publisher.approve(approval(owned.ownershipId, owned.ownershipDigest)),
       publisher.approve(approval(owned.ownershipId, owned.ownershipDigest)),
@@ -132,7 +138,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
       { approverId: "operator_changed" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
     await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
-      { expiresAt: "2026-08-15T12:29:59.000Z" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
+      { expiresAt: new Date(now.getTime() + 29 * 60_000).toISOString() }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
   });
 
   it("serializes publication, records start before effects, and authorizes retry only after durable authoritative absence", async () => {
@@ -143,6 +149,22 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     const push = pushRace.find((result) => result.kind === "issued")!;
     expect(push.kind).toBe("issued");
     if (push.kind !== "issued") return;
+    // RED before Slice B: a caller could backdate begunAt past a DB-expired
+    // lease and the publisher would accept it. Only the coordinator DB clock
+    // may authorize begin.
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
+      [principal.organizationId, candidate.runId, claim.attempt.id],
+    );
+    await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken,
+      capability: push.capability, begunAt: new Date(now.getTime() - 60 * 60_000).toISOString() }))
+      .resolves.toEqual({ kind: "stale_fence" });
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP + interval '1 minute'
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
+      [principal.organizationId, candidate.runId, claim.attempt.id],
+    );
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken, capability: push.capability, begunAt: now.toISOString() })).resolves.toEqual({ kind: "begun" });
     const receiptSeed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const, receiptId: "receipt_push",
       capabilityId: push.capability.capabilityId, operationId: push.capability.operationId, organizationId: principal.organizationId,
@@ -150,16 +172,38 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       step: "push_owned_branch" as const, runnerId: principal.runnerId, runnerGeneration: 1,
       fencingTokenDigest: await computeMaterialActionFencingTokenDigestV1(claim.attempt.fencingToken),
       observation: { kind: "present" as const, headSha: "c".repeat(40) }, outcome: "succeeded" as const, observedAt: now.toISOString() };
+    const forgedPush = { ...receiptSeed, receiptId: "receipt_push_forged",
+      observation: { kind: "present" as const, headSha: "d".repeat(40) } };
+    await expect(publisher.record({ principal, receipt: { ...forgedPush,
+      receiptDigest: await computePublicationOperationReceiptDigestV1(forgedPush) } })).resolves.toEqual({ kind: "conflict" });
+    await expect(fixture.pool.query(`SELECT 1 FROM cp_publication_receipt WHERE organization_id=$1 AND capability_id=$2`,
+      [principal.organizationId, push.capability.capabilityId])).resolves.toMatchObject({ rows: [] });
     const pushReceipt = { ...receiptSeed, receiptDigest: await computePublicationOperationReceiptDigestV1(receiptSeed) };
     await expect(publisher.record({ principal, receipt: pushReceipt })).resolves.toMatchObject({ kind: "recorded" });
     const pr = await claimOperation("create_draft_pull_request");
     expect(pr.kind).toBe("issued");
     if (pr.kind !== "issued") return;
     await publisher.begin({ principal, fencingToken: claim.attempt.fencingToken, capability: pr.capability, begunAt: now.toISOString() });
+    const forgedPr = { ...receiptSeed, receiptId: "receipt_pr_forged", capabilityId: pr.capability.capabilityId,
+      operationId: pr.capability.operationId, step: "create_draft_pull_request" as const,
+      observation: { kind: "present" as const, headSha: "d".repeat(40), externalId: "github_pr_8",
+        externalUri: "https://github.com/evil/repo/pull/8", draft: true as const, provider: "github" as const,
+        repository: { owner: "evil", repo: "repo" }, baseBranch: "other", state: "open" as const },
+      outcome: "succeeded" as const };
+    await expect(publisher.record({ principal, receipt: { ...forgedPr,
+      receiptDigest: await computePublicationOperationReceiptDigestV1(forgedPr) } })).resolves.toEqual({ kind: "conflict" });
+    await expect(fixture.pool.query(`SELECT 1 FROM cp_publication_receipt WHERE organization_id=$1 AND capability_id=$2`,
+      [principal.organizationId, pr.capability.capabilityId])).resolves.toMatchObject({ rows: [] });
     const unknownSeed = { ...receiptSeed, receiptId: "receipt_pr_unknown", capabilityId: pr.capability.capabilityId,
       operationId: pr.capability.operationId, step: "create_draft_pull_request" as const,
       observation: { kind: "ambiguous" as const }, outcome: "outcome_unknown" as const };
     await publisher.record({ principal, receipt: { ...unknownSeed, receiptDigest: await computePublicationOperationReceiptDigestV1(unknownSeed) } });
+    // RED before Slice B: this became `{ kind: "blocked" }`, which the HTTP
+    // handler collapsed into 204 and stranded the exact begun operation.
+    await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
+      kind: "reconciliation_pending", capability: { capabilityId: pr.capability.capabilityId,
+        operationId: pr.capability.operationId },
+    });
     await expect(claimOperation("create_draft_pull_request")).resolves.toMatchObject({ kind: "unavailable", reason: "reconciliation_required" });
     await expect(publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId, operationId: pr.capability.operationId,
       reconciliationId: "reconcile_pr_absent", observation: { kind: "absent" }, observedAt: now.toISOString() })).resolves.toEqual({ kind: "retry_authorized" });
@@ -171,12 +215,21 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     const presentSeed = { ...receiptSeed, receiptId: "receipt_pr_present",
       capabilityId: retried.capability.capabilityId, operationId: retried.capability.operationId,
       step: "create_draft_pull_request" as const,
-      observation: { kind: "present" as const, headSha: "c".repeat(40),
-        externalId: "github_pr_7", externalUri: "https://github.com/acme/demo/pull/7", draft: true as const },
-      outcome: "succeeded" as const };
+      observation: { kind: "ambiguous" as const }, outcome: "outcome_unknown" as const };
     await expect(publisher.record({ principal, receipt: { ...presentSeed,
       receiptDigest: await computePublicationOperationReceiptDigestV1(presentSeed) } }))
       .resolves.toMatchObject({ kind: "recorded" });
+    // RED before Slice B: an exact provider presence observation remained
+    // blocked behind the old unknown receipt rather than settling this step.
+    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
+      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
+      observation: { kind: "present", headSha: "c".repeat(40), externalId: "github_pr_7",
+        externalUri: "https://github.com/acme/demo/pull/7", draft: true, provider: "github",
+        repository: { owner: "acme", repo: "demo" }, baseBranch: "main", state: "open" },
+      observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
+    await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
+      kind: "completion_pending", capability: { capabilityId: retried.capability.capabilityId },
+    });
     await expect(fixture.pool.query<{ step: string; attempt_number: number }>(
       `SELECT step,attempt_number FROM cp_publication_capability
        WHERE organization_id=$1 ORDER BY step,attempt_number`, [principal.organizationId]))
