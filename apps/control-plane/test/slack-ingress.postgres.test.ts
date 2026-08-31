@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeSlackSignature, createSlackSourceApp } from "@opentag/slack";
 import { SourceAppRegistry } from "@opentag/source-app-runtime";
 import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";
@@ -98,7 +98,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
   }
 
-  function productionComponents(input: { commandAuthority?: any; tokenFactory?: () => string } = {}) {
+  function productionComponents(input: { commandAuthority?: any; publicationAuthority?: any;
+    tokenFactory?: () => string } = {}) {
     const material = new Map([
       ["secret://slack/signing", "secret"], ["secret://slack/bot", "bot-token"]
     ]);
@@ -119,6 +120,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         const value = material.get(reference); if (!value) throw new Error("secret_unavailable");
         return value;
       } }, ...(input.commandAuthority ? { commandAuthority: input.commandAuthority } : {}),
+      ...(input.publicationAuthority ? { publicationAuthority: input.publicationAuthority } : {}),
       ...(input.tokenFactory ? { tokenFactory: input.tokenFactory } : {}),
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
   }
@@ -409,9 +411,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       async approve(command: any) { decisions.push(command.decision); envelopes.push(command.authority); return completed; },
       async reject() { decisions.push("deny"); return completed; }, async bind() { return completed; },
       async unbind() { return completed; } };
+    const publicationApprove = vi.fn(async () => ({ kind: "approved" as const }));
     const { ingress } = productionComponents({ commandAuthority: authority,
+      publicationAuthority: { approve: publicationApprove },
       tokenFactory: () => `opaque_action_token_${++sequence}_abcdefghijklmnopqrstuvwxyz` });
-    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "bind" | "unbind" = "approval",
+    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "publication" | "bind" | "unbind" = "approval",
       override: Record<string, unknown> = {}) => ingress.issueAction({
       organizationId: "org_a", actionId, installationId: "install_1", bindingId: "binding_1",
       teamId: "T1", appId: "A1", channelId: "C1", threadRootMessageId: "1700000000.000100",
@@ -471,6 +475,51 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       .resolves.toMatchObject({ status: 403 });
     await expect(ingress.receiveInteractivity("route_1", action(bind, "bind", "U_ADMIN")))
       .resolves.toMatchObject({ status: 200 });
+    const publicationApproval = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.publication.v1"] as const, requestId: "request_publication",
+      organizationId: "org_a", runnerId: "runner_1", runId: "run_1",
+      ownershipId: "ownership_1", ownershipDigest: digest("ownership"),
+      candidateId: "candidate_1", candidateDigest: digest("candidate"),
+      approvalId: "approval_1", approvedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString() };
+    const publication = await issue("action_publication", ["publication_approve"], "publication",
+      { publicationApproval });
+    await expect(ingress.receiveInteractivity("route_1",
+      action(publication, "publication_approve", "U_MEMBER")))
+      .resolves.toMatchObject({ status: 403 });
+    await expect(ingress.receiveInteractivity("route_1",
+      action(publication, "publication_approve", "U_APPROVER")))
+      .resolves.toMatchObject({ status: 200 });
+    expect(publicationApprove).toHaveBeenCalledWith({ ...publicationApproval,
+      approverId: "U_APPROVER" });
+    await issue("projection_status_source", ["status"], "status");
+    await issue("projection_cancel_source", ["cancel"], "cancel");
+    await issue("projection_publication_source", ["publication_approve", "publication_reject"],
+      "publication", { publicationApproval });
+    const projectedControls = await ingress.issueProjectionControls({
+      organizationId: "org_a", runId: "run_1", generation: 1 });
+    expect(projectedControls.map((control) => control.kind)).toEqual(expect.arrayContaining([
+      "status", "cancel", "publication_approve", "publication_reject"]));
+    const staleControls = [
+      [await issue("stale_status", ["status"], "status"), "status", "U_MEMBER"],
+      [await issue("stale_cancel", ["cancel"], "cancel"), "cancel", "U_REQUESTER"],
+      [await issue("stale_approve", ["allow_once"], "approval"), "allow_once", "U_APPROVER"],
+      [await issue("stale_reject", ["deny"], "approval"), "deny", "U_APPROVER"],
+      [await issue("stale_publication", ["publication_approve"], "publication",
+        { publicationApproval }), "publication_approve", "U_APPROVER"],
+      [await issue("stale_bind", ["bind"], "bind"), "bind", "U_ADMIN"],
+    ] as const;
+    await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,
+      attempt_id,runner_id,credential_id,fencing_token_digest,lease_expires_at,material_start_state,
+      state,claimed_at,updated_at)
+      VALUES('org_a','run_1',2,'attempt_2','runner_1','credential_1',$1,$2,'open','claimed',$3,$3)`,
+    [digest("fence_2"), new Date(now.getTime() + 60_000), now]);
+    await fixture.pool.query(`UPDATE cp_hosted_run SET current_attempt_number=2,updated_at=$1
+      WHERE organization_id='org_a' AND run_id='run_1'`, [now]);
+    for (const [token, decision, actorId] of staleControls) {
+      await expect(ingress.receiveInteractivity("route_1", action(token, decision, actorId)))
+        .resolves.toMatchObject({ status: 403, body: { error: "slack_action_authority_stale" } });
+    }
     expect(decisions).toEqual(["allow_once", "allow_run"]);
     expect(envelopes).toEqual(expect.arrayContaining([
       expect.objectContaining({ selectedDecision: "allow_once", allowedDecisions: ["allow_once"] }),

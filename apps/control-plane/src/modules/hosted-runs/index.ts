@@ -228,8 +228,9 @@ export type HostedRunCoordinator = {
     organizationId: string | null,
   ): Promise<{ expired: number }>;
   expireQueued(organizationId: string | null): Promise<{ expired: number }>;
-  cancelRun(input: { organizationId: string; runId: string; reason: string }): Promise<
-    { kind: "cancelled" | "terminal" | "missing" }
+  cancelRun(input: { organizationId: string; runId: string; reason: string;
+    expected?: { attemptId: string; attemptNumber: number; fencingTokenDigest: string } }): Promise<
+    { kind: "cancelled" | "terminal" | "missing" | "stale_fence" }
   >;
   invalidate(input: { organizationId: string; sourceVersionRef: string;
     contentIds: string[]; reason: "source_content_deleted"; commandId: string }): Promise<unknown>;
@@ -1568,6 +1569,18 @@ export function createHostedRunCoordinator(input: {
         const run = selected.rows[0];
         if (!run) return { kind: "missing" } as const;
         if (run.terminal_kind) return { kind: "terminal" } as const;
+        if (command.expected) {
+          const attempt = await client.query<HostedAttemptRow>(
+            `SELECT * FROM cp_hosted_attempt WHERE organization_id=$1 AND run_id=$2
+             AND attempt_number=$3 FOR UPDATE`,
+            [command.organizationId, command.runId, run.current_attempt_number]);
+          const current = attempt.rows[0];
+          if (!current || run.current_attempt_number !== command.expected.attemptNumber
+            || current.attempt_id !== command.expected.attemptId
+            || current.fencing_token_digest !== command.expected.fencingTokenDigest) {
+            return { kind: "stale_fence" } as const;
+          }
+        }
         const now = input.clock.now().toISOString();
         await client.query(
           `UPDATE cp_hosted_attempt SET state = 'cancelled', updated_at = $3

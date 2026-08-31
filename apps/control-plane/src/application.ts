@@ -86,9 +86,19 @@ export type ControlPlaneDependencies = {
     };
     runners: RunnerDirectory;
     hosted: HostedRunCoordinator;
+    projections?: { projectRun(input: { organizationId: string; runId: string }): Promise<unknown> };
+    sourceThreadReads?: { authorize(input: { organizationId: string; runId: string;
+      installationId: string; actorId: string }): Promise<boolean> };
     materials?: MaterialActionCoordinator;
     publisher?: PublicationPublisher;
     permissions?: PermissionCoordinator;
+    reader?: {
+      authenticate(token: string): Promise<
+        | { kind: "authenticated"; principal: { organizationId: string; actorId: string; scopes: readonly string[] } }
+        | { kind: "invalid_credential" }
+        | { kind: "insufficient_scope" }
+      >;
+    };
     approver?: {
       authenticate(token: string): Promise<
         | {
@@ -291,8 +301,8 @@ export function createControlPlaneApplication(
 
     app.get("/v1/source-thread-controls/runs/:runId/status", async (context) => {
       const token = bearerToken(context.req.raw);
-      const authentication = token && control.approver
-        ? await control.approver.authenticate(token) : { kind: "invalid_credential" as const };
+      const authentication = token && control.reader
+        ? await control.reader.authenticate(token) : { kind: "invalid_credential" as const };
       if (authentication.kind === "invalid_credential") {
         return context.json(controlError("invalid_credential"), 401);
       }
@@ -301,7 +311,14 @@ export function createControlPlaneApplication(
         return context.json(controlError("insufficient_scope"), 403);
       }
       const organizationId = context.req.query("organizationId");
+      const installationId = context.req.query("installationId");
+      const actorId = context.req.query("actorId");
       if (!organizationId || organizationId !== authentication.principal.organizationId) {
+        return context.json(controlError("missing_or_concealed"), 404);
+      }
+      if (!installationId || !actorId || !control.sourceThreadReads
+        || !await control.sourceThreadReads.authorize({ organizationId,
+          runId: context.req.param("runId"), installationId, actorId })) {
         return context.json(controlError("missing_or_concealed"), 404);
       }
       const projection = await control.hosted.inspect({ organizationId,
@@ -897,7 +914,10 @@ export function createControlPlaneApplication(
         }
         const outcome = await publisher.approve({ ...request,
           approverId: authentication.principal.actorId });
-        if (outcome.kind === "approved" || outcome.kind === "replayed") return context.json(outcome, 200);
+        if (outcome.kind === "approved" || outcome.kind === "replayed") {
+          await control.projections?.projectRun({ organizationId: request.organizationId, runId: request.runId });
+          return context.json(outcome, 200);
+        }
         return context.json(controlError("idempotency_conflict", request.requestId), 409);
       };
       app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", publicationApprovalHandler);
@@ -1051,9 +1071,13 @@ export function createControlPlaneApplication(
             request,
           });
           if (outcome.kind === "accepted") {
+            await control.projections?.projectRun({ organizationId: principal.organizationId,
+              runId: context.req.param("runId") });
             return context.json(outcome.receipt, 201);
           }
           if (outcome.kind === "replayed") {
+            await control.projections?.projectRun({ organizationId: principal.organizationId,
+              runId: context.req.param("runId") });
             return context.json(outcome.receipt, 200);
           }
           return context.json(

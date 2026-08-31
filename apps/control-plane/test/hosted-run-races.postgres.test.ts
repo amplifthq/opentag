@@ -606,6 +606,32 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
       });
   });
 
+  it("fences source-thread cancellation to the exact current Attempt", async () => {
+    now = new Date("2026-08-15T10:05:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_cancel_fenced",
+      suffix: "cancel_fenced", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T11:00:00.000Z" });
+    await service.admit({ runId: "run_cancel_fenced", admission: candidate.admission,
+      policy: candidate.policy });
+    const claim = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_cancel_fenced", requestId: "request_cancel_fenced",
+      credentialId: "credential_race" }) });
+    if (claim.kind !== "claimed") throw new Error("claim failed");
+    await expect(service.cancelRun({ organizationId: "org_race", runId: claim.claim.runId,
+      reason: "stale", expected: { attemptId: "attempt_stale",
+        attemptNumber: claim.claim.attempt.number,
+        fencingTokenDigest: claim.claim.attempt.fencingTokenDigest } }))
+      .resolves.toEqual({ kind: "stale_fence" });
+    await expect(service.inspect({ organizationId: "org_race", runId: claim.claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "assigned" });
+    await expect(service.cancelRun({ organizationId: "org_race", runId: claim.claim.runId,
+      reason: "current", expected: { attemptId: claim.claim.attempt.id,
+        attemptNumber: claim.claim.attempt.number,
+        fencingTokenDigest: claim.claim.attempt.fencingTokenDigest } }))
+      .resolves.toEqual({ kind: "cancelled" });
+  });
+
   it("preserves outcome_unknown and reconciliation identity when deletion follows material start", async () => {
     now = new Date("2026-08-15T12:00:00.000Z");
     const service = coordinator();

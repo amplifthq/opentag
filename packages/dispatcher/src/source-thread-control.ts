@@ -39,7 +39,7 @@ export type SourceThreadProjectionControlReason =
 
 export function authorizeSourceThreadProjectionControl(input: {
   authority: SourceThreadProjectionControlAuthority;
-  control: "status" | "cancel" | "approve" | "reject" | "bind" | "unbind";
+  control: "status" | "cancel" | "approve" | "reject" | "publication_approve" | "publication_reject" | "bind" | "unbind";
   actorId: string;
   generation: number;
 }): { allowed: true } | { allowed: false; reasonCode: SourceThreadProjectionControlReason } {
@@ -52,6 +52,7 @@ export function authorizeSourceThreadProjectionControl(input: {
       ? input.actorId === input.authority.requesterUserId
         || input.authority.operatorUserIds.includes(input.actorId)
       : input.control === "approve" || input.control === "reject"
+        || input.control === "publication_approve" || input.control === "publication_reject"
         ? input.actorId === input.authority.approverUserId
         : input.authority.adminUserIds.includes(input.actorId);
   return allowed ? { allowed: true }

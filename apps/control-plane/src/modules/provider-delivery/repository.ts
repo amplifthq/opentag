@@ -151,6 +151,15 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             AND intent_id<>$1 AND state IN ('pending','leased')
             AND presentation_phase IN ('received','running')`,
           [intent.sideEffectIntentId, sha256("opentag.delivery.superseded.v1"), at, truthKey]);
+        } else if (inserted.rowCount === 1) {
+          const at = now();
+          await client.query(`UPDATE cp_provider_delivery_intent SET state='superseded', revision=revision+1,
+            lease_owner=NULL,lease_expires_at=NULL,lease_fence=NULL,lease_fence_digest=NULL,
+            superseded_by_intent_id=$1,evidence_digest=$2,error_code='delivery_superseded',
+            outcome_recorded_at=$3,updated_at=$3 WHERE current_truth_key=$4
+            AND intent_id<>$1 AND state IN ('pending','leased')
+            AND presentation_phase IN ('received','running')`,
+          [intent.sideEffectIntentId, sha256("opentag.delivery.superseded.v1"), at, truthKey]);
         }
       });
     },

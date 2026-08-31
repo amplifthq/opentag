@@ -24,7 +24,9 @@ export function createControlPlaneSourceThreadAuthority(input: {
     async cancel(command) {
       const authority = envelope(command, undefined, "cancel"); if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
       const result = await input.hosted.cancelRun({ organizationId: authority.organizationId,
-        runId: authority.runId, reason: command.reason });
+        runId: authority.runId, reason: command.reason, expected: {
+          attemptId: authority.attemptId, attemptNumber: authority.attemptNumber,
+          fencingTokenDigest: authority.fencingTokenDigest } });
       return result.kind === "cancelled" || result.kind === "terminal"
         ? { outcome: "completed", value: result }
         : { outcome: "rejected", reason: "run_not_found" };

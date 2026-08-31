@@ -526,11 +526,18 @@ export async function checkSlackIngressSchemaReadiness(
   pool: Pick<MigrationPool, "query">,
 ): Promise<ReadinessResult> {
   try {
-    const result = await pool.query<{ present: boolean }>(
-      `SELECT bool_and(to_regclass(name) IS NOT NULL) AS present
-       FROM unnest($1::text[]) AS required(name)`,
-      [["cp_slack_installation", "cp_slack_action_authority"]],
-    );
+    const result = await pool.query<{ present: boolean }>(`SELECT
+      to_regclass('cp_slack_installation') IS NOT NULL
+      AND to_regclass('cp_slack_action_authority') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
+        AND attname='projection_generation' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
+        AND attname='publication_approval' AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_projection_generation_check' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_publication_shape_check' AND convalidated)
+      AS present`);
     return result.rows[0]?.present
       ? { ready: true }
       : { ready: false, reason: "migrations_pending" };

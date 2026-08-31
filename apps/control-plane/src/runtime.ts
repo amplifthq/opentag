@@ -43,6 +43,7 @@ import { createSourceIngressService } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
+import { createTeamRelayProjectionService } from "./modules/provider-delivery/team-relay-projection.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
 import { SourceAppRegistry, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import { ProviderAdapterRegistry, ProviderSideEffectKernel,
@@ -216,6 +217,7 @@ export function createControlPlaneRuntime(input: {
         jobs,
       })
     : null;
+  let teamRelayProjection: ReturnType<typeof createTeamRelayProjectionService> | null = null;
   const sourceResolutionPort = input.sourceResolutionPort ?? {
     async resolve(command) {
       const context = z.object({
@@ -270,6 +272,8 @@ export function createControlPlaneRuntime(input: {
          WHERE idempotency_key = $1 AND request_digest = $3 AND run_id = $4`,
         [command.idempotencyKey, JSON.stringify(resolution), requestDigest, context.runId],
       );
+      await teamRelayProjection?.projectRun({ organizationId: context.hostedAdmission.organizationId,
+        runId: context.runId });
       return resolution;
     },
   } satisfies SourceResolutionPort;
@@ -300,6 +304,7 @@ export function createControlPlaneRuntime(input: {
   const slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
         jobs, secrets: input.slackSecrets, sourceApps, commandAuthority: slackCommandAuthority,
+        publicationAuthority: { approve: (command) => publisher.approve(command) },
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
   const providerDeliveryKernel = new ProviderSideEffectKernel<object>({
@@ -328,12 +333,15 @@ export function createControlPlaneRuntime(input: {
         ...deliveryRuntimeOwner } }) };
     return { intent, persistedPayload };
   } });
+  teamRelayProjection = createTeamRelayProjectionService({ pool: postgres.pool,
+    hosted, producer: providerDeliveryProducer, clock,
+    ...(slack ? { controls: slack } : {}) });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
     preloadSourceApps: async () => {
       const preload = await slack?.preloadSourceApps();
       return { registered: sourceApps.deliveryAuthorities().length,
         healthy: sourceApps.deliveryAuthorities(), failures: preload?.failures ?? [] };
-    }, clock });
+    }, clock, onDeliveryResult: (intentId) => teamRelayProjection!.projectDeliveryIntent(intentId) });
   const jobHandlers = {
     "hosted-attempt-reconciliation": async (job: { organizationId: string | null }) => {
       const queued = await hosted.expireQueued(job.organizationId);
@@ -430,6 +438,27 @@ export function createControlPlaneRuntime(input: {
       materials,
       publisher,
       permissions,
+      projections: teamRelayProjection,
+      sourceThreadReads: { async authorize(command) {
+        const result = await postgres.pool.query(`SELECT 1 FROM cp_hosted_run run
+          JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id
+            AND slack.installation_id=$3
+            AND run.source_version_ref LIKE 'slack:' || slack.team_id || ':' || slack.channel_id || ':%'
+          WHERE run.organization_id=$1 AND run.run_id=$2 AND $4=ANY(slack.member_user_ids) LIMIT 1`,
+        [command.organizationId, command.runId, command.installationId, command.actorId]);
+        return result.rowCount === 1;
+      } },
+      reader: {
+        async authenticate(token) {
+          const outcome = await identity.authenticateApiKey(token);
+          if (outcome.kind !== "authenticated") return outcome;
+          return { kind: "authenticated" as const, principal: {
+            organizationId: outcome.principal.organizationId,
+            actorId: outcome.principal.apiKeyId,
+            scopes: outcome.principal.scopes,
+          } };
+        },
+      },
       approver: {
         async authenticate(token) {
           const outcome = await identity.authenticateApiKey(token);
@@ -476,6 +505,7 @@ export function createControlPlaneRuntime(input: {
     providerDeliveryProducer,
     providerDeliveryRepository,
     providerDeliveryWorker,
+    teamRelayProjection,
     reads,
     runners,
     sourceContent,
