@@ -189,6 +189,7 @@ const BusinessDeliveryIntentV2Schema = z
     presentationDigest: digest,
     statusMessageId: safeId.optional(),
     projectionRevision: positiveInteger.optional(),
+    projectionPurpose: z.enum(['external','anchor_create','anchor_update']).optional(),
   })
   .strict()
   .superRefine(assertBusinessEnvelope);

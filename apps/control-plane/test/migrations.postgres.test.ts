@@ -50,7 +50,7 @@ async function createActualUnversionedFixture(
   mutation: HistoricalCandidateMutation = {},
 ) {
   const fixture = await createIsolatedPostgres();
-  await runMigrations(fixture.pool, fixture.migrations.slice(0, -5));
+  await runMigrations(fixture.pool, fixture.migrations.slice(0, -6));
   const now = new Date("2026-08-15T07:00:00.000Z");
   const runners = createRunnerDirectory({ pool: fixture.pool,
     clock: { now: () => now }, tokenFactory: () => "runtime_malformed_secret",
@@ -166,6 +166,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0015_slack_projection_authority.sql",
       "0016_projection_outbox_control_family.sql",
       "0017_projection_authority_hardening.sql",
+      "0018_projection_event_anchor_wakeup.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -241,7 +242,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("revokes pre-0017 publication-reject authority without harming approve", async () => {
     const legacy = await createIsolatedPostgres();
     try {
-      await runMigrations(legacy.pool, legacy.migrations.slice(0,-1));
+      await runMigrations(legacy.pool, legacy.migrations.slice(0,-2));
       await legacy.pool.query("SET session_replication_role=replica");
       await legacy.pool.query(`INSERT INTO cp_slack_action_authority(
         organization_id,action_id,action_token_hash,installation_id,binding_id,team_id,app_id,
@@ -496,7 +497,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades a fully applied 0012 schema through checked-in publication migrations", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -5));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -6));
       expect((await upgrade.pool.query(
         "SELECT to_regclass('cp_publication_candidate') AS relation",
       )).rows).toEqual([{ relation: null }]);
@@ -511,7 +512,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades the exact b1f954dd unversioned immutable table with a durably accepted row", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -5));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -6));
       const now = new Date("2026-08-15T07:00:00.000Z");
       const runners = createRunnerDirectory({ pool: upgrade.pool,
         clock: { now: () => now }, tokenFactory: () => "runtime_upgrade_secret",
@@ -608,7 +609,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("aborts unversioned Candidate reconciliation with a stable operator-action reason", async () => {
     const unsupported = await createIsolatedPostgres();
     try {
-      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -5));
+      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -6));
       await unsupported.pool.query(
         "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES('org_orphan','Orphan',clock_timestamp())");
       await unsupported.pool.query(`

@@ -34,9 +34,7 @@ export function createControlPlaneSourceThreadAuthority(input: {
     async approve(command) {
       const authority = envelope(command, command.requestId, command.decision);
       if (!authority) return { outcome: "rejected", reason: "authority_invalid" };
-      if (command.decision === "allow_run") {
-        return { outcome: "rejected", reason: "allow_run_not_supported" };
-      }
+      if(command.decision==="allow_run")return {outcome:"rejected",reason:"allow_run_not_supported"};
       const result = await input.permissions.resolve({ principal: {
         organizationId: authority.organizationId, actorId: command.actor.id },
         runnerId: authority.runnerId, authorityAttemptEpoch: authority.attemptEpoch, decision: {

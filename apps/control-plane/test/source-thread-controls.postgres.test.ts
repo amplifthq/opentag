@@ -6,6 +6,7 @@ import { createIdentityModule, createLoginThrottleKeyFactory } from "../src/modu
 import { createTeamRelayProjectionService } from "../src/modules/provider-delivery/team-relay-projection.js";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
 import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor } from "@opentag/delivery-contract";
+import { createControlPlaneSourceThreadAuthority } from "../src/modules/slack-ingress/authority.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`;
@@ -175,6 +176,26 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
       kind: "delivered", recovered: 0, failures: [], result: settlement,
       providerDelivery: { state: "outcome_unknown", reasonCode: "delivery_restart_after_begin" },
     });
+  });
+
+  it("keeps status nonterminal before canonical allow_run unsupported rejection",async()=>{
+    const resolve=vi.fn();
+    const authority=createControlPlaneSourceThreadAuthority({hosted:{
+      inspect:async()=>({status:"waiting_for_approval"}),cancelRun:async()=>({kind:"cancelled"})
+    } as never,permissions:{resolve} as never,clock:{now:()=>new Date("2026-09-01T00:00:00.000Z")}});
+    const envelope=(selectedDecision:"status"|"allow_run")=>({organizationId:"org_1",
+      installationId:"install_1",bindingId:"binding_1",sourceThreadId:"C1:1",runId:"run_1",
+      pendingRequestId:"permission_1",approvalEpoch:"1",runnerId:"runner_1",attemptId:"attempt_1",
+      attemptNumber:1,attemptEpoch:1,fencingTokenDigest:digest("f"),permissionRequestDigest:digest("a"),
+      actionId:"action_1",actionDescriptorDigest:digest("b"),frozenCeilingDigest:digest("c"),
+      policyDigest:digest("d"),actionTokenIdentity:digest("e"),selectedDecision,
+      allowedDecisions:[selectedDecision]});
+    await expect(authority.status({type:"status",commandId:"status_1",actor:{provider:"slack",id:"U"},
+      authority:envelope("status")})).resolves.toMatchObject({outcome:"completed"});
+    await expect(authority.approve({type:"approve",commandId:"allow_run_1",actor:{provider:"slack",id:"U"},
+      requestId:"permission_1",decision:"allow_run",authority:envelope("allow_run")}))
+      .resolves.toEqual({outcome:"rejected",reason:"allow_run_not_supported"});
+    expect(resolve).not.toHaveBeenCalled();
   });
 
   it("projects a stored Run and delivery into one queued Slack status anchor", async () => {

@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
   domainSeparatedCanonicalBytes, type DeliveryBegin,
   type DeliveryClaim, type DeliveryErrorCode, type DeliveryIntentV2,
+  type DeliveryExternalResourceLookupDescriptor,
   type DeliveryPayloadEnvelope, type DeliverySettlement, type DeliverySettlementInput,
   type ExpectedDeliveryOwner, type StoredDeliveryIntent } from "@opentag/delivery-contract";
 import type { DeliveryKernelRepository } from "@opentag/delivery-runtime";
@@ -12,6 +13,7 @@ type Row = { intent_id: string; journal_intent_digest: string; intent: unknown; 
   organization_id: string;
   payload_digest: string; presentation_phase: string; current_truth_key: string;
   projection_revision: number | null;
+  projection_purpose: string;
   state: string; revision: number; sequence: number; provider_id: string; provider_instance_id: string;
   provider_binding_digest: string; provider_config_generation: number;
   provider_config_generation_digest: string; runtime_owner_id: string; runtime_generation: number;
@@ -27,6 +29,38 @@ const terminal = new Set(["accepted", "rejected", "outcome_unknown", "attention"
 const errorCodes = new Set<string>(DELIVERY_ERROR_CODES);
 const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const jsonValue = (value: unknown) => JSON.parse(JSON.stringify(value ?? null)) as unknown;
+
+export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
+  input: DeliveryExternalResourceLookupDescriptor) {
+  const result=await pool.query<{ state:string;intent_id:string;external_resource_id:string|null;
+    external_resource_digest:string|null }>(`SELECT state,intent_id,external_resource_id,external_resource_digest
+    FROM cp_provider_delivery_intent WHERE intent->'provenance'->>'kind'='business'
+      AND organization_id=$1 AND intent->>'operation'='create' AND run_id=$2 AND status_message_id=$3
+      AND scope_kind=$4 AND scope_id=$5 AND intent->>'targetDigest'=$6 AND provider_id=$7
+      AND provider_instance_id=$8 AND provider_binding_digest=$9
+      AND intent->'providerBinding'->>'providerPrincipalDigest'=$10
+      AND intent->'providerBinding'->>'principalAssurance'=$11
+      AND provider_config_generation=$12 AND provider_config_generation_digest=$13
+      AND runtime_owner_id=$14 AND runtime_generation=$15 AND schema_generation=$16
+      AND authority_snapshot_digest=$17
+      AND intent->'provenance'->>'repositoryIdentityDigest'=$18
+      AND intent->'provenance'->>'authorityLineageDigest'=$19
+      AND COALESCE(intent->'providerBinding'->>'connectionId','')=COALESCE($20,'')
+      AND COALESCE(intent->'providerBinding'->>'connectionIdDigest','')=COALESCE($21,'')
+      AND state IN ('pending','leased','provider_io_begun','outcome_unknown','accepted')
+      ORDER BY created_at,intent_id LIMIT 3`,[input.organizationId,input.runId,input.statusMessageId,
+    input.scopeKind,input.scopeId,input.targetDigest,input.providerId,input.providerInstanceId,
+    input.providerBindingDigest,input.providerPrincipalDigest,input.principalAssurance,
+    input.providerConfigGeneration,input.providerConfigGenerationDigest,input.runtimeOwnerId,
+    input.runtimeGeneration,input.schemaGeneration,input.authoritySnapshotDigest,
+    input.repositoryIdentityDigest,input.authorityLineageDigest,input.connectionId,input.connectionIdDigest]);
+  const active=result.rows.find((row)=>row.state!=="accepted");
+  if(active)return {outcome:"pending" as const,anchorIntentId:active.intent_id,state:active.state};
+  const accepted=result.rows.filter((row)=>row.state==="accepted"&&row.external_resource_id&&row.external_resource_digest);
+  return accepted.length===0?{outcome:"none" as const}:accepted.length>1?{outcome:"ambiguous" as const}
+    :{outcome:"exact" as const,anchorIntentId:accepted[0]!.intent_id,
+      externalResourceId:accepted[0]!.external_resource_id!,externalResourceDigest:accepted[0]!.external_resource_digest!};
+}
 function payloadEnvelope(value: unknown, intent: DeliveryIntentV2, owner: RelayOwner): DeliveryPayloadEnvelope {
   if (!value || typeof value !== "object") throw new Error("delivery payload envelope invalid");
   const envelope = value as DeliveryPayloadEnvelope;
@@ -114,6 +148,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
         const explicitProjectionRevision = "projectionRevision" in intent
           && intent.projectionRevision !== undefined;
         const projectionRevision = explicitProjectionRevision ? intent.projectionRevision! : 1;
+        const projectionPurpose="projectionPurpose" in intent?intent.projectionPurpose??"external":"external";
         if (intent.provenance.kind === "business" && "projectionRevision" in intent
           && intent.projectionRevision !== undefined) {
           await options.testHooks?.beforeCanonicalLock?.();
@@ -152,10 +187,10 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             presentation_phase,current_truth_key,state,revision,sequence,
             scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
             provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
-            schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
+            schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,projection_purpose,
             deadline_at,created_at,updated_at)
             VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,'pending',1,$10,$11,$12,$13,$14,$15,
-              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$28)
             ON CONFLICT DO NOTHING RETURNING intent_id`,
           [intent.sideEffectIntentId, intent.organizationId, digest, JSON.stringify(intent), JSON.stringify(payload),
             providerPayloadDigest, `postgres-jsonb:${intent.sideEffectIntentId}:${providerPayloadDigest}`,
@@ -166,7 +201,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             options.owner.runtimeGeneration, options.owner.schemaGeneration, intent.authoritySnapshotDigest,
             "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
             intent.provenance.kind === "business" ? intent.provenance.runId : null,
-            projectionRevision, deadline, new Date(intent.createdAt)]);
+            projectionRevision,projectionPurpose,deadline, new Date(intent.createdAt)]);
         const existing = await client.query<Row>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE",
           [intent.sideEffectIntentId]);
@@ -335,33 +370,10 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       return result.rowCount ?? 0;
     },
     async findAcceptedExternalResource(input) {
-      const result = await options.pool.query<{ external_resource_id: string; external_resource_digest: string }>(
-        `SELECT DISTINCT external_resource_id,external_resource_digest FROM cp_provider_delivery_intent
-         WHERE state='accepted' AND intent->'provenance'->>'kind'='business'
-         AND organization_id=$1 AND intent->>'operation'=$2 AND run_id=$3 AND status_message_id=$4
-         AND scope_kind=$5 AND scope_id=$6 AND intent->>'targetDigest'=$7
-         AND provider_id=$8 AND provider_instance_id=$9 AND provider_binding_digest=$10
-         AND intent->'providerBinding'->>'providerPrincipalDigest'=$11
-         AND intent->'providerBinding'->>'principalAssurance'=$12
-         AND provider_config_generation=$13 AND provider_config_generation_digest=$14
-         AND runtime_owner_id=$15 AND runtime_generation=$16 AND schema_generation=$17
-         AND authority_snapshot_digest=$18
-         AND intent->'provenance'->>'repositoryIdentityDigest'=$19
-         AND intent->'provenance'->>'authorityLineageDigest'=$20
-         AND COALESCE(intent->'providerBinding'->>'connectionId','')=COALESCE($21,'')
-         AND COALESCE(intent->'providerBinding'->>'connectionIdDigest','')=COALESCE($22,'')
-         AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL LIMIT 2`,
-      [input.organizationId, input.operation, input.runId, input.statusMessageId,
-        input.scopeKind, input.scopeId, input.targetDigest, input.providerId,
-        input.providerInstanceId, input.providerBindingDigest, input.providerPrincipalDigest,
-        input.principalAssurance, input.providerConfigGeneration,
-        input.providerConfigGenerationDigest, input.runtimeOwnerId, input.runtimeGeneration,
-        input.schemaGeneration, input.authoritySnapshotDigest, input.repositoryIdentityDigest,
-        input.authorityLineageDigest, input.connectionId, input.connectionIdDigest]);
-      return result.rows.length === 0 ? { outcome: "none" } : result.rows.length > 1
-        ? { outcome: "ambiguous" }
-        : { outcome: "exact", externalResourceId: result.rows[0]!.external_resource_id,
-          externalResourceDigest: result.rows[0]!.external_resource_digest };
+      const result=await readExactDeliveryAnchor(options.pool,input);
+      return result.outcome==="exact"?{outcome:"exact" as const,
+        externalResourceId:result.externalResourceId,externalResourceDigest:result.externalResourceDigest}
+        :result.outcome==="ambiguous"?{outcome:"ambiguous" as const}:{outcome:"none" as const};
     },
   };
 }

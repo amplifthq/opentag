@@ -96,6 +96,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const baseline = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_projection",
       sideEffectIntentId: "intent_baseline", causalId: "run_projection", intentKind: "delivery",
       operation: "create", deliveryKind: "message", presentationDigest: digest("baseline"),
+      projectionPurpose:"anchor_create",
       provenance: { kind: "business", repositoryIdentityDigest: digest("repo"), runId: "run_projection",
         authorityLineageDigest: digest("authority") }, providerBinding: { bindingKind: "established",
         providerId: "slack", providerInstanceId: "A1", providerPrincipalDigest: digest("principal"),
@@ -135,6 +136,26 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(requests[0].intent.operation).toBe("update");
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
       channelId: "C1", messageTs: "171.001" });
+    const external=DeliveryIntentV2Schema.parse({...baseline,sideEffectIntentId:"external_rejected",
+      idempotencyKey:"external_rejected",projectionPurpose:"external",
+      presentationDigest:digest("external-rejected"),createdAt:new Date(now.getTime()+1).toISOString()});
+    const externalPayload={...payload,currentTruth:deliveryCurrentTruthDescriptor({intent:external,owner:{
+      organizationId:external.organizationId,providerId:"slack",providerInstanceId:"A1",
+      providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+      providerConfigGenerationDigest:digest("generation"),...owner}})};
+    await repository.recordIntent(external,externalPayload);
+    const externalClaim=(await repository.claimNext())!;
+    const externalRenewed=(await repository.renewLease(externalClaim))!;
+    const externalBegun=(await repository.markBegin({...externalRenewed,
+      installationBeginMarkerId:"external-install",installationBeginMarkerDigest:digest("external-marker"),
+      scopeBeginMarkerId:"external-scope",scopeBeginMarkerDigest:digest("external-marker")}))!;
+    await repository.settleOrReadTerminal({...externalBegun,outcome:"rejected",
+      evidenceDigest:digest("external-evidence"),errorCode:"slack_rejected"});
+    const event=await fixture.pool.query<{delivery_revision:number}>(`SELECT delivery_revision
+      FROM cp_projection_delivery_watermark WHERE intent_id='external_rejected' AND delivery_state='rejected'`);
+    const eventResult=await service.projectRun({organizationId:"org_projection",runId:"run_projection",
+      projectionRevision:1,deliveryEvent:{intentId:"external_rejected",revision:event.rows[0]!.delivery_revision}});
+    expect(eventResult).toMatchObject({kind:"queued",presentation:{providerDelivery:{state:"rejected"}}});
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(
       intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
       presentation_phase,current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,
@@ -159,7 +180,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       digest("duplicate-resource")]);
     await expect(service.projectRun({ organizationId:"org_projection",runId:"run_projection" }))
       .resolves.toMatchObject({kind:"anchor_ambiguous"});
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
   });
 
   it("defers N+1 while the one exact create anchor is still begun", async () => {
@@ -167,6 +188,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const baseline = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_projection",
       sideEffectIntentId: "intent_anchor_begun", causalId: "run_projection", intentKind: "delivery",
       operation: "create", deliveryKind: "message", presentationDigest: digest("begun"), projectionRevision: 1,
+      projectionPurpose:"anchor_create",
       provenance: { kind: "business", repositoryIdentityDigest: digest("repo"), runId: "run_projection",
         authorityLineageDigest: digest("authority") }, providerBinding: { bindingKind: "established",
         providerId: "slack", providerInstanceId: "A1", providerPrincipalDigest: digest("principal"),
@@ -205,11 +227,15 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const deliveryJobs=await fixture.pool.query(`SELECT job_id FROM cp_job
       WHERE state='pending' AND job_kind='team-relay.project'`);
     expect(deliveryJobs.rows).toHaveLength(1);
-    expect(deliveryJobs.rows[0]?.job_id).toMatch(/^team-relay-delivery:/u);
+    expect(deliveryJobs.rows[0]?.job_id).toMatch(/^team-relay-anchor-wake:/u);
+    await service.projectRun({organizationId:"org_projection",runId:"run_projection",projectionRevision:1});
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.intent.operation).toBe("update");
     await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
     const selfIntent=DeliveryIntentV2Schema.parse({...baseline,
       sideEffectIntentId:"intent_projection_self",idempotencyKey:"projection_self",
-      operation:"update",presentationDigest:digest("self"),createdAt:new Date(now.getTime()+2).toISOString()});
+      operation:"update",projectionPurpose:"anchor_update",presentationDigest:digest("self"),
+      createdAt:new Date(now.getTime()+2).toISOString()});
     const selfPayload={...payload,phase:"received" as const,
       currentTruth:deliveryCurrentTruthDescriptor({intent:selfIntent,owner:{
         organizationId:selfIntent.organizationId,providerId:"slack",providerInstanceId:"A1",
@@ -230,6 +256,19 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await insertRun();
     await expect(fixture.pool.query("UPDATE cp_hosted_run SET projection_revision=0 WHERE run_id='run_projection'"))
       .rejects.toThrow();
+    await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(intent_id,organization_id,
+      journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,presentation_phase,
+      current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,provider_id,
+      provider_instance_id,provider_binding_digest,provider_config_generation,
+      provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
+      authority_snapshot_digest,projection_revision,projection_purpose,deadline_at,created_at,updated_at)
+      VALUES('constraint_delivery','org_projection',$1,'{}','{}',$2,'constraint','received',$3,
+      'pending',1,1,'local_repository','repo','constraint','slack','A1',$4,1,$5,'control-plane',1,1,$6,
+      1,'external',$7,$8,$8)`,[digest("journal"),digest("payload"),digest("truth"),digest("binding"),
+      digest("generation"),digest("snapshot"),new Date(now.getTime()+60_000),now]);
+    for(const invalid of [null,0,-1])await expect(fixture.pool.query(
+      "UPDATE cp_provider_delivery_intent SET projection_revision=$1 WHERE intent_id='constraint_delivery'",
+      [invalid])).rejects.toThrow();
     const column = await fixture.pool.query(`SELECT is_nullable FROM information_schema.columns
       WHERE table_schema=current_schema() AND table_name='cp_provider_delivery_intent'
         AND column_name='projection_revision'`);
@@ -276,5 +315,21 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     [{kind:"terminal"},new Date(now.getTime()+2)]);
     release();
     await expect(pending).rejects.toThrow("delivery_projection_revision_stale");
+  });
+
+  it.each([
+    ["same-name trigger on wrong table", `DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent;
+      CREATE TRIGGER cp_delivery_projection_trigger AFTER UPDATE ON cp_job FOR EACH ROW
+      EXECUTE FUNCTION cp_delivery_projection_after()`],
+    ["permissive delivery function body", `CREATE OR REPLACE FUNCTION cp_delivery_projection_after()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+    ["missing positive Run constraint", `ALTER TABLE cp_hosted_run
+      DROP CONSTRAINT cp_hosted_run_projection_revision_check`],
+    ["nullable watermark timestamp", `ALTER TABLE cp_projection_delivery_watermark
+      ALTER COLUMN created_at DROP NOT NULL`],
+  ])("fails readiness for %s",async(_label,sql)=>{
+    await fixture.pool.query(sql);
+    await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({
+      ready:false,reason:"migrations_pending"});
   });
 });

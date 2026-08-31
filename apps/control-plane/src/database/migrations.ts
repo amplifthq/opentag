@@ -563,21 +563,61 @@ export async function checkProjectionSchemaReadiness(
         AND conname='cp_hosted_run_projection_revision_check' AND convalidated)
       AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
         AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
+        AND attname='projection_purpose' AND attnotnull AND NOT attisdropped)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
         AND conname='cp_provider_delivery_projection_revision_check' AND convalidated)
       AND to_regclass('cp_projection_delivery_watermark') IS NOT NULL
-      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_enqueue_team_relay_projection' AND pronargs=3)
-      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_hosted_run_projection_before' AND pronargs=0)
-      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_hosted_run_projection_after' AND pronargs=0)
-      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_related_projection_after' AND pronargs=0)
-      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_delivery_projection_after' AND pronargs=0)
+      AND to_regclass('cp_projection_deferred_revision') IS NOT NULL
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_decisions_check' AND convalidated
+        AND pg_get_constraintdef(oid) LIKE '%publication_approve%'
+        AND pg_get_constraintdef(oid) NOT LIKE '%publication_reject%')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_epoch_check' AND convalidated)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated)
+      AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_delivery_watermark'
+        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='intent_id' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='delivery_state' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='delivery_revision' AND data_type='integer' AND is_nullable='NO')
+          OR (column_name='projection_revision' AND data_type='integer' AND is_nullable='NO')
+          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO')))
+      AND EXISTS(SELECT 1 FROM pg_proc function_row JOIN pg_namespace namespace
+        ON namespace.oid=function_row.pronamespace JOIN pg_language language_row ON language_row.oid=function_row.prolang
+        WHERE namespace.nspname=current_schema() AND function_row.proname='cp_enqueue_team_relay_projection'
+          AND function_row.pronargs=3 AND language_row.lanname='plpgsql'
+          AND pg_get_function_result(function_row.oid)='void'
+          AND pg_get_functiondef(function_row.oid) LIKE '%team-relay.project%')
+      AND EXISTS(SELECT 1 FROM pg_proc function_row JOIN pg_namespace namespace ON namespace.oid=function_row.pronamespace
+        JOIN pg_language language_row ON language_row.oid=function_row.prolang
+        WHERE namespace.nspname=current_schema() AND function_row.proname='cp_delivery_projection_after'
+          AND function_row.pronargs=0 AND language_row.lanname='plpgsql'
+          AND pg_get_function_result(function_row.oid)='trigger'
+          AND pg_get_functiondef(function_row.oid) LIKE '%projection_purpose%anchor_create%'
+          AND pg_get_functiondef(function_row.oid) LIKE '%projection_purpose%anchor_update%'
+          AND pg_get_functiondef(function_row.oid) LIKE '%cp_projection_delivery_watermark%')
       AND (SELECT count(*)=6 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
         JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-        WHERE namespace.nspname=current_schema() AND NOT trigger_row.tgisinternal AND trigger_row.tgname IN (
-        'cp_hosted_run_projection_before_trigger','cp_hosted_run_projection_after_trigger',
-        'cp_permission_projection_trigger','cp_candidate_projection_trigger',
-        'cp_publication_intent_projection_trigger','cp_delivery_projection_trigger')) AS ready`);
+        JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+        WHERE namespace.nspname=current_schema() AND NOT trigger_row.tgisinternal
+          AND trigger_row.tgenabled='O' AND trigger_row.tgqual IS NULL AND (
+          (trigger_row.tgname='cp_hosted_run_projection_before_trigger' AND relation.relname='cp_hosted_run'
+            AND trigger_row.tgtype=19 AND function_row.proname='cp_hosted_run_projection_before') OR
+          (trigger_row.tgname='cp_hosted_run_projection_after_trigger' AND relation.relname='cp_hosted_run'
+            AND trigger_row.tgtype=21 AND function_row.proname='cp_hosted_run_projection_after') OR
+          (trigger_row.tgname='cp_permission_projection_trigger' AND relation.relname='cp_permission_request'
+            AND trigger_row.tgtype=21 AND function_row.proname='cp_related_projection_after') OR
+          (trigger_row.tgname='cp_candidate_projection_trigger' AND relation.relname='cp_publication_candidate'
+            AND trigger_row.tgtype=21 AND function_row.proname='cp_related_projection_after') OR
+          (trigger_row.tgname='cp_publication_intent_projection_trigger' AND relation.relname='cp_publication_intent'
+            AND trigger_row.tgtype=21 AND function_row.proname='cp_related_projection_after') OR
+          (trigger_row.tgname='cp_delivery_projection_trigger' AND relation.relname='cp_provider_delivery_intent'
+            AND trigger_row.tgtype=17 AND function_row.proname='cp_delivery_projection_after'))) AS ready`);
     return result.rows[0]?.ready ? { ready: true }
       : { ready: false, reason: "migrations_pending" };
   } catch { return { ready: false, reason: "migrations_pending" }; }

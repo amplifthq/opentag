@@ -332,7 +332,7 @@ export function createControlPlaneRuntime(input: {
     return { intent, persistedPayload };
   } });
   const teamRelayProjection = createTeamRelayProjectionService({ pool: postgres.pool,
-    hosted, producer: providerDeliveryProducer, clock,
+    hosted, producer: providerDeliveryProducer, clock,deliveryOwner:deliveryRuntimeOwner,
     ...(slack ? { controls: slack } : {}) });
   const providerDeliveryWorker = createProviderDeliveryWorker({ kernel: providerDeliveryKernel,
     preloadSourceApps: async () => {
@@ -352,8 +352,13 @@ export function createControlPlaneRuntime(input: {
     "team-relay.project": async (job: { payload: unknown }) => {
       const payload = z.object({ organizationId: z.string().min(1), runId: z.string().min(1),
         projectionRevision: z.number().int().positive(),
-        deliveryEventId: z.string().min(1).optional() }).strict().parse(job.payload);
-      return teamRelayProjection.projectRun(payload);
+        deliveryIntentId:z.string().min(1).optional(),deliveryRevision:z.number().int().positive().optional()
+      }).strict().superRefine((value,context)=>{
+        if((value.deliveryIntentId===undefined)!==(value.deliveryRevision===undefined))
+          context.addIssue({code:"custom",message:"delivery event identity must be complete"});
+      }).parse(job.payload);
+      return teamRelayProjection.projectRun({...payload,...(payload.deliveryIntentId?{
+        deliveryEvent:{intentId:payload.deliveryIntentId,revision:payload.deliveryRevision!}}:{})});
     },
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };

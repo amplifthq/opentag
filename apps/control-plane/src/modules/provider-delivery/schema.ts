@@ -20,6 +20,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   schemaGeneration: integer("schema_generation").notNull(), authoritySnapshotDigest: text("authority_snapshot_digest").notNull(),
   statusMessageId: text("status_message_id"), runId: text("run_id"),
   projectionRevision: integer("projection_revision").notNull().default(1),
+  projectionPurpose: text("projection_purpose").notNull().default("external"),
   leaseOwner: text("lease_owner"), leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   leaseFence: text("lease_fence"), leaseFenceDigest: text("lease_fence_digest"), installationBeginMarkerId: text("installation_begin_marker_id"),
   installationBeginMarkerDigest: text("installation_begin_marker_digest"), scopeBeginMarkerId: text("scope_begin_marker_id"),
@@ -36,6 +37,8 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   check("cp_provider_delivery_intent_revision_check", sql`${table.revision} > 0 AND ${table.sequence} > 0
     AND ${table.providerConfigGeneration} > 0 AND ${table.runtimeGeneration} > 0 AND ${table.schemaGeneration} > 0`),
   check("cp_provider_delivery_projection_revision_check", sql`${table.projectionRevision} > 0`),
+  check("cp_provider_delivery_projection_purpose_check",
+    sql`${table.projectionPurpose} IN ('external','anchor_create','anchor_update')`),
   check("cp_provider_delivery_intent_state_check", sql`${table.state} IN
     ('pending','leased','provider_io_begun','accepted','rejected','outcome_unknown','attention','superseded')`),
   check("cp_provider_delivery_intent_phase_check", sql`${table.presentationPhase} IN ('received','running','terminal')`),
@@ -115,4 +118,19 @@ export const projectionDeliveryWatermarks = pgTable("cp_projection_delivery_wate
     foreignColumns: [hostedRuns.organizationId,hostedRuns.runId] }),
   check("cp_projection_delivery_watermark_revision_check",
     sql`${table.deliveryRevision}>0 AND ${table.projectionRevision}>0`),
+]);
+
+export const projectionDeferredRevisions = pgTable("cp_projection_deferred_revision", {
+  organizationId:text("organization_id").notNull(),runId:text("run_id").notNull(),
+  projectionRevision:integer("projection_revision").notNull(),anchorIntentId:text("anchor_intent_id").notNull(),
+  state:text("state").notNull(),createdAt:timestamp("created_at",{withTimezone:true}).notNull(),
+  wokenAt:timestamp("woken_at",{withTimezone:true}),
+},(table)=>[
+  primaryKey({columns:[table.organizationId,table.runId,table.projectionRevision]}),
+  foreignKey({columns:[table.organizationId,table.runId],foreignColumns:[hostedRuns.organizationId,hostedRuns.runId]}),
+  check("cp_projection_deferred_revision_revision_check",sql`${table.projectionRevision}>0`),
+  check("cp_projection_deferred_revision_state_check",sql`${table.state} IN ('pending','woken')`),
+  check("cp_projection_deferred_revision_shape_check",sql`
+    (${table.state}='pending' AND ${table.wokenAt} IS NULL)
+    OR (${table.state}='woken' AND ${table.wokenAt} IS NOT NULL)`),
 ]);
