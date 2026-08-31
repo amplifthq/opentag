@@ -31,7 +31,7 @@ import {
 } from "@opentag/control-protocol";
 import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { ZodError } from "zod";
@@ -288,6 +288,27 @@ export function createControlPlaneApplication(
 
   if (dependencies.control) {
     const control = dependencies.control;
+
+    app.get("/v1/source-thread-controls/runs/:runId/status", async (context) => {
+      const token = bearerToken(context.req.raw);
+      const authentication = token && control.approver
+        ? await control.approver.authenticate(token) : { kind: "invalid_credential" as const };
+      if (authentication.kind === "invalid_credential") {
+        return context.json(controlError("invalid_credential"), 401);
+      }
+      if (authentication.kind === "insufficient_scope"
+        || !authentication.principal.scopes.includes("run:read")) {
+        return context.json(controlError("insufficient_scope"), 403);
+      }
+      const organizationId = context.req.query("organizationId");
+      if (!organizationId || organizationId !== authentication.principal.organizationId) {
+        return context.json(controlError("missing_or_concealed"), 404);
+      }
+      const projection = await control.hosted.inspect({ organizationId,
+        runId: context.req.param("runId") });
+      return projection ? context.json(projection, 200)
+        : context.json(controlError("missing_or_concealed"), 404);
+    });
 
     app.post("/v1/runners", async (context) => {
       const token = bearerToken(context.req.raw);
@@ -858,7 +879,7 @@ export function createControlPlaneApplication(
         return context.json(controlError("idempotency_conflict", request.requestId), 409);
       });
 
-      app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", async (context) => {
+      const publicationApprovalHandler = async (context: Context) => {
         let request: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>;
         try { request = HumanPublicationApprovalV1Schema.parse(await context.req.json()); }
         catch { return context.json(controlError("invalid_request_body"), 400); }
@@ -878,7 +899,10 @@ export function createControlPlaneApplication(
           approverId: authentication.principal.actorId });
         if (outcome.kind === "approved" || outcome.kind === "replayed") return context.json(outcome, 200);
         return context.json(controlError("idempotency_conflict", request.requestId), 409);
-      });
+      };
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", publicationApprovalHandler);
+      app.post("/v1/source-thread-controls/runners/:runnerId/runs/:runId/publication/approve",
+        publicationApprovalHandler);
 
       app.post("/v1/runners/:runnerId/runs/:runId/publication/claim", async (context) => {
         const principal = await runtimePrincipal(context.req.raw);

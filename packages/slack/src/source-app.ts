@@ -10,9 +10,11 @@ import { verifySlackSignature, verifySlackTimestamp } from "./ingress.js";
 import { normalizeSlackChannelMessage } from "./normalize.js";
 import { createSlackActionReceiptBlocks, createSlackApprovalPromptBlocks,
   createSlackDoctorSummaryBlocks, createSlackFinalSummaryBlocks, createSlackRunStatusBlocks,
-  createSlackSourceThreadStatusBlocks, renderSlackActionReceiptPresentation,
+  createSlackSourceThreadStatusBlocks, createSlackTeamRelayProjectionBlocks,
+  renderSlackActionReceiptPresentation,
   renderSlackApprovalPrompt, renderSlackFinalSummaryPresentation,
-  renderSlackRunStatusPresentation, type SlackBlock } from "./render.js";
+  renderSlackRunStatusPresentation, renderSlackTeamRelayProjection,
+  type SlackBlock } from "./render.js";
 
 type SlackNativeRequest = { operation: SlackDeliveryOperation; presentation: SlackDeliveryPresentation };
 type VerifiedSlackInput = { payload: unknown; verifiedAt: string; evidenceDigest: string };
@@ -33,10 +35,12 @@ function render(command: OpenTagChannelPresentationCommand): SlackDeliveryPresen
     case "final_summary": text = renderSlackFinalSummaryPresentation(presentation); blocks = createSlackFinalSummaryBlocks(presentation); break;
     case "doctor_summary": text = presentation.title; blocks = createSlackDoctorSummaryBlocks(presentation); break;
     case "source_thread_status": text = presentation.title; blocks = createSlackSourceThreadStatusBlocks(presentation); break;
+    case "source_thread_projection": text = renderSlackTeamRelayProjection(presentation); blocks = createSlackTeamRelayProjectionBlocks(presentation); break;
     case "action_receipt": text = renderSlackActionReceiptPresentation(presentation); blocks = createSlackActionReceiptBlocks(presentation); break;
     default: text = "OpenTag update";
   }
-  const certifiedBlocks = blocks?.filter((block) => block.type !== "actions");
+  const certifiedBlocks = presentation.kind === "source_thread_projection"
+    ? blocks : blocks?.filter((block) => block.type !== "actions");
   return { kind: "message", text, textFormat: "mrkdwn",
     ...(certifiedBlocks?.length ? { blocks: certifiedBlocks } : {}) };
 }

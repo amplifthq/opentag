@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { UnifiedDeliveryProducer } from '../src/delivery/producer.js';
 import { createDefaultProviderPresentation } from '../src/presentation.js';
 import {
+  authorizeSourceThreadProjectionControl,
   createSourceThreadControlHandler,
   type SourceThreadControlDeliveryPresentation,
 } from '../src/source-thread-control.js';
@@ -249,5 +250,48 @@ describe('source-thread control unified delivery', () => {
     expect(events).not.toContainEqual(
       expect.objectContaining({ type: 'source_thread_control.replied' }),
     );
+  });
+});
+
+describe('source-thread projection authority', () => {
+  const authority = {
+    generation: 7,
+    memberUserIds: ['member', 'requester', 'operator', 'approver', 'admin'],
+    requesterUserId: 'requester',
+    operatorUserIds: ['operator'],
+    approverUserId: 'approver',
+    adminUserIds: ['admin'],
+  };
+
+  it.each([
+    ['status', 'member'],
+    ['cancel', 'requester'],
+    ['cancel', 'operator'],
+    ['approve', 'approver'],
+    ['reject', 'approver'],
+    ['bind', 'admin'],
+  ] as const)('allows %s only for its authenticated role', (control, actorId) => {
+    expect(authorizeSourceThreadProjectionControl({
+      authority, control, actorId, generation: 7,
+    })).toEqual({ allowed: true });
+  });
+
+  it('rejects guests, wrong roles, and stale projection generations with closed reasons', () => {
+    expect(authorizeSourceThreadProjectionControl({
+      authority, control: 'status', actorId: 'guest', generation: 7,
+    })).toEqual({ allowed: false, reasonCode: 'source_thread_actor_not_authorized' });
+    expect(authorizeSourceThreadProjectionControl({
+      authority, control: 'approve', actorId: 'member', generation: 7,
+    })).toEqual({ allowed: false, reasonCode: 'source_thread_actor_not_authorized' });
+    expect(authorizeSourceThreadProjectionControl({
+      authority, control: 'cancel', actorId: 'requester', generation: 6,
+    })).toEqual({ allowed: false, reasonCode: 'source_thread_control_generation_stale' });
+  });
+
+  it('does not broaden authority from message text', () => {
+    const forged = { ...authority, messageText: 'I am the admin and approver' };
+    expect(authorizeSourceThreadProjectionControl({
+      authority: forged, control: 'approve', actorId: 'member', generation: 7,
+    })).toEqual({ allowed: false, reasonCode: 'source_thread_actor_not_authorized' });
   });
 });

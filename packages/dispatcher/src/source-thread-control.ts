@@ -24,6 +24,40 @@ import type { PresentedProviderBody, ProviderPresentation } from "./presentation
 
 type OpenTagRepository = ReturnType<typeof createOpenTagRepository>;
 
+export type SourceThreadProjectionControlAuthority = {
+  generation: number;
+  memberUserIds: readonly string[];
+  requesterUserId?: string;
+  operatorUserIds: readonly string[];
+  approverUserId?: string;
+  adminUserIds: readonly string[];
+};
+
+export type SourceThreadProjectionControlReason =
+  | "source_thread_control_generation_stale"
+  | "source_thread_actor_not_authorized";
+
+export function authorizeSourceThreadProjectionControl(input: {
+  authority: SourceThreadProjectionControlAuthority;
+  control: "status" | "cancel" | "approve" | "reject" | "bind" | "unbind";
+  actorId: string;
+  generation: number;
+}): { allowed: true } | { allowed: false; reasonCode: SourceThreadProjectionControlReason } {
+  if (input.generation !== input.authority.generation) {
+    return { allowed: false, reasonCode: "source_thread_control_generation_stale" };
+  }
+  const allowed = input.control === "status"
+    ? input.authority.memberUserIds.includes(input.actorId)
+    : input.control === "cancel"
+      ? input.actorId === input.authority.requesterUserId
+        || input.authority.operatorUserIds.includes(input.actorId)
+      : input.control === "approve" || input.control === "reject"
+        ? input.actorId === input.authority.approverUserId
+        : input.authority.adminUserIds.includes(input.actorId);
+  return allowed ? { allowed: true }
+    : { allowed: false, reasonCode: "source_thread_actor_not_authorized" };
+}
+
 export type SourceThreadControlDeliveryPresentation = PresentedProviderBody & {
   kind: "source_thread_control";
   request: SourceThreadControlActionRequest;

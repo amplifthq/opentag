@@ -104,6 +104,39 @@ export const OpenTagSourceThreadStatusPresentationSchema = z.object({
   detailHint: z.string().min(1).optional()
 });
 
+export const OpenTagSourceThreadProjectionPresentationSchema = z.object({
+  kind: z.literal("source_thread_projection"),
+  runId: CredentialSafePresentationTextSchema,
+  generation: z.number().int().positive(),
+  state: z.enum(["waiting_for_runner", "assigned", "running", "waiting_for_approval",
+    "publication_pending", "proposal_ready", "ready_for_review", "failed", "cancelled",
+    "interrupted", "timed_out"]),
+  title: CredentialSafePresentationTextSchema,
+  summary: CredentialSafePresentationTextSchema,
+  runOutcome: z.enum(["pending", "succeeded", "failed", "cancelled", "interrupted", "timed_out"]),
+  controls: z.array(z.object({
+    kind: z.enum(["status", "cancel", "approve", "reject"]),
+    actionId: CredentialSafePresentationTextSchema,
+    generation: z.number().int().positive()
+  }).strict()).max(4),
+  providerDelivery: z.object({
+    state: z.enum(["pending", "accepted", "rejected", "outcome_unknown", "attention"]),
+    reasonCode: z.enum(["provider_adapter_not_registered", "delivery_request_preparation_failed",
+      "delivery_request_digest_mismatch", "delivery_payload_custody_unavailable",
+      "provider_binding_mismatch", "invalid_delivery_shape", "provider_5xx",
+      "malformed_response", "slack_rejected", "ambiguous_response", "deadline_exceeded",
+      "transport_error", "provider_delivery_timeout", "provider_delivery_exception",
+      "provider_result_invalid", "delivery_settlement_stale", "delivery_restart_after_begin",
+      "delivery_deadline_exceeded", "delivery_superseded"]).optional(),
+    message: CredentialSafePresentationTextSchema
+  }).strict().optional()
+}).strict().superRefine((value, context) => {
+  value.controls.forEach((control, index) => {
+    if (control.generation !== value.generation) context.addIssue({ code: "custom",
+      path: ["controls", index, "generation"], message: "source_thread_control_generation_stale" });
+  });
+});
+
 export const OpenTagActionReceiptPresentationSchema = z.object({
   kind: z.literal("action_receipt"),
   title: z.string().min(1),
@@ -149,6 +182,7 @@ export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
   OpenTagApprovalPromptPresentationSchema,
   OpenTagDoctorSummaryPresentationSchema,
   OpenTagSourceThreadStatusPresentationSchema,
+  OpenTagSourceThreadProjectionPresentationSchema,
   OpenTagActionReceiptPresentationSchema,
   OpenTagProposalReadyPresentationSchema,
   OpenTagFinalSummaryPresentationSchema
@@ -162,6 +196,7 @@ export type OpenTagDoctorSummaryPresentation = z.infer<typeof OpenTagDoctorSumma
 export type OpenTagSourceThreadStatusRun = z.infer<typeof OpenTagSourceThreadStatusRunSchema>;
 export type OpenTagSourceThreadQueuedFollowUp = z.infer<typeof OpenTagSourceThreadQueuedFollowUpSchema>;
 export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSourceThreadStatusPresentationSchema>;
+export type OpenTagSourceThreadProjectionPresentation = z.infer<typeof OpenTagSourceThreadProjectionPresentationSchema>;
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
 export type OpenTagProposalReadyPresentation = z.infer<typeof OpenTagProposalReadyPresentationSchema>;
@@ -170,10 +205,16 @@ export type OpenTagPresentationDeliveryTier = "silent" | "status" | "attention_r
 
 export function presentationDeliveryTier(presentation: OpenTagPresentation): OpenTagPresentationDeliveryTier {
   if (presentation.kind === "final_summary"
-    || (presentation.kind === "publication_candidate" && presentation.state === "proposal_ready")) {
+    || (presentation.kind === "publication_candidate" && presentation.state === "proposal_ready")
+    || (presentation.kind === "source_thread_projection"
+      && ["proposal_ready", "ready_for_review", "failed", "cancelled", "interrupted", "timed_out"].includes(presentation.state))) {
     return "terminal";
   }
   if (presentation.kind === "publication_candidate") return "attention_required";
+  if (presentation.kind === "source_thread_projection") {
+    return presentation.state === "waiting_for_approval" || presentation.state === "publication_pending"
+      ? "attention_required" : "status";
+  }
   if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
   if (presentation.kind === "run_status") {
     if (presentation.detailVisibility === "audit") return "silent";
@@ -623,6 +664,11 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
         ? ["Exact approval and publication evidence are still required."] : []),
       "No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.",
     ].join("\n");
+  }
+  if (presentation.kind === "source_thread_projection") {
+    return [presentation.title, presentation.summary, `Run: ${presentation.runId}`,
+      ...(presentation.providerDelivery ? [`Provider delivery: ${presentation.providerDelivery.message}`] : [])]
+      .join("\n");
   }
   return [
     `Finished: ${presentation.outcome}`,

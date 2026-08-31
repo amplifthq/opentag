@@ -1,6 +1,7 @@
 import {
   createFinalSummaryPresentation,
   createRunStatusPresentation,
+  OpenTagSourceThreadProjectionPresentationSchema,
   platformCapabilityForProvider,
   renderOpenTagPresentationPlainText,
   shouldDeliverProgressPresentation,
@@ -13,6 +14,7 @@ import {
   type OpenTagPresentation,
   type OpenTagRunResult,
   type OpenTagRunStatusPresentation,
+  type OpenTagSourceThreadProjectionPresentation,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
 import { renderAcknowledgement, renderFinalSummaryPresentation, renderProgress } from "@opentag/github";
@@ -45,12 +47,14 @@ import {
   createSlackFinalSummaryBlocks,
   createSlackRunStatusBlocks,
   createSlackSourceThreadStatusBlocks,
+  createSlackTeamRelayProjectionBlocks,
   markdownToSlackMrkdwn,
   renderSlackActionReceiptPresentation,
   renderSlackApprovalPrompt,
   renderSlackAcknowledgement,
   renderSlackFinalSummaryPresentation,
   renderSlackRunStatusPresentation,
+  renderSlackTeamRelayProjection,
   type SlackBlock
 } from "@opentag/slack";
 import {
@@ -64,6 +68,47 @@ import {
 export type LarkRenderLocale = "en-US" | "zh-CN";
 
 export type PresentedProviderBody = { body: string; blocks?: SlackBlock[]; rich?: { provider: string; payload: unknown } };
+
+type TeamRelayState = OpenTagSourceThreadProjectionPresentation["state"];
+const TEAM_RELAY_COPY: Record<TeamRelayState, { title: string; summary: string;
+  runOutcome: OpenTagSourceThreadProjectionPresentation["runOutcome"] }> = {
+  waiting_for_runner: { title: "Waiting for your paired Runner",
+    summary: "OpenTag will start automatically if the paired Runner becomes eligible before the claim deadline.", runOutcome: "pending" },
+  assigned: { title: "Assigned", summary: "A paired Runner has claimed this Run.", runOutcome: "pending" },
+  running: { title: "Running", summary: "The paired Runner has reported a current running receipt.", runOutcome: "pending" },
+  waiting_for_approval: { title: "Waiting for approval", summary: "An exact current action needs approval before execution can continue.", runOutcome: "pending" },
+  publication_pending: { title: "Publication approval required", summary: "The governed Candidate is ready, but publication has not been approved or observed.", runOutcome: "pending" },
+  proposal_ready: { title: "Proposal ready", summary: "The governed proposal is complete. No publication is claimed.", runOutcome: "succeeded" },
+  ready_for_review: { title: "Ready for review", summary: "The exact draft pull request publication was observed.", runOutcome: "succeeded" },
+  failed: { title: "Failed", summary: "The Run failed under its completion contract.", runOutcome: "failed" },
+  cancelled: { title: "Cancelled", summary: "The Run was cancelled and cannot be revived by this projection.", runOutcome: "cancelled" },
+  interrupted: { title: "Interrupted", summary: "The Run was interrupted; unresolved effects remain governed separately.", runOutcome: "interrupted" },
+  timed_out: { title: "Timed out", summary: "The Run reached its canonical deadline.", runOutcome: "timed_out" }
+};
+
+export function composeTeamRelayThreadProjection(input: {
+  runId: string; generation: number; state: TeamRelayState;
+  controls: OpenTagSourceThreadProjectionPresentation["controls"];
+  providerDelivery?: { state: "pending" | "accepted" | "rejected" | "outcome_unknown" | "attention";
+    reasonCode?: NonNullable<OpenTagSourceThreadProjectionPresentation["providerDelivery"]>["reasonCode"] };
+}): OpenTagSourceThreadProjectionPresentation {
+  const copy = TEAM_RELAY_COPY[input.state];
+  const deliveryMessage = input.providerDelivery?.state === "outcome_unknown"
+    ? "Slack status delivery outcome is unknown."
+    : input.providerDelivery?.state === "attention" || input.providerDelivery?.state === "rejected"
+      ? "Slack status delivery needs attention."
+      : input.providerDelivery?.state === "pending" ? "Slack status delivery is pending."
+        : input.providerDelivery?.state === "accepted" ? "Slack status delivery was accepted." : undefined;
+  return OpenTagSourceThreadProjectionPresentationSchema.parse({
+    kind: "source_thread_projection", runId: input.runId, generation: input.generation,
+    state: input.state, ...copy, controls: input.controls,
+    ...(input.providerDelivery && deliveryMessage ? { providerDelivery: {
+      state: input.providerDelivery.state,
+      ...(input.providerDelivery.reasonCode ? { reasonCode: input.providerDelivery.reasonCode } : {}),
+      message: deliveryMessage
+    } } : {})
+  });
+}
 
 export type ProviderPresentation = {
   shouldDeliverAcknowledgement(provider: string): boolean;
@@ -354,6 +399,13 @@ export function createDefaultProviderPresentation(): ProviderPresentation {
       }
       if (input.presentation.kind === "source_thread_status") {
         return renderSourceThreadStatus(input.provider, input.presentation);
+      }
+      if (input.presentation.kind === "source_thread_projection") {
+        if (input.provider === "slack") return {
+          body: renderSlackTeamRelayProjection(input.presentation),
+          blocks: createSlackTeamRelayProjectionBlocks(input.presentation)
+        };
+        return { body: renderOpenTagPresentationPlainText(input.presentation) };
       }
       if (input.presentation.kind === "action_receipt") {
         return renderActionReceipt(input.provider, input.presentation, {

@@ -21,7 +21,10 @@ export function createProviderDeliveryWorker(input: { kernel: Kernel;
     catch { return { kind: "preload_unavailable" as const, recovered }; }
     const result = await input.kernel.deliverNext({ authorities: preload.healthy });
     return result === null ? { kind: "empty" as const, recovered, failures: preload.failures }
-      : { kind: "delivered" as const, recovered, failures: preload.failures, result };
+      : { kind: "delivered" as const, recovered, failures: preload.failures, result,
+          providerDelivery: { state: result.outcome,
+            ...("errorCode" in result && result.errorCode
+              ? { reasonCode: result.errorCode } : {}) } };
   } };
 }
 
