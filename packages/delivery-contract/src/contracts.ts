@@ -190,6 +190,7 @@ const BusinessDeliveryIntentV2Schema = z
     statusMessageId: safeId.optional(),
     projectionRevision: positiveInteger.optional(),
     projectionPurpose: z.enum(['external','anchor_create','anchor_update']).optional(),
+    projectionEventSequence: z.number().int().nonnegative().optional(),
   })
   .strict()
   .superRefine(assertBusinessEnvelope);

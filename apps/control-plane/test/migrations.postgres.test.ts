@@ -50,7 +50,7 @@ async function createActualUnversionedFixture(
   mutation: HistoricalCandidateMutation = {},
 ) {
   const fixture = await createIsolatedPostgres();
-  await runMigrations(fixture.pool, fixture.migrations.slice(0, -6));
+  await runMigrations(fixture.pool, fixture.migrations.slice(0, -7));
   const now = new Date("2026-08-15T07:00:00.000Z");
   const runners = createRunnerDirectory({ pool: fixture.pool,
     clock: { now: () => now }, tokenFactory: () => "runtime_malformed_secret",
@@ -167,6 +167,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0016_projection_outbox_control_family.sql",
       "0017_projection_authority_hardening.sql",
       "0018_projection_event_anchor_wakeup.sql",
+      "0019_projection_event_sequence.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -242,7 +243,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("revokes pre-0017 publication-reject authority without harming approve", async () => {
     const legacy = await createIsolatedPostgres();
     try {
-      await runMigrations(legacy.pool, legacy.migrations.slice(0,-2));
+      await runMigrations(legacy.pool, legacy.migrations.slice(0,-3));
       await legacy.pool.query("SET session_replication_role=replica");
       await legacy.pool.query(`INSERT INTO cp_slack_action_authority(
         organization_id,action_id,action_token_hash,installation_id,binding_id,team_id,app_id,
@@ -273,6 +274,35 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
           claim_state:"consumed",consumed:true},
       ]);
     } finally { await legacy.close(); }
+  });
+
+  it("backfills pre-0018 status anchors by durable shape without emitting external events",async()=>{
+    const legacy=await createIsolatedPostgres();
+    try{
+      await runMigrations(legacy.pool,legacy.migrations.slice(0,-1));
+      const insert=async(id:string,operation:"create"|"update")=>legacy.pool.query(`INSERT INTO
+        cp_provider_delivery_intent(intent_id,organization_id,journal_intent_digest,intent,payload,
+        payload_digest,payload_custody_ref,presentation_phase,current_truth_key,state,revision,sequence,
+        scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
+        provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
+        schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
+        projection_purpose,deadline_at,created_at,updated_at)
+        VALUES($1,'org_legacy',$2,$3,'{}',$4,$5,'received',$6,'pending',1,1,'local_repository','repo',$7,
+        'slack','A1',$8,1,$9,'control-plane',1,1,$10,'run_legacy:status','run_legacy',1,'external',$11,$12,$12)`,
+      [id,`journal_${id}`,JSON.stringify({operation,deliveryKind:"message",provenance:{kind:"business"}}),
+        `payload_${id}`,`custody_${id}`,`truth_${id}`,`key_${id}`,`binding_${id}`,`generation_${id}`,
+        `snapshot_${id}`,new Date("2026-09-01T02:00:00.000Z"),new Date("2026-09-01T01:00:00.000Z")]);
+      await insert("legacy_create","create");await insert("legacy_update","update");
+      await runMigrations(legacy.pool,legacy.migrations);
+      expect((await legacy.pool.query(`SELECT intent_id,projection_purpose FROM cp_provider_delivery_intent
+        ORDER BY intent_id`)).rows).toEqual([
+        {intent_id:"legacy_create",projection_purpose:"anchor_create"},
+        {intent_id:"legacy_update",projection_purpose:"anchor_update"}]);
+      expect((await legacy.pool.query("SELECT count(*)::int count FROM cp_projection_delivery_watermark")).rows[0])
+        .toEqual({count:0});
+      expect((await legacy.pool.query(`SELECT count(*)::int count FROM cp_job
+        WHERE job_id LIKE 'team-relay-delivery:%'`)).rows[0]).toEqual({count:0});
+    }finally{await legacy.close();}
   });
 
   it("keeps every 0014 publication authority family fail-closed in the schema catalog", async () => {
@@ -497,7 +527,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades a fully applied 0012 schema through checked-in publication migrations", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -6));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -7));
       expect((await upgrade.pool.query(
         "SELECT to_regclass('cp_publication_candidate') AS relation",
       )).rows).toEqual([{ relation: null }]);
@@ -512,7 +542,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades the exact b1f954dd unversioned immutable table with a durably accepted row", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -6));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -7));
       const now = new Date("2026-08-15T07:00:00.000Z");
       const runners = createRunnerDirectory({ pool: upgrade.pool,
         clock: { now: () => now }, tokenFactory: () => "runtime_upgrade_secret",
@@ -609,7 +639,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("aborts unversioned Candidate reconciliation with a stable operator-action reason", async () => {
     const unsupported = await createIsolatedPostgres();
     try {
-      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -6));
+      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -7));
       await unsupported.pool.query(
         "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES('org_orphan','Orphan',clock_timestamp())");
       await unsupported.pool.query(`

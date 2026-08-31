@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor } from "@opentag/delivery-contract";
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
-import { createTeamRelayProjectionService } from "../src/modules/provider-delivery/team-relay-projection.js";
+import { createTeamRelayProjectionJobHandler,
+  createTeamRelayProjectionService } from "../src/modules/provider-delivery/team-relay-projection.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 import { checkProjectionSchemaReadiness } from "../src/database/migrations.js";
+import { createDurableJobQueue } from "../src/modules/jobs/index.js";
+import { runOneJob } from "../src/modules/jobs/worker.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 const now = new Date("2026-09-01T00:00:00.000Z");
@@ -143,6 +146,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       organizationId:external.organizationId,providerId:"slack",providerInstanceId:"A1",
       providerBindingDigest:digest("binding"),providerConfigGeneration:1,
       providerConfigGenerationDigest:digest("generation"),...owner}})};
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
     await repository.recordIntent(external,externalPayload);
     const externalClaim=(await repository.claimNext())!;
     const externalRenewed=(await repository.renewLease(externalClaim))!;
@@ -151,11 +155,30 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       scopeBeginMarkerId:"external-scope",scopeBeginMarkerDigest:digest("external-marker")}))!;
     await repository.settleOrReadTerminal({...externalBegun,outcome:"rejected",
       evidenceDigest:digest("external-evidence"),errorCode:"slack_rejected"});
-    const event=await fixture.pool.query<{delivery_revision:number}>(`SELECT delivery_revision
+    const event=await fixture.pool.query<{delivery_revision:number;event_sequence:number}>(`SELECT delivery_revision,event_sequence
       FROM cp_projection_delivery_watermark WHERE intent_id='external_rejected' AND delivery_state='rejected'`);
-    const eventResult=await service.projectRun({organizationId:"org_projection",runId:"run_projection",
-      projectionRevision:1,deliveryEvent:{intentId:"external_rejected",revision:event.rows[0]!.delivery_revision}});
-    expect(eventResult).toMatchObject({kind:"queued",presentation:{providerDelivery:{state:"rejected"}}});
+    await fixture.pool.query("UPDATE cp_hosted_run SET updated_at=$1 WHERE run_id='run_projection'",
+      [new Date(now.getTime()+3)]);
+    const eventService=createTeamRelayProjectionService({pool:fixture.pool,hosted:{inspect:async()=>({
+      state:"queued",canonicalStatus:"queued",status:"waiting_for_runner",
+      queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),outcome:null,
+      terminalKind:null,terminalReason:null})} as any,clock:{now:()=>new Date(now.getTime()+4)},
+      producer:{async enqueue(value){requests.push(value);await repository.recordIntent(value.intent,{
+        envelopeVersion:1,providerRequest:value.providerRequest,phase:value.phase,
+        frozenDeadline:new Date(now.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
+          intent:value.intent,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
+            providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+            providerConfigGenerationDigest:digest("generation"),...owner}})});}}});
+    const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>new Date(now.getTime()+5)},
+      leaseDurationMs:30_000,tokenFactory:()=>"event-job-lease"});
+    await expect(runOneJob({queue,workerId:"event-worker",handlers:{
+      "team-relay.project":createTeamRelayProjectionJobHandler(eventService)},retryDelayMs:1000,
+      clock:{now:()=>new Date(now.getTime()+5)}})).resolves.toMatchObject({kind:"settled"});
+    expect(requests[1]?.intent.projectionRevision).toBe(2);
+    expect(requests[1]?.intent.projectionEventSequence).toBe(event.rows[0]!.event_sequence);
+    expect((await fixture.pool.query(`SELECT projection_revision,projection_event_sequence,state
+      FROM cp_provider_delivery_intent WHERE intent_id=$1`,[requests[1]!.intent.sideEffectIntentId])).rows[0])
+      .toEqual({projection_revision:2,projection_event_sequence:event.rows[0]!.event_sequence,state:"pending"});
     await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(
       intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
       presentation_phase,current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,
@@ -220,6 +243,9 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await expect(service.projectRun({organizationId:"org_projection",runId:"run_projection"}))
       .resolves.toMatchObject({kind:"anchor_pending"});
     expect(requests).toHaveLength(0);
+    await fixture.pool.query(`INSERT INTO cp_projection_deferred_revision(organization_id,run_id,
+      projection_revision,anchor_intent_id,state,created_at)
+      VALUES('org_projection','run_projection',2,'unrelated_anchor','pending',$1)`,[now]);
     await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
     await repository.settleOrReadTerminal({ ...begun,outcome:"accepted",
       evidenceDigest:digest("accepted"),externalResourceId:"171.002",
@@ -228,7 +254,14 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       WHERE state='pending' AND job_kind='team-relay.project'`);
     expect(deliveryJobs.rows).toHaveLength(1);
     expect(deliveryJobs.rows[0]?.job_id).toMatch(/^team-relay-anchor-wake:/u);
-    await service.projectRun({organizationId:"org_projection",runId:"run_projection",projectionRevision:1});
+    expect((await fixture.pool.query(`SELECT projection_revision,state FROM cp_projection_deferred_revision
+      WHERE run_id='run_projection' ORDER BY projection_revision`)).rows).toEqual([
+      {projection_revision:1,state:"woken"},{projection_revision:2,state:"pending"}]);
+    const wakeQueue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>new Date(now.getTime()+1)},
+      leaseDurationMs:30_000,tokenFactory:()=>"wake-job-lease"});
+    await expect(runOneJob({queue:wakeQueue,workerId:"wake-worker",handlers:{
+      "team-relay.project":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
+      clock:{now:()=>new Date(now.getTime()+1)}})).resolves.toMatchObject({kind:"settled"});
     expect(requests).toHaveLength(1);
     expect(requests[0]?.intent.operation).toBe("update");
     await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
@@ -250,6 +283,25 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       externalResourceId:"171.002",externalResourceDigest:digest("self-resource")});
     expect((await fixture.pool.query(`SELECT count(*)::int count FROM cp_job
       WHERE state='pending' AND job_kind='team-relay.project'`)).rows[0]).toEqual({count:0});
+    const {projectionRevision:_uncertainRevision,...uncertainBase}=baseline;
+    const uncertain=DeliveryIntentV2Schema.parse({...uncertainBase,
+      sideEffectIntentId:"uncertain_attention",idempotencyKey:"uncertain_attention",
+      presentationDigest:digest("uncertain"),createdAt:new Date(now.getTime()+3).toISOString()});
+    const uncertainPayload={...payload,currentTruth:deliveryCurrentTruthDescriptor({intent:uncertain,owner:{
+      organizationId:uncertain.organizationId,providerId:"slack",providerInstanceId:"A1",
+      providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+      providerConfigGenerationDigest:digest("generation"),...owner}})};
+    await repository.recordIntent(uncertain,uncertainPayload);
+    const uncertainClaim=(await repository.claimNext())!;
+    const uncertainRenewed=(await repository.renewLease(uncertainClaim))!;
+    const uncertainBegun=(await repository.markBegin({...uncertainRenewed,
+      installationBeginMarkerId:"uncertain-install",installationBeginMarkerDigest:digest("uncertain-marker"),
+      scopeBeginMarkerId:"uncertain-scope",scopeBeginMarkerDigest:digest("uncertain-marker")}))!;
+    await repository.settleOrReadTerminal({...uncertainBegun,outcome:"attention",
+      evidenceDigest:digest("uncertain-evidence"),errorCode:"provider_delivery_timeout"});
+    await expect(service.projectRun({organizationId:"org_projection",runId:"run_projection"}))
+      .resolves.toMatchObject({kind:"anchor_pending"});
+    expect(requests).toHaveLength(1);
   });
 
   it("requires positive Run revisions, non-null delivery revisions, and durable delivery watermark", async () => {
@@ -268,6 +320,17 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       digest("generation"),digest("snapshot"),new Date(now.getTime()+60_000),now]);
     for(const invalid of [null,0,-1])await expect(fixture.pool.query(
       "UPDATE cp_provider_delivery_intent SET projection_revision=$1 WHERE intent_id='constraint_delivery'",
+      [invalid])).rejects.toThrow();
+    await expect(fixture.pool.query(`UPDATE cp_provider_delivery_intent SET projection_purpose='blind_retry'
+      WHERE intent_id='constraint_delivery'`)).rejects.toThrow();
+    for(const invalid of [null,-1])await expect(fixture.pool.query(
+      "UPDATE cp_provider_delivery_intent SET projection_event_sequence=$1 WHERE intent_id='constraint_delivery'",
+      [invalid])).rejects.toThrow();
+    await fixture.pool.query(`INSERT INTO cp_projection_delivery_watermark(organization_id,run_id,intent_id,
+      delivery_state,delivery_revision,projection_revision,event_sequence,created_at)
+      VALUES('org_projection','run_projection','constraint_event','rejected',1,1,1,$1)`,[now]);
+    for(const invalid of [null,0,-1])await expect(fixture.pool.query(
+      "UPDATE cp_projection_delivery_watermark SET event_sequence=$1 WHERE intent_id='constraint_event'",
       [invalid])).rejects.toThrow();
     const column = await fixture.pool.query(`SELECT is_nullable FROM information_schema.columns
       WHERE table_schema=current_schema() AND table_name='cp_provider_delivery_intent'
@@ -317,6 +380,35 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await expect(pending).rejects.toThrow("delivery_projection_revision_stale");
   });
 
+  it("orders and replays same-Run delivery events lexicographically",async()=>{
+    await insertRun();
+    const repository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
+      leaseOwner:"event-sequence",leaseSeconds:30,now:()=>now});
+    const make=(eventSequence:number,id:string)=>DeliveryIntentV2Schema.parse({contractVersion:2,
+      organizationId:"org_projection",sideEffectIntentId:id,causalId:"run_projection",intentKind:"delivery",
+      operation:"update",deliveryKind:"message",presentationDigest:digest(id),projectionRevision:1,
+      projectionEventSequence:eventSequence,projectionPurpose:"anchor_update",
+      provenance:{kind:"business",repositoryIdentityDigest:digest("repo"),runId:"run_projection",
+        authorityLineageDigest:digest("authority")},providerBinding:{bindingKind:"established",providerId:"slack",
+        providerInstanceId:"A1",providerPrincipalDigest:digest("principal"),principalAssurance:"provider_verified",
+        providerConfigGeneration:1,providerConfigGenerationDigest:digest("generation"),lifecycle:"active",
+        bindingDigest:digest("binding")},targetDigest:digest("target"),authorityKind:"run_authority",
+      authoritySnapshotDigest:digest("snapshot"),evidencePolicy:"local_audit",idempotencyKey:id,
+      statusMessageId:"run_projection:status",scope:{kind:"local_repository",id:"repo"},createdAt:now.toISOString(),
+      initialAttemptSequence:1});
+    const record=(intent:ReturnType<typeof make>)=>repository.recordIntent(intent,{envelopeVersion:1,
+      providerRequest:{},phase:"received",frozenDeadline:new Date(now.getTime()+60_000).toISOString(),
+      currentTruth:deliveryCurrentTruthDescriptor({intent,owner:{organizationId:"org_projection",
+        providerId:"slack",providerInstanceId:"A1",providerBindingDigest:digest("binding"),
+        providerConfigGeneration:1,providerConfigGenerationDigest:digest("generation"),...owner}})});
+    const ordinary=make(0,"event_zero");await record(ordinary);
+    const first=make(1,"event_one");await record(first);await record(first);
+    await expect(record(make(0,"event_zero_late"))).rejects.toThrow("delivery_projection_revision_stale");
+    expect((await fixture.pool.query(`SELECT intent_id,state FROM cp_provider_delivery_intent
+      WHERE run_id='run_projection' ORDER BY projection_event_sequence,intent_id`)).rows)
+      .toEqual([{intent_id:"event_zero",state:"superseded"},{intent_id:"event_one",state:"pending"}]);
+  });
+
   it.each([
     ["same-name trigger on wrong table", `DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent;
       CREATE TRIGGER cp_delivery_projection_trigger AFTER UPDATE ON cp_job FOR EACH ROW
@@ -327,6 +419,11 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       DROP CONSTRAINT cp_hosted_run_projection_revision_check`],
     ["nullable watermark timestamp", `ALTER TABLE cp_projection_delivery_watermark
       ALTER COLUMN created_at DROP NOT NULL`],
+    ["weakened event cursor constraint", `ALTER TABLE cp_projection_event_cursor
+      DROP CONSTRAINT cp_projection_event_cursor_current_sequence_check`],
+    ["same-name wrong function arguments", `DROP FUNCTION cp_enqueue_team_relay_projection(text,text,integer);
+      CREATE FUNCTION cp_enqueue_team_relay_projection(text,text) RETURNS void LANGUAGE plpgsql
+      AS $$ BEGIN RETURN; END $$`],
   ])("fails readiness for %s",async(_label,sql)=>{
     await fixture.pool.query(sql);
     await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({

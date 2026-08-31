@@ -44,7 +44,8 @@ import { createSourceIngressService } from "./modules/source-ingress/index.js";
 import { createPostgresSlackIngress, type SlackSecretResolver } from "./modules/slack-ingress/index.js";
 import { createPostgresDeliveryRepository } from "./modules/provider-delivery/repository.js";
 import { createProviderDeliveryWorker } from "./modules/provider-delivery/worker.js";
-import { createTeamRelayProjectionService } from "./modules/provider-delivery/team-relay-projection.js";
+import { createTeamRelayProjectionJobHandler,
+  createTeamRelayProjectionService } from "./modules/provider-delivery/team-relay-projection.js";
 import { createControlPlaneSourceThreadAuthority } from "./modules/slack-ingress/authority.js";
 import { SourceAppRegistry, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import { ProviderAdapterRegistry, ProviderSideEffectKernel,
@@ -349,17 +350,7 @@ export function createControlPlaneRuntime(input: {
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
     "provider-delivery": async () => providerDeliveryWorker.processNext(),
-    "team-relay.project": async (job: { payload: unknown }) => {
-      const payload = z.object({ organizationId: z.string().min(1), runId: z.string().min(1),
-        projectionRevision: z.number().int().positive(),
-        deliveryIntentId:z.string().min(1).optional(),deliveryRevision:z.number().int().positive().optional()
-      }).strict().superRefine((value,context)=>{
-        if((value.deliveryIntentId===undefined)!==(value.deliveryRevision===undefined))
-          context.addIssue({code:"custom",message:"delivery event identity must be complete"});
-      }).parse(job.payload);
-      return teamRelayProjection.projectRun({...payload,...(payload.deliveryIntentId?{
-        deliveryEvent:{intentId:payload.deliveryIntentId,revision:payload.deliveryRevision!}}:{})});
-    },
+    "team-relay.project": createTeamRelayProjectionJobHandler(teamRelayProjection),
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };
   const application = createControlPlaneApplication({

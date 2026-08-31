@@ -565,10 +565,29 @@ export async function checkProjectionSchemaReadiness(
         AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
       AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
         AND attname='projection_purpose' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
+        AND attname='projection_event_sequence' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
+        AND conname='cp_provider_delivery_projection_purpose_check' AND convalidated)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
+        AND conname='cp_provider_delivery_projection_event_sequence_check' AND convalidated)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
         AND conname='cp_provider_delivery_projection_revision_check' AND convalidated)
       AND to_regclass('cp_projection_delivery_watermark') IS NOT NULL
       AND to_regclass('cp_projection_deferred_revision') IS NOT NULL
+      AND to_regclass('cp_projection_event_cursor') IS NOT NULL
+      AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_event_cursor'
+        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO')
+          OR (column_name='current_sequence' AND data_type='integer' AND is_nullable='NO'
+            AND column_default='0')))
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
+        AND conname='cp_projection_delivery_watermark_run_event_key' AND contype='u' AND convalidated)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
+        AND conname='cp_projection_delivery_watermark_event_sequence_check' AND convalidated)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_event_cursor'::regclass
+        AND conname='cp_projection_event_cursor_current_sequence_check' AND convalidated)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_decisions_check' AND convalidated
         AND pg_get_constraintdef(oid) LIKE '%publication_approve%'
@@ -577,7 +596,7 @@ export async function checkProjectionSchemaReadiness(
         AND conname='cp_slack_action_authority_epoch_check' AND convalidated)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated)
-      AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
+      AND (SELECT count(*)=8 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_delivery_watermark'
         AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
           OR (column_name='run_id' AND data_type='text' AND is_nullable='NO')
@@ -585,6 +604,7 @@ export async function checkProjectionSchemaReadiness(
           OR (column_name='delivery_state' AND data_type='text' AND is_nullable='NO')
           OR (column_name='delivery_revision' AND data_type='integer' AND is_nullable='NO')
           OR (column_name='projection_revision' AND data_type='integer' AND is_nullable='NO')
+          OR (column_name='event_sequence' AND data_type='integer' AND is_nullable='NO')
           OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO')))
       AND EXISTS(SELECT 1 FROM pg_proc function_row JOIN pg_namespace namespace
         ON namespace.oid=function_row.pronamespace JOIN pg_language language_row ON language_row.oid=function_row.prolang
@@ -599,6 +619,9 @@ export async function checkProjectionSchemaReadiness(
           AND pg_get_function_result(function_row.oid)='trigger'
           AND pg_get_functiondef(function_row.oid) LIKE '%projection_purpose%anchor_create%'
           AND pg_get_functiondef(function_row.oid) LIKE '%projection_purpose%anchor_update%'
+          AND pg_get_functiondef(function_row.oid) LIKE '%anchor_intent_id%NEW.intent_id%'
+          AND pg_get_functiondef(function_row.oid) LIKE '%event_sequence%'
+          AND pg_get_functiondef(function_row.oid) LIKE '%cp_projection_event_cursor%'
           AND pg_get_functiondef(function_row.oid) LIKE '%cp_projection_delivery_watermark%')
       AND (SELECT count(*)=6 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid

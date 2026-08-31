@@ -14,6 +14,7 @@ type Row = { intent_id: string; journal_intent_digest: string; intent: unknown; 
   payload_digest: string; presentation_phase: string; current_truth_key: string;
   projection_revision: number | null;
   projection_purpose: string;
+  projection_event_sequence:number;
   state: string; revision: number; sequence: number; provider_id: string; provider_instance_id: string;
   provider_binding_digest: string; provider_config_generation: number;
   provider_config_generation_digest: string; runtime_owner_id: string; runtime_generation: number;
@@ -47,7 +48,7 @@ export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
       AND intent->'provenance'->>'authorityLineageDigest'=$19
       AND COALESCE(intent->'providerBinding'->>'connectionId','')=COALESCE($20,'')
       AND COALESCE(intent->'providerBinding'->>'connectionIdDigest','')=COALESCE($21,'')
-      AND state IN ('pending','leased','provider_io_begun','outcome_unknown','accepted')
+      AND state IN ('pending','leased','provider_io_begun','outcome_unknown','attention','accepted')
       ORDER BY created_at,intent_id LIMIT 3`,[input.organizationId,input.runId,input.statusMessageId,
     input.scopeKind,input.scopeId,input.targetDigest,input.providerId,input.providerInstanceId,
     input.providerBindingDigest,input.providerPrincipalDigest,input.principalAssurance,
@@ -81,7 +82,7 @@ function payloadEnvelope(value: unknown, intent: DeliveryIntentV2, owner: RelayO
 const payloadDigest = (payload: DeliveryPayloadEnvelope) => sha256(domainSeparatedCanonicalBytes(
   "opentag.delivery.provider-payload.v1", payload));
 const currentTruthKey = (payload: DeliveryPayloadEnvelope) => {
-  const { projectionRevision: _revision, ...identity } = payload.currentTruth;
+  const { projectionRevision: _revision,projectionEventSequence:_eventSequence, ...identity } = payload.currentTruth;
   return sha256(domainSeparatedCanonicalBytes("opentag.delivery.current-truth.v1", identity));
 };
 
@@ -149,6 +150,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
           && intent.projectionRevision !== undefined;
         const projectionRevision = explicitProjectionRevision ? intent.projectionRevision! : 1;
         const projectionPurpose="projectionPurpose" in intent?intent.projectionPurpose??"external":"external";
+        const projectionEventSequence="projectionEventSequence" in intent?intent.projectionEventSequence??0:0;
         if (intent.provenance.kind === "business" && "projectionRevision" in intent
           && intent.projectionRevision !== undefined) {
           await options.testHooks?.beforeCanonicalLock?.();
@@ -175,11 +177,15 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
               [truthKey]);
               if (activeAnchor.rows[0]) throw new Error("delivery_anchor_pending");
             }
-            const latest = await client.query<{ projection_revision: string | null }>(
-              `SELECT max(projection_revision)::text projection_revision
-               FROM cp_provider_delivery_intent WHERE current_truth_key=$1`, [truthKey]);
-            const latestRevision = Number(latest.rows[0]?.projection_revision ?? 0);
-            if (latestRevision >= projectionRevision) throw new Error("delivery_projection_revision_stale");
+            const latest = await client.query<{ projection_revision:number;projection_event_sequence:number }>(
+              `SELECT projection_revision,projection_event_sequence FROM cp_provider_delivery_intent
+               WHERE current_truth_key=$1 ORDER BY projection_revision DESC,projection_event_sequence DESC LIMIT 1`,
+            [truthKey]);
+            const prior=latest.rows[0];
+            if(prior&&(prior.projection_revision>projectionRevision
+              ||(prior.projection_revision===projectionRevision
+                &&prior.projection_event_sequence>=projectionEventSequence)))
+              throw new Error("delivery_projection_revision_stale");
           }
         }
         const inserted = await client.query(`INSERT INTO cp_provider_delivery_intent(
@@ -187,10 +193,11 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             presentation_phase,current_truth_key,state,revision,sequence,
             scope_kind,scope_id,idempotency_key,provider_id,provider_instance_id,provider_binding_digest,
             provider_config_generation,provider_config_generation_digest,runtime_owner_id,runtime_generation,
-            schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,projection_purpose,
+            schema_generation,authority_snapshot_digest,status_message_id,run_id,projection_revision,
+            projection_event_sequence,projection_purpose,
             deadline_at,created_at,updated_at)
             VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,$9,'pending',1,$10,$11,$12,$13,$14,$15,
-              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$28)
+              $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$29)
             ON CONFLICT DO NOTHING RETURNING intent_id`,
           [intent.sideEffectIntentId, intent.organizationId, digest, JSON.stringify(intent), JSON.stringify(payload),
             providerPayloadDigest, `postgres-jsonb:${intent.sideEffectIntentId}:${providerPayloadDigest}`,
@@ -201,7 +208,7 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             options.owner.runtimeGeneration, options.owner.schemaGeneration, intent.authoritySnapshotDigest,
             "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
             intent.provenance.kind === "business" ? intent.provenance.runId : null,
-            projectionRevision,projectionPurpose,deadline, new Date(intent.createdAt)]);
+            projectionRevision,projectionEventSequence,projectionPurpose,deadline, new Date(intent.createdAt)]);
         const existing = await client.query<Row>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE",
           [intent.sideEffectIntentId]);

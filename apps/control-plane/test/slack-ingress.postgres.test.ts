@@ -517,6 +517,33 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       action(statusThenStatus, "status", "U_MEMBER"))).resolves.toMatchObject({ status: 200 });
     await expect(ingress.receiveInteractivity("route_1",
       action(statusThenCancel, "cancel", "U_REQUESTER"))).resolves.toMatchObject({ status: 200 });
+    const statusAllowStatus=await issue("status_allow_status",["status"],"status",
+      {authorityFamilyId:"family_status_allow"});
+    const statusAllow=await issue("status_allow_once",["allow_once"],"approval",
+      {authorityFamilyId:"family_status_allow"});
+    await expect(ingress.receiveInteractivity("route_1",action(statusAllowStatus,"status","U_MEMBER")))
+      .resolves.toMatchObject({status:200});
+    await expect(ingress.receiveInteractivity("route_1",action(statusAllow,"allow_once","U_APPROVER")))
+      .resolves.toMatchObject({status:200});
+    await expect(ingress.receiveInteractivity("route_1",action(statusAllowStatus,"status","U_MEMBER")))
+      .resolves.toMatchObject({status:403});
+    const statusDenyStatus=await issue("status_deny_status",["status"],"status",
+      {authorityFamilyId:"family_status_deny"});
+    const statusDeny=await issue("status_deny",["deny"],"approval",
+      {authorityFamilyId:"family_status_deny"});
+    await expect(ingress.receiveInteractivity("route_1",action(statusDenyStatus,"status","U_MEMBER")))
+      .resolves.toMatchObject({status:200});
+    await expect(ingress.receiveInteractivity("route_1",action(statusDeny,"deny","U_APPROVER")))
+      .resolves.toMatchObject({status:200});
+    const statusPublicationStatus=await issue("status_publication_status",["status"],"status",
+      {authorityFamilyId:"family_status_publication"});
+    const statusPublication=await issue("status_publication_approve",["publication_approve"],"publication",
+      {authorityFamilyId:"family_status_publication",publicationApproval});
+    await expect(ingress.receiveInteractivity("route_1",action(statusPublicationStatus,"status","U_MEMBER")))
+      .resolves.toMatchObject({status:200});
+    await expect(ingress.receiveInteractivity("route_1",
+      action(statusPublication,"publication_approve","U_APPROVER"))).resolves.toMatchObject({status:200});
+    expect(publicationApprove).toHaveBeenLastCalledWith({...publicationApproval,approverId:"U_APPROVER"});
     await expect(issue("forbidden_publication_reject", ["publication_reject"],
       "publication", { publicationApproval })).rejects.toThrow();
 

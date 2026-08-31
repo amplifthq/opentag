@@ -21,6 +21,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   statusMessageId: text("status_message_id"), runId: text("run_id"),
   projectionRevision: integer("projection_revision").notNull().default(1),
   projectionPurpose: text("projection_purpose").notNull().default("external"),
+  projectionEventSequence:integer("projection_event_sequence").notNull().default(0),
   leaseOwner: text("lease_owner"), leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   leaseFence: text("lease_fence"), leaseFenceDigest: text("lease_fence_digest"), installationBeginMarkerId: text("installation_begin_marker_id"),
   installationBeginMarkerDigest: text("installation_begin_marker_digest"), scopeBeginMarkerId: text("scope_begin_marker_id"),
@@ -39,6 +40,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   check("cp_provider_delivery_projection_revision_check", sql`${table.projectionRevision} > 0`),
   check("cp_provider_delivery_projection_purpose_check",
     sql`${table.projectionPurpose} IN ('external','anchor_create','anchor_update')`),
+  check("cp_provider_delivery_projection_event_sequence_check",sql`${table.projectionEventSequence}>=0`),
   check("cp_provider_delivery_intent_state_check", sql`${table.state} IN
     ('pending','leased','provider_io_begun','accepted','rejected','outcome_unknown','attention','superseded')`),
   check("cp_provider_delivery_intent_phase_check", sql`${table.presentationPhase} IN ('received','running','terminal')`),
@@ -112,12 +114,15 @@ export const projectionDeliveryWatermarks = pgTable("cp_projection_delivery_wate
   deliveryRevision: integer("delivery_revision").notNull(),
   projectionRevision: integer("projection_revision").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  eventSequence:integer("event_sequence").notNull(),
 }, (table) => [
   primaryKey({ columns: [table.intentId,table.deliveryState,table.deliveryRevision] }),
   foreignKey({ columns: [table.organizationId,table.runId],
     foreignColumns: [hostedRuns.organizationId,hostedRuns.runId] }),
   check("cp_projection_delivery_watermark_revision_check",
     sql`${table.deliveryRevision}>0 AND ${table.projectionRevision}>0`),
+  check("cp_projection_delivery_watermark_event_sequence_check",sql`${table.eventSequence}>0`),
+  unique("cp_projection_delivery_watermark_run_event_key").on(table.organizationId,table.runId,table.eventSequence),
 ]);
 
 export const projectionDeferredRevisions = pgTable("cp_projection_deferred_revision", {
@@ -133,4 +138,13 @@ export const projectionDeferredRevisions = pgTable("cp_projection_deferred_revis
   check("cp_projection_deferred_revision_shape_check",sql`
     (${table.state}='pending' AND ${table.wokenAt} IS NULL)
     OR (${table.state}='woken' AND ${table.wokenAt} IS NOT NULL)`),
+]);
+
+export const projectionEventCursors=pgTable("cp_projection_event_cursor",{
+  organizationId:text("organization_id").notNull(),runId:text("run_id").notNull(),
+  currentSequence:integer("current_sequence").notNull().default(0),
+},(table)=>[
+  primaryKey({columns:[table.organizationId,table.runId]}),
+  foreignKey({columns:[table.organizationId,table.runId],foreignColumns:[hostedRuns.organizationId,hostedRuns.runId]}),
+  check("cp_projection_event_cursor_current_sequence_check",sql`${table.currentSequence}>=0`),
 ]);
