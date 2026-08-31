@@ -4,12 +4,14 @@ import type {
   HumanEscalation,
   OpenTagRunResult
 } from "@opentag/core";
+import { buildProposalReadyPresentation, renderOpenTagPresentationPlainText } from "@opentag/core";
 import { describe, expect, it } from "vitest";
 import {
   completionInputDigest,
   createOpenTagGovernance,
   deriveWorkLoopView,
   evaluateCompletion,
+  evaluateProposalReadiness,
   type CompletionArtifact,
   type CompletionEvaluationSnapshot,
   type CompletionEvidenceFact,
@@ -66,6 +68,20 @@ function compatibilityContract(): CompletionContract {
 }
 
 const successResult: OpenTagRunResult = { conclusion: "success", summary: "Created pull request." };
+
+const proposalCandidate = {
+  candidateId: "candidate_run-1_attempt-1",
+  runId: "run-1",
+  attemptId: "attempt-1",
+  projectTargetId: "target-1",
+  frozenBaseRevision: "a".repeat(40),
+  workspaceTreeDigest: "b".repeat(40),
+  patchDigest: `sha256:${"c".repeat(64)}`,
+  changedFiles: ["packages/core/src/schema.ts"],
+  verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
+  publicationPolicyDigest: `sha256:${"e".repeat(64)}`,
+  createdAt: t2,
+} as const;
 
 function prArtifact(input: { ref?: string; version?: string; id?: string } = {}): CompletionArtifact {
   return {
@@ -132,6 +148,117 @@ function baseInput() {
 }
 
 describe("evaluateCompletion", () => {
+  it("requires immutable verified proposal evidence beyond executor success", () => {
+    const base = {
+      executorConclusion: "success" as const,
+      publicationMode: "proposal_only" as const,
+      completionMode: "proposal_ready" as const,
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      unresolvedMaterialOutcomes: [] as string[],
+      assessedAt: t3,
+    };
+
+    expect(evaluateProposalReadiness(base)).toMatchObject({
+      state: "pending",
+      accepted: false,
+      reasonCodes: ["publication_candidate_missing"],
+    });
+    expect(evaluateProposalReadiness({
+      ...base,
+      candidate: { ...proposalCandidate, verificationEvidenceIds: [] },
+    })).toMatchObject({
+      state: "pending",
+      accepted: false,
+      reasonCodes: ["verification_missing"],
+    });
+    expect(evaluateProposalReadiness({
+      ...base,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: ["external_operation:push:outcome_unknown"],
+    })).toMatchObject({
+      state: "blocked",
+      accepted: false,
+      reasonCodes: ["material_action_unknown"],
+    });
+  });
+
+  it("accepts only an admission-frozen proposal-only candidate and keeps pull-request publication nonterminal", () => {
+    const proposalOnly = evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    });
+    expect(proposalOnly).toEqual({
+      state: "proposal_ready",
+      accepted: true,
+      candidateId: proposalCandidate.candidateId,
+      reasonCodes: ["proposal_ready"],
+      assessedAt: t3,
+    });
+
+    expect(evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "pull_request",
+      completionMode: "pull_request_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toEqual({
+      state: "publication_pending",
+      accepted: false,
+      candidateId: proposalCandidate.candidateId,
+      reasonCodes: ["publication_evidence_missing"],
+      assessedAt: t3,
+    });
+  });
+
+  it("renders candidate, verification, limitations, and exact next action without publication claims", () => {
+    const presentation = buildProposalReadyPresentation({
+      candidate: proposalCandidate,
+      summary: "A verified local proposal is ready for inspection.",
+      verification: ["governance tests passed"],
+      limitations: ["No provider publication was attempted."],
+      nextAction: "Review the local candidate.",
+    });
+    const rendered = renderOpenTagPresentationPlainText(presentation);
+    expect(rendered).toContain(proposalCandidate.candidateId);
+    expect(rendered).toContain("packages/core/src/schema.ts");
+    expect(rendered).toContain("governance tests passed");
+    expect(rendered).toContain("No provider publication was attempted.");
+    expect(rendered).toContain("Next action: Review the local candidate.");
+    expect(rendered).toContain("No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.");
+  });
+
+  it("fails closed on policy mismatch and rejects malformed mutable candidate identities", () => {
+    expect(evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: `sha256:${"f".repeat(64)}`,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toMatchObject({
+      state: "blocked",
+      accepted: false,
+      reasonCodes: ["publication_policy_mismatch"],
+    });
+
+    expect(() => evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: { ...proposalCandidate, changedFiles: ["b.ts", "a.ts"] },
+      unresolvedMaterialOutcomes: [],
+      assessedAt: t3,
+    })).toThrow(/PublicationCandidate/u);
+  });
   it("keeps compatibility execution success out of evidence-backed completion metrics", () => {
     const assessment = evaluateCompletion({
       ...baseInput(),

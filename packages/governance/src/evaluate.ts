@@ -5,12 +5,15 @@ import {
   compareRfc3339Timestamps,
   CompletionContractSchema,
   CompletionGateResultSchema,
+  ProposalReadinessAssessmentSchema,
+  PublicationCandidateSchema,
   reduceCompletionGateStates,
   type CompletionAssessment,
   type CompletionGate,
   type CompletionGateResult,
   type CompletionReasonCode,
   type CompletionWaiver,
+  type PublicationCandidate,
   type ResolvedCompletionTarget
 } from "@opentag/core";
 import type {
@@ -20,6 +23,47 @@ import type {
   WorkLoopCause,
   WorkLoopView
 } from "./types.js";
+
+export type ProposalReadinessEvaluationInput = {
+  executorConclusion: "success" | "failure" | "cancelled" | "interrupted" | "timed_out" | "needs_human";
+  publicationMode: "proposal_only" | "pull_request";
+  completionMode: "proposal_ready" | "pull_request_ready";
+  publicationPolicyDigest: string;
+  candidate?: PublicationCandidate;
+  unresolvedMaterialOutcomes: string[];
+  assessedAt: string;
+};
+
+export function evaluateProposalReadiness(input: ProposalReadinessEvaluationInput) {
+  const assessedAt = new Date(input.assessedAt).toISOString();
+  if (input.executorConclusion !== "success") return ProposalReadinessAssessmentSchema.parse({
+    state: "pending", accepted: false, reasonCodes: ["execution_not_succeeded"], assessedAt,
+  });
+  if (!input.candidate) return ProposalReadinessAssessmentSchema.parse({
+    state: "pending", accepted: false, reasonCodes: ["publication_candidate_missing"], assessedAt,
+  });
+  const candidate = PublicationCandidateSchema.parse(input.candidate);
+  if (candidate.verificationEvidenceIds.length === 0) return ProposalReadinessAssessmentSchema.parse({
+    state: "pending", accepted: false, reasonCodes: ["verification_missing"], assessedAt,
+  });
+  if (candidate.publicationPolicyDigest !== input.publicationPolicyDigest) {
+    return ProposalReadinessAssessmentSchema.parse({ state: "blocked", accepted: false,
+      reasonCodes: ["publication_policy_mismatch"], assessedAt });
+  }
+  const contractMatches = (input.publicationMode === "proposal_only" && input.completionMode === "proposal_ready")
+    || (input.publicationMode === "pull_request" && input.completionMode === "pull_request_ready");
+  if (!contractMatches) return ProposalReadinessAssessmentSchema.parse({
+    state: "blocked", accepted: false, reasonCodes: ["completion_contract_mismatch"], assessedAt,
+  });
+  if (input.unresolvedMaterialOutcomes.length > 0) return ProposalReadinessAssessmentSchema.parse({
+    state: "blocked", accepted: false, reasonCodes: ["material_action_unknown"], assessedAt,
+  });
+  return ProposalReadinessAssessmentSchema.parse(input.publicationMode === "proposal_only"
+    ? { state: "proposal_ready", accepted: true, candidateId: candidate.candidateId,
+        reasonCodes: ["proposal_ready"], assessedAt }
+    : { state: "publication_pending", accepted: false, candidateId: candidate.candidateId,
+        reasonCodes: ["publication_evidence_missing"], assessedAt });
+}
 
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);

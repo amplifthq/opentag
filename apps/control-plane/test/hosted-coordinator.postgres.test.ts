@@ -169,6 +169,83 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       request: complete })).resolves.toEqual({ kind: "conflict", reason: "invalid_request" });
   });
 
+  it.each([
+    ["proposal_only", "proposal_ready", true, "succeeded", "proposal_ready"],
+    ["pull_request", "publication_pending", false, "running", "publication_pending"],
+  ] as const)("atomically persists a verified %s candidate with truthful settlement", async (
+    publicationMode, assessmentState, accepted, canonicalStatus, status,
+  ) => {
+    const service = coordinator();
+    const suffix = `candidate_${publicationMode}`;
+    const input = await hostedAdmissionFixture({ runId: `run_${suffix}`, suffix, publicationMode });
+    await service.admit({ runId: `run_${suffix}`, admission: input.admission, policy: input.policy });
+    const claimed = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: `operation_claim_${suffix}`, requestId: `request_claim_${suffix}`,
+      readinessDigest: input.readinessDigest,
+    }) });
+    if (claimed.kind !== "claimed") throw new Error(`claim failed: ${claimed.kind}`);
+    const claim = claimed.claim;
+    const attestation = { workspaceId: `workspace_${claim.attempt.id}`,
+      workspacePathDigest: `sha256:${"1".repeat(64)}`,
+      repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+      worktreeIdentityDigest: `sha256:${"3".repeat(64)}`,
+      baseRevision: "a".repeat(40), currentRevision: "b".repeat(40),
+      currentTree: "c".repeat(40), workspaceStateDigest: `sha256:${"4".repeat(64)}`,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: claim.authority.credentialId,
+      leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    const attempt = { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch, fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest };
+    const running = await buildHostedLifecycleRequestV1({ action: "running",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      attempt, occurredAt: now.toISOString(), executorId: claim.executorId,
+      executorCapabilityDigest: claim.authority.executorCapabilityDigest,
+      workspaceAttestation: attestation });
+    await service.lifecycle({ principal, runId: claim.runId, action: "running", request: running });
+    const complete = await buildHostedLifecycleRequestV1({ action: "complete",
+      organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,
+      attempt, occurredAt: now.toISOString(), conclusion: "success",
+      reasonCode: "executor_success", resultDigest: `sha256:${"5".repeat(64)}`,
+      artifactDigests: [], evidenceDigests: [`sha256:${"6".repeat(64)}`],
+      workspaceAttestation: attestation });
+    await service.lifecycle({ principal, runId: claim.runId, action: "complete", request: complete });
+    const candidate = { candidateId: `candidate_${claim.runId}`, runId: claim.runId,
+      attemptId: claim.attempt.id, projectTargetId: claim.hostedAdmission.projectTarget.projectTargetId,
+      frozenBaseRevision: attestation.baseRevision, workspaceTreeDigest: attestation.currentTree,
+      patchDigest: `sha256:${"7".repeat(64)}`,
+      changedFiles: ["packages/core/src/schema.ts"],
+      verificationEvidenceIds: [`sha256:${"8".repeat(64)}`],
+      publicationPolicyDigest: claim.hostedAdmission.publicationPolicy.digest,
+      createdAt: now.toISOString() };
+    const assessment = { state: assessmentState, accepted,
+      candidateId: candidate.candidateId,
+      reasonCodes: [accepted ? "proposal_ready" : "publication_evidence_missing"],
+      assessedAt: now.toISOString() };
+
+    const proposalEvidence = { sourceRunId: claim.runId,
+      attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      workspaceId: attestation.workspaceId,
+      workspacePathDigest: attestation.workspacePathDigest,
+      baseRevision: attestation.baseRevision, finalTree: attestation.currentTree,
+      diffDigest: candidate.patchDigest, changedFiles: candidate.changedFiles,
+      verificationEvidenceDigests: candidate.verificationEvidenceIds,
+      evidenceDigest: `sha256:${"9".repeat(64)}` };
+    await expect(service.settleProposalCandidate({ principal, runId: claim.runId,
+      attempt, candidateId: candidate.candidateId, proposalEvidence, assessment }))
+      .resolves.toMatchObject({ kind: "created",
+        view: { canonicalStatus, status } });
+    await expect(service.settleProposalCandidate({ principal, runId: claim.runId,
+      attempt, candidateId: candidate.candidateId, proposalEvidence, assessment }))
+      .resolves.toMatchObject(
+        { kind: "replayed" });
+    const durable = await fixture.pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM cp_publication_candidate WHERE run_id = $1",
+      [claim.runId]);
+    expect(durable.rows[0]?.count).toBe(1);
+  });
+
   it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {
     const runners = createRunnerDirectory({
       pool: fixture.pool,
@@ -708,11 +785,11 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     });
     await expect(
       service.lifecycle({ principal, runId: claim.runId, action: "complete", request: late }),
-    ).resolves.toEqual({ kind: "terminal", terminalKind: "succeeded" });
+    ).resolves.toEqual({ kind: "conflict", reason: "invalid_transition" });
   });
 
   it.each([
-    ["0success", "success", "succeeded", "succeeded", "proposal_ready"],
+    ["0success", "success", "running", "succeeded", "running"],
     ["1failure", "failure", "failed", "failed", "failed"],
     ["2cancelled", "cancelled", "cancelled", "cancelled", "cancelled"],
     ["3interrupted", "interrupted", "interrupted", "interrupted", "interrupted"],
@@ -890,10 +967,9 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       }),
       service.lifecycle({ principal, runId: claim.runId, action: "complete", request: complete }),
     ]);
-    expect(outcomes.filter(({ kind }) => kind === "accepted")).toHaveLength(1);
-    expect(outcomes.filter(({ kind }) => kind === "terminal")).toHaveLength(1);
+    expect(outcomes.filter(({ kind }) => kind === "accepted").length).toBeGreaterThanOrEqual(1);
     const terminal = await service.inspect({ organizationId: "org_hosted", runId: claim.runId });
-    expect(terminal?.state).toMatch(/cancelled|succeeded/u);
+    expect(terminal?.state).toBe("cancelled");
   });
 
   it("replays one lifecycle receipt under an identical concurrent operation", async () => {

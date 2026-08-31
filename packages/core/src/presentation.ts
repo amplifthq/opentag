@@ -8,7 +8,8 @@ import {
   type ActionReceiptPrimaryDecision,
   type ActionReceiptState
 } from "./action.js";
-import { OpenTagRunResultSchema, type OpenTagRunResult } from "./schema.js";
+import { OpenTagRunResultSchema, PublicationCandidateSchema,
+  type OpenTagRunResult, type PublicationCandidate } from "./schema.js";
 import { isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 
 const CredentialSafePresentationTextSchema = z.string().min(1).refine(isCredentialSafeText);
@@ -124,12 +125,31 @@ export const OpenTagFinalSummaryPresentationSchema = z.object({
   result: OpenTagRunResultSchema.refine(isCredentialSafeValue)
 });
 
+export const OpenTagProposalReadyPresentationSchema = z.object({
+  kind: z.literal("proposal_ready"),
+  candidate: PublicationCandidateSchema,
+  summary: CredentialSafePresentationTextSchema,
+  changedFiles: z.array(CredentialSafePresentationTextSchema).min(1),
+  verification: z.array(CredentialSafePresentationTextSchema).min(1),
+  limitations: z.array(CredentialSafePresentationTextSchema),
+  nextAction: CredentialSafePresentationTextSchema,
+  absentClaims: z.tuple([
+    z.literal("branch_not_published"),
+    z.literal("pull_request_not_created"),
+    z.literal("checks_not_observed"),
+    z.literal("review_not_observed"),
+    z.literal("merge_not_observed"),
+    z.literal("deployment_not_observed"),
+  ]),
+}).strict();
+
 export const OpenTagPresentationSchema = z.discriminatedUnion("kind", [
   OpenTagRunStatusPresentationSchema,
   OpenTagApprovalPromptPresentationSchema,
   OpenTagDoctorSummaryPresentationSchema,
   OpenTagSourceThreadStatusPresentationSchema,
   OpenTagActionReceiptPresentationSchema,
+  OpenTagProposalReadyPresentationSchema,
   OpenTagFinalSummaryPresentationSchema
 ]);
 
@@ -143,11 +163,12 @@ export type OpenTagSourceThreadQueuedFollowUp = z.infer<typeof OpenTagSourceThre
 export type OpenTagSourceThreadStatusPresentation = z.infer<typeof OpenTagSourceThreadStatusPresentationSchema>;
 export type OpenTagActionReceiptPresentation = z.infer<typeof OpenTagActionReceiptPresentationSchema>;
 export type OpenTagFinalSummaryPresentation = z.infer<typeof OpenTagFinalSummaryPresentationSchema>;
+export type OpenTagProposalReadyPresentation = z.infer<typeof OpenTagProposalReadyPresentationSchema>;
 export type OpenTagPresentation = z.infer<typeof OpenTagPresentationSchema>;
 export type OpenTagPresentationDeliveryTier = "silent" | "status" | "attention_required" | "terminal";
 
 export function presentationDeliveryTier(presentation: OpenTagPresentation): OpenTagPresentationDeliveryTier {
-  if (presentation.kind === "final_summary") return "terminal";
+  if (presentation.kind === "final_summary" || presentation.kind === "proposal_ready") return "terminal";
   if (presentation.kind === "approval_prompt" || presentation.kind === "action_receipt") return "attention_required";
   if (presentation.kind === "run_status") {
     if (presentation.detailVisibility === "audit") return "silent";
@@ -156,6 +177,27 @@ export function presentationDeliveryTier(presentation: OpenTagPresentation): Ope
     return "status";
   }
   return "status";
+}
+
+export function buildProposalReadyPresentation(input: {
+  candidate: PublicationCandidate;
+  summary: string;
+  verification: string[];
+  limitations?: string[];
+  nextAction: string;
+}): OpenTagProposalReadyPresentation {
+  return OpenTagProposalReadyPresentationSchema.parse({
+    kind: "proposal_ready",
+    candidate: input.candidate,
+    summary: input.summary,
+    changedFiles: input.candidate.changedFiles,
+    verification: input.verification,
+    limitations: input.limitations ?? [],
+    nextAction: input.nextAction,
+    absentClaims: ["branch_not_published", "pull_request_not_created",
+      "checks_not_observed", "review_not_observed", "merge_not_observed",
+      "deployment_not_observed"],
+  });
 }
 
 export function renderMarkdownArtifactLines(presentation: Pick<OpenTagFinalSummaryPresentation, "artifacts">): string[] {
@@ -552,6 +594,21 @@ export function renderOpenTagPresentationPlainText(presentation: OpenTagPresenta
     }
     if (presentation.auditRunId) lines.push(`Audit: opentag status --run ${presentation.auditRunId}`);
     return lines.join("\n");
+  }
+  if (presentation.kind === "proposal_ready") {
+    return [
+      "Proposal ready",
+      presentation.summary,
+      `Candidate: ${presentation.candidate.candidateId}`,
+      "Changed files:",
+      ...presentation.changedFiles.map((file) => `- ${file}`),
+      "Verification:",
+      ...presentation.verification.map((check) => `- ${check}`),
+      ...(presentation.limitations.length
+        ? ["Limitations:", ...presentation.limitations.map((item) => `- ${item}`)] : []),
+      `Next action: ${presentation.nextAction}`,
+      "No branch, pull request, checks, review, merge, deployment, or production behavior is claimed.",
+    ].join("\n");
   }
   return [
     `Finished: ${presentation.outcome}`,

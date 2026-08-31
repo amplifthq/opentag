@@ -45,6 +45,45 @@ export const CompletionReasonCodeSchema = z.enum([
   "execution_not_succeeded",
 ]);
 
+export const ProposalReadinessStateSchema = z.enum([
+  "pending",
+  "blocked",
+  "proposal_ready",
+  "publication_pending",
+]);
+
+export const ProposalReadinessReasonCodeSchema = z.enum([
+  "execution_not_succeeded",
+  "publication_candidate_missing",
+  "verification_missing",
+  "publication_policy_mismatch",
+  "completion_contract_mismatch",
+  "material_action_unknown",
+  "proposal_ready",
+  "publication_evidence_missing",
+]);
+
+export const ProposalReadinessAssessmentSchema = z.object({
+  state: ProposalReadinessStateSchema,
+  accepted: z.boolean(),
+  candidateId: z.string().min(1).optional(),
+  reasonCodes: z.array(ProposalReadinessReasonCodeSchema).min(1),
+  assessedAt: z.string().datetime(),
+}).strict().superRefine((assessment, ctx) => {
+  if (assessment.accepted !== (assessment.state === "proposal_ready")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["accepted"],
+      message: "Only proposal_ready is an accepted proposal assessment." });
+  }
+  if ((assessment.state === "proposal_ready" || assessment.state === "publication_pending")
+    !== Boolean(assessment.candidateId)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["candidateId"],
+      message: "Candidate identity is required exactly for candidate-backed projections." });
+  }
+});
+
+export type ProposalReadinessAssessment = z.infer<typeof ProposalReadinessAssessmentSchema>;
+export type ProposalReadinessReasonCode = z.infer<typeof ProposalReadinessReasonCodeSchema>;
+
 type CompletionGateResultState = z.infer<typeof CompletionGateResultStateSchema>;
 type CompletionAssessmentState = z.infer<typeof CompletionAssessmentStateSchema>;
 type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;

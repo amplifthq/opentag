@@ -5,6 +5,35 @@ import type { ReadinessResult } from "../application.js";
 
 const MIGRATION_LOCK_KEY = 7_118_403_982;
 const MIGRATION_NAME = /^[0-9]{4}_[a-z0-9_]+\.sql$/u;
+const PUBLICATION_CANDIDATE_MIGRATION_SQL = `
+CREATE TABLE cp_publication_candidate (
+  organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+  candidate_id text NOT NULL,
+  run_id text NOT NULL,
+  attempt_id text NOT NULL,
+  project_target_id text NOT NULL,
+  frozen_base_revision text NOT NULL CHECK (frozen_base_revision ~ '^[a-f0-9]{40,64}$'),
+  workspace_tree_digest text NOT NULL CHECK (workspace_tree_digest ~ '^[a-f0-9]{40,64}$'),
+  patch_digest text NOT NULL CHECK (patch_digest ~ '^sha256:[a-f0-9]{64}$'),
+  changed_files text[] NOT NULL CHECK (cardinality(changed_files) > 0),
+  verification_evidence_ids text[] NOT NULL CHECK (cardinality(verification_evidence_ids) > 0),
+  publication_policy_digest text NOT NULL CHECK (publication_policy_digest ~ '^sha256:[a-f0-9]{64}$'),
+  candidate jsonb NOT NULL CHECK (
+    jsonb_typeof(candidate) = 'object'
+    AND NOT candidate ?| ARRAY['baseToFinalBinaryDiff','limitations','workspacePath','logs','output','secret']
+  ),
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (organization_id, candidate_id),
+  UNIQUE (organization_id, run_id, attempt_id)
+);
+CREATE INDEX cp_publication_candidate_run_idx
+  ON cp_publication_candidate(organization_id, run_id);
+CREATE FUNCTION cp_reject_publication_candidate_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publication_candidate_immutable'; END $$;
+CREATE TRIGGER cp_publication_candidate_immutable
+BEFORE UPDATE OR DELETE ON cp_publication_candidate
+FOR EACH ROW EXECUTE FUNCTION cp_reject_publication_candidate_mutation();
+`;
 
 export type SqlMigration = {
   name: string;
@@ -102,6 +131,19 @@ export async function runMigrations(
         throw error;
       }
     }
+    await client.query(PUBLICATION_CANDIDATE_MIGRATION_SQL.replace(
+      "CREATE TABLE cp_publication_candidate",
+      "CREATE TABLE IF NOT EXISTS cp_publication_candidate",
+    ).replace(
+      "CREATE INDEX cp_publication_candidate_run_idx",
+      "CREATE INDEX IF NOT EXISTS cp_publication_candidate_run_idx",
+    ).replace(
+      "CREATE FUNCTION cp_reject_publication_candidate_mutation()",
+      "CREATE OR REPLACE FUNCTION cp_reject_publication_candidate_mutation()",
+    ).replace(
+      "CREATE TRIGGER cp_publication_candidate_immutable\nBEFORE",
+      "DROP TRIGGER IF EXISTS cp_publication_candidate_immutable ON cp_publication_candidate;\nCREATE TRIGGER cp_publication_candidate_immutable\nBEFORE",
+    ));
   } finally {
     try {
       if (locked) {
@@ -122,7 +164,11 @@ export async function checkMigrationReadiness(
       "SELECT name, checksum FROM control_plane_migrations ORDER BY name",
     );
     const applied = new Map(result.rows.map((row) => [row.name, row.checksum]));
-    const current = applied.size === migrations.length
+    const schema = await pool.query<{ present: boolean }>(
+      "SELECT to_regclass('cp_publication_candidate') IS NOT NULL AS present",
+    );
+    const current = schema.rows[0]?.present === true
+      && applied.size === migrations.length
       && migrations.every(
         (migration) => applied.get(migration.name) === migration.checksum,
       );

@@ -1191,6 +1191,57 @@ export const CompletionAssessmentSchema = z
     }
   });
 
+const PublicationCandidateDigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+const PublicationCandidateRevisionSchema = z.string().regex(/^[a-f0-9]{40,64}$/u);
+
+export const PublicationCandidateSchema = z.object({
+  candidateId: z.string().min(1),
+  runId: z.string().min(1),
+  attemptId: z.string().min(1),
+  projectTargetId: z.string().min(1),
+  frozenBaseRevision: PublicationCandidateRevisionSchema,
+  workspaceTreeDigest: PublicationCandidateRevisionSchema,
+  patchDigest: PublicationCandidateDigestSchema,
+  changedFiles: z.array(z.string().min(1)).min(1),
+  verificationEvidenceIds: z.array(PublicationCandidateDigestSchema),
+  publicationPolicyDigest: PublicationCandidateDigestSchema,
+  createdAt: z.string().datetime(),
+}).strict().superRefine((candidate, ctx) => {
+  for (const [key, values] of [
+    ["changedFiles", candidate.changedFiles],
+    ["verificationEvidenceIds", candidate.verificationEvidenceIds],
+  ] as const) {
+    for (let index = 1; index < values.length; index += 1) {
+      if (values[index - 1]!.localeCompare(values[index]!) >= 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, index],
+          message: "PublicationCandidate identity arrays must be sorted and unique." });
+      }
+    }
+  }
+});
+
+export const ProposalReadinessAssessmentSchema = z.object({
+  state: z.enum(["pending", "blocked", "proposal_ready", "publication_pending"]),
+  accepted: z.boolean(),
+  candidateId: z.string().min(1).optional(),
+  reasonCodes: z.array(z.enum([
+    "execution_not_succeeded", "publication_candidate_missing", "verification_missing",
+    "publication_policy_mismatch", "completion_contract_mismatch", "material_action_unknown",
+    "proposal_ready", "publication_evidence_missing",
+  ])).min(1),
+  assessedAt: z.string().datetime(),
+}).strict().superRefine((assessment, ctx) => {
+  if (assessment.accepted !== (assessment.state === "proposal_ready")) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["accepted"],
+      message: "Only proposal_ready is an accepted proposal assessment." });
+  }
+  if ((assessment.state === "proposal_ready" || assessment.state === "publication_pending")
+    !== Boolean(assessment.candidateId)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["candidateId"],
+      message: "Candidate identity is required exactly for candidate-backed projections." });
+  }
+});
+
 export const ReassessmentObligationSourceKindSchema = z.enum([
   "run_result_recorded",
   "verification_evidence_attached",
@@ -1975,6 +2026,8 @@ export type CompletionReasonCode = z.infer<typeof CompletionReasonCodeSchema>;
 export type CompletionGateResult = z.infer<typeof CompletionGateResultSchema>;
 export type CompletionWaiver = z.infer<typeof CompletionWaiverSchema>;
 export type CompletionAssessment = z.infer<typeof CompletionAssessmentSchema>;
+export type PublicationCandidate = z.infer<typeof PublicationCandidateSchema>;
+export type ProposalReadinessAssessment = z.infer<typeof ProposalReadinessAssessmentSchema>;
 export type ReassessmentObligationSourceKind = z.infer<typeof ReassessmentObligationSourceKindSchema>;
 export type ReassessmentObligationState = z.infer<typeof ReassessmentObligationStateSchema>;
 export type ReassessmentObligationReasonCode = z.infer<typeof ReassessmentObligationReasonCodeSchema>;

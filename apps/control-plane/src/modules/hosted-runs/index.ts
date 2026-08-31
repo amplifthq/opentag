@@ -28,10 +28,13 @@ import {
   type HostedLifecycleRequestV1,
   type HostedSourceContentRedeemRequestV1,
 } from "@opentag/control-protocol";
+import { ProposalReadinessAssessmentSchema, PublicationCandidateSchema,
+  type PublicationCandidate } from "@opentag/core";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { withPostgresTransaction } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
+import { createPublicationCandidateRepository } from "../publication-candidates/index.js";
 import { classifyAttemptMaterialActionTruth } from "./material-actions.js";
 
 type Clock = { now(): Date };
@@ -104,6 +107,9 @@ type HostedRunRow = {
   source_content_ids: string[];
   queue_claim_deadline: Date;
   outcome_state: "outcome_unknown" | null;
+  publication_mode: "proposal_only" | "pull_request";
+  publication_policy_digest: string;
+  completion_mode: "proposal_ready" | "pull_request_ready";
 };
 
 type HostedAttemptRow = {
@@ -148,6 +154,24 @@ export type HostedRunCoordinator = {
     | { kind: "stale_fence" }
     | { kind: "terminal"; terminalKind: TerminalKind }
     | { kind: "conflict"; reason: "operation_mismatch" | "invalid_request" | "invalid_transition" }
+  >;
+  settleProposalCandidate(input: {
+    principal: RuntimePrincipal;
+    runId: string;
+    attempt: { attemptId: string; attemptNumber: number; fencingToken: string;
+      fencingTokenDigest: string };
+    candidateId: string;
+    proposalEvidence: {
+      sourceRunId: string; attemptId: string; attemptNumber: number;
+      workspaceId: string; workspacePathDigest: string; baseRevision: string;
+      finalTree: string; diffDigest: string; changedFiles: string[];
+      verificationEvidenceDigests: string[]; evidenceDigest: string;
+    };
+    assessment: unknown;
+  }): Promise<
+    | { kind: "created" | "replayed"; candidate: PublicationCandidate; view: HostedRunProjection }
+    | { kind: "stale_fence" }
+    | { kind: "conflict"; reason: "candidate_mismatch" | "invalid_assessment" | "invalid_request" }
   >;
   reconcileExpiredAttempts(
     organizationId: string | null,
@@ -223,14 +247,16 @@ function terminalKind(state: HostedRunRow["state"]): TerminalKind | null {
 }
 
 function projectRun(run: Pick<HostedRunRow, "state" | "queue_claim_deadline" | "outcome_state">
-  & { publication_mode?: string }): HostedRunProjection {
+  & { publication_mode?: string; has_candidate?: boolean }): HostedRunProjection {
   const status = run.state === "queued" ? "waiting_for_runner"
     : run.state === "needs_approval" ? "waiting_for_approval"
     : run.state === "succeeded" && run.publication_mode === "proposal_only"
       ? "proposal_ready"
-      : run.state === "succeeded" && run.publication_mode === "pull_request"
-        ? "ready_for_review"
-        : run.state;
+    : run.state === "succeeded" && run.publication_mode === "pull_request"
+      ? "ready_for_review"
+      : run.state === "running" && run.publication_mode === "pull_request" && run.has_candidate
+        ? "publication_pending"
+      : run.state;
   return { canonicalStatus: run.state, status,
     queueClaimDeadline: run.queue_claim_deadline.toISOString(),
     outcome: run.outcome_state };
@@ -247,6 +273,7 @@ export function createHostedRunCoordinator(input: {
     contentIds: string[]; purpose: "source_context"; expiresAt: Date;
   }) => Promise<HostedClaimV1["sourceContentGrant"]>;
 }): HostedRunCoordinator {
+  const publicationCandidates = createPublicationCandidateRepository({ pool: input.pool });
   async function hydrateStoredClaim(client: PoolClient, value: unknown): Promise<HostedClaimV1 | null> {
     const stored = StoredHostedClaimV1Schema.parse(value);
     const fencingToken = input.tokenFactory({
@@ -938,6 +965,9 @@ export function createHostedRunCoordinator(input: {
           && command.action !== "heartbeat" && command.action !== "cancel") {
           return { kind: "conflict", reason: "invalid_transition" } as const;
         }
+        if (command.action === "complete" && !["claimed", "running"].includes(attempt.state)) {
+          return { kind: "conflict", reason: "invalid_transition" } as const;
+        }
         const workspaceAttestation = request.workspaceAttestation;
         const interruptionEvidence = request.interruptionEvidence;
         const acceptedWorkspaceAttestation = attempt.workspace_attestation
@@ -1139,7 +1169,7 @@ export function createHostedRunCoordinator(input: {
         } else if (command.action === "complete") {
           const conclusion = HostedCompleteRequestV1Schema.parse(request).conclusion;
           const completion = {
-            success: ["succeeded", "succeeded", "succeeded"],
+            success: ["running", "succeeded", null],
             failure: ["failed", "failed", "failed"],
             cancelled: ["cancelled", "cancelled", "cancelled"],
             interrupted: ["interrupted", "interrupted", "interrupted"],
@@ -1230,6 +1260,95 @@ export function createHostedRunCoordinator(input: {
           ],
         );
         return { kind: "accepted", receipt } as const;
+      });
+    },
+
+    async settleProposalCandidate(command) {
+      if (command.attempt.fencingTokenDigest
+        !== await computeHostedClaimFencingTokenDigestV1(command.attempt.fencingToken)) {
+        return { kind: "conflict", reason: "invalid_request" } as const;
+      }
+      const assessmentResult = ProposalReadinessAssessmentSchema.safeParse(command.assessment);
+      if (!assessmentResult.success) {
+        return { kind: "conflict", reason: "invalid_assessment" } as const;
+      }
+      const assessment = assessmentResult.data;
+      return withPostgresTransaction(input.pool, async (client) => {
+        const runResult = await client.query<HostedRunRow>(
+          `SELECT * FROM cp_hosted_run WHERE organization_id = $1 AND run_id = $2 FOR UPDATE`,
+          [command.principal.organizationId, command.runId],
+        );
+        const run = runResult.rows[0];
+        if (!run || (run.terminal_kind && run.terminal_kind !== "succeeded")) {
+          return { kind: "stale_fence" } as const;
+        }
+        const attemptResult = await client.query<HostedAttemptRow>(
+          `SELECT attempt_number, attempt_id, runner_id, credential_id,
+                  fencing_token_digest, lease_expires_at, material_start_state, state,
+                  workspace_attestation, interruption_evidence
+           FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
+             AND attempt_number = $3 FOR UPDATE`,
+          [command.principal.organizationId, command.runId, run.current_attempt_number],
+        );
+        const attempt = attemptResult.rows[0];
+        const admission = HostedAdmissionEnvelopeV1Schema.parse(run.hosted_admission);
+        const attestation = attempt?.workspace_attestation
+          ? AttemptWorkspaceAttestationV1Schema.parse(attempt.workspace_attestation) : null;
+        if (!attempt || attempt.attempt_id !== command.attempt.attemptId
+          || attempt.attempt_number !== command.attempt.attemptNumber
+          || attempt.runner_id !== command.principal.runnerId
+          || attempt.credential_id !== command.principal.credentialId
+          || attempt.fencing_token_digest !== command.attempt.fencingTokenDigest
+          || attempt.state !== "succeeded") return { kind: "stale_fence" } as const;
+        const evidence = command.proposalEvidence;
+        if (!attestation || evidence.sourceRunId !== command.runId
+          || evidence.attemptId !== attempt.attempt_id
+          || evidence.attemptNumber !== attempt.attempt_number
+          || evidence.workspaceId !== attestation.workspaceId
+          || evidence.workspacePathDigest !== attestation.workspacePathDigest
+          || evidence.baseRevision !== attestation.baseRevision
+          || evidence.finalTree !== attestation.currentTree) {
+          return { kind: "conflict", reason: "candidate_mismatch" } as const;
+        }
+        const candidateResult = PublicationCandidateSchema.safeParse({
+          candidateId: command.candidateId, runId: command.runId,
+          attemptId: attempt.attempt_id,
+          projectTargetId: admission.projectTarget.projectTargetId,
+          frozenBaseRevision: evidence.baseRevision,
+          workspaceTreeDigest: evidence.finalTree,
+          patchDigest: evidence.diffDigest,
+          changedFiles: evidence.changedFiles,
+          verificationEvidenceIds: evidence.verificationEvidenceDigests,
+          publicationPolicyDigest: run.publication_policy_digest,
+          createdAt: assessment.assessedAt,
+        });
+        if (!candidateResult.success || assessment.candidateId !== command.candidateId) {
+          return { kind: "conflict", reason: "candidate_mismatch" } as const;
+        }
+        const candidate = candidateResult.data;
+        const expectedState = run.publication_mode === "proposal_only"
+          ? "proposal_ready" : "publication_pending";
+        if (assessment.state !== expectedState
+          || assessment.accepted !== (run.publication_mode === "proposal_only")) {
+          return { kind: "conflict", reason: "invalid_assessment" } as const;
+        }
+        const persisted = await publicationCandidates.putInTransaction(client, {
+          organizationId: command.principal.organizationId, candidate,
+        });
+        if (persisted.kind === "conflict") return persisted;
+        const nextState: CanonicalRunStatus = assessment.accepted ? "succeeded" : "running";
+        const terminal = assessment.accepted ? "succeeded" : null;
+        await client.query(
+          `UPDATE cp_hosted_run SET state = $3, terminal_kind = $4,
+             terminal_receipt = $5::jsonb, updated_at = $6
+           WHERE organization_id = $1 AND run_id = $2`,
+          [command.principal.organizationId, command.runId, nextState, terminal,
+            terminal ? JSON.stringify({ kind: "proposal_ready", candidateId: candidate.candidateId,
+              assessment }) : null, input.clock.now().toISOString()],
+        );
+        return { kind: persisted.kind, candidate,
+          view: projectRun({ ...run, state: nextState, publication_mode: run.publication_mode,
+            has_candidate: true }) } as const;
       });
     },
 
@@ -1444,9 +1563,14 @@ export function createHostedRunCoordinator(input: {
       const result = await input.pool.query<HostedRunRow & {
         terminal_reason: string | null;
         publication_mode: string;
+        has_candidate: boolean;
       }>(
-        `SELECT * FROM cp_hosted_run
-         WHERE organization_id = $1 AND run_id = $2`,
+        `SELECT run.*, EXISTS(
+           SELECT 1 FROM cp_publication_candidate candidate
+           WHERE candidate.organization_id = run.organization_id
+             AND candidate.run_id = run.run_id
+         ) AS has_candidate FROM cp_hosted_run run
+         WHERE run.organization_id = $1 AND run.run_id = $2`,
         [query.organizationId, query.runId],
       );
       const row = result.rows[0];

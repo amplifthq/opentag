@@ -16,6 +16,7 @@ import {
 import {
   createOpenTagGovernance,
   deriveWorkLoopView,
+  evaluateProposalReadiness,
   type CompletionArtifact,
   type CompletionEvidenceFact,
   type CompletionEvaluationSnapshot,
@@ -23,6 +24,12 @@ import {
   type GovernanceRepository,
   type WorkLoopView
 } from "@opentag/governance";
+import type { ProposalReadinessEvaluationInput } from "@opentag/governance";
+
+/** The dispatcher delegates proposal completion judgment to Governance. */
+export function assessProposalCompletion(input: ProposalReadinessEvaluationInput) {
+  return evaluateProposalReadiness(input);
+}
 import type { GitHubVerifiedPullRequestSnapshot } from "@opentag/github";
 import type { GitHubCompletionReconciliationEscalationRequest } from "@opentag/github";
 import {
