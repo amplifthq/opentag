@@ -36,7 +36,7 @@ WHERE candidate.organization_id = attempt.organization_id
 CREATE OR REPLACE FUNCTION cp_is_canonical_utc_millis(value text) RETURNS boolean
 LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 BEGIN
-  IF value !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' THEN
+  IF value !~ '^(000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' THEN
     RETURN false;
   END IF;
   RETURN to_char(value::timestamptz AT TIME ZONE 'UTC',

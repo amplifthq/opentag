@@ -381,6 +381,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     ["noncanonical assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["assessedAt"] = "2026-08-15T07:00:00Z";
     }}],
+    ["year-zero assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
+      assessment["assessedAt"] = "0000-01-01T00:00:00.000Z";
+    }}],
     ["extra key", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["unexpected"] = true;
     }}],
@@ -450,6 +453,11 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     }],
     ["noncanonical Candidate timestamp", {
       prepareCandidate: (candidate) => { candidate.createdAt = "2026-08-15T07:00:00Z"; },
+    }],
+    ["year-zero Candidate timestamp", {
+      mutateCandidate: (candidate: Record<string, unknown>) => {
+        candidate["createdAt"] = "0000-01-01T00:00:00.000Z";
+      },
     }],
   ] as const)("refuses malformed historical Candidate: %s", async (_label, mutation) => {
     const malformed = await createActualUnversionedFixture(mutation);

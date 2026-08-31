@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ProposalReadinessAssessmentSchema } from "@opentag/control-protocol";
 import {
   AcceptedProgressAttributionViewSchema,
   AgentAccessProfileSnapshotSchema,
@@ -19,7 +20,6 @@ import {
   OpenTagRunSchema,
   PolicySnapshotProvenanceSchema,
   PolicyResolutionSchema,
-  ProposalReadinessAssessmentSchema,
   PublicationCandidateSchema,
   RunAdmissionDecisionSchema,
   RunEventSchema,
@@ -93,6 +93,13 @@ describe("PublicationCandidate canonical contracts", () => {
       ...candidate,
       changedFiles: ["A.ts", "a.ts", "é.ts", "é.ts"],
     }).success).toBe(false);
+    for (const changedFile of [
+      String.fromCharCode(0xd800) + ".ts",
+      String.fromCharCode(0xdc00) + ".ts",
+    ]) {
+      expect(PublicationCandidateSchema.safeParse({ ...candidate, changedFiles: [changedFile] }).success)
+        .toBe(false);
+    }
     expect(PublicationCandidateSchema.safeParse({
       ...candidate,
       verificationEvidenceIds: [
@@ -108,6 +115,7 @@ describe("PublicationCandidate canonical contracts", () => {
       ],
     }).success).toBe(false);
     for (const createdAt of [
+      "0000-01-01T00:00:00.000Z",
       "2026-08-31T01:02:03Z",
       "2026-08-31T01:02:03.0Z",
       "2026-08-31T01:02:03.00Z",

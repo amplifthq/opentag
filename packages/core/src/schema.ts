@@ -1,16 +1,23 @@
 import { z } from "zod";
 import {
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionAssessmentStateSchema,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  isCanonicalUtcMillisTimestamp,
+  ProposalReadinessAssessmentSchema as ControlProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
+  WellFormedUnicodeStringSchema,
 } from "@opentag/control-protocol";
 import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 import { FrozenRoutingPolicySchema } from "./routing.js";
 import { canonicalJsonStringify } from "./canonical-json.js";
 
 export {
+  CanonicalUtcMillisTimestampSchema,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
@@ -848,18 +855,11 @@ export function completionReasonRequiresGateEvidence(reasonCode: CompletionReaso
  * TypeScript counterpart of `COLLATE "C"` for persisted identity arrays.
  */
 export function compareCanonicalUnicodeStrings(left: string, right: string): number {
-  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
-  const length = Math.min(leftPoints.length, rightPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = leftPoints[index]! - rightPoints[index]!;
-    if (difference !== 0) return difference;
-  }
-  return leftPoints.length - rightPoints.length;
+  return compareWellFormedUnicodeStrings(left, right);
 }
 
 export function sortCanonicalUnicodeStrings(values: readonly string[]): string[] {
-  return [...values].sort(compareCanonicalUnicodeStrings);
+  return sortWellFormedUnicodeStrings(values);
 }
 
 export const compareCompletionGateIds = compareCanonicalUnicodeStrings;
@@ -1203,34 +1203,30 @@ export const CompletionAssessmentSchema = z
     }
   });
 
-const PublicationCandidateDigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-const PublicationCandidateRevisionSchema = z.string().regex(/^[a-f0-9]{40,64}$/u);
-const CANONICAL_UTC_MILLIS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+export { isCanonicalUtcMillisTimestamp };
 
-export function isCanonicalUtcMillisTimestamp(value: string): boolean {
-  if (!CANONICAL_UTC_MILLIS_PATTERN.test(value)) return false;
-  try {
-    return new Date(value).toISOString() === value;
-  } catch {
-    return false;
-  }
-}
-
-export const CanonicalUtcMillisTimestampSchema = z.string().refine(isCanonicalUtcMillisTimestamp, {
-  message: "Timestamp must be a real canonical UTC instant with exactly millisecond precision."
-});
+const WellFormedNonEmptyStringSchema = z.string().min(1).refine(
+  (value) => WellFormedUnicodeStringSchema.safeParse(value).success,
+  "Value must be a well-formed Unicode string.",
+);
+const WellFormedPublicationCandidateDigestSchema = z.string()
+  .regex(/^sha256:[a-f0-9]{64}$/u)
+  .refine((value) => WellFormedUnicodeStringSchema.safeParse(value).success);
+const WellFormedPublicationCandidateRevisionSchema = z.string()
+  .regex(/^[a-f0-9]{40,64}$/u)
+  .refine((value) => WellFormedUnicodeStringSchema.safeParse(value).success);
 
 export const PublicationCandidateSchema = z.object({
-  candidateId: z.string().min(1),
-  runId: z.string().min(1),
-  attemptId: z.string().min(1),
-  projectTargetId: z.string().min(1),
-  frozenBaseRevision: PublicationCandidateRevisionSchema,
-  workspaceTreeDigest: PublicationCandidateRevisionSchema,
-  patchDigest: PublicationCandidateDigestSchema,
-  changedFiles: z.array(z.string().min(1)).min(1),
-  verificationEvidenceIds: z.array(PublicationCandidateDigestSchema),
-  publicationPolicyDigest: PublicationCandidateDigestSchema,
+  candidateId: WellFormedNonEmptyStringSchema,
+  runId: WellFormedNonEmptyStringSchema,
+  attemptId: WellFormedNonEmptyStringSchema,
+  projectTargetId: WellFormedNonEmptyStringSchema,
+  frozenBaseRevision: WellFormedPublicationCandidateRevisionSchema,
+  workspaceTreeDigest: WellFormedPublicationCandidateRevisionSchema,
+  patchDigest: WellFormedPublicationCandidateDigestSchema,
+  changedFiles: z.array(WellFormedNonEmptyStringSchema).min(1),
+  verificationEvidenceIds: z.array(WellFormedPublicationCandidateDigestSchema),
+  publicationPolicyDigest: WellFormedPublicationCandidateDigestSchema,
   createdAt: CanonicalUtcMillisTimestampSchema,
 }).strict().superRefine((candidate, ctx) => {
   for (const [key, values] of [
@@ -1246,45 +1242,25 @@ export const PublicationCandidateSchema = z.object({
   }
 });
 
-export const ProposalReadinessAssessmentSchema = z.object({
-  state: z.enum(["pending", "blocked", "proposal_ready", "publication_pending"]),
-  accepted: z.boolean(),
-  candidateId: z.string().min(1).optional(),
-  reasonCodes: z.array(z.enum([
-    "execution_not_succeeded", "publication_candidate_missing", "verification_missing",
-    "publication_policy_mismatch", "completion_contract_mismatch", "material_action_unknown",
-    "proposal_ready", "publication_evidence_missing",
-  ])).min(1),
-  assessedAt: CanonicalUtcMillisTimestampSchema,
-}).strict().superRefine((assessment, ctx) => {
-  if (assessment.accepted !== (assessment.state === "proposal_ready")) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["accepted"],
-      message: "Only proposal_ready is an accepted proposal assessment." });
-  }
-  if ((assessment.state === "proposal_ready" || assessment.state === "publication_pending")
-    !== Boolean(assessment.candidateId)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["candidateId"],
-      message: "Candidate identity is required exactly for candidate-backed projections." });
-  }
-});
+const ProposalReadinessAssessmentSchema = ControlProposalReadinessAssessmentSchema;
 
 export const AttemptProposalEvidenceSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("attempt_proposal_evidence"),
-  attemptId: z.string().min(1),
+  attemptId: WellFormedNonEmptyStringSchema,
   attemptNumber: z.number().int().positive(),
-  workspaceId: z.string().min(1),
-  workspacePathDigest: PublicationCandidateDigestSchema,
-  baseRevision: PublicationCandidateRevisionSchema,
-  finalRevision: PublicationCandidateRevisionSchema.optional(),
-  finalTree: PublicationCandidateRevisionSchema,
-  diffDigest: PublicationCandidateDigestSchema,
-  baseToFinalBinaryDiff: z.string(),
-  changedFilesDigest: PublicationCandidateDigestSchema,
-  changedFiles: z.array(z.string().min(1)).min(1),
-  verificationEvidenceDigests: z.array(PublicationCandidateDigestSchema).min(1),
-  limitations: z.array(z.string()),
-  evidenceDigest: PublicationCandidateDigestSchema,
+  workspaceId: WellFormedNonEmptyStringSchema,
+  workspacePathDigest: WellFormedPublicationCandidateDigestSchema,
+  baseRevision: WellFormedPublicationCandidateRevisionSchema,
+  finalRevision: WellFormedPublicationCandidateRevisionSchema.optional(),
+  finalTree: WellFormedPublicationCandidateRevisionSchema,
+  diffDigest: WellFormedPublicationCandidateDigestSchema,
+  baseToFinalBinaryDiff: WellFormedUnicodeStringSchema,
+  changedFilesDigest: WellFormedPublicationCandidateDigestSchema,
+  changedFiles: z.array(WellFormedNonEmptyStringSchema).min(1),
+  verificationEvidenceDigests: z.array(WellFormedPublicationCandidateDigestSchema).min(1),
+  limitations: z.array(WellFormedUnicodeStringSchema),
+  evidenceDigest: WellFormedPublicationCandidateDigestSchema,
 }).strict().superRefine((evidence, ctx) => {
   for (const [key, values] of [
     ["changedFiles", evidence.changedFiles],
@@ -1306,8 +1282,8 @@ export const AttemptProposalEvidenceArtifactSchema = z.object({
   createdAt: z.string().datetime(),
   metadata: z.object({
     proposalEvidence: AttemptProposalEvidenceSchema,
-    evidenceDigest: PublicationCandidateDigestSchema,
-    artifactDigest: PublicationCandidateDigestSchema,
+    evidenceDigest: WellFormedPublicationCandidateDigestSchema,
+    artifactDigest: WellFormedPublicationCandidateDigestSchema,
     readiness: z.literal("not_assessed"),
   }).strict(),
 }).strict();

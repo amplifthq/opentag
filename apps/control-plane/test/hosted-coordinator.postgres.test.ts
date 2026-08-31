@@ -292,6 +292,13 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     await expect(service.settleProposalCandidate({ ...settlementCommand,
       proposalArtifact: mismatchedDigest })).resolves.toEqual({
         kind: "conflict", reason: "invalid_evidence" });
+    const nonWellFormedEvidence = structuredClone(artifact);
+    nonWellFormedEvidence.metadata.proposalEvidence.changedFiles = [
+      String.fromCharCode(0xd800) + ".ts",
+    ];
+    await expect(service.settleProposalCandidate({ ...settlementCommand,
+      proposalArtifact: nonWellFormedEvidence })).resolves.toEqual({
+        kind: "conflict", reason: "invalid_evidence" });
     await fixture.pool.query("ALTER TABLE cp_hosted_run DISABLE TRIGGER cp_hosted_run_frozen_admission_guard");
     const mismatchedMode = publicationMode === "proposal_only" ? "pull_request" : "proposal_only";
     await fixture.pool.query(

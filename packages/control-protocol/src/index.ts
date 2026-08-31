@@ -2,17 +2,31 @@ import { z } from "zod";
 import { canonicalJsonStringify } from "./canonical-json.js";
 import { isCredentialSafeText } from "./credential-safety.js";
 import {
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionReasonCodeSchema,
+  isCanonicalUtcMillisTimestamp,
+  isWellFormedUnicodeString,
+  ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
+  WellFormedUnicodeStringSchema,
 } from "./completion.js";
 
 export {
   COMPLETION_REASON_ALLOWED_GATE_STATES,
+  CanonicalUtcMillisTimestampSchema,
+  compareWellFormedUnicodeStrings,
   CompletionAssessmentStateSchema,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  isCanonicalUtcMillisTimestamp,
+  isWellFormedUnicodeString,
+  ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
+  WellFormedUnicodeStringSchema,
 } from "./completion.js";
 export { canonicalJsonStringify } from "./canonical-json.js";
 
@@ -47,16 +61,7 @@ export const RelayCapabilitySchema = z.enum([
   "relay.check-observation.v1",
 ]);
 
-function compareUnicodeCodePoints(left: string, right: string): number {
-  const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
-  const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
-  const length = Math.min(leftPoints.length, rightPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftPoints[index] ?? 0) - (rightPoints[index] ?? 0);
-    if (difference !== 0) return difference;
-  }
-  return leftPoints.length - rightPoints.length;
-}
+const compareUnicodeCodePoints = compareWellFormedUnicodeStrings;
 
 function sortedUniqueArray<T extends z.ZodType<string>>(item: T) {
   return z.array(item).superRefine((values, ctx) => {
@@ -78,13 +83,7 @@ function sortedUniqueArray<T extends z.ZodType<string>>(item: T) {
 export const RequiredRelayCapabilitiesSchema = sortedUniqueArray(RelayCapabilitySchema).min(1);
 export const RelayCapabilitiesSchema = sortedUniqueArray(RelayCapabilitySchema);
 export const ReceiptDigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
-export const ControlTimestampSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u)
-  .refine((value) => {
-    const timestamp = Date.parse(value);
-    return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
-  }, "Timestamp must be a real RFC 3339 UTC millisecond instant.");
+export const ControlTimestampSchema = CanonicalUtcMillisTimestampSchema;
 export const WorkerReleaseShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 export const WorkerReleaseIdentitySchema = z.union([z.literal("local"), WorkerReleaseShaSchema]);
 export const NpmPackageVersionSchema = z

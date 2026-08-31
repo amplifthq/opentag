@@ -1,5 +1,59 @@
 import { z } from "zod";
 
+const CANONICAL_UTC_MILLIS_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/u;
+
+/** Reject UTF-16 surrogate code units that cannot be encoded as UTF-8. */
+export function isWellFormedUnicodeString(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export const WellFormedUnicodeStringSchema = z.string().refine(isWellFormedUnicodeString, {
+  message: "Value must be a well-formed Unicode string.",
+});
+
+/** Unicode scalar lexicographic order, equivalent to UTF-8 `COLLATE \"C\"`. */
+export function compareWellFormedUnicodeStrings(left: string, right: string): number {
+  if (!isWellFormedUnicodeString(left) || !isWellFormedUnicodeString(right)) {
+    throw new TypeError("Canonical Unicode ordering requires well-formed strings.");
+  }
+  const leftPoints = Array.from(left, (value) => value.codePointAt(0)!);
+  const rightPoints = Array.from(right, (value) => value.codePointAt(0)!);
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = leftPoints[index]! - rightPoints[index]!;
+    if (difference !== 0) return difference;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+export function sortWellFormedUnicodeStrings(values: readonly string[]): string[] {
+  if (values.some((value) => !isWellFormedUnicodeString(value))) {
+    throw new TypeError("Canonical Unicode ordering requires well-formed strings.");
+  }
+  return [...values].sort(compareWellFormedUnicodeStrings);
+}
+
+export function isCanonicalUtcMillisTimestamp(value: string): boolean {
+  const match = CANONICAL_UTC_MILLIS_PATTERN.exec(value);
+  if (!match || match[1]! < "0001") return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+export const CanonicalUtcMillisTimestampSchema = z.string().refine(isCanonicalUtcMillisTimestamp, {
+  message: "Timestamp must be a real canonical UTC instant with exactly millisecond precision.",
+});
+
 export const CompletionAssessmentStateSchema = z.enum([
   "pending",
   "satisfied",
@@ -68,7 +122,7 @@ export const ProposalReadinessAssessmentSchema = z.object({
   accepted: z.boolean(),
   candidateId: z.string().min(1).optional(),
   reasonCodes: z.array(ProposalReadinessReasonCodeSchema).min(1),
-  assessedAt: z.string().datetime(),
+  assessedAt: CanonicalUtcMillisTimestampSchema,
 }).strict().superRefine((assessment, ctx) => {
   if (assessment.accepted !== (assessment.state === "proposal_ready")) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["accepted"],
