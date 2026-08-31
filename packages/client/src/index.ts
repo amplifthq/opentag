@@ -102,6 +102,7 @@ import {
   HumanPermissionDecisionHttpResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   HumanPublicationApprovalV1Schema,
+  RunnerBranchOwnershipAttestationV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionStableIdV1Schema,
@@ -151,6 +152,7 @@ import {
   type HostedSourceContentRedeemResponseV1,
   type HumanPermissionDecisionRequestV1,
   type HumanPublicationApprovalV1,
+  type RunnerBranchOwnershipAttestationV1,
   type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
   type RunnerControlContextResponseV1,
@@ -824,6 +826,9 @@ export type OpenTagClient = {
     acceptedProgress: AcceptedProgressAttributionView | null;
   }>;
   approvePublicationControlV1(input: HumanPublicationApprovalV1): Promise<{ intentId: string; replayed: boolean }>;
+  attestPublicationBranchOwnershipControlV1(input: RunnerBranchOwnershipAttestationV1): Promise<{
+    ownershipId: string; ownershipDigest: string; replayed: boolean;
+  }>;
   listWorkLoopsRequiringAttention(input?: { limit?: number }): Promise<WorkLoopAttentionResult>;
   listHumanEscalations(input: { runId: string }): Promise<{
     escalations: HumanEscalation[];
@@ -2405,6 +2410,27 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
       }
       return { intentId: body.intentId, replayed: body.kind === "replayed" };
+    },
+
+    async attestPublicationBranchOwnershipControlV1(input) {
+      const request = RunnerBranchOwnershipAttestationV1Schema.parse(input);
+      const action = "attestPublicationBranchOwnershipControlV1";
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/publication/ownership`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
+      );
+      assertControlResponseBoundary(response, action, trustedControlOrigin);
+      const body = await parseControlJson(response, action, trustedControlOrigin) as {
+        kind?: unknown; ownershipId?: unknown; ownershipDigest?: unknown;
+      };
+      if (response.status !== 200 || (body.kind !== "recorded" && body.kind !== "replayed")
+        || typeof body.ownershipId !== "string" || typeof body.ownershipDigest !== "string") {
+        if (response.status !== 200) throwControlV1Error(response, body, action, request.requestId);
+        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
+      }
+      return { ownershipId: body.ownershipId, ownershipDigest: body.ownershipDigest,
+        replayed: body.kind === "replayed" };
     },
 
     async reconcileMaterialActionControlV1(input) {

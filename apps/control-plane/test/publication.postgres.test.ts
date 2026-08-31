@@ -50,6 +50,23 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     if (outcome.kind !== "claimed") throw new Error("claim failed");
     claim = outcome.claim as typeof claim;
     candidate.attemptId = claim.attempt.id;
+    const workspaceAttestation = { workspaceId: "workspace_publication",
+      workspacePathDigest: sha256("workspace_path"), repositoryPathDigest: sha256("repository_path"),
+      worktreeIdentityDigest: sha256("worktree"), baseRevision: candidate.frozenBaseRevision,
+      currentRevision: "c".repeat(40), currentTree: candidate.workspaceTreeDigest,
+      workspaceStateDigest: sha256("workspace_state"), attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      credentialId: principal.credentialId, leaseExpiresAt: claim.attempt.leaseExpiresAt };
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET state='succeeded',workspace_attestation=$4::jsonb
+       WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
+      [principal.organizationId,candidate.runId,claim.attempt.id,JSON.stringify(workspaceAttestation)]);
+    await fixture.pool.query(
+      `INSERT INTO cp_project_target(organization_id,project_target_id,runner_id,binding_digest,
+       provider,owner,repo,default_executor,default_branch,version,updated_at)
+       VALUES($1,$2,$3,$4,'github','Acme','Demo','executor_acp','main',1,$5)`,
+      [principal.organizationId,candidate.projectTargetId,principal.runnerId,
+        admission.admission.projectTarget.digest,now]);
     await fixture.pool.query(
       `INSERT INTO cp_publication_candidate(organization_id,candidate_id,run_id,attempt_id,attempt_number,project_target_id,frozen_base_revision,workspace_tree_digest,patch_digest,changed_files,verification_evidence_ids,publication_policy_digest,candidate,completion_assessment,created_at)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15)`,
@@ -63,11 +80,23 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
 
   afterAll(async () => fixture.close());
 
-  const approval = (overrides: Partial<Record<string, unknown>> = {}) => ({ organizationId: principal.organizationId,
-    runnerId: principal.runnerId, runId: candidate.runId, attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
-    fencingToken: claim.attempt.fencingToken, candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
-    approvalId: "approval_publication", approverId: "operator_publication", repository,
-    branch: "opentag/run_publication", expectedHeadSha: "c".repeat(40), runnerGeneration: 1,
+  const ownership = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+    requiredCapabilities: ["relay.publication.v1"] as ["relay.publication.v1"],
+    requestId: "request_ownership_publication", organizationId: principal.organizationId,
+    runnerId: principal.runnerId, runnerGeneration: 1, runId: candidate.runId,
+    attemptId: claim.attempt.id, attemptNumber: claim.attempt.number, fencingToken: claim.attempt.fencingToken,
+    candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
+    projectTargetId: candidate.projectTargetId, targetBindingDigest: `sha256:${"e".repeat(64)}`,
+    remote: "origin", baseBranch: "main", frozenBaseRevision: candidate.frozenBaseRevision,
+    workspaceTreeDigest: candidate.workspaceTreeDigest, branch: "opentag/run_publication",
+    expectedHeadSha: "c".repeat(40), attestedAt: now.toISOString(), ...overrides });
+
+  const approval = (ownershipId: string, ownershipDigest: string,
+    overrides: Partial<Record<string, unknown>> = {}) => ({ organizationId: principal.organizationId,
+    runnerId: principal.runnerId, runId: candidate.runId, ownershipId, ownershipDigest,
+    candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
+    approvalId: "approval_publication", approverId: "operator_publication",
     approvedAt: now.toISOString(), expiresAt: "2026-08-15T12:30:00.000Z", ...overrides });
 
   const claimOperation = (step: "push_owned_branch" | "create_draft_pull_request") => publisher.claim({ principal,
@@ -75,17 +104,43 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     fencingToken: claim.attempt.fencingToken, candidateId: candidate.candidateId, candidateDigest: sha256(candidate),
     runnerGeneration: 1, step });
 
-  it("requires a distinct actor and exact Candidate, Attempt/fence, branch, generation, and unexpired pull-request policy", async () => {
-    await expect(publisher.approve(approval({ approverId: principal.runnerId }))).resolves.toMatchObject({ kind: "rejected", reason: "self_approval_prohibited" });
-    await expect(publisher.approve(approval({ candidateDigest: sha256("wrong") }))).resolves.toMatchObject({ kind: "rejected", reason: "candidate_digest_mismatch" });
-    await expect(publisher.approve(approval({ branch: "main" }))).resolves.toMatchObject({ kind: "rejected", reason: "target_branch_write_prohibited" });
-    await expect(publisher.approve(approval({ expiresAt: "2026-08-15T11:59:59.000Z" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_expired" });
-    await expect(publisher.approve(approval())).resolves.toMatchObject({ kind: "approved" });
-    await expect(publisher.approve(approval())).resolves.toMatchObject({ kind: "replayed" });
+  it("freezes exact Runner-owned branch authority before human approval and conflicts on any replay change", async () => {
+    await expect(publisher.attestOwnership({ principal, attestation: ownership({
+      candidateDigest: sha256("wrong") }) as never })).resolves.toMatchObject({ kind: "rejected" });
+    const ownershipRace = await Promise.all([
+      publisher.attestOwnership({ principal, attestation: ownership() as never }),
+      publisher.attestOwnership({ principal, attestation: ownership() as never }),
+    ]);
+    expect(ownershipRace.map((result) => result.kind).sort()).toEqual(["recorded", "replayed"]);
+    const owned = ownershipRace.find((result) => result.kind !== "rejected")!;
+    if (owned.kind === "rejected") return;
+    await expect(publisher.attestOwnership({ principal, attestation: ownership() as never }))
+      .resolves.toMatchObject({ kind: "replayed", ownershipId: owned.ownershipId });
+    await expect(publisher.attestOwnership({ principal, attestation: ownership({ remote: "upstream" }) as never }))
+      .resolves.toMatchObject({ kind: "rejected", reason: "ownership_attestation_conflict" });
+    await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
+      { approverId: principal.runnerId }))).resolves.toMatchObject({ kind: "rejected", reason: "self_approval_prohibited" });
+    await expect(publisher.approve(approval(owned.ownershipId, sha256("wrong"))))
+      .resolves.toMatchObject({ kind: "rejected", reason: "stale_publication_authority" });
+    await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
+      { expiresAt: "2026-08-15T11:59:59.000Z" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_expired" });
+    const approvalRace = await Promise.all([
+      publisher.approve(approval(owned.ownershipId, owned.ownershipDigest)),
+      publisher.approve(approval(owned.ownershipId, owned.ownershipDigest)),
+    ]);
+    expect(approvalRace.map((result) => result.kind).sort()).toEqual(["approved", "replayed"]);
+    await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
+      { approverId: "operator_changed" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
+    await expect(publisher.approve(approval(owned.ownershipId, owned.ownershipDigest,
+      { expiresAt: "2026-08-15T12:29:59.000Z" }))).resolves.toMatchObject({ kind: "rejected", reason: "approval_replay_conflict" });
   });
 
   it("serializes publication, records start before effects, and authorizes retry only after durable authoritative absence", async () => {
-    const push = await claimOperation("push_owned_branch");
+    const pushRace = await Promise.all([
+      claimOperation("push_owned_branch"), claimOperation("push_owned_branch"),
+    ]);
+    expect(pushRace.map((result) => result.kind).sort()).toEqual(["issued", "unavailable"]);
+    const push = pushRace.find((result) => result.kind === "issued")!;
     expect(push.kind).toBe("issued");
     if (push.kind !== "issued") return;
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken, capability: push.capability, begunAt: now.toISOString() })).resolves.toEqual({ kind: "begun" });
@@ -122,6 +177,35 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(publisher.record({ principal, receipt: { ...presentSeed,
       receiptDigest: await computePublicationOperationReceiptDigestV1(presentSeed) } }))
       .resolves.toMatchObject({ kind: "recorded" });
+    await expect(fixture.pool.query<{ step: string; attempt_number: number }>(
+      `SELECT step,attempt_number FROM cp_publication_capability
+       WHERE organization_id=$1 ORDER BY step,attempt_number`, [principal.organizationId]))
+      .resolves.toMatchObject({ rows: [
+        { step: "create_draft_pull_request", attempt_number: 1 },
+        { step: "create_draft_pull_request", attempt_number: 2 },
+        { step: "push_owned_branch", attempt_number: 1 },
+      ] });
+  });
+
+  it("normalizes canonical repository identity and rejects casing, remote, and base variants for the owned branch", async () => {
+    const stored = (await fixture.pool.query<any>(
+      `SELECT * FROM cp_publication_branch_ownership WHERE organization_id=$1`,
+      [principal.organizationId])).rows[0];
+    expect({ provider: stored.provider, owner: stored.owner, repo: stored.repo })
+      .toEqual({ provider: "github", owner: "acme", repo: "demo" });
+    await expect(fixture.pool.query(
+      `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,run_id,
+       attempt_id,attempt_number,fencing_token_digest,runner_id,runner_generation,candidate_id,
+       candidate_digest,project_target_id,target_binding_digest,provider,owner,repo,remote,
+       base_branch,frozen_base_revision,workspace_tree_digest,branch,expected_head_sha,
+       attestation_digest,attested_at,created_at)
+       SELECT organization_id,'ownership_takeover',run_id,attempt_id,attempt_number,
+       fencing_token_digest,runner_id,runner_generation,'candidate_takeover',candidate_digest,
+       project_target_id,target_binding_digest,provider,owner,repo,'upstream','trunk',
+       frozen_base_revision,workspace_tree_digest,upper(branch),expected_head_sha,
+       $2,attested_at,created_at FROM cp_publication_branch_ownership
+       WHERE organization_id=$1`, [principal.organizationId,sha256("takeover")]))
+      .rejects.toMatchObject({ code: "23505" });
   });
 
   it("settles exactly once only after successful receipts and frozen checks prove exact-head readiness", async () => {

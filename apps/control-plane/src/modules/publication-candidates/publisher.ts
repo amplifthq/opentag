@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
 import {
   AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
+  RunnerBranchOwnershipAttestationV1Schema,
   PublicationOperationCapabilityV1Schema,
   RunnerPublicationCompletionV1Schema,
   PublicationOperationReceiptV1Schema,
   PublicationOperationObservationV1Schema,
   computeMaterialActionFencingTokenDigestV1,
+  computeBranchOwnershipAttestationDigestV1,
   computePublicationCapabilityDigestV1,
   computePublicationOperationReceiptDigestV1,
   type PublicationOperationCapabilityV1,
   type PublicationOperationReceiptV1,
   type PublicationOperationStepV1,
+  type RunnerBranchOwnershipAttestationV1,
 } from "@opentag/control-protocol";
 import { canonicalJsonStringify } from "@opentag/control-protocol/canonical-json";
 import { assessExactPullRequestReadiness } from "@opentag/github";
@@ -26,11 +29,9 @@ function digest(value: unknown): string {
 }
 
 export type PublicationApprovalInput = {
-  organizationId: string; runnerId: string;
-  runId: string; attemptId: string; attemptNumber: number; fencingToken: string;
+  organizationId: string; runnerId: string; runId: string;
+  ownershipId: string; ownershipDigest: string;
   candidateId: string; candidateDigest: string; approvalId: string; approverId: string;
-  repository: { provider: "github"; owner: string; repo: string; remote: string; baseBranch: string };
-  branch: string; expectedHeadSha: string; runnerGeneration: number;
   approvedAt: string; expiresAt: string;
 };
 
@@ -38,37 +39,146 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
   idFactory: IdFactory; capabilityTtlMs?: number }) {
   const ttl = Math.min(input.capabilityTtlMs ?? 60_000, 5 * 60_000);
   return {
+    async attestOwnership(command: { principal: RuntimePrincipal;
+      attestation: RunnerBranchOwnershipAttestationV1 }): Promise<
+        { kind: "recorded" | "replayed"; ownershipId: string; ownershipDigest: string }
+        | { kind: "rejected"; reason: string }> {
+      const attestation = RunnerBranchOwnershipAttestationV1Schema.parse(command.attestation);
+      const now = input.clock.now();
+      const ownershipDigest = await computeBranchOwnershipAttestationDigestV1(attestation);
+      const fenceDigest = await computeMaterialActionFencingTokenDigestV1(attestation.fencingToken);
+      if (Date.parse(attestation.attestedAt) > now.getTime()) {
+        return { kind: "rejected", reason: "future_ownership_attestation" };
+      }
+      try {
+        return await withPostgresTransaction(input.pool, async (client) => {
+          const existing = await client.query<{ ownership_id: string; attestation_digest: string }>(
+            `SELECT ownership_id,attestation_digest FROM cp_publication_branch_ownership
+             WHERE organization_id=$1 AND candidate_id=$2 FOR UPDATE`,
+            [command.principal.organizationId, attestation.candidateId]);
+          if (existing.rows[0]) return existing.rows[0].attestation_digest === ownershipDigest
+            ? { kind: "replayed" as const, ownershipId: existing.rows[0].ownership_id, ownershipDigest }
+            : { kind: "rejected" as const, reason: "ownership_attestation_conflict" };
+          const exact = await client.query<any>(
+            `SELECT run.publication_mode,run.runner_id,run.current_attempt_number,run.terminal_kind,
+               run.hosted_admission,run.admission_policy_snapshot,
+               attempt.attempt_id,attempt.fencing_token_digest,attempt.state,
+               attempt.workspace_attestation,runner.credential_generation,
+               candidate.candidate,candidate.project_target_id,candidate.frozen_base_revision,
+               candidate.workspace_tree_digest,target.binding_digest,target.provider,target.owner,
+               target.repo,target.default_branch
+             FROM cp_hosted_run run
+             JOIN cp_hosted_attempt attempt ON attempt.organization_id=run.organization_id
+               AND attempt.run_id=run.run_id AND attempt.attempt_number=run.current_attempt_number
+             JOIN cp_runner runner ON runner.organization_id=run.organization_id AND runner.runner_id=run.runner_id
+             JOIN cp_publication_candidate candidate ON candidate.organization_id=run.organization_id
+               AND candidate.run_id=run.run_id AND candidate.attempt_id=attempt.attempt_id
+             JOIN cp_project_target target ON target.organization_id=run.organization_id
+               AND target.project_target_id=candidate.project_target_id
+             WHERE run.organization_id=$1 AND run.run_id=$2 AND candidate.candidate_id=$3
+             FOR UPDATE OF run,attempt,runner,candidate,target`,
+            [command.principal.organizationId, attestation.runId, attestation.candidateId]);
+          const row = exact.rows[0];
+          const admission = row?.hosted_admission;
+          const policy = row?.admission_policy_snapshot;
+          const workspace = row?.workspace_attestation;
+          const provider = String(row?.provider ?? "").toLowerCase();
+          const owner = String(row?.owner ?? "").toLowerCase();
+          const repo = String(row?.repo ?? "").toLowerCase();
+          if (!row || row.publication_mode !== "pull_request" || row.terminal_kind !== null
+            || row.runner_id !== command.principal.runnerId || attestation.runnerId !== command.principal.runnerId
+            || row.current_attempt_number !== attestation.attemptNumber || row.attempt_id !== attestation.attemptId
+            || row.fencing_token_digest !== fenceDigest || row.state !== "succeeded"
+            || row.credential_generation !== attestation.runnerGeneration
+            || command.principal.credentialGeneration !== attestation.runnerGeneration
+            || digest(row.candidate) !== attestation.candidateDigest
+            || row.project_target_id !== attestation.projectTargetId
+            || row.binding_digest !== attestation.targetBindingDigest
+            || row.frozen_base_revision !== attestation.frozenBaseRevision
+            || row.workspace_tree_digest !== attestation.workspaceTreeDigest
+            || workspace?.attemptId !== attestation.attemptId
+            || workspace?.attemptNumber !== attestation.attemptNumber
+            || workspace?.fencingTokenDigest !== fenceDigest
+            || workspace?.baseRevision !== attestation.frozenBaseRevision
+            || workspace?.currentTree !== attestation.workspaceTreeDigest
+            || workspace?.currentRevision !== attestation.expectedHeadSha
+            || admission?.projectTarget?.projectTargetId !== attestation.projectTargetId
+            || admission?.projectTarget?.digest !== attestation.targetBindingDigest
+            || String(admission?.provider ?? "").toLowerCase() !== provider
+            || String(admission?.repository?.owner ?? "").toLowerCase() !== owner
+            || String(admission?.repository?.repo ?? "").toLowerCase() !== repo
+            || policy?.payload?.target?.projectTargetId !== attestation.projectTargetId
+            || policy?.payload?.target?.defaultBranch !== attestation.baseBranch
+            || row.default_branch !== attestation.baseBranch
+            || provider !== "github") {
+            return { kind: "rejected" as const, reason: "exact_branch_ownership_authority_missing" };
+          }
+          if (attestation.branch.toLowerCase() === attestation.baseBranch.toLowerCase()) {
+            return { kind: "rejected" as const, reason: "target_branch_write_prohibited" };
+          }
+          const ownershipId = input.idFactory("ownership");
+          await client.query(
+            `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,run_id,
+             attempt_id,attempt_number,fencing_token_digest,runner_id,runner_generation,candidate_id,
+             candidate_digest,project_target_id,target_binding_digest,provider,owner,repo,remote,
+             base_branch,frozen_base_revision,workspace_tree_digest,branch,expected_head_sha,
+             attestation_digest,attested_at,created_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+            [command.principal.organizationId,ownershipId,attestation.runId,attestation.attemptId,
+              attestation.attemptNumber,fenceDigest,command.principal.runnerId,attestation.runnerGeneration,
+              attestation.candidateId,attestation.candidateDigest,attestation.projectTargetId,
+              attestation.targetBindingDigest,provider,owner,repo,attestation.remote,attestation.baseBranch,
+              attestation.frozenBaseRevision,attestation.workspaceTreeDigest,attestation.branch,
+              attestation.expectedHeadSha,ownershipDigest,attestation.attestedAt,now]);
+          return { kind: "recorded" as const, ownershipId, ownershipDigest };
+        });
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505") {
+          const existing = await input.pool.query<{ ownership_id: string; attestation_digest: string }>(
+            `SELECT ownership_id,attestation_digest FROM cp_publication_branch_ownership
+             WHERE organization_id=$1 AND candidate_id=$2`,
+            [command.principal.organizationId,attestation.candidateId]);
+          if (existing.rows[0]?.attestation_digest === ownershipDigest) {
+            return { kind: "replayed", ownershipId: existing.rows[0].ownership_id, ownershipDigest };
+          }
+          return { kind: "rejected", reason: "branch_not_owned_by_run" };
+        }
+        throw error;
+      }
+    },
+
     async approve(command: PublicationApprovalInput): Promise<
       { kind: "approved"; intentId: string } | { kind: "replayed"; intentId: string }
       | { kind: "rejected"; reason: string }> {
       if (command.approverId === command.runnerId) {
         return { kind: "rejected", reason: "self_approval_prohibited" };
       }
-      if (command.branch === command.repository.baseBranch) {
-        return { kind: "rejected", reason: "target_branch_write_prohibited" };
-      }
       const now = input.clock.now();
       if (Date.parse(command.approvedAt) > now.getTime()
         || Date.parse(command.expiresAt) <= now.getTime()) {
         return { kind: "rejected", reason: "approval_expired" };
       }
-      const fenceDigest = await computeMaterialActionFencingTokenDigestV1(command.fencingToken);
       try {
         return await withPostgresTransaction(input.pool, async (client) => {
-          const existing = await client.query<{ intent_id: string }>(
-            `SELECT intent_id FROM cp_publication_intent
-             WHERE organization_id = $1 AND candidate_id = $2`,
-            [command.organizationId, command.candidateId]);
-          if (existing.rows[0]) return { kind: "replayed" as const,
-            intentId: existing.rows[0].intent_id };
-          const exact = await client.query<{ publication_mode: string; runner_id: string;
-            current_attempt_number: number; terminal_kind: string | null;
-            attempt_id: string; fencing_token_digest: string; lease_expires_at: Date;
-            state: string; credential_generation: number; candidate: unknown }>(
-            `SELECT run.publication_mode, run.runner_id, run.current_attempt_number,
-               run.terminal_kind, attempt.attempt_id, attempt.fencing_token_digest,
-               attempt.lease_expires_at, attempt.state, runner.credential_generation,
-               candidate.candidate
+          const exact = await client.query<any>(
+            `SELECT run.publication_mode,run.runner_id AS run_runner_id,
+               run.current_attempt_number,run.terminal_kind,
+               attempt.attempt_id AS current_attempt_id,
+               attempt.fencing_token_digest AS current_fencing_token_digest,attempt.state,
+               runner.credential_generation,candidate.candidate,candidate.project_target_id,
+               ownership.ownership_id,ownership.run_id AS ownership_run_id,
+               ownership.attempt_id AS ownership_attempt_id,
+               ownership.attempt_number AS ownership_attempt_number,
+               ownership.fencing_token_digest AS ownership_fencing_token_digest,
+               ownership.runner_id AS ownership_runner_id,
+               ownership.runner_generation AS ownership_runner_generation,
+               ownership.candidate_id AS ownership_candidate_id,
+               ownership.candidate_digest AS ownership_candidate_digest,
+               ownership.project_target_id AS ownership_project_target_id,
+               ownership.target_binding_digest,ownership.provider,ownership.owner,ownership.repo,
+               ownership.remote,ownership.base_branch,ownership.branch,ownership.expected_head_sha,
+               ownership.attestation_digest,target.binding_digest,target.provider AS target_provider,
+               target.owner AS target_owner,target.repo AS target_repo,target.default_branch
              FROM cp_hosted_run run
              JOIN cp_hosted_attempt attempt ON attempt.organization_id = run.organization_id
               AND attempt.run_id = run.run_id AND attempt.attempt_number = run.current_attempt_number
@@ -76,41 +186,67 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
               AND runner.runner_id = run.runner_id
              JOIN cp_publication_candidate candidate ON candidate.organization_id = run.organization_id
               AND candidate.run_id = run.run_id AND candidate.attempt_id = attempt.attempt_id
-             WHERE run.organization_id = $1 AND run.run_id = $2 AND candidate.candidate_id = $3
-             FOR UPDATE OF run, attempt, runner, candidate`,
-            [command.organizationId, command.runId, command.candidateId]);
+             JOIN cp_publication_branch_ownership ownership ON ownership.organization_id=run.organization_id
+               AND ownership.ownership_id=$4 AND ownership.candidate_id=candidate.candidate_id
+             JOIN cp_project_target target ON target.organization_id=run.organization_id
+               AND target.project_target_id=ownership.project_target_id
+             WHERE run.organization_id=$1 AND run.run_id=$2 AND candidate.candidate_id=$3
+             FOR UPDATE OF run,attempt,runner,candidate,ownership,target`,
+            [command.organizationId, command.runId, command.candidateId, command.ownershipId]);
           const row = exact.rows[0];
           if (!row || row.publication_mode !== "pull_request") {
             return { kind: "rejected" as const, reason: "proposal_only_frozen" };
           }
-          if (row.terminal_kind !== null || row.runner_id !== command.runnerId
-            || row.current_attempt_number !== command.attemptNumber
-            || row.attempt_id !== command.attemptId || row.fencing_token_digest !== fenceDigest
-            || row.lease_expires_at <= now || !["claimed", "running"].includes(row.state)
-            || row.credential_generation !== command.runnerGeneration) {
+          if (row.terminal_kind !== null || row.run_runner_id !== command.runnerId
+            || row.current_attempt_number !== row.ownership_attempt_number
+            || row.current_attempt_id !== row.ownership_attempt_id
+            || row.state !== "succeeded" || row.credential_generation !== row.ownership_runner_generation
+            || row.current_fencing_token_digest !== row.ownership_fencing_token_digest
+            || row.attestation_digest !== command.ownershipDigest
+            || row.ownership_id !== command.ownershipId || row.ownership_run_id !== command.runId
+            || row.ownership_runner_id !== command.runnerId
+            || row.ownership_candidate_id !== command.candidateId
+            || row.ownership_candidate_digest !== command.candidateDigest
+            || row.project_target_id !== row.ownership_project_target_id
+            || row.binding_digest !== row.target_binding_digest
+            || String(row.target_provider).toLowerCase() !== row.provider
+            || String(row.target_owner).toLowerCase() !== row.owner
+            || String(row.target_repo).toLowerCase() !== row.repo
+            || row.default_branch !== row.base_branch) {
             return { kind: "rejected" as const, reason: "stale_publication_authority" };
           }
           if (digest(row.candidate) !== command.candidateDigest) {
             return { kind: "rejected" as const, reason: "candidate_digest_mismatch" };
           }
+          const approvalDigest = digest({ organizationId: command.organizationId, runId: command.runId,
+            candidateId: command.candidateId, candidateDigest: command.candidateDigest,
+            ownershipId: command.ownershipId, ownershipDigest: command.ownershipDigest,
+            approvalId: command.approvalId, approverId: command.approverId,
+            approvedAt: command.approvedAt, expiresAt: command.expiresAt,
+            attemptId: row.ownership_attempt_id, attemptNumber: row.ownership_attempt_number,
+            fencingTokenDigest: row.ownership_fencing_token_digest, runnerId: row.ownership_runner_id,
+            runnerGeneration: row.ownership_runner_generation });
+          const existing = await client.query<{ intent_id: string; approval_digest: string }>(
+            `SELECT intent_id,approval_digest FROM cp_publication_intent
+             WHERE organization_id=$1 AND (candidate_id=$2 OR approval_id=$3) FOR UPDATE`,
+            [command.organizationId,command.candidateId,command.approvalId]);
+          if (existing.rows[0]) return existing.rows[0].approval_digest === approvalDigest
+            ? { kind: "replayed" as const, intentId: existing.rows[0].intent_id }
+            : { kind: "rejected" as const, reason: "approval_replay_conflict" };
           const intentId = input.idFactory("intent");
+          const repository = { provider: "github" as const, owner: row.owner, repo: row.repo,
+            remote: row.remote, baseBranch: row.base_branch };
           await client.query(
             `INSERT INTO cp_publication_intent(organization_id,intent_id,run_id,
-             attempt_id,attempt_number,candidate_id,candidate_digest,approval_id,
-             approver_id,repository,branch,expected_head_sha,runner_id,runner_generation,
-             approved_at,expires_at,created_at)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-            [command.organizationId, intentId, command.runId, command.attemptId,
-              command.attemptNumber, command.candidateId, command.candidateDigest,
-              command.approvalId, command.approverId, command.repository, command.branch,
-              command.expectedHeadSha, command.runnerId, command.runnerGeneration,
-              command.approvedAt, command.expiresAt, now]);
-          await client.query(
-            `INSERT INTO cp_publication_branch_ownership(organization_id,ownership_id,
-             intent_id,repository,branch,expected_head_sha,created_at)
-             VALUES($1,$2,$3,$4,$5,$6,$7)`,
-            [command.organizationId, input.idFactory("ownership"), intentId,
-              command.repository, command.branch, command.expectedHeadSha, now]);
+             attempt_id,attempt_number,candidate_id,candidate_digest,ownership_id,ownership_digest,
+             approval_id,approver_id,approval_digest,repository,branch,expected_head_sha,runner_id,
+             runner_generation,approved_at,expires_at,created_at)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+            [command.organizationId,intentId,command.runId,row.ownership_attempt_id,row.ownership_attempt_number,
+              command.candidateId,command.candidateDigest,command.ownershipId,command.ownershipDigest,
+              command.approvalId,command.approverId,approvalDigest,repository,row.branch,
+              row.expected_head_sha,row.ownership_runner_id,row.ownership_runner_generation,command.approvedAt,
+              command.expiresAt,now]);
           return { kind: "approved" as const, intentId };
         });
       } catch (error) {
@@ -177,7 +313,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              ON reconciliation.organization_id = capability.organization_id
             AND reconciliation.capability_id = capability.capability_id
            WHERE capability.organization_id = $1 AND capability.intent_id = $2
-             AND capability.step = $3 ORDER BY capability.issued_at DESC LIMIT 1`,
+             AND capability.step = $3 ORDER BY capability.attempt_number DESC LIMIT 1`,
           [command.principal.organizationId, row.intent_id, command.step]);
         const priorObservation = prior.rows[0]?.observation
           ? PublicationOperationObservationV1Schema.parse(prior.rows[0].observation) : null;
@@ -203,12 +339,16 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           runnerId: command.principal.runnerId, runnerGeneration: command.runnerGeneration,
           issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + ttl).toISOString(),
         });
+        const capabilityAttemptNumber = (await client.query<{ next_attempt_number: number }>(
+          `SELECT COALESCE(MAX(attempt_number),0)+1 AS next_attempt_number
+           FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2 AND step=$3`,
+          [command.principal.organizationId,row.intent_id,command.step])).rows[0]!.next_attempt_number;
         await client.query(
           `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,
-           operation_id,idempotency_key,step,capability_digest,capability,issued_at,expires_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+           operation_id,idempotency_key,step,attempt_number,capability_digest,capability,issued_at,expires_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
           [command.principal.organizationId, capability.capabilityId, row.intent_id,
-            capability.operationId, capability.idempotencyKey, capability.step,
+            capability.operationId, capability.idempotencyKey, capability.step, capabilityAttemptNumber,
             await computePublicationCapabilityDigestV1(capability), capability,
             capability.issuedAt, capability.expiresAt]);
         return { kind: "issued" as const, capability };
@@ -261,7 +401,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              LEFT JOIN cp_publication_reconciliation reconciliation ON reconciliation.organization_id = capability.organization_id
                AND reconciliation.capability_id = capability.capability_id
              WHERE capability.organization_id = $1 AND capability.intent_id = $2 AND capability.step = $3
-             ORDER BY capability.issued_at DESC, capability.capability_id DESC LIMIT 1`,
+             ORDER BY capability.attempt_number DESC LIMIT 1`,
             [command.principal.organizationId, row.intent_id, step],
           );
           return result.rows[0] ?? null;
@@ -307,12 +447,16 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           runnerId: command.principal.runnerId, runnerGeneration: row.runner_generation,
           issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + ttl).toISOString(),
         });
+        const capabilityAttemptNumber = (await client.query<{ next_attempt_number: number }>(
+          `SELECT COALESCE(MAX(attempt_number),0)+1 AS next_attempt_number
+           FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2 AND step=$3`,
+          [command.principal.organizationId,row.intent_id,step])).rows[0]!.next_attempt_number;
         await client.query(
           `INSERT INTO cp_publication_capability(organization_id,capability_id,intent_id,operation_id,
-             idempotency_key,step,capability_digest,capability,issued_at,expires_at)
-           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+             idempotency_key,step,attempt_number,capability_digest,capability,issued_at,expires_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
           [command.principal.organizationId, capability.capabilityId, row.intent_id,
-            capability.operationId, capability.idempotencyKey, capability.step,
+            capability.operationId, capability.idempotencyKey, capability.step, capabilityAttemptNumber,
             await computePublicationCapabilityDigestV1(capability), capability,
             capability.issuedAt, capability.expiresAt],
         );
@@ -462,7 +606,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              attempt.fencing_token_digest, candidate.candidate_id, candidate.candidate, intent.intent_id,
              intent.candidate_digest AS intent_candidate_digest, intent.repository AS intent_repository,
              intent.branch AS intent_branch, intent.expected_head_sha, intent.runner_generation,
-             ownership.ownership_id, ownership.repository AS ownership_repository,
+             ownership.ownership_id, ownership.provider AS ownership_provider,
+             ownership.owner AS ownership_owner, ownership.repo AS ownership_repo,
+             ownership.remote AS ownership_remote, ownership.base_branch AS ownership_base_branch,
              ownership.branch AS ownership_branch, ownership.expected_head_sha AS ownership_head
            FROM cp_hosted_run run
            JOIN cp_hosted_attempt attempt ON attempt.organization_id = run.organization_id
@@ -473,7 +619,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
              AND intent.run_id = run.run_id AND intent.attempt_id = attempt.attempt_id
              AND intent.candidate_id = candidate.candidate_id
            JOIN cp_publication_branch_ownership ownership ON ownership.organization_id = intent.organization_id
-             AND ownership.intent_id = intent.intent_id
+             AND ownership.ownership_id = intent.ownership_id
            WHERE run.organization_id = $1 AND run.run_id = $2
            FOR UPDATE OF run, attempt, candidate, intent, ownership`,
           [completion.organizationId, completion.runId],
@@ -507,7 +653,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           })
           || row.intent_branch !== completion.observation.branch
           || row.expected_head_sha !== completion.observation.headSha
-          || canonicalJsonStringify(row.ownership_repository) !== canonicalJsonStringify(row.intent_repository)
+          || canonicalJsonStringify({ provider: row.ownership_provider, owner: row.ownership_owner,
+            repo: row.ownership_repo, remote: row.ownership_remote,
+            baseBranch: row.ownership_base_branch }) !== canonicalJsonStringify(row.intent_repository)
           || row.ownership_branch !== row.intent_branch || row.ownership_head !== row.expected_head_sha) {
           return { kind: "stale_fence" as const };
         }
@@ -520,7 +668,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
            JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
              AND receipt.capability_id = capability.capability_id
            WHERE capability.organization_id = $1 AND capability.intent_id = $2
-           ORDER BY capability.issued_at DESC, capability.capability_id DESC`,
+           ORDER BY capability.attempt_number DESC`,
           [completion.organizationId, row.intent_id],
         );
         const latestByStep = new Map<string, any>();

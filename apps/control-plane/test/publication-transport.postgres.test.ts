@@ -19,6 +19,8 @@ describe.skipIf(!TEST_DATABASE_URL)("publication Control V1 transport", () => {
   afterAll(async () => { if (fixture) await fixture.close(); });
 
   it("injects the authenticated human actor and keeps both approval and completion payloads credential-free", async () => {
+    const attestOwnership = vi.fn(async () => ({ kind: "recorded" as const,
+      ownershipId: "ownership_transport", ownershipDigest: `sha256:${"d".repeat(64)}` }));
     const approve = vi.fn(async () => ({ kind: "approved" as const, intentId: "intent_transport" }));
     const claimNext = vi.fn(async () => ({ kind: "issued" as const, capability }));
     const application = createControlPlaneApplication({ capabilities: { schemaVersion: 1, protocolVersion: "1.0",
@@ -27,7 +29,7 @@ describe.skipIf(!TEST_DATABASE_URL)("publication Control V1 transport", () => {
       readiness: { check: async () => ({ ready: true }) }, control: { bootstrap: { authenticate: () => null },
         runners: { authenticate: async () => ({ kind: "authenticated" as const,
           principal: { organizationId: "org_transport", runnerId: "runner_transport" } }) } as never, hosted: {} as never, permissions: {} as never,
-        publisher: { approve, claim: async () => ({ kind: "issued" as const, capability }), begin: async () => ({ kind: "begun" as const }),
+        publisher: { attestOwnership, approve, claim: async () => ({ kind: "issued" as const, capability }), begin: async () => ({ kind: "begun" as const }),
           record: async ({ receipt }: { receipt: unknown }) => ({ kind: "recorded" as const, receipt }),
           reconcile: async () => ({ kind: "outcome_unknown" as const }),
           claimNextForRunner: claimNext,
@@ -41,16 +43,44 @@ describe.skipIf(!TEST_DATABASE_URL)("publication Control V1 transport", () => {
       Object.defineProperty(response, "url", { value: String(url) });
       return response;
     };
-    const client = createOpenTagClient({ dispatcherUrl: "http://control.test", controlCredential: { kind: "approver", token: "opaque_approver_token" }, fetchImpl });
-    await expect(client.approvePublicationControlV1({ schemaVersion: 1, protocolVersion: "1.0",
-      requiredCapabilities: ["relay.publication.v1"], requestId: "request_transport", organizationId: "org_transport",
-      runnerId: "runner_transport", runId: "run_transport", attemptId: "attempt_transport", attemptNumber: 1,
-      fencingToken: "fence_transport", candidateId: "candidate_transport", candidateDigest: `sha256:${"b".repeat(64)}`,
-      approvalId: "approval_transport", repository: capability.repository, branch: capability.branch,
-      expectedHeadSha: capability.expectedHeadSha, runnerGeneration: 1, approvedAt: capability.issuedAt, expiresAt: capability.expiresAt,
-    })).resolves.toEqual({ intentId: "intent_transport", replayed: false });
     const runtimeClient = createOpenTagClient({ dispatcherUrl: "http://control.test",
       controlCredential: { kind: "runtime", token: "opaque_runtime_token" }, fetchImpl });
+    await expect(runtimeClient.attestPublicationBranchOwnershipControlV1({
+      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
+      requestId: "request_ownership_transport", organizationId: "org_transport",
+      runnerId: "runner_transport", runnerGeneration: 1, runId: "run_transport",
+      attemptId: "attempt_transport", attemptNumber: 1, fencingToken: "fence_transport",
+      candidateId: "candidate_transport", candidateDigest: `sha256:${"b".repeat(64)}`,
+      projectTargetId: "target_transport", targetBindingDigest: `sha256:${"a".repeat(64)}`,
+      remote: "origin", baseBranch: "main", frozenBaseRevision: "a".repeat(40),
+      workspaceTreeDigest: "b".repeat(40), branch: "opentag/run_transport",
+      expectedHeadSha: "c".repeat(40), attestedAt: "2026-08-15T12:00:00.000Z",
+    })).resolves.toEqual({ ownershipId: "ownership_transport",
+      ownershipDigest: `sha256:${"d".repeat(64)}`, replayed: false });
+    const client = createOpenTagClient({ dispatcherUrl: "http://control.test", controlCredential: { kind: "approver", token: "opaque_approver_token" }, fetchImpl });
+    const maliciousApproval = await fetchImpl(
+      "http://control.test/v1/runners/runner_transport/runs/run_transport/publication/approve",
+      { method: "POST", headers: { authorization: "Bearer opaque_approver_token",
+        "content-type": "application/json" }, body: JSON.stringify({
+          schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
+          requestId: "request_malicious_transport", organizationId: "org_transport",
+          runnerId: "runner_transport", runId: "run_transport", ownershipId: "ownership_transport",
+          ownershipDigest: `sha256:${"d".repeat(64)}`, candidateId: "candidate_transport",
+          candidateDigest: `sha256:${"b".repeat(64)}`, approvalId: "approval_transport",
+          approvedAt: capability.issuedAt, expiresAt: capability.expiresAt,
+          repository: capability.repository, branch: capability.branch,
+          expectedHeadSha: capability.expectedHeadSha,
+        }) },
+    );
+    expect(maliciousApproval.status).toBe(400);
+    expect(approve).not.toHaveBeenCalled();
+    await expect(client.approvePublicationControlV1({ schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.publication.v1"], requestId: "request_transport", organizationId: "org_transport",
+      runnerId: "runner_transport", runId: "run_transport", ownershipId: "ownership_transport",
+      ownershipDigest: `sha256:${"d".repeat(64)}`, candidateId: "candidate_transport",
+      candidateDigest: `sha256:${"b".repeat(64)}`, approvalId: "approval_transport",
+      approvedAt: capability.issuedAt, expiresAt: capability.expiresAt,
+    })).resolves.toEqual({ intentId: "intent_transport", replayed: false });
     await expect(runtimeClient.claimNextPublicationOperationControlV1({ schemaVersion: 1,
       protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
       requestId: "request_poll_transport", organizationId: "org_transport",
@@ -70,6 +100,8 @@ describe.skipIf(!TEST_DATABASE_URL)("publication Control V1 transport", () => {
         headSha: "c".repeat(40), baseSha: "d".repeat(40), checks: {}, checksComplete: true,
         observedAt: "2026-08-15T12:00:00.000Z" } })).resolves.toEqual({ status: 200, outcome: "ready" });
     expect(approve).toHaveBeenCalledWith(expect.objectContaining({ approverId: "operator_injected" }));
+    expect(attestOwnership).toHaveBeenCalledWith(expect.objectContaining({ principal: expect.objectContaining({
+      organizationId: "org_transport", runnerId: "runner_transport" }) }));
     expect(JSON.stringify(bodies)).not.toContain("githubToken");
     expect(JSON.stringify(bodies)).not.toContain("ghp_");
   });

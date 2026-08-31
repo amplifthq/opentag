@@ -276,6 +276,24 @@ export async function checkMigrationReadiness(
               'cp_publication_receipt', 'cp_publication_reconciliation',
               'cp_publication_completion'
             ])) = 7
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+             FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_branch_ownership')
+          = ARRAY['organization_id','ownership_id','run_id','attempt_id','attempt_number',
+            'fencing_token_digest','runner_id','runner_generation','candidate_id','candidate_digest',
+            'project_target_id','target_binding_digest','provider','owner','repo','remote','base_branch',
+            'frozen_base_revision','workspace_tree_digest','branch','expected_head_sha',
+            'attestation_digest','attested_at','created_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position)
+             FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_capability')
+          = ARRAY['organization_id','capability_id','intent_id','operation_id','idempotency_key',
+            'step','attempt_number','capability_digest','capability','issued_at','expires_at']
+        AND EXISTS (SELECT 1 FROM pg_indexes
+          WHERE schemaname=current_schema() AND tablename='cp_publication_branch_ownership'
+            AND indexname='cp_publication_branch_owner_key'
+            AND regexp_replace(indexdef, '[[:space:]\"]+', '', 'g')
+              LIKE '%lower(provider),lower(owner),lower(repo),lower(branch)%')
         AND EXISTS (SELECT 1 FROM pg_trigger trigger_row
           JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
           WHERE trigger_row.tgrelid = 'cp_publication_completion'::regclass

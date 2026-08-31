@@ -429,6 +429,40 @@ export const RunnerPublicationClaimNextV1Schema = z.object({
   runnerId: MaterialActionStableIdV1Schema,
 }).strict();
 
+export const RunnerBranchOwnershipAttestationV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.publication.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runnerGeneration: z.number().int().positive(),
+  runId: MaterialActionStableIdV1Schema,
+  attemptId: MaterialActionStableIdV1Schema,
+  attemptNumber: z.number().int().positive(),
+  fencingToken: z.string().min(1).max(4096),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  projectTargetId: MaterialActionStableIdV1Schema,
+  targetBindingDigest: ReceiptDigestSchema,
+  remote: z.string().min(1).max(128).regex(/^[A-Za-z0-9._/-]+$/u),
+  baseBranch: z.string().min(1).max(255),
+  frozenBaseRevision: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  workspaceTreeDigest: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  branch: z.string().min(1).max(255),
+  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
+  attestedAt: ControlTimestampSchema,
+}).strict().superRefine((attestation, ctx) => {
+  if (attestation.branch !== `opentag/${attestation.runId}`) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must be the deterministic Run branch." });
+  }
+  if (attestation.branch === attestation.baseBranch) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["branch"],
+      message: "Publication branch must not be the target branch." });
+  }
+});
+
 export const HumanPublicationApprovalV1Schema = z.object({
   schemaVersion: ControlSchemaVersionSchema,
   protocolVersion: ControlProtocolVersionSchema,
@@ -437,16 +471,11 @@ export const HumanPublicationApprovalV1Schema = z.object({
   organizationId: MaterialActionStableIdV1Schema,
   runnerId: MaterialActionStableIdV1Schema,
   runId: MaterialActionStableIdV1Schema,
-  attemptId: MaterialActionStableIdV1Schema,
-  attemptNumber: z.number().int().positive(),
-  fencingToken: z.string().min(1).max(4096),
+  ownershipId: MaterialActionStableIdV1Schema,
+  ownershipDigest: ReceiptDigestSchema,
   candidateId: MaterialActionStableIdV1Schema,
   candidateDigest: ReceiptDigestSchema,
   approvalId: MaterialActionStableIdV1Schema,
-  repository: PublicationRepositoryV1Schema,
-  branch: z.string().min(1).max(255),
-  expectedHeadSha: z.string().regex(/^[a-f0-9]{40,64}$/u),
-  runnerGeneration: z.number().int().positive(),
   approvedAt: ControlTimestampSchema,
   expiresAt: ControlTimestampSchema,
 }).strict();
@@ -579,6 +608,13 @@ export function computePublicationCapabilityDigestV1(
 ): Promise<string> {
   return sha256Utf8V1(canonicalJsonStringify(
     PublicationOperationCapabilityV1Schema.parse(capability)));
+}
+
+export function computeBranchOwnershipAttestationDigestV1(
+  attestation: z.input<typeof RunnerBranchOwnershipAttestationV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(canonicalJsonStringify(
+    RunnerBranchOwnershipAttestationV1Schema.parse(attestation)));
 }
 
 export function computePublicationOperationReceiptDigestV1(
@@ -3977,6 +4013,7 @@ export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Sche
 export type PublicationOperationCapabilityV1 = z.infer<typeof PublicationOperationCapabilityV1Schema>;
 export type RunnerPublicationClaimV1 = z.infer<typeof RunnerPublicationClaimV1Schema>;
 export type RunnerPublicationClaimNextV1 = z.infer<typeof RunnerPublicationClaimNextV1Schema>;
+export type RunnerBranchOwnershipAttestationV1 = z.infer<typeof RunnerBranchOwnershipAttestationV1Schema>;
 export type HumanPublicationApprovalV1 = z.infer<typeof HumanPublicationApprovalV1Schema>;
 export type RunnerPublicationBeginV1 = z.infer<typeof RunnerPublicationBeginV1Schema>;
 export type PublicationOperationReceiptV1 = z.infer<typeof PublicationOperationReceiptV1Schema>;

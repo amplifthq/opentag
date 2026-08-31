@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  HumanPublicationApprovalV1Schema,
+  RunnerBranchOwnershipAttestationV1Schema,
   RunnerPublicationCompletionV1Schema,
   PublicationOperationReceiptDigestInputV1Schema,
 } from "../src/index.js";
@@ -75,6 +77,47 @@ describe("Task 8 Unicode scalar contract", () => {
 describe("Task 9 publication receipt digest schema", () => {
   it("loads a digest input schema without receiptDigest", () => {
     expect(PublicationOperationReceiptDigestInputV1Schema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("Task 9 frozen branch ownership and approval boundary", () => {
+  const ownership = {
+    schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+    requiredCapabilities: ["relay.publication.v1"] as const,
+    requestId: "request_ownership_1", organizationId: "org_1",
+    runnerId: "runner_1", runnerGeneration: 2, runId: "run_1",
+    attemptId: "attempt_1", attemptNumber: 1, fencingToken: "local_fence",
+    candidateId: "candidate_1", candidateDigest: `sha256:${"a".repeat(64)}`,
+    projectTargetId: "target_1", targetBindingDigest: `sha256:${"b".repeat(64)}`,
+    remote: "origin", baseBranch: "main", frozenBaseRevision: "c".repeat(40),
+    workspaceTreeDigest: "d".repeat(40), branch: "opentag/run_1",
+    expectedHeadSha: "e".repeat(40), attestedAt: "2026-08-31T01:02:03.004Z",
+  };
+
+  it("accepts a credential-free Runner ownership attestation and rejects a non-deterministic branch", () => {
+    expect(RunnerBranchOwnershipAttestationV1Schema.parse(ownership)).not.toHaveProperty("repository");
+    expect(RunnerBranchOwnershipAttestationV1Schema.safeParse({
+      ...ownership, branch: "opentag/another-run",
+    }).success).toBe(false);
+    expect(JSON.stringify(ownership)).not.toMatch(/ghp_|github_token|authorization: bearer/iu);
+  });
+
+  it("keeps repository, branch, head, Attempt, fence, and generation out of human approval", () => {
+    const approval = {
+      schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      requiredCapabilities: ["relay.publication.v1"] as const,
+      requestId: "request_approval_1", organizationId: "org_1",
+      runnerId: "runner_1", runId: "run_1", ownershipId: "ownership_1",
+      ownershipDigest: `sha256:${"f".repeat(64)}`, candidateId: "candidate_1",
+      candidateDigest: `sha256:${"a".repeat(64)}`, approvalId: "approval_1",
+      approvedAt: "2026-08-31T01:03:03.004Z", expiresAt: "2026-08-31T01:08:03.004Z",
+    };
+    expect(HumanPublicationApprovalV1Schema.safeParse(approval).success).toBe(true);
+    for (const injected of ["repository", "branch", "expectedHeadSha", "attemptId",
+      "attemptNumber", "fencingToken", "runnerGeneration"]) {
+      expect(HumanPublicationApprovalV1Schema.safeParse({ ...approval, [injected]: "malicious" }).success)
+        .toBe(false);
+    }
   });
 });
 

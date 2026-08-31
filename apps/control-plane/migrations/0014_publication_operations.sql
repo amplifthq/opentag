@@ -1,31 +1,59 @@
+CREATE TABLE cp_publication_branch_ownership (
+  organization_id text NOT NULL, ownership_id text NOT NULL,
+  run_id text NOT NULL, attempt_id text NOT NULL, attempt_number integer NOT NULL,
+  fencing_token_digest text NOT NULL CHECK (fencing_token_digest ~ '^sha256:[a-f0-9]{64}$'),
+  runner_id text NOT NULL, runner_generation integer NOT NULL CHECK (runner_generation > 0),
+  candidate_id text NOT NULL,
+  candidate_digest text NOT NULL CHECK (candidate_digest ~ '^sha256:[a-f0-9]{64}$'),
+  project_target_id text NOT NULL,
+  target_binding_digest text NOT NULL CHECK (target_binding_digest ~ '^sha256:[a-f0-9]{64}$'),
+  provider text NOT NULL, owner text NOT NULL, repo text NOT NULL,
+  remote text NOT NULL, base_branch text NOT NULL,
+  frozen_base_revision text NOT NULL CHECK (frozen_base_revision ~ '^[a-f0-9]{40,64}$'),
+  workspace_tree_digest text NOT NULL CHECK (workspace_tree_digest ~ '^[a-f0-9]{40,64}$'),
+  branch text NOT NULL,
+  expected_head_sha text NOT NULL CHECK (expected_head_sha ~ '^[a-f0-9]{40,64}$'),
+  attestation_digest text NOT NULL CHECK (attestation_digest ~ '^sha256:[a-f0-9]{64}$'),
+  attested_at timestamptz NOT NULL, created_at timestamptz NOT NULL,
+  PRIMARY KEY (organization_id, ownership_id), UNIQUE (organization_id, candidate_id),
+  FOREIGN KEY (organization_id, run_id, attempt_number, attempt_id)
+    REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number, attempt_id),
+  CHECK (provider = lower(provider) AND owner = lower(owner) AND repo = lower(repo))
+);
+CREATE UNIQUE INDEX cp_publication_branch_owner_key
+  ON cp_publication_branch_ownership(
+    organization_id, lower(provider), lower(owner), lower(repo), lower(branch));
+
 CREATE TABLE cp_publication_intent (
   organization_id text NOT NULL REFERENCES cp_organization(organization_id),
   intent_id text NOT NULL, run_id text NOT NULL, attempt_id text NOT NULL,
   attempt_number integer NOT NULL, candidate_id text NOT NULL,
   candidate_digest text NOT NULL CHECK (candidate_digest ~ '^sha256:[a-f0-9]{64}$'),
-  approval_id text NOT NULL, approver_id text NOT NULL, repository jsonb NOT NULL,
-  branch text NOT NULL, expected_head_sha text NOT NULL CHECK (expected_head_sha ~ '^[a-f0-9]{40,64}$'),
+  ownership_id text NOT NULL,
+  ownership_digest text NOT NULL CHECK (ownership_digest ~ '^sha256:[a-f0-9]{64}$'),
+  approval_id text NOT NULL, approver_id text NOT NULL,
+  approval_digest text NOT NULL CHECK (approval_digest ~ '^sha256:[a-f0-9]{64}$'),
+  repository jsonb NOT NULL, branch text NOT NULL,
+  expected_head_sha text NOT NULL CHECK (expected_head_sha ~ '^[a-f0-9]{40,64}$'),
   runner_id text NOT NULL, runner_generation integer NOT NULL CHECK (runner_generation > 0),
   approved_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL, PRIMARY KEY (organization_id, intent_id),
-  UNIQUE (organization_id, candidate_id), CHECK (expires_at > approved_at),
+  UNIQUE (organization_id, candidate_id), UNIQUE (organization_id, approval_id),
+  CHECK (expires_at > approved_at),
+  FOREIGN KEY (organization_id, ownership_id)
+    REFERENCES cp_publication_branch_ownership(organization_id, ownership_id),
   FOREIGN KEY (organization_id, run_id, attempt_number, attempt_id)
     REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number, attempt_id)
-);
-CREATE TABLE cp_publication_branch_ownership (
-  organization_id text NOT NULL, ownership_id text NOT NULL, intent_id text NOT NULL,
-  repository jsonb NOT NULL, branch text NOT NULL, expected_head_sha text NOT NULL,
-  created_at timestamptz NOT NULL, PRIMARY KEY (organization_id, ownership_id),
-  UNIQUE (organization_id, repository, branch),
-  FOREIGN KEY (organization_id, intent_id) REFERENCES cp_publication_intent(organization_id, intent_id)
 );
 CREATE TABLE cp_publication_capability (
   organization_id text NOT NULL, capability_id text NOT NULL, intent_id text NOT NULL,
   operation_id text NOT NULL, idempotency_key text NOT NULL,
   step text NOT NULL CHECK (step IN ('push_owned_branch','create_draft_pull_request')),
+  attempt_number integer NOT NULL CHECK (attempt_number > 0),
   capability_digest text NOT NULL, capability jsonb NOT NULL,
   issued_at timestamptz NOT NULL, expires_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, capability_id),
+  UNIQUE (organization_id, intent_id, step, attempt_number),
   FOREIGN KEY (organization_id, intent_id) REFERENCES cp_publication_intent(organization_id, intent_id),
   CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '5 minutes')
 );

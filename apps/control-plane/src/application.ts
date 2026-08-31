@@ -10,6 +10,7 @@ import {
   HostedSourceContentRedeemResponseV1Schema,
   HumanPermissionDecisionRequestV1Schema,
   HumanPublicationApprovalV1Schema,
+  RunnerBranchOwnershipAttestationV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   RelayCapabilitiesResponseV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
@@ -841,6 +842,21 @@ export function createControlPlaneApplication(
 
     if (control.publisher) {
       const publisher = control.publisher;
+
+      app.post("/v1/runners/:runnerId/runs/:runId/publication/ownership", async (context) => {
+        const principal = await runtimePrincipal(context.req.raw);
+        if (!principal) return context.json(controlError("invalid_credential"), 401);
+        let request: ReturnType<typeof RunnerBranchOwnershipAttestationV1Schema.parse>;
+        try { request = RunnerBranchOwnershipAttestationV1Schema.parse(await context.req.json()); }
+        catch { return context.json(controlError("invalid_request_body"), 400); }
+        if (principal.organizationId !== request.organizationId || principal.runnerId !== request.runnerId
+          || request.runnerId !== context.req.param("runnerId") || request.runId !== context.req.param("runId")) {
+          return context.json(controlError("stale_attempt", request.requestId), 409);
+        }
+        const outcome = await publisher.attestOwnership({ principal, attestation: request });
+        if (outcome.kind === "recorded" || outcome.kind === "replayed") return context.json(outcome, 200);
+        return context.json(controlError("idempotency_conflict", request.requestId), 409);
+      });
 
       app.post("/v1/runners/:runnerId/runs/:runId/publication/approve", async (context) => {
         let request: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>;
