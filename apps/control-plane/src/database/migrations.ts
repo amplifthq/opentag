@@ -131,6 +131,21 @@ export async function checkMigrationReadiness(
         ('verification_evidence_ids','text[]'),('publication_policy_digest','text'),
         ('candidate','jsonb'),('completion_assessment','jsonb'),
         ('created_at','timestamp with time zone')
+      ), expected_checks(name, definition) AS (VALUES
+        ('cp_publication_candidate_changed_files_check',
+          'CHECK((cardinality(changed_files)>0))'),
+        ('cp_publication_candidate_verification_check',
+          'CHECK((cardinality(verification_evidence_ids)>0))'),
+        ('cp_publication_candidate_base_revision_check',
+          'CHECK((frozen_base_revision~''^[a-f0-9]{40,64}$''::text))'),
+        ('cp_publication_candidate_tree_digest_check',
+          'CHECK((workspace_tree_digest~''^[a-f0-9]{40,64}$''::text))'),
+        ('cp_publication_candidate_patch_digest_check',
+          'CHECK((patch_digest~''^sha256:[a-f0-9]{64}$''::text))'),
+        ('cp_publication_candidate_policy_digest_check',
+          'CHECK((publication_policy_digest~''^sha256:[a-f0-9]{64}$''::text))'),
+        ('cp_publication_candidate_content_free_check',
+          'CHECK(((jsonb_typeof(candidate)=''object''::text)AND(NOT(candidate?|ARRAY[''baseToFinalBinaryDiff''::text,''limitations''::text,''workspacePath''::text,''logs''::text,''output''::text,''secret''::text]))))')
       ) SELECT (
         to_regclass('cp_publication_candidate') IS NOT NULL
         AND (SELECT count(*) = 15 FROM pg_attribute
@@ -178,6 +193,10 @@ export async function checkMigrationReadiness(
           WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
             AND constraint_row.conname = 'cp_publication_candidate_attempt_fk'
             AND constraint_row.contype = 'f'
+            AND constraint_row.convalidated
+            AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
+            AND constraint_row.confmatchtype = 's'
+            AND constraint_row.confupdtype = 'a' AND constraint_row.confdeltype = 'a'
             AND constraint_row.confrelid = 'cp_hosted_attempt'::regclass
             AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
               WITH ORDINALITY key(attnum, ordinal)
@@ -192,49 +211,24 @@ export async function checkMigrationReadiness(
         AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
           WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
             AND constraint_row.contype = 'f'
+            AND constraint_row.convalidated
+            AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
+            AND constraint_row.confmatchtype = 's'
+            AND constraint_row.confupdtype = 'a' AND constraint_row.confdeltype = 'a'
             AND constraint_row.confrelid = 'cp_organization'::regclass
             AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
               WITH ORDINALITY key(attnum, ordinal)
               JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
                 AND attribute.attnum = key.attnum ORDER BY key.ordinal)
               = ARRAY['organization_id'])
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_changed_files_check'
-            AND constraint_row.contype = 'c'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(cardinality(changed_files) > 0)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_verification_check'
-            AND constraint_row.contype = 'c'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(cardinality(verification_evidence_ids) > 0)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_base_revision_check'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(frozen_base_revision ~ ''^[a-f0-9]{40,64}$''::text)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_tree_digest_check'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(workspace_tree_digest ~ ''^[a-f0-9]{40,64}$''::text)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_patch_digest_check'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(patch_digest ~ ''^sha256:[a-f0-9]{64}$''::text)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_policy_digest_check'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              = '(publication_policy_digest ~ ''^sha256:[a-f0-9]{64}$''::text)')
-        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
-          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
-            AND constraint_row.conname = 'cp_publication_candidate_content_free_check'
-            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
-              LIKE '%jsonb_typeof(candidate)%baseToFinalBinaryDiff%limitations%workspacePath%logs%output%secret%')
+        AND NOT EXISTS (SELECT 1 FROM expected_checks expected
+          LEFT JOIN pg_constraint constraint_row
+            ON constraint_row.conrelid = 'cp_publication_candidate'::regclass
+           AND constraint_row.conname = expected.name
+          WHERE constraint_row.oid IS NULL OR constraint_row.contype <> 'c'
+            OR NOT constraint_row.convalidated OR constraint_row.connoinherit
+            OR regexp_replace(pg_get_constraintdef(constraint_row.oid),
+              '[[:space:]]+', '', 'g') <> expected.definition)
         AND EXISTS (SELECT 1 FROM pg_index index_row
           JOIN pg_class index_class ON index_class.oid = index_row.indexrelid
           WHERE index_row.indrelid = 'cp_publication_candidate'::regclass
@@ -259,8 +253,14 @@ export async function checkMigrationReadiness(
           WHERE tgrelid = 'cp_publication_candidate'::regclass
             AND tgname = 'cp_publication_candidate_immutable'
             AND tgenabled = 'O' AND NOT tgisinternal AND tgtype = 27
+            AND tgqual IS NULL AND tgnargs = 0
             AND function_row.proname = 'cp_reject_publication_candidate_mutation'
-            AND function_row.pronamespace = current_schema()::regnamespace)
+            AND function_row.pronamespace = current_schema()::regnamespace
+            AND regexp_replace(pg_get_triggerdef(trigger_row.oid),
+              '[[:space:]]+', ' ', 'g') NOT LIKE '% WHEN %'
+            AND regexp_replace(pg_get_triggerdef(trigger_row.oid),
+              '[[:space:]]+', '', 'g') LIKE
+              'CREATETRIGGERcp_publication_candidate_immutableBEFOREDELETEORUPDATEON%FOREACHROWEXECUTEFUNCTION%cp_reject_publication_candidate_mutation()')
       ) AS schema_ready`,
     );
     const current = schema.rows[0]?.schema_ready === true

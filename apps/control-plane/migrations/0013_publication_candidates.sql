@@ -33,6 +33,18 @@ WHERE candidate.organization_id = attempt.organization_id
   AND candidate.attempt_id = attempt.attempt_id
   AND candidate.attempt_number IS NULL;
 
+CREATE OR REPLACE FUNCTION cp_is_canonical_utc_millis(value text) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+BEGIN
+  IF value !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$' THEN
+    RETURN false;
+  END IF;
+  RETURN to_char(value::timestamptz AT TIME ZONE 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') = value;
+EXCEPTION WHEN others THEN
+  RETURN false;
+END $$;
+
 UPDATE cp_publication_candidate candidate
 SET completion_assessment = run.terminal_receipt->'assessment'
 FROM cp_hosted_run run
@@ -48,8 +60,40 @@ WHERE candidate.organization_id = run.organization_id
   AND run.terminal_receipt->>'candidateId' = candidate.candidate_id
   AND run.terminal_receipt->'assessment'->>'candidateId' = candidate.candidate_id
   AND run.terminal_receipt->'assessment'->>'state' = 'proposal_ready'
-  AND run.terminal_receipt->'assessment'->>'accepted' = 'true'
-  AND run.terminal_receipt->'assessment'->'reasonCodes' = '["proposal_ready"]'::jsonb;
+  AND jsonb_typeof(run.terminal_receipt->'assessment') = 'object'
+  AND (SELECT count(*) FROM jsonb_object_keys(run.terminal_receipt->'assessment')) = 5
+  AND run.terminal_receipt->'assessment' ?&
+    ARRAY['state','accepted','candidateId','reasonCodes','assessedAt']
+  AND jsonb_typeof(run.terminal_receipt->'assessment'->'state') = 'string'
+  AND jsonb_typeof(run.terminal_receipt->'assessment'->'accepted') = 'boolean'
+  AND run.terminal_receipt->'assessment'->'accepted' = 'true'::jsonb
+  AND jsonb_typeof(run.terminal_receipt->'assessment'->'candidateId') = 'string'
+  AND jsonb_typeof(run.terminal_receipt->'assessment'->'reasonCodes') = 'array'
+  AND run.terminal_receipt->'assessment'->'reasonCodes' = '["proposal_ready"]'::jsonb
+  AND jsonb_typeof(run.terminal_receipt->'assessment'->'assessedAt') = 'string'
+  AND cp_is_canonical_utc_millis(
+    run.terminal_receipt->'assessment'->>'assessedAt')
+  AND jsonb_typeof(candidate.candidate) = 'object'
+  AND (SELECT count(*) FROM jsonb_object_keys(candidate.candidate)) = 11
+  AND candidate.candidate ?& ARRAY['candidateId','runId','attemptId','projectTargetId',
+    'frozenBaseRevision','workspaceTreeDigest','patchDigest','changedFiles',
+    'verificationEvidenceIds','publicationPolicyDigest','createdAt']
+  AND candidate.candidate->>'candidateId' = candidate.candidate_id
+  AND candidate.candidate->>'runId' = candidate.run_id
+  AND candidate.candidate->>'attemptId' = candidate.attempt_id
+  AND candidate.candidate->>'projectTargetId' = candidate.project_target_id
+  AND candidate.candidate->>'frozenBaseRevision' = candidate.frozen_base_revision
+  AND candidate.candidate->>'workspaceTreeDigest' = candidate.workspace_tree_digest
+  AND candidate.candidate->>'patchDigest' = candidate.patch_digest
+  AND candidate.candidate->'changedFiles' = to_jsonb(candidate.changed_files)
+  AND candidate.candidate->'verificationEvidenceIds' =
+    to_jsonb(candidate.verification_evidence_ids)
+  AND candidate.candidate->>'publicationPolicyDigest' = candidate.publication_policy_digest
+  AND jsonb_typeof(candidate.candidate->'createdAt') = 'string'
+  AND candidate.candidate->>'createdAt' = to_char(candidate.created_at AT TIME ZONE 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+
+DROP FUNCTION cp_is_canonical_utc_millis(text);
 
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM cp_publication_candidate

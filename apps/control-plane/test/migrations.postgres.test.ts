@@ -9,6 +9,88 @@ import {
   TEST_DATABASE_URL,
 } from "./postgres-fixture.js";
 
+async function createActualUnversionedFixture(
+  mutateAssessment: (assessment: Record<string, unknown>) => void,
+) {
+  const fixture = await createIsolatedPostgres();
+  await runMigrations(fixture.pool, fixture.migrations.slice(0, -1));
+  const now = new Date("2026-08-15T07:00:00.000Z");
+  const runners = createRunnerDirectory({ pool: fixture.pool,
+    clock: { now: () => now }, tokenFactory: () => "runtime_malformed_secret",
+    idFactory: () => "credential_malformed" });
+  await runners.register({ organizationId: "org_malformed", organizationName: "Malformed",
+    request: { schemaVersion: 1, protocolVersion: "1.0",
+      requiredCapabilities: ["relay.registration.v1"], requestId: "request_malformed",
+      operationId: "operation_malformed", runnerId: "runner_malformed",
+      capabilities: [...HOSTED_CAPABILITIES] } });
+  const authenticated = await runners.authenticate("runtime_malformed_secret");
+  if (authenticated.kind !== "authenticated") throw new Error("malformed auth failed");
+  await recordHostedReadiness({ pool: fixture.pool, organizationId: "org_malformed",
+    runnerId: "runner_malformed" });
+  const hosted = createHostedRunCoordinator({ pool: fixture.pool,
+    clock: { now: () => now }, leaseDurationMs: 60_000,
+    idFactory: () => "attempt_malformed", tokenFactory: () => "fence_attempt_malformed",
+    issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+  const admission = await hostedAdmissionFixture({ runId: "run_malformed",
+    suffix: "malformed", organizationId: "org_malformed", runnerId: "runner_malformed" });
+  await hosted.admit({ runId: "run_malformed", admission: admission.admission,
+    policy: admission.policy });
+  const claimed = await hosted.claim({ principal: authenticated.principal,
+    request: hostedClaimRequest({ operationId: "operation_claim_malformed",
+      requestId: "request_claim_malformed", readinessDigest: admission.readinessDigest,
+      credentialId: "credential_malformed" }) });
+  if (claimed.kind !== "claimed") throw new Error("malformed claim failed");
+  const candidateId = "candidate_malformed";
+  const assessment: Record<string, unknown> = { state: "proposal_ready", accepted: true,
+    candidateId, reasonCodes: ["proposal_ready"], assessedAt: now.toISOString() };
+  mutateAssessment(assessment);
+  await fixture.pool.query(
+    "UPDATE cp_hosted_attempt SET state = 'succeeded' WHERE organization_id = $1 AND run_id = $2",
+    ["org_malformed", "run_malformed"]);
+  await fixture.pool.query(
+    `UPDATE cp_hosted_run SET state = 'succeeded', terminal_kind = 'succeeded',
+       terminal_receipt = $3::jsonb WHERE organization_id = $1 AND run_id = $2`,
+    ["org_malformed", "run_malformed", JSON.stringify({ kind: "proposal_ready",
+      candidateId, assessment })]);
+  await fixture.pool.query(`
+    CREATE TABLE cp_publication_candidate (
+      organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+      candidate_id text NOT NULL, run_id text NOT NULL, attempt_id text NOT NULL,
+      project_target_id text NOT NULL, frozen_base_revision text NOT NULL,
+      workspace_tree_digest text NOT NULL, patch_digest text NOT NULL,
+      changed_files text[] NOT NULL, verification_evidence_ids text[] NOT NULL,
+      publication_policy_digest text NOT NULL, candidate jsonb NOT NULL,
+      created_at timestamptz NOT NULL, PRIMARY KEY (organization_id, candidate_id),
+      UNIQUE (organization_id, run_id, attempt_id));
+    CREATE INDEX cp_publication_candidate_run_idx
+      ON cp_publication_candidate(organization_id, run_id);
+    CREATE FUNCTION cp_reject_publication_candidate_mutation() RETURNS trigger
+    LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publication_candidate_immutable'; END $$;
+    CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE OR DELETE
+      ON cp_publication_candidate FOR EACH ROW
+      EXECUTE FUNCTION cp_reject_publication_candidate_mutation();`);
+  const candidate = { candidateId, runId: "run_malformed",
+    attemptId: claimed.claim.attempt.id,
+    projectTargetId: admission.admission.projectTarget.projectTargetId,
+    frozenBaseRevision: "a".repeat(40), workspaceTreeDigest: "b".repeat(40),
+    patchDigest: `sha256:${"c".repeat(64)}`, changedFiles: ["a.ts"],
+    verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
+    publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+    createdAt: now.toISOString() };
+  await fixture.pool.query(
+    `INSERT INTO cp_publication_candidate(organization_id, candidate_id, run_id,
+       attempt_id, project_target_id, frozen_base_revision, workspace_tree_digest,
+       patch_digest, changed_files, verification_evidence_ids,
+       publication_policy_digest, candidate, created_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
+    ["org_malformed", candidateId, "run_malformed", claimed.claim.attempt.id,
+      candidate.projectTargetId, candidate.frozenBaseRevision,
+      candidate.workspaceTreeDigest, candidate.patchDigest, candidate.changedFiles,
+      candidate.verificationEvidenceIds, candidate.publicationPolicyDigest,
+      JSON.stringify(candidate), now]);
+  return { fixture, candidateId };
+}
+
 describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
 
@@ -265,6 +347,38 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   });
 
   it.each([
+    ["missing assessedAt", (assessment: Record<string, unknown>) => {
+      delete assessment["assessedAt"];
+    }],
+    ["invalid assessedAt", (assessment: Record<string, unknown>) => {
+      assessment["assessedAt"] = "not-a-timestamp";
+    }],
+    ["extra key", (assessment: Record<string, unknown>) => {
+      assessment["unexpected"] = true;
+    }],
+    ["wrong accepted type", (assessment: Record<string, unknown>) => {
+      assessment["accepted"] = "true";
+    }],
+    ["duplicate reason codes", (assessment: Record<string, unknown>) => {
+      assessment["reasonCodes"] = ["proposal_ready", "proposal_ready"];
+    }],
+    ["noncanonical reason codes", (assessment: Record<string, unknown>) => {
+      assessment["reasonCodes"] = ["proposal_ready", "material_action_unknown"];
+    }],
+    ["Candidate mismatch", (assessment: Record<string, unknown>) => {
+      assessment["candidateId"] = "candidate_other";
+    }],
+  ] as const)("refuses malformed historical assessment: %s", async (_label, mutate) => {
+    const malformed = await createActualUnversionedFixture(mutate);
+    try {
+      await expect(runMigrations(malformed.fixture.pool, malformed.fixture.migrations))
+        .rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
+    } finally {
+      await malformed.fixture.close();
+    }
+  });
+
+  it.each([
     ["attempt FK", `ALTER TABLE cp_publication_candidate DROP CONSTRAINT cp_publication_candidate_attempt_fk;
       ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_attempt_fk
       FOREIGN KEY (organization_id, run_id, attempt_number)
@@ -280,6 +394,38 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       FOR EACH ROW EXECUTE FUNCTION cp_reject_publication_candidate_mutation()`],
     ["function body", `CREATE OR REPLACE FUNCTION cp_reject_publication_candidate_mutation()
       RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+    ["token-preserving content check", `ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_content_free_check;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_content_free_check
+      CHECK ((jsonb_typeof(candidate) = 'object' AND NOT candidate ?| ARRAY[
+        'baseToFinalBinaryDiff','limitations','workspacePath','logs','output','secret']) OR true)`],
+    ["not-valid attempt FK", `ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_attempt_fk;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_attempt_fk
+      FOREIGN KEY (organization_id,run_id,attempt_number,attempt_id)
+      REFERENCES cp_hosted_attempt(organization_id,run_id,attempt_number,attempt_id) NOT VALID`],
+    ["not-valid check", `ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_patch_digest_check;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_patch_digest_check
+      CHECK (patch_digest ~ '^sha256:[a-f0-9]{64}$') NOT VALID`],
+    ["FK actions and deferrability", `ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_attempt_fk;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_attempt_fk
+      FOREIGN KEY (organization_id,run_id,attempt_number,attempt_id)
+      REFERENCES cp_hosted_attempt(organization_id,run_id,attempt_number,attempt_id)
+      MATCH FULL ON UPDATE CASCADE ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED`],
+    ["no-inherit check", `ALTER TABLE cp_publication_candidate
+      DROP CONSTRAINT cp_publication_candidate_patch_digest_check;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_patch_digest_check
+      CHECK (patch_digest ~ '^sha256:[a-f0-9]{64}$') NO INHERIT`],
+    ["conditional trigger", `DROP TRIGGER cp_publication_candidate_immutable ON cp_publication_candidate;
+      CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE OR DELETE
+      ON cp_publication_candidate FOR EACH ROW WHEN (false)
+      EXECUTE FUNCTION cp_reject_publication_candidate_mutation()`],
+    ["trigger arguments", `DROP TRIGGER cp_publication_candidate_immutable ON cp_publication_candidate;
+      CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE OR DELETE
+      ON cp_publication_candidate FOR EACH ROW
+      EXECUTE FUNCTION cp_reject_publication_candidate_mutation('unexpected')`],
   ] as const)("fails readiness closed for tampered %s", async (_label, tamperSql) => {
     const tampered = await createIsolatedPostgres();
     try {
