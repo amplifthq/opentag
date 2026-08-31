@@ -1464,27 +1464,25 @@ export function createHostedRunCoordinator(input: {
           !== command.principal.registrationGeneration
         || request.expectedAuthority.credentialGeneration
           !== command.principal.credentialGeneration) return false;
-      const runner = await client.query<{ registration_generation: number;
-        credential_generation: number; current_credential_id: string; revoked_at: Date | null }>(
-        `SELECT runner.registration_generation, runner.credential_generation,
-                runner.current_credential_id, credential.revoked_at
-         FROM cp_runner runner
-         JOIN cp_runner_credential credential
-           ON credential.organization_id = runner.organization_id
-          AND credential.credential_id = runner.current_credential_id
-         WHERE runner.organization_id = $1 AND runner.runner_id = $2
-         FOR UPDATE OF runner, credential`,
-        [request.organizationId, request.runnerId],
-      );
-      const currentRunner = runner.rows[0];
-      if (!currentRunner || currentRunner.revoked_at
-        || currentRunner.current_credential_id !== request.expectedAuthority.credentialId
-        || currentRunner.registration_generation !== request.expectedAuthority.registrationGeneration
-        || currentRunner.credential_generation !== request.expectedAuthority.credentialGeneration) return false;
-      const result = await client.query<{
+      // Every publication path that can touch the same authority locks the
+      // durable lineage as Run -> exact Attempt -> Runner.  Redemption must
+      // follow that order before it reaches its credential/grant rows too:
+      // locking Runner first lets a stale redemption wait on Run while a
+      // publication operation holding Run waits on that Runner.
+      const runResult = await client.query<{
         hosted_admission: unknown;
         current_attempt_number: number;
         terminal_kind: string | null;
+      }>(
+        `SELECT hosted_admission, current_attempt_number, terminal_kind
+         FROM cp_hosted_run
+         WHERE organization_id = $1 AND run_id = $2
+         FOR UPDATE`,
+        [request.organizationId, request.runId],
+      );
+      const run = runResult.rows[0];
+      if (!run) return false;
+      const attemptResult = await client.query<{
         attempt_id: string;
         attempt_number: number;
         runner_id: string;
@@ -1493,31 +1491,49 @@ export function createHostedRunCoordinator(input: {
         lease_expires_at: Date;
         state: string;
       }>(
-        `SELECT run.hosted_admission, run.current_attempt_number, run.terminal_kind,
-                attempt.attempt_id, attempt.attempt_number, attempt.runner_id,
-                attempt.credential_id, attempt.fencing_token_digest,
-                attempt.lease_expires_at, attempt.state
-         FROM cp_hosted_run run
-         JOIN cp_hosted_attempt attempt
-           ON attempt.organization_id = run.organization_id
-          AND attempt.run_id = run.run_id
-          AND attempt.attempt_number = run.current_attempt_number
-         WHERE run.organization_id = $1 AND run.run_id = $2
-         FOR UPDATE OF run, attempt`,
-        [request.organizationId, request.runId],
+        `SELECT attempt_id, attempt_number, runner_id, credential_id,
+                fencing_token_digest, lease_expires_at, state
+         FROM cp_hosted_attempt
+         WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3
+           AND attempt_number = $4
+         FOR UPDATE`,
+        [request.organizationId, request.runId, request.attempt.attemptId,
+          request.attempt.attemptNumber],
       );
-      const row = result.rows[0];
-      if (!row || row.terminal_kind !== null
-        || row.attempt_id !== request.attempt.attemptId
-        || row.attempt_number !== request.attempt.attemptNumber
-        || row.current_attempt_number !== request.attempt.attemptNumber
-        || row.runner_id !== request.runnerId
-        || row.credential_id !== request.expectedAuthority.credentialId
-        || row.fencing_token_digest !== request.attempt.fencingTokenDigest
-        || row.lease_expires_at.toISOString() !== request.attempt.leaseExpiresAt
-        || row.lease_expires_at.getTime() <= input.clock.now().getTime()
-        || !["claimed", "running", "needs_approval"].includes(row.state)) return false;
-      const admission = HostedAdmissionEnvelopeV1Schema.parse(row.hosted_admission);
+      const attempt = attemptResult.rows[0];
+      if (!attempt) return false;
+      const runnerResult = await client.query<{
+        registration_generation: number; credential_generation: number;
+        current_credential_id: string;
+      }>(
+        `SELECT registration_generation, credential_generation, current_credential_id
+         FROM cp_runner
+         WHERE organization_id = $1 AND runner_id = $2
+         FOR UPDATE`,
+        [request.organizationId, request.runnerId],
+      );
+      const currentRunner = runnerResult.rows[0];
+      if (!currentRunner) return false;
+      const credentialResult = await client.query<{ credential_id: string; revoked_at: Date | null }>(
+        `SELECT credential_id, revoked_at FROM cp_runner_credential
+         WHERE organization_id = $1 AND credential_id = $2
+         FOR UPDATE`,
+        [request.organizationId, request.expectedAuthority.credentialId],
+      );
+      const credential = credentialResult.rows[0];
+      if (!credential || credential.revoked_at
+        || currentRunner.current_credential_id !== request.expectedAuthority.credentialId
+        || currentRunner.registration_generation !== request.expectedAuthority.registrationGeneration
+        || currentRunner.credential_generation !== request.expectedAuthority.credentialGeneration
+        || run.terminal_kind !== null
+        || run.current_attempt_number !== request.attempt.attemptNumber
+        || attempt.runner_id !== request.runnerId
+        || attempt.credential_id !== request.expectedAuthority.credentialId
+        || attempt.fencing_token_digest !== request.attempt.fencingTokenDigest
+        || attempt.lease_expires_at.toISOString() !== request.attempt.leaseExpiresAt
+        || attempt.lease_expires_at.getTime() <= input.clock.now().getTime()
+        || !["claimed", "running", "needs_approval"].includes(attempt.state)) return false;
+      const admission = HostedAdmissionEnvelopeV1Schema.parse(run.hosted_admission);
       return admission.envelopeDigest === request.admissionEnvelopeDigest
         && canonicalJsonStringify(admission.sourceContextEnvelope)
           === canonicalJsonStringify(request.contentEnvelope);

@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createPublicationPublisher } from "../src/modules/publication-candidates/publisher.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { hostedAdmissionFixture, hostedClaimRequest, hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
@@ -151,6 +152,56 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
               if (query === "BEGIN") {
                 await client.query("SET LOCAL lock_timeout = '3s'");
                 await client.query("SET LOCAL statement_timeout = '5s'");
+              }
+              return result;
+            },
+            release: () => client.release(),
+          };
+        },
+      },
+    };
+  };
+
+  const createRedemptionRacePool = () => {
+    const backendPid = Promise.withResolvers<number>();
+    const runLockRequested = Promise.withResolvers<void>();
+    const runLockAcquired = Promise.withResolvers<void>();
+    const releaseRunLock = Promise.withResolvers<void>();
+    const firstLockViolation = Promise.withResolvers<never>();
+    let firstLock = true;
+    let gateRunLock = true;
+    return {
+      backendPid: backendPid.promise,
+      runLockRequested: runLockRequested.promise,
+      runLockAcquired: runLockAcquired.promise,
+      waitForRunLock: Promise.race([runLockRequested.promise, firstLockViolation.promise]),
+      releaseRunLock: releaseRunLock.resolve,
+      pool: {
+        connect: async () => {
+          const client = await fixture.pool.connect();
+          backendPid.resolve((await client.query<{ pid: number }>("SELECT pg_backend_pid() pid")).rows[0]!.pid);
+          return {
+            query: async (query: string, values?: unknown[]) => {
+              const canonicalRunLock = query.includes("FOR UPDATE")
+                && query.includes("FROM cp_hosted_run") && !query.includes("JOIN");
+              if (query.includes("FOR UPDATE") && firstLock) {
+                firstLock = false;
+                if (!canonicalRunLock) {
+                  const error = new Error("redemption_lock_before_canonical_run");
+                  firstLockViolation.reject(error);
+                  throw error;
+                }
+              }
+              if (canonicalRunLock) runLockRequested.resolve();
+              const result = await client.query(query, values);
+              if (query === "BEGIN") {
+                await client.query("SET LOCAL lock_timeout = '3s'");
+                await client.query("SET LOCAL statement_timeout = '5s'");
+              }
+              if (canonicalRunLock && gateRunLock) {
+                gateRunLock = false;
+                runLockAcquired.resolve();
+                await releaseRunLock.promise;
               }
               return result;
             },
@@ -532,6 +583,129 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       expect(values).toContainEqual({ kind: "unavailable", reason: "exact_publication_authority_missing" });
     },
   );
+
+  const sourceContentPublicationRace = async (first: "publication" | "redemption") => {
+      const authority = await createFreshApprovalAuthority(`source_redeem_race_${first}`);
+      await expect(publisher.approve(freshApproval(authority))).resolves.toEqual({
+        kind: "approved", intentId: expect.any(String),
+      });
+      const key = Buffer.alloc(32, 9);
+      const contentId = claim.hostedAdmission.sourceContextEnvelope.contentId;
+      const custody = createRelayContentCustody({ pool: fixture.pool,
+        clock: { now: () => now }, key: { key, keyVersion: "relay-v1" } });
+      await custody.store({ organizationId: principal.organizationId, installationId: "publication_race",
+        sourceAppId: "github", sourceDeliveryId: "publication_race",
+        sourceMessageId: "publication_race",
+        sourceVersionRef: claim.hostedAdmission.sourceContextEnvelope.sourceVersionRef,
+        purpose: "source_context", contentId, payload: { text: "bounded" },
+        expiresAt: new Date(now.getTime() + 30 * 60_000) });
+      const grant = await custody.issueReadGrant({ organizationId: principal.organizationId,
+        runId: authority.runId, attemptId: authority.attemptId,
+        fenceDigest: claim.attempt.fencingTokenDigest, contentIds: [contentId],
+        purpose: "source_context", expiresAt: new Date(claim.attempt.leaseExpiresAt) });
+      const request = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+        requiredCapabilities: ["relay.source-content-redeem.v1"] as const,
+        requestId: `request_publication_redeem_race_${first}`,
+        operationId: `operation_publication_redeem_race_${first}`,
+        organizationId: principal.organizationId, runnerId: principal.runnerId,
+        runId: authority.runId,
+        expectedAuthority: { credentialId: principal.credentialId,
+          registrationGeneration: principal.registrationGeneration,
+          credentialGeneration: principal.credentialGeneration },
+        attempt: { attemptId: authority.attemptId, attemptNumber: claim.attempt.number,
+          epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest,
+          leaseExpiresAt: claim.attempt.leaseExpiresAt }, grant,
+        admissionEnvelopeDigest: claim.hostedAdmission.envelopeDigest,
+        contentEnvelope: claim.hostedAdmission.sourceContextEnvelope };
+      const redemptionPool = createRedemptionRacePool();
+      const redemptionCustody = createRelayContentCustody({ pool: redemptionPool.pool as never,
+        clock: { now: () => now }, key: { key, keyVersion: "relay-v1" } });
+      const redemptionCoordinator = createHostedRunCoordinator({ pool: redemptionPool.pool as never,
+        clock: { now: () => now }, leaseDurationMs: 60_000,
+        idFactory: () => "unused_publication_redeem_race",
+        tokenFactory: () => "unused_publication_redeem_race",
+        issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+      const publicationRunRequested = Promise.withResolvers<void>();
+      const publicationRunAcquired = Promise.withResolvers<void>();
+      const releasePublication = Promise.withResolvers<void>();
+      const publicationPool = createLockTestPool(true);
+      const racePublisher = createPublicationPublisher({ pool: publicationPool.pool as never,
+        clock: { now: () => now }, idFactory: () => `publication_redeem_race_${first}`,
+        testHooks: { onLifecycleLock: async (event) => {
+          if (event.runId !== authority.runId || event.resource !== "run") return;
+          if (event.phase === "before") publicationRunRequested.resolve();
+          else {
+            publicationRunAcquired.resolve();
+            await releasePublication.promise;
+          }
+        } } });
+      const publish = () => racePublisher.claim({ principal, runId: authority.runId,
+        attemptId: authority.attemptId, attemptNumber: claim.attempt.number,
+        fencingToken: claim.attempt.fencingToken, candidateId: authority.candidateId,
+        candidateDigest: authority.candidateDigest,
+        runnerGeneration: principal.credentialGeneration,
+        step: "push_owned_branch" });
+      const redeem = () => redemptionCustody.read({ ...grant, organizationId: principal.organizationId,
+        runId: authority.runId, attemptId: authority.attemptId,
+        fenceDigest: claim.attempt.fencingTokenDigest, contentIds: [contentId],
+        purpose: "source_context", authorizeInTransaction: (client) =>
+          redemptionCoordinator.validateSourceContentRedemptionInTransaction(client, { principal, request }) })
+        .then(() => ({ kind: "redeemed" as const }))
+        .catch((error: unknown) => ({ kind: "rejected" as const,
+          reason: error instanceof Error ? error.message : String(error) }));
+
+      let publication: ReturnType<typeof publish>;
+      let redemption: ReturnType<typeof redeem>;
+      try {
+        if (first === "publication") {
+          publication = publish();
+          await publicationRunAcquired.promise;
+          redemption = redeem();
+          await redemptionPool.waitForRunLock;
+          await expectBackendWaitingOnLock(redemptionPool.backendPid);
+          releasePublication.resolve();
+          await redemptionPool.runLockAcquired;
+          redemptionPool.releaseRunLock();
+        } else {
+          redemption = redeem();
+          await redemptionPool.runLockAcquired;
+          publication = publish();
+          await publicationRunRequested.promise;
+          await expectBackendWaitingOnLock(publicationPool.backendPid);
+          redemptionPool.releaseRunLock();
+          await publicationRunAcquired.promise;
+          releasePublication.resolve();
+        }
+        const [publicationResult, redemptionResult] = await Promise.all([publication!, redemption!]);
+        expect(publicationResult).toEqual({ kind: "issued", capability: expect.any(Object) });
+        expect(redemptionResult).toEqual({ kind: "rejected", reason: "source_content_grant_stale" });
+        expect(JSON.stringify([publicationResult, redemptionResult])).not.toMatch(/40P01|55P03|57014/);
+      } finally {
+        redemptionPool.releaseRunLock();
+        releasePublication.resolve();
+      }
+      await expect(fixture.pool.query<{ consumed_at: Date | null }>(
+        `SELECT consumed_at FROM cp_source_content_read_grant WHERE grant_id=$1`, [grant.grantId],
+      )).resolves.toMatchObject({ rows: [{ consumed_at: null }], rowCount: 1 });
+      await expect(fixture.pool.query<{ capabilities: number; begins: number; receipts: number }>(
+        `SELECT (SELECT count(*)::int FROM cp_publication_capability capability
+                  JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
+                    AND intent.intent_id=capability.intent_id
+                  WHERE capability.organization_id=$1 AND intent.run_id=$2) capabilities,
+                (SELECT count(*)::int FROM cp_publication_begin WHERE organization_id=$1
+                  AND capability_id IN (SELECT capability.capability_id FROM cp_publication_capability capability
+                    JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
+                      AND intent.intent_id=capability.intent_id
+                    WHERE capability.organization_id=$1 AND intent.run_id=$2)) begins,
+                (SELECT count(*)::int FROM cp_publication_receipt WHERE organization_id=$1
+                  AND capability_id IN (SELECT capability.capability_id FROM cp_publication_capability capability
+                    JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
+                      AND intent.intent_id=capability.intent_id
+                    WHERE capability.organization_id=$1 AND intent.run_id=$2)) receipts`,
+        [principal.organizationId, authority.runId],
+      )).resolves.toMatchObject({ rows: [{ capabilities: 1, begins: 0, receipts: 0 }], rowCount: 1 });
+      await closeFreshApprovalRuns(authority.runId);
+  };
 
   it("serializes publication, records start before effects, and authorizes retry only after durable authoritative absence", async () => {
     const pushRace = await Promise.all([
@@ -1049,4 +1223,9 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(fixture.pool.query("UPDATE cp_publication_intent SET branch = 'other' WHERE organization_id = $1", [principal.organizationId]))
       .rejects.toThrow("publication_authority_immutable");
   });
+
+  it.each(["publication", "redemption"] as const)(
+    "serializes publication and authenticated stale source redemption when %s starts first",
+    sourceContentPublicationRace,
+  );
 });
