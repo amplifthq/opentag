@@ -497,7 +497,9 @@ export const PublicationOperationObservationV1Schema = z.discriminatedUnion("kin
     draft: z.literal(true).optional(), provider: z.literal("github").optional(),
     repository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
       .strict().optional(), baseBranch: z.string().min(1).max(255).optional(),
-    state: z.literal("open").optional() }).strict(),
+    state: z.literal("open").optional(), headBranch: z.string().min(1).max(255).optional(),
+    headRepository: z.object({ owner: z.string().min(1).max(128), repo: z.string().min(1).max(128) })
+      .strict().optional() }).strict(),
   z.object({ kind: z.literal("absent") }).strict(),
   z.object({ kind: z.literal("ambiguous"), reason: z.string().min(1).max(256).optional() }).strict(),
 ]);

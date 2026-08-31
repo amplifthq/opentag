@@ -984,6 +984,9 @@ function publicationReconciliationObservation(capability: PublicationOperationCa
       ...(provider.provider && provider.repository && provider.baseBranch && provider.state ? {
         provider: provider.provider, repository: provider.repository,
         baseBranch: provider.baseBranch, state: provider.state,
+        ...(provider.headBranch && provider.headRepository ? {
+          headBranch: provider.headBranch, headRepository: provider.headRepository,
+        } : {}),
       } : {}),
     } : {}),
   };
@@ -1044,7 +1047,7 @@ function githubPublicationApi(input: {
     ...(input.apiOrigin ? { apiBaseUrl: input.apiOrigin } : {}) });
 }
 
-async function observeDraftPullRequest(input: {
+export async function observeDraftPullRequest(input: {
   capability: PublicationOperationCapabilityV1;
   token: string;
   fetchImpl?: typeof fetch;

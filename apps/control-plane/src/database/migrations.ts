@@ -332,7 +332,60 @@ export async function checkMigrationReadiness(
             AND function_row.pronamespace=current_schema()::regnamespace))
       ) AS schema_ready`,
     );
+    // 0014 is durable authority, not a representative-table migration.  Keep
+    // this catalog separate from the older 0013 check so every authority
+    // family must remain immutable and structurally complete at startup.
+    const publicationOperations = await pool.query<{ schema_ready: boolean }>(
+      `WITH expected(table_name, column_count) AS (VALUES
+         ('cp_publication_branch_ownership',24),('cp_publication_intent',20),
+         ('cp_publication_capability',11),('cp_publication_begin',4),
+         ('cp_publication_receipt',8),('cp_publication_reconciliation',6),
+         ('cp_publication_completion',27)
+       ), immutable(table_name, trigger_name) AS (VALUES
+         ('cp_publication_branch_ownership','cp_publication_branch_ownership_immutable'),
+         ('cp_publication_intent','cp_publication_intent_immutable'),
+         ('cp_publication_capability','cp_publication_capability_immutable'),
+         ('cp_publication_begin','cp_publication_begin_immutable'),
+         ('cp_publication_receipt','cp_publication_receipt_immutable'),
+         ('cp_publication_reconciliation','cp_publication_reconciliation_immutable'),
+         ('cp_publication_completion','cp_publication_completion_immutable')
+       ) SELECT (
+         NOT EXISTS (SELECT 1 FROM expected WHERE to_regclass(table_name) IS NULL)
+         AND NOT EXISTS (SELECT 1 FROM expected expected_table
+           LEFT JOIN LATERAL (SELECT count(*)::integer AS count FROM pg_attribute
+             WHERE attrelid=to_regclass(expected_table.table_name) AND attnum>0 AND NOT attisdropped) actual ON true
+           WHERE actual.count<>expected_table.column_count)
+         AND NOT EXISTS (SELECT 1 FROM expected JOIN pg_attribute attribute
+           ON attribute.attrelid=to_regclass(expected.table_name) AND attribute.attnum>0 AND NOT attribute.attisdropped
+           LEFT JOIN pg_attrdef default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
+           WHERE NOT attribute.attnotnull OR default_value.oid IS NOT NULL)
+         AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_publication_capability'::regclass
+           AND contype='u' AND ARRAY(SELECT attribute.attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=conrelid AND attribute.attnum=key.attnum ORDER BY ordinal)
+             = ARRAY['organization_id','intent_id','step','attempt_number'])
+         AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_publication_receipt'::regclass
+           AND contype='u' AND ARRAY(SELECT attribute.attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=conrelid AND attribute.attnum=key.attnum ORDER BY ordinal)
+             = ARRAY['organization_id','capability_id'])
+         AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_publication_reconciliation'::regclass
+           AND contype='u' AND ARRAY(SELECT attribute.attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=conrelid AND attribute.attnum=key.attnum ORDER BY ordinal)
+             = ARRAY['organization_id','capability_id'])
+         AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_publication_completion'::regclass
+           AND contype='u' AND ARRAY(SELECT attribute.attname::text FROM unnest(conkey) WITH ORDINALITY key(attnum,ordinal)
+             JOIN pg_attribute attribute ON attribute.attrelid=conrelid AND attribute.attnum=key.attnum ORDER BY ordinal)
+             = ARRAY['organization_id','run_id'])
+         AND NOT EXISTS (SELECT 1 FROM immutable expected_trigger WHERE NOT EXISTS (
+           SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+           WHERE trigger_row.tgrelid=to_regclass(expected_trigger.table_name)
+             AND trigger_row.tgname=expected_trigger.trigger_name AND trigger_row.tgenabled='O'
+             AND NOT trigger_row.tgisinternal AND trigger_row.tgtype=27 AND trigger_row.tgqual IS NULL
+             AND trigger_row.tgnargs=0 AND function_row.proname='cp_reject_publication_authority_mutation'
+             AND function_row.pronamespace=current_schema()::regnamespace))
+       ) AS schema_ready`,
+    );
     const current = schema.rows[0]?.schema_ready === true
+      && publicationOperations.rows[0]?.schema_ready === true
       && applied.size === migrations.length
       && migrations.every(
         (migration) => applied.get(migration.name) === migration.checksum,

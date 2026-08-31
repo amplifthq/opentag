@@ -180,7 +180,17 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       [principal.organizationId, push.capability.capabilityId])).resolves.toMatchObject({ rows: [] });
     const pushReceipt = { ...receiptSeed, receiptDigest: await computePublicationOperationReceiptDigestV1(receiptSeed) };
     await expect(publisher.record({ principal, receipt: pushReceipt })).resolves.toMatchObject({ kind: "recorded" });
-    const pr = await claimOperation("create_draft_pull_request");
+    // A durable succeeded receipt is authoritative forever: an absence read
+    // cannot turn the already-settled operation back into a retry candidate.
+    await expect(publisher.reconcile({ principal, capabilityId: push.capability.capabilityId,
+      operationId: push.capability.operationId, reconciliationId: "reconcile_push_absent_after_success",
+      observation: { kind: "absent" }, observedAt: now.toISOString() }))
+      .resolves.toEqual({ kind: "conflict" });
+    await expect(claimOperation("push_owned_branch")).resolves.toMatchObject({
+      kind: "unavailable", reason: "operation_already_settled" });
+    const next = await publisher.claimNextForRunner({ principal });
+    expect(next).toMatchObject({ kind: "issued", capability: { step: "create_draft_pull_request" } });
+    const pr = next;
     expect(pr.kind).toBe("issued");
     if (pr.kind !== "issued") return;
     await publisher.begin({ principal, fencingToken: claim.attempt.fencingToken, capability: pr.capability, begunAt: now.toISOString() });
@@ -269,7 +279,7 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
     await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
       operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
-      observation: { kind: "ambiguous" }, observedAt: now.toISOString() }))
+      observation: { kind: "absent" }, observedAt: now.toISOString() }))
       .resolves.toEqual({ kind: "conflict" });
     await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
       kind: "completion_pending", capability: { capabilityId: retried.capability.capabilityId },

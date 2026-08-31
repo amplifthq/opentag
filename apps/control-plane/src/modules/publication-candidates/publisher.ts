@@ -42,7 +42,100 @@ function exactReceiptObservation(capability: PublicationOperationCapabilityV1,
     && observation.draft === true && observation.provider === "github"
     && observation.repository?.owner === capability.repository.owner
     && observation.repository?.repo === capability.repository.repo
-    && observation.baseBranch === capability.repository.baseBranch && observation.state === "open");
+    && observation.baseBranch === capability.repository.baseBranch && observation.state === "open"
+    && (observation.headBranch === undefined || observation.headBranch === capability.branch)
+    && (observation.headRepository === undefined || (observation.headRepository.owner === capability.repository.owner
+      && observation.headRepository.repo === capability.repository.repo)));
+}
+
+type PublicationOperationRecord = {
+  capability: PublicationOperationCapabilityV1;
+  begunAt: Date | null;
+  receipt: PublicationOperationReceiptV1 | null;
+  reconciliation: { reconciliationId: string; observation: PublicationOperationReceiptV1["observation"]; observedAt: Date } | null;
+};
+
+type PublicationOperationState =
+  | { kind: "settled"; record: PublicationOperationRecord }
+  | { kind: "retryable"; record: PublicationOperationRecord }
+  | { kind: "reconciliation_pending"; record: PublicationOperationRecord }
+  | { kind: "issuable"; latest: PublicationOperationRecord | null };
+
+/**
+ * The only operation-state reducer.  It deliberately considers every durable
+ * capability attempt for one immutable intent/step, rather than whichever
+ * attempt happened to be queried last.  A success or exact provider presence
+ * therefore remains authoritative even if a later observer reports absence.
+ */
+function reducePublicationOperation(records: PublicationOperationRecord[]): PublicationOperationState {
+  const settled = records.find((record) => record.receipt?.outcome === "succeeded")
+    ?? records.find((record) => record.reconciliation?.observation.kind === "present");
+  if (settled) return { kind: "settled", record: settled };
+  const absent = records.find((record) => record.reconciliation?.observation.kind === "absent");
+  if (absent) return { kind: "retryable", record: absent };
+  const pending = records.find((record) => record.begunAt !== null || record.receipt !== null
+    || record.reconciliation !== null);
+  if (pending) return { kind: "reconciliation_pending", record: pending };
+  return { kind: "issuable", latest: records[0] ?? null };
+}
+
+async function readPublicationOperationState(client: any, input: {
+  organizationId: string; intentId: string; step: PublicationOperationStepV1; lock?: boolean;
+}): Promise<{ records: PublicationOperationRecord[]; state: PublicationOperationState }> {
+  const capabilities = await client.query(
+    `SELECT * FROM cp_publication_capability WHERE organization_id=$1 AND intent_id=$2 AND step=$3
+     ORDER BY attempt_number DESC${input.lock ? " FOR UPDATE" : ""}`,
+    [input.organizationId, input.intentId, input.step],
+  );
+  const capabilityIds = capabilities.rows.map((row: { capability_id: string }) => row.capability_id);
+  if (capabilityIds.length === 0) return { records: [], state: reducePublicationOperation([]) };
+  if (input.lock) {
+    await client.query(`SELECT 1 FROM cp_publication_begin WHERE organization_id=$1 AND capability_id=ANY($2::text[]) FOR UPDATE`, [input.organizationId, capabilityIds]);
+    await client.query(`SELECT 1 FROM cp_publication_receipt WHERE organization_id=$1 AND capability_id=ANY($2::text[]) FOR UPDATE`, [input.organizationId, capabilityIds]);
+    await client.query(`SELECT 1 FROM cp_publication_reconciliation WHERE organization_id=$1 AND capability_id=ANY($2::text[]) FOR UPDATE`, [input.organizationId, capabilityIds]);
+  }
+  const facts = await client.query(
+    `SELECT capability.capability,begin.begun_at,receipt.receipt,
+            reconciliation.reconciliation_id,reconciliation.observation,reconciliation.observed_at
+     FROM cp_publication_capability capability
+     LEFT JOIN cp_publication_begin begin ON begin.organization_id=capability.organization_id
+       AND begin.capability_id=capability.capability_id
+     LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id=capability.organization_id
+       AND receipt.capability_id=capability.capability_id
+     LEFT JOIN cp_publication_reconciliation reconciliation ON reconciliation.organization_id=capability.organization_id
+       AND reconciliation.capability_id=capability.capability_id
+     WHERE capability.organization_id=$1 AND capability.capability_id=ANY($2::text[])
+     ORDER BY capability.attempt_number DESC`, [input.organizationId, capabilityIds],
+  );
+  const records = facts.rows.map((row: any): PublicationOperationRecord => ({
+    capability: PublicationOperationCapabilityV1Schema.parse(row.capability),
+    begunAt: row.begun_at ?? null,
+    receipt: row.receipt ? PublicationOperationReceiptV1Schema.parse(row.receipt) : null,
+    reconciliation: row.observation ? {
+      reconciliationId: row.reconciliation_id,
+      observation: PublicationOperationObservationV1Schema.parse(row.observation),
+      observedAt: row.observed_at,
+    } : null,
+  }));
+  return { records, state: reducePublicationOperation(records) };
+}
+
+async function canonicalSettledReceipt(record: PublicationOperationRecord): Promise<PublicationOperationReceiptV1> {
+  if (record.receipt?.outcome === "succeeded") return record.receipt;
+  if (!record.reconciliation || record.reconciliation.observation.kind !== "present") {
+    throw new Error("publication_operation_not_settled");
+  }
+  const capability = record.capability;
+  const seed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+    receiptId: `reconciled_${capability.capabilityId}`, capabilityId: capability.capabilityId,
+    operationId: capability.operationId, organizationId: capability.organizationId,
+    runId: capability.runId, attemptId: capability.attemptId, candidateId: capability.candidateId,
+    candidateDigest: capability.candidateDigest, step: capability.step, runnerId: capability.runnerId,
+    runnerGeneration: capability.runnerGeneration, fencingTokenDigest: capability.fencingTokenDigest,
+    observation: record.reconciliation.observation, outcome: "succeeded" as const,
+    observedAt: new Date(record.reconciliation.observedAt).toISOString() };
+  return PublicationOperationReceiptV1Schema.parse({ ...seed,
+    receiptDigest: await computePublicationOperationReceiptDigestV1(seed) });
 }
 
 export type PublicationApprovalInput = {
@@ -309,45 +402,21 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           return { kind: "unavailable" as const, reason: "exact_publication_authority_missing" };
         }
         if (command.step === "create_draft_pull_request") {
-          const pushed = await client.query(
-            `SELECT 1 FROM cp_publication_capability capability
-             LEFT JOIN cp_publication_receipt receipt
-               ON capability.organization_id = receipt.organization_id
-              AND capability.capability_id = receipt.capability_id
-             LEFT JOIN cp_publication_reconciliation reconciliation
-               ON capability.organization_id = reconciliation.organization_id
-              AND capability.capability_id = reconciliation.capability_id
-             WHERE capability.organization_id = $1 AND capability.intent_id = $2
-               AND capability.step = 'push_owned_branch'
-               AND (receipt.outcome = 'succeeded' OR reconciliation.observation->>'kind' = 'present')`,
-            [command.principal.organizationId, row.intent_id]);
-          if (pushed.rows.length === 0) return { kind: "unavailable" as const,
+          const push = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+            intentId: row.intent_id, step: "push_owned_branch", lock: true });
+          if (push.state.kind !== "settled") return { kind: "unavailable" as const,
             reason: "owned_branch_not_pushed" };
         }
-        const prior = await client.query<{ begun_at: Date | null; outcome: string | null; observation: unknown }>(
-          `SELECT begin.begun_at, receipt.outcome, reconciliation.observation FROM cp_publication_capability capability
-           LEFT JOIN cp_publication_begin begin ON begin.organization_id = capability.organization_id
-             AND begin.capability_id = capability.capability_id
-           LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
-             AND receipt.capability_id = capability.capability_id
-           LEFT JOIN cp_publication_reconciliation reconciliation
-             ON reconciliation.organization_id = capability.organization_id
-            AND reconciliation.capability_id = capability.capability_id
-           WHERE capability.organization_id = $1 AND capability.intent_id = $2
-             AND capability.step = $3 ORDER BY capability.attempt_number DESC LIMIT 1`,
-          [command.principal.organizationId, row.intent_id, command.step]);
-        const priorObservation = prior.rows[0]?.observation
-          ? PublicationOperationObservationV1Schema.parse(prior.rows[0].observation) : null;
-        // A provider response of `absent` is not, by itself, proof that the
-        // write did not happen.  The only retry gate is a separately persisted
-        // authoritative reconciliation observation.  This also makes the
-        // begin-without-receipt crash boundary fail closed.
-        if (prior.rows[0] && priorObservation?.kind === "present") {
+        const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+          intentId: row.intent_id, step: command.step, lock: true });
+        if (operation.state.kind === "settled") {
           return { kind: "unavailable" as const, reason: "operation_already_settled" };
         }
-        if (prior.rows[0] && priorObservation?.kind !== "absent") {
-          return { kind: "unavailable" as const, reason: prior.rows[0].begun_at
-            ? "reconciliation_required" : "capability_nonrenewable" };
+        if (operation.state.kind === "reconciliation_pending") {
+          return { kind: "unavailable" as const, reason: "reconciliation_required" };
+        }
+        if (operation.state.kind === "issuable" && operation.state.latest) {
+          return { kind: "unavailable" as const, reason: "capability_nonrenewable" };
         }
         const capability = PublicationOperationCapabilityV1Schema.parse({
           schemaVersion: 1, protocolVersion: "1.0",
@@ -397,32 +466,26 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         // The currently authenticated paired Runner must still be the same
         // Runner identity; a rotated credential generation is allowed solely
         // to observe this immutable original operation.
-        const recovery = await client.query<{ capability: unknown }>(
-          `SELECT capability.capability
+        const recovery = await client.query<{ intent_id: string; step: PublicationOperationStepV1 }>(
+          `SELECT capability.intent_id,capability.step
            FROM cp_publication_capability capability
            JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
              AND intent.intent_id=capability.intent_id
-           JOIN cp_publication_begin begin ON begin.organization_id=capability.organization_id
-             AND begin.capability_id=capability.capability_id
            JOIN cp_runner runner ON runner.organization_id=intent.organization_id
              AND runner.runner_id=intent.runner_id
-           LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id=capability.organization_id
-             AND receipt.capability_id=capability.capability_id
-           LEFT JOIN cp_publication_reconciliation reconciliation
-             ON reconciliation.organization_id=capability.organization_id
-            AND reconciliation.capability_id=capability.capability_id
            WHERE capability.organization_id=$1 AND intent.runner_id=$2
              AND runner.credential_generation=$3
-             AND COALESCE(reconciliation.observation->>'kind','') <> 'absent'
-             AND COALESCE(receipt.outcome <> 'succeeded', true)
-             AND COALESCE(reconciliation.observation->>'kind' <> 'present', true)
-           ORDER BY capability.issued_at ASC, capability.capability_id ASC
-           FOR UPDATE OF capability,intent,runner SKIP LOCKED LIMIT 1`,
+           GROUP BY capability.intent_id,capability.step
+           ORDER BY min(capability.issued_at), capability.intent_id, capability.step`,
           [command.principal.organizationId, command.principal.runnerId,
             command.principal.credentialGeneration],
         );
-        if (recovery.rows[0]) return { kind: "reconciliation_pending" as const,
-          capability: PublicationOperationCapabilityV1Schema.parse(recovery.rows[0].capability) };
+        for (const candidate of recovery.rows) {
+          const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+            intentId: candidate.intent_id, step: candidate.step, lock: true });
+          if (operation.state.kind === "reconciliation_pending") return { kind: "reconciliation_pending" as const,
+            capability: operation.state.record.capability };
+        }
         const selected = await client.query<any>(
           `SELECT intent.*, attempt.fencing_token_digest, attempt.state AS attempt_state,
              attempt.lease_expires_at, run.current_attempt_number, run.terminal_kind,
@@ -447,77 +510,32 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         );
         const row = selected.rows[0];
         if (!row) return { kind: "empty" as const };
-        const latest = async (step: PublicationOperationStepV1) => {
-          const result = await client.query<any>(
-            `SELECT capability.*, begin.begun_at, receipt.outcome, receipt.receipt,
-                    reconciliation.observation, reconciliation.observed_at AS reconciliation_observed_at
-             FROM cp_publication_capability capability
-             LEFT JOIN cp_publication_begin begin ON begin.organization_id = capability.organization_id
-               AND begin.capability_id = capability.capability_id
-             LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
-               AND receipt.capability_id = capability.capability_id
-             LEFT JOIN cp_publication_reconciliation reconciliation ON reconciliation.organization_id = capability.organization_id
-               AND reconciliation.capability_id = capability.capability_id
-             WHERE capability.organization_id = $1 AND capability.intent_id = $2 AND capability.step = $3
-             ORDER BY capability.attempt_number DESC LIMIT 1`,
-            [command.principal.organizationId, row.intent_id, step],
-          );
-          return result.rows[0] ?? null;
-        };
-        const isSettled = (prior: any) => prior?.outcome === "succeeded" || (prior?.observation
-          && PublicationOperationObservationV1Schema.parse(prior.observation).kind === "present");
-        const settledReceipt = async (prior: any): Promise<PublicationOperationReceiptV1> => {
-          if (prior.receipt && prior.outcome === "succeeded") return PublicationOperationReceiptV1Schema.parse(prior.receipt);
-          const capability = PublicationOperationCapabilityV1Schema.parse(prior.capability);
-          const observation = PublicationOperationObservationV1Schema.parse(prior.observation);
-          const seed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-            receiptId: `reconciled_${capability.capabilityId}`, capabilityId: capability.capabilityId,
-            operationId: capability.operationId, organizationId: capability.organizationId,
-            runId: capability.runId, attemptId: capability.attemptId, candidateId: capability.candidateId,
-            candidateDigest: capability.candidateDigest, step: capability.step, runnerId: capability.runnerId,
-            runnerGeneration: capability.runnerGeneration, fencingTokenDigest: capability.fencingTokenDigest,
-            observation, outcome: "succeeded" as const,
-            observedAt: new Date(prior.reconciliation_observed_at).toISOString() };
-          return PublicationOperationReceiptV1Schema.parse({ ...seed,
-            receiptDigest: await computePublicationOperationReceiptDigestV1(seed) });
-        };
-        const retryable = async (step: PublicationOperationStepV1) => {
-          const prior = await latest(step);
-          if (!prior) return { retry: true as const };
-          const reconciliation = prior.observation
-            ? PublicationOperationObservationV1Schema.parse(prior.observation) : null;
-          // A receipt or a begin without a later authoritative absence is an
-          // ambiguous external-write boundary, never a blind reissue.
-          if (reconciliation?.kind === "absent") return { retry: true as const };
-          return { retry: false as const, reason: prior.begun_at
-            ? "reconciliation_required" : "capability_nonrenewable" };
-        };
-        const push = await latest("push_owned_branch");
+        const operation = (step: PublicationOperationStepV1) => readPublicationOperationState(client,
+          { organizationId: command.principal.organizationId, intentId: row.intent_id, step, lock: true });
+        const push = await operation("push_owned_branch");
         let step: PublicationOperationStepV1;
-        if (!push) {
+        if (push.state.kind === "issuable" && !push.state.latest) {
           step = "push_owned_branch";
-        } else if (isSettled(push)) {
-          const pullRequest = await latest("create_draft_pull_request");
-          if (isSettled(pullRequest)) {
+        } else if (push.state.kind === "settled") {
+          const pullRequest = await operation("create_draft_pull_request");
+          if (pullRequest.state.kind === "settled") {
             return { kind: "completion_pending" as const,
-              capability: PublicationOperationCapabilityV1Schema.parse(pullRequest.capability),
-              completionReceipt: await settledReceipt(pullRequest) };
+              capability: pullRequest.state.record.capability,
+              completionReceipt: await canonicalSettledReceipt(pullRequest.state.record) };
           }
-          const ready = await retryable("create_draft_pull_request");
-          if (!ready.retry) {
-            const original = await latest("create_draft_pull_request");
-            if (original?.begun_at) return { kind: "reconciliation_pending" as const,
-              capability: PublicationOperationCapabilityV1Schema.parse(original.capability) };
-            return { kind: "blocked" as const, reason: ready.reason };
+          if (pullRequest.state.kind === "reconciliation_pending") {
+            return { kind: "reconciliation_pending" as const, capability: pullRequest.state.record.capability };
+          }
+          if (pullRequest.state.kind === "issuable" && pullRequest.state.latest) {
+            return { kind: "blocked" as const, reason: "capability_nonrenewable" };
           }
           step = "create_draft_pull_request";
         } else {
-          const ready = await retryable("push_owned_branch");
-          if (!ready.retry) {
-            const original = await latest("push_owned_branch");
-            if (original?.begun_at) return { kind: "reconciliation_pending" as const,
-              capability: PublicationOperationCapabilityV1Schema.parse(original.capability) };
-            return { kind: "blocked" as const, reason: ready.reason };
+          if (push.state.kind === "reconciliation_pending") {
+            return { kind: "reconciliation_pending" as const, capability: push.state.record.capability };
+          }
+          if (push.state.kind === "issuable" && push.state.latest) {
+            return { kind: "blocked" as const, reason: "capability_nonrenewable" };
           }
           step = "push_owned_branch";
         }
@@ -641,49 +659,40 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
     async reconcile(command: { principal: RuntimePrincipal; capabilityId: string;
       operationId: string; reconciliationId: string; observation: unknown; observedAt: string }) {
       const observation = PublicationOperationObservationV1Schema.parse(command.observation);
-      const capability = await input.pool.query<{ capability: unknown; begun: boolean }>(
-        `SELECT capability.capability,
-           EXISTS(SELECT 1 FROM cp_publication_begin begin
-             WHERE begin.organization_id = capability.organization_id
-               AND begin.capability_id = capability.capability_id
-               AND begin.operation_id = capability.operation_id) AS begun
-         FROM cp_publication_capability capability
-         WHERE capability.organization_id = $1 AND capability.capability_id = $2
-           AND capability.operation_id = $3`,
-        [command.principal.organizationId, command.capabilityId, command.operationId]);
-      const exact = capability.rows[0]
-        ? PublicationOperationCapabilityV1Schema.parse(capability.rows[0].capability) : null;
-      if (!exact || !capability.rows[0]?.begun
-        || exact.runnerId !== command.principal.runnerId
-        || !exactReceiptObservation(exact, observation)) return { kind: "conflict" as const };
-      try {
-        await input.pool.query(
+      return withPostgresTransaction(input.pool, async (client) => {
+        const capability = await client.query<{ intent_id: string; capability: unknown }>(
+          `SELECT intent_id,capability FROM cp_publication_capability
+           WHERE organization_id=$1 AND capability_id=$2 AND operation_id=$3 FOR UPDATE`,
+          [command.principal.organizationId, command.capabilityId, command.operationId]);
+        const exact = capability.rows[0]
+          ? PublicationOperationCapabilityV1Schema.parse(capability.rows[0].capability) : null;
+        if (!exact || exact.runnerId !== command.principal.runnerId
+          || !exactReceiptObservation(exact, observation)) return { kind: "conflict" as const };
+        const operation = await readPublicationOperationState(client, { organizationId: command.principal.organizationId,
+          intentId: capability.rows[0]!.intent_id, step: exact.step, lock: true });
+        const record = operation.records.find((candidate) => candidate.capability.capabilityId === exact.capabilityId);
+        if (!record || record.begunAt === null) return { kind: "conflict" as const };
+        const resultFor = (value: PublicationOperationReceiptV1["observation"]) => value.kind === "present"
+          ? { kind: "settled" as const } : value.kind === "absent"
+            ? { kind: "retry_authorized" as const } : { kind: "outcome_unknown" as const };
+        if (record.reconciliation) {
+          return record.reconciliation.reconciliationId === command.reconciliationId
+            && canonicalJsonStringify(record.reconciliation.observation) === canonicalJsonStringify(observation)
+            && record.reconciliation.observedAt.toISOString() === command.observedAt
+            ? resultFor(record.reconciliation.observation)
+            : { kind: "conflict" as const };
+        }
+        // A settled receipt/presence is stronger than any later absence or
+        // ambiguity.  Do not insert contradictory history, and do not rewrite
+        // an original unknown receipt when exact presence settles it.
+        if (operation.state.kind === "settled") return { kind: "conflict" as const };
+        await client.query(
           `INSERT INTO cp_publication_reconciliation(organization_id,reconciliation_id,
-           capability_id,operation_id,observation,observed_at)
-           VALUES($1,$2,$3,$4,$5,$6)`,
+           capability_id,operation_id,observation,observed_at) VALUES($1,$2,$3,$4,$5,$6)`,
           [command.principal.organizationId, command.reconciliationId, command.capabilityId,
             command.operationId, observation, command.observedAt]);
-      } catch (error) {
-        if ((error as { code?: string }).code !== "23505") throw error;
-        const existing = await input.pool.query<{ reconciliation_id: string; operation_id: string;
-          observation: unknown; observed_at: Date }>(
-          `SELECT reconciliation_id,operation_id,observation,observed_at
-           FROM cp_publication_reconciliation
-           WHERE organization_id=$1 AND capability_id=$2`,
-          [command.principal.organizationId, command.capabilityId]);
-        const persisted = existing.rows[0];
-        if (!persisted || persisted.reconciliation_id !== command.reconciliationId
-          || persisted.operation_id !== command.operationId
-          || canonicalJsonStringify(persisted.observation) !== canonicalJsonStringify(observation)
-          || persisted.observed_at.toISOString() !== command.observedAt) return { kind: "conflict" as const };
-        const replay = PublicationOperationObservationV1Schema.parse(persisted.observation);
-        return replay.kind === "present" ? { kind: "settled" as const }
-          : replay.kind === "absent" ? { kind: "retry_authorized" as const }
-            : { kind: "outcome_unknown" as const };
-      }
-      return observation.kind === "present" ? { kind: "settled" as const }
-        : observation.kind === "absent" ? { kind: "retry_authorized" as const }
-          : { kind: "outcome_unknown" as const };
+        return resultFor(observation);
+      });
     },
 
     /**
@@ -762,56 +771,23 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
 
         const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(row.admission_policy_snapshot);
         const requiredChecks = policy.payload.admissionRules.requiredCheckNames;
-        const operations = await client.query<any>(
-          `SELECT capability.step, capability.operation_id, capability.capability, receipt.outcome,
-                  receipt.receipt_digest, receipt.receipt, reconciliation.observation,
-                  reconciliation.observed_at AS reconciliation_observed_at
-           FROM cp_publication_capability capability
-           LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id = capability.organization_id
-             AND receipt.capability_id = capability.capability_id
-           LEFT JOIN cp_publication_reconciliation reconciliation
-             ON reconciliation.organization_id = capability.organization_id
-            AND reconciliation.capability_id = capability.capability_id
-           WHERE capability.organization_id = $1 AND capability.intent_id = $2
-           ORDER BY capability.attempt_number DESC`,
-          [completion.organizationId, row.intent_id],
-        );
-        const latestByStep = new Map<string, any>();
-        for (const operation of operations.rows) {
-          if (!latestByStep.has(operation.step)) latestByStep.set(operation.step, operation);
-        }
-        const push = latestByStep.get("push_owned_branch");
-        const pullRequest = latestByStep.get("create_draft_pull_request");
-        const observation = (operation: any) => operation?.observation
-          ? PublicationOperationObservationV1Schema.parse(operation.observation) : null;
-        const succeeded = (operation: any) => operation?.outcome === "succeeded"
-          || observation(operation)?.kind === "present";
-        if ([push, pullRequest].some((operation) => operation?.outcome === "outcome_unknown"
-          && observation(operation)?.kind !== "present")) {
+        const pushOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "push_owned_branch", lock: true });
+        const pullRequestOperation = await readPublicationOperationState(client, { organizationId: completion.organizationId,
+          intentId: row.intent_id, step: "create_draft_pull_request", lock: true });
+        if (pushOperation.state.kind === "reconciliation_pending"
+          || pullRequestOperation.state.kind === "reconciliation_pending") {
           return { kind: "outcome_unknown" as const, reason: "publication_outcome_unknown" };
         }
-        if (!succeeded(push) || !succeeded(pullRequest)) {
+        if (pushOperation.state.kind !== "settled" || pullRequestOperation.state.kind !== "settled") {
           return { kind: "nonterminal" as const, reason: "publication_receipt_missing" };
         }
-        const receipt = async (operation: any): Promise<PublicationOperationReceiptV1> => {
-          if (operation.receipt && operation.outcome === "succeeded") return PublicationOperationReceiptV1Schema.parse(operation.receipt);
-          const capability = PublicationOperationCapabilityV1Schema.parse(operation.capability);
-          const observed = PublicationOperationObservationV1Schema.parse(operation.observation);
-          const seed = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-            receiptId: `reconciled_${capability.capabilityId}`, capabilityId: capability.capabilityId,
-            operationId: capability.operationId, organizationId: capability.organizationId,
-            runId: capability.runId, attemptId: capability.attemptId, candidateId: capability.candidateId,
-            candidateDigest: capability.candidateDigest, step: capability.step, runnerId: capability.runnerId,
-            runnerGeneration: capability.runnerGeneration, fencingTokenDigest: capability.fencingTokenDigest,
-            observation: observed, outcome: "succeeded" as const,
-            observedAt: new Date(operation.reconciliation_observed_at).toISOString() };
-          return PublicationOperationReceiptV1Schema.parse({ ...seed,
-            receiptDigest: await computePublicationOperationReceiptDigestV1(seed) });
-        };
-        const pushReceipt = await receipt(push);
-        const pullRequestReceipt = await receipt(pullRequest);
-        if (!exactReceiptObservation(PublicationOperationCapabilityV1Schema.parse(push.capability), pushReceipt.observation)
-          || !exactReceiptObservation(PublicationOperationCapabilityV1Schema.parse(pullRequest.capability), pullRequestReceipt.observation)) {
+        const push = pushOperation.state.record;
+        const pullRequest = pullRequestOperation.state.record;
+        const pushReceipt = await canonicalSettledReceipt(push);
+        const pullRequestReceipt = await canonicalSettledReceipt(pullRequest);
+        if (!exactReceiptObservation(push.capability, pushReceipt.observation)
+          || !exactReceiptObservation(pullRequest.capability, pullRequestReceipt.observation)) {
           return { kind: "nonterminal" as const, reason: "publication_receipt_mismatch" };
         }
         if (pullRequestReceipt.observation.kind !== "present"
@@ -851,8 +827,8 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26::jsonb,$27)`,
           [completion.organizationId, input.idFactory("completion"), completion.runId, completion.attemptId,
             completion.attemptNumber, fenceDigest, completion.candidateId, completion.candidateDigest,
-            row.intent_id, row.ownership_id, push.operation_id, pushReceipt.receiptDigest,
-            pullRequest.operation_id, pullRequestReceipt.receiptDigest, pullRequestReceipt.observation.externalId,
+            row.intent_id, row.ownership_id, push.capability.operationId, pushReceipt.receiptDigest,
+            pullRequest.capability.operationId, pullRequestReceipt.receiptDigest, pullRequestReceipt.observation.externalId,
             digest({ externalId: pullRequestReceipt.observation.externalId, externalUri: pullRequestReceipt.observation.externalUri }),
             row.intent_repository, completion.observation.remote, completion.observation.baseBranch,
             completion.observation.branch, row.expected_head_sha, completion.observation.headSha,

@@ -266,6 +266,28 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     expect(capability.rows.every((column) => column.is_nullable === "NO")).toBe(true);
   });
 
+  it.each([
+    ["receipt nullability", "ALTER TABLE cp_publication_receipt ALTER COLUMN receipt_digest DROP NOT NULL"],
+    ["capability attempt uniqueness", `DO $$ DECLARE constraint_name text; BEGIN
+      SELECT conname INTO constraint_name FROM pg_constraint
+       WHERE conrelid='cp_publication_capability'::regclass AND contype='u'
+         AND conkey=ARRAY[1,3,6,7]::smallint[];
+      EXECUTE format('ALTER TABLE cp_publication_capability DROP CONSTRAINT %I', constraint_name);
+      END $$;
+      ALTER TABLE cp_publication_capability
+      ADD CONSTRAINT cp_publication_capability_organization_id_intent_id_step_attempt_number_key
+      UNIQUE (organization_id,intent_id,step,capability_id)`],
+    ["authority trigger disabled", "ALTER TABLE cp_publication_completion DISABLE TRIGGER cp_publication_completion_immutable"],
+  ] as const)("fails readiness closed for tampered 0014 %s", async (_label, tamperSql) => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(tamperSql);
+      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
+        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    } finally { await tampered.close(); }
+  });
+
   it("matches the shared Unicode scalar sorter with real C-collated PostgreSQL text", async () => {
     const values = ["😀", "é", "e\u0301", "ab", "a", "Z", "A"];
     const expected = ["A", "Z", "a", "ab", "e\u0301", "é", "😀"];

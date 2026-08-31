@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { runPublicationControlV1Iteration } from "../src/control-v1.js";
+import { observeDraftPullRequest, runPublicationControlV1Iteration } from "../src/control-v1.js";
 import { executePublicationControlV1, executePublicationOperation } from "../src/pr.js";
 
 const capability = {
@@ -19,6 +19,48 @@ const capability = {
 };
 
 describe("publication Control V1 local execution", () => {
+  it.each([
+    ["exact owned pull request", [{ number: 7 }], {
+      number: 7, state: "open", merged: false, draft: true,
+      html_url: "https://github.com/acme/widget/pull/7",
+      head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "acme/widget" } },
+      base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+    }, "present"],
+    ["wrong branch at the same SHA", [{ number: 7 }], {
+      number: 7, state: "open", merged: false, draft: true,
+      html_url: "https://github.com/acme/widget/pull/7",
+      head: { sha: "a".repeat(40), ref: "other", repo: { full_name: "acme/widget" } },
+      base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+    }, "ambiguous"],
+    ["fork head at the same SHA", [{ number: 7 }], {
+      number: 7, state: "open", merged: false, draft: true,
+      html_url: "https://github.com/acme/widget/pull/7",
+      head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "fork/widget" } },
+      base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+    }, "ambiguous"],
+    ["an exact candidate after a wrong candidate", [{ number: 6 }, { number: 7 }], {
+      number: 7, state: "open", merged: false, draft: true,
+      html_url: "https://github.com/acme/widget/pull/7",
+      head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: "acme/widget" } },
+      base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+    }, "present"],
+    ["no candidate", [], null, "absent"],
+  ] as const)("reconciles %s from real GitHub payload fields", async (_label, candidates, exact, kind) => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const path = String(url);
+      if (path.includes(`/commits/${"a".repeat(40)}/pulls`)) return Response.json(candidates);
+      const number = Number(path.match(/\/pulls\/(\d+)$/u)?.[1]);
+      if (number === 6) return Response.json({ ...exact, number: 6,
+        head: { ...(exact?.head ?? {}), ref: "wrong" } });
+      return Response.json(exact);
+    });
+    const observation = await observeDraftPullRequest({ capability, token: "local_only",
+      fetchImpl, apiOrigin: "https://github.test" });
+    expect(observation.kind).toBe(kind);
+    if (kind === "present") expect(observation).toMatchObject({ headBranch: capability.branch,
+      headRepository: { owner: capability.repository.owner, repo: capability.repository.repo } });
+  });
+
   it("fails closed before provider or relay mutation when the exact local fence is absent", async () => {
     const begin = vi.fn();
     const record = vi.fn();
@@ -54,7 +96,11 @@ describe("publication Control V1 local execution", () => {
     const push = vi.fn();
     const createDraftPullRequest = vi.fn();
     const reconcileOperation = vi.fn(async () => ({ kind: "present" as const,
-      headSha: capability.expectedHeadSha }));
+      headSha: capability.expectedHeadSha, pullRequestNumber: 7,
+      pullRequestUrl: "https://github.com/acme/widget/pull/7", draft: true as const,
+      provider: "github" as const, repository: { owner: "acme", repo: "widget" },
+      baseBranch: "main", state: "open" as const, headBranch: "opentag/run_1",
+      headRepository: { owner: "acme", repo: "widget" } }));
     const reconcile = vi.fn(async () => ({ status: 200 as const, outcome: "settled" as const }));
     await expect(runPublicationControlV1Iteration({
       organizationId: "org_1", runnerId: "runner_1", runnerGeneration: 3,
@@ -70,7 +116,9 @@ describe("publication Control V1 local execution", () => {
     expect(createDraftPullRequest).not.toHaveBeenCalled();
     expect(reconcileOperation).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: capability.capabilityId }));
     expect(reconcile).toHaveBeenCalledWith(expect.objectContaining({ capabilityId: capability.capabilityId,
-      operationId: capability.operationId, observation: { kind: "present", headSha: capability.expectedHeadSha } }));
+      operationId: capability.operationId, observation: expect.objectContaining({ kind: "present",
+        headSha: capability.expectedHeadSha, headBranch: capability.branch,
+        headRepository: { owner: capability.repository.owner, repo: capability.repository.repo } }) }));
   });
 
   it("completes from the immutable prior PR receipt without replaying either publication effect", async () => {
