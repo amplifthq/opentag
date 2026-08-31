@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPublicationCandidateRepository } from "../src/modules/publication-candidates/index.js";
+import * as publicationCandidateModule from "../src/modules/publication-candidates/index.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
 
 const sha256 = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -36,6 +37,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PublicationCandidate PostgreSQL repository"
   it("exposes no out-of-transaction Candidate write and rejects orphan persistence", async () => {
     const repository = createPublicationCandidateRepository({ pool: fixture.pool });
     expect("put" in repository).toBe(false);
+    expect("persistPublicationCandidateInTransaction" in publicationCandidateModule).toBe(false);
     await expect(fixture.pool.query(
       `INSERT INTO cp_publication_candidate(
          organization_id, candidate_id, run_id, attempt_id, attempt_number,

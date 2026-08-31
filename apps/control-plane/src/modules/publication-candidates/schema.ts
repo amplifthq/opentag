@@ -25,9 +25,9 @@ export const publicationCandidates = pgTable("cp_publication_candidate", {
   unique("cp_publication_candidate_organization_run_attempt_key")
     .on(table.organizationId, table.runId, table.attemptId),
   foreignKey({ name: "cp_publication_candidate_attempt_fk",
-    columns: [table.organizationId, table.runId, table.attemptNumber],
+    columns: [table.organizationId, table.runId, table.attemptNumber, table.attemptId],
     foreignColumns: [hostedAttempts.organizationId, hostedAttempts.runId,
-      hostedAttempts.attemptNumber] }),
+      hostedAttempts.attemptNumber, hostedAttempts.attemptId] }),
   check("cp_publication_candidate_verification_check",
     sql`cardinality(${table.verificationEvidenceIds}) > 0`),
   check("cp_publication_candidate_changed_files_check",

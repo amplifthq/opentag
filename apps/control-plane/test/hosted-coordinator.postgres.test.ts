@@ -366,6 +366,51 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     expect(afterReplay.rows[0]).toEqual(beforeReplay.rows[0]);
   });
 
+  it("rejects Candidate rows whose attempt id and number do not name the same exact Attempt", async () => {
+    const claim = await admitAndClaim("candidate_exact_attempt_fk");
+    await fixture.pool.query(
+      `INSERT INTO cp_hosted_attempt(organization_id, run_id, attempt_number,
+         attempt_id, runner_id, credential_id, fencing_token_digest,
+         lease_expires_at, material_start_state, state, claimed_at, updated_at)
+       SELECT organization_id, run_id, 2, 'attempt_candidate_exact_alternate',
+         runner_id, credential_id, fencing_token_digest, lease_expires_at,
+         material_start_state, state, claimed_at, updated_at
+       FROM cp_hosted_attempt WHERE organization_id = $1 AND run_id = $2
+         AND attempt_number = 1`, [claim.organizationId, claim.runId]);
+    const insert = (candidateId: string, attemptId: string, attemptNumber: number) => {
+      const candidate = { candidateId, runId: claim.runId, attemptId,
+        projectTargetId: claim.hostedAdmission.projectTarget.projectTargetId,
+        frozenBaseRevision: "a".repeat(40), workspaceTreeDigest: "b".repeat(40),
+        patchDigest: `sha256:${"c".repeat(64)}`, changedFiles: ["a.ts"],
+        verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
+        publicationPolicyDigest: claim.hostedAdmission.publicationPolicy.digest,
+        createdAt: now.toISOString() };
+      return fixture.pool.query(
+        `INSERT INTO cp_publication_candidate(organization_id, candidate_id, run_id,
+           attempt_id, attempt_number, project_target_id, frozen_base_revision,
+           workspace_tree_digest, patch_digest, changed_files, verification_evidence_ids,
+           publication_policy_digest, candidate, completion_assessment, created_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15)`,
+        [claim.organizationId, candidateId, claim.runId, attemptId, attemptNumber,
+          candidate.projectTargetId, candidate.frozenBaseRevision,
+          candidate.workspaceTreeDigest, candidate.patchDigest, candidate.changedFiles,
+          candidate.verificationEvidenceIds, candidate.publicationPolicyDigest,
+          JSON.stringify(candidate), JSON.stringify({ state: "proposal_ready", accepted: true,
+            candidateId, reasonCodes: ["proposal_ready"], assessedAt: now.toISOString() }),
+          now.toISOString()]);
+    };
+    const outcomes = await Promise.allSettled([
+      insert("candidate_wrong_id", "attempt_wrong_but_number_valid", 1),
+      insert("candidate_wrong_number", claim.attempt.id, 2),
+    ]);
+    expect(outcomes.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") {
+        expect(String(outcome.reason)).toMatch(/cp_publication_candidate_attempt_fk|foreign key/iu);
+      }
+    }
+  });
+
   it("admits while the paired Runner is offline without extending the finite claim deadline", async () => {
     const runners = createRunnerDirectory({
       pool: fixture.pool,

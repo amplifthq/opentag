@@ -123,32 +123,144 @@ export async function checkMigrationReadiness(
     );
     const applied = new Map(result.rows.map((row) => [row.name, row.checksum]));
     const schema = await pool.query<{ schema_ready: boolean }>(
-      `SELECT (
+      `WITH expected_columns(name, type_name) AS (VALUES
+        ('organization_id','text'),('candidate_id','text'),('run_id','text'),
+        ('attempt_id','text'),('attempt_number','integer'),('project_target_id','text'),
+        ('frozen_base_revision','text'),('workspace_tree_digest','text'),
+        ('patch_digest','text'),('changed_files','text[]'),
+        ('verification_evidence_ids','text[]'),('publication_policy_digest','text'),
+        ('candidate','jsonb'),('completion_assessment','jsonb'),
+        ('created_at','timestamp with time zone')
+      ) SELECT (
         to_regclass('cp_publication_candidate') IS NOT NULL
-        AND (SELECT count(*) = 15 FROM information_schema.columns
-          WHERE table_schema = current_schema() AND table_name = 'cp_publication_candidate'
-          AND column_name = ANY(ARRAY['organization_id','candidate_id','run_id','attempt_id',
-            'attempt_number','project_target_id','frozen_base_revision','workspace_tree_digest',
-            'patch_digest','changed_files','verification_evidence_ids',
-            'publication_policy_digest','candidate','completion_assessment','created_at']))
-        AND (SELECT count(*) = 10 FROM pg_constraint
-          WHERE conrelid = 'cp_publication_candidate'::regclass
-          AND conname = ANY(ARRAY['cp_publication_candidate_pkey',
-            'cp_publication_candidate_organization_run_attempt_key',
-            'cp_publication_candidate_attempt_fk','cp_publication_candidate_changed_files_check',
-            'cp_publication_candidate_verification_check',
-            'cp_publication_candidate_base_revision_check','cp_publication_candidate_tree_digest_check',
-            'cp_publication_candidate_patch_digest_check','cp_publication_candidate_policy_digest_check',
-            'cp_publication_candidate_content_free_check']))
-        AND to_regclass('cp_publication_candidate_run_idx') IS NOT NULL
+        AND (SELECT count(*) = 15 FROM pg_attribute
+          WHERE attrelid = 'cp_publication_candidate'::regclass
+            AND attnum > 0 AND NOT attisdropped)
+        AND NOT EXISTS (SELECT 1 FROM expected_columns expected
+          LEFT JOIN pg_attribute attribute
+            ON attribute.attrelid = 'cp_publication_candidate'::regclass
+           AND attribute.attname = expected.name AND attribute.attnum > 0
+           AND NOT attribute.attisdropped
+          LEFT JOIN pg_attrdef default_value
+            ON default_value.adrelid = attribute.attrelid
+           AND default_value.adnum = attribute.attnum
+          WHERE attribute.attname IS NULL OR NOT attribute.attnotnull
+            OR format_type(attribute.atttypid, attribute.atttypmod) <> expected.type_name
+            OR default_value.oid IS NOT NULL)
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_pkey'
+            AND constraint_row.contype = 'p'
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','candidate_id'])
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_organization_run_attempt_key'
+            AND constraint_row.contype = 'u'
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','run_id','attempt_id'])
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_hosted_attempt'::regclass
+            AND constraint_row.conname = 'cp_hosted_attempt_exact_identity_key'
+            AND constraint_row.contype = 'u'
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','run_id','attempt_number','attempt_id'])
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_attempt_fk'
+            AND constraint_row.contype = 'f'
+            AND constraint_row.confrelid = 'cp_hosted_attempt'::regclass
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','run_id','attempt_number','attempt_id']
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.confkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.confrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','run_id','attempt_number','attempt_id'])
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.contype = 'f'
+            AND constraint_row.confrelid = 'cp_organization'::regclass
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(constraint_row.conkey)
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = constraint_row.conrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id'])
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_changed_files_check'
+            AND constraint_row.contype = 'c'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(cardinality(changed_files) > 0)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_verification_check'
+            AND constraint_row.contype = 'c'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(cardinality(verification_evidence_ids) > 0)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_base_revision_check'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(frozen_base_revision ~ ''^[a-f0-9]{40,64}$''::text)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_tree_digest_check'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(workspace_tree_digest ~ ''^[a-f0-9]{40,64}$''::text)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_patch_digest_check'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(patch_digest ~ ''^sha256:[a-f0-9]{64}$''::text)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_policy_digest_check'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              = '(publication_policy_digest ~ ''^sha256:[a-f0-9]{64}$''::text)')
+        AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
+          WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_content_free_check'
+            AND pg_get_expr(constraint_row.conbin, constraint_row.conrelid)
+              LIKE '%jsonb_typeof(candidate)%baseToFinalBinaryDiff%limitations%workspacePath%logs%output%secret%')
+        AND EXISTS (SELECT 1 FROM pg_index index_row
+          JOIN pg_class index_class ON index_class.oid = index_row.indexrelid
+          WHERE index_row.indrelid = 'cp_publication_candidate'::regclass
+            AND index_class.relname = 'cp_publication_candidate_run_idx'
+            AND index_row.indisvalid AND index_row.indisready
+            AND NOT index_row.indisunique AND index_row.indpred IS NULL
+            AND ARRAY(SELECT attribute.attname::text FROM unnest(index_row.indkey::smallint[])
+              WITH ORDINALITY key(attnum, ordinal)
+              JOIN pg_attribute attribute ON attribute.attrelid = index_row.indrelid
+                AND attribute.attnum = key.attnum ORDER BY key.ordinal)
+              = ARRAY['organization_id','run_id'])
         AND EXISTS (SELECT 1 FROM pg_proc
           WHERE proname = 'cp_reject_publication_candidate_mutation'
             AND pronamespace = current_schema()::regnamespace
-            AND prosrc LIKE '%publication_candidate_immutable%')
-        AND EXISTS (SELECT 1 FROM pg_trigger
+            AND prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+            AND prorettype = 'trigger'::regtype AND pronargs = 0
+            AND NOT prosecdef AND NOT proleakproof AND provolatile = 'v'
+            AND regexp_replace(prosrc, '[[:space:]]+', '', 'g')
+              = 'BEGINRAISEEXCEPTION''publication_candidate_immutable'';END')
+        AND EXISTS (SELECT 1 FROM pg_trigger trigger_row
+          JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
           WHERE tgrelid = 'cp_publication_candidate'::regclass
             AND tgname = 'cp_publication_candidate_immutable'
-            AND tgenabled = 'O' AND NOT tgisinternal)
+            AND tgenabled = 'O' AND NOT tgisinternal AND tgtype = 27
+            AND function_row.proname = 'cp_reject_publication_candidate_mutation'
+            AND function_row.pronamespace = current_schema()::regnamespace)
       ) AS schema_ready`,
     );
     const current = schema.rows[0]?.schema_ready === true

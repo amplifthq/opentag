@@ -135,6 +135,9 @@ export const hostedAttempts = pgTable(
       table.organizationId,
       table.attemptId,
     ),
+    unique("cp_hosted_attempt_exact_identity_key").on(
+      table.organizationId, table.runId, table.attemptNumber, table.attemptId,
+    ),
     foreignKey({
       columns: [table.organizationId, table.runId],
       foreignColumns: [hostedRuns.organizationId, hostedRuns.runId],

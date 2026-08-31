@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { checkMigrationReadiness, runMigrations } from "../src/database/migrations.js";
+import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
+import { createRunnerDirectory } from "../src/modules/runners/index.js";
+import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
+  hostedGrantIssuerFixture, recordHostedReadiness } from "./control-fixtures.js";
 import {
   createIsolatedPostgres,
   TEST_DATABASE_URL,
@@ -118,6 +122,173 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         .resolves.toEqual({ ready: true });
     } finally {
       await upgrade.close();
+    }
+  });
+
+  it("upgrades the exact b1f954dd unversioned immutable table with a durably accepted row", async () => {
+    const upgrade = await createIsolatedPostgres();
+    try {
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -1));
+      const now = new Date("2026-08-15T07:00:00.000Z");
+      const runners = createRunnerDirectory({ pool: upgrade.pool,
+        clock: { now: () => now }, tokenFactory: () => "runtime_upgrade_secret",
+        idFactory: () => "credential_upgrade" });
+      await runners.register({ organizationId: "org_upgrade", organizationName: "Upgrade",
+        request: { schemaVersion: 1, protocolVersion: "1.0",
+          requiredCapabilities: ["relay.registration.v1"], requestId: "request_upgrade",
+          operationId: "operation_upgrade", runnerId: "runner_upgrade",
+          capabilities: [...HOSTED_CAPABILITIES] } });
+      const authenticated = await runners.authenticate("runtime_upgrade_secret");
+      if (authenticated.kind !== "authenticated") throw new Error("upgrade auth failed");
+      await recordHostedReadiness({ pool: upgrade.pool, organizationId: "org_upgrade",
+        runnerId: "runner_upgrade" });
+      const hosted = createHostedRunCoordinator({ pool: upgrade.pool,
+        clock: { now: () => now }, leaseDurationMs: 60_000,
+        idFactory: () => "attempt_upgrade", tokenFactory: () => "fence_attempt_upgrade",
+        issueSourceContentGrantInTransaction: hostedGrantIssuerFixture });
+      const admission = await hostedAdmissionFixture({ runId: "run_upgrade",
+        suffix: "upgrade", organizationId: "org_upgrade", runnerId: "runner_upgrade" });
+      await hosted.admit({ runId: "run_upgrade", admission: admission.admission,
+        policy: admission.policy });
+      const claimed = await hosted.claim({ principal: authenticated.principal,
+        request: hostedClaimRequest({ operationId: "operation_claim_upgrade",
+          requestId: "request_claim_upgrade", readinessDigest: admission.readinessDigest,
+          credentialId: "credential_upgrade" }) });
+      if (claimed.kind !== "claimed") throw new Error("upgrade claim failed");
+      const candidateId = "candidate_upgrade";
+      const assessment = { state: "proposal_ready", accepted: true, candidateId,
+        reasonCodes: ["proposal_ready"], assessedAt: now.toISOString() };
+      await upgrade.pool.query(
+        "UPDATE cp_hosted_attempt SET state = 'succeeded' WHERE organization_id = $1 AND run_id = $2",
+        ["org_upgrade", "run_upgrade"]);
+      await upgrade.pool.query(
+        `UPDATE cp_hosted_run SET state = 'succeeded', terminal_kind = 'succeeded',
+           terminal_receipt = $3::jsonb WHERE organization_id = $1 AND run_id = $2`,
+        ["org_upgrade", "run_upgrade", JSON.stringify({ kind: "proposal_ready",
+          candidateId, assessment })]);
+      await upgrade.pool.query(`
+        CREATE TABLE cp_publication_candidate (
+          organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+          candidate_id text NOT NULL, run_id text NOT NULL, attempt_id text NOT NULL,
+          project_target_id text NOT NULL, frozen_base_revision text NOT NULL
+            CHECK (frozen_base_revision ~ '^[a-f0-9]{40,64}$'),
+          workspace_tree_digest text NOT NULL CHECK (workspace_tree_digest ~ '^[a-f0-9]{40,64}$'),
+          patch_digest text NOT NULL CHECK (patch_digest ~ '^sha256:[a-f0-9]{64}$'),
+          changed_files text[] NOT NULL CHECK (cardinality(changed_files) > 0),
+          verification_evidence_ids text[] NOT NULL CHECK (cardinality(verification_evidence_ids) > 0),
+          publication_policy_digest text NOT NULL CHECK (publication_policy_digest ~ '^sha256:[a-f0-9]{64}$'),
+          candidate jsonb NOT NULL CHECK (jsonb_typeof(candidate) = 'object'
+            AND NOT candidate ?| ARRAY['baseToFinalBinaryDiff','limitations','workspacePath','logs','output','secret']),
+          created_at timestamptz NOT NULL, PRIMARY KEY (organization_id, candidate_id),
+          UNIQUE (organization_id, run_id, attempt_id));
+        CREATE INDEX cp_publication_candidate_run_idx
+          ON cp_publication_candidate(organization_id, run_id);
+        CREATE FUNCTION cp_reject_publication_candidate_mutation() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publication_candidate_immutable'; END $$;
+        CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE OR DELETE
+          ON cp_publication_candidate FOR EACH ROW
+          EXECUTE FUNCTION cp_reject_publication_candidate_mutation();`);
+      const candidate = { candidateId, runId: "run_upgrade",
+        attemptId: claimed.claim.attempt.id,
+        projectTargetId: admission.admission.projectTarget.projectTargetId,
+        frozenBaseRevision: "a".repeat(40), workspaceTreeDigest: "b".repeat(40),
+        patchDigest: `sha256:${"c".repeat(64)}`, changedFiles: ["a.ts"],
+        verificationEvidenceIds: [`sha256:${"d".repeat(64)}`],
+        publicationPolicyDigest: admission.admission.publicationPolicy.digest,
+        createdAt: now.toISOString() };
+      await upgrade.pool.query(
+        `INSERT INTO cp_publication_candidate(organization_id, candidate_id, run_id,
+           attempt_id, project_target_id, frozen_base_revision, workspace_tree_digest,
+           patch_digest, changed_files, verification_evidence_ids,
+           publication_policy_digest, candidate, created_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)`,
+        ["org_upgrade", candidateId, "run_upgrade", claimed.claim.attempt.id,
+          candidate.projectTargetId, candidate.frozenBaseRevision,
+          candidate.workspaceTreeDigest, candidate.patchDigest, candidate.changedFiles,
+          candidate.verificationEvidenceIds, candidate.publicationPolicyDigest,
+          JSON.stringify(candidate), now]);
+
+      await runMigrations(upgrade.pool, upgrade.migrations);
+
+      expect((await upgrade.pool.query(
+        `SELECT attempt_number, completion_assessment, candidate
+         FROM cp_publication_candidate WHERE candidate_id = $1`, [candidateId])).rows)
+        .toEqual([{ attempt_number: claimed.claim.attempt.number,
+          completion_assessment: assessment, candidate }]);
+      await expect(checkMigrationReadiness(upgrade.pool, upgrade.migrations))
+        .resolves.toEqual({ ready: true });
+    } finally {
+      await upgrade.close();
+    }
+  });
+
+  it("aborts unversioned Candidate reconciliation with a stable operator-action reason", async () => {
+    const unsupported = await createIsolatedPostgres();
+    try {
+      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -1));
+      await unsupported.pool.query(
+        "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES('org_orphan','Orphan',clock_timestamp())");
+      await unsupported.pool.query(`
+        CREATE TABLE cp_publication_candidate (
+          organization_id text NOT NULL REFERENCES cp_organization(organization_id),
+          candidate_id text NOT NULL, run_id text NOT NULL, attempt_id text NOT NULL,
+          project_target_id text NOT NULL, frozen_base_revision text NOT NULL,
+          workspace_tree_digest text NOT NULL, patch_digest text NOT NULL,
+          changed_files text[] NOT NULL, verification_evidence_ids text[] NOT NULL,
+          publication_policy_digest text NOT NULL, candidate jsonb NOT NULL,
+          created_at timestamptz NOT NULL, PRIMARY KEY (organization_id, candidate_id),
+          UNIQUE (organization_id, run_id, attempt_id));
+        CREATE INDEX cp_publication_candidate_run_idx
+          ON cp_publication_candidate(organization_id, run_id);
+        CREATE FUNCTION cp_reject_publication_candidate_mutation() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'publication_candidate_immutable'; END $$;
+        CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE OR DELETE
+          ON cp_publication_candidate FOR EACH ROW
+          EXECUTE FUNCTION cp_reject_publication_candidate_mutation();
+        INSERT INTO cp_publication_candidate VALUES(
+          'org_orphan','candidate_orphan','run_missing','attempt_missing','target',
+          repeat('a',40),repeat('b',40),'sha256:'||repeat('c',64),ARRAY['a.ts'],
+          ARRAY['sha256:'||repeat('d',64)],'sha256:'||repeat('e',64),
+          jsonb_build_object('candidateId','candidate_orphan','runId','run_missing',
+            'attemptId','attempt_missing','projectTargetId','target',
+            'frozenBaseRevision',repeat('a',40),'workspaceTreeDigest',repeat('b',40),
+            'patchDigest','sha256:'||repeat('c',64),'changedFiles',ARRAY['a.ts'],
+            'verificationEvidenceIds',ARRAY['sha256:'||repeat('d',64)],
+            'publicationPolicyDigest','sha256:'||repeat('e',64),
+            'createdAt','2026-08-15T07:00:00.000Z'),clock_timestamp());`);
+
+      await expect(runMigrations(unsupported.pool, unsupported.migrations))
+        .rejects.toThrow("publication_candidate_upgrade_reconciliation_required");
+    } finally {
+      await unsupported.close();
+    }
+  });
+
+  it.each([
+    ["attempt FK", `ALTER TABLE cp_publication_candidate DROP CONSTRAINT cp_publication_candidate_attempt_fk;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_attempt_fk
+      FOREIGN KEY (organization_id, run_id, attempt_number)
+      REFERENCES cp_hosted_attempt(organization_id, run_id, attempt_number)`],
+    ["check definition", `ALTER TABLE cp_publication_candidate DROP CONSTRAINT cp_publication_candidate_patch_digest_check;
+      ALTER TABLE cp_publication_candidate ADD CONSTRAINT cp_publication_candidate_patch_digest_check CHECK (patch_digest <> '')`],
+    ["column nullability", "ALTER TABLE cp_publication_candidate ALTER COLUMN completion_assessment DROP NOT NULL"],
+    ["column type", "ALTER TABLE cp_publication_candidate ALTER COLUMN project_target_id TYPE varchar(255)"],
+    ["index definition", `DROP INDEX cp_publication_candidate_run_idx;
+      CREATE INDEX cp_publication_candidate_run_idx ON cp_publication_candidate(candidate_id)`],
+    ["trigger event", `DROP TRIGGER cp_publication_candidate_immutable ON cp_publication_candidate;
+      CREATE TRIGGER cp_publication_candidate_immutable BEFORE UPDATE ON cp_publication_candidate
+      FOR EACH ROW EXECUTE FUNCTION cp_reject_publication_candidate_mutation()`],
+    ["function body", `CREATE OR REPLACE FUNCTION cp_reject_publication_candidate_mutation()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+  ] as const)("fails readiness closed for tampered %s", async (_label, tamperSql) => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(tamperSql);
+      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
+        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    } finally {
+      await tampered.close();
     }
   });
 

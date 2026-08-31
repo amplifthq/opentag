@@ -28,15 +28,14 @@ import {
   type HostedLifecycleRequestV1,
   type HostedSourceContentRedeemRequestV1,
 } from "@opentag/control-protocol";
-import { PublicationCandidateSchema, validateAttemptProposalEvidenceArtifact,
+import { ProposalReadinessAssessmentSchema, PublicationCandidateSchema,
+  validateAttemptProposalEvidenceArtifact, type ProposalReadinessAssessment,
   type PublicationCandidate } from "@opentag/core";
 import { evaluateProposalReadiness } from "@opentag/governance";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
-import { persistPublicationCandidateInTransaction,
-  readPublicationCandidateInTransaction } from "../publication-candidates/index.js";
 import { classifyAttemptMaterialActionTruth } from "./material-actions.js";
 
 type Clock = { now(): Date };
@@ -126,6 +125,61 @@ type HostedAttemptRow = {
   workspace_attestation: unknown | null;
   interruption_evidence: unknown | null;
 };
+
+async function readPublicationCandidateInTransaction(client: PostgresTransactionClient,
+  command: { organizationId: string; runId: string; attemptId: string }) {
+  const result = await client.query<{ candidate: unknown; completion_assessment: unknown }>(
+    `SELECT candidate, completion_assessment FROM cp_publication_candidate
+     WHERE organization_id = $1 AND run_id = $2 AND attempt_id = $3 FOR UPDATE`,
+    [command.organizationId, command.runId, command.attemptId],
+  );
+  return result.rows[0] ? {
+    candidate: PublicationCandidateSchema.parse(result.rows[0].candidate),
+    assessment: ProposalReadinessAssessmentSchema.parse(result.rows[0].completion_assessment),
+  } : null;
+}
+
+async function persistPublicationCandidateInTransaction(client: PostgresTransactionClient,
+  command: { organizationId: string; attemptNumber: number;
+    candidate: PublicationCandidate; assessment: ProposalReadinessAssessment }) {
+  const candidate = PublicationCandidateSchema.parse(command.candidate);
+  const assessment = ProposalReadinessAssessmentSchema.parse(command.assessment);
+  const inserted = await client.query<{ candidate: unknown }>(
+    `INSERT INTO cp_publication_candidate(
+       organization_id, candidate_id, run_id, attempt_id, attempt_number, project_target_id,
+       frozen_base_revision, workspace_tree_digest, patch_digest, changed_files,
+       verification_evidence_ids, publication_policy_digest, candidate,
+       completion_assessment, created_at)
+     SELECT $1,$2,run.run_id,attempt.attempt_id,attempt.attempt_number,$6,$7,$8,$9,
+       $10,$11,$12,$13::jsonb,$14::jsonb,$15
+     FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
+       ON attempt.organization_id = run.organization_id AND attempt.run_id = run.run_id
+      AND attempt.attempt_number = run.current_attempt_number
+     WHERE run.organization_id = $1 AND run.run_id = $3
+       AND run.current_attempt_number = $5 AND attempt.attempt_id = $4
+       AND attempt.attempt_number = $5 AND attempt.state = 'succeeded'
+       AND $13::jsonb->>'runId' = run.run_id
+       AND $13::jsonb->>'attemptId' = attempt.attempt_id
+       AND $14::jsonb->>'candidateId' = $2
+     ON CONFLICT DO NOTHING RETURNING candidate`,
+    [command.organizationId, candidate.candidateId, candidate.runId,
+      candidate.attemptId, command.attemptNumber, candidate.projectTargetId,
+      candidate.frozenBaseRevision, candidate.workspaceTreeDigest, candidate.patchDigest,
+      candidate.changedFiles, candidate.verificationEvidenceIds,
+      candidate.publicationPolicyDigest, JSON.stringify(candidate),
+      JSON.stringify(assessment), candidate.createdAt],
+  );
+  if (inserted.rows[0]) return { kind: "created", candidate } as const;
+  const existing = await readPublicationCandidateInTransaction(client, {
+    organizationId: command.organizationId, runId: candidate.runId,
+    attemptId: candidate.attemptId,
+  });
+  return existing
+    && canonicalJsonStringify(existing.candidate) === canonicalJsonStringify(candidate)
+    && canonicalJsonStringify(existing.assessment) === canonicalJsonStringify(assessment)
+    ? { kind: "replayed", candidate: existing.candidate } as const
+    : { kind: "conflict", reason: "candidate_mismatch" } as const;
+}
 
 export type HostedRunCoordinator = {
   admit(input: {
