@@ -50,6 +50,14 @@ describe("publication Control V1 local execution", () => {
       head: { sha: "a".repeat(40), ref: "opentag/run_1" },
       base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
     }, "ambiguous"],
+    ...["acme/widget/extra", "/widget", "acme/", ""].map((fullName) => [
+      `malformed head repository provenance ${JSON.stringify(fullName)}`, [{ number: 7 }], {
+        number: 7, state: "open", merged: false, draft: true,
+        html_url: "https://github.com/acme/widget/pull/7",
+        head: { sha: "a".repeat(40), ref: "opentag/run_1", repo: { full_name: fullName } },
+        base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/widget" } },
+      }, "ambiguous" as const,
+    ] as const),
     ["no candidate", [], null, "absent"],
   ] as const)("reconciles %s from real GitHub payload fields", async (_label, candidates, exact, kind) => {
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {

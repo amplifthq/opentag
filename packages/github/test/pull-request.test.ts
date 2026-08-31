@@ -82,4 +82,16 @@ describe("pull request helpers", () => {
     expect(observation).toEqual(expect.objectContaining({ kind: "present", headBranch: "opentag/run_1",
       headRepository: { owner: "AcMe", repo: "DeMo" } }));
   });
+
+  it.each(["acme/demo/extra", "/demo", "acme/", ""])("keeps malformed provider head repository %j ambiguous", async (fullName) => {
+    await expect(createExactDraftPullRequest({ token: "ghs_test", owner: "acme", repo: "demo",
+      title: "title", body: "body", head: "opentag/run_1", base: "main", expectedHeadSha: "a".repeat(40),
+      fetchImpl: (async (_url, init) => init?.method === "POST"
+        ? Response.json({ html_url: "https://github.com/acme/demo/pull/7" })
+        : Response.json({ number: 7, html_url: "https://github.com/acme/demo/pull/7", draft: true,
+          state: "open", merged: false, head: { sha: "a".repeat(40), ref: "opentag/run_1",
+            repo: { full_name: fullName } },
+          base: { ref: "main", sha: "b".repeat(40), repo: { full_name: "acme/demo" } } })) as typeof fetch,
+    })).resolves.toEqual({ kind: "ambiguous" });
+  });
 });

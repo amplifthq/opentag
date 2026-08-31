@@ -127,6 +127,32 @@ async function readPublicationOperationState(client: any, input: {
 async function readLockedPublicationOperationState(client: any, input: {
   organizationId: string; intentId: string; step: PublicationOperationStepV1;
 }): Promise<{ records: PublicationOperationRecord[]; state: PublicationOperationState } | null> {
+  // Discover immutable identity without a lock, then take every higher-level
+  // authority row in one global order before the operation parent and facts.
+  // This is deliberately valid for late observation after terminal settlement:
+  // no active lease, current generation, or nonterminal Run predicate appears.
+  const discovered = await client.query(
+    `SELECT run_id,attempt_id,attempt_number,runner_id FROM cp_publication_intent
+    WHERE organization_id=$1 AND intent_id=$2`, [input.organizationId, input.intentId],
+  );
+  const identity = discovered.rows[0] as { run_id: string; attempt_id: string; attempt_number: number; runner_id: string } | undefined;
+  if (!identity) return null;
+  const run = await client.query(
+    `SELECT 1 FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
+    [input.organizationId, identity.run_id],
+  );
+  if (run.rowCount !== 1) return null;
+  const attempt = await client.query(
+    `SELECT 1 FROM cp_hosted_attempt
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3 AND attempt_number=$4 FOR UPDATE`,
+    [input.organizationId, identity.run_id, identity.attempt_id, identity.attempt_number],
+  );
+  if (attempt.rowCount !== 1) return null;
+  const runner = await client.query(
+    `SELECT 1 FROM cp_runner WHERE organization_id=$1 AND runner_id=$2 FOR UPDATE`,
+    [input.organizationId, identity.runner_id],
+  );
+  if (runner.rowCount !== 1) return null;
   const intent = await client.query(
     `SELECT 1 FROM cp_publication_intent WHERE organization_id=$1 AND intent_id=$2 FOR UPDATE`,
     [input.organizationId, input.intentId],
