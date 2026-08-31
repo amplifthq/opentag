@@ -210,6 +210,7 @@ export async function checkMigrationReadiness(
               = ARRAY['organization_id','run_id','attempt_number','attempt_id'])
         AND EXISTS (SELECT 1 FROM pg_constraint constraint_row
           WHERE constraint_row.conrelid = 'cp_publication_candidate'::regclass
+            AND constraint_row.conname = 'cp_publication_candidate_organization_id_fkey'
             AND constraint_row.contype = 'f'
             AND constraint_row.convalidated
             AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred

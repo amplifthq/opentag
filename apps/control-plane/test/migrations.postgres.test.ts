@@ -112,7 +112,7 @@ async function createActualUnversionedFixture(
       durableCandidate.projectTargetId, durableCandidate.frozenBaseRevision,
       durableCandidate.workspaceTreeDigest, durableCandidate.patchDigest,
       durableCandidate.changedFiles, durableCandidate.verificationEvidenceIds,
-      durableCandidate.publicationPolicyDigest, JSON.stringify(candidateJson), now]);
+      durableCandidate.publicationPolicyDigest, JSON.stringify(candidateJson), durableCandidate.createdAt]);
   return { fixture, candidateId };
 }
 
@@ -378,6 +378,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     ["invalid assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["assessedAt"] = "not-a-timestamp";
     }}],
+    ["noncanonical assessedAt", { mutateAssessment: (assessment: Record<string, unknown>) => {
+      assessment["assessedAt"] = "2026-08-15T07:00:00Z";
+    }}],
     ["extra key", { mutateAssessment: (assessment: Record<string, unknown>) => {
       assessment["unexpected"] = true;
     }}],
@@ -444,6 +447,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     }],
     ["wrong Candidate value type", {
       mutateCandidate: (candidate: Record<string, unknown>) => { candidate["createdAt"] = null; },
+    }],
+    ["noncanonical Candidate timestamp", {
+      prepareCandidate: (candidate) => { candidate.createdAt = "2026-08-15T07:00:00Z"; },
     }],
   ] as const)("refuses malformed historical Candidate: %s", async (_label, mutation) => {
     const malformed = await createActualUnversionedFixture(mutation);
@@ -520,6 +526,31 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     try {
       await tampered.migrate();
       await tampered.pool.query(tamperSql);
+      await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
+        .resolves.toEqual({ ready: false, reason: "migrations_pending" });
+    } finally {
+      await tampered.close();
+    }
+  });
+
+  it("does not let a spare correct Organization FK mask a retargeted canonical FK", async () => {
+    const tampered = await createIsolatedPostgres();
+    try {
+      await tampered.migrate();
+      await tampered.pool.query(`ALTER TABLE cp_organization
+        ADD COLUMN alternate_organization_id text;
+        UPDATE cp_organization SET alternate_organization_id = organization_id || '_alternate';
+        ALTER TABLE cp_organization ALTER COLUMN alternate_organization_id SET NOT NULL;
+        ALTER TABLE cp_organization
+          ADD CONSTRAINT cp_organization_alternate_organization_key UNIQUE (alternate_organization_id);
+        ALTER TABLE cp_publication_candidate
+          DROP CONSTRAINT cp_publication_candidate_organization_id_fkey;
+        ALTER TABLE cp_publication_candidate
+          ADD CONSTRAINT cp_publication_candidate_organization_id_fkey
+          FOREIGN KEY (organization_id) REFERENCES cp_organization(alternate_organization_id);
+        ALTER TABLE cp_publication_candidate
+          ADD CONSTRAINT cp_publication_candidate_spare_organization_fk
+          FOREIGN KEY (organization_id) REFERENCES cp_organization(organization_id)`);
       await expect(checkMigrationReadiness(tampered.pool, tampered.migrations))
         .resolves.toEqual({ ready: false, reason: "migrations_pending" });
     } finally {

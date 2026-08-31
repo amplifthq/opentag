@@ -19,6 +19,8 @@ import {
   OpenTagRunSchema,
   PolicySnapshotProvenanceSchema,
   PolicyResolutionSchema,
+  ProposalReadinessAssessmentSchema,
+  PublicationCandidateSchema,
   RunAdmissionDecisionSchema,
   RunEventSchema,
   SuccessMetricNameSchema,
@@ -60,6 +62,80 @@ describe("RFC3339 timestamp comparison", () => {
     "2026-01-01T00:00:00+00:60"
   ])("rejects an invalid calendar or time value: %s", (value) => {
     expect(() => compareRfc3339Timestamps(value, value)).toThrow(TypeError);
+  });
+});
+
+describe("PublicationCandidate canonical contracts", () => {
+  const candidate = {
+    candidateId: "candidate_1",
+    runId: "run_1",
+    attemptId: "attempt_1",
+    projectTargetId: "target_1",
+    frozenBaseRevision: "a".repeat(40),
+    workspaceTreeDigest: "b".repeat(40),
+    patchDigest: `sha256:${"c".repeat(64)}`,
+    changedFiles: ["A.ts", "a.ts", "é.ts", "😀.ts"],
+    verificationEvidenceIds: [
+      `sha256:${"0".repeat(64)}`,
+      `sha256:${"a".repeat(64)}`,
+    ],
+    publicationPolicyDigest: `sha256:${"d".repeat(64)}`,
+    createdAt: "2026-08-31T01:02:03.004Z",
+  };
+
+  it("accepts only canonical Unicode identity-array order and exact UTC milliseconds", () => {
+    expect(PublicationCandidateSchema.safeParse(candidate).success).toBe(true);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      changedFiles: ["😀.ts", "é.ts", "a.ts", "A.ts"],
+    }).success).toBe(false);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      changedFiles: ["A.ts", "a.ts", "é.ts", "é.ts"],
+    }).success).toBe(false);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      verificationEvidenceIds: [
+        `sha256:${"a".repeat(64)}`,
+        `sha256:${"0".repeat(64)}`,
+      ],
+    }).success).toBe(false);
+    expect(PublicationCandidateSchema.safeParse({
+      ...candidate,
+      verificationEvidenceIds: [
+        `sha256:${"0".repeat(64)}`,
+        `sha256:${"0".repeat(64)}`,
+      ],
+    }).success).toBe(false);
+    for (const createdAt of [
+      "2026-08-31T01:02:03Z",
+      "2026-08-31T01:02:03.0Z",
+      "2026-08-31T01:02:03.00Z",
+      "2026-08-31T01:02:03.0000Z",
+      "2026-08-31T09:02:03.004+08:00",
+      "2026-02-30T01:02:03.004Z",
+    ]) {
+      expect(PublicationCandidateSchema.safeParse({ ...candidate, createdAt }).success).toBe(false);
+    }
+  });
+
+  it("requires exact UTC milliseconds for proposal-readiness assessments", () => {
+    const assessment = {
+      state: "proposal_ready" as const,
+      accepted: true,
+      candidateId: candidate.candidateId,
+      reasonCodes: ["proposal_ready" as const],
+      assessedAt: "2026-08-31T01:02:03.004Z",
+    };
+    expect(ProposalReadinessAssessmentSchema.safeParse(assessment).success).toBe(true);
+    for (const assessedAt of [
+      "2026-08-31T01:02:03Z",
+      "2026-08-31T01:02:03.00Z",
+      "2026-08-31T09:02:03.004+08:00",
+      "2026-02-30T01:02:03.004Z",
+    ]) {
+      expect(ProposalReadinessAssessmentSchema.safeParse({ ...assessment, assessedAt }).success).toBe(false);
+    }
   });
 });
 

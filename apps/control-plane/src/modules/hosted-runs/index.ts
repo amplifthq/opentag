@@ -28,7 +28,7 @@ import {
   type HostedLifecycleRequestV1,
   type HostedSourceContentRedeemRequestV1,
 } from "@opentag/control-protocol";
-import { ProposalReadinessAssessmentSchema, PublicationCandidateSchema,
+import { ProposalReadinessAssessmentSchema, PublicationCandidateSchema, sortCanonicalUnicodeStrings,
   validateAttemptProposalEvidenceArtifact, type ProposalReadinessAssessment,
   type PublicationCandidate } from "@opentag/core";
 import { evaluateProposalReadiness } from "@opentag/governance";
@@ -1397,8 +1397,8 @@ export function createHostedRunCoordinator(input: {
           frozenBaseRevision: evidence.baseRevision,
           workspaceTreeDigest: evidence.finalTree,
           patchDigest: evidence.diffDigest,
-          changedFiles: evidence.changedFiles,
-          verificationEvidenceIds: evidence.verificationEvidenceDigests,
+          changedFiles: sortCanonicalUnicodeStrings(evidence.changedFiles),
+          verificationEvidenceIds: sortCanonicalUnicodeStrings(evidence.verificationEvidenceDigests),
           publicationPolicyDigest: run.publication_policy_digest,
           createdAt: existing?.candidate.createdAt ?? input.clock.now().toISOString(),
         });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   CompletionAssessmentSchema,
+  CanonicalUtcMillisTimestampSchema,
   compareCompletionGateIds,
   compareRfc3339Timestamps,
   CompletionContractSchema,
@@ -35,7 +36,7 @@ export type ProposalReadinessEvaluationInput = {
 };
 
 export function evaluateProposalReadiness(input: ProposalReadinessEvaluationInput) {
-  const assessedAt = new Date(input.assessedAt).toISOString();
+  const assessedAt = CanonicalUtcMillisTimestampSchema.parse(input.assessedAt);
   if (input.executorConclusion !== "success") return ProposalReadinessAssessmentSchema.parse({
     state: "pending", accepted: false, reasonCodes: ["execution_not_succeeded"], assessedAt,
   });

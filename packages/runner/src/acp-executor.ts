@@ -12,6 +12,7 @@ import {
   isCredentialSafeText,
   OpenTagIntegrationManifestSchema,
   redactCredentialLikeData,
+  sortCanonicalUnicodeStrings,
   type OpenTagIntegrationManifestInput,
   type OpenTagStdioBinding
 } from "@opentag/core";
@@ -1178,7 +1179,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           if (finalRevisionResult.exitCode !== 0 || finalTreeResult.exitCode !== 0
             || diffResult.exitCode !== 0) throw new Error("proposal_evidence_git_read_failed");
           const baseToFinalBinaryDiff = diffResult.stdout;
-          const changedFilesEvidence = [...files].sort();
+          const changedFilesEvidence = sortCanonicalUnicodeStrings(files);
           const evidenceSeed = {
             schemaVersion: 1 as const,
             kind: "attempt_proposal_evidence" as const,

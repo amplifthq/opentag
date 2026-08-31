@@ -31,6 +31,7 @@ function proposalArtifact(input: {
   workspacePathDigest: string;
   baseRevision: string;
   finalTree: string;
+  changedFiles?: string[];
   verificationEvidenceDigests?: string[];
   createdAt?: string;
 }) {
@@ -46,8 +47,8 @@ function proposalArtifact(input: {
     finalTree: input.finalTree,
     diffDigest: sha256(binaryDiff),
     baseToFinalBinaryDiff: binaryDiff,
-    changedFilesDigest: sha256(canonicalJsonStringify(["a.ts"])),
-    changedFiles: ["a.ts"],
+    changedFilesDigest: sha256(canonicalJsonStringify(input.changedFiles ?? ["a.ts"])),
+    changedFiles: input.changedFiles ?? ["a.ts"],
     verificationEvidenceDigests: input.verificationEvidenceDigests
       ?? [sha256("verification")],
     limitations: ["No remote publication was attempted."],
@@ -269,6 +270,8 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
       attemptNumber: claim.attempt.number, workspaceId: attestation.workspaceId,
       workspacePathDigest: attestation.workspacePathDigest,
       baseRevision: attestation.baseRevision, finalTree: attestation.currentTree,
+      changedFiles: publicationMode === "proposal_only"
+        ? ["A.ts", "a.ts", "é.ts", "😀.ts"] : undefined,
       createdAt: "2026-08-14T00:00:00.000Z" });
     const complete = await buildHostedLifecycleRequestV1({ action: "complete",
       organizationId: claim.organizationId, runnerId: claim.runnerId, runId: claim.runId,

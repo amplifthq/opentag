@@ -218,6 +218,18 @@ describe("evaluateCompletion", () => {
     });
   });
 
+  it("rejects noncanonical proposal-readiness assessment timestamps instead of normalizing them", () => {
+    expect(() => evaluateProposalReadiness({
+      executorConclusion: "success",
+      publicationMode: "proposal_only",
+      completionMode: "proposal_ready",
+      publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+      candidate: proposalCandidate,
+      unresolvedMaterialOutcomes: [],
+      assessedAt: "2026-07-21T10:03:00Z",
+    })).toThrow(/canonical UTC instant/u);
+  });
+
   it("renders candidate, verification, limitations, and exact next action without publication claims", () => {
     const presentation = buildPublicationCandidatePresentation({
       state: "proposal_ready",

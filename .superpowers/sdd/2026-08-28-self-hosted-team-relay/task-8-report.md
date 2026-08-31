@@ -336,3 +336,41 @@ Control-protocol, Core, Governance, Dispatcher, and Control Plane builds: exit 0
 ```
 
 All PostgreSQL tests used random isolated schemas and dropped them during cleanup. The migration remains edited in place under the existing undeployed-0013 checksum assumption; no additional migration was added. No provider, delivery, push, publish, or deploy operation occurred.
+
+## Fix Round 5
+
+### Findings Closed
+
+1. **Canonical Organization-FK identity is now enforced by readiness.** Readiness requires the exact named constraint `cp_publication_candidate_organization_id_fkey` in addition to the already checked Candidate source relation/`organization_id`, Organization target relation/`organization_id`, validation, `MATCH SIMPLE`, `NO ACTION`, and immediate nondeferrable properties. A correct spare FK can no longer mask a retargeted canonical FK.
+2. **Candidate identity arrays have one cross-runtime ordering contract.** Core exports `compareCanonicalUnicodeStrings` and `sortCanonicalUnicodeStrings`, which compare Unicode scalar values lexicographically without locale state. This is equivalent to PostgreSQL `COLLATE "C"` for UTF-8 strings because UTF-8 preserves scalar-value order. Candidate and Task 7 proposal-evidence schemas reject reverse or duplicate arrays; Runner proposal evidence and coordinator Candidate derivation use the shared Core normalizer. SQL historical reconciliation retains its explicit `COLLATE "C"` predicate.
+3. **Candidate/readiness timestamps now share the exact canonical UTC-millisecond contract.** Core's `CanonicalUtcMillisTimestampSchema` requires exactly `YYYY-MM-DDTHH:mm:ss.SSSZ` and uses a `Date#toISOString()` round trip to reject invalid dates. It applies only to `PublicationCandidate.createdAt` and `ProposalReadinessAssessment.assessedAt`. Governance now rejects noncanonical evaluator input rather than normalizing it. The 0013 historical reconciliation validator and PostgreSQL corpus use the same form.
+
+### Strict TDD Evidence
+
+The Core RED corpus was written before the Core contract change. It showed that the old locale-sensitive Candidate comparison rejected the explicit code-point sequence `A.ts`, `a.ts`, `é.ts`, `😀.ts`, while the old proposal-readiness schema accepted invalid `2026-02-30T01:02:03.004Z`. A Governance RED then showed that `evaluateProposalReadiness` silently normalized `2026-07-21T10:03:00Z` instead of rejecting it.
+
+The canonical-FK test required a correction: static inspection was insufficient. The readiness name predicate was deliberately removed, a disposable local PostgreSQL 17 cluster was initialized at `127.0.0.1:55432`, and the exact two-FK tamper was run. It returned `{ ready: true }` while the test required `{ ready: false, reason: "migrations_pending" }`. Reapplying only the canonical constraint-name predicate made the same PostgreSQL corpus green.
+
+The Runner integration fixture initially attempted both `A.ts` and `a.ts`; the macOS case-insensitive filesystem correctly collapsed that pair. The Core schema matrix remains the explicit ASCII-case proof; the real Runner fixture uses the non-colliding sequence `B.ts`, `a.ts`, `é.ts`, `😀.ts` and proves proposal-evidence order. The Coordinator PostgreSQL fixture separately persists the full explicit Core sequence `A.ts`, `a.ts`, `é.ts`, `😀.ts` without filesystem dependence.
+
+### GREEN Evidence
+
+```text
+Focused Core protocol/schema + Governance + Runner: 4 files, 230/230 passed.
+Focused Core + Governance + Runner before protocol expansion: 3 files, 122/122 passed.
+Migration PostgreSQL corpus (two-FK and canonical timestamp reconciliation): 47/47 passed.
+Hosted Coordinator PostgreSQL lifecycle corpus: 29/29 passed.
+Complete Store/local-runtime/Runner: 35 files, 603/603 passed.
+Complete Control Plane with --maxWorkers=1: 36 files, 271/271 passed.
+Root typecheck: exit 0.
+Root lint: 29 workspace projects, exit 0.
+Root recursive build: 29 workspace projects, exit 0.
+git diff --check: exit 0.
+```
+
+The first Store/local-runtime/Runner attempt was blocked only by the sandbox's loopback `listen EPERM`; its privileged rerun passed all 603 tests. The initial PostgreSQL start was similarly blocked by sandbox shared-memory permissions; the isolated, privileged retry supplied the required real-database RED/GREEN. The cluster used only a temporary data directory and is stopped and removed after verification.
+
+### Remaining Boundary
+
+- No remote/provider behavior, completion authority, publication intent, receipt, push, publish, deploy, or delivery path changed.
+- Task 9 remains responsible for remote publication facts and receipt authority.

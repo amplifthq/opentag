@@ -842,7 +842,12 @@ export function completionReasonRequiresGateEvidence(reasonCode: CompletionReaso
   return COMPLETION_REASON_REQUIRES_GATE_EVIDENCE[reasonCode];
 }
 
-export function compareCompletionGateIds(left: string, right: string): number {
+/**
+ * Locale-independent Unicode scalar-value ordering.  UTF-8 byte order under
+ * PostgreSQL's C collation preserves this order, so this is the shared
+ * TypeScript counterpart of `COLLATE "C"` for persisted identity arrays.
+ */
+export function compareCanonicalUnicodeStrings(left: string, right: string): number {
   const leftPoints = Array.from(left, (value) => value.codePointAt(0) ?? 0);
   const rightPoints = Array.from(right, (value) => value.codePointAt(0) ?? 0);
   const length = Math.min(leftPoints.length, rightPoints.length);
@@ -852,6 +857,12 @@ export function compareCompletionGateIds(left: string, right: string): number {
   }
   return leftPoints.length - rightPoints.length;
 }
+
+export function sortCanonicalUnicodeStrings(values: readonly string[]): string[] {
+  return [...values].sort(compareCanonicalUnicodeStrings);
+}
+
+export const compareCompletionGateIds = compareCanonicalUnicodeStrings;
 
 const RFC3339_INSTANT_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):(\d{2}))$/u;
 
@@ -1194,6 +1205,20 @@ export const CompletionAssessmentSchema = z
 
 const PublicationCandidateDigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
 const PublicationCandidateRevisionSchema = z.string().regex(/^[a-f0-9]{40,64}$/u);
+const CANONICAL_UTC_MILLIS_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
+
+export function isCanonicalUtcMillisTimestamp(value: string): boolean {
+  if (!CANONICAL_UTC_MILLIS_PATTERN.test(value)) return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
+export const CanonicalUtcMillisTimestampSchema = z.string().refine(isCanonicalUtcMillisTimestamp, {
+  message: "Timestamp must be a real canonical UTC instant with exactly millisecond precision."
+});
 
 export const PublicationCandidateSchema = z.object({
   candidateId: z.string().min(1),
@@ -1206,14 +1231,14 @@ export const PublicationCandidateSchema = z.object({
   changedFiles: z.array(z.string().min(1)).min(1),
   verificationEvidenceIds: z.array(PublicationCandidateDigestSchema),
   publicationPolicyDigest: PublicationCandidateDigestSchema,
-  createdAt: z.string().datetime(),
+  createdAt: CanonicalUtcMillisTimestampSchema,
 }).strict().superRefine((candidate, ctx) => {
   for (const [key, values] of [
     ["changedFiles", candidate.changedFiles],
     ["verificationEvidenceIds", candidate.verificationEvidenceIds],
   ] as const) {
     for (let index = 1; index < values.length; index += 1) {
-      if (values[index - 1]!.localeCompare(values[index]!) >= 0) {
+      if (compareCanonicalUnicodeStrings(values[index - 1]!, values[index]!) >= 0) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, index],
           message: "PublicationCandidate identity arrays must be sorted and unique." });
       }
@@ -1230,7 +1255,7 @@ export const ProposalReadinessAssessmentSchema = z.object({
     "publication_policy_mismatch", "completion_contract_mismatch", "material_action_unknown",
     "proposal_ready", "publication_evidence_missing",
   ])).min(1),
-  assessedAt: z.string().datetime(),
+  assessedAt: CanonicalUtcMillisTimestampSchema,
 }).strict().superRefine((assessment, ctx) => {
   if (assessment.accepted !== (assessment.state === "proposal_ready")) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["accepted"],
@@ -1260,7 +1285,19 @@ export const AttemptProposalEvidenceSchema = z.object({
   verificationEvidenceDigests: z.array(PublicationCandidateDigestSchema).min(1),
   limitations: z.array(z.string()),
   evidenceDigest: PublicationCandidateDigestSchema,
-}).strict();
+}).strict().superRefine((evidence, ctx) => {
+  for (const [key, values] of [
+    ["changedFiles", evidence.changedFiles],
+    ["verificationEvidenceDigests", evidence.verificationEvidenceDigests],
+  ] as const) {
+    for (let index = 1; index < values.length; index += 1) {
+      if (compareCanonicalUnicodeStrings(values[index - 1]!, values[index]!) >= 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [key, index],
+          message: "Attempt proposal evidence identity arrays must be sorted and unique." });
+      }
+    }
+  }
+});
 
 export const AttemptProposalEvidenceArtifactSchema = z.object({
   id: z.string().min(1), type: z.literal("patch_summary"), kind: z.literal("patch"),

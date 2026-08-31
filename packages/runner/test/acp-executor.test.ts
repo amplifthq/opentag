@@ -254,6 +254,32 @@ describe("ACP executor", () => {
     expect(prompt.text).not.toContain("Read the selected repository");
   }, 15_000);
 
+  it("produces proposal evidence in canonical Unicode code-point order", async () => {
+    const repo = initRepo();
+    const executor = createAcpExecutor({ manifest: manifest("unicode-order") });
+    const result = await executor.run({
+      ...input({ kind: "repository", path: repo }, "run_unicode_order"),
+      attemptId: "attempt_unicode_order",
+      attemptAuthority: {
+        attemptNumber: 1,
+        fencingTokenDigest: `sha256:${"a".repeat(64)}`,
+        credentialId: "credential_unicode_order",
+        leaseExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    }, { emit: async () => undefined });
+
+    const proposal = result.artifacts?.find((artifact) => artifact.id.endsWith(":proposal-evidence"));
+    expect((proposal?.metadata?.proposalEvidence as { changedFiles?: string[] } | undefined)?.changedFiles).toEqual([
+      "B.ts",
+      "a.ts",
+      "acp-output.txt",
+      "acp-prompt.json",
+      "acp-session.json",
+      "é.ts",
+      "😀.ts",
+    ]);
+  }, 15_000);
+
   it.skipIf(process.platform === "win32")("does not signal a foreign process group after the ACP child exits", async () => {
     const scratch = tempDir("foreign-process-group");
     const executor = createAcpExecutor({ manifest: manifest(), cancelGraceMs: 100 });
