@@ -52,12 +52,30 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const identity = { runId: command.runId, generation, projectionRevision, state, deliveryState,
       errorCode: row.error_code, presentation };
     const suffix = hash(identity).slice(7, 31);
+    const exactParams = [command.organizationId,command.runId,
+      "statusMessageId" in base ? base.statusMessageId ?? null : null,
+      base.providerBinding.providerInstanceId,base.providerBinding.bindingDigest,base.targetDigest,
+      base.authoritySnapshotDigest,base.provenance.kind === "business"
+        ? base.provenance.repositoryIdentityDigest : null,
+      base.provenance.kind === "business" ? base.provenance.authorityLineageDigest : null];
+    const inFlightAnchor = await input.pool.query(`SELECT 1 FROM cp_provider_delivery_intent
+      WHERE organization_id=$1 AND run_id=$2 AND status_message_id=$3 AND provider_id='slack'
+        AND provider_instance_id=$4 AND provider_binding_digest=$5 AND intent->>'targetDigest'=$6
+        AND authority_snapshot_digest=$7
+        AND intent->'provenance'->>'repositoryIdentityDigest'=$8
+        AND intent->'provenance'->>'authorityLineageDigest'=$9
+        AND intent->>'operation'='create'
+        AND state IN ('pending','leased','provider_io_begun','outcome_unknown') LIMIT 1`,exactParams);
+    if (inFlightAnchor.rows[0]) return { kind: "anchor_pending" as const };
     const anchor = await input.pool.query<{ external_resource_id: string; external_resource_digest: string }>(
       `SELECT DISTINCT external_resource_id,external_resource_digest FROM cp_provider_delivery_intent
        WHERE organization_id=$1 AND run_id=$2 AND status_message_id=$3 AND state='accepted'
+         AND provider_id='slack' AND provider_instance_id=$4 AND provider_binding_digest=$5
+         AND intent->>'targetDigest'=$6 AND authority_snapshot_digest=$7
+         AND intent->'provenance'->>'repositoryIdentityDigest'=$8
+         AND intent->'provenance'->>'authorityLineageDigest'=$9
          AND external_resource_id IS NOT NULL AND external_resource_digest IS NOT NULL LIMIT 2`,
-      [command.organizationId, command.runId,
-        "statusMessageId" in base ? base.statusMessageId ?? null : null]);
+      exactParams);
     if (anchor.rows.length > 1) return { kind: "anchor_ambiguous" as const };
     const acceptedAnchor = anchor.rows[0];
     const intent = DeliveryIntentV2Schema.parse({ ...base,

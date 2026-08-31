@@ -72,7 +72,7 @@ export const slackActionAuthorities = pgTable("cp_slack_action_authority", {
   check("cp_slack_action_authority_kind_check",
     sql`${table.actionKind} IN ('status','cancel','approval','publication','bind','unbind')`),
   check("cp_slack_action_authority_decisions_check", sql`cardinality(${table.allowedDecisions}) > 0
-    AND ${table.allowedDecisions} <@ ARRAY['status','cancel','allow_once','allow_run','deny','publication_approve','publication_reject','bind','unbind']::text[]`),
+    AND ${table.allowedDecisions} <@ ARRAY['status','cancel','allow_once','allow_run','deny','publication_approve','bind','unbind']::text[]`),
   check("cp_slack_action_authority_members_check", sql`cardinality(${table.memberUserIds}) > 0`),
   check("cp_slack_action_authority_expiry_check", sql`${table.expiresAt} > ${table.createdAt}`),
   check("cp_slack_action_authority_attempt_number_check", sql`${table.attemptNumber} > 0`),

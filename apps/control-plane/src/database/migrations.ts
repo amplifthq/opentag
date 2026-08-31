@@ -551,3 +551,34 @@ export async function checkSlackIngressSchemaReadiness(
       : { ready: false, reason: "migrations_pending" };
   } catch { return { ready: false, reason: "migrations_pending" }; }
 }
+
+export async function checkProjectionSchemaReadiness(
+  pool: Pick<MigrationPool, "query">,
+): Promise<ReadinessResult> {
+  try {
+    const result = await pool.query<{ ready: boolean }>(`SELECT
+      EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_hosted_run'::regclass
+        AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_hosted_run'::regclass
+        AND conname='cp_hosted_run_projection_revision_check' AND convalidated)
+      AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
+        AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
+        AND conname='cp_provider_delivery_projection_revision_check' AND convalidated)
+      AND to_regclass('cp_projection_delivery_watermark') IS NOT NULL
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_enqueue_team_relay_projection' AND pronargs=3)
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_hosted_run_projection_before' AND pronargs=0)
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_hosted_run_projection_after' AND pronargs=0)
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_related_projection_after' AND pronargs=0)
+      AND EXISTS(SELECT 1 FROM pg_proc WHERE proname='cp_delivery_projection_after' AND pronargs=0)
+      AND (SELECT count(*)=6 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+        WHERE namespace.nspname=current_schema() AND NOT trigger_row.tgisinternal AND trigger_row.tgname IN (
+        'cp_hosted_run_projection_before_trigger','cp_hosted_run_projection_after_trigger',
+        'cp_permission_projection_trigger','cp_candidate_projection_trigger',
+        'cp_publication_intent_projection_trigger','cp_delivery_projection_trigger')) AS ready`);
+    return result.rows[0]?.ready ? { ready: true }
+      : { ready: false, reason: "migrations_pending" };
+  } catch { return { ready: false, reason: "migrations_pending" }; }
+}

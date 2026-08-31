@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, jsonb, pgTable, text, timestamp, unique,
+import { check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique,
   uniqueIndex } from "drizzle-orm/pg-core";
+import { hostedRuns } from "../hosted-runs/schema.js";
 
 export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   intentId: text("intent_id").primaryKey(), organizationId: text("organization_id").notNull(),
@@ -18,7 +19,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
   runtimeOwnerId: text("runtime_owner_id").notNull(), runtimeGeneration: integer("runtime_generation").notNull(),
   schemaGeneration: integer("schema_generation").notNull(), authoritySnapshotDigest: text("authority_snapshot_digest").notNull(),
   statusMessageId: text("status_message_id"), runId: text("run_id"),
-  projectionRevision: integer("projection_revision"),
+  projectionRevision: integer("projection_revision").notNull().default(1),
   leaseOwner: text("lease_owner"), leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
   leaseFence: text("lease_fence"), leaseFenceDigest: text("lease_fence_digest"), installationBeginMarkerId: text("installation_begin_marker_id"),
   installationBeginMarkerDigest: text("installation_begin_marker_digest"), scopeBeginMarkerId: text("scope_begin_marker_id"),
@@ -34,6 +35,7 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
     table.providerId, table.providerInstanceId, table.idempotencyKey),
   check("cp_provider_delivery_intent_revision_check", sql`${table.revision} > 0 AND ${table.sequence} > 0
     AND ${table.providerConfigGeneration} > 0 AND ${table.runtimeGeneration} > 0 AND ${table.schemaGeneration} > 0`),
+  check("cp_provider_delivery_projection_revision_check", sql`${table.projectionRevision} > 0`),
   check("cp_provider_delivery_intent_state_check", sql`${table.state} IN
     ('pending','leased','provider_io_begun','accepted','rejected','outcome_unknown','attention','superseded')`),
   check("cp_provider_delivery_intent_phase_check", sql`${table.presentationPhase} IN ('received','running','terminal')`),
@@ -99,4 +101,18 @@ export const providerDeliveryIntents = pgTable("cp_provider_delivery_intent", {
     table.providerId, table.providerInstanceId, table.externalResourceId),
   uniqueIndex("cp_provider_delivery_one_terminal_idx").on(table.currentTruthKey)
     .where(sql`${table.presentationPhase} = 'terminal'`),
+]);
+
+export const projectionDeliveryWatermarks = pgTable("cp_projection_delivery_watermark", {
+  organizationId: text("organization_id").notNull(), runId: text("run_id").notNull(),
+  intentId: text("intent_id").notNull(), deliveryState: text("delivery_state").notNull(),
+  deliveryRevision: integer("delivery_revision").notNull(),
+  projectionRevision: integer("projection_revision").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.intentId,table.deliveryState,table.deliveryRevision] }),
+  foreignKey({ columns: [table.organizationId,table.runId],
+    foreignColumns: [hostedRuns.organizationId,hostedRuns.runId] }),
+  check("cp_projection_delivery_watermark_revision_check",
+    sql`${table.deliveryRevision}>0 AND ${table.projectionRevision}>0`),
 ]);

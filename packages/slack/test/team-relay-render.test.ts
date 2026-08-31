@@ -20,6 +20,13 @@ const waiting = {
 };
 
 describe("Slack team relay projection", () => {
+  it("rejects publication_reject before Slack action rendering", () => {
+    expect(() => createSlackTeamRelayProjectionBlocks({
+      ...waiting,
+      controls: [{ kind: "publication_reject" as never,
+        actionId: "opaque_publication_reject", generation: 2 }],
+    })).toThrow();
+  });
   it("renders exact semantic copy without deciding lifecycle state", () => {
     const text = renderSlackTeamRelayProjection(waiting);
     expect(text).toContain("Waiting for your paired Runner");

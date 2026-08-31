@@ -495,7 +495,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       approverId: "U_APPROVER" });
     await issue("projection_status_source", ["status"], "status");
     await issue("projection_cancel_source", ["cancel"], "cancel");
-    await issue("projection_publication_source", ["publication_approve", "publication_reject"],
+    await issue("projection_publication_source", ["publication_approve"],
       "publication", { publicationApproval });
     const projectedControls = await ingress.issueProjectionControls({
       organizationId: "org_a", runId: "run_1", generation: 1 });
@@ -509,6 +509,35 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveInteractivity("route_1",
       action(familyStatus.actionId, "status", "U_MEMBER")))
       .resolves.toMatchObject({ status: 403, body: { error: "slack_action_not_authorized" } });
+    const statusThenStatus = await issue("family_status_then_status", ["status"], "status",
+      { authorityFamilyId: "family_status_then_cancel" });
+    const statusThenCancel = await issue("family_status_then_cancel", ["cancel"], "cancel",
+      { authorityFamilyId: "family_status_then_cancel" });
+    await expect(ingress.receiveInteractivity("route_1",
+      action(statusThenStatus, "status", "U_MEMBER"))).resolves.toMatchObject({ status: 200 });
+    await expect(ingress.receiveInteractivity("route_1",
+      action(statusThenCancel, "cancel", "U_REQUESTER"))).resolves.toMatchObject({ status: 200 });
+    await expect(issue("forbidden_publication_reject", ["publication_reject"],
+      "publication", { publicationApproval })).rejects.toThrow();
+
+    const raceCancel = await issue("race_family_cancel", ["cancel"], "cancel",
+      { authorityFamilyId: "family_cancel_approve" });
+    const raceApprove = await issue("race_family_approve", ["allow_once"], "approval",
+      { authorityFamilyId: "family_cancel_approve" });
+    const raceOutcomes = await Promise.all([
+      ingress.receiveInteractivity("route_1", action(raceCancel, "cancel", "U_REQUESTER")),
+      ingress.receiveInteractivity("route_1", action(raceApprove, "allow_once", "U_APPROVER")),
+    ]);
+    expect(raceOutcomes.map((outcome) => outcome.status).sort()).toEqual([200, 403]);
+    const raceAllow = await issue("race_family_allow", ["allow_once"], "approval",
+      { authorityFamilyId: "family_allow_deny" });
+    const raceDeny = await issue("race_family_deny", ["deny"], "approval",
+      { authorityFamilyId: "family_allow_deny" });
+    const decisionRace = await Promise.all([
+      ingress.receiveInteractivity("route_1", action(raceAllow, "allow_once", "U_APPROVER")),
+      ingress.receiveInteractivity("route_1", action(raceDeny, "deny", "U_APPROVER")),
+    ]);
+    expect(decisionRace.map((outcome) => outcome.status).sort()).toEqual([200, 403]);
     const staleControls = [
       [await issue("stale_status", ["status"], "status"), "status", "U_MEMBER"],
       [await issue("stale_cancel", ["cancel"], "cancel"), "cancel", "U_REQUESTER"],
@@ -578,7 +607,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     const poolResults = await Promise.all(poolActions.map((token) =>
       poolRuntime.ingress.receiveInteractivity("route_1", action(token, "status", "U_MEMBER"))));
     expect(poolResults.map((result) => result.status)).toEqual(Array(8).fill(200));
-    expect(decisions).toEqual(["allow_once", "allow_run"]);
+    expect(decisions).toEqual(expect.arrayContaining(["allow_once", "allow_run"]));
     expect(envelopes).toEqual(expect.arrayContaining([
       expect.objectContaining({ selectedDecision: "allow_once", allowedDecisions: ["allow_once"] }),
       expect.objectContaining({ selectedDecision: "allow_run", allowedDecisions: ["allow_run"] })

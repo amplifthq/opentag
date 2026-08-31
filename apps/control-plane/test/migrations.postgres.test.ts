@@ -50,7 +50,7 @@ async function createActualUnversionedFixture(
   mutation: HistoricalCandidateMutation = {},
 ) {
   const fixture = await createIsolatedPostgres();
-  await runMigrations(fixture.pool, fixture.migrations.slice(0, -4));
+  await runMigrations(fixture.pool, fixture.migrations.slice(0, -5));
   const now = new Date("2026-08-15T07:00:00.000Z");
   const runners = createRunnerDirectory({ pool: fixture.pool,
     clock: { now: () => now }, tokenFactory: () => "runtime_malformed_secret",
@@ -165,6 +165,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       "0014_publication_operations.sql",
       "0015_slack_projection_authority.sql",
       "0016_projection_outbox_control_family.sql",
+      "0017_projection_authority_hardening.sql",
     ]);
 
     await expect(fixture.migrate()).resolves.toBeUndefined();
@@ -235,6 +236,42 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     expect(sessionTenantForeignKey.rows).toEqual([
       { constraint_name: "cp_session_membership_fk" },
     ]);
+  });
+
+  it("revokes pre-0017 publication-reject authority without harming approve", async () => {
+    const legacy = await createIsolatedPostgres();
+    try {
+      await runMigrations(legacy.pool, legacy.migrations.slice(0,-1));
+      await legacy.pool.query("SET session_replication_role=replica");
+      await legacy.pool.query(`INSERT INTO cp_slack_action_authority(
+        organization_id,action_id,action_token_hash,installation_id,binding_id,team_id,app_id,
+        channel_id,thread_root_message_id,run_id,pending_request_id,action_kind,action_descriptor,
+        action_descriptor_digest,approval_epoch,frozen_ceiling,frozen_ceiling_digest,policy_digest,
+        runner_id,attempt_id,attempt_number,attempt_epoch,projection_generation,authority_family_id,
+        authority_epoch,claim_state,claimed_at,fencing_token_digest,permission_request_digest,
+        pending_action_id,allowed_decisions,requester_user_id,member_user_ids,operator_user_ids,
+        approver_user_id,admin_user_ids,publication_approval,expires_at,created_at)
+        VALUES('org_legacy','reject_only','token_reject','install','binding','T','A','C','1','run',
+        'request','publication','{}','descriptor','1','{}','ceiling','policy','runner','attempt',1,1,1,
+        'family_reject',1,'available',NULL,'fence','permission','pending',ARRAY['publication_reject'],
+        NULL,ARRAY['U'],ARRAY[]::text[],'APPROVER',ARRAY[]::text[],'{}',$1,$2),
+        ('org_legacy','approve_and_reject','token_both','install','binding','T','A','C','1','run',
+        'request','publication','{}','descriptor','1','{}','ceiling','policy','runner','attempt',1,1,1,
+        'family_both',1,'available',NULL,'fence','permission','pending',
+        ARRAY['publication_approve','publication_reject'],NULL,ARRAY['U'],ARRAY[]::text[],
+        'APPROVER',ARRAY[]::text[],'{}',$1,$2)`,
+      [new Date("2026-09-01T01:00:00.000Z"),new Date("2026-09-01T00:00:00.000Z")]);
+      await legacy.pool.query("SET session_replication_role=origin");
+      await runMigrations(legacy.pool, legacy.migrations);
+      const rows=await legacy.pool.query(`SELECT action_id,allowed_decisions,claim_state,
+        consumed_at IS NOT NULL consumed FROM cp_slack_action_authority ORDER BY action_id`);
+      expect(rows.rows).toEqual([
+        {action_id:"approve_and_reject",allowed_decisions:["publication_approve"],
+          claim_state:"available",consumed:false},
+        {action_id:"reject_only",allowed_decisions:["publication_approve"],
+          claim_state:"consumed",consumed:true},
+      ]);
+    } finally { await legacy.close(); }
   });
 
   it("keeps every 0014 publication authority family fail-closed in the schema catalog", async () => {
@@ -459,7 +496,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades a fully applied 0012 schema through checked-in publication migrations", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -4));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -5));
       expect((await upgrade.pool.query(
         "SELECT to_regclass('cp_publication_candidate') AS relation",
       )).rows).toEqual([{ relation: null }]);
@@ -474,7 +511,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("upgrades the exact b1f954dd unversioned immutable table with a durably accepted row", async () => {
     const upgrade = await createIsolatedPostgres();
     try {
-      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -4));
+      await runMigrations(upgrade.pool, upgrade.migrations.slice(0, -5));
       const now = new Date("2026-08-15T07:00:00.000Z");
       const runners = createRunnerDirectory({ pool: upgrade.pool,
         clock: { now: () => now }, tokenFactory: () => "runtime_upgrade_secret",
@@ -571,7 +608,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
   it("aborts unversioned Candidate reconciliation with a stable operator-action reason", async () => {
     const unsupported = await createIsolatedPostgres();
     try {
-      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -4));
+      await runMigrations(unsupported.pool, unsupported.migrations.slice(0, -5));
       await unsupported.pool.query(
         "INSERT INTO cp_organization(organization_id, display_name, created_at) VALUES('org_orphan','Orphan',clock_timestamp())");
       await unsupported.pool.query(`

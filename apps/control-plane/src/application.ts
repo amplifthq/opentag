@@ -86,18 +86,9 @@ export type ControlPlaneDependencies = {
     };
     runners: RunnerDirectory;
     hosted: HostedRunCoordinator;
-    sourceThreadReads?: { authorize(input: { organizationId: string; runId: string;
-      installationId: string; actorId: string }): Promise<boolean> };
     materials?: MaterialActionCoordinator;
     publisher?: PublicationPublisher;
     permissions?: PermissionCoordinator;
-    reader?: {
-      authenticate(token: string): Promise<
-        | { kind: "authenticated"; principal: { organizationId: string; actorId: string; scopes: readonly string[] } }
-        | { kind: "invalid_credential" }
-        | { kind: "insufficient_scope" }
-      >;
-    };
     approver?: {
       authenticate(token: string): Promise<
         | {
@@ -297,34 +288,6 @@ export function createControlPlaneApplication(
 
   if (dependencies.control) {
     const control = dependencies.control;
-
-    app.get("/v1/source-thread-controls/runs/:runId/status", async (context) => {
-      const token = bearerToken(context.req.raw);
-      const authentication = token && control.reader
-        ? await control.reader.authenticate(token) : { kind: "invalid_credential" as const };
-      if (authentication.kind === "invalid_credential") {
-        return context.json(controlError("invalid_credential"), 401);
-      }
-      if (authentication.kind === "insufficient_scope"
-        || !authentication.principal.scopes.includes("run:read")) {
-        return context.json(controlError("insufficient_scope"), 403);
-      }
-      const organizationId = context.req.query("organizationId");
-      const installationId = context.req.query("installationId");
-      if (!organizationId || organizationId !== authentication.principal.organizationId) {
-        return context.json(controlError("missing_or_concealed"), 404);
-      }
-      if (!installationId || !control.sourceThreadReads
-        || !await control.sourceThreadReads.authorize({ organizationId,
-          runId: context.req.param("runId"), installationId,
-          actorId: authentication.principal.actorId })) {
-        return context.json(controlError("missing_or_concealed"), 404);
-      }
-      const projection = await control.hosted.inspect({ organizationId,
-        runId: context.req.param("runId") });
-      return projection ? context.json(projection, 200)
-        : context.json(controlError("missing_or_concealed"), 404);
-    });
 
     app.post("/v1/runners", async (context) => {
       const token = bearerToken(context.req.raw);

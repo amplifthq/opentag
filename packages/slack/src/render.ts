@@ -10,6 +10,7 @@ import {
   type OpenTagRunStatusPresentation,
   type OpenTagSourceThreadStatusPresentation,
   type OpenTagSourceThreadProjectionPresentation,
+  OpenTagSourceThreadProjectionPresentationSchema,
   createFinalSummaryPresentation,
   type OpenTagRunResult
 } from "@opentag/core";
@@ -261,8 +262,9 @@ export function renderSlackTeamRelayProjection(presentation: OpenTagSourceThread
 export function createSlackTeamRelayProjectionBlocks(
   presentation: OpenTagSourceThreadProjectionPresentation
 ): SlackBlock[] {
+  presentation = OpenTagSourceThreadProjectionPresentationSchema.parse(presentation);
   const labels = { status: "Status", cancel: "Cancel", approve: "Allow once", reject: "Deny",
-    publication_approve: "Approve publication", publication_reject: "Reject publication" } as const;
+    publication_approve: "Approve publication" } as const;
   const blocks: SlackBlock[] = [slackSection(renderSlackTeamRelayProjection(presentation))];
   if (presentation.controls.length > 0) blocks.push({
     type: "actions",
@@ -275,7 +277,7 @@ export function createSlackTeamRelayProjectionBlocks(
       value: control.actionId,
       ...(control.kind === "approve" || control.kind === "publication_approve"
         ? { style: "primary" as const } : {}),
-      ...(control.kind === "cancel" || control.kind === "reject" || control.kind === "publication_reject"
+      ...(control.kind === "cancel" || control.kind === "reject"
         ? { style: "danger" as const } : {})
     }))
   });

@@ -94,7 +94,8 @@ function settlement(row: Row, leaseFence: string): DeliverySettlement {
 }
 
 export function createPostgresDeliveryRepository(options: { pool: Pool; owner: RelayOwner;
-  leaseOwner: string; leaseSeconds: number; now?: () => Date }): DeliveryKernelRepository {
+  leaseOwner: string; leaseSeconds: number; now?: () => Date;
+  testHooks?: { beforeCanonicalLock?(): Promise<void> } }): DeliveryKernelRepository {
   if (!Number.isSafeInteger(options.leaseSeconds) || options.leaseSeconds < 1 || options.leaseSeconds > 86_400)
     throw new Error("leaseSeconds must be an integer from 1 to 86400");
   const now = () => options.now?.() ?? new Date();
@@ -110,12 +111,35 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
       const providerPayloadDigest = payloadDigest(payload); const truthKey = currentTruthKey(payload);
       const deadline = new Date(payload.frozenDeadline);
       await withTx(async (client) => {
-        const projectionRevision = "projectionRevision" in intent ? intent.projectionRevision ?? null : null;
-        if (projectionRevision !== null) {
+        const explicitProjectionRevision = "projectionRevision" in intent
+          && intent.projectionRevision !== undefined;
+        const projectionRevision = explicitProjectionRevision ? intent.projectionRevision! : 1;
+        if (intent.provenance.kind === "business" && "projectionRevision" in intent
+          && intent.projectionRevision !== undefined) {
+          await options.testHooks?.beforeCanonicalLock?.();
+          const canonical = await client.query<{ projection_revision: number; terminal_kind: string | null }>(
+            `SELECT projection_revision,terminal_kind FROM cp_hosted_run
+             WHERE organization_id=$1 AND run_id=$2 FOR UPDATE`,
+            [intent.organizationId,intent.provenance.runId]);
+          const run = canonical.rows[0];
+          const terminalPhase = payload.phase === "terminal";
+          if (!run || run.projection_revision !== intent.projectionRevision
+            || terminalPhase !== (run.terminal_kind !== null)) {
+            throw new Error("delivery_projection_revision_stale");
+          }
+        }
+        if (explicitProjectionRevision) {
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [truthKey]);
           const same = await client.query("SELECT 1 FROM cp_provider_delivery_intent WHERE intent_id=$1",
             [intent.sideEffectIntentId]);
           if (!same.rows[0]) {
+            if (intent.operation === "create") {
+              const activeAnchor = await client.query(`SELECT 1 FROM cp_provider_delivery_intent
+                WHERE current_truth_key=$1 AND intent->>'operation'='create'
+                  AND state IN ('pending','leased','provider_io_begun','outcome_unknown') LIMIT 1`,
+              [truthKey]);
+              if (activeAnchor.rows[0]) throw new Error("delivery_anchor_pending");
+            }
             const latest = await client.query<{ projection_revision: string | null }>(
               `SELECT max(projection_revision)::text projection_revision
                FROM cp_provider_delivery_intent WHERE current_truth_key=$1`, [truthKey]);

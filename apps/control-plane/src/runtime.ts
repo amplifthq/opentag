@@ -12,6 +12,7 @@ import {
   checkSourceContentSchemaReadiness,
   checkSourceIngressSchemaReadiness,
   checkSlackIngressSchemaReadiness,
+  checkProjectionSchemaReadiness,
   type SqlMigration,
 } from "./database/migrations.js";
 import {
@@ -350,7 +351,8 @@ export function createControlPlaneRuntime(input: {
     "provider-delivery": async () => providerDeliveryWorker.processNext(),
     "team-relay.project": async (job: { payload: unknown }) => {
       const payload = z.object({ organizationId: z.string().min(1), runId: z.string().min(1),
-        projectionRevision: z.number().int().positive() }).strict().parse(job.payload);
+        projectionRevision: z.number().int().positive(),
+        deliveryEventId: z.string().min(1).optional() }).strict().parse(job.payload);
       return teamRelayProjection.projectRun(payload);
     },
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
@@ -382,6 +384,8 @@ export function createControlPlaneRuntime(input: {
         if (!database.ready) return database;
         const migrations = await checkMigrationReadiness(postgres.pool, input.migrations);
         if (!migrations.ready) return migrations;
+        const projectionSchema = await checkProjectionSchemaReadiness(postgres.pool);
+        if (!projectionSchema.ready) return projectionSchema;
         // Hand-constructed legacy test configs omit the property. Parsed runtime
         // configs always carry null or an explicit reference and therefore fail
         // closed when relay content custody has no usable operator key.
@@ -440,26 +444,6 @@ export function createControlPlaneRuntime(input: {
       materials,
       publisher,
       permissions,
-      sourceThreadReads: { async authorize(command) {
-        const result = await postgres.pool.query(`SELECT 1 FROM cp_hosted_run run
-          JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id
-            AND slack.installation_id=$3
-            AND run.source_version_ref LIKE 'slack:' || slack.team_id || ':' || slack.channel_id || ':%'
-          WHERE run.organization_id=$1 AND run.run_id=$2 AND $4=ANY(slack.member_user_ids) LIMIT 1`,
-        [command.organizationId, command.runId, command.installationId, command.actorId]);
-        return result.rowCount === 1;
-      } },
-      reader: {
-        async authenticate(token) {
-          const outcome = await identity.authenticateApiKey(token);
-          if (outcome.kind !== "authenticated") return outcome;
-          return { kind: "authenticated" as const, principal: {
-            organizationId: outcome.principal.organizationId,
-            actorId: outcome.principal.apiKeyId,
-            scopes: outcome.principal.scopes,
-          } };
-        },
-      },
       approver: {
         async authenticate(token) {
           const outcome = await identity.authenticateApiKey(token);

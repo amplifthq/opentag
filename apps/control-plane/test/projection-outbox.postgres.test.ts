@@ -4,6 +4,7 @@ import { DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor } from "@opentag
 import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
 import { createTeamRelayProjectionService } from "../src/modules/provider-delivery/team-relay-projection.js";
 import { createIsolatedPostgres, TEST_DATABASE_URL } from "./postgres-fixture.js";
+import { checkProjectionSchemaReadiness } from "../src/database/migrations.js";
 
 const digest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
 const now = new Date("2026-09-01T00:00:00.000Z");
@@ -53,6 +54,12 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
   });
 
   it("rejects a delayed older running projection after terminal revision commits", async () => {
+    await insertRun();
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='running',updated_at=$1 WHERE run_id='run_projection'",
+      [new Date(now.getTime()+1)]);
+    await fixture.pool.query(`UPDATE cp_hosted_run SET state='failed',terminal_kind='failed',
+      terminal_reason='terminal',terminal_receipt=$1,updated_at=$2 WHERE run_id='run_projection'`,
+    [{kind:"terminal"},new Date(now.getTime()+2)]);
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
       leaseOwner: "projection-worker", leaseSeconds: 30, now: () => now });
     const intent = (revision: number, phase: "running" | "terminal") => DeliveryIntentV2Schema.parse({
@@ -128,5 +135,146 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect(requests[0].intent.operation).toBe("update");
     expect(requests[0].providerRequest.operation).toEqual({ kind: "update_message",
       channelId: "C1", messageTs: "171.001" });
+    await fixture.pool.query(`INSERT INTO cp_provider_delivery_intent(
+      intent_id,organization_id,journal_intent_digest,intent,payload,payload_digest,payload_custody_ref,
+      presentation_phase,current_truth_key,state,revision,sequence,scope_kind,scope_id,idempotency_key,
+      provider_id,provider_instance_id,provider_binding_digest,provider_config_generation,
+      provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
+      authority_snapshot_digest,status_message_id,run_id,projection_revision,lease_owner,lease_expires_at,
+      lease_fence,lease_fence_digest,installation_begin_marker_id,installation_begin_marker_digest,
+      scope_begin_marker_id,scope_begin_marker_digest,begun_at,evidence_digest,external_resource_digest,
+      external_resource_id,outcome_recorded_at,deadline_at,created_at,updated_at)
+      SELECT 'intent_duplicate_anchor',organization_id,$1,
+        jsonb_set(jsonb_set(intent,'{sideEffectIntentId}','"intent_duplicate_anchor"'),
+          '{idempotencyKey}','"duplicate_anchor"'),payload,$2,'duplicate-custody',presentation_phase,
+        current_truth_key,state,revision,sequence,scope_kind,scope_id,'duplicate_anchor',provider_id,
+        provider_instance_id,provider_binding_digest,provider_config_generation,
+        provider_config_generation_digest,runtime_owner_id,runtime_generation,schema_generation,
+        authority_snapshot_digest,status_message_id,run_id,projection_revision,lease_owner,lease_expires_at,
+        lease_fence,lease_fence_digest,installation_begin_marker_id,installation_begin_marker_digest,
+        scope_begin_marker_id,scope_begin_marker_digest,begun_at,$3,$4,'171.009',outcome_recorded_at,
+        deadline_at,created_at+interval '1 millisecond',updated_at
+      FROM cp_provider_delivery_intent WHERE intent_id='intent_baseline'`,
+    [digest("duplicate-journal"),digest("duplicate-payload"),digest("duplicate-evidence"),
+      digest("duplicate-resource")]);
+    await expect(service.projectRun({ organizationId:"org_projection",runId:"run_projection" }))
+      .resolves.toMatchObject({kind:"anchor_ambiguous"});
+    expect(requests).toHaveLength(1);
+  });
+
+  it("defers N+1 while the one exact create anchor is still begun", async () => {
+    await insertRun(); const requests: any[] = [];
+    const baseline = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_projection",
+      sideEffectIntentId: "intent_anchor_begun", causalId: "run_projection", intentKind: "delivery",
+      operation: "create", deliveryKind: "message", presentationDigest: digest("begun"), projectionRevision: 1,
+      provenance: { kind: "business", repositoryIdentityDigest: digest("repo"), runId: "run_projection",
+        authorityLineageDigest: digest("authority") }, providerBinding: { bindingKind: "established",
+        providerId: "slack", providerInstanceId: "A1", providerPrincipalDigest: digest("principal"),
+        principalAssurance: "provider_verified", providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), lifecycle: "active", bindingDigest: digest("binding") },
+      targetDigest: digest("target"), authorityKind: "run_authority", authoritySnapshotDigest: digest("snapshot"),
+      evidencePolicy: "local_audit", idempotencyKey: "anchor_begun", statusMessageId: "run_projection:status",
+      scope: { kind: "local_repository", id: "repo" }, createdAt: now.toISOString(), initialAttemptSequence: 1 });
+    const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "anchor-begun", leaseSeconds: 30, now: () => now });
+    const payload = { envelopeVersion: 1 as const, providerRequest: { operation: {
+      kind: "create_message", channelId: "C1", threadTs: "1700000000.1" },
+      presentation: { kind: "message", text: "creating" } }, phase: "received" as const,
+      frozenDeadline: new Date(now.getTime()+300_000).toISOString(),
+      currentTruth: deliveryCurrentTruthDescriptor({ intent: baseline, owner: {
+        organizationId: baseline.organizationId, providerId: "slack", providerInstanceId: "A1",
+        providerBindingDigest: digest("binding"), providerConfigGeneration: 1,
+        providerConfigGenerationDigest: digest("generation"), ...owner } }) };
+    await repository.recordIntent(baseline,payload);
+    const claim=(await repository.claimNext())!; const renewed=(await repository.renewLease(claim))!;
+    const begun=(await repository.markBegin({ ...renewed, installationBeginMarkerId:"installation",
+      installationBeginMarkerDigest:digest("marker"),scopeBeginMarkerId:"scope",
+      scopeBeginMarkerDigest:digest("marker") }))!;
+    const service=createTeamRelayProjectionService({ pool:fixture.pool,
+      hosted:{ inspect:async()=>({ state:"running",canonicalStatus:"running",status:"running",
+        queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),outcome:null,
+        terminalKind:null,terminalReason:null }) } as any,
+      producer:{ async enqueue(value){requests.push(value);} },clock:{now:()=>new Date(now.getTime()+1)} });
+    await expect(service.projectRun({organizationId:"org_projection",runId:"run_projection"}))
+      .resolves.toMatchObject({kind:"anchor_pending"});
+    expect(requests).toHaveLength(0);
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
+    await repository.settleOrReadTerminal({ ...begun,outcome:"accepted",
+      evidenceDigest:digest("accepted"),externalResourceId:"171.002",
+      externalResourceDigest:digest("resource") });
+    const deliveryJobs=await fixture.pool.query(`SELECT job_id FROM cp_job
+      WHERE state='pending' AND job_kind='team-relay.project'`);
+    expect(deliveryJobs.rows).toHaveLength(1);
+    expect(deliveryJobs.rows[0]?.job_id).toMatch(/^team-relay-delivery:/u);
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
+    const selfIntent=DeliveryIntentV2Schema.parse({...baseline,
+      sideEffectIntentId:"intent_projection_self",idempotencyKey:"projection_self",
+      operation:"update",presentationDigest:digest("self"),createdAt:new Date(now.getTime()+2).toISOString()});
+    const selfPayload={...payload,phase:"received" as const,
+      currentTruth:deliveryCurrentTruthDescriptor({intent:selfIntent,owner:{
+        organizationId:selfIntent.organizationId,providerId:"slack",providerInstanceId:"A1",
+        providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+        providerConfigGenerationDigest:digest("generation"),...owner}})};
+    await repository.recordIntent(selfIntent,selfPayload);
+    const selfClaim=(await repository.claimNext())!; const selfRenewed=(await repository.renewLease(selfClaim))!;
+    const selfBegun=(await repository.markBegin({...selfRenewed,installationBeginMarkerId:"self-install",
+      installationBeginMarkerDigest:digest("self-marker"),scopeBeginMarkerId:"self-scope",
+      scopeBeginMarkerDigest:digest("self-marker")}))!;
+    await repository.settleOrReadTerminal({...selfBegun,outcome:"accepted",evidenceDigest:digest("self-evidence"),
+      externalResourceId:"171.002",externalResourceDigest:digest("self-resource")});
+    expect((await fixture.pool.query(`SELECT count(*)::int count FROM cp_job
+      WHERE state='pending' AND job_kind='team-relay.project'`)).rows[0]).toEqual({count:0});
+  });
+
+  it("requires positive Run revisions, non-null delivery revisions, and durable delivery watermark", async () => {
+    await insertRun();
+    await expect(fixture.pool.query("UPDATE cp_hosted_run SET projection_revision=0 WHERE run_id='run_projection'"))
+      .rejects.toThrow();
+    const column = await fixture.pool.query(`SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema=current_schema() AND table_name='cp_provider_delivery_intent'
+        AND column_name='projection_revision'`);
+    expect(column.rows).toEqual([{ is_nullable: "NO" }]);
+    const watermark = await fixture.pool.query("SELECT to_regclass('cp_projection_delivery_watermark') relation");
+    expect(watermark.rows[0]?.relation).toBe("cp_projection_delivery_watermark");
+    await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({ready:true});
+    await fixture.pool.query("DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent");
+    await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({
+      ready:false,reason:"migrations_pending"});
+  });
+
+  it("rejects an old projection when terminal truth commits before the canonical Run lock", async () => {
+    await insertRun();
+    await fixture.pool.query("UPDATE cp_hosted_run SET state='running',updated_at=$1 WHERE run_id='run_projection'",
+      [new Date(now.getTime()+1)]);
+    let release!: () => void; const released=new Promise<void>((resolve)=>{release=resolve;});
+    let entered!: () => void; const hookEntered=new Promise<void>((resolve)=>{entered=resolve;});
+    const repository=createPostgresDeliveryRepository({ pool:fixture.pool,owner,
+      leaseOwner:"toctou-worker",leaseSeconds:30,now:()=>now,
+      testHooks:{ async beforeCanonicalLock(){entered();await released;} } } as any);
+    const old=DeliveryIntentV2Schema.parse({ contractVersion:2,organizationId:"org_projection",
+      sideEffectIntentId:"intent_toctou_old",causalId:"run_projection",intentKind:"delivery",
+      operation:"create",deliveryKind:"message",presentationDigest:digest("old"),projectionRevision:2,
+      provenance:{kind:"business",repositoryIdentityDigest:digest("repo"),runId:"run_projection",
+        authorityLineageDigest:digest("authority")},providerBinding:{bindingKind:"established",providerId:"slack",
+        providerInstanceId:"A1",providerPrincipalDigest:digest("principal"),principalAssurance:"provider_verified",
+        providerConfigGeneration:1,providerConfigGenerationDigest:digest("generation"),lifecycle:"active",
+        bindingDigest:digest("binding")},targetDigest:digest("target"),authorityKind:"run_authority",
+      authoritySnapshotDigest:digest("snapshot"),evidencePolicy:"local_audit",idempotencyKey:"toctou_old",
+      statusMessageId:"run_projection:status",scope:{kind:"local_repository",id:"repo"},createdAt:now.toISOString(),
+      initialAttemptSequence:1});
+    const payload={envelopeVersion:1 as const,providerRequest:{},phase:"running" as const,
+      frozenDeadline:new Date(now.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
+        intent:old,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
+          providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+          providerConfigGenerationDigest:digest("generation"),...owner}})};
+    const pending=repository.recordIntent(old,payload);
+    const observed=await Promise.race([hookEntered.then(()=>true),
+      new Promise<boolean>((resolve)=>setTimeout(()=>resolve(false),50))]);
+    expect(observed).toBe(true);
+    await fixture.pool.query(`UPDATE cp_hosted_run SET state='failed',terminal_kind='failed',
+      terminal_reason='terminal',terminal_receipt=$1,updated_at=$2 WHERE run_id='run_projection'`,
+    [{kind:"terminal"},new Date(now.getTime()+2)]);
+    release();
+    await expect(pending).rejects.toThrow("delivery_projection_revision_stale");
   });
 });

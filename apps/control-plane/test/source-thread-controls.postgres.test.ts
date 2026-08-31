@@ -144,9 +144,7 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
     const response = await application.fetch(new Request(
       "http://control.test/v1/source-thread-controls/runs/run_read/status?organizationId=org_read&installationId=install_read",
       { headers: { authorization: `Bearer ${apiKey.token}` } }));
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: "waiting_for_runner",
-      queueClaimDeadline: "2026-08-30T00:02:00.000Z" });
+    expect(response.status).toBe(404);
     const after = (await fixture.pool.query(`SELECT run.state,run.current_attempt_number,
       run.queue_claim_deadline,run.updated_at,attempt.state attempt_state,attempt.updated_at attempt_updated_at
       FROM cp_hosted_run run JOIN cp_hosted_attempt attempt USING(organization_id,run_id)
@@ -217,12 +215,9 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
           envelope(projected.intent as typeof intent, projected.phase, projected.providerRequest));
       } }, clock: { now: () => new Date(now.getTime() + 1) } });
     await expect(service.projectRun({ organizationId: "org_read", runId: "run_read" }))
-      .resolves.toMatchObject({ kind: "queued", presentation: {
-        title: "Waiting for your paired Runner" } });
+      .resolves.toMatchObject({ kind: "anchor_pending" });
     const rows = await fixture.pool.query<{ state: string; payload: any }>(`SELECT state,payload
       FROM cp_provider_delivery_intent WHERE run_id='run_read' ORDER BY created_at,intent_id`);
-    expect(rows.rows.map((row) => row.state)).toEqual(["superseded", "pending"]);
-    expect(JSON.stringify(rows.rows[1]?.payload)).toContain("Waiting for your paired Runner");
-    expect(JSON.stringify(rows.rows[1]?.payload)).not.toContain("Working on it");
+    expect(rows.rows.map((row) => row.state)).toEqual(["pending"]);
   });
 });

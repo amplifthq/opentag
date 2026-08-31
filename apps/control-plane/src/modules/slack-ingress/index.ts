@@ -297,11 +297,10 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           AND expires_at>$4 ORDER BY action_kind,created_at DESC`,
       [command.organizationId, command.runId, command.generation, input.clock.now()]);
       const controls: Array<{ kind: "status" | "cancel" | "approve" | "reject"
-        | "publication_approve" | "publication_reject"; actionId: string; generation: number }> = [];
+        | "publication_approve"; actionId: string; generation: number }> = [];
       const kindFor = (decision: string) => decision === "allow_once" ? "approve" as const
         : decision === "deny" ? "reject" as const
         : decision === "publication_approve" ? "publication_approve" as const
-        : decision === "publication_reject" ? null
         : decision === "status" ? "status" as const
         : decision === "cancel" ? "cancel" as const : null;
       const familyId = `projection:${command.runId}:${command.generation}:${randomBytes(12).toString("hex")}`;
@@ -431,14 +430,23 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         const token = action?.value; const actorId = payload.user?.id;
         if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,512}$/u.test(token)
           || typeof actorId !== "string" || typeof action.action_id !== "string"
-          || !/^opentag:decision:(status|cancel|allow_once|allow_run|deny|publication_approve|publication_reject|bind|unbind)$/u.test(action.action_id)) {
+          || !/^opentag:decision:(status|cancel|allow_once|allow_run|deny|publication_approve|bind|unbind)$/u.test(action.action_id)) {
           return { status: 400, body: { error: "invalid_slack_action" } };
         }
         const claimed = await withPostgresTransaction(input.pool, async (client) => {
           const rows = await client.query<ActionRow>(`SELECT * FROM cp_slack_action_authority
-            WHERE action_token_hash = $1 FOR UPDATE`, [hashBytes(token)]);
-          const row = rows.rows[0];
+            WHERE action_token_hash = $1`, [hashBytes(token)]);
+          let row = rows.rows[0];
           if (!row || row.consumed_at || row.expires_at <= input.clock.now()) {
+            return { status: 403, body: { error: "slack_action_not_authorized" } };
+          }
+          const lockedFamily = await client.query<ActionRow>(`SELECT * FROM cp_slack_action_authority
+            WHERE organization_id=$1 AND authority_family_id=$2 ORDER BY action_id FOR UPDATE`,
+          [row.organization_id,row.authority_family_id]);
+          row = lockedFamily.rows.find((member) => member.action_token_hash === hashBytes(token))!;
+          if (!row || row.consumed_at || lockedFamily.rows.some((member) =>
+            (member.claim_state === "consumed" && member.action_kind !== "status")
+            || (member.claim_state === "claimed" && member.action_id !== row.action_id))) {
             return { status: 403, body: { error: "slack_action_not_authorized" } };
           }
           const currentAuthority = await client.query<{ current_attempt_number: number;
@@ -512,17 +520,10 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
             }
           }
           const actor = { provider: "slack", id: actorId } as const;
-          if ((decision === "publication_approve" || decision === "publication_reject")
+          if (decision === "publication_approve"
             && row.action_kind === "publication" && actorId === row.approver_user_id) {
             if (!row.publication_approval) return { status: 403,
               body: { error: "slack_action_authority_stale" } };
-            const family = await client.query<ActionRow>(`SELECT * FROM cp_slack_action_authority
-              WHERE organization_id=$1 AND authority_family_id=$2 FOR UPDATE`,
-            [row.organization_id,row.authority_family_id]);
-            if (family.rows.some((member) => member.claim_state === "consumed"
-              || (member.claim_state === "claimed" && member.action_id !== row.action_id))) {
-              return { status: 403, body: { error: "slack_action_not_authorized" } };
-            }
             if (row.claim_state === "available") await client.query(`UPDATE cp_slack_action_authority
               SET claim_state='claimed',claimed_at=$3 WHERE organization_id=$1 AND action_id=$2`,
             [row.organization_id,row.action_id,input.clock.now()]);
@@ -541,8 +542,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
             frozenCeilingDigest: row.frozen_ceiling_digest, policyDigest: row.policy_digest,
             actionTokenIdentity: row.action_token_hash,
             selectedDecision: decision as "status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind",
-            allowedDecisions: row.allowed_decisions.filter((value) => value !== "publication_approve"
-              && value !== "publication_reject") as Array<"status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind"> };
+            allowedDecisions: row.allowed_decisions.filter((value) => value !== "publication_approve") as
+              Array<"status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind"> };
           let command: SourceThreadCommand | null = null;
           if (decision === "status" && row.action_kind === "status" && row.member_user_ids.includes(actorId)) command = {
             type: "status", commandId: row.action_id, actor, authority };
@@ -565,13 +566,6 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
               bindingDigest: resolved.installation.bindingDigest, authority };
           }
           if (!command) return { status: 403, body: { error: "slack_action_not_authorized" } };
-          const family = await client.query<ActionRow>(`SELECT * FROM cp_slack_action_authority
-            WHERE organization_id=$1 AND authority_family_id=$2 FOR UPDATE`,
-          [row.organization_id,row.authority_family_id]);
-          if (family.rows.some((member) => member.claim_state === "consumed"
-            || (member.claim_state === "claimed" && member.action_id !== row.action_id))) {
-            return { status: 403, body: { error: "slack_action_not_authorized" } };
-          }
           if (row.claim_state === "available") await client.query(`UPDATE cp_slack_action_authority
             SET claim_state='claimed',claimed_at=$3 WHERE organization_id=$1 AND action_id=$2`,
           [row.organization_id,row.action_id,input.clock.now()]);
@@ -580,8 +574,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         if (!("kind" in claimed) || claimed.kind !== "claimed") return claimed;
         let completed = false;
         if ("publicationApproval" in claimed) {
-          if (claimed.decision === "publication_reject") completed = true;
-          else if (input.publicationAuthority) {
+          if (input.publicationAuthority) {
             const result = await input.publicationAuthority.approve({ ...claimed.publicationApproval,
               approverId: claimed.actorId! });
             completed = result.kind === "approved" || result.kind === "replayed";

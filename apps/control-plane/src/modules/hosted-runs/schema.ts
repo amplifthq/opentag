@@ -72,6 +72,7 @@ export const hostedRuns = pgTable(
       "cp_hosted_run_current_attempt_number_check",
       sql`${table.currentAttemptNumber} >= 0`,
     ),
+    check("cp_hosted_run_projection_revision_check", sql`${table.projectionRevision} > 0`),
     check(
       "cp_hosted_run_terminal_kind_check",
       sql`${table.terminalKind} IN ('succeeded', 'failed', 'cancelled', 'interrupted', 'timed_out')`,
