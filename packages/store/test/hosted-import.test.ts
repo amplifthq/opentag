@@ -821,7 +821,7 @@ describe("hosted assigned Run import", () => {
     }
   });
 
-  it("retains the exact active hosted payload after a caller presents a wrong fence", async () => {
+  it("retains the exact active hosted payload when terminal reason is null", async () => {
     const sqlite = new Database(":memory:"); migrateSchema(sqlite);
     const repo = createOpenTagRepository(drizzle(sqlite));
     const secret = "HOSTED_ACTIVE_TERMINAL_NULL_CONTROL_4de7";
@@ -830,6 +830,22 @@ describe("hosted assigned Run import", () => {
     await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
       attemptId: value.claim.attempt.id, fencingToken: value.claim.attempt.fencingToken }))
       .resolves.toBe(true);
+    sqlite.prepare("UPDATE hosted_claim_operations SET execution_started_at=NULL WHERE operation_id=?")
+      .run(value.request.operationId);
+    await expect(repo.getHostedAssignedRunForRecovery({ destinationId: "cloud-1",
+      organizationId: value.claim.organizationId, runnerId: value.claim.runnerId }))
+      .resolves.toMatchObject({ claimed: { attemptId: value.claim.attempt.id,
+        event: { command: { rawText: secret } } } });
+    expect(sqlite.serialize().includes(Buffer.from(secret))).toBe(false);
+    sqlite.close();
+  });
+
+  it("retains canonical active authority after a caller presents a wrong fence", async () => {
+    const sqlite = new Database(":memory:"); migrateSchema(sqlite);
+    const repo = createOpenTagRepository(drizzle(sqlite));
+    const secret = "HOSTED_WRONG_CALLER_FENCE_CONTROL_63b8";
+    const value = await fixture({ body: secret }); await begin(repo, value);
+    await repo.importHostedAssignedRun(value); await startHostedExecution(repo, value.claim);
     await expect(repo.isHostedExecutionCurrent({ runId: value.claim.runId,
       attemptId: value.claim.attempt.id, fencingToken: "caller-wrong-fence" }))
       .resolves.toBe(false);
