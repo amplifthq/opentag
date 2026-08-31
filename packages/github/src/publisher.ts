@@ -7,6 +7,10 @@ export type DraftPullRequestPresence = {
   pullRequestUrl: string;
   headSha: string;
   draft: true;
+  provider?: "github";
+  repository?: { owner: string; repo: string };
+  baseBranch?: string;
+  state?: "open";
 };
 
 export type OwnedBranchPresence = {

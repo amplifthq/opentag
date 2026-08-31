@@ -204,6 +204,40 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
       kind: "reconciliation_pending", capability: { capabilityId: pr.capability.capabilityId,
         operationId: pr.capability.operationId },
     });
+    // A started external effect is observation-only recovery work even after
+    // every issuance gate changes; a restart must not turn it into a 204.
+    await fixture.pool.query("ALTER TABLE cp_publication_intent DISABLE TRIGGER cp_publication_intent_immutable");
+    await fixture.pool.query(
+      `UPDATE cp_publication_intent SET expires_at=CURRENT_TIMESTAMP - interval '1 millisecond'
+       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
+    await fixture.pool.query("ALTER TABLE cp_publication_intent ENABLE TRIGGER cp_publication_intent_immutable");
+    await fixture.pool.query(
+      `UPDATE cp_hosted_run SET state='cancelled', terminal_kind='cancelled', terminal_receipt='{"kind":"cancelled"}'::jsonb WHERE organization_id=$1 AND run_id=$2`,
+      [principal.organizationId, candidate.runId]);
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
+       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
+    await fixture.pool.query(
+      `UPDATE cp_runner SET credential_generation=2 WHERE organization_id=$1 AND runner_id=$2`,
+      [principal.organizationId, principal.runnerId]);
+    const rotatedPrincipal = { ...principal, credentialGeneration: 2 };
+    await expect(publisher.claimNextForRunner({ principal: rotatedPrincipal })).resolves.toMatchObject({
+      kind: "reconciliation_pending", capability: { capabilityId: pr.capability.capabilityId,
+        operationId: pr.capability.operationId },
+    });
+    await fixture.pool.query("ALTER TABLE cp_publication_intent DISABLE TRIGGER cp_publication_intent_immutable");
+    await fixture.pool.query(
+      `UPDATE cp_publication_intent SET expires_at=CURRENT_TIMESTAMP + interval '1 minute'
+       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
+    await fixture.pool.query("ALTER TABLE cp_publication_intent ENABLE TRIGGER cp_publication_intent_immutable");
+    await fixture.pool.query(`UPDATE cp_hosted_run SET state='running', terminal_kind=NULL, terminal_receipt=NULL WHERE organization_id=$1 AND run_id=$2`,
+      [principal.organizationId, candidate.runId]);
+    await fixture.pool.query(
+      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP + interval '1 minute'
+       WHERE organization_id=$1 AND run_id=$2`, [principal.organizationId, candidate.runId]);
+    await fixture.pool.query(
+      `UPDATE cp_runner SET credential_generation=1 WHERE organization_id=$1 AND runner_id=$2`,
+      [principal.organizationId, principal.runnerId]);
     await expect(claimOperation("create_draft_pull_request")).resolves.toMatchObject({ kind: "unavailable", reason: "reconciliation_required" });
     await expect(publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId, operationId: pr.capability.operationId,
       reconciliationId: "reconcile_pr_absent", observation: { kind: "absent" }, observedAt: now.toISOString() })).resolves.toEqual({ kind: "retry_authorized" });
@@ -227,6 +261,16 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
         externalUri: "https://github.com/acme/demo/pull/7", draft: true, provider: "github",
         repository: { owner: "acme", repo: "demo" }, baseBranch: "main", state: "open" },
       observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
+    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
+      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
+      observation: { kind: "present", headSha: "c".repeat(40), externalId: "github_pr_7",
+        externalUri: "https://github.com/acme/demo/pull/7", draft: true, provider: "github",
+        repository: { owner: "acme", repo: "demo" }, baseBranch: "main", state: "open" },
+      observedAt: now.toISOString() })).resolves.toEqual({ kind: "settled" });
+    await expect(publisher.reconcile({ principal, capabilityId: retried.capability.capabilityId,
+      operationId: retried.capability.operationId, reconciliationId: "reconcile_pr_present",
+      observation: { kind: "ambiguous" }, observedAt: now.toISOString() }))
+      .resolves.toEqual({ kind: "conflict" });
     await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
       kind: "completion_pending", capability: { capabilityId: retried.capability.capabilityId },
     });

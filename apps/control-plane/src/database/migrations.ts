@@ -289,6 +289,21 @@ export async function checkMigrationReadiness(
              WHERE table_schema=current_schema() AND table_name='cp_publication_capability')
           = ARRAY['organization_id','capability_id','intent_id','operation_id','idempotency_key',
             'step','attempt_number','capability_digest','capability','issued_at','expires_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_intent')
+          = ARRAY['organization_id','intent_id','run_id','attempt_id','attempt_number','candidate_id','candidate_digest','ownership_id','ownership_digest','approval_id','approver_id','approval_digest','repository','branch','expected_head_sha','runner_id','runner_generation','approved_at','expires_at','created_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_begin')
+          = ARRAY['organization_id','capability_id','operation_id','begun_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_receipt')
+          = ARRAY['organization_id','receipt_id','capability_id','operation_id','outcome','receipt_digest','receipt','observed_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_reconciliation')
+          = ARRAY['organization_id','reconciliation_id','capability_id','operation_id','observation','observed_at']
+        AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
+             WHERE table_schema=current_schema() AND table_name='cp_publication_completion')
+          = ARRAY['organization_id','completion_id','run_id','attempt_id','attempt_number','fencing_token_digest','candidate_id','candidate_digest','intent_id','ownership_id','push_operation_id','push_receipt_digest','pull_request_operation_id','pull_request_receipt_digest','pull_request_external_id','pull_request_external_digest','repository','remote','base_branch','branch','expected_head_sha','observed_head_sha','required_check_names','evidence_digest','completion_decision','observation','created_at']
         AND EXISTS (SELECT 1 FROM pg_indexes
           WHERE schemaname=current_schema() AND tablename='cp_publication_branch_ownership'
             AND indexname='cp_publication_branch_owner_key'
@@ -301,6 +316,20 @@ export async function checkMigrationReadiness(
             AND trigger_row.tgenabled = 'O' AND NOT trigger_row.tgisinternal
             AND function_row.proname = 'cp_reject_publication_authority_mutation'
             AND function_row.pronamespace = current_schema()::regnamespace)
+        AND NOT EXISTS (SELECT 1 FROM (VALUES
+          ('cp_publication_intent','cp_publication_intent_immutable'),
+          ('cp_publication_branch_ownership','cp_publication_branch_ownership_immutable'),
+          ('cp_publication_capability','cp_publication_capability_immutable'),
+          ('cp_publication_begin','cp_publication_begin_immutable'),
+          ('cp_publication_receipt','cp_publication_receipt_immutable'),
+          ('cp_publication_reconciliation','cp_publication_reconciliation_immutable'),
+          ('cp_publication_completion','cp_publication_completion_immutable')
+        ) expected(table_name, trigger_name)
+        WHERE NOT EXISTS (SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+          WHERE trigger_row.tgrelid=to_regclass(expected.table_name) AND trigger_row.tgname=expected.trigger_name
+            AND trigger_row.tgenabled='O' AND NOT trigger_row.tgisinternal AND trigger_row.tgtype=27
+            AND function_row.proname='cp_reject_publication_authority_mutation'
+            AND function_row.pronamespace=current_schema()::regnamespace))
       ) AS schema_ready`,
     );
     const current = schema.rows[0]?.schema_ready === true

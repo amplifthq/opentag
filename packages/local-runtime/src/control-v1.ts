@@ -980,9 +980,11 @@ function publicationReconciliationObservation(capability: PublicationOperationCa
   return { kind: "present" as const, headSha: provider.headSha,
     ...("pullRequestNumber" in provider ? {
       externalId: `github_pr_${provider.pullRequestNumber}`,
-      externalUri: provider.pullRequestUrl, draft: true as const, provider: "github" as const,
-      repository: { owner: capability.repository.owner, repo: capability.repository.repo },
-      baseBranch: capability.repository.baseBranch, state: "open" as const,
+      externalUri: provider.pullRequestUrl, draft: provider.draft,
+      ...(provider.provider && provider.repository && provider.baseBranch && provider.state ? {
+        provider: provider.provider, repository: provider.repository,
+        baseBranch: provider.baseBranch, state: provider.state,
+      } : {}),
     } : {}),
   };
 }
@@ -1057,11 +1059,16 @@ async function observeDraftPullRequest(input: {
     for (const candidate of candidates) {
       const pullRequest = await api.getPullRequest({ owner: input.capability.repository.owner,
         repo: input.capability.repository.repo, pullRequestNumber: candidate.number });
-      if (pullRequest.head.sha === input.capability.expectedHeadSha
+      const expectedRepository = `${input.capability.repository.owner}/${input.capability.repository.repo}`.toLowerCase();
+      const exactUrl = `https://github.com/${input.capability.repository.owner}/${input.capability.repository.repo}/pull/${pullRequest.number}`;
+      if (pullRequest.state === "open" && pullRequest.head.sha === input.capability.expectedHeadSha
         && pullRequest.base.ref === input.capability.repository.baseBranch
-        && pullRequest.draft === true && pullRequest.htmlUrl) {
+        && pullRequest.base.repo?.full_name?.toLowerCase() === expectedRepository
+        && pullRequest.draft === true && pullRequest.htmlUrl === exactUrl) {
         return { kind: "present", pullRequestNumber: pullRequest.number,
-          pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true };
+          pullRequestUrl: pullRequest.htmlUrl, headSha: pullRequest.head.sha, draft: true,
+          provider: "github", repository: { owner: input.capability.repository.owner,
+            repo: input.capability.repository.repo }, baseBranch: pullRequest.base.ref, state: "open" };
       }
     }
     return { kind: "absent" };

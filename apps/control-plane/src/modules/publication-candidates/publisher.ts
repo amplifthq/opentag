@@ -310,12 +310,16 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         }
         if (command.step === "create_draft_pull_request") {
           const pushed = await client.query(
-            `SELECT 1 FROM cp_publication_receipt receipt
-             JOIN cp_publication_capability capability
+            `SELECT 1 FROM cp_publication_capability capability
+             LEFT JOIN cp_publication_receipt receipt
                ON capability.organization_id = receipt.organization_id
               AND capability.capability_id = receipt.capability_id
+             LEFT JOIN cp_publication_reconciliation reconciliation
+               ON capability.organization_id = reconciliation.organization_id
+              AND capability.capability_id = reconciliation.capability_id
              WHERE capability.organization_id = $1 AND capability.intent_id = $2
-               AND capability.step = 'push_owned_branch' AND receipt.outcome = 'succeeded'`,
+               AND capability.step = 'push_owned_branch'
+               AND (receipt.outcome = 'succeeded' OR reconciliation.observation->>'kind' = 'present')`,
             [command.principal.organizationId, row.intent_id]);
           if (pushed.rows.length === 0) return { kind: "unavailable" as const,
             reason: "owned_branch_not_pushed" };
@@ -338,6 +342,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
         // write did not happen.  The only retry gate is a separately persisted
         // authoritative reconciliation observation.  This also makes the
         // begin-without-receipt crash boundary fail closed.
+        if (prior.rows[0] && priorObservation?.kind === "present") {
+          return { kind: "unavailable" as const, reason: "operation_already_settled" };
+        }
         if (prior.rows[0] && priorObservation?.kind !== "absent") {
           return { kind: "unavailable" as const, reason: prior.rows[0].begun_at
             ? "reconciliation_required" : "capability_nonrenewable" };
@@ -384,6 +391,38 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
     > {
       return withPostgresTransaction(input.pool, async (client) => {
         const now = (await client.query<{ now: Date }>("SELECT CURRENT_TIMESTAMP AS now")).rows[0]!.now;
+        // A persisted begin is an external-effect boundary.  Recovery below is
+        // observation-only, so it deliberately does not reuse the issuance
+        // gates (intent expiry, Run terminality, lease, or original generation).
+        // The currently authenticated paired Runner must still be the same
+        // Runner identity; a rotated credential generation is allowed solely
+        // to observe this immutable original operation.
+        const recovery = await client.query<{ capability: unknown }>(
+          `SELECT capability.capability
+           FROM cp_publication_capability capability
+           JOIN cp_publication_intent intent ON intent.organization_id=capability.organization_id
+             AND intent.intent_id=capability.intent_id
+           JOIN cp_publication_begin begin ON begin.organization_id=capability.organization_id
+             AND begin.capability_id=capability.capability_id
+           JOIN cp_runner runner ON runner.organization_id=intent.organization_id
+             AND runner.runner_id=intent.runner_id
+           LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id=capability.organization_id
+             AND receipt.capability_id=capability.capability_id
+           LEFT JOIN cp_publication_reconciliation reconciliation
+             ON reconciliation.organization_id=capability.organization_id
+            AND reconciliation.capability_id=capability.capability_id
+           WHERE capability.organization_id=$1 AND intent.runner_id=$2
+             AND runner.credential_generation=$3
+             AND COALESCE(reconciliation.observation->>'kind','') <> 'absent'
+             AND COALESCE(receipt.outcome <> 'succeeded', true)
+             AND COALESCE(reconciliation.observation->>'kind' <> 'present', true)
+           ORDER BY capability.issued_at ASC, capability.capability_id ASC
+           FOR UPDATE OF capability,intent,runner SKIP LOCKED LIMIT 1`,
+          [command.principal.organizationId, command.principal.runnerId,
+            command.principal.credentialGeneration],
+        );
+        if (recovery.rows[0]) return { kind: "reconciliation_pending" as const,
+          capability: PublicationOperationCapabilityV1Schema.parse(recovery.rows[0].capability) };
         const selected = await client.query<any>(
           `SELECT intent.*, attempt.fencing_token_digest, attempt.state AS attempt_state,
              attempt.lease_expires_at, run.current_attempt_number, run.terminal_kind,
@@ -626,6 +665,21 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             command.operationId, observation, command.observedAt]);
       } catch (error) {
         if ((error as { code?: string }).code !== "23505") throw error;
+        const existing = await input.pool.query<{ reconciliation_id: string; operation_id: string;
+          observation: unknown; observed_at: Date }>(
+          `SELECT reconciliation_id,operation_id,observation,observed_at
+           FROM cp_publication_reconciliation
+           WHERE organization_id=$1 AND capability_id=$2`,
+          [command.principal.organizationId, command.capabilityId]);
+        const persisted = existing.rows[0];
+        if (!persisted || persisted.reconciliation_id !== command.reconciliationId
+          || persisted.operation_id !== command.operationId
+          || canonicalJsonStringify(persisted.observation) !== canonicalJsonStringify(observation)
+          || persisted.observed_at.toISOString() !== command.observedAt) return { kind: "conflict" as const };
+        const replay = PublicationOperationObservationV1Schema.parse(persisted.observation);
+        return replay.kind === "present" ? { kind: "settled" as const }
+          : replay.kind === "absent" ? { kind: "retry_authorized" as const }
+            : { kind: "outcome_unknown" as const };
       }
       return observation.kind === "present" ? { kind: "settled" as const }
         : observation.kind === "absent" ? { kind: "retry_authorized" as const }
