@@ -33,6 +33,23 @@ describe("Task 8 canonical timestamp contract", () => {
     expect(ProposalReadinessAssessmentSchema.safeParse({ ...assessment, assessedAt }).success)
       .toBe(expected);
   });
+
+  it("rejects malformed Candidate identities without throwing and accepts supplementary scalars", () => {
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => ProposalReadinessAssessmentSchema.safeParse({
+        ...assessment,
+        candidateId: malformed,
+      })).not.toThrow();
+      expect(ProposalReadinessAssessmentSchema.safeParse({
+        ...assessment,
+        candidateId: malformed,
+      }).success).toBe(false);
+    }
+    expect(ProposalReadinessAssessmentSchema.safeParse({
+      ...assessment,
+      candidateId: "candidate_😀",
+    }).success).toBe(true);
+  });
 });
 
 describe("Task 8 Unicode scalar contract", () => {

@@ -21,6 +21,10 @@ export const WellFormedUnicodeStringSchema = z.string().refine(isWellFormedUnico
   message: "Value must be a well-formed Unicode string.",
 });
 
+export const WellFormedNonEmptyUnicodeStringSchema = z.string().min(1).refine(isWellFormedUnicodeString, {
+  message: "Value must be a well-formed Unicode string.",
+});
+
 /** Unicode scalar lexicographic order, equivalent to UTF-8 `COLLATE \"C\"`. */
 export function compareWellFormedUnicodeStrings(left: string, right: string): number {
   if (!isWellFormedUnicodeString(left) || !isWellFormedUnicodeString(right)) {
@@ -120,7 +124,7 @@ export const ProposalReadinessReasonCodeSchema = z.enum([
 export const ProposalReadinessAssessmentSchema = z.object({
   state: ProposalReadinessStateSchema,
   accepted: z.boolean(),
-  candidateId: z.string().min(1).optional(),
+  candidateId: WellFormedNonEmptyUnicodeStringSchema.optional(),
   reasonCodes: z.array(ProposalReadinessReasonCodeSchema).min(1),
   assessedAt: CanonicalUtcMillisTimestampSchema,
 }).strict().superRefine((assessment, ctx) => {

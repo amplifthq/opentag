@@ -10,6 +10,7 @@ import {
   ProposalReadinessAssessmentSchema as ControlProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
   sortWellFormedUnicodeStrings,
+  WellFormedNonEmptyUnicodeStringSchema,
   WellFormedUnicodeStringSchema,
 } from "@opentag/control-protocol";
 import { isCredentialSafeDisplayResource, isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
@@ -21,13 +22,12 @@ export {
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionGateResultStateSchema,
   CompletionReasonCodeSchema,
+  compareWellFormedUnicodeStrings,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
 };
 
-export const WellFormedNonEmptyStringSchema = z.string().min(1).refine(
-  (value) => WellFormedUnicodeStringSchema.safeParse(value).success,
-  "Value must be a well-formed Unicode string.",
-);
+export const WellFormedNonEmptyStringSchema = WellFormedNonEmptyUnicodeStringSchema;
 
 export const ProviderSchema = z.string().min(1);
 export const SourceSchema = ProviderSchema;
@@ -969,7 +969,7 @@ export const CompletionGateResultSchema = z
     gateId: CompletionGateIdSchema,
     targetKey: CompletionTargetKeySchema.optional(),
     state: CompletionGateResultStateSchema,
-    evidenceIds: z.array(z.string().min(1)),
+    evidenceIds: z.array(WellFormedNonEmptyStringSchema),
     reasonCode: CompletionReasonCodeSchema,
     reason: z.string().min(1),
     evaluatedAt: CompletionTimestampSchema

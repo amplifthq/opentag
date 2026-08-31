@@ -149,6 +149,58 @@ function baseInput() {
 }
 
 describe("evaluateCompletion", () => {
+  const unicodeIds = ["e\u0301", "é", "😀", "A", "a", "ab"];
+  const canonicalUnicodeIds = ["A", "a", "ab", "e\u0301", "é", "😀"];
+
+  it("uses scalar identity order for hashing, replay, target selection, and evidence presentation", () => {
+    const artifacts = unicodeIds.map((id) => prArtifact({ id }));
+    const checks = unicodeIds.map((id) => evidence({
+      id,
+      kind: "source_control.required_checks",
+      predicate: "checks",
+      outcome: "passed",
+      observations: { test: "passed", build: "passed" },
+    }));
+    const input = {
+      ...baseInput(),
+      artifacts,
+      evidence: checks,
+      evaluatedAt: t3,
+    };
+    const forward = evaluateCompletion(input);
+    const reversed = evaluateCompletion({
+      ...input,
+      artifacts: [...artifacts].reverse(),
+      evidence: [...checks].reverse(),
+    });
+
+    expect(reversed.inputDigest).toBe(forward.inputDigest);
+    expect(reversed.id).toBe(forward.id);
+    expect(reversed).toEqual(forward);
+    expect(forward.targetBindings[0]?.artifactId).toBe("A");
+    expect(forward.gateResults.find((gate) => gate.gateId === "pr")?.evidenceIds)
+      .toEqual(canonicalUnicodeIds);
+  });
+
+  it("rejects malformed identities at the exported digest and proposal-readiness boundaries", () => {
+    for (const malformed of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00)]) {
+      expect(() => completionInputDigest({
+        ...baseInput(),
+        evidence: [evidence({ id: malformed, kind: "source_control.required_checks",
+          predicate: "checks", outcome: "passed" })],
+      })).toThrow(/well-formed Unicode/u);
+      expect(() => evaluateProposalReadiness({
+        executorConclusion: "success",
+        publicationMode: "proposal_only",
+        completionMode: "proposal_ready",
+        publicationPolicyDigest: proposalCandidate.publicationPolicyDigest,
+        candidate: { ...proposalCandidate, candidateId: malformed },
+        unresolvedMaterialOutcomes: [],
+        assessedAt: t3,
+      })).toThrow(/well-formed Unicode/u);
+    }
+  });
+
   it.each([
     ["run result id", (input: ReturnType<typeof baseInput>, malformed: string) => {
       input.runResults[0] = { ...input.runResults[0]!, runId: malformed };
@@ -842,6 +894,70 @@ describe("evaluateCompletion", () => {
 });
 
 describe("deriveWorkLoopView", () => {
+  it("orders material action and receipt identities by Unicode scalar value across permutations", () => {
+    const actionIds = ["e\u0301", "é", "😀", "A", "a", "ab"];
+    const expectedActionIds = ["A", "a", "ab", "e\u0301", "é", "😀"];
+    const contract: CompletionContract = {
+      ...strictContract(),
+      targetSelectors: [],
+      gates: actionIds.map((actionId) => ({
+        id: `gate:${actionId}`,
+        kind: "material_action" as const,
+        actionFamily: `family:${actionId}`,
+        requiredOutcome: "succeeded" as const,
+      })),
+    };
+    const receipts = actionIds.flatMap((actionId) => [
+      {
+        id: `${actionId}:e\u0301`, actionId, provider: "github", receiptRef: `${actionId}:1`,
+        outcome: "failed" as const, observedAt: t2, metadata: { actionFamily: `family:${actionId}` },
+      },
+      {
+        id: `${actionId}:😀`, actionId, provider: "github", receiptRef: `${actionId}:2`,
+        outcome: "unknown" as const, observedAt: t2, metadata: { actionFamily: `family:${actionId}` },
+      },
+    ]);
+    const render = (materialActionReceipts: typeof receipts) => {
+      const assessment = evaluateCompletion({
+        ...baseInput(), contract, artifacts: [], materialActionReceipts, evaluatedAt: t3,
+      });
+      return deriveWorkLoopView({
+        contract,
+        runResults: baseInput().runResults,
+        materialActionReceipts,
+        assessment,
+      }).nextAction.causes.filter((cause) => cause.kind === "material_action");
+    };
+    const forward = render(receipts);
+    const reversed = render([...receipts].reverse());
+
+    expect(reversed).toEqual(forward);
+    expect(forward.map((cause) => cause.kind === "material_action" ? cause.actionId : ""))
+      .toEqual(expectedActionIds);
+    for (const cause of forward) {
+      if (cause.kind !== "material_action") continue;
+      expect(cause.receiptIds).toEqual([`${cause.actionId}:e\u0301`, `${cause.actionId}:😀`]);
+    }
+  });
+
+  it("rejects malformed action identities before view ordering", () => {
+    const assessment = evaluateCompletion(baseInput());
+    const malformed = String.fromCharCode(0xd800);
+    expect(() => deriveWorkLoopView({
+      contract: strictContract(),
+      runResults: baseInput().runResults,
+      materialActionReceipts: [{
+        id: "receipt-valid",
+        actionId: malformed,
+        provider: "github",
+        receiptRef: "receipt:valid",
+        outcome: "unknown",
+        observedAt: t2,
+      }],
+      assessment,
+    })).toThrow(/well-formed Unicode/u);
+  });
+
   it("turns completion state into structured native action hints and explicit causes", () => {
     const pendingAssessment = evaluateCompletion(baseInput());
     const pending = deriveWorkLoopView({

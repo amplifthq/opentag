@@ -11,6 +11,7 @@ import {
   ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
   sortWellFormedUnicodeStrings,
+  WellFormedNonEmptyUnicodeStringSchema,
   WellFormedUnicodeStringSchema,
 } from "./completion.js";
 
@@ -26,6 +27,7 @@ export {
   ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
   sortWellFormedUnicodeStrings,
+  WellFormedNonEmptyUnicodeStringSchema,
   WellFormedUnicodeStringSchema,
 } from "./completion.js";
 export { canonicalJsonStringify } from "./canonical-json.js";

@@ -954,7 +954,21 @@ describe("Completion governance schemas", () => {
         targetBindings: [{ ...assessment.targetBindings[0]!, key: malformed }],
         gateResults: [{ ...assessment.gateResults[0], targetKey: malformed }],
       }).success).toBe(false);
+      expect(() => CompletionGateResultSchema.safeParse({
+        ...assessment.gateResults[0],
+        evidenceIds: [malformed],
+      })).not.toThrow();
+      expect(CompletionGateResultSchema.safeParse({
+        ...assessment.gateResults[0],
+        evidenceIds: [malformed],
+      }).success).toBe(false);
     }
+    expect(CompletionGateResultSchema.safeParse({
+      ...assessment.gateResults[0],
+      state: "passed",
+      reasonCode: "verification_passed",
+      evidenceIds: ["evidence_😀"],
+    }).success).toBe(true);
     expect(CompletionAssessmentSchema.parse({
       ...assessment,
       gateResults: [{

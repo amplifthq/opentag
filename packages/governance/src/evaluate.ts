@@ -3,12 +3,14 @@ import {
   CompletionAssessmentSchema,
   CanonicalUtcMillisTimestampSchema,
   compareCompletionGateIds,
+  compareWellFormedUnicodeStrings,
   compareRfc3339Timestamps,
   CompletionContractSchema,
   CompletionGateResultSchema,
   ProposalReadinessAssessmentSchema,
   PublicationCandidateSchema,
   reduceCompletionGateStates,
+  sortWellFormedUnicodeStrings,
   WellFormedNonEmptyStringSchema,
   type CompletionAssessment,
   type CompletionGate,
@@ -34,6 +36,24 @@ function assertWellFormedSortableIdentifiers(input: CompletionEvaluationInput): 
     ...input.materialActionReceipts.map((receipt) => receipt.id),
     ...input.waivers.map((waiver) => waiver.id),
     ...(input.blockingEscalations ?? []).map((escalation) => escalation.id),
+  ]) {
+    WellFormedNonEmptyStringSchema.parse(value);
+  }
+}
+
+function assertWellFormedViewIdentifiers(input: {
+  contract: CompletionEvaluationInput["contract"];
+  runResults: CompletionEvaluationInput["runResults"];
+  materialActionReceipts?: CompletionEvaluationInput["materialActionReceipts"];
+  blockingEscalations?: CompletionEvaluationInput["blockingEscalations"];
+  assessment: CompletionAssessment;
+}): void {
+  for (const value of [
+    ...input.contract.gates.map((gate) => gate.id),
+    ...input.runResults.map((result) => result.runId),
+    ...(input.materialActionReceipts ?? []).flatMap((receipt) => [receipt.id, receipt.actionId]),
+    ...(input.blockingEscalations ?? []).map((escalation) => escalation.id),
+    ...input.assessment.gateResults.flatMap((gate) => [gate.gateId, ...gate.evidenceIds]),
   ]) {
     WellFormedNonEmptyStringSchema.parse(value);
   }
@@ -83,32 +103,33 @@ export function evaluateProposalReadiness(input: ProposalReadinessEvaluationInpu
 function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, child]) => [key, canonicalize(child)])
-    );
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(sortWellFormedUnicodeStrings(Object.keys(record))
+      .map((key) => [key, canonicalize(record[key])]));
   }
   return value;
 }
 
 export function completionInputDigest(input: Omit<CompletionEvaluationInput, "lineage">): string {
+  assertWellFormedSortableIdentifiers(input);
   const waiverEvaluationTime = input.evaluatedAt ?? latestTimestamp(input);
   const ordered = {
     contract: input.contract,
-    runResults: [...input.runResults].sort((left, right) => left.runId.localeCompare(right.runId)),
-    artifacts: [...input.artifacts].sort((left, right) => left.id.localeCompare(right.id)),
-    evidence: [...input.evidence].sort((left, right) => left.id.localeCompare(right.id)),
-    materialActionReceipts: [...input.materialActionReceipts].sort((left, right) => left.id.localeCompare(right.id)),
-    waivers: [...input.waivers].sort((left, right) => left.id.localeCompare(right.id)),
-    blockingEscalations: [...(input.blockingEscalations ?? [])].sort((left, right) => left.id.localeCompare(right.id)),
+    runResults: [...input.runResults].sort((left, right) => compareWellFormedUnicodeStrings(left.runId, right.runId)),
+    artifacts: [...input.artifacts].sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id)),
+    evidence: [...input.evidence].sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id)),
+    materialActionReceipts: [...input.materialActionReceipts]
+      .sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id)),
+    waivers: [...input.waivers].sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id)),
+    blockingEscalations: [...(input.blockingEscalations ?? [])]
+      .sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id)),
     waiverValidity: [...input.waivers]
       .filter((waiver) => Boolean(waiver.expiresAt))
       .map((waiver) => ({
         id: waiver.id,
         active: compareRfc3339Timestamps(waiver.expiresAt!, waiverEvaluationTime) > 0
       }))
-      .sort((left, right) => left.id.localeCompare(right.id))
+      .sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id))
   };
   return `sha256:${createHash("sha256").update(JSON.stringify(canonicalize(ordered))).digest("hex")}`;
 }
@@ -229,7 +250,8 @@ function resolvedTargets(input: CompletionEvaluationInput): {
   const bindings: ResolvedCompletionTarget[] = [];
   const ambiguousKeys = new Set<string>();
   for (const selector of input.contract.targetSelectors) {
-    const candidates = [...(artifactsByTarget.get(selector.key) ?? [])].sort((left, right) => left.id.localeCompare(right.id));
+    const candidates = [...(artifactsByTarget.get(selector.key) ?? [])]
+      .sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id));
     const identities = new Map<string, CompletionArtifact[]>();
     for (const artifact of candidates) {
       const identity = JSON.stringify([artifact.target?.provider, artifact.target?.resourceRef, artifact.target?.resourceVersion]);
@@ -339,7 +361,7 @@ function evaluateGate(
     if (!target || matching.length < gate.minimum) {
       return result({ gateId: gate.id, targetKey: gate.targetKey, state: "missing", evidenceIds: [], reasonCode: "artifact_missing", reason: `Missing ${gate.artifactKind} artifact for the current delivery target.` }, evaluatedAt);
     }
-    return result({ gateId: gate.id, targetKey: gate.targetKey, state: "passed", evidenceIds: matching.map((artifact) => artifact.id).sort(), reasonCode: "artifact_requirement_satisfied", reason: `${matching.length} matching ${gate.artifactKind} artifact(s) recorded.` }, evaluatedAt);
+    return result({ gateId: gate.id, targetKey: gate.targetKey, state: "passed", evidenceIds: sortWellFormedUnicodeStrings(matching.map((artifact) => artifact.id)), reasonCode: "artifact_requirement_satisfied", reason: `${matching.length} matching ${gate.artifactKind} artifact(s) recorded.` }, evaluatedAt);
   }
   if (gate.kind === "verification") {
     if (!target) {
@@ -348,22 +370,22 @@ function evaluateGate(
     const matching = targetEvidence(input.evidence, target, gate.evidenceKind);
     if (matching.length === 0) {
       const stale = staleTargetEvidence(input.evidence, target, gate.evidenceKind);
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "missing", evidenceIds: stale.map((item) => item.id).sort(), reasonCode: stale.length > 0 ? "verification_stale" : "verification_missing", reason: stale.length > 0 ? "Verification exists only for a different resource version." : "Required verification evidence has not arrived." }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "missing", evidenceIds: sortWellFormedUnicodeStrings(stale.map((item) => item.id)), reasonCode: stale.length > 0 ? "verification_stale" : "verification_missing", reason: stale.length > 0 ? "Verification exists only for a different resource version." : "Required verification evidence has not arrived." }, evaluatedAt);
     }
     const authoritative = authoritativeEvidence(matching);
     if (authoritative.conflicted) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: authoritative.facts.map((item) => item.id).sort(), reasonCode: "verification_assurance_insufficient", reason: "Equally current authoritative verification observations conflict." }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: sortWellFormedUnicodeStrings(authoritative.facts.map((item) => item.id)), reasonCode: "verification_assurance_insufficient", reason: "Equally current authoritative verification observations conflict." }, evaluatedAt);
     }
     const assured = authoritative.facts.filter((item) => assuranceAccepted(item.assurance, gate.minimumAssurance));
     if (assured.length === 0) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: authoritative.facts.map((item) => item.id).sort(), reasonCode: "verification_assurance_insufficient", reason: `Verification requires ${gate.minimumAssurance} evidence.` }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: sortWellFormedUnicodeStrings(authoritative.facts.map((item) => item.id)), reasonCode: "verification_assurance_insufficient", reason: `Verification requires ${gate.minimumAssurance} evidence.` }, evaluatedAt);
     }
     const requiredObservationsPassed = (item: CompletionEvidenceFact) => (gate.requiredObservations ?? []).every(
       (name) => item.claim.observations?.[name] === "passed"
     );
     const passed = assured.find((item) => item.claim.outcome === gate.requiredOutcome && requiredObservationsPassed(item));
     if (!passed) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "failed", evidenceIds: assured.map((item) => item.id).sort(), reasonCode: "verification_failed", reason: "Verified evidence does not satisfy the required outcome and observations." }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "failed", evidenceIds: sortWellFormedUnicodeStrings(assured.map((item) => item.id)), reasonCode: "verification_failed", reason: "Verified evidence does not satisfy the required outcome and observations." }, evaluatedAt);
     }
     return result({ gateId: gate.id, targetKey: gate.targetKey, state: "passed", evidenceIds: [passed.id], reasonCode: "verification_passed", reason: "Required verification passed for the current resource version." }, evaluatedAt);
   }
@@ -377,26 +399,26 @@ function evaluateGate(
     const matching = targetEvidence(input.evidence, target).filter((item) => item.claim.predicate === "state");
     if (matching.length === 0) {
       const stale = staleTargetEvidence(input.evidence, target).filter((item) => item.claim.predicate === "state");
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "missing", evidenceIds: stale.map((item) => item.id).sort(), reasonCode: stale.length > 0 ? "external_state_stale" : "external_state_missing", reason: stale.length > 0 ? "External state exists only for a different resource version." : "Required external state evidence has not arrived." }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "missing", evidenceIds: sortWellFormedUnicodeStrings(stale.map((item) => item.id)), reasonCode: stale.length > 0 ? "external_state_stale" : "external_state_missing", reason: stale.length > 0 ? "External state exists only for a different resource version." : "Required external state evidence has not arrived." }, evaluatedAt);
     }
     const authoritative = authoritativeEvidence(matching);
     if (authoritative.conflicted) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: authoritative.facts.map((item) => item.id).sort(), reasonCode: "external_state_assurance_insufficient", reason: "Equally current authoritative external-state observations conflict." }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: sortWellFormedUnicodeStrings(authoritative.facts.map((item) => item.id)), reasonCode: "external_state_assurance_insufficient", reason: "Equally current authoritative external-state observations conflict." }, evaluatedAt);
     }
     const assured = authoritative.facts.filter((item) => assuranceAccepted(item.assurance, gate.minimumAssurance));
     if (assured.length === 0) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: authoritative.facts.map((item) => item.id).sort(), reasonCode: "external_state_assurance_insufficient", reason: `External state requires ${gate.minimumAssurance} evidence.` }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "unknown", evidenceIds: sortWellFormedUnicodeStrings(authoritative.facts.map((item) => item.id)), reasonCode: "external_state_assurance_insufficient", reason: `External state requires ${gate.minimumAssurance} evidence.` }, evaluatedAt);
     }
     const satisfied = assured.find((item) => item.claim.outcome === gate.requiredState);
     if (!satisfied) {
-      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "failed", evidenceIds: assured.map((item) => item.id).sort(), reasonCode: "external_state_mismatch", reason: `Verified external state is not ${gate.requiredState}.` }, evaluatedAt);
+      return result({ gateId: gate.id, targetKey: gate.targetKey, state: "failed", evidenceIds: sortWellFormedUnicodeStrings(assured.map((item) => item.id)), reasonCode: "external_state_mismatch", reason: `Verified external state is not ${gate.requiredState}.` }, evaluatedAt);
     }
     return result({ gateId: gate.id, targetKey: gate.targetKey, state: "passed", evidenceIds: [satisfied.id], reasonCode: "external_state_satisfied", reason: `Verified external state is ${gate.requiredState}.` }, evaluatedAt);
   }
   if (gate.kind === "material_action") {
     const receipts = input.materialActionReceipts.filter((receipt) => receipt.metadata?.["actionFamily"] === gate.actionFamily);
     const current = currentReceipt(receipts);
-    if (current.conflicted) return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "unknown", evidenceIds: current.receipts.map((receipt) => receipt.id).sort(), reasonCode: "material_action_unknown", reason: "Equally current material action receipts conflict and require reconciliation." }, evaluatedAt);
+    if (current.conflicted) return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "unknown", evidenceIds: sortWellFormedUnicodeStrings(current.receipts.map((receipt) => receipt.id)), reasonCode: "material_action_unknown", reason: "Equally current material action receipts conflict and require reconciliation." }, evaluatedAt);
     const succeeded = current.receipts.find((receipt) => receipt.outcome === gate.requiredOutcome);
     if (succeeded) return result({ gateId: gate.id, ...(gate.targetKey ? { targetKey: gate.targetKey } : {}), state: "passed", evidenceIds: [succeeded.id], reasonCode: "material_action_succeeded", reason: "The required material action has a succeeded receipt." }, evaluatedAt);
     const unknown = current.receipts.find((receipt) => receipt.outcome === "unknown");
@@ -565,6 +587,7 @@ export function deriveWorkLoopView(input: {
   blockingEscalations?: CompletionEvaluationInput["blockingEscalations"];
   assessment: CompletionAssessment;
 }): WorkLoopView {
+  assertWellFormedViewIdentifiers(input);
   const latestRunResult = canonicalLatestRunResult(input.runResults);
   const latestResult = latestRunResult?.result;
   const execution = latestResult?.conclusion === "success"
@@ -591,7 +614,7 @@ export function deriveWorkLoopView(input: {
     }));
   const activeEscalations = [...(input.blockingEscalations ?? [])]
     .filter((escalation) => escalation.blocking && (escalation.state === "open" || escalation.state === "acknowledged"))
-    .sort((left, right) => left.id.localeCompare(right.id));
+    .sort((left, right) => compareWellFormedUnicodeStrings(left.id, right.id));
   const escalationCauses: WorkLoopCause[] = activeEscalations.map((escalation) => ({
     kind: "human_escalation",
     escalationId: escalation.id,
@@ -612,12 +635,12 @@ export function deriveWorkLoopView(input: {
         kind: "material_action",
         actionId: receipt.actionId,
         outcome: current?.outcome === "unknown" || outcome === "unknown" ? "unknown" : "failed",
-        receiptIds: [...new Set([...(current?.receiptIds ?? []), receipt.id])].sort()
+        receiptIds: sortWellFormedUnicodeStrings([...new Set([...(current?.receiptIds ?? []), receipt.id])])
       });
     }
   }
   const materialActionCauses: WorkLoopCause[] = [...materialActionCausesById.values()]
-    .sort((left, right) => left.actionId.localeCompare(right.actionId));
+    .sort((left, right) => compareWellFormedUnicodeStrings(left.actionId, right.actionId));
   const runCauses: WorkLoopCause[] = latestRunResult && latestRunResult.result.conclusion !== "success"
     ? [{ kind: "run", runId: latestRunResult.runId, conclusion: latestRunResult.result.conclusion }]
     : [];
