@@ -54,7 +54,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const run = await fixture.pool.query("SELECT projection_revision FROM cp_hosted_run WHERE run_id='run_projection'");
     expect(run.rows[0]).toEqual({ projection_revision: 3 });
     const jobs = await fixture.pool.query(`SELECT (payload->>'projectionRevision')::bigint revision
-      FROM cp_job WHERE job_kind='team-relay.project' ORDER BY revision`);
+      FROM cp_job WHERE job_kind='team-relay.project.v2' ORDER BY revision`);
     expect(jobs.rows).toEqual([{ revision: "1" }, { revision: "2" }, { revision: "3" }]);
   });
 
@@ -123,7 +123,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       [legacyJob.rows[0]!.job_id]);
     expect(migrated.rows[0]?.payload).toMatchObject({ deliveryIntentId: legacyIntent.sideEffectIntentId,
       deliveryRevision: 4, eventSequence: expect.any(Number) });
-    await fixture.pool.query(`UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'
+    await fixture.pool.query(`UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'
       AND job_id<>$1`,[legacyJob.rows[0]!.job_id]);
     const projected: any[]=[];
     const projectionRepository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
@@ -142,7 +142,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>queueNow},
       leaseDurationMs:30_000,tokenFactory:()=>"legacy-job-lease"});
     await expect(runOneJob({queue,workerId:"legacy-worker",handlers:{
-      "team-relay.project":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
+      "team-relay.project.v2":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
       clock:{now:()=>queueNow}})).resolves.toEqual({kind:"settled",jobId:legacyJob.rows[0]!.job_id});
     expect(projected).toHaveLength(1);
     expect(projected[0]?.intent.projectionEventSequence).toBe(migrated.rows[0]?.payload.eventSequence);
@@ -168,7 +168,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     [nextIntent.sideEffectIntentId]);
     expect(newEvent.rows).toEqual([{event_sequence:historicalMax.rows[0]!.maximum+1}]);
     const newJobs=await fixture.pool.query<{count:number}>(`SELECT count(*)::int count FROM cp_job
-      WHERE job_kind='team-relay.project' AND payload->>'deliveryIntentId'=$1
+      WHERE job_kind='team-relay.project.v2' AND payload->>'deliveryIntentId'=$1
         AND (payload->>'eventSequence')::integer=$2`,[nextIntent.sideEffectIntentId,newEvent.rows[0]!.event_sequence]);
     expect(newJobs.rows).toEqual([{count:1}]);
   });
@@ -239,6 +239,42 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       .resolves.toEqual({outcome:"none"});
   });
 
+  it("blocks create when an accepted anchor lacks external resource identity",async()=>{
+    await insertRun();const requests:any[]=[];
+    const anchor=DeliveryIntentV2Schema.parse({contractVersion:2,organizationId:"org_projection",
+      sideEffectIntentId:"intent_anchor_without_resource",causalId:"run_projection",intentKind:"delivery",
+      operation:"create",deliveryKind:"message",presentationDigest:digest("anchor-without-resource"),
+      projectionPurpose:"anchor_create",provenance:{kind:"business",repositoryIdentityDigest:digest("repo"),
+        runId:"run_projection",authorityLineageDigest:digest("authority")},providerBinding:{bindingKind:"established",
+        providerId:"slack",providerInstanceId:"A1",providerPrincipalDigest:digest("principal"),
+        principalAssurance:"provider_verified",providerConfigGeneration:1,
+        providerConfigGenerationDigest:digest("generation"),lifecycle:"active",bindingDigest:digest("binding")},
+      targetDigest:digest("target"),authorityKind:"run_authority",authoritySnapshotDigest:digest("snapshot"),
+      evidencePolicy:"local_audit",idempotencyKey:"anchor-without-resource",statusMessageId:"run_projection:status",
+      scope:{kind:"local_repository",id:"repo"},createdAt:now.toISOString(),initialAttemptSequence:1});
+    const repository=createPostgresDeliveryRepository({pool:fixture.pool,owner,
+      leaseOwner:"resource-less-anchor",leaseSeconds:30,now:()=>now});
+    await repository.recordIntent(anchor,{envelopeVersion:1,providerRequest:{operation:{kind:"create_message",
+      channelId:"C1",threadTs:"1700000000.1"}},phase:"received",
+      frozenDeadline:new Date(now.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
+        intent:anchor,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
+          providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+          providerConfigGenerationDigest:digest("generation"),...owner}})});
+    const claim=(await repository.claimNext())!;const renewed=(await repository.renewLease(claim))!;
+    const begun=(await repository.markBegin({...renewed,installationBeginMarkerId:"resource-less-install",
+      installationBeginMarkerDigest:digest("resource-less-marker"),scopeBeginMarkerId:"resource-less-scope",
+      scopeBeginMarkerDigest:digest("resource-less-marker")}))!;
+    await repository.settleOrReadTerminal({...begun,outcome:"accepted",
+      evidenceDigest:digest("resource-less-evidence")});
+    const service=createTeamRelayProjectionService({pool:fixture.pool,hosted:{inspect:async()=>({state:"queued",
+      canonicalStatus:"queued",status:"waiting_for_runner",queueClaimDeadline:new Date(now.getTime()+300_000).toISOString(),
+      outcome:null,terminalKind:null,terminalReason:null})} as any,producer:{async enqueue(value){requests.push(value);}},
+      clock:{now:()=>new Date(now.getTime()+1)}});
+    await expect(service.projectRun({organizationId:"org_projection",runId:"run_projection"}))
+      .resolves.toEqual({kind:"anchor_ambiguous"});
+    expect(requests).toEqual([]);
+  });
+
   it("creates one Slack anchor and uses update_message for later projections", async () => {
     await insertRun();
     const requests: any[] = [];
@@ -292,7 +328,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       organizationId:external.organizationId,providerId:"slack",providerInstanceId:"A1",
       providerBindingDigest:digest("binding"),providerConfigGeneration:1,
       providerConfigGenerationDigest:digest("generation"),...owner}})};
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
     await repository.recordIntent(external,externalPayload);
     const externalClaim=(await repository.claimNext())!;
     const externalRenewed=(await repository.renewLease(externalClaim))!;
@@ -319,7 +355,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>eventClock},
       leaseDurationMs:30_000,tokenFactory:()=>"event-job-lease"});
     await expect(runOneJob({queue,workerId:"event-worker",handlers:{
-      "team-relay.project":createTeamRelayProjectionJobHandler(eventService)},retryDelayMs:1000,
+      "team-relay.project.v2":createTeamRelayProjectionJobHandler(eventService)},retryDelayMs:1000,
       clock:{now:()=>eventClock}})).resolves.toMatchObject({kind:"settled"});
     expect(requests[1]?.intent.projectionRevision).toBe(2);
     expect(requests[1]?.intent.projectionEventSequence).toBe(event.rows[0]!.event_sequence);
@@ -472,12 +508,12 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await fixture.pool.query(`INSERT INTO cp_projection_deferred_revision(organization_id,run_id,
       projection_revision,anchor_intent_id,state,created_at)
       VALUES('org_projection','run_projection',2,'unrelated_anchor','pending',$1)`,[now]);
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
     await repository.settleOrReadTerminal({ ...begun,outcome:"accepted",
       evidenceDigest:digest("accepted"),externalResourceId:"171.002",
       externalResourceDigest:digest("resource") });
     const deliveryJobs=await fixture.pool.query(`SELECT job_id FROM cp_job
-      WHERE state='pending' AND job_kind='team-relay.project'`);
+      WHERE state='pending' AND job_kind='team-relay.project.v2'`);
     expect(deliveryJobs.rows).toHaveLength(1);
     expect(deliveryJobs.rows[0]?.job_id).toMatch(/^team-relay-anchor-wake:/u);
     expect((await fixture.pool.query(`SELECT projection_revision,state FROM cp_projection_deferred_revision
@@ -487,11 +523,11 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     const wakeQueue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>wakeClock},
       leaseDurationMs:30_000,tokenFactory:()=>"wake-job-lease"});
     await expect(runOneJob({queue:wakeQueue,workerId:"wake-worker",handlers:{
-      "team-relay.project":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
+      "team-relay.project.v2":createTeamRelayProjectionJobHandler(service)},retryDelayMs:1000,
       clock:{now:()=>wakeClock}})).resolves.toMatchObject({kind:"settled"});
     expect(requests).toHaveLength(1);
     expect(requests[0]?.intent.operation).toBe("update");
-    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project'");
+    await fixture.pool.query("UPDATE cp_job SET state='succeeded' WHERE job_kind='team-relay.project.v2'");
     const selfIntent=DeliveryIntentV2Schema.parse({...baseline,
       sideEffectIntentId:"intent_projection_self",idempotencyKey:"projection_self",
       operation:"update",projectionPurpose:"anchor_update",presentationDigest:digest("self"),
@@ -509,7 +545,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     await repository.settleOrReadTerminal({...selfBegun,outcome:"accepted",evidenceDigest:digest("self-evidence"),
       externalResourceId:"171.002",externalResourceDigest:digest("self-resource")});
     expect((await fixture.pool.query(`SELECT count(*)::int count FROM cp_job
-      WHERE state='pending' AND job_kind='team-relay.project'`)).rows[0]).toEqual({count:0});
+      WHERE state='pending' AND job_kind='team-relay.project.v2'`)).rows[0]).toEqual({count:0});
     const {projectionRevision:_uncertainRevision,...uncertainBase}=baseline;
     const uncertain=DeliveryIntentV2Schema.parse({...uncertainBase,
       sideEffectIntentId:"uncertain_attention",idempotencyKey:"uncertain_attention",
@@ -678,6 +714,12 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     ["same-name wrong function arguments", `DROP FUNCTION cp_enqueue_team_relay_projection(text,text,integer);
       CREATE FUNCTION cp_enqueue_team_relay_projection(text,text) RETURNS void LANGUAGE plpgsql
       AS $$ BEGIN RETURN; END $$`],
+    ["no-op hosted run before body", `CREATE OR REPLACE FUNCTION cp_hosted_run_projection_before()
+      RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`],
+    ["wrong event sequence default", `ALTER TABLE cp_provider_delivery_intent
+      ALTER COLUMN projection_event_sequence SET DEFAULT 99`],
+    ["extra enabled projection trigger", `CREATE TRIGGER cp_projection_extra_trigger
+      AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_projection_after()`],
   ])("fails readiness for %s",async(_label,sql)=>{
     await fixture.pool.query(sql);
     await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({

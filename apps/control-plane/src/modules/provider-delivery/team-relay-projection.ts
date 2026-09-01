@@ -19,7 +19,8 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     generation: number }): Promise<any[]> } }) {
   const service = { async projectRun(command: { organizationId: string; runId: string;
     projectionRevision?: number; includeControls?: boolean;
-    deliveryEvent?: { intentId:string; revision:number; eventSequence:number } }) {
+    deliveryEvent?: { intentId:string; revision:number; eventSequence:number;
+      state:"accepted"|"rejected"|"outcome_unknown"|"attention" } }) {
     const run = await input.hosted.inspect(command); if (!run) return { kind: "missing" as const };
     const current = await input.pool.query<{ current_attempt_number: number; projection_revision: string }>(
       "SELECT current_attempt_number,projection_revision::text FROM cp_hosted_run WHERE organization_id=$1 AND run_id=$2",
@@ -64,9 +65,11 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
         WHERE watermark.organization_id=$1 AND watermark.run_id=$2 AND watermark.intent_id=$3
           AND watermark.delivery_revision=$4 AND watermark.projection_revision=$5
           AND watermark.event_sequence=$6
+          AND watermark.delivery_state=$7
           AND watermark.delivery_state IN ('accepted','rejected','outcome_unknown','attention')`,
       [command.organizationId,command.runId,command.deliveryEvent.intentId,
-        command.deliveryEvent.revision,command.projectionRevision,command.deliveryEvent.eventSequence]);
+        command.deliveryEvent.revision,command.projectionRevision,command.deliveryEvent.eventSequence,
+        command.deliveryEvent.state]);
       const exact=event.rows[0]; if(!exact)return {kind:"delivery_event_stale" as const};
       if(!["accepted","rejected","outcome_unknown","attention"].includes(exact.state))
         return {kind:"delivery_event_stale" as const};
@@ -148,12 +151,15 @@ export function createTeamRelayProjectionJobHandler(service:ReturnType<typeof cr
   return async(job:{payload:unknown})=>{
     const payload=z.object({organizationId:z.string().min(1),runId:z.string().min(1),
       projectionRevision:z.number().int().positive(),deliveryIntentId:z.string().min(1).optional(),
-      deliveryRevision:z.number().int().positive().optional(),eventSequence:z.number().int().positive().optional()
+      deliveryRevision:z.number().int().positive().optional(),eventSequence:z.number().int().positive().optional(),
+      deliveryState:z.enum(["accepted","rejected","outcome_unknown","attention"]).optional()
     }).strict().superRefine((value,context)=>{
-      if([value.deliveryIntentId,value.deliveryRevision,value.eventSequence].filter((item)=>item!==undefined).length%3!==0)
+      if([value.deliveryIntentId,value.deliveryRevision,value.eventSequence,value.deliveryState]
+        .filter((item)=>item!==undefined).length%4!==0)
         context.addIssue({code:"custom",message:"delivery event identity must be complete"});
     }).parse(job.payload);
     return service.projectRun({...payload,...(payload.deliveryIntentId?{deliveryEvent:{
-      intentId:payload.deliveryIntentId,revision:payload.deliveryRevision!,eventSequence:payload.eventSequence!}}:{})});
+      intentId:payload.deliveryIntentId,revision:payload.deliveryRevision!,eventSequence:payload.eventSequence!,
+      state:payload.deliveryState!}}:{})});
   };
 }

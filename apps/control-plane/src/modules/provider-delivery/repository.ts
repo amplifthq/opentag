@@ -51,7 +51,7 @@ export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
       AND COALESCE(intent->'providerBinding'->>'connectionId','')=COALESCE($20,'')
       AND COALESCE(intent->'providerBinding'->>'connectionIdDigest','')=COALESCE($21,'')
       AND state IN ('pending','leased','provider_io_begun','outcome_unknown','attention','accepted')
-      ORDER BY created_at,intent_id LIMIT 3`,[input.organizationId,input.runId,input.statusMessageId,
+      ORDER BY created_at,intent_id`,[input.organizationId,input.runId,input.statusMessageId,
     input.scopeKind,input.scopeId,input.targetDigest,input.providerId,input.providerInstanceId,
     input.providerBindingDigest,input.providerPrincipalDigest,input.principalAssurance,
     input.providerConfigGeneration,input.providerConfigGenerationDigest,input.runtimeOwnerId,
@@ -60,10 +60,15 @@ export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
     options.projectionPurpose??null]);
   const active=result.rows.find((row)=>row.state!=="accepted");
   if(active)return {outcome:"pending" as const,anchorIntentId:active.intent_id,state:active.state};
-  const accepted=result.rows.filter((row)=>row.state==="accepted"&&row.external_resource_id&&row.external_resource_digest);
-  return accepted.length===0?{outcome:"none" as const}:accepted.length>1?{outcome:"ambiguous" as const}
-    :{outcome:"exact" as const,anchorIntentId:accepted[0]!.intent_id,
-      externalResourceId:accepted[0]!.external_resource_id!,externalResourceDigest:accepted[0]!.external_resource_digest!};
+  const accepted=result.rows.filter((row)=>row.state==="accepted");
+  if(accepted.length===0)return {outcome:"none" as const};
+  if(accepted.some((row)=>!row.external_resource_id||!row.external_resource_digest))
+    return {outcome:"ambiguous" as const};
+  const tuples=new Map(accepted.map((row)=>[`${row.external_resource_id}\u0000${row.external_resource_digest}`,row]));
+  if(tuples.size!==1)return {outcome:"ambiguous" as const};
+  const exact=[...tuples.values()][0]!;
+  return {outcome:"exact" as const,anchorIntentId:exact.intent_id,
+    externalResourceId:exact.external_resource_id!,externalResourceDigest:exact.external_resource_digest!};
 }
 function payloadEnvelope(value: unknown, intent: DeliveryIntentV2, owner: RelayOwner): DeliveryPayloadEnvelope {
   if (!value || typeof value !== "object") throw new Error("delivery payload envelope invalid");

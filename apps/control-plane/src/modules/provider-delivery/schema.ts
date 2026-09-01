@@ -153,3 +153,10 @@ export const providerDeliveryTruthLocks=pgTable("cp_provider_delivery_truth_lock
   currentTruthKey:text("current_truth_key").primaryKey(),
   createdAt:timestamp("created_at",{withTimezone:true}).notNull().default(sql`clock_timestamp()`),
 });
+
+export const projectionJobV2Authority=pgTable("cp_projection_job_v2_authority",{
+  authorityVersion:integer("authority_version").primaryKey(),
+  activatedAt:timestamp("activated_at",{withTimezone:true}).notNull(),
+},(table)=>[
+  check("cp_projection_job_v2_authority_authority_version_check",sql`${table.authorityVersion}=2`),
+]);

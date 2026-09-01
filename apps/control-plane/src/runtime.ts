@@ -350,7 +350,7 @@ export function createControlPlaneRuntime(input: {
     "runner-readiness-retention": async (job: { organizationId: string | null }) =>
       runners.pruneExpiredReadiness(job.organizationId),
     "provider-delivery": async () => providerDeliveryWorker.processNext(),
-    "team-relay.project": createTeamRelayProjectionJobHandler(teamRelayProjection),
+    "team-relay.project.v2": createTeamRelayProjectionJobHandler(teamRelayProjection),
     ...(sourceContent ? createSourceContentJobHandlers(sourceContent) : {}),
   };
   const application = createControlPlaneApplication({
