@@ -594,9 +594,19 @@ export async function checkProjectionSchemaReadiness(
       AND to_regclass('cp_provider_delivery_truth_lock') IS NOT NULL
       AND to_regclass('cp_projection_job_v2_authority') IS NOT NULL
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_event_cursor')
+      AND (SELECT count(*)=8 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_delivery_watermark')
+      AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_deferred_revision')
+      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_provider_delivery_truth_lock')
+      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_job_v2_authority')
+      AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_event_cursor'
-        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
-          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO')
+        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
           OR (column_name='current_sequence' AND data_type='integer' AND is_nullable='NO'
             AND column_default='0')))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
@@ -679,6 +689,8 @@ export async function checkProjectionSchemaReadiness(
         AND conname='cp_projection_job_v2_authority_authority_version_check' AND contype='c'
         AND convalidated AND NOT connoinherit
         AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')='CHECK((authority_version=2))')
+      AND (SELECT count(*)=1 AND min(authority_version)=2 AND max(authority_version)=2
+        FROM cp_projection_job_v2_authority)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_decisions_check' AND convalidated
         AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
@@ -722,6 +734,27 @@ export async function checkProjectionSchemaReadiness(
         WHERE namespace.nspname=current_schema() AND function_row.proname='cp_insert_team_relay_v2_job'
           AND function_row.pronargs=3 AND language_row.lanname='plpgsql'
           AND pg_get_function_result(function_row.oid)='void')
+      AND NOT EXISTS(SELECT 1 FROM (VALUES
+        ('cp_hosted_run_projection_before',0,''::text,'trigger'),
+        ('cp_hosted_run_projection_after',0,'','trigger'),
+        ('cp_related_projection_after',0,'','trigger'),
+        ('cp_enqueue_team_relay_projection',3,'25 25 23','void'),
+        ('cp_delivery_projection_after',0,'','trigger'),
+        ('cp_insert_team_relay_v2_job',3,'25 25 3802','void'),
+        ('cp_provider_delivery_guard',0,'','trigger'),
+        ('cp_provider_delivery_delete_guard',0,'','trigger'),
+        ('cp_reject_projection_job_v2_authority_mutation',0,'','trigger')
+      ) expected(name,nargs,argtypes,result_type)
+      LEFT JOIN pg_proc function_row ON function_row.pronamespace=current_schema()::regnamespace
+        AND function_row.proname=expected.name
+      LEFT JOIN pg_language language_row ON language_row.oid=function_row.prolang
+      WHERE function_row.oid IS NULL OR function_row.pronargs<>expected.nargs
+        OR function_row.proargtypes::text<>expected.argtypes
+        OR pg_get_function_result(function_row.oid)<>expected.result_type
+        OR language_row.lanname<>'plpgsql' OR function_row.provolatile<>'v'
+        OR function_row.proisstrict OR function_row.prosecdef OR function_row.proleakproof
+        OR function_row.proparallel<>'u' OR function_row.proconfig IS NOT NULL
+        OR function_row.proacl IS NOT NULL OR pg_get_userbyid(function_row.proowner)<>current_user)
       AND EXISTS(SELECT 1 FROM pg_proc function_row JOIN pg_namespace namespace ON namespace.oid=function_row.pronamespace
         JOIN pg_language language_row ON language_row.oid=function_row.prolang
         WHERE namespace.nspname=current_schema() AND function_row.proname='cp_delivery_projection_after'
@@ -759,13 +792,47 @@ export async function checkProjectionSchemaReadiness(
           AND trigger_row.tgname NOT IN ('cp_hosted_run_projection_before_trigger',
             'cp_hosted_run_projection_after_trigger','cp_permission_projection_trigger',
             'cp_candidate_projection_trigger','cp_publication_intent_projection_trigger',
-            'cp_delivery_projection_trigger')) AS ready,
+            'cp_delivery_projection_trigger','cp_projection_job_v2_authority_immutable'))
+      AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+        WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
+          AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
+            'cp_publication_candidate','cp_publication_intent','cp_provider_delivery_intent',
+            'cp_projection_event_cursor','cp_projection_delivery_watermark',
+            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock',
+            'cp_projection_job_v2_authority'])
+          AND (NOT ((relation.relname,trigger_row.tgname,trigger_row.tgtype,function_row.proname) IN (
+            ('cp_hosted_run','cp_hosted_run_frozen_admission_guard',19,'cp_hosted_run_frozen_admission_guard'),
+            ('cp_hosted_run','cp_hosted_run_projection_after_trigger',21,'cp_hosted_run_projection_after'),
+            ('cp_hosted_run','cp_hosted_run_projection_before_trigger',19,'cp_hosted_run_projection_before'),
+            ('cp_permission_request','cp_permission_projection_trigger',21,'cp_related_projection_after'),
+            ('cp_provider_delivery_intent','cp_delivery_projection_trigger',17,'cp_delivery_projection_after'),
+            ('cp_provider_delivery_intent','cp_provider_delivery_delete_guard',11,'cp_provider_delivery_delete_guard'),
+            ('cp_provider_delivery_intent','cp_provider_delivery_guard',19,'cp_provider_delivery_guard'),
+            ('cp_publication_candidate','cp_candidate_projection_trigger',21,'cp_related_projection_after'),
+            ('cp_publication_candidate','cp_publication_candidate_immutable',27,'cp_reject_publication_candidate_mutation'),
+            ('cp_publication_intent','cp_publication_intent_immutable',27,'cp_reject_publication_authority_mutation'),
+            ('cp_publication_intent','cp_publication_intent_projection_trigger',21,'cp_related_projection_after'),
+            ('cp_projection_job_v2_authority','cp_projection_job_v2_authority_immutable',27,
+              'cp_reject_projection_job_v2_authority_mutation')))
+          OR trigger_row.tgnargs<>0 OR trigger_row.tgqual IS NOT NULL
+          OR function_row.pronamespace<>current_schema()::regnamespace))
+      AND (SELECT count(*)=12 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
+          AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
+            'cp_publication_candidate','cp_publication_intent','cp_provider_delivery_intent',
+            'cp_projection_event_cursor','cp_projection_delivery_watermark',
+            'cp_projection_deferred_revision','cp_provider_delivery_truth_lock',
+            'cp_projection_job_v2_authority'])) AS ready,
       (SELECT jsonb_object_agg(proname,prosrc) FROM pg_proc
         WHERE pronamespace=current_schema()::regnamespace AND proname=ANY(ARRAY[
           'cp_hosted_run_projection_before','cp_hosted_run_projection_after',
           'cp_related_projection_after','cp_enqueue_team_relay_projection',
           'cp_delivery_projection_after','cp_insert_team_relay_v2_job',
-          'cp_provider_delivery_guard','cp_provider_delivery_delete_guard'])) AS function_bodies`);
+          'cp_provider_delivery_guard','cp_provider_delivery_delete_guard',
+          'cp_reject_projection_job_v2_authority_mutation'])) AS function_bodies`);
     const row=result.rows[0];
     const expectedBodies:Record<string,string>={
       cp_hosted_run_projection_before:"ce182dbbbc5b7e647d44cfc21743d251c9403617fffb4995add1f262ef3f0201",
@@ -773,9 +840,10 @@ export async function checkProjectionSchemaReadiness(
       cp_related_projection_after:"45df6d507d1d6a13538b119a53ce564a7a4d14752400d0847c62436cf9fb5edc",
       cp_enqueue_team_relay_projection:"a3c97f7dd4eebbc2ccc938a2c872d12bb6334fa85dcd87c10f8d76b4c1ca28f5",
       cp_delivery_projection_after:"6b6728815b61052622498226f1942cd74be0917267a07377b4fefa915f0c7ae7",
-      cp_insert_team_relay_v2_job:"2e27b17be2242f160c19c79aadfb664b801f7d189f9359ccdc241c3b232275ca",
+      cp_insert_team_relay_v2_job:"97b6cbed038516edf1a71ee7bf015b15fc9bbc784a48154dbeec1accec01f465",
       cp_provider_delivery_guard:"230836960c8ede6836e3bce2afc156b10fa6495b730b9d128561abea4e1f9627",
-      cp_provider_delivery_delete_guard:"e81aff8787906c110cdb1f222824bbec8ba939b8d4d6b4448a5e3e48c8909e7a"};
+      cp_provider_delivery_delete_guard:"e81aff8787906c110cdb1f222824bbec8ba939b8d4d6b4448a5e3e48c8909e7a",
+      cp_reject_projection_job_v2_authority_mutation:"fb41729b151f0f30c20ae06bde8890328b7e385af98945ff69f458a7547b0d67"};
     const exactBodies=row?.function_bodies!==null&&row?.function_bodies!==undefined
       &&Object.keys(row.function_bodies).length===Object.keys(expectedBodies).length
       &&Object.entries(expectedBodies).every(([name,digest])=>typeof row.function_bodies?.[name]==="string"

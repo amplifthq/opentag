@@ -189,7 +189,7 @@ export function createDurableJobQueue(input: {
         await client.query(
           `UPDATE cp_job
            SET state = 'succeeded', lease_owner = NULL, lease_token = NULL,
-               lease_expires_at = NULL, updated_at = $2
+               lease_expires_at = NULL, last_error_code = NULL, updated_at = $2
            WHERE job_id = $1`,
           [command.jobId, now],
         );

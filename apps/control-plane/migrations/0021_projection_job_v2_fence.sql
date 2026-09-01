@@ -6,10 +6,126 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+DO $$
+DECLARE legacy record; key_count integer; settlement_count integer;
+  watermark_matches integer; terminal_matches integer; expected_job_id text; expected_digest text;
+BEGIN
+  FOR legacy IN SELECT * FROM cp_job
+    WHERE job_kind='team-relay.project' AND state='pending' ORDER BY job_id FOR UPDATE
+  LOOP
+    SELECT count(*) INTO settlement_count FROM cp_job_settlement WHERE job_id=legacy.job_id;
+    IF legacy.attempt_count>=legacy.max_attempts OR legacy.max_attempts<=0
+      OR legacy.lease_owner IS NOT NULL OR legacy.lease_token IS NOT NULL
+      OR legacy.lease_expires_at IS NOT NULL OR settlement_count<>0
+      OR jsonb_typeof(legacy.payload)<>'object'
+      OR NOT (legacy.payload ?& ARRAY['organizationId','runId','projectionRevision'])
+      OR jsonb_typeof(legacy.payload->'organizationId')<>'string'
+      OR jsonb_typeof(legacy.payload->'runId')<>'string'
+      OR jsonb_typeof(legacy.payload->'projectionRevision')<>'number'
+      OR (legacy.payload->>'projectionRevision')::integer<=0
+      OR legacy.organization_id IS DISTINCT FROM legacy.payload->>'organizationId'
+      OR (legacy.attempt_count=0 AND legacy.last_error_code IS NOT NULL)
+      OR (legacy.attempt_count>0 AND legacy.last_error_code IS NULL)
+      OR (legacy.attempt_count>0 AND legacy.available_at<legacy.updated_at) THEN
+      RAISE EXCEPTION 'projection_v2_legacy_job_contract_invalid';
+    END IF;
+    SELECT count(*) INTO key_count FROM jsonb_object_keys(legacy.payload);
+    IF legacy.payload ?| ARRAY['deliveryIntentId','deliveryRevision','eventSequence','deliveryState'] THEN
+      IF key_count<>6 OR legacy.payload ? 'deliveryState'
+        OR NOT (legacy.payload ?& ARRAY['deliveryIntentId','deliveryRevision','eventSequence'])
+        OR jsonb_typeof(legacy.payload->'deliveryIntentId')<>'string'
+        OR jsonb_typeof(legacy.payload->'deliveryRevision')<>'number'
+        OR jsonb_typeof(legacy.payload->'eventSequence')<>'number'
+        OR (legacy.payload->>'deliveryRevision')::integer<=0
+        OR (legacy.payload->>'eventSequence')::integer<=0 THEN
+        RAISE EXCEPTION 'projection_v2_legacy_payload_invalid';
+      END IF;
+      IF legacy.job_id NOT IN (
+        'team-relay-delivery:'||(legacy.payload->>'organizationId')||':'||
+          (legacy.payload->>'runId')||':'||(legacy.payload->>'eventSequence'),
+        'team-relay-delivery:'||(legacy.payload->>'organizationId')||':'||
+          (legacy.payload->>'runId')||':'||(legacy.payload->>'deliveryIntentId')||':'||
+          (legacy.payload->>'deliveryRevision')) THEN
+        RAISE EXCEPTION 'projection_v2_legacy_job_identity_invalid';
+      END IF;
+      expected_job_id:=legacy.job_id;
+      expected_digest:=md5(expected_job_id);
+      SELECT count(*),count(*) FILTER(WHERE watermark.delivery_state IN
+        ('accepted','rejected','outcome_unknown','attention')) INTO watermark_matches,terminal_matches
+      FROM cp_projection_delivery_watermark watermark
+      WHERE watermark.organization_id=legacy.payload->>'organizationId'
+        AND watermark.run_id=legacy.payload->>'runId'
+        AND watermark.intent_id=legacy.payload->>'deliveryIntentId'
+        AND watermark.delivery_revision=(legacy.payload->>'deliveryRevision')::integer
+        AND watermark.projection_revision=(legacy.payload->>'projectionRevision')::integer
+        AND watermark.event_sequence=(legacy.payload->>'eventSequence')::integer;
+      IF watermark_matches<>1 THEN RAISE EXCEPTION 'projection_v2_legacy_event_ambiguous'; END IF;
+      IF terminal_matches=1 THEN
+        IF NOT EXISTS(SELECT 1 FROM cp_projection_delivery_watermark watermark
+          JOIN cp_provider_delivery_intent delivery ON delivery.organization_id=watermark.organization_id
+            AND delivery.run_id=watermark.run_id AND delivery.intent_id=watermark.intent_id
+            AND delivery.revision=watermark.delivery_revision AND delivery.state=watermark.delivery_state
+            AND delivery.projection_purpose='external'
+          WHERE watermark.organization_id=legacy.payload->>'organizationId'
+            AND watermark.run_id=legacy.payload->>'runId'
+            AND watermark.intent_id=legacy.payload->>'deliveryIntentId'
+            AND watermark.delivery_revision=(legacy.payload->>'deliveryRevision')::integer
+            AND watermark.projection_revision=(legacy.payload->>'projectionRevision')::integer
+            AND watermark.event_sequence=(legacy.payload->>'eventSequence')::integer) THEN
+          RAISE EXCEPTION 'projection_v2_legacy_provider_mismatch';
+        END IF;
+      ELSE
+        IF NOT EXISTS(SELECT 1 FROM cp_provider_delivery_intent delivery
+          WHERE delivery.organization_id=legacy.payload->>'organizationId'
+            AND delivery.run_id=legacy.payload->>'runId'
+            AND delivery.intent_id=legacy.payload->>'deliveryIntentId'
+            AND delivery.revision>=(legacy.payload->>'deliveryRevision')::integer
+            AND delivery.projection_purpose='external'
+            AND delivery.state IN ('accepted','rejected','outcome_unknown','attention')) THEN
+          RAISE EXCEPTION 'projection_v2_legacy_provider_mismatch';
+        END IF;
+      END IF;
+    ELSE
+      IF key_count<>3 THEN RAISE EXCEPTION 'projection_v2_legacy_payload_invalid'; END IF;
+      IF legacy.job_id LIKE 'team-relay-anchor-wake:%' THEN
+        expected_job_id:='team-relay-anchor-wake:'||(legacy.payload->>'organizationId')||':'||
+          (legacy.payload->>'runId')||':'||(legacy.payload->>'projectionRevision');
+        expected_digest:=md5(expected_job_id);
+        IF NOT EXISTS(SELECT 1 FROM cp_projection_deferred_revision deferred
+          WHERE deferred.organization_id=legacy.payload->>'organizationId'
+            AND deferred.run_id=legacy.payload->>'runId'
+            AND deferred.projection_revision=(legacy.payload->>'projectionRevision')::integer
+            AND deferred.state='woken') THEN
+          RAISE EXCEPTION 'projection_v2_legacy_deferred_missing';
+        END IF;
+      ELSE
+        expected_job_id:='team-relay:'||(legacy.payload->>'organizationId')||':'||
+          (legacy.payload->>'runId')||':'||(legacy.payload->>'projectionRevision');
+        expected_digest:=md5((legacy.payload->>'organizationId')||':'||
+          (legacy.payload->>'runId')||':'||(legacy.payload->>'projectionRevision'));
+      END IF;
+      IF NOT EXISTS(SELECT 1 FROM cp_hosted_run run
+        WHERE run.organization_id=legacy.payload->>'organizationId'
+          AND run.run_id=legacy.payload->>'runId'
+          AND run.projection_revision>=(legacy.payload->>'projectionRevision')::integer) THEN
+        RAISE EXCEPTION 'projection_v2_legacy_run_missing';
+      END IF;
+    END IF;
+    IF legacy.job_id<>expected_job_id OR legacy.request_digest<>expected_digest THEN
+      RAISE EXCEPTION 'projection_v2_legacy_job_identity_invalid';
+    END IF;
+  END LOOP;
+END $$;
+
 CREATE TABLE cp_projection_job_v2_authority(
   authority_version integer PRIMARY KEY CHECK(authority_version=2),
   activated_at timestamptz NOT NULL
 );
+CREATE FUNCTION cp_reject_projection_job_v2_authority_mutation() RETURNS trigger
+LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'projection_v2_authority_immutable'; END $$;
+CREATE TRIGGER cp_projection_job_v2_authority_immutable BEFORE UPDATE OR DELETE
+ON cp_projection_job_v2_authority FOR EACH ROW
+EXECUTE FUNCTION cp_reject_projection_job_v2_authority_mutation();
 INSERT INTO cp_projection_job_v2_authority VALUES(2,clock_timestamp());
 
 WITH quarantined AS (
@@ -85,6 +201,7 @@ END $$;
 CREATE FUNCTION cp_insert_team_relay_v2_job(p_job text,p_org text,p_payload jsonb)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE expected_digest text; existing cp_job%ROWTYPE; settlement_count integer;
+  settlement_token text; settlement_outcome jsonb;
 BEGIN
   expected_digest:=md5(p_job||':'||p_payload::text);
   INSERT INTO cp_job(job_id,organization_id,job_kind,payload,request_digest,state,available_at,
@@ -98,13 +215,32 @@ BEGIN
     OR existing.request_digest<>expected_digest THEN
     RAISE EXCEPTION 'projection_v2_job_identity_conflict';
   END IF;
-  SELECT count(*) INTO settlement_count FROM cp_job_settlement WHERE job_id=p_job;
-  IF (existing.state='pending' AND (existing.lease_owner IS NOT NULL OR existing.lease_token IS NOT NULL
-        OR existing.lease_expires_at IS NOT NULL OR settlement_count<>0))
-    OR (existing.state='claimed' AND (existing.lease_owner IS NULL OR existing.lease_token IS NULL
-        OR existing.lease_expires_at IS NULL OR settlement_count<>0))
-    OR (existing.state IN ('succeeded','failed') AND (existing.lease_owner IS NOT NULL
-        OR existing.lease_token IS NOT NULL OR existing.lease_expires_at IS NOT NULL OR settlement_count<>1)) THEN
+  SELECT count(*),min(lease_token),min(outcome::text)::jsonb INTO settlement_count,
+    settlement_token,settlement_outcome FROM cp_job_settlement WHERE job_id=p_job;
+  IF existing.state NOT IN ('pending','claimed','succeeded','failed')
+    OR existing.max_attempts<=0 OR existing.attempt_count<0
+    OR (existing.state='pending' AND (existing.attempt_count>=existing.max_attempts
+        OR existing.lease_owner IS NOT NULL OR existing.lease_token IS NOT NULL
+        OR existing.lease_expires_at IS NOT NULL OR settlement_count<>0
+        OR (existing.attempt_count=0 AND existing.last_error_code IS NOT NULL)
+        OR (existing.attempt_count>0 AND (existing.last_error_code IS NULL
+          OR existing.available_at<existing.updated_at))))
+    OR (existing.state='claimed' AND (existing.attempt_count=0
+        OR existing.attempt_count>existing.max_attempts OR existing.lease_owner IS NULL
+        OR existing.lease_token IS NULL OR existing.lease_expires_at IS NULL OR settlement_count<>0))
+    OR (existing.state='succeeded' AND (existing.attempt_count=0
+        OR existing.attempt_count>existing.max_attempts OR existing.lease_owner IS NOT NULL
+        OR existing.lease_token IS NOT NULL OR existing.lease_expires_at IS NOT NULL
+        OR existing.last_error_code IS NOT NULL OR settlement_count<>1
+        OR settlement_token IS NULL OR settlement_token='' OR settlement_outcome IS NULL
+        OR jsonb_typeof(settlement_outcome)<>'object' OR settlement_outcome ? 'errorCode'))
+    OR (existing.state='failed' AND (existing.attempt_count=0
+        OR existing.attempt_count>existing.max_attempts OR existing.lease_owner IS NOT NULL
+        OR existing.lease_token IS NOT NULL OR existing.lease_expires_at IS NOT NULL
+        OR existing.last_error_code IS NULL OR settlement_count<>1
+        OR settlement_token IS NULL OR settlement_token='' OR settlement_outcome IS NULL
+        OR jsonb_typeof(settlement_outcome)<>'object'
+        OR settlement_outcome->>'errorCode' IS DISTINCT FROM existing.last_error_code)) THEN
     RAISE EXCEPTION 'projection_v2_job_state_conflict';
   END IF;
 END $$;

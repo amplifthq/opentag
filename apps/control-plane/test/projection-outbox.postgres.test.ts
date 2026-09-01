@@ -607,6 +607,13 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       ready:false,reason:"migrations_pending"});
   });
 
+  it("keeps the v2 activation authority immutable",async()=>{
+    await expect(fixture.pool.query(`UPDATE cp_projection_job_v2_authority SET activated_at=$1
+      WHERE authority_version=2`,[new Date(now.getTime()+1)])).rejects.toThrow("projection_v2_authority_immutable");
+    await expect(fixture.pool.query(`DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`))
+      .rejects.toThrow("projection_v2_authority_immutable");
+  });
+
   it("rejects an old projection when terminal truth commits before the canonical Run lock", async () => {
     await insertRun();
     await fixture.pool.query("UPDATE cp_hosted_run SET state='running',updated_at=$1 WHERE run_id='run_projection'",
@@ -720,6 +727,20 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       ALTER COLUMN projection_event_sequence SET DEFAULT 99`],
     ["extra enabled projection trigger", `CREATE TRIGGER cp_projection_extra_trigger
       AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_hosted_run_projection_after()`],
+    ["deleted v2 activation row", `ALTER TABLE cp_projection_job_v2_authority
+      DISABLE TRIGGER cp_projection_job_v2_authority_immutable;
+      DELETE FROM cp_projection_job_v2_authority WHERE authority_version=2`],
+    ["security definer projection function", `ALTER FUNCTION cp_hosted_run_projection_before() SECURITY DEFINER`],
+    ["cursor organization default drift", `ALTER TABLE cp_projection_event_cursor
+      ALTER COLUMN organization_id SET DEFAULT 'wrong'`],
+    ["extra arbitrary Run trigger", `CREATE FUNCTION cp_extra_run_guard() RETURNS trigger LANGUAGE plpgsql
+      AS $$ BEGIN RETURN NEW; END $$;
+      CREATE TRIGGER arbitrary_extra AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_extra_run_guard()`],
+    ["immutable function attribute", `ALTER FUNCTION cp_hosted_run_projection_before() IMMUTABLE`],
+    ["strict function attribute", `ALTER FUNCTION cp_hosted_run_projection_before() RETURNS NULL ON NULL INPUT`],
+    ["parallel-safe function attribute", `ALTER FUNCTION cp_hosted_run_projection_before() PARALLEL SAFE`],
+    ["function config drift", `ALTER FUNCTION cp_hosted_run_projection_before() SET search_path=public`],
+    ["extra cursor column", `ALTER TABLE cp_projection_event_cursor ADD COLUMN unexpected text`],
   ])("fails readiness for %s",async(_label,sql)=>{
     await fixture.pool.query(sql);
     await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({
