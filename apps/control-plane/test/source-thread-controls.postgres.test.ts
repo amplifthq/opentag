@@ -204,6 +204,7 @@ describe.skipIf(!TEST_DATABASE_URL)("source-thread control transport", () => {
     const intent = DeliveryIntentV2Schema.parse({ contractVersion: 2, organizationId: "org_read",
       sideEffectIntentId: "intent_projection_baseline", causalId: "run_read", intentKind: "delivery",
       operation: "create", deliveryKind: "message", presentationDigest: digest("a"),
+      projectionPurpose: "anchor_create",
       provenance: { kind: "business", repositoryIdentityDigest: digest("b"), runId: "run_read",
         authorityLineageDigest: digest("c") }, providerBinding: { bindingKind: "established",
         providerId: "slack", providerInstanceId: "AREAD", providerPrincipalDigest: digest("d"),

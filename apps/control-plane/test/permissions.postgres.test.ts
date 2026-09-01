@@ -7,10 +7,17 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestV1Schema,
 } from "@opentag/control-protocol";
+import { randomBytes } from "node:crypto";
+import { computeSlackSignature } from "@opentag/slack";
+import { SourceAppRegistry } from "@opentag/source-app-runtime";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
+import { createControlPlaneSourceThreadAuthority } from "../src/modules/slack-ingress/authority.js";
+import { createPostgresSlackIngress } from "../src/modules/slack-ingress/index.js";
+import { createDurableJobQueue } from "../src/modules/jobs/index.js";
+import { createRelayContentCustody } from "../src/modules/source-content/index.js";
 import { createConsoleReadModel } from "../src/modules/console-reads/index.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
@@ -27,6 +34,7 @@ import {
 describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", () => {
   let fixture: Awaited<ReturnType<typeof createIsolatedPostgres>>;
   let principal: RuntimePrincipal;
+  let signedTokenSequence=0;
   const now = new Date("2026-08-15T14:00:00.000Z");
 
   beforeAll(async () => {
@@ -73,6 +81,50 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
   afterAll(async () => {
     await fixture.close();
   });
+
+  async function signedIngress(commandAuthority: ReturnType<typeof createControlPlaneSourceThreadAuthority>) {
+    const bindingDigest=`sha256:${"7".repeat(64)}`;
+    const generationDigest=`sha256:${"8".repeat(64)}`;
+    await fixture.pool.query(`INSERT INTO cp_source_app_installation(organization_id,installation_id,
+      source_app_id,app_instance_id,binding_digest,credential_generation,credential_generation_digest,
+      state,created_at,updated_at) VALUES('org_permission','install_permission','slack','A_PERMISSION',
+      $1,1,$2,'active',$3,$3) ON CONFLICT DO NOTHING`,[bindingDigest,generationDigest,now]);
+    await fixture.pool.query(`INSERT INTO cp_source_binding(organization_id,binding_id,installation_id,
+      binding_digest,state,created_at,updated_at) VALUES('org_permission','binding_permission',
+      'install_permission',$1,'active',$2,$2) ON CONFLICT DO NOTHING`,[bindingDigest,now]);
+    await fixture.pool.query(`INSERT INTO cp_slack_installation(organization_id,installation_id,route_identity,
+      binding_id,team_id,app_id,channel_id,bot_user_id,member_user_ids,signing_secret_ref,bot_token_ref,
+      created_at,updated_at) VALUES('org_permission','install_permission','route_permission',
+      'binding_permission','T_PERMISSION','A_PERMISSION','C_PERMISSION','U_APP',
+      ARRAY['U_MEMBER','U_APPROVER'],'secret://permission/signing','secret://permission/bot',$1,$1)
+      ON CONFLICT DO NOTHING`,[now]);
+    const clock={now:()=>now};
+    const jobs=createDurableJobQueue({pool:fixture.pool,clock,leaseDurationMs:30_000,
+      tokenFactory:()=>"permission-job-lease"});
+    const custody=createRelayContentCustody({pool:fixture.pool,clock,key:{key:randomBytes(32),keyVersion:"v1"},
+      invalidationAuthority:{async invalidateInTransaction(_client,command){return {commandId:command.commandId,
+        organizationId:command.organizationId,sourceVersionRef:command.sourceVersionRef,
+        reason:"source_content_deleted" as const,recordedAt:now.toISOString(),
+        authorityReceiptDigest:`sha256:${"9".repeat(64)}`};}}});
+    return createPostgresSlackIngress({pool:fixture.pool,clock,custody,sourceApps:new SourceAppRegistry(),jobs,
+      secrets:{async resolve(reference){if(reference==="secret://permission/signing")return "secret";
+        if(reference==="secret://permission/bot")return "bot";throw new Error("secret_unavailable");}},
+      commandAuthority,tokenFactory:()=>`permission_action_${++signedTokenSequence}_abcdefghijklmnopqrstuvwxyz`,
+      fetchImpl:async()=>{throw new Error("provider_call_forbidden");}});
+  }
+
+  function signedAction(token:string,decision:"status"|"allow_once"|"deny",actorId:string){
+    const payload={type:"block_actions",api_app_id:"A_PERMISSION",team:{id:"T_PERMISSION"},
+      user:{id:actorId},channel:{id:"C_PERMISSION"},container:{channel_id:"C_PERMISSION",
+        thread_ts:"1700000000.000100",message_ts:"1700000001.000100"},
+      actions:[{action_id:`opentag:decision:${decision}`,value:token}]};
+    const body=new URLSearchParams({payload:JSON.stringify(payload)}).toString();
+    const timestamp=String(Math.floor(now.getTime()/1000));
+    return {rawBody:new TextEncoder().encode(body),headers:new Headers({
+      "content-type":"application/x-www-form-urlencoded","x-slack-request-timestamp":timestamp,
+      "x-slack-signature":computeSlackSignature({signingSecret:"secret",timestamp,rawBody:body})}),
+      receivedAt:now.toISOString()};
+  }
 
   it("persists waiting authority and resolves exactly one attributed decision", async () => {
     const hosted = createHostedRunCoordinator({
@@ -526,20 +578,43 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
     expect((await fixture.pool.query(`SELECT state FROM cp_permission_request
       WHERE organization_id='org_permission' AND permission_request_id=$1`,
     [request.permissionRequestId])).rows).toEqual([{ state: "waiting" }]);
-    const approved = await permissions.resolve({
-      principal: { organizationId: "org_permission", actorId: "api_key_approver" },
-      runnerId: "runner_permission", decision: allow,
-    });
-    expect(approved).toMatchObject({ kind: "resolved",
-      receipt: { payload: { state: "authorized" } } });
-    if (approved.kind !== "resolved") throw new Error("approval resolution missing");
+    const sourceAuthority=createControlPlaneSourceThreadAuthority({hosted,permissions,clock:{now:()=>now}});
+    const ingress=await signedIngress(sourceAuthority);const family="family_real_allow";
+    const projectionGeneration=claim.attempt.number;
+    const issue=(actionId:string,actionKind:"status"|"approval",allowedDecisions:string[])=>ingress.issueAction({
+      organizationId:"org_permission",actionId,installationId:"install_permission",
+      bindingId:"binding_permission",teamId:"T_PERMISSION",appId:"A_PERMISSION",channelId:"C_PERMISSION",
+      threadRootMessageId:"1700000000.000100",runId:"run_permission",
+      pendingRequestId:request.permissionRequestId,actionKind,
+      actionDescriptor:actionKind==="approval"?request.actionDescriptor:{kind:"status"},
+      approvalEpoch:String(claim.attempt.epoch),
+      frozenCeiling:admission.admission.permissionCeiling.allowedActionDescriptors,
+      policyDigest:request.policySnapshotDigest,runnerId:"runner_permission",attemptId:claim.attempt.id,
+      attemptNumber:claim.attempt.number,attemptEpoch:claim.attempt.epoch,
+      fencingTokenDigest:claim.attempt.fencingTokenDigest,permissionRequestDigest:request.permissionRequestDigest,
+      pendingActionId:request.actionId,allowedDecisions,memberUserIds:["U_MEMBER"],requesterUserId:"U_MEMBER",
+      operatorUserIds:[],approverUserId:"U_APPROVER",adminUserIds:[],authorityFamilyId:family,
+      projectionGeneration,authorityEpoch:projectionGeneration,
+      expiresAt:new Date(now.getTime()+60_000)});
+    const statusToken=await issue("real_status_allow","status",["status"]);
+    const allowToken=await issue("real_allow_once","approval",["allow_once"]);
+    await expect(ingress.receiveInteractivity("route_permission",signedAction(statusToken,"status","U_MEMBER")))
+      .resolves.toEqual({status:200,body:{ok:true}});
+    await expect(ingress.receiveInteractivity("route_permission",signedAction(allowToken,"allow_once","U_APPROVER")))
+      .resolves.toEqual({status:200,body:{ok:true}});
+    expect((await fixture.pool.query(`SELECT claim_state FROM cp_slack_action_authority
+      WHERE authority_family_id=$1 ORDER BY action_id`,[family])).rows)
+      .toEqual([{claim_state:"consumed"},{claim_state:"consumed"}]);
+    const approvalReceipt=PermissionResolutionReceiptEnvelopeV1Schema.parse((await fixture.pool.query(
+      `SELECT current_receipt FROM cp_permission_request WHERE organization_id='org_permission'
+       AND permission_request_id=$1`,[request.permissionRequestId])).rows[0]?.current_receipt);
     await expect(hosted.inspect({ organizationId: "org_permission",
       runId: "run_permission" })).resolves.toMatchObject({ canonicalStatus: "running" });
     const current = await permissions.current({ principal, query });
     expect(current.kind).toBe("resolved");
     if (current.kind !== "resolved") throw new Error("resolution missing");
     expect(current.receipt.payload.state).toBe("authorized");
-    expect(current.receipt.payload.decisionActorRef).toBe("api_key_approver");
+    expect(current.receipt.payload.decisionActorRef).toBe("U_APPROVER");
     const material = createMaterialActionCoordinator({ pool: fixture.pool,
       clock: { now: () => now } });
     await expect(material.begin({ principal,
@@ -554,8 +629,8 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       authority: { kind: "permission_resolution",
         permissionRequestId: request.permissionRequestId,
         permissionRequestDigest: request.permissionRequestDigest,
-        resolutionReceiptId: approved.receipt.receiptId,
-        resolutionReceiptDigest: approved.receipt.receiptDigest,
+        resolutionReceiptId: approvalReceipt.receiptId,
+        resolutionReceiptDigest: approvalReceipt.receiptDigest,
         workspaceAttestationDigest },
       idempotencyKey: "material_begin_exact_approval",
     })).resolves.toEqual({ kind: "begun" });
@@ -646,9 +721,32 @@ describe.skipIf(!TEST_DATABASE_URL)("governed permissions PostgreSQL module", ()
       policySnapshotDigest: request.policySnapshotDigest,
       decisionId: "decision_deny", decision: "deny", decidedAt: now.toISOString() });
 
-    await expect(permissions.resolve({ principal: { organizationId: principal.organizationId,
-      actorId: "api_key_approver" }, runnerId: principal.runnerId, decision: deny }))
-      .resolves.toMatchObject({ kind: "resolved", receipt: { payload: { state: "denied" } } });
+    const sourceAuthority=createControlPlaneSourceThreadAuthority({hosted,permissions,clock:{now:()=>now}});
+    const ingress=await signedIngress(sourceAuthority);const family="family_real_deny";
+    const projectionGeneration=claim.attempt.number;
+    const issue=(actionId:string,actionKind:"status"|"approval",allowedDecisions:string[])=>ingress.issueAction({
+      organizationId:principal.organizationId,actionId,installationId:"install_permission",
+      bindingId:"binding_permission",teamId:"T_PERMISSION",appId:"A_PERMISSION",channelId:"C_PERMISSION",
+      threadRootMessageId:"1700000000.000100",runId:claim.runId,pendingRequestId:request.permissionRequestId,
+      actionKind,actionDescriptor:actionKind==="approval"?request.actionDescriptor:{kind:"status"},
+      approvalEpoch:String(claim.attempt.epoch),
+      frozenCeiling:admission.admission.permissionCeiling.allowedActionDescriptors,
+      policyDigest:request.policySnapshotDigest,runnerId:principal.runnerId,attemptId:claim.attempt.id,
+      attemptNumber:claim.attempt.number,attemptEpoch:claim.attempt.epoch,
+      fencingTokenDigest:claim.attempt.fencingTokenDigest,permissionRequestDigest:request.permissionRequestDigest,
+      pendingActionId:request.actionId,allowedDecisions,memberUserIds:["U_MEMBER"],requesterUserId:"U_MEMBER",
+      operatorUserIds:[],approverUserId:"U_APPROVER",adminUserIds:[],authorityFamilyId:family,
+      projectionGeneration,authorityEpoch:projectionGeneration,
+      expiresAt:new Date(now.getTime()+60_000)});
+    const statusToken=await issue("real_status_deny","status",["status"]);
+    const denyToken=await issue("real_deny","approval",["deny"]);
+    await expect(ingress.receiveInteractivity("route_permission",signedAction(statusToken,"status","U_MEMBER")))
+      .resolves.toEqual({status:200,body:{ok:true}});
+    await expect(ingress.receiveInteractivity("route_permission",signedAction(denyToken,"deny","U_APPROVER")))
+      .resolves.toEqual({status:200,body:{ok:true}});
+    expect((await fixture.pool.query(`SELECT claim_state FROM cp_slack_action_authority
+      WHERE authority_family_id=$1 ORDER BY action_id`,[family])).rows)
+      .toEqual([{claim_state:"consumed"},{claim_state:"consumed"}]);
     await expect(hosted.inspect({ organizationId: principal.organizationId,
       runId: claim.runId })).resolves.toMatchObject({ canonicalStatus: "failed",
         terminalReason: "permission_denied" });

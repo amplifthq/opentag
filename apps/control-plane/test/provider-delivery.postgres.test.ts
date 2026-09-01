@@ -92,6 +92,51 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL provider delivery repository", (
       .rejects.toThrow(/conflict/u);
   });
 
+  it("serializes provider I/O for one current-truth key and blocks after unknown outcome", async () => {
+    const firstRepository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-serial-first", leaseSeconds: 30 });
+    const secondRepository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-serial-second", leaseSeconds: 30 });
+    const thirdRepository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
+      leaseOwner: "worker-serial-third", leaseSeconds: 30 });
+    const value = (name: string, scopeId = "repo-1") => DeliveryIntentV2Schema.parse({ ...intent,
+      sideEffectIntentId: `intent-serial-${name}`, idempotencyKey: `key-serial-${name}`,
+      presentationDigest: digest(`presentation-serial-${name}`),
+      scope: { kind: "local_repository", id: scopeId },
+      createdAt: `2026-08-28T00:00:0${name.length}.000Z` });
+    const first = value("first");
+    const second = value("second");
+    const unrelated = value("unrelated", "repo-unrelated");
+    await firstRepository.recordIntent(first, envelope(first));
+    const firstClaim = (await firstRepository.claimNext())!;
+    const firstRenewed = (await firstRepository.renewLease(firstClaim))!;
+    const firstBegun = (await firstRepository.markBegin({ ...firstRenewed,
+      installationBeginMarkerId: "install-serial-first",
+      installationBeginMarkerDigest: digest("install-serial-first"),
+      scopeBeginMarkerId: "scope-serial-first",
+      scopeBeginMarkerDigest: digest("scope-serial-first") }))!;
+    await secondRepository.recordIntent(second, envelope(second));
+    await secondRepository.recordIntent(unrelated, envelope(unrelated));
+    const parallelClaims=await Promise.all([secondRepository.claimNext(),thirdRepository.claimNext()]);
+    expect(parallelClaims.filter(Boolean)).toHaveLength(1);
+    expect(parallelClaims.find(Boolean)).toMatchObject({intentId:unrelated.sideEffectIntentId});
+    await firstRepository.settleOrReadTerminal({ ...firstBegun, outcome: "accepted",
+      evidenceDigest: digest("accepted-serial-first") });
+    const secondClaim = await secondRepository.claimNext();
+    expect(secondClaim).toMatchObject({ intentId: second.sideEffectIntentId });
+    const secondRenewed = (await secondRepository.renewLease(secondClaim!))!;
+    const secondBegun = (await secondRepository.markBegin({ ...secondRenewed,
+      installationBeginMarkerId: "install-serial-second",
+      installationBeginMarkerDigest: digest("install-serial-second"),
+      scopeBeginMarkerId: "scope-serial-second",
+      scopeBeginMarkerDigest: digest("scope-serial-second") }))!;
+    const third = value("third");
+    await firstRepository.recordIntent(third, envelope(third));
+    await secondRepository.settleOrReadTerminal({ ...secondBegun, outcome: "outcome_unknown",
+      evidenceDigest: digest("unknown-serial-second"), errorCode: "ambiguous_response" });
+    await expect(firstRepository.claimNext()).resolves.toBeNull();
+  });
+
   it("conflicts on the same intent with different payload or runtime owner", async () => {
     const repository = createPostgresDeliveryRepository({ pool: fixture.pool, owner,
       leaseOwner: "worker-1", leaseSeconds: 30 });

@@ -148,3 +148,8 @@ export const projectionEventCursors=pgTable("cp_projection_event_cursor",{
   foreignKey({columns:[table.organizationId,table.runId],foreignColumns:[hostedRuns.organizationId,hostedRuns.runId]}),
   check("cp_projection_event_cursor_current_sequence_check",sql`${table.currentSequence}>=0`),
 ]);
+
+export const providerDeliveryTruthLocks=pgTable("cp_provider_delivery_truth_lock",{
+  currentTruthKey:text("current_truth_key").primaryKey(),
+  createdAt:timestamp("created_at",{withTimezone:true}).notNull().default(sql`clock_timestamp()`),
+});

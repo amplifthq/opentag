@@ -42,10 +42,20 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     if (!(["waiting_for_runner", "assigned", "running", "waiting_for_approval",
       "publication_pending", "proposal_ready", "ready_for_review", "failed", "cancelled",
       "interrupted", "timed_out"] as string[]).includes(state)) return { kind: "not_projectable" as const };
-    let deliveryState:"pending"|"accepted"|"rejected"|"outcome_unknown"|"attention" =
-      ["accepted", "rejected", "outcome_unknown", "attention"].includes(row.state)
-      ? row.state as "accepted" | "rejected" | "outcome_unknown" | "attention" : "pending";
-    let deliveryErrorCode=row.error_code;
+    let deliveryState:"pending"|"accepted"|"rejected"|"outcome_unknown"|"attention" = "pending";
+    let deliveryErrorCode:string|null=null;
+    const latestEvent=await input.pool.query<{state:string;error_code:string|null;event_sequence:number}>(
+      `SELECT delivery.state,delivery.error_code,watermark.event_sequence
+       FROM cp_projection_delivery_watermark watermark
+       JOIN cp_provider_delivery_intent delivery ON delivery.intent_id=watermark.intent_id
+        AND delivery.revision=watermark.delivery_revision AND delivery.state=watermark.delivery_state
+       WHERE watermark.organization_id=$1 AND watermark.run_id=$2
+        AND delivery.projection_purpose='external'
+        AND watermark.delivery_state IN ('accepted','rejected','outcome_unknown','attention')
+       ORDER BY watermark.event_sequence DESC LIMIT 1`,[command.organizationId,command.runId]);
+    const durableEvent=latestEvent.rows[0];
+    if(durableEvent){deliveryState=durableEvent.state as typeof deliveryState;
+      deliveryErrorCode=durableEvent.error_code;}
     if(command.deliveryEvent){
       const event=await input.pool.query<{state:string;error_code:string|null}>(`SELECT delivery.state,
         delivery.error_code FROM cp_projection_delivery_watermark watermark
@@ -59,6 +69,8 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
         command.deliveryEvent.revision,command.projectionRevision,command.deliveryEvent.eventSequence]);
       const exact=event.rows[0]; if(!exact)return {kind:"delivery_event_stale" as const};
       if(!["accepted","rejected","outcome_unknown","attention"].includes(exact.state))
+        return {kind:"delivery_event_stale" as const};
+      if(durableEvent&&command.deliveryEvent.eventSequence<durableEvent.event_sequence)
         return {kind:"delivery_event_stale" as const};
       deliveryState=exact.state as typeof deliveryState; deliveryErrorCode=exact.error_code;
     }
@@ -76,7 +88,8 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
     const blocks = createSlackTeamRelayProjectionBlocks(presentation);
     const base = DeliveryIntentV2Schema.parse(row.intent);
     const identity = { runId: command.runId, generation, projectionRevision, state, deliveryState,
-      projectionEventSequence:command.deliveryEvent?.eventSequence??0,errorCode: row.error_code, presentation };
+      projectionEventSequence:command.deliveryEvent?.eventSequence??durableEvent?.event_sequence??0,
+      errorCode:deliveryErrorCode,presentation };
     const suffix = hash(identity).slice(7, 31);
     if(base.provenance.kind!=="business"||!("statusMessageId" in base)||!base.statusMessageId)
       return {kind:"not_projectable" as const};
@@ -88,7 +101,7 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
         providerBindingDigest:base.providerBinding.bindingDigest,
         providerConfigGeneration:base.providerBinding.providerConfigGeneration,
         providerConfigGenerationDigest:base.providerBinding.providerConfigGenerationDigest,...runtimeOwner}});
-    const anchor=await readExactDeliveryAnchor(input.pool,descriptor);
+    const anchor=await readExactDeliveryAnchor(input.pool,descriptor,{projectionPurpose:"anchor_create"});
     if(anchor.outcome==="pending"){
       await input.pool.query(`INSERT INTO cp_projection_deferred_revision(organization_id,run_id,
         projection_revision,anchor_intent_id,state,created_at) VALUES($1,$2,$3,$4,'pending',$5)
@@ -103,7 +116,7 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
       sideEffectIntentId: `intent_projection_${suffix}`,
       idempotencyKey: `delivery_projection_${suffix}`,
       operation: acceptedAnchor ? "update" : "create", projectionRevision,
-      projectionEventSequence:command.deliveryEvent?.eventSequence??0,
+      projectionEventSequence:command.deliveryEvent?.eventSequence??durableEvent?.event_sequence??0,
       projectionPurpose: acceptedAnchor ? "anchor_update" : "anchor_create",
       presentationDigest: hash({ text, blocks }),
       createdAt: input.clock.now().toISOString() });

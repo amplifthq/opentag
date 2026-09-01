@@ -556,7 +556,8 @@ export async function checkProjectionSchemaReadiness(
   pool: Pick<MigrationPool, "query">,
 ): Promise<ReadinessResult> {
   try {
-    const result = await pool.query<{ ready: boolean }>(`SELECT
+    const result = await pool.query<{ ready: boolean; delivery_body: string | null;
+      enqueue_body: string | null }>(`SELECT
       EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_hosted_run'::regclass
         AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_hosted_run'::regclass
@@ -568,14 +569,21 @@ export async function checkProjectionSchemaReadiness(
       AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
         AND attname='projection_event_sequence' AND attnotnull AND NOT attisdropped)
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
-        AND conname='cp_provider_delivery_projection_purpose_check' AND convalidated)
+        AND conname='cp_provider_delivery_projection_purpose_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((projection_purpose=ANY(ARRAY[''external''::text,''anchor_create''::text,''anchor_update''::text])))')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
-        AND conname='cp_provider_delivery_projection_event_sequence_check' AND convalidated)
+        AND conname='cp_provider_delivery_projection_event_sequence_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((projection_event_sequence>=0))')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_intent'::regclass
-        AND conname='cp_provider_delivery_projection_revision_check' AND convalidated)
+        AND conname='cp_provider_delivery_projection_revision_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((projection_revision>0))')
       AND to_regclass('cp_projection_delivery_watermark') IS NOT NULL
       AND to_regclass('cp_projection_deferred_revision') IS NOT NULL
       AND to_regclass('cp_projection_event_cursor') IS NOT NULL
+      AND to_regclass('cp_provider_delivery_truth_lock') IS NOT NULL
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_event_cursor'
         AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
@@ -583,19 +591,94 @@ export async function checkProjectionSchemaReadiness(
           OR (column_name='current_sequence' AND data_type='integer' AND is_nullable='NO'
             AND column_default='0')))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
-        AND conname='cp_projection_delivery_watermark_run_event_key' AND contype='u' AND convalidated)
+        AND conname='cp_projection_delivery_watermark_run_event_key' AND contype='u' AND convalidated
+        AND pg_get_constraintdef(oid)='UNIQUE (organization_id, run_id, event_sequence)')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
-        AND conname='cp_projection_delivery_watermark_event_sequence_check' AND convalidated)
+        AND conname='cp_projection_delivery_watermark_event_sequence_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((event_sequence>0))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
+        AND conname='cp_projection_delivery_watermark_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK(((delivery_revision>0)AND(projection_revision>0)))')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_event_cursor'::regclass
-        AND conname='cp_projection_event_cursor_current_sequence_check' AND convalidated)
+        AND conname='cp_projection_event_cursor_current_sequence_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((current_sequence>=0))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_event_cursor'::regclass
+        AND conname='cp_projection_event_cursor_pkey' AND contype='p' AND convalidated
+        AND pg_get_constraintdef(oid)='PRIMARY KEY (organization_id, run_id)')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_event_cursor'::regclass
+        AND conname='cp_projection_event_cursor_organization_id_run_id_fkey' AND contype='f'
+        AND convalidated AND NOT condeferrable AND NOT condeferred AND confrelid='cp_hosted_run'::regclass
+        AND confupdtype='a' AND confdeltype='a'
+        AND pg_get_constraintdef(oid)='FOREIGN KEY (organization_id, run_id) REFERENCES cp_hosted_run(organization_id, run_id)')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
+        AND conname='cp_projection_delivery_watermark_pkey' AND contype='p' AND convalidated
+        AND pg_get_constraintdef(oid)='PRIMARY KEY (intent_id, delivery_state, delivery_revision)')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
+        AND conname='cp_projection_delivery_watermark_organization_id_run_id_fkey' AND contype='f'
+        AND convalidated AND NOT condeferrable AND NOT condeferred AND confrelid='cp_hosted_run'::regclass
+        AND confupdtype='a' AND confdeltype='a'
+        AND pg_get_constraintdef(oid)='FOREIGN KEY (organization_id, run_id) REFERENCES cp_hosted_run(organization_id, run_id)')
+      AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_projection_deferred_revision'
+        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='projection_revision' AND data_type='integer' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='anchor_intent_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='state' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='woken_at' AND data_type='timestamp with time zone' AND is_nullable='YES' AND column_default IS NULL)))
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
+        AND conname='cp_projection_deferred_revision_pkey' AND contype='p' AND convalidated
+        AND pg_get_constraintdef(oid)='PRIMARY KEY (organization_id, run_id, projection_revision)')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
+        AND conname='cp_projection_deferred_revision_organization_id_run_id_fkey' AND contype='f'
+        AND convalidated AND NOT condeferrable AND NOT condeferred AND confrelid='cp_hosted_run'::regclass
+        AND confupdtype='a' AND confdeltype='a'
+        AND pg_get_constraintdef(oid)='FOREIGN KEY (organization_id, run_id) REFERENCES cp_hosted_run(organization_id, run_id)')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
+        AND conname='cp_projection_deferred_revision_projection_revision_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')='CHECK((projection_revision>0))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
+        AND conname='cp_projection_deferred_revision_state_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((state=ANY(ARRAY[''pending''::text,''woken''::text])))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
+        AND conname='cp_projection_deferred_revision_check' AND contype='c' AND convalidated
+        AND NOT connoinherit AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((((state=''pending''::text)AND(woken_atISNULL))OR((state=''woken''::text)AND(woken_atISNOTNULL))))')
+      AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_provider_delivery_truth_lock'
+        AND ((column_name='current_truth_key' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
+          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO'
+            AND column_default='clock_timestamp()')))
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_truth_lock'::regclass
+        AND conname='cp_provider_delivery_truth_lock_pkey' AND contype='p' AND convalidated
+        AND pg_get_constraintdef(oid)='PRIMARY KEY (current_truth_key)')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
         AND conname='cp_slack_action_authority_decisions_check' AND convalidated
-        AND pg_get_constraintdef(oid) LIKE '%publication_approve%'
-        AND pg_get_constraintdef(oid) NOT LIKE '%publication_reject%')
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK(((cardinality(allowed_decisions)>0)AND(allowed_decisions<@ARRAY[''status''::text,''cancel''::text,''allow_once''::text,''allow_run''::text,''deny''::text,''publication_approve''::text,''bind''::text,''unbind''::text])))')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
-        AND conname='cp_slack_action_authority_epoch_check' AND convalidated)
+        AND conname='cp_slack_action_authority_epoch_check' AND convalidated
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')='CHECK((authority_epoch>0))')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
-        AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated)
+        AND conname='cp_slack_action_authority_claim_state_check' AND convalidated
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((claim_state=ANY(ARRAY[''available''::text,''claimed''::text,''consumed''::text])))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_claim_shape_check' AND convalidated
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK((((claim_state=''available''::text)AND(claimed_atISNULL)AND(consumed_atISNULL))OR((claim_state=''claimed''::text)AND(claimed_atISNOTNULL)AND(consumed_atISNULL))OR((claim_state=''consumed''::text)AND(consumed_atISNOTNULL))))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_projection_generation_check' AND convalidated
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')='CHECK((projection_generation>0))')
+      AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_action_authority'::regclass
+        AND conname='cp_slack_action_authority_publication_shape_check' AND convalidated
+        AND regexp_replace(pg_get_constraintdef(oid),'[[:space:]]+','','g')=
+          'CHECK(((action_kind=''publication''::text)=(publication_approvalISNOTNULL)))')
       AND (SELECT count(*)=8 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_delivery_watermark'
         AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
@@ -628,7 +711,8 @@ export async function checkProjectionSchemaReadiness(
         JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
         JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
         WHERE namespace.nspname=current_schema() AND NOT trigger_row.tgisinternal
-          AND trigger_row.tgenabled='O' AND trigger_row.tgqual IS NULL AND (
+          AND trigger_row.tgenabled='O' AND trigger_row.tgqual IS NULL AND trigger_row.tgnargs=0
+          AND function_row.pronamespace=current_schema()::regnamespace AND (
           (trigger_row.tgname='cp_hosted_run_projection_before_trigger' AND relation.relname='cp_hosted_run'
             AND trigger_row.tgtype=19 AND function_row.proname='cp_hosted_run_projection_before') OR
           (trigger_row.tgname='cp_hosted_run_projection_after_trigger' AND relation.relname='cp_hosted_run'
@@ -640,8 +724,19 @@ export async function checkProjectionSchemaReadiness(
           (trigger_row.tgname='cp_publication_intent_projection_trigger' AND relation.relname='cp_publication_intent'
             AND trigger_row.tgtype=21 AND function_row.proname='cp_related_projection_after') OR
           (trigger_row.tgname='cp_delivery_projection_trigger' AND relation.relname='cp_provider_delivery_intent'
-            AND trigger_row.tgtype=17 AND function_row.proname='cp_delivery_projection_after'))) AS ready`);
-    return result.rows[0]?.ready ? { ready: true }
+            AND trigger_row.tgtype=17 AND function_row.proname='cp_delivery_projection_after'))) AS ready,
+      (SELECT prosrc FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+        AND proname='cp_delivery_projection_after' AND pronargs=0) AS delivery_body,
+      (SELECT prosrc FROM pg_proc WHERE pronamespace=current_schema()::regnamespace
+        AND proname='cp_enqueue_team_relay_projection' AND pronargs=3) AS enqueue_body`);
+    const row=result.rows[0];
+    const exactBodies=row?.delivery_body !== null && row?.delivery_body !== undefined
+      && row?.enqueue_body !== null && row?.enqueue_body !== undefined
+      && createHash("sha256").update(row.delivery_body).digest("hex")
+        === "5c729c5ff77bc086a2d1205da52f5a753baf891e86a50af59c215015e9032ce9"
+      && createHash("sha256").update(row.enqueue_body).digest("hex")
+        === "33f521f1fa192f7cec8f43d3e9aeff4c9cd606c7a21193768bdb29bc29bf2995";
+    return row?.ready && exactBodies ? { ready: true }
       : { ready: false, reason: "migrations_pending" };
   } catch { return { ready: false, reason: "migrations_pending" }; }
 }

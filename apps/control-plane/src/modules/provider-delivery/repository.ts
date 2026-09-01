@@ -32,10 +32,12 @@ const SHA256 = /^sha256:[a-f0-9]{64}$/u;
 const jsonValue = (value: unknown) => JSON.parse(JSON.stringify(value ?? null)) as unknown;
 
 export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
-  input: DeliveryExternalResourceLookupDescriptor) {
+  input: DeliveryExternalResourceLookupDescriptor,
+  options: { projectionPurpose?: "anchor_create" } = {}) {
   const result=await pool.query<{ state:string;intent_id:string;external_resource_id:string|null;
     external_resource_digest:string|null }>(`SELECT state,intent_id,external_resource_id,external_resource_digest
     FROM cp_provider_delivery_intent WHERE intent->'provenance'->>'kind'='business'
+      AND ($22::text IS NULL OR projection_purpose=$22)
       AND organization_id=$1 AND intent->>'operation'='create' AND run_id=$2 AND status_message_id=$3
       AND scope_kind=$4 AND scope_id=$5 AND intent->>'targetDigest'=$6 AND provider_id=$7
       AND provider_instance_id=$8 AND provider_binding_digest=$9
@@ -54,7 +56,8 @@ export async function readExactDeliveryAnchor(pool: Pick<Pool,"query">,
     input.providerBindingDigest,input.providerPrincipalDigest,input.principalAssurance,
     input.providerConfigGeneration,input.providerConfigGenerationDigest,input.runtimeOwnerId,
     input.runtimeGeneration,input.schemaGeneration,input.authoritySnapshotDigest,
-    input.repositoryIdentityDigest,input.authorityLineageDigest,input.connectionId,input.connectionIdDigest]);
+    input.repositoryIdentityDigest,input.authorityLineageDigest,input.connectionId,input.connectionIdDigest,
+    options.projectionPurpose??null]);
   const active=result.rows.find((row)=>row.state!=="accepted");
   if(active)return {outcome:"pending" as const,anchorIntentId:active.intent_id,state:active.state};
   const accepted=result.rows.filter((row)=>row.state==="accepted"&&row.external_resource_id&&row.external_resource_digest);
@@ -209,6 +212,8 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             "statusMessageId" in intent ? intent.statusMessageId ?? null : null,
             intent.provenance.kind === "business" ? intent.provenance.runId : null,
             projectionRevision,projectionEventSequence,projectionPurpose,deadline, new Date(intent.createdAt)]);
+        await client.query(`INSERT INTO cp_provider_delivery_truth_lock(current_truth_key)
+          VALUES($1) ON CONFLICT(current_truth_key) DO NOTHING`,[truthKey]);
         const existing = await client.query<Row>(
           "SELECT * FROM cp_provider_delivery_intent WHERE intent_id=$1 FOR UPDATE",
           [intent.sideEffectIntentId]);
@@ -270,10 +275,21 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
             AND provider_config_generation_digest=$${offset + 5})`;
         }).join(" OR ")})` : "";
         const fence = randomBytes(32).toString("base64url");
-        const result = await client.query<Row>(`WITH candidate AS (
-          SELECT intent_id FROM cp_provider_delivery_intent
-          WHERE state='pending'${authoritySql}
-          ORDER BY created_at,intent_id FOR UPDATE SKIP LOCKED LIMIT 1)
+        const result = await client.query<Row>(`WITH truth AS (
+          SELECT truth_lock.current_truth_key FROM cp_provider_delivery_truth_lock truth_lock
+          WHERE EXISTS(SELECT 1 FROM cp_provider_delivery_intent pending
+            WHERE pending.current_truth_key=truth_lock.current_truth_key
+              AND pending.state='pending'${authoritySql})
+            AND NOT EXISTS(SELECT 1 FROM cp_provider_delivery_intent blocker
+              WHERE blocker.current_truth_key=truth_lock.current_truth_key
+                AND blocker.state IN ('leased','provider_io_begun','outcome_unknown','attention'))
+          ORDER BY (SELECT min(pending.created_at) FROM cp_provider_delivery_intent pending
+            WHERE pending.current_truth_key=truth_lock.current_truth_key AND pending.state='pending'),
+            truth_lock.current_truth_key
+          FOR UPDATE SKIP LOCKED LIMIT 1), candidate AS (
+          SELECT delivery.intent_id FROM cp_provider_delivery_intent delivery JOIN truth USING(current_truth_key)
+          WHERE delivery.state='pending'${authoritySql}
+          ORDER BY delivery.created_at,delivery.intent_id FOR UPDATE OF delivery SKIP LOCKED LIMIT 1)
           UPDATE cp_provider_delivery_intent delivery SET state='leased',revision=delivery.revision+1,
           lease_owner=$2,lease_expires_at=$3,lease_fence=$4,lease_fence_digest=$5,updated_at=$1
           FROM candidate WHERE delivery.intent_id=candidate.intent_id RETURNING delivery.*`,
