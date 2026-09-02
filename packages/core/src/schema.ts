@@ -1800,9 +1800,9 @@ export const AcceptedProgressAttributionViewSchema = z.object({
       path: ["unresolvedGateAdvanceCount"]
     });
   }
-  const expectedRunIds = [...new Set(view.advances.flatMap((advance) =>
+  const expectedRunIds = sortCanonicalUnicodeStrings([...new Set(view.advances.flatMap((advance) =>
     advance.resolution.status === "attributed" ? [advance.resolution.sourceRunId] : []
-  ))].sort();
+  ))]);
   if (
     expectedRunIds.length !== view.runIdsWithAcceptedProgress.length
     || expectedRunIds.some((runId, index) => view.runIdsWithAcceptedProgress[index] !== runId)

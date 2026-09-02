@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   RoutingDecisionSchema,
+  compareCanonicalUnicodeStrings,
   type RoutingCandidate,
   type RoutingDecision,
   RoutingExecutorRequirementsSchema,
@@ -68,7 +69,7 @@ function canonicalize(value: unknown): unknown {
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
         .map(([key, child]) => [key, canonicalize(child)])
     );
   }

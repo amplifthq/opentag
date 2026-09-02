@@ -23,6 +23,7 @@ import type {
 import {
   computeControlPayloadDigestV1,
   computeControlReceiptDigestV1,
+  compareCanonicalUnicodeStrings,
   buildHostedLifecycleRequestV1,
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
@@ -38,6 +39,7 @@ import {
   verifyHostedSourceContentRedeemPayloadV1,
   OpenTagEventSchema,
   RunnerReadinessReceiptEnvelopeV1Schema,
+  sortCanonicalUnicodeStrings,
 } from "@opentag/core";
 import { openDispatcherGovernanceStore } from "@opentag/dispatcher";
 import {
@@ -503,11 +505,11 @@ function canonicalReadinessAuthority(
       registrationGeneration: readiness.producer.registrationGeneration,
     },
     registrationGeneration: readiness.payload.registrationGeneration,
-    capabilities: [...readiness.payload.capabilities].sort(),
+    capabilities: sortCanonicalUnicodeStrings(readiness.payload.capabilities),
     executors: [...readiness.payload.executors]
-      .sort((left, right) => left.executorId.localeCompare(right.executorId)),
+      .sort((left, right) => compareCanonicalUnicodeStrings(left.executorId, right.executorId)),
     targets: [...readiness.payload.targets]
-      .sort((left, right) => left.projectTargetId.localeCompare(right.projectTargetId)),
+      .sort((left, right) => compareCanonicalUnicodeStrings(left.projectTargetId, right.projectTargetId)),
   };
 }
 
@@ -599,10 +601,10 @@ export async function assertHostedClaimCurrentAuthorityV1(input: {
   ) {
     throw new Error("hosted_claim_current_context_mismatch");
   }
-  const contextCapabilities = [...new Set(context.capabilities)].sort();
-  const readinessCapabilities = [
+  const contextCapabilities = sortCanonicalUnicodeStrings([...new Set(context.capabilities)]);
+  const readinessCapabilities = sortCanonicalUnicodeStrings([
     ...new Set(readiness.payload.capabilities),
-  ].sort();
+  ]);
   if (
     request.requiredCapabilities.some(
       (capability) => !contextCapabilities.includes(capability),
@@ -764,7 +766,7 @@ export async function buildRunnerReadinessReceipt(input: {
         };
   });
   const executors = await Promise.all(Object.values(input.executors)
-    .sort((left, right) => left.id.localeCompare(right.id))
+    .sort((left, right) => compareCanonicalUnicodeStrings(left.id, right.id))
     .map(async (executor) => {
       const base = {
         executorId: executor.id,
@@ -1339,16 +1341,16 @@ export async function buildHostedCompletionMetadataForControlV1(
     conclusion: result.conclusion,
     reasonCode: reasonCodes[result.conclusion],
     resultDigest: await computeControlPayloadDigestV1(result),
-    artifactDigests: [...new Set(await Promise.all(
+    artifactDigests: sortCanonicalUnicodeStrings([...new Set(await Promise.all(
       (result.artifacts ?? []).map((artifact) =>
         computeControlPayloadDigestV1(artifact)
       ),
-    ))].sort(),
-    evidenceDigests: [...new Set(await Promise.all(
+    ))]),
+    evidenceDigests: sortCanonicalUnicodeStrings([...new Set(await Promise.all(
       (result.verification ?? []).map((evidence) =>
         computeControlPayloadDigestV1(evidence)
       ),
-    ))].sort(),
+    ))]),
   };
 }
 

@@ -1,6 +1,8 @@
 import {
   AcceptedProgressAttributionViewSchema,
+  compareCanonicalUnicodeStrings,
   CompletionAssessmentSchema,
+  sortCanonicalUnicodeStrings,
   type AcceptedGateAdvance,
   type AcceptedProgressAttributionView,
   type CompletionAssessment,
@@ -151,12 +153,12 @@ export function deriveAcceptedProgressAttribution(
   }
   advances.sort((left, right) =>
     left.assessmentSequence - right.assessmentSequence
-    || left.gateId.localeCompare(right.gateId)
+    || compareCanonicalUnicodeStrings(left.gateId, right.gateId)
   );
   const attributedGateAdvanceCount = advances.filter((advance) => advance.resolution.status === "attributed").length;
-  const runIdsWithAcceptedProgress = [...new Set(advances.flatMap((advance) =>
+  const runIdsWithAcceptedProgress = sortCanonicalUnicodeStrings([...new Set(advances.flatMap((advance) =>
     advance.resolution.status === "attributed" ? [advance.resolution.sourceRunId] : []
-  ))].sort();
+  ))]);
   return AcceptedProgressAttributionViewSchema.parse({
     workThreadId: currentAssessment.workThreadId,
     contract: {

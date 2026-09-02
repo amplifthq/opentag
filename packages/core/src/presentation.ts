@@ -8,7 +8,7 @@ import {
   type ActionReceiptPrimaryDecision,
   type ActionReceiptState
 } from "./action.js";
-import { OpenTagRunResultSchema, PublicationCandidateSchema,
+import { compareCanonicalUnicodeStrings, OpenTagRunResultSchema, PublicationCandidateSchema,
   type OpenTagRunResult, type PublicationCandidate } from "./schema.js";
 import { isCredentialSafeText, isCredentialSafeValue } from "./credential-safety.js";
 
@@ -738,7 +738,7 @@ function stablePresentationJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stablePresentationJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
       .map(([key, child]) => `${JSON.stringify(key)}:${stablePresentationJson(child)}`)
       .join(",")}}`;
   }
@@ -747,7 +747,7 @@ function stablePresentationJson(value: unknown): string {
 
 export function renderApprovalRunScope(scope: Record<string, unknown>): string {
   return Object.entries(scope)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCanonicalUnicodeStrings(left, right))
     .map(([key, value]) => `${key}=${stablePresentationJson(value)}`)
     .join(", ");
 }

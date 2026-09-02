@@ -12,7 +12,7 @@ import {
   type ExecutorAdapter,
   type RunnerSecurityPolicy
 } from "@opentag/runner";
-import type { RunnerExecutorRegistration } from "@opentag/core";
+import { compareCanonicalUnicodeStrings, type RunnerExecutorRegistration } from "@opentag/core";
 import {
   assertHostedRelayAuthorization,
   hostedRunnerAuthProblem,
@@ -109,7 +109,7 @@ export function runnerExecutorRegistrations(
       readiness: "ready" as const,
       reason: "Executor is configured; run-specific readiness is verified before execution starts."
     }))
-    .sort((left, right) => left.executorId.localeCompare(right.executorId));
+    .sort((left, right) => compareCanonicalUnicodeStrings(left.executorId, right.executorId));
 }
 
 export function createDaemonClient(config: OpenTagDaemonConfig): DaemonClient {
