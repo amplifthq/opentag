@@ -4,6 +4,8 @@ import { sortCanonicalUnicodeStrings } from "@opentag/core";
 import { checkMigrationReadiness, runMigrations } from "../src/database/migrations.js";
 import { createDurableJobQueue } from "../src/modules/jobs/index.js";
 import { runOneJob } from "../src/modules/jobs/worker.js";
+import { createPostgresDeliveryRepository } from "../src/modules/provider-delivery/repository.js";
+import { DeliveryIntentV2Schema,deliveryCurrentTruthDescriptor } from "@opentag/delivery-contract";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createRunnerDirectory } from "../src/modules/runners/index.js";
 import { HOSTED_CAPABILITIES, hostedAdmissionFixture, hostedClaimRequest,
@@ -283,7 +285,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         VALUES('org_upgrade','Upgrade',$1)`,[createdAt]);
       await insertProjectionRun(upgrade.pool,"org_upgrade","run_claimed","claimed",createdAt);
       await insertProjectionRun(upgrade.pool,"org_upgrade","run_pending","pending",createdAt);
-      const queueNow=new Date("2026-09-02T00:00:00.000Z");
+      const queueNow=new Date(Date.now()+1_000);
       const oldQueue=createDurableJobQueue({pool:upgrade.pool,clock:{now:()=>queueNow},
         leaseDurationMs:30_000,tokenFactory:()=>"old-worker-lease"});
       const claimed=await oldQueue.claim("old-worker",["team-relay.project"]);
@@ -452,6 +454,51 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await expect(corrupted.pool.query("SELECT cp_insert_team_relay_v2_job($1,$2,$3)",
         [failed.jobId,"org_replay",failed.payload])).rejects.toThrow("projection_v2_job_state_conflict");
     }finally{await corrupted.close();}
+  });
+
+  it("recovers a crashed v2 job without authorizing duplicate provider I/O",async()=>{
+    const recovered=await createIsolatedPostgres();
+    try{
+      await recovered.migrate();let clock=new Date(Date.now()+1_000);
+      await recovered.pool.query(`INSERT INTO cp_organization(organization_id,display_name,created_at)
+        VALUES('org_crash','Crash',$1)`,[clock]);
+      const digest=(value:string)=>`sha256:${createHash("sha256").update(value).digest("hex")}`;
+      const intent=DeliveryIntentV2Schema.parse({contractVersion:2,organizationId:"org_crash",
+        sideEffectIntentId:"intent_crash_once",causalId:"run_crash",intentKind:"delivery",operation:"create",
+        deliveryKind:"message",presentationDigest:digest("presentation"),provenance:{kind:"business",
+          repositoryIdentityDigest:digest("repo"),runId:"run_crash",authorityLineageDigest:digest("authority")},
+        providerBinding:{bindingKind:"established",providerId:"slack",providerInstanceId:"A_CRASH",
+          providerPrincipalDigest:digest("principal"),principalAssurance:"provider_verified",
+          providerConfigGeneration:1,providerConfigGenerationDigest:digest("generation"),lifecycle:"active",
+          bindingDigest:digest("binding")},targetDigest:digest("target"),authorityKind:"run_authority",
+        authoritySnapshotDigest:digest("snapshot"),evidencePolicy:"local_audit",idempotencyKey:"crash-once",
+        statusMessageId:"run_crash:status",scope:{kind:"local_repository",id:"repo"},
+        createdAt:clock.toISOString(),initialAttemptSequence:1});
+      const owner={runtimeOwnerId:"control-plane",runtimeGeneration:1,schemaGeneration:1} as const;
+      const repository=createPostgresDeliveryRepository({pool:recovered.pool,owner,
+        leaseOwner:"provider-worker",leaseSeconds:30,now:()=>clock});
+      const payload={envelopeVersion:1 as const,providerRequest:{},phase:"running" as const,
+        frozenDeadline:new Date(clock.getTime()+300_000).toISOString(),currentTruth:deliveryCurrentTruthDescriptor({
+          intent,owner:{organizationId:"org_crash",providerId:"slack",providerInstanceId:"A_CRASH",
+            providerBindingDigest:digest("binding"),providerConfigGeneration:1,
+            providerConfigGenerationDigest:digest("generation"),...owner}})};
+      await repository.recordIntent(intent,payload);
+      const jobPayload={organizationId:"org_crash",runId:"run_crash",projectionRevision:1};
+      await recovered.pool.query("SELECT cp_insert_team_relay_v2_job($1,$2,$3)",
+        ["team-relay-crash-recovery","org_crash",jobPayload]);
+      const queue=createDurableJobQueue({pool:recovered.pool,clock:{now:()=>clock},leaseDurationMs:1_000,
+        tokenFactory:()=>`lease-${clock.getTime()}`});
+      const crashed=await queue.claim("crashed-worker",["team-relay.project.v2"]);
+      expect(crashed).toMatchObject({kind:"claimed"});
+      clock=new Date(clock.getTime()+2_000);
+      await expect(runOneJob({queue,workerId:"recovery-worker",handlers:{
+        "team-relay.project.v2":async()=>{await repository.recordIntent(intent,payload);return {kind:"recovered"};}},
+        retryDelayMs:1_000,clock:{now:()=>clock}})).resolves.toMatchObject({kind:"settled"});
+      expect((await recovered.pool.query(`SELECT count(*)::int count FROM cp_provider_delivery_intent
+        WHERE intent_id=$1`,[intent.sideEffectIntentId])).rows).toEqual([{count:1}]);
+      const first=await repository.claimNext();expect(first).not.toBeNull();
+      await expect(repository.claimNext()).resolves.toBeNull();
+    }finally{await recovered.close();}
   });
 
   it("revokes pre-0017 publication-reject authority without harming approve", async () => {
