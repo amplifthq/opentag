@@ -122,8 +122,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
           ? {
               githubOwner: input.github.owner,
               githubRepo: input.github.repo,
-              githubPort: input.github.port,
-              githubAutoCreatePullRequest: input.github.autoCreatePullRequest
+              githubPort: input.github.port
             }
           : {}),
         ...(input.gitlab
@@ -197,8 +196,6 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
         : {}),
       ...(channelBindings.length > 0 ? { channelBindings } : {}),
       ...(input.github ? { githubToken: input.github.token } : {}),
-      ...(input.github ? { preparePullRequestBranch: true } : {}),
-      ...(input.github ? { allowAutoCreatePullRequest: input.github.autoCreatePullRequest } : {}),
       pollIntervalMs: 5000,
       heartbeatIntervalMs: 15000
     },

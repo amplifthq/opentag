@@ -240,14 +240,13 @@ For GitHub pull request apply, configure the repository as GitHub, not local-onl
 }
 ```
 
-Also configure a GitHub token/apply token and enable branch preparation:
+Also configure the GitHub credentials used by the exact, capability-authorized publication flow:
 
 ```json
 {
   "daemon": {
     "githubToken": "<redacted>",
-    "githubApplyToken": "<redacted>",
-    "preparePullRequestBranch": true
+    "githubApplyToken": "<redacted>"
   }
 }
 ```

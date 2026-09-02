@@ -113,7 +113,6 @@ async function createGitHubConfiguredDispatcher() {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });
@@ -159,7 +158,8 @@ describe("CLI platform contract smoke", () => {
     expect(dispatcherRuntimeInputFromCliConfig(config)).toMatchObject({
       githubToken: "ghp_contract"
     });
-    expect(config.daemon.preparePullRequestBranch).toBe(true);
+    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
+    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
 
     const githubIngress = createGitHubWebhookApp({
       webhookSecret: config.platforms.github!.webhookSecret,
@@ -201,20 +201,10 @@ describe("CLI platform contract smoke", () => {
     });
     expect(mention.status).toBe(200);
 
-    const gitCommands: string[] = [];
     await runOneDaemonIteration({
       runnerId: config.daemon.runnerId,
       repositories: config.daemon.repositories,
       executors: { codex: changingExecutor },
-      pullRequestOptions: {
-        preparePullRequestBranch: true,
-        commandRunner: {
-          async run(command, args) {
-            gitCommands.push(`${command} ${args.join(" ")}`);
-            return { exitCode: 0, stdout: "", stderr: "" };
-          }
-        }
-      },
       client: {
         claim: () => client.claim({ runnerId: config.daemon.runnerId }),
         markRunning: (runId, executor, lease) => client.markRunning({ runnerId: config.daemon.runnerId, runId, ...lease, executor }),
@@ -224,7 +214,6 @@ describe("CLI platform contract smoke", () => {
       }
     });
 
-    expect(gitCommands).toEqual([]);
     expect(delivered.some((message) =>
       message.kind === "business"
       && message.phase === "final"

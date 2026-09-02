@@ -72,7 +72,7 @@ import {
   type ClaimedRun,
   type ClaimedRunExecutionClient,
 } from "./daemon.js";
-import { executePublicationControlV1, type PullRequestOptions } from "./pr.js";
+import { executePublicationControlV1 } from "./pr.js";
 
 const require = createRequire(import.meta.url);
 const LOCAL_RUNTIME_VERSION = (require("../package.json") as { version: string }).version;
@@ -2015,7 +2015,6 @@ export function createHostedControlLoop(input: {
   config: OpenTagDaemonConfig;
   databasePath: string;
   executors: Record<string, ExecutorAdapter>;
-  pullRequestOptions?: PullRequestOptions;
   security?: RunnerSecurityPolicy;
   githubApiOrigin?: string;
   now?: () => Date;
@@ -2269,7 +2268,6 @@ export function createHostedControlLoop(input: {
             keepScratch: input.config.keepScratch,
             approvalMode: input.config.approvalMode,
             ...(input.security ? { security: input.security } : {}),
-            ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
             ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
             ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
             ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),
@@ -2569,7 +2567,6 @@ export function createHostedControlLoop(input: {
           keepScratch: input.config.keepScratch,
           approvalMode: input.config.approvalMode,
           ...(input.security ? { security: input.security } : {}),
-          ...(input.pullRequestOptions ? { pullRequestOptions: input.pullRequestOptions } : {}),
           ...(input.config.heartbeatIntervalMs ? { heartbeatIntervalMs: input.config.heartbeatIntervalMs } : {}),
           ...(input.config.runTimeoutMs ? { runTimeoutMs: input.config.runTimeoutMs } : {}),
           ...(input.config.agentSessionProfile ? { agentSessionProfile: input.config.agentSessionProfile } : {}),

@@ -924,16 +924,15 @@ async function collectGitHubSetup(
     "GitHub repository"
   );
   const repository = parseGitHubRepository(repositoryInput);
-  const autoCreatePullRequest =
-    options.githubAutoCreatePr ??
-    (options.yes
-      ? defaults.githubAutoCreatePullRequest ?? false
-      : await prompts.confirm({
-          message: t(language, "githubAutoCreatePr"),
-          initialValue: defaults.githubAutoCreatePullRequest ?? false
-        }));
+  if (options.githubAutoCreatePr === true) {
+    prompts.note(
+      language === "zh-CN"
+        ? "--github-auto-create-pr 已弃用并会被忽略。发布现在需要精确的 Candidate、当前审批和协调器签发的 capability。"
+        : "--github-auto-create-pr is deprecated and ignored. Publication now requires an exact Candidate, current approval, and a coordinator-issued capability."
+    );
+  }
   if (!options.githubToken) {
-    prompts.note(formatGitHubTokenHelp(language, { autoCreatePullRequest }));
+    prompts.note(formatGitHubTokenHelp(language));
   }
   const token = nonEmpty(options.githubToken ?? (await prompts.password({ message: t(language, "githubToken") })), "GitHub token");
   const webhookSecret = options.githubWebhookSecret
@@ -957,7 +956,6 @@ async function collectGitHubSetup(
     owner: repository.owner,
     repo: repository.repo,
     webhookPath: parseGitHubWebhookPath(options.githubWebhookPath ?? defaults.githubWebhookPath ?? "/github/webhooks"),
-    autoCreatePullRequest,
     port
   };
 }

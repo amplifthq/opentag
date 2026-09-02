@@ -20,6 +20,11 @@ export type PullRequestOptions = {
   fetchImpl?: FetchLike;
 };
 
+/**
+ * @deprecated Automatic pull-request preparation was retired. Publication now
+ * requires an exact coordinator-issued capability. This no-op remains only so
+ * existing integrations can upgrade without triggering provider side effects.
+ */
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;
   executorCapability?: Pick<ExecutorCapabilityContract, "sourceControl">;

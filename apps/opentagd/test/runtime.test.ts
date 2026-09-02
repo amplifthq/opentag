@@ -288,14 +288,8 @@ describe("opentagd runtime helpers", () => {
     });
   });
 
-  it("omits pull request options when GitHub PR creation is not configured", () => {
-    const {
-      githubToken: _githubToken,
-      preparePullRequestBranch: _preparePullRequestBranch,
-      allowAutoCreatePullRequest: _allowAutoCreatePullRequest,
-      ...configWithoutPullRequests
-    } = config;
-    expect(pullRequestOptionsFromConfig(configWithoutPullRequests)).toBeUndefined();
+  it("ignores legacy automatic-PR configuration", () => {
+    expect(pullRequestOptionsFromConfig(config)).toBeUndefined();
   });
 
   it("creates reusable daemon runtime input from daemon config", () => {
@@ -307,7 +301,7 @@ describe("opentagd runtime helpers", () => {
     expect(input.executors.codex.id).toBe("codex");
     expect(input.executors["claude-code"].id).toBe("claude-code");
     expect(input.security).toEqual(securityFromConfig(config));
-    expect(input.pullRequestOptions).toEqual({ githubToken: "ghs_test", preparePullRequestBranch: true, allowAutoCreatePullRequest: true });
+    expect(input).not.toHaveProperty("pullRequestOptions");
     expect(input.pollIntervalMs).toBe(1000);
     expect(input.heartbeatIntervalMs).toBe(15000);
     expect(input.runTimeoutMs).toBe(30_000);

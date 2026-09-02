@@ -37,7 +37,6 @@ import {
   type RepositoryBindingConfig,
 } from "./config.js";
 import type { HostedControlLoop } from "./control-v1.js";
-import { maybeCreatePullRequest, type PullRequestOptions } from "./pr.js";
 
 export type ClaimedRun = {
   run: OpenTagRun;
@@ -182,17 +181,6 @@ type ExecutorRunOutcome =
   | { kind: "timeout" }
   | { kind: "hosted_lease_expired" };
 
-function pullRequestPreparationFailureResult(result: OpenTagRunResult, error: unknown): OpenTagRunResult {
-  return {
-    conclusion: "needs_human",
-    summary: `Executor completed, but OpenTag could not prepare the pull request action: ${errorMessage(error)}`,
-    ...(result.changedFiles ? { changedFiles: result.changedFiles } : {}),
-    ...(result.artifacts ? { artifacts: result.artifacts } : {}),
-    ...(result.verification ? { verification: result.verification } : {}),
-    nextAction: "Fix branch push or pull request credentials, then retry the run before applying the PR action."
-  };
-}
-
 function metadataToken(metadata: Record<string, unknown> | null | undefined, key: string): string | undefined {
   const value = metadata?.[key];
   if (typeof value === "string") return value;
@@ -230,7 +218,6 @@ export type LegacyDaemonIterationInput = {
   approvalMode?: ApprovalMode;
   trustedMaterialActionReceipt?: TrustedMaterialActionReceiptProvider;
   security?: RunnerSecurityPolicy;
-  pullRequestOptions?: PullRequestOptions;
   heartbeatIntervalMs?: number;
   runTimeoutMs?: number;
   agentSessionProfile?: AgentSessionProfileConfig;
@@ -892,30 +879,7 @@ export async function executeClaimedRun(
   const executorResult = sanitizeCredentialLikeValue(executorOutcome.result, {
     secrets: [lease.fencingToken]
   });
-  let result: OpenTagRunResult;
-  try {
-    result = binding
-      ? await maybeCreatePullRequest({
-          run: claimed.run,
-          ...(executor.capability ? { executorCapability: executor.capability } : {}),
-          event: claimed.event,
-          binding,
-          result: executorResult,
-          options: input.pullRequestOptions ?? {},
-          ...(hostedAuthority
-            ? { assertExecutionCurrent: hostedExecutionIsCurrent }
-            : {})
-        })
-      : executorResult;
-  } catch (error) {
-    if (!(await hostedExecutionIsCurrent())) {
-      if (cancelPromise) await cancelPromise;
-      return true;
-    }
-    result = sanitizeCredentialLikeValue(pullRequestPreparationFailureResult(executorResult, error), {
-      secrets: [lease.fencingToken]
-    });
-  }
+  const result = executorResult;
   if (!(await hostedExecutionIsCurrent())) {
     if (cancelPromise) await cancelPromise;
     return true;

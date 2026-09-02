@@ -408,11 +408,6 @@ export function dispatcherRuntimeInputFromCliConfig(
       "Microsoft Teams platform requires both platforms.teams.appId/appPassword or OPENTAG_TEAMS_APP_ID/OPENTAG_TEAMS_APP_PASSWORD together."
     );
   }
-  if (github && !config.daemon.preparePullRequestBranch && !config.daemon.allowAutoCreatePullRequest) {
-    throw new Error(
-      "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled. Run `opentag setup` and choose GitHub to update this config."
-    );
-  }
   const reassessmentObligations = reassessmentObligationTestRuntimeInputFromEnv(env);
   return {
     port: dispatcherPortFromUrl(config.daemon.dispatcherUrl),

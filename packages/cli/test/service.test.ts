@@ -47,7 +47,6 @@ function writeConfig(path: string, mutate?: (config: OpenTagCliConfig) => void):
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });
@@ -69,7 +68,6 @@ function writeRelayConfig(path: string): void {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: 3050
     }
   });

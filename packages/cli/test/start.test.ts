@@ -96,7 +96,6 @@ function githubConfig(port?: number) {
       owner: "acme",
       repo: "demo",
       webhookPath: "/github/webhooks",
-      autoCreatePullRequest: false,
       port: port ?? 3050
     }
   });
@@ -878,14 +877,16 @@ describe("OpenTag CLI start wiring", () => {
     }
   });
 
-  it("fails fast for GitHub when run branches are not prepared for apply actions", () => {
+  it("ignores legacy automatic-PR flags when building the GitHub runtime", () => {
     const built = githubConfig();
     built.daemon.preparePullRequestBranch = false;
     built.daemon.allowAutoCreatePullRequest = false;
 
-    expect(() => dispatcherRuntimeInputFromCliConfig(built)).toThrow(
-      "GitHub platform requires daemon.preparePullRequestBranch=true unless legacy daemon.allowAutoCreatePullRequest is enabled."
-    );
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).not.toThrow();
+
+    built.daemon.preparePullRequestBranch = true;
+    built.daemon.allowAutoCreatePullRequest = true;
+    expect(() => dispatcherRuntimeInputFromCliConfig(built)).not.toThrow();
   });
 
   it("fails fast when the Discord public key is set without a bot token", () => {

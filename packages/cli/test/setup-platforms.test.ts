@@ -326,8 +326,8 @@ describe("OpenTag CLI setup platforms", () => {
       port: 3050
     });
     expect(config.daemon.githubToken).toBe("ghp_token");
-    expect(config.daemon.preparePullRequestBranch).toBe(true);
-    expect(config.daemon.allowAutoCreatePullRequest).toBe(false);
+    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
+    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
     expect(config.daemon.repositories).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ provider: "github", owner: "acme", repo: "demo" })
@@ -335,8 +335,9 @@ describe("OpenTag CLI setup platforms", () => {
     );
   });
 
-  it("generates the GitHub webhook secret and records the pull request choice", async () => {
+  it("generates the GitHub webhook secret and ignores the deprecated automatic-PR option", async () => {
     const configPath = join(tempDir(), "config.json");
+    const notes: string[] = [];
 
     await runSetupCommand(
       {
@@ -352,14 +353,15 @@ describe("OpenTag CLI setup platforms", () => {
         force: true,
         yes: true
       },
-      { prompts: testPrompts() }
+      { prompts: testPrompts(notes) }
     );
 
     const config = readCliConfig(configPath);
     expect(config.platforms.github?.webhookSecret).toMatch(/^[a-f0-9]{64}$/);
-    expect(config.daemon.preparePullRequestBranch).toBe(true);
-    expect(config.daemon.allowAutoCreatePullRequest).toBe(true);
-    expect(config.preferences?.lastSetup?.githubAutoCreatePullRequest).toBe(true);
+    expect(config.daemon).not.toHaveProperty("preparePullRequestBranch");
+    expect(config.daemon).not.toHaveProperty("allowAutoCreatePullRequest");
+    expect(config.preferences?.lastSetup).not.toHaveProperty("githubAutoCreatePullRequest");
+    expect(notes.join("\n")).toContain("--github-auto-create-pr is deprecated and ignored");
   });
 
   it("writes a GitLab config with a GitLab repository binding", async () => {
