@@ -234,11 +234,6 @@ function retryAfterMs(error: unknown): number {
     : 0;
 }
 
-function retryableControlContextError(error: unknown): boolean {
-  const status = httpStatus(error);
-  return status !== undefined && retryable(status);
-}
-
 async function deliverProjection(client: ControlProjectionClient, envelope: ControlPlaneProjectionEnvelope): Promise<number> {
   const result = envelope.receiptKind === "runner_readiness"
     ? await client.reportRunnerReadinessControlV1(envelope)

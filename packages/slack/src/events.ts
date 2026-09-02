@@ -570,7 +570,6 @@ export function createSlackEventProcessor(input: SlackEventProcessorInput) {
       }
       const stopRequest = payload.event.type === "app_mention" ? parseStopCommand(rawThreadActionText) : null;
       if (stopRequest) {
-        const threadTs = payload.event.thread_ts ?? payload.event.ts;
         if (!input.stopRun) {
           if (deliverReply) {
             await deliverReply("stop", {

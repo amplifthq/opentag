@@ -812,7 +812,6 @@ export const CompletionContractSchema = z
   });
 
 type CompletionGateResultStateValue = z.infer<typeof CompletionGateResultStateSchema>;
-type CompletionAssessmentStateValue = z.infer<typeof CompletionStateSchema>;
 type CompletionReasonCodeValue = z.infer<typeof CompletionReasonCodeSchema>;
 
 const COMPLETION_REASON_REQUIRES_GATE_EVIDENCE = Object.freeze({

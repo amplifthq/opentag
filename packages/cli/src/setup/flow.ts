@@ -16,7 +16,6 @@ import {
   defaultExecutorId,
   detectExecutors,
   EXECUTOR_CATALOG,
-  executorLabel,
   isExecutorId
 } from "../catalogs/executors.js";
 import { LANGUAGE_OPTIONS, parseCliLanguage, type CliLanguage } from "../catalogs/languages.js";

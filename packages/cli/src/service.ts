@@ -715,7 +715,7 @@ export function disableServiceAutostart(options: ServiceCommandOptions = {}, dep
   return paths;
 }
 
-function serviceAutostart(paths: ServicePaths, dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
+function serviceAutostart(dependencies: ServiceDependencies, isInstalled: boolean): ServiceStatusSummary["autostart"] {
   if (!isInstalled) return "disabled";
   const controller = serviceControllerFrom(dependencies);
   if (controller === "systemd") {
@@ -784,7 +784,7 @@ export function getServiceStatus(options: ServiceCommandOptions = {}, dependenci
     secrets,
     capabilities,
     serviceHardening: formatServiceHardening(paths),
-    autostart: serviceAutostart(paths, dependencies, isInstalled)
+    autostart: serviceAutostart(dependencies, isInstalled)
   };
 }
 
