@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { OpenTagSourceDeletionEventSchema, type OpenTagChannelPresentationCommand,
-  type OpenTagSourceIngressEvent, type SourceIngressNormalizationResult } from "@opentag/core";
+  type SourceIngressNormalizationResult } from "@opentag/core";
 import type { ProviderDeliveryResult } from "@opentag/delivery-contract";
 import type { SourceAppDefinition, SourceAppInstallation } from "@opentag/source-app-runtime";
 import { readSlackThreadContext } from "./context.js";

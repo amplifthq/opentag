@@ -923,7 +923,7 @@ export async function runPublicationControlV1Iteration(input: {
       requestId: `request_publication_reconcile_${randomUUID()}`,
       organizationId: capability.organizationId, runnerId: capability.runnerId, runId: capability.runId,
       capabilityId: capability.capabilityId, operationId: capability.operationId,
-      observation: publicationReconciliationObservation(capability, provider),
+      observation: publicationReconciliationObservation(provider),
       observedAt: input.now().toISOString(),
     });
     return true;
@@ -958,7 +958,7 @@ export async function runPublicationControlV1Iteration(input: {
   });
   if (receipt.outcome === "outcome_unknown") {
     const provider = await input.reconcileOperation(capability);
-    const observation = publicationReconciliationObservation(capability, provider);
+    const observation = publicationReconciliationObservation(provider);
     await input.client.reconcilePublicationOperationControlV1({
       schemaVersion: 1,
       protocolVersion: "1.0",
@@ -976,8 +976,7 @@ export async function runPublicationControlV1Iteration(input: {
   return true;
 }
 
-function publicationReconciliationObservation(capability: PublicationOperationCapabilityV1,
-  provider: PublicationProviderObservation) {
+function publicationReconciliationObservation(provider: PublicationProviderObservation) {
   if (provider.kind !== "present") return provider;
   return { kind: "present" as const, headSha: provider.headSha,
     ...("pullRequestNumber" in provider ? {

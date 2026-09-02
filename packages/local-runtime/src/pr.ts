@@ -7,17 +7,10 @@ import {
   type PublicationOperationReceiptV1,
 } from "@opentag/control-protocol";
 import {
-  branchNameForRun,
-  commitChangedFiles,
-  nodeCommandRunner,
-  pushBranch,
   type CommandRunner,
   type ExecutorCapabilityContract
 } from "@opentag/runner";
-import {
-  canonicalRepositoryIdentity,
-  type RepositoryBindingConfig,
-} from "./config.js";
+import type { RepositoryBindingConfig } from "./config.js";
 
 export type PullRequestOptions = {
   githubToken?: string;
@@ -26,60 +19,6 @@ export type PullRequestOptions = {
   commandRunner?: CommandRunner;
   fetchImpl?: FetchLike;
 };
-
-function hasPermission(event: OpenTagEvent, scope: string): boolean {
-  return event.permissions.some((permission) => permission.scope === scope);
-}
-
-function isGitHubRepositoryTarget(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
-  const repoProvider = input.event.metadata["repoProvider"];
-  return input.binding.provider.toLowerCase() === "github"
-    && (repoProvider == null
-      || (typeof repoProvider === "string" && repoProvider.toLowerCase() === "github"));
-}
-
-function repositoryTargetMatchesBinding(input: { event: OpenTagEvent; binding: RepositoryBindingConfig }): boolean {
-  const owner = input.event.metadata["owner"];
-  const repo = input.event.metadata["repo"];
-  if (typeof owner !== "string" || typeof repo !== "string") return false;
-  const provider = input.event.metadata["repoProvider"];
-  const targetIdentity = canonicalRepositoryIdentity({
-    provider: typeof provider === "string" ? provider : input.binding.provider,
-    owner,
-    repo,
-  });
-  const bindingIdentity = canonicalRepositoryIdentity(input.binding);
-  return targetIdentity.provider === bindingIdentity.provider
-    && targetIdentity.owner === bindingIdentity.owner
-    && targetIdentity.repo === bindingIdentity.repo;
-}
-
-type CreatePullRequestIntent = {
-  head: string;
-  base?: string;
-  title?: string;
-  body?: string;
-};
-
-function createPullRequestIntent(result: OpenTagRunResult): CreatePullRequestIntent | null {
-  for (const snapshot of result.suggestedChanges ?? []) {
-    for (const intent of snapshot.intents) {
-      if (intent.domain !== "pull_request" || intent.action !== "create_pull_request") continue;
-      const head = intent.params?.["head"];
-      if (typeof head !== "string" || head.length === 0) continue;
-      const base = intent.params?.["base"];
-      const title = intent.params?.["title"];
-      const body = intent.params?.["body"];
-      return {
-        head,
-        ...(typeof base === "string" && base.length > 0 ? { base } : {}),
-        ...(typeof title === "string" && title.length > 0 ? { title } : {}),
-        ...(typeof body === "string" && body.length > 0 ? { body } : {})
-      };
-    }
-  }
-  return null;
-}
 
 export async function maybeCreatePullRequest(input: {
   run: OpenTagRun;

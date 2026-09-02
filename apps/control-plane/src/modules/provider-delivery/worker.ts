@@ -27,8 +27,3 @@ export function createProviderDeliveryWorker(input: { kernel: Kernel;
               ? { reasonCode: result.errorCode } : {}) } };
   } };
 }
-
-/** Compatibility one-shot seam; scheduling and retry truth remain outside this function. */
-export async function runOneProviderDelivery(kernel: Pick<ProviderSideEffectKernel<object>, "deliverNext">) {
-  return kernel.deliverNext();
-}

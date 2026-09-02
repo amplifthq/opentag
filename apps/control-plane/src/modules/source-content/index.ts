@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { computeControlPayloadDigestV1 } from "@opentag/control-protocol";

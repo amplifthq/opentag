@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { DELIVERY_ERROR_CODES, DeliveryIntentV2Schema, deliveryCurrentTruthDescriptor,
   domainSeparatedCanonicalBytes, type DeliveryBegin,
   type DeliveryClaim, type DeliveryErrorCode, type DeliveryIntentV2,
