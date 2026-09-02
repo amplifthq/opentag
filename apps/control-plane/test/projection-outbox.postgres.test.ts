@@ -138,7 +138,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
           intent:value.intent,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
             providerBindingDigest:digest("binding"),providerConfigGeneration:1,
             providerConfigGenerationDigest:digest("generation"),...owner}})});}}});
-    const queueNow=new Date("2026-09-02T00:00:00.000Z");
+    const queueNow=new Date(Date.now()+1_000);
     const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>queueNow},
       leaseDurationMs:30_000,tokenFactory:()=>"legacy-job-lease"});
     await expect(runOneJob({queue,workerId:"legacy-worker",handlers:{
@@ -351,7 +351,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
           intent:value.intent,owner:{organizationId:"org_projection",providerId:"slack",providerInstanceId:"A1",
             providerBindingDigest:digest("binding"),providerConfigGeneration:1,
             providerConfigGenerationDigest:digest("generation"),...owner}})});}}});
-    const eventClock=new Date("2026-09-02T00:00:00.000Z");
+    const eventClock=new Date(Date.now()+1_000);
     const queue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>eventClock},
       leaseDurationMs:30_000,tokenFactory:()=>"event-job-lease"});
     await expect(runOneJob({queue,workerId:"event-worker",handlers:{
@@ -519,7 +519,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     expect((await fixture.pool.query(`SELECT projection_revision,state FROM cp_projection_deferred_revision
       WHERE run_id='run_projection' ORDER BY projection_revision`)).rows).toEqual([
       {projection_revision:1,state:"woken"},{projection_revision:2,state:"pending"}]);
-    const wakeClock=new Date("2026-09-02T00:00:00.000Z");
+    const wakeClock=new Date(Date.now()+1_000);
     const wakeQueue=createDurableJobQueue({pool:fixture.pool,clock:{now:()=>wakeClock},
       leaseDurationMs:30_000,tokenFactory:()=>"wake-job-lease"});
     await expect(runOneJob({queue:wakeQueue,workerId:"wake-worker",handlers:{
