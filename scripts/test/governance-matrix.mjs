@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -104,16 +104,18 @@ const cases = [
   },
   {
     id: "apply-failure-ux",
-    label: "Apply cleanup and failure experience matrix",
+    label: "Publication and direct-apply failure experience matrix",
     command: [
       "corepack pnpm vitest run",
       "packages/dispatcher/test/server.test.ts",
-      "apps/opentagd/test/pr.test.ts",
+      "packages/local-runtime/test/pr.test.ts",
+      "packages/local-runtime/test/publication-control-v1.test.ts",
       "packages/github/test/pull-request.test.ts",
       "packages/gitlab/test/apply.test.ts"
     ].join(" "),
     covers: [
-      "branch already exists and isolated branch readiness are represented as setup or executor conditions",
+      "retired automatic-PR compatibility cannot perform git or provider side effects",
+      "exact publication capabilities preserve operation identity and reconcile ambiguous provider outcomes before retry",
       "missing source or target branches keep apply disabled before external writes",
       "GitHub PR and GitLab MR create failures fall back to child runs with quiet source-thread receipts",
       "repeated apply replies do not create duplicate PRs or MRs",
@@ -284,10 +286,19 @@ function commandExists(command) {
   return result.status === 0;
 }
 
-function preflight(testCase) {
+export function testFilesFromCommand(command) {
+  return command
+    .split(/\s+/u)
+    .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(token));
+}
+
+export function preflight(testCase) {
   const missing = [];
   for (const command of testCase.requiredCommands ?? []) {
     if (!commandExists(command)) missing.push(`command:${command}`);
+  }
+  for (const testFile of testFilesFromCommand(testCase.command)) {
+    if (!existsSync(resolve(rootDir, testFile))) missing.push(`file:${testFile}`);
   }
   return { missing, warnings: [] };
 }
@@ -419,7 +430,9 @@ async function main() {
   if (!report.ok) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

@@ -276,7 +276,7 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("GitHub token");
   });
 
-  it("keeps GitHub setup docs aligned with webhook, token, and apply-1 pull request requirements", () => {
+  it("keeps GitHub setup docs aligned with webhook, token, and exact publication requirements", () => {
     const english = repoFile("docs/platforms/github.en.md");
     const chinese = repoFile("docs/platforms/github.zh-CN.md");
     const combined = `${english}\n${chinese}`;
@@ -288,7 +288,10 @@ describe("platform setup docs contract", () => {
     expect(combined).toContain("Pull request review comments");
     expect(combined).toContain("Issues");
     expect(combined).toContain("Pull requests");
-    expect(combined).toContain("apply 1");
+    expect(combined).toContain("exact Candidate");
+    expect(combined).toContain("coordinator-issued capability");
+    expect(combined).not.toContain("create a PR immediately after every run");
+    expect(combined).not.toContain("每次 run 结束立刻自动创建 PR");
     expect(combined).toContain("Content type");
     expect(combined).toContain("application/json");
     expect(combined).toContain("3050");

@@ -309,7 +309,7 @@ that Gateway-owned tool subprocesses have stopped.
 | `openclaw` | installed `openclaw` command, default profile and Gateway | Optional OpenClaw command, profile, and Gateway WebSocket URL. The built-in launch is `openclaw [--profile <profile>] acp [--url <gatewayUrl>]`; cancellation is best effort. |
 | `agentSessionProfile` | derived per run | Executor-neutral session identity. Use `profile` for a fixed local agent identity or `profileTemplate` for a stable identity derived from provider, source thread, Project Target, and actor metadata. The `opentag status` session-profile section shows the active rule without embedding local checkout paths or secret values in the session identity. |
 | `security` | none | Runner security policy |
-| `githubToken` | none | GitHub credential fallback for direct-apply helpers and optional legacy PR creation |
+| `githubToken` | none | GitHub credential fallback for source-thread replies and capability-authorized publication |
 | `githubApplyToken` | `githubToken` | Optional dispatcher direct-apply token override. Set to `null` to render direct-apply actions as setup-required. |
 | `completionPolicies` | none | Per-repository strict GitHub completion policies (`owner`, `repo`, `requiredChecks`, optional `baseBranch` and `requireMerge`) that gate completion on named checks and merge evidence |
 | `defaultGitHubCompletion` | `governed` | Zero-config completion tier for GitHub-backed runs without a matching completion policy. `governed` holds a run that ships a pull request open until the PR exists and every observed check passes on the current head; `compat` preserves legacy executor-success semantics. Runs that ship no pull request keep executor-success semantics in both modes. |
