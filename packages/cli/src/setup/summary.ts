@@ -281,7 +281,7 @@ export function formatSetupComplete(config: OpenTagCliConfig, configPath: string
   const githubPort = github?.port ?? DEFAULT_GITHUB_WEBHOOK_PORT;
   const gitlabPort = gitlab?.port ?? DEFAULT_GITLAB_WEBHOOK_PORT;
   const linearPort = linear?.port ?? DEFAULT_LINEAR_WEBHOOK_PORT;
-  const relayUrl = config.runtime?.mode === "relay" ? config.runtime.relayUrl : undefined;
+  const relayUrl = config.runtime?.mode === "paired_relay" ? config.runtime.relayUrl : undefined;
   const githubWebhookPath = github?.webhookPath ?? "/github/webhooks";
   const gitlabWebhookPath = gitlab?.webhookPath ?? "/gitlab/webhooks";
   const linearWebhookPath = linear?.webhookPath ?? "/linear/webhooks";

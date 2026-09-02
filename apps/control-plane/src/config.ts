@@ -179,6 +179,9 @@ export function parseControlPlaneConfig(
   input: Record<string, string | undefined>,
 ): ControlPlaneConfig {
   try {
+    if (input.OPENTAG_RELAY_CONTENT_KEK !== undefined) {
+      throw new Error("inline relay content KEK is forbidden");
+    }
     const parsed = RawConfigSchema.parse(input);
     for (const secret of [
       parsed.OPENTAG_BOOTSTRAP_PAIRING_TOKEN,

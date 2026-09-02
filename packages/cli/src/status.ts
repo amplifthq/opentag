@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   createOpenTagClient,
   OpenTagClientHttpError,
@@ -39,6 +40,7 @@ import {
   redactedCliConfig,
   runnerDispatcherToken,
   runtimeModeFromConfig,
+  runtimeModeProfileFromConfig,
   type OpenTagCliConfig
 } from "./config.js";
 import { probeDispatcherHealth } from "./health.js";
@@ -60,7 +62,24 @@ export type StatusSummary = {
   configPath: string;
   dispatcher: "online" | "offline";
   dispatcherUrl: string;
-  runtimeMode: "local" | "relay";
+  runtimeMode: "local_direct" | "paired_relay";
+  runtimeProfile: {
+    offlineSafe: false;
+    executionLocality: "local" | "paired_runner";
+  };
+  operationalEvidence: {
+    relayDeploymentIdentity: string;
+    slackInstallationDigest: string;
+    slackBindingDigest: string;
+    runnerCredential: string;
+    runnerGeneration: string;
+    runnerReadiness: string;
+    acpExecutorHarness: string;
+    queueDeadlinePolicy: string;
+    executionIsolation: string;
+    deliveryHealth: string;
+    certification: "unsupported" | "unverified";
+  };
   relayUrl?: string;
   relaySecurity: string[];
   controlPlaneAlerts: ControlPlaneAlert[];
@@ -77,6 +96,41 @@ export type StatusSummary = {
   acceptedProgressMetrics?: AcceptedProgressMetrics;
   acceptedProgressMetricsError?: string;
 };
+
+function evidenceDigest(parts: Array<string | undefined>): string {
+  if (parts.some((part) => !part)) return "unknown";
+  return `sha256:${createHash("sha256").update(parts.join("\u0000")).digest("hex")}`;
+}
+
+function operationalEvidenceFromConfig(
+  config: OpenTagCliConfig,
+  dispatcher: "online" | "offline",
+  runTimeoutPolicy: string
+): StatusSummary["operationalEvidence"] {
+  const control = config.daemon.controlRegistration;
+  const registration = control && "registration" in control ? control.registration : undefined;
+  const slack = config.platforms.slack;
+  const executors = [...new Set(config.daemon.repositories.map((repository) => repository.defaultExecutor))].sort();
+  return {
+    relayDeploymentIdentity: registration
+      ? `organization=${registration.organizationId}; registrationGeneration=${registration.registrationGeneration}`
+      : "unknown",
+    slackInstallationDigest: slack ? evidenceDigest([slack.appId, slack.teamId]) : "unsupported",
+    slackBindingDigest: slack ? evidenceDigest([slack.teamId, slack.channelId]) : "unsupported",
+    runnerCredential: config.daemon.runnerToken
+      ? "runner_scoped_configured"
+      : config.daemon.pairingToken
+        ? "legacy_pairing_fallback"
+        : "missing",
+    runnerGeneration: registration ? String(registration.credentialGeneration) : "unknown",
+    runnerReadiness: dispatcher === "online" ? "dispatcher_reachable_readiness_unverified" : "unknown",
+    acpExecutorHarness: executors.length ? `declared:${executors.join(",")}; harness=unverified` : "unsupported",
+    queueDeadlinePolicy: runTimeoutPolicy,
+    executionIsolation: "declared_by_executor_configuration; verification=unavailable",
+    deliveryHealth: "unknown",
+    certification: runtimeModeFromConfig(config) === "local_direct" ? "unsupported" : "unverified"
+  };
+}
 
 function assertHostedStatusAuth(config: OpenTagCliConfig): void {
   const problem = hostedRunnerAuthProblem(config.daemon);
@@ -235,17 +289,20 @@ export async function statusFromConfig(input: {
     .filter(([, value]) => value !== undefined)
     .map(([key]) => key);
   const executors = input.config.daemon.repositories.map((repository) => repository.defaultExecutor);
+  const runTimeoutPolicy = formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs);
   return {
     configPath: input.configPath,
     dispatcher,
     dispatcherUrl: input.config.daemon.dispatcherUrl,
     runtimeMode: runtimeModeFromConfig(input.config),
+    runtimeProfile: runtimeModeProfileFromConfig(input.config),
     ...(relayUrl ? { relayUrl } : {}),
     relaySecurity: formatRelaySecurityChecks(relaySecurityChecksFromConfig(input.config)),
     controlPlaneAlerts: controlPlaneAlertState.alerts,
     ...(controlPlaneAlertState.error ? { controlPlaneAlertsError: controlPlaneAlertState.error } : {}),
     runnerId: input.config.daemon.runnerId,
-    runTimeoutPolicy: formatRunTimeoutPolicy(input.config.daemon.runTimeoutMs),
+    runTimeoutPolicy,
+    operationalEvidence: operationalEvidenceFromConfig(input.config, dispatcher, runTimeoutPolicy),
     secrets: formatSecretReadiness(input.secretConfig ?? redactedCliConfig(input.config)),
     repositories: input.config.daemon.repositories.map((repository) => {
       return formatConfiguredProjectTargetSummary(repository);
@@ -557,6 +614,7 @@ export function formatStatus(summary: StatusSummary): string {
   return [
     `Config: ${summary.configPath}`,
     `Runtime: ${summary.runtimeMode}`,
+    `Mode Profile: offlineSafe=${summary.runtimeProfile.offlineSafe}; executionLocality=${summary.runtimeProfile.executionLocality}`,
     ...(summary.relayUrl ? [`Relay: ${summary.relayUrl}`] : []),
     ...summary.relaySecurity,
     `Dispatcher: ${summary.dispatcher} (${summary.dispatcherUrl})`,
@@ -565,6 +623,18 @@ export function formatStatus(summary: StatusSummary): string {
     ...formatRunnerDirectory(summary),
     ...formatAcceptedProgressMetrics(summary),
     `Run Timeout: ${summary.runTimeoutPolicy}`,
+    "Operational Evidence:",
+    `  Relay deployment identity: ${summary.operationalEvidence.relayDeploymentIdentity}`,
+    `  Slack installation digest: ${summary.operationalEvidence.slackInstallationDigest}`,
+    `  Slack binding digest: ${summary.operationalEvidence.slackBindingDigest}`,
+    `  Runner credential: ${summary.operationalEvidence.runnerCredential}`,
+    `  Runner generation: ${summary.operationalEvidence.runnerGeneration}`,
+    `  Runner readiness: ${summary.operationalEvidence.runnerReadiness}`,
+    `  ACP executor/harness: ${summary.operationalEvidence.acpExecutorHarness}`,
+    `  Queue deadline policy: ${summary.operationalEvidence.queueDeadlinePolicy}`,
+    `  Execution isolation: ${summary.operationalEvidence.executionIsolation}`,
+    `  Delivery health: ${summary.operationalEvidence.deliveryHealth}`,
+    `  Certification: ${summary.operationalEvidence.certification}`,
     ...summary.secrets,
     ...summary.agentSessionProfile,
     `Platforms: ${summary.platforms.length ? summary.platforms.join(", ") : "none"}`,

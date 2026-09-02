@@ -168,7 +168,7 @@ export function createSetupConfig(input: OpenTagSetupInput, env: PathEnvironment
       worktreeRoot
     },
     runtime: {
-      mode: "local"
+      mode: "local_direct"
     },
     daemon: {
       runnerId: "runner_local",

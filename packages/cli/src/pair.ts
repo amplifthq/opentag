@@ -13,6 +13,7 @@ import {
 } from "@opentag/local-runtime";
 import {
   defaultConfigPath,
+  assertRemotePairedRelayEndpoint,
   readCliConfig,
   readCliRawConfig,
   writeCliConfigAtomic,
@@ -112,7 +113,7 @@ export function relayConfigFrom(input: { config: OpenTagCliConfig; relayUrl: str
   return {
     ...input.config,
     runtime: {
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: input.relayUrl,
       relayProvider
     },
@@ -560,6 +561,7 @@ export function formatPairRelaySummary(input: PairRelaySummaryInput): string {
   return [
     "OpenTag relay pairing updated.",
     `Config: ${input.configPath}`,
+    "Runtime: paired_relay",
     `Relay: ${input.relayUrl}`,
     `Runner: ${input.config.daemon.runnerId}`,
     `Registration: ${input.registered ? "completed" : "skipped"}`,
@@ -790,6 +792,16 @@ export async function runPairCommand(options: PairCommandOptions, dependencies: 
   assertRelayTransportAllowed(relayUrl);
   const readRawConfig = dependencies.readRawConfig ?? readCliRawConfig;
   const rawConfig = readRawConfig(configPath);
+  const rawRuntime = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig)
+    ? (rawConfig as Record<string, unknown>).runtime
+    : undefined;
+  const localProcessEndpoint = rawRuntime && typeof rawRuntime === "object" && !Array.isArray(rawRuntime)
+    ? (rawRuntime as Record<string, unknown>).localProcessEndpoint
+    : undefined;
+  assertRemotePairedRelayEndpoint({
+    relayUrl,
+    ...(typeof localProcessEndpoint === "string" ? { localProcessEndpoint } : {})
+  });
   const plan = hostedPairPlan({
     options,
     rawConfig,

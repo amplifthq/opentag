@@ -74,7 +74,7 @@ function writeRelayConfig(path: string): void {
     }
   });
   config.runtime = {
-    mode: "relay",
+    mode: "paired_relay",
     relayUrl: "https://relay.example",
     relayProvider: "custom"
   };
@@ -780,7 +780,7 @@ describe("OpenTag CLI service", () => {
       getServiceStatus({ config: configPath }, { platform: "darwin", homeDir: home, launchctl: launchctl(0) })
     );
 
-    expect(formatted).toContain("Runtime: relay");
+    expect(formatted).toContain("Runtime: paired_relay");
     expect(formatted).toContain("Relay Security:");
     expect(formatted).toContain("OK relay transport: HTTPS is enabled.");
     expect(formatted).toContain("WARN relay trust: Use only a relay you operate or trust");

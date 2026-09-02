@@ -1021,7 +1021,7 @@ function assertRelayModePlatformsSupported(config: OpenTagCliConfig): void {
   ];
   if (unsupported.length > 0) {
     throw new Error(
-      `Relay mode currently supports GitHub/GitLab/Linear-backed ingress only. ${unsupported.join(", ")} configs still require local mode.`
+      `paired_relay currently supports GitHub/GitLab/Linear-backed ingress only. ${unsupported.join(", ")} configs still require local_direct.`
     );
   }
 }
@@ -1255,10 +1255,12 @@ async function startRelayMode(
     });
     abortOnSubsystemFailure(daemonPromise, abortController);
 
-    logger.log("OpenTag is running in relay mode.");
+    logger.log("OpenTag is running in paired_relay mode.");
     logger.log(`Config: ${input.configPath}`);
     logger.log(`Relay: ${relayUrl}`);
     logger.log(relayTrustWarning(relayUrl));
+    logger.log("Offline-safe: false (configuration and reachability do not certify this installation)");
+    logger.log("Certification: unverified");
     logger.log("Local dispatcher: disabled");
     logger.log(`Runner: ${config.daemon.runnerId}`);
     const hermesWarning = hermesProfileConfigurationWarning(config.daemon);
@@ -1305,7 +1307,7 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
     });
     const relayUrl = relayUrlFromConfig(input.config);
     if (!relayUrl) {
-      throw new Error("Hosted Control V1 requires runtime.mode=relay before secrets or network access.");
+      throw new Error("Hosted Control V1 requires runtime.mode=paired_relay before secrets or network access.");
     }
     if (
       canonicalHostedRelayOrigin(relayUrl)
@@ -1325,14 +1327,14 @@ export async function startFromConfig(input: StartFromConfigInput): Promise<void
   ensurePrivateDirectory(input.config.state.worktreeRoot);
 
   const dependencies = defaultStartDependencies(input.dependencies);
-  if (runtimeModeFromConfig(input.config) === "local") {
+  if (runtimeModeFromConfig(input.config) === "local_direct") {
     await dependencies.assertStartPortsAvailable(input.config);
   }
 
   const abortController = new AbortController();
   const abortHandlers = addAbortHandlers(input, abortController);
   try {
-    if (runtimeModeFromConfig(input.config) === "relay") {
+    if (runtimeModeFromConfig(input.config) === "paired_relay") {
       await startRelayMode(
         input,
         abortController,

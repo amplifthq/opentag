@@ -82,7 +82,7 @@ export type ServiceStatusSummary = ServicePaths & {
   relayUrl?: string;
   relaySecurity: string[];
   running: "running" | "stopped" | "unknown";
-  runtimeMode: "local" | "relay" | "unknown";
+  runtimeMode: "local_direct" | "paired_relay" | "unknown";
   runtimeReadiness: "ready" | "starting" | "degraded" | "stale_heartbeat" | "unreachable" | "unverified" | "stopped" | "unknown";
   runtimeReadinessDetail?: string;
   runtimeDiagnostics?: string[];

@@ -44,6 +44,7 @@ const hostedCapabilities = [
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -252,6 +253,8 @@ async function main(): Promise<void> {
   });
   assert(claim?.runId === admitted.runId, "hosted_claim_missing");
 
+  const actionDescriptor = "github.pull_request.merge" as const;
+  const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
   const permissionDigestInput = {
     schemaVersion: 1 as const,
     protocolVersion: "1.0" as const,
@@ -267,10 +270,10 @@ async function main(): Promise<void> {
     },
     permissionRequestId: `permission_smoke_${stamp}`,
     actionId: `action_smoke_${stamp}`,
-    actionFamily: "github.merge",
+    actionDescriptor,
+    actionDescriptorDigest,
     riskTier: "high" as const,
     targetFingerprint: `sha256:${"d".repeat(64)}`,
-    permissionScopes: ["github:merge"],
     policySnapshotRef: claim.admissionPolicySnapshot.payload.snapshotId,
     policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest,
     requestedAt: new Date().toISOString(),
@@ -330,7 +333,9 @@ async function main(): Promise<void> {
 
   const materialPayload = {
     actionId: permission.actionId,
-    actionFamily: "github.merge",
+    actionDescriptor,
+    actionDescriptorDigest,
+    idempotencyKey: `material_smoke_${stamp}`,
     provider: "github",
     connectionRef: `connection_smoke_${stamp}`,
     targetFingerprint: permission.targetFingerprint,

@@ -64,6 +64,7 @@ describe("Control Plane configuration", () => {
       keyVersion: "v1",
     });
     for (const partial of [
+      { OPENTAG_RELAY_CONTENT_KEK: "inline-key-material" },
       { OPENTAG_RELAY_CONTENT_KEK_FILE: "/run/secrets/key" },
       { OPENTAG_RELAY_CONTENT_KEY_VERSION: "v1" },
       { OPENTAG_RELAY_CONTENT_KEK_FILE: "replace-with-key-file", OPENTAG_RELAY_CONTENT_KEY_VERSION: "v1" },

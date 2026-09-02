@@ -183,6 +183,18 @@ describe("OpenTag CLI pair relay", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("rejects loopback paired relay origins before health checks", async () => {
+    const configPath = join(tempDir(), "config.json");
+    writeCliConfigAtomic(configPath, githubConfig());
+    const fetchImpl = okFetch();
+
+    await expect(runPairCommand(
+      { config: configPath, relay: "http://127.0.0.1:3030", register: false },
+      { fetchImpl }
+    )).rejects.toThrow("paired_relay requires a distinct relay process");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("updates config for relay mode without dropping existing runner and project target fields", async () => {
     const configPath = join(tempDir(), "config.json");
     const source = githubConfig();
@@ -207,7 +219,7 @@ describe("OpenTag CLI pair relay", () => {
 
     const updated = readCliConfig(configPath);
     expect(updated.runtime).toEqual({
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://example.up.railway.app",
       relayProvider: "railway"
     });
@@ -335,7 +347,7 @@ describe("OpenTag CLI pair relay", () => {
     );
 
     expect(readCliConfig(configPath).runtime).toEqual({
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     });
@@ -628,7 +640,7 @@ describe("OpenTag CLI pair relay", () => {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       const daemon = raw.daemon as Record<string, unknown>;
       raw.runtime = {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: patch.relayUrl,
         ...(patch.relayProvider ? { relayProvider: patch.relayProvider } : {})
       };
@@ -719,7 +731,7 @@ describe("OpenTag CLI pair relay", () => {
   it("rejects trusted-origin rebinding before fetch, secret reads, clients, or writes", async () => {
     const raw = githubConfig() as unknown as Record<string, unknown>;
     const daemon = (raw.daemon as Record<string, unknown>);
-    raw.runtime = { mode: "relay", relayUrl: "https://relay-a.example" };
+    raw.runtime = { mode: "paired_relay", relayUrl: "https://relay-a.example" };
     daemon.dispatcherUrl = "https://relay-a.example";
     daemon.trustedRelay = {
       schemaVersion: 1,
@@ -778,7 +790,7 @@ describe("OpenTag CLI pair relay", () => {
           path: "/must/not/read/no-register-pairing-canary"
         };
       } else {
-        raw.runtime = { mode: "relay", relayUrl: "https://control.example" };
+        raw.runtime = { mode: "paired_relay", relayUrl: "https://control.example" };
         daemon.dispatcherUrl = "https://control.example";
         daemon.trustedRelay = {
           schemaVersion: 1,
@@ -853,7 +865,7 @@ describe("OpenTag CLI pair relay", () => {
   it("reads the recovery secret only after trust and pending readback, then uses the exact endpoint", async () => {
     const configPath = join(tempDir(), "config.json");
     const source = githubConfig();
-    source.runtime = { mode: "relay", relayUrl: "https://control.example" };
+    source.runtime = { mode: "paired_relay", relayUrl: "https://control.example" };
     source.daemon.dispatcherUrl = "https://control.example";
     source.daemon.trustedRelay = {
       schemaVersion: 1,
@@ -1037,7 +1049,7 @@ describe("OpenTag CLI pair relay", () => {
   ])("rejects corrupt staged state without writes: %s", async (_name, token, registrationRunnerId) => {
     const raw = githubConfig() as unknown as Record<string, unknown>;
     const daemon = raw.daemon as Record<string, unknown>;
-    raw.runtime = { mode: "relay", relayUrl: "https://control.example" };
+    raw.runtime = { mode: "paired_relay", relayUrl: "https://control.example" };
     daemon.dispatcherUrl = "https://control.example";
     daemon.trustedRelay = {
       schemaVersion: 1,

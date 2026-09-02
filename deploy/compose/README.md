@@ -4,14 +4,27 @@ This is the reference single-host installation. It runs PostgreSQL and four
 roles from one `opentag-control-plane:local` image: migrations, administrator
 bootstrap, the HTTP application/static console, and durable jobs.
 
+The declared profile envelope is `Runner-offline-safe`; an exact installation
+may display that state only after completing the required certification checks
+in the deployment runbook. Its availability declaration is always
+`Relay-not-HA`.
+
 1. Copy `.env.example` to `.env` and replace every placeholder secret. Use an
    independently generated fencing-token and login-throttle secrets rather
    than reusing the pairing, recovery, administrator, or database secret. Keep
    the file out of version control.
-2. Run `docker compose --env-file .env up --build` from this directory.
-3. Wait for `control-plane` to become healthy, then open the configured
+2. Create a separately backed-up relay-content KEK file with mode `0600` and
+   set `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to its host-side path. The file
+   must contain exactly 32 raw bytes, 64 hexadecimal characters, or base64 that
+   decodes to 32 bytes. Do not put the KEK itself in `.env`. Missing files make
+   Compose refuse the deployment; malformed or placeholder content makes relay
+   readiness fail closed. The container receives only the mounted file path
+   `/run/secrets/opentag_relay_content_kek` and immutable version `v1`.
+3. Run `docker compose --env-file .env config` and inspect the rendered secret
+   mount before running `docker compose --env-file .env up --build`.
+4. Wait for `control-plane` to become healthy, then open the configured
    `OPENTAG_PUBLIC_URL`.
-4. Sign in with the bootstrapped owner and pair a local OpenTag runner with
+5. Sign in with the bootstrapped owner and pair a local OpenTag runner with
    `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`.
 
 Useful checks:
@@ -58,11 +71,15 @@ The default profile is intentionally PostgreSQL-only. It does not require
 Cloudflare, Redis, object storage, a broker, or a platform scheduler. Put a TLS
 reverse proxy in front before exposing the service or GitHub webhook publicly.
 
-Back up the database with normal PostgreSQL tooling rather than copying a live
-volume. Test restore, runner credential reprovisioning, and old-credential
-revocation before relying on this profile for production. Compose is a
-single-host availability profile; it is not a substitute for a multi-node
-PostgreSQL and container-orchestrator design.
+Treat the PostgreSQL backup, the exact KEK file, and key version `v1` as one
+recovery set. Losing PostgreSQL loses the authority and ciphertext records;
+losing the KEK makes every retained relay-content ciphertext unrecoverable.
+Restoring mismatched members is not a valid recovery. Back up the database with
+normal PostgreSQL tooling rather than copying a live volume, protect the KEK
+backup separately, and rehearse restoring both together. Do not rotate or
+replace this profile's KEK or change `v1` without an explicit ciphertext/key
+migration. Compose is a single-host availability profile; it is not a
+multi-node PostgreSQL or container-orchestrator HA design.
 
 The application uses the same checked-in migrations and image commands in
 self-hosted and future managed installations. This profile does not claim a

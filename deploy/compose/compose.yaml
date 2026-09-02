@@ -21,6 +21,11 @@ x-control-plane-environment: &control-plane-environment
   OPENTAG_LOGIN_NETWORK_MAX_FAILURES: ${OPENTAG_LOGIN_NETWORK_MAX_FAILURES:-50}
   OPENTAG_LOGIN_WINDOW_MS: ${OPENTAG_LOGIN_WINDOW_MS:-300000}
   OPENTAG_LOGIN_LOCKOUT_MS: ${OPENTAG_LOGIN_LOCKOUT_MS:-900000}
+  OPENTAG_RELAY_CONTENT_KEK_FILE: /run/secrets/opentag_relay_content_kek
+  OPENTAG_RELAY_CONTENT_KEY_VERSION: v1
+
+x-control-plane-secrets: &control-plane-secrets
+  - opentag_relay_content_kek
 
 services:
   postgres:
@@ -48,6 +53,7 @@ services:
       postgres:
         condition: service_healthy
     environment: *control-plane-environment
+    secrets: *control-plane-secrets
     restart: "no"
 
   bootstrap-admin:
@@ -61,6 +67,7 @@ services:
       OPENTAG_BOOTSTRAP_ADMIN_EMAIL: ${OPENTAG_BOOTSTRAP_ADMIN_EMAIL:?set OPENTAG_BOOTSTRAP_ADMIN_EMAIL}
       OPENTAG_BOOTSTRAP_ADMIN_NAME: ${OPENTAG_BOOTSTRAP_ADMIN_NAME:-OpenTag Owner}
       OPENTAG_BOOTSTRAP_ADMIN_PASSWORD: ${OPENTAG_BOOTSTRAP_ADMIN_PASSWORD:?set OPENTAG_BOOTSTRAP_ADMIN_PASSWORD}
+    secrets: *control-plane-secrets
     restart: "no"
 
   control-plane:
@@ -70,6 +77,10 @@ services:
       bootstrap-admin:
         condition: service_completed_successfully
     environment: *control-plane-environment
+    labels:
+      io.opentag.profile-envelope: Runner-offline-safe
+      io.opentag.availability: Relay-not-HA
+    secrets: *control-plane-secrets
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -86,7 +97,12 @@ services:
       control-plane:
         condition: service_healthy
     environment: *control-plane-environment
+    secrets: *control-plane-secrets
     restart: unless-stopped
+
+secrets:
+  opentag_relay_content_kek:
+    file: ${OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE:?set OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE to the KEK file path}
 
 volumes:
   opentag-postgres:

@@ -483,7 +483,7 @@ describe("OpenTag CLI setup", () => {
         worktreeRoot: "/tmp/opentag-state/worktrees"
       },
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: "https://relay.example",
         relayProvider: "custom"
       },
@@ -543,7 +543,7 @@ describe("OpenTag CLI setup", () => {
         worktreeRoot: "/tmp/opentag-state/worktrees"
       },
       runtime: {
-        mode: "relay",
+        mode: "paired_relay",
         relayUrl: "https://relay.example",
         relayProvider: "custom"
       },

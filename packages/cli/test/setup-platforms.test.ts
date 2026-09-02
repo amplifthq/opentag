@@ -654,7 +654,7 @@ describe("OpenTag CLI setup platforms", () => {
 
     const config = readCliConfig(configPath);
     expect(config.runtime).toEqual({
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     });
@@ -738,7 +738,7 @@ describe("OpenTag CLI setup platforms", () => {
 
     const config = readCliConfig(configPath);
     expect(config.runtime).toEqual({
-      mode: "relay",
+      mode: "paired_relay",
       relayUrl: "https://relay.example",
       relayProvider: "custom"
     });

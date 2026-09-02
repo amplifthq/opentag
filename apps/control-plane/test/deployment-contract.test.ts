@@ -29,6 +29,62 @@ describe("Control Plane deployment contract", () => {
     );
   });
 
+  it("mounts the relay-content KEK only as a Docker secret with immutable references", async () => {
+    const [compose, example, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/.env.example"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+
+    expect(compose).toContain("opentag_relay_content_kek:");
+    expect(compose).toContain(
+      "file: ${OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE:?set OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE to the KEK file path}",
+    );
+    expect(compose).toContain(
+      "OPENTAG_RELAY_CONTENT_KEK_FILE: /run/secrets/opentag_relay_content_kek",
+    );
+    expect(compose).toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION: v1");
+    expect(compose.match(/^\s+secrets: \*control-plane-secrets$/gmu)).toHaveLength(4);
+    expect(example).toContain(
+      "OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=replace-with-path-to-32-byte-kek-file",
+    );
+    for (const text of [compose, example]) {
+      expect(text).not.toMatch(/^\s*OPENTAG_RELAY_CONTENT_KEK=/gmu);
+    }
+    expect(example).not.toContain("OPENTAG_RELAY_CONTENT_KEK_FILE=");
+    expect(example).not.toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION=");
+    expect(composeReadme).toMatch(/Missing files make\s+Compose refuse the deployment/u);
+    expect(composeReadme).toMatch(/malformed or placeholder content makes relay\s+readiness fail closed/u);
+    expect(deployment).toContain("Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable");
+  });
+
+  it("documents one Postgres-and-KEK recovery set without claiming HA or certification", async () => {
+    const [compose, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+
+    expect(compose).toContain("io.opentag.profile-envelope: Runner-offline-safe");
+    expect(compose).toContain("io.opentag.availability: Relay-not-HA");
+    expect(composeReadme).toContain("required certification checks");
+    expect(deployment).toContain("required certification target");
+    expect(deployment).toContain("not evidence that a particular installation has passed certification");
+    expect(deployment).toContain("PostgreSQL data, the exact relay-content KEK file, and immutable key version");
+    expect(deployment).toMatch(/Losing the KEK makes all retained ciphertext\s+unrecoverable/u);
+    expect(deployment).toMatch(/Do not rotate or replace the KEK/u);
+    expect(deployment).toContain("explicit migration");
+    expect(composeReadme).toContain("Relay-not-HA");
+    expect(deployment).toContain("Slack installation identity");
+    expect(deployment).toContain("paired Runner identity");
+    expect(deployment).toContain("GitHub Project Target binding");
+    expect(deployment).toContain("named ACP executor declaration");
+    for (const forbiddenService of ["redis:", "kafka:", "rabbitmq:", "minio:"]) {
+      expect(compose.toLowerCase()).not.toContain(forbiddenService);
+    }
+  });
+
   it("makes the PostgreSQL lifecycle corpus mandatory in CI", async () => {
     const workflow = await read(".github/workflows/ci.yml");
     expect(workflow).toContain("postgres:17-alpine");
@@ -55,6 +111,25 @@ describe("Control Plane deployment contract", () => {
     );
     expect(dockerfile).toContain(
       "COPY packages/core/package.json packages/core/package.json",
+    );
+    for (const workspace of [
+      "control-protocol",
+      "core",
+      "client",
+      "delivery-contract",
+      "delivery-runtime",
+      "github",
+      "governance",
+      "source-app-runtime",
+      "slack",
+    ]) {
+      expect(dockerfile).toContain(
+        `COPY packages/${workspace}/package.json packages/${workspace}/package.json`,
+      );
+      expect(dockerfile).toContain(`COPY packages/${workspace} packages/${workspace}`);
+    }
+    expect(dockerfile).toContain(
+      "pnpm --filter @opentag/control-plane^... build",
     );
     expect(dockerfile).toContain('CMD ["node", "apps/control-plane/dist/index.js", "serve"]');
     for (const forbidden of ["cloudflare", "wrangler", "sqlite", "redis", "kafka"] ) {

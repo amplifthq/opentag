@@ -32,7 +32,7 @@ export function relayTrustWarning(relayUrl: string): string {
 }
 
 export function relaySecurityChecksFromConfig(config: OpenTagCliConfig): RelaySecurityCheck[] {
-  if (runtimeModeFromConfig(config) !== "relay") return [];
+  if (runtimeModeFromConfig(config) !== "paired_relay") return [];
   const relayUrl = relayUrlFromConfig(config) ?? config.daemon.dispatcherUrl;
   let relay: URL;
   try {

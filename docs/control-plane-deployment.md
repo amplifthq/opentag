@@ -21,6 +21,11 @@ No Cloudflare service, Redis instance, broker, object store, or external
 scheduler is required. Compose is a single-host availability profile; it is
 not a multi-node high-availability design.
 
+The profile declares the capability envelope `Runner-offline-safe` and the
+availability limit `Relay-not-HA`. The first is a required certification target,
+not evidence that a particular installation has passed certification or is
+active in production. The second remains true for this single-node profile.
+
 ## Secrets and configuration
 
 Copy `deploy/compose/.env.example` to an ignored `.env` and replace all
@@ -41,6 +46,24 @@ Required values:
   pseudonymous keyed identifiers and are bounded by expiry cleanup;
 - `OPENTAG_BOOTSTRAP_ADMIN_EMAIL`, `...NAME`, and `...PASSWORD`: initial owner;
 - `OPENTAG_PUBLIC_URL`: the exact browser and webhook origin.
+
+Relay content encryption is deliberately not configured with an inline
+environment secret. On the host, set only
+`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to a mode-`0600` file containing exactly
+32 raw bytes, 64 hexadecimal characters, or base64 that decodes to 32 bytes.
+Compose mounts that file as the `opentag_relay_content_kek` Docker secret. The
+container receives only these immutable references:
+
+```text
+OPENTAG_RELAY_CONTENT_KEK_FILE=/run/secrets/opentag_relay_content_kek
+OPENTAG_RELAY_CONTENT_KEY_VERSION=v1
+```
+
+Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable. Compose refuses a
+missing source file, and the Control Plane key loader rejects malformed or
+placeholder file content and keeps relay readiness closed. A copied example
+must not be treated as deployable until every placeholder and the KEK path have
+been replaced.
 
 The server refuses to start while any secret still carries the unchanged
 `replace-with-…` placeholder from `.env.example`, so a copied example file can
@@ -114,6 +137,18 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
+Before starting it, complete and record this secret-free binding checklist:
+
+- Slack installation identity and installation credential **Secret Reference**;
+- paired Runner identity, credential generation, and expected relay origin;
+- GitHub Project Target binding (owner/repository identity, never a token);
+- named ACP executor declaration and its workspace/isolation policy.
+
+Do not paste Slack, Runner, GitHub, or executor credentials into this document,
+Compose environment values, command history, or binding records. Store only
+secret references where the relevant installation or Runner contract calls for
+them.
+
 Startup is ordered by health and completion: PostgreSQL, migration, bootstrap,
 HTTP readiness, then jobs. Migrations take a PostgreSQL advisory lock, verify
 the checksum of every already-applied file, and only append new migrations.
@@ -121,7 +156,8 @@ Never edit a migration after it has been released.
 
 For an upgrade:
 
-1. Back up PostgreSQL and verify the backup artifact is readable.
+1. Back up the complete recovery set—PostgreSQL plus the exact relay-content
+   KEK file and immutable key version `v1`—and verify both artifacts are readable.
 2. Pull or build the exact reviewed image digest.
 3. Run the `migrate` role and wait for successful completion.
 4. Restart HTTP and jobs on the same image digest.
@@ -154,7 +190,14 @@ longer than normal request/transaction duration.
 
 ## Backup and restore rehearsal
 
-Back up with normal PostgreSQL tooling. A custom-format example:
+PostgreSQL data, the exact relay-content KEK file, and immutable key version
+`v1` are one indivisible recovery set. Losing the database loses canonical
+authority and ciphertext state. Losing the KEK makes all retained ciphertext
+unrecoverable. A database dump paired with a different KEK or version is not a
+recovery. Protect the database dump and KEK backup separately while preserving
+their explicit recovery-set association.
+
+Back up PostgreSQL with normal tooling. A custom-format example:
 
 ```bash
 docker compose --env-file .env exec -T postgres \
@@ -171,10 +214,17 @@ pg_restore --exit-on-error --no-owner --dbname=opentag_restore \
 ```
 
 After restore, point the same application image at the restored database and
-verify migrations, `/readyz`, tenant counts, runner registrations, hosted run
-terminal states, permission receipts, material-action receipts, jobs, and
-audit records. A backup without a successful restore rehearsal is not recovery
-evidence.
+mount the exact recovery-set KEK at `/run/secrets/opentag_relay_content_kek`
+with `OPENTAG_RELAY_CONTENT_KEY_VERSION=v1`. Verify migrations, `/readyz`,
+tenant counts, runner registrations, hosted run terminal states, permission
+receipts, material-action receipts, retained relay-content decryption, jobs,
+and audit records. A backup without a successful restore rehearsal is not
+recovery evidence.
+
+Do not rotate or replace the KEK, and do not change its key version, without an
+explicit migration that rewraps or migrates every retained encrypted object and
+proves crash-safe resume. This reference profile supplies no such rotation
+migration; ad hoc replacement makes retained ciphertext unrecoverable.
 
 ## Credential recovery and re-pairing
 
@@ -203,6 +253,11 @@ Before production use, require:
 - provider signature, replay, and tenant-mismatch negatives;
 - audited provider-binding secret rotation and disable/re-enable recovery;
 - graceful shutdown and connection-budget checks.
+
+Only after these checks pass for the exact deployment identity may status report
+`Runner-offline-safe` for that installation. It must continue to report
+`Relay-not-HA`; neither a successful check nor a healthy process turns this
+single-node Compose topology into HA or proves production activation.
 
 The repository proves the local Compose profile only after those checks are
 run against the exact image. A managed deployment, multi-replica behavior,

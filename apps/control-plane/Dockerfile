@@ -10,6 +10,12 @@ COPY apps/control-plane/package.json apps/control-plane/package.json
 COPY packages/control-protocol/package.json packages/control-protocol/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/client/package.json packages/client/package.json
+COPY packages/delivery-contract/package.json packages/delivery-contract/package.json
+COPY packages/delivery-runtime/package.json packages/delivery-runtime/package.json
+COPY packages/github/package.json packages/github/package.json
+COPY packages/governance/package.json packages/governance/package.json
+COPY packages/source-app-runtime/package.json packages/source-app-runtime/package.json
+COPY packages/slack/package.json packages/slack/package.json
 RUN corepack pnpm install --frozen-lockfile \
   --ignore-scripts \
   --filter @opentag/control-plane...
@@ -17,7 +23,15 @@ RUN corepack pnpm rebuild esbuild
 
 COPY apps/control-plane apps/control-plane
 COPY packages/control-protocol packages/control-protocol
-RUN corepack pnpm --filter @opentag/control-protocol build
+COPY packages/core packages/core
+COPY packages/client packages/client
+COPY packages/delivery-contract packages/delivery-contract
+COPY packages/delivery-runtime packages/delivery-runtime
+COPY packages/github packages/github
+COPY packages/governance packages/governance
+COPY packages/source-app-runtime packages/source-app-runtime
+COPY packages/slack packages/slack
+RUN corepack pnpm --filter @opentag/control-plane^... build
 RUN corepack pnpm --filter @opentag/control-plane build
 RUN npm pkg delete devDependencies --prefix apps/control-plane
 RUN corepack pnpm --filter @opentag/control-plane \
