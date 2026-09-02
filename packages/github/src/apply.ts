@@ -116,55 +116,6 @@ function teamReviewersFromIntent(intent: MutationIntent): string[] | undefined {
   return values.length > 0 ? [...new Set(values)] : undefined;
 }
 
-function stringParam(intent: MutationIntent, ...keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = intent.params?.[key];
-    if (typeof value === "string" && value.length > 0) return value;
-  }
-  return undefined;
-}
-
-function stringArrayParam(intent: MutationIntent, key: string): string[] {
-  const value = intent.params?.[key];
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
-}
-
-function verificationLinesFromIntent(intent: MutationIntent): string[] {
-  const value = intent.params?.["verification"];
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
-      const command = (item as Record<string, unknown>)["command"];
-      const outcome = (item as Record<string, unknown>)["outcome"];
-      return typeof command === "string" && typeof outcome === "string" ? `- \`${command}\`: ${outcome}` : undefined;
-    })
-    .filter((line): line is string => Boolean(line));
-}
-
-function pullRequestBodyFromIntent(intent: MutationIntent): string {
-  const explicitBody = stringParam(intent, "body");
-  const changedFiles = stringArrayParam(intent, "changedFiles");
-  const risks = stringArrayParam(intent, "risks");
-  const verification = verificationLinesFromIntent(intent);
-  const executorConditions = stringArrayParam(intent, "executorConditions");
-  const lines = explicitBody ? [explicitBody] : ["## Summary", "", intent.summary];
-  if (changedFiles.length > 0) {
-    lines.push("", "## Changed Files", ...changedFiles.map((file) => `- \`${file}\``));
-  }
-  if (risks.length > 0) {
-    lines.push("", "## Risks", ...risks.map((risk) => `- ${risk}`));
-  }
-  if (verification.length > 0) {
-    lines.push("", "## Verification", ...verification);
-  }
-  if (executorConditions.length > 0) {
-    lines.push("", "## Executor Conditions", ...executorConditions.map((condition) => `- ${condition}`));
-  }
-  return lines.join("\n");
-}
-
 function mappedValueFromIntent(intent: MutationIntent): string | undefined {
   const key = intent.domain === "status" ? "status" : "priority";
   const value = intent.params?.[key] ?? intent.params?.["value"];

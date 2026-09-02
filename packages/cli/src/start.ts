@@ -347,7 +347,6 @@ export function dispatcherRuntimeInputFromCliConfig(
   }
   const lark = config.platforms.lark;
   const slack = config.platforms.slack;
-  const github = config.platforms.github;
   const gitlab = config.platforms.gitlab;
   const linear = config.platforms.linear;
   const telegram = config.platforms.telegram;

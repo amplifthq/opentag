@@ -14,7 +14,6 @@ import {
   type OpenTagPresentation,
   type OpenTagRunResult,
   type OpenTagRunStatusPresentation,
-  type OpenTagSourceThreadProjectionPresentation,
   type OpenTagSourceThreadStatusPresentation
 } from "@opentag/core";
 import { renderAcknowledgement, renderFinalSummaryPresentation, renderProgress } from "@opentag/github";
@@ -250,7 +249,7 @@ function renderSourceThreadStatus(provider: string, presentation: OpenTagSourceT
   return { body };
 }
 
-function renderActionReceipt(provider: string, presentation: OpenTagActionReceiptPresentation, options: { larkRenderLocale?: LarkRenderLocale } = {}): PresentedProviderBody {
+function renderActionReceipt(provider: string, presentation: OpenTagActionReceiptPresentation): PresentedProviderBody {
   const body =
     provider === "slack"
       ? renderSlackActionReceiptPresentation(presentation)
@@ -369,9 +368,7 @@ export function createDefaultProviderPresentation(): ProviderPresentation {
         return { body: renderOpenTagPresentationPlainText(input.presentation) };
       }
       if (input.presentation.kind === "action_receipt") {
-        return renderActionReceipt(input.provider, input.presentation, {
-          ...(input.larkRenderLocale ? { larkRenderLocale: input.larkRenderLocale } : {})
-        });
+        return renderActionReceipt(input.provider, input.presentation);
       }
       return {
         body: renderOpenTagPresentationPlainText(input.presentation)

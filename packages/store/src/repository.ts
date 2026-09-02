@@ -19,7 +19,6 @@ import {
   CompletionWaiverSchema,
   canonicalJsonStringify,
   computeControlPayloadDigestV1,
-  computeControlReceiptDigestV1,
   computeHostedLifecycleRequestDigestV1,
   computeHostedLifecycleRequestIdV1,
   computeHostedLifecycleOperationIdV1,
@@ -40,7 +39,6 @@ import {
   defaultRunEventMetadata,
   OpenTagEventSchema,
   OpenTagRunResultSchema,
-  parseGitHubIssueCommentsTargetV1,
   ReassessmentObligationReasonCodeSchema,
   ReassessmentObligationSchema,
   ReassessmentObligationSourceKindSchema,
@@ -9627,7 +9625,7 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
-    async enqueueHostedLifecycleOperation(input: {
+    async enqueueHostedLifecycleOperation(_input: {
       destinationId: string;
       organizationId: string;
       runnerId: string;

@@ -6,13 +6,7 @@ import {
   compareWellFormedUnicodeStrings,
   COMPLETION_REASON_ALLOWED_GATE_STATES,
   CompletionReasonCodeSchema,
-  isCanonicalUtcMillisTimestamp,
-  isWellFormedUnicodeString,
-  ProposalReadinessAssessmentSchema,
   reduceCompletionGateStates,
-  sortWellFormedUnicodeStrings,
-  WellFormedNonEmptyUnicodeStringSchema,
-  WellFormedUnicodeStringSchema,
 } from "./completion.js";
 
 export {

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { DELIVERY_ERROR_CODES, type DeliveryErrorCode } from "@opentag/delivery-contract";
+import { DELIVERY_ERROR_CODES } from "@opentag/delivery-contract";
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export { DELIVERY_ERROR_CODES } from "@opentag/delivery-contract";
