@@ -54,7 +54,7 @@ describe("Slack typed Source App", () => {
 
   it("maps an authenticated message deletion to source withdrawal", async () => {
     const payload = {
-      ...mention(), event_id: "EvDelete1", event: {
+      ...mention(), event_id: "EvDelete1", event_time: 1_699_999_999, event: {
         type: "message", subtype: "message_deleted", user: "USLACKBOT",
         channel: "C1", ts: "1700000001.000100",
         deleted_ts: "1700000000.000100"
@@ -68,6 +68,8 @@ describe("Slack typed Source App", () => {
     const normalized = sourceApp.ingress.normalize(trusted);
     expect(normalized).toMatchObject({
       trigger: "source_content_deleted",
+      occurredAt: "2023-11-14T22:13:19.000Z",
+      verification: { verifiedAt: "2023-11-14T22:13:20.000Z" },
       source: { sourceVersionRef: "slack:T1:C1:1700000000.000100" }
     });
   });

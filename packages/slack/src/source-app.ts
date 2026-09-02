@@ -77,9 +77,15 @@ function normalizeResult(payloadInput: unknown, botUserId: string,
     }
     if (!verified) return { kind: "malformed", code: "slack_deletion_unverified" };
     const verifiedAt = verified.verifiedAt;
+    const occurredAt = typeof payload.event_time === "number"
+      && Number.isSafeInteger(payload.event_time)
+      && payload.event_time > 0
+      && payload.event_time <= 253_402_300_799
+      ? new Date(payload.event_time * 1000).toISOString()
+      : verifiedAt;
     const threadRootTs = event.previous_message?.thread_ts ?? deletedTs;
     return { kind: "accepted", event: OpenTagSourceDeletionEventSchema.parse({ protocol: "opentag.channel.v1",
-      eventId: payload.event_id, occurredAt: verifiedAt, trigger: "source_content_deleted",
+      eventId: payload.event_id, occurredAt, trigger: "source_content_deleted",
       source: { provider: "slack", channel: { provider: "slack", workspace: payload.team_id, id: event.channel },
         thread: { provider: "slack", id: `${event.channel}:${threadRootTs}`, parentMessageId: threadRootTs },
         actor: { provider: "slack", id: typeof event.user === "string" ? event.user : "slack-system" },
