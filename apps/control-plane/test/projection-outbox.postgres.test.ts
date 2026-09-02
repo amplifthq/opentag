@@ -733,6 +733,10 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
     ["security definer projection function", `ALTER FUNCTION cp_hosted_run_projection_before() SECURITY DEFINER`],
     ["cursor organization default drift", `ALTER TABLE cp_projection_event_cursor
       ALTER COLUMN organization_id SET DEFAULT 'wrong'`],
+    ["watermark organization default drift", `ALTER TABLE cp_projection_delivery_watermark
+      ALTER COLUMN organization_id SET DEFAULT 'wrong'`],
+    ["hosted Run revision default drift", `ALTER TABLE cp_hosted_run
+      ALTER COLUMN projection_revision SET DEFAULT 99`],
     ["extra arbitrary Run trigger", `CREATE FUNCTION cp_extra_run_guard() RETURNS trigger LANGUAGE plpgsql
       AS $$ BEGIN RETURN NEW; END $$;
       CREATE TRIGGER arbitrary_extra AFTER UPDATE ON cp_hosted_run FOR EACH ROW EXECUTE FUNCTION cp_extra_run_guard()`],

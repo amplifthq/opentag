@@ -558,8 +558,9 @@ export async function checkProjectionSchemaReadiness(
   try {
     const result = await pool.query<{ ready: boolean;
       function_bodies: Record<string,string> | null }>(`SELECT
-      EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_hosted_run'::regclass
-        AND attname='projection_revision' AND attnotnull AND NOT attisdropped)
+      (SELECT count(*)=1 FROM information_schema.columns WHERE table_schema=current_schema()
+        AND table_name='cp_hosted_run' AND ordinal_position=29 AND column_name='projection_revision'
+        AND data_type='integer' AND is_nullable='NO' AND column_default='1')
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_hosted_run'::regclass
         AND conname='cp_hosted_run_projection_revision_check' AND convalidated)
       AND EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='cp_provider_delivery_intent'::regclass
@@ -605,9 +606,11 @@ export async function checkProjectionSchemaReadiness(
         AND table_name='cp_projection_job_v2_authority')
       AND (SELECT count(*)=3 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_event_cursor'
-        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='current_sequence' AND data_type='integer' AND is_nullable='NO'
+        AND ((ordinal_position=1 AND column_name='organization_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=2 AND column_name='run_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=3 AND column_name='current_sequence' AND data_type='integer' AND is_nullable='NO'
             AND column_default='0')))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_delivery_watermark'::regclass
         AND conname='cp_projection_delivery_watermark_run_event_key' AND contype='u' AND convalidated
@@ -642,13 +645,20 @@ export async function checkProjectionSchemaReadiness(
         AND pg_get_constraintdef(oid)='FOREIGN KEY (organization_id, run_id) REFERENCES cp_hosted_run(organization_id, run_id)')
       AND (SELECT count(*)=7 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_deferred_revision'
-        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='projection_revision' AND data_type='integer' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='anchor_intent_id' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='state' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='woken_at' AND data_type='timestamp with time zone' AND is_nullable='YES' AND column_default IS NULL)))
+        AND ((ordinal_position=1 AND column_name='organization_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=2 AND column_name='run_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=3 AND column_name='projection_revision' AND data_type='integer'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=4 AND column_name='anchor_intent_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=5 AND column_name='state' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=6 AND column_name='created_at' AND data_type='timestamp with time zone'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=7 AND column_name='woken_at' AND data_type='timestamp with time zone'
+            AND is_nullable='YES' AND column_default IS NULL)))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_projection_deferred_revision'::regclass
         AND conname='cp_projection_deferred_revision_pkey' AND contype='p' AND convalidated
         AND pg_get_constraintdef(oid)='PRIMARY KEY (organization_id, run_id, projection_revision)')
@@ -670,8 +680,9 @@ export async function checkProjectionSchemaReadiness(
           'CHECK((((state=''pending''::text)AND(woken_atISNULL))OR((state=''woken''::text)AND(woken_atISNOTNULL))))')
       AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_provider_delivery_truth_lock'
-        AND ((column_name='current_truth_key' AND data_type='text' AND is_nullable='NO' AND column_default IS NULL)
-          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO'
+        AND ((ordinal_position=1 AND column_name='current_truth_key' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=2 AND column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO'
             AND column_default='clock_timestamp()')))
       AND EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='cp_provider_delivery_truth_lock'::regclass
         AND conname='cp_provider_delivery_truth_lock_pkey' AND contype='p' AND convalidated
@@ -715,14 +726,22 @@ export async function checkProjectionSchemaReadiness(
           'CHECK(((action_kind=''publication''::text)=(publication_approvalISNOTNULL)))')
       AND (SELECT count(*)=8 FROM information_schema.columns WHERE table_schema=current_schema()
         AND table_name='cp_projection_delivery_watermark'
-        AND ((column_name='organization_id' AND data_type='text' AND is_nullable='NO')
-          OR (column_name='run_id' AND data_type='text' AND is_nullable='NO')
-          OR (column_name='intent_id' AND data_type='text' AND is_nullable='NO')
-          OR (column_name='delivery_state' AND data_type='text' AND is_nullable='NO')
-          OR (column_name='delivery_revision' AND data_type='integer' AND is_nullable='NO')
-          OR (column_name='projection_revision' AND data_type='integer' AND is_nullable='NO')
-          OR (column_name='event_sequence' AND data_type='integer' AND is_nullable='NO')
-          OR (column_name='created_at' AND data_type='timestamp with time zone' AND is_nullable='NO')))
+        AND ((ordinal_position=1 AND column_name='organization_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=2 AND column_name='run_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=3 AND column_name='intent_id' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=4 AND column_name='delivery_state' AND data_type='text'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=5 AND column_name='delivery_revision' AND data_type='integer'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=6 AND column_name='projection_revision' AND data_type='integer'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=7 AND column_name='created_at' AND data_type='timestamp with time zone'
+            AND is_nullable='NO' AND column_default IS NULL)
+          OR (ordinal_position=8 AND column_name='event_sequence' AND data_type='integer'
+            AND is_nullable='NO' AND column_default IS NULL)))
       AND EXISTS(SELECT 1 FROM pg_proc function_row JOIN pg_namespace namespace
         ON namespace.oid=function_row.pronamespace JOIN pg_language language_row ON language_row.oid=function_row.prolang
         WHERE namespace.nspname=current_schema() AND function_row.proname='cp_enqueue_team_relay_projection'
