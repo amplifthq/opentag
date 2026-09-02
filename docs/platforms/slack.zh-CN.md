@@ -1,15 +1,22 @@
 # Slack 配置教程
 
-当 `opentag setup` 询问 Slack 配置时，用这份教程对照填写。
+当 `opentag setup` 询问 Slack 配置时，用这份教程对照填写。在 `paired_relay`
+团队 profile 中，Slack 是唯一支持的 Source App：它接收经过签名校验的讨论串事件并呈现
+状态/审批投影；canonical Run 与 Attempt 状态由自托管 Control Plane 持有。
 
 OpenTag 支持两种 Slack 连接方式：
 
-- **本地 Socket Mode**：推荐在这台电脑上运行 OpenTag 时使用，不需要公网 URL。
-- **公网 Events API**：适合云端部署，或者高级用户用 tunnel 做本地测试。
+- **本地 Socket Mode**：`local_direct` 的试用/单机路径，不需要公网 URL，但 `offlineSafe=false`。
+- **公网 Events API**：自托管 `paired_relay` profile 所需的 Source App ingress，也可用于有边界的本地 tunnel 测试。
 
 两种方式最终都支持同一个核心体验：在 Slack 里 mention 这个 app，OpenTag 把这个 Slack thread 变成一个可治理的 agent 工作回路，在本机运行 coding agent，然后把简洁产物、状态和安全下一步回复回同一个 Slack thread。详细过程留在本地 audit/status 里，不把 Slack 变成 agent 内部日志流。
 
-Slack-only setup 证明的是 Slack 这条链路。它不会自动获得 GitHub 写权限。如果某次 run 产出了 pull request action，只有在 OpenTag 同时配置了 GitHub repository target 和 GitHub token 时，Slack thread 里的 `apply 1` 才能直接创建 GitHub PR。
+仅完成 Slack 配置既不证明安装认证，也不授予 GitHub 写权限。Run 只能在配置了 GitHub
+Project Target 与 provider binding 时提出 pull-request action。真实 draft PR 仍需要精确且
+当前的策略和单独显式审批；Slack 确认或智能体结果不会自动执行它。
+
+GitHub token 只应保存在配对 Runner 的秘密存储中，不得写入 Slack 消息、channel
+binding 或 relay 配置。
 
 Suggested action 按钮依赖 Slack Block Kit interactivity。需要在 Slack app 里开启 **Interactivity & Shortcuts**，这样 **Apply 1**、**Continue**、**Reject** 这类状态驱动按钮才会提交和手动 thread reply 相同的 source-thread action。
 
@@ -103,9 +110,11 @@ Socket Mode 不需要填写 Request URL。`opentag start` 会主动连到 Slack 
 
 这一步会让 Slack 里的 **Apply 1**、**Continue**、**Reject** 按钮真正可用。如果没有开启 Interactivity，OpenTag 仍然可以接收用户手打的 thread reply，但点击按钮会在 Slack 侧失败，事件不会到达 OpenTag。
 
-## 高级：公网 Events API
+## `paired_relay` 必需：公网 Events API
 
-如果 OpenTag 有一个稳定的公网 endpoint，或者你明确要用 tunnel 做本地测试，选这个模式。
+自托管 `paired_relay` profile 使用此模式：relay 必须暴露稳定的公网 HTTPS endpoint，并且
+要与配对的本地 Runner 分处不同机器/故障域。也可以用它做有边界的本地 tunnel 测试。Socket
+Mode 不属于已认证的 paired-relay ingress。
 
 ### 你需要准备什么
 

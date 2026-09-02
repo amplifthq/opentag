@@ -1,10 +1,27 @@
 # ADR 0004: Keep Channel Ingress Always-On While Execution Remains Local
 
-- Status: Accepted; implementation pending
+- Status: Accepted in part; managed-relay material deferred 2026-09-02
 - Date: 2026-08-18
 - Decision owners: OpenTag maintainers
 
 ## Context
+
+## Current scope and supersession note
+
+The accepted public profile is `local_direct` or self-hosted `paired_relay`.
+`local_direct` is trial/single-machine and `offlineSafe=false`. `paired_relay`
+uses a Slack Events API and interactivity HTTPS ingress outside one paired local
+Runner's fault domain; the reference single-node relay remains `Relay-not-HA`.
+It may be called `Runner-offline-safe` only after separate deterministic and
+installation certification.
+
+All later sections that describe `managed_relay`, managed KMS/custody, regional
+availability, managed defaults, managed scheduling, or a managed production
+envelope are retained as historical/deferred design exploration. They are not
+implemented product commitments and must not be used to claim a managed service,
+production activation, high availability, scheduled work, ambient memory, or
+automatic merge. Slack is the only currently supported Source App in this
+profile; GitHub is a Project Target and optional publication provider.
 
 OpenTag currently supports two deployment shapes:
 
@@ -94,7 +111,7 @@ is offline.
 | --- | --- | --- | --- | --- | --- |
 | `local_direct` | Local OpenTag process | Local runner | No | No provider-independent guarantee | Works while this machine and OpenTag service are online |
 | `paired_relay` | User-operated always-on relay outside the Runner fault domain | Paired user-controlled runner | Yes | Yes | Runner-offline-safe within the declared relay envelope; relay is not implicitly HA; execution remains local or user-controlled |
-| `managed_relay` | Managed OpenTag Control Plane outside the Runner fault domain | Paired user-controlled runner | Yes | Yes | Runner-offline-safe within the verified managed envelope; execution remains local or user-controlled |
+| `managed_relay` (deferred) | Not a supported current profile | Not applicable | Not asserted | Not asserted | Historical/deferred only; no managed service is claimed |
 
 Availability mode and execution policy are independent. Selecting a relay
 does not authorize hosted code execution, and a local runner becoming

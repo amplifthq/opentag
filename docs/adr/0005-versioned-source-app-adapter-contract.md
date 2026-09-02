@@ -1,6 +1,6 @@
 # Source Apps use one versioned five-port adapter contract
 
-- Status: Accepted
+- Status: Accepted; current supported-app scope note added 2026-09-02
 - Date: 2026-08-28
 - Decision owners: OpenTag maintainers
 
@@ -13,6 +13,13 @@ evidence, completion, delivery journaling, retry authority, or terminal
 settlement. Source-thread commands such as bind, unbind, status, stop, cancel,
 approve, and reject are normalized into one provider-neutral command service
 instead of being reimplemented by each App.
+
+For the current self-hosted team profile, Slack is the only supported Source
+App and uses signed Events API plus interactivity HTTPS ingress. GitHub is a
+Project Target and optional exact-approved publication provider, not a second
+source ingress. Later Source Apps remain deferred until they implement this
+contract and its conformance evidence; no adapter receives ambient lifecycle,
+approval, retry, or provider-action authority.
 
 Adapters are loaded from an explicit registry in the first release and must
 pass one shared conformance suite. Capabilities are declared as data;

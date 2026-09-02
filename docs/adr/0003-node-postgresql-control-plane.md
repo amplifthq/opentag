@@ -1,10 +1,19 @@
 # ADR 0003: Rebuild the Control Plane on Node and PostgreSQL
 
-- Status: Accepted
+- Status: Accepted; managed-service portions deferred 2026-09-02
 - Date: 2026-08-15
 - Decision owners: OpenTag maintainers
 
 ## Context
+
+## Current scope and supersession note
+
+The implemented public profile is a self-hosted, single-node Compose relay
+paired with one local Runner. It is `Relay-not-HA`; `Runner-offline-safe` needs
+separate deterministic and installation certification. This ADR's historical
+references to an "OpenTag Cloud", managed hosting, or managed-installation
+parity are deferred design context, not availability, production, or product
+claims. No managed OpenTag service is asserted by this repository.
 
 OpenTag needs an optional shared Control Plane for identity, runner pairing,
 public ingress, tenant-scoped coordination, and retained audit projections.
@@ -100,11 +109,12 @@ implementation later is possible behind the normalized principal boundary,
 but the replacement must preserve tenant scoping, origin checks, one-time
 credential material, and closed errors.
 
-### Use PostgreSQL for self-hosted and managed installations
+### Use PostgreSQL for self-hosted installations; managed parity is deferred
 
 PostgreSQL is the only v1 durable database. The open-source Docker Compose
-profile and managed OpenTag Cloud both run the same schema, migration corpus,
-and PostgreSQL-backed domain implementation.
+profile runs the checked-in schema, migration corpus, and PostgreSQL-backed
+domain implementation. A possible future managed offering is not implemented
+or certified by this decision and must not be inferred from shared code.
 
 Drizzle is the schema, migration-generation, and typed-query toolkit.
 `drizzle-orm/node-postgres` runs on `pg` (node-postgres). `pg` is selected

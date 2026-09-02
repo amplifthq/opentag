@@ -57,17 +57,26 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check Source App architecture boundaries
+        run: pnpm check:source-apps
+
       - name: Build
         run: pnpm build
-
-      - name: Lint
-        run: pnpm lint
 
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Lint
+        run: pnpm lint
+
       - name: Test
         run: pnpm test
+
+      - name: Certify deterministic team relay profile
+        run: pnpm test:team-relay
+
+      - name: Typecheck the Compose smoke contract
+        run: pnpm smoke:control-plane-compose:typecheck
 
       - name: Check deterministic factory conformance
         run: pnpm smoke:factory-conformance
@@ -80,6 +89,7 @@ jobs:
 
   control-plane-e2e:
     name: Control Plane browser E2E
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

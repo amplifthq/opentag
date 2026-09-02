@@ -6,348 +6,145 @@
   </picture>
 </p>
 
-<p align="center">
-  <a href="./README.md">English</a> ·
-  <b>简体中文</b>
-</p>
+<p align="center"><a href="./README.md">English</a> · <b>简体中文</b></p>
 
 # OpenTag
 
-**[opentag.im](https://opentag.im)**
+**提及任意编码智能体。拿到证据，而不是承诺。**
 
-**@ 任何 coding agent，拿到的是证据，不是口头汇报。**
+把 OpenTag relay 部署在你选择的基础设施上，配对一个本地 Runner，就能把 Slack
+工程讨论串变成可治理、可核验的本地智能体工作。代码仓库、编码智能体凭据、worktree
+与实际执行始终留在你控制的 Runner 上。
 
-[![Release](https://img.shields.io/github/v/release/amplifthq/opentag?include_prereleases&label=release)](https://github.com/amplifthq/opentag/releases)
-[![npm](https://img.shields.io/npm/v/@opentag/cli?label=%40opentag%2Fcli)](https://www.npmjs.com/package/@opentag/cli)
-[![pnpm build](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20build)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
-[![pnpm typecheck](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20typecheck)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
-[![pnpm test](https://img.shields.io/github/actions/workflow/status/amplifthq/opentag/ci.yml?branch=main&label=pnpm%20test)](https://github.com/amplifthq/opentag/actions/workflows/ci.yml)
-[![Node](https://img.shields.io/badge/Node-%3E%3D20-339933)](https://nodejs.org/)
-[![License](https://img.shields.io/badge/license-MIT-green)](#许可证)
+OpenTag 是自托管协调边界，不是托管编码服务。它接收讨论串请求，记录受治理的 Run
+和 Attempt 状态，配对明确的 Runner，并把已核验状态投影回原 Slack 讨论串。Provider
+delivery 是独立证据，不能取代 canonical Run 或 Attempt 的事实来源。
 
-OpenTag 是团队协作线程和 coding agent 之间的开源、本地优先网关。在 Slack 或 GitHub 里 @opentag，它会在你自己的电脑上运行 Claude Code、Codex、Cursor 或任何 [Agent Client Protocol](https://agentclientprotocol.com) agent，然后把带证据的结果回复到同一个 thread——而不只是一段总结。
+## 工作路径
 
-- **任何 agent，一个协议。** Codex、Claude Code、Cursor、OpenCode、Hermes、OpenClaw 六个内置执行器和自定义 runner 全部通过 ACP 运行。提及不绑定任何一家厂商。
-- **默认本地优先。** 代码、凭据和完整执行轨迹留在你的机器上。平台只收到确认、回复和你批准执行的动作所需的消息。
-- **「完成」需要证据。** executor 报告成功不等于工作完成。OpenTag 可以让 run 保持打开，直到可验证的证据——pull request、绿色 checks、merge——满足配置的 completion gates，全程记录在本地审计账本里。
+1. 工程师在 Slack 工程讨论串中提及已配置的 OpenTag App。
+2. 自托管 Control Plane 准入唯一的 **Run**，记录源讨论串、Project Target、授权与证据谱系。
+3. 已配对本地 Runner 领取带 fence 的 **Attempt**，以本地 checkout 运行配置的 ACP executor。
+4. Runner 回报有边界的证据；OpenTag 在原讨论串呈现状态、需关注状态或审批请求。
+5. 创建 draft PR 等实质性 provider 动作必须满足精确策略与单独显式审批；智能体报告本身不会执行真实 provider 动作。
 
-Slack、GitHub、GitLab、Linear、Lark / 飞书今天已完整支持；Telegram、Discord、Microsoft Teams 为预览状态。
+## 如实说明运行模式
 
-## 演示
-
-在 Slack 里提及 OpenTag，审批建议动作，然后得到一个真实的 GitHub pull request。
-
-https://github.com/user-attachments/assets/86edc4e1-7de9-4d07-a0ba-847fa6438191
-
-![OpenTag overview](./assets/readme-hero.png)
-
-## 源线程操作回执
-
-OpenTag 把请求发生的原始 thread 当成审批 agent 建议变更的地方。agent 提出要修改系统记录时，OpenTag 会渲染一个简洁的 action receipt，说明将要改什么、现在是否可以 apply，以及当前最安全的决策是什么。
-
-只有 dispatcher 确认已有 adapter 可以执行该 action 时，OpenTag 才会显示 `Apply`。否则 receipt 会显示需要 setup 或需要注意的原因，同时保留本地 audit 入口，例如 `opentag status --run <run_id>`。
-
-每个 run 也会保留本地 agent work ledger：source event、admission decision、context packet snapshot、executor capability snapshot、产物、delivery intent audit 和最终结果都可以通过 status / audit API 查看，而不会把 agent 内部过程刷到人类 thread。Provider outcome 以 delivery journal 为准，不能从 run event 推断。
-
-## 快速开始
-
-需要 Node.js 22 或更新版本。
-
-```bash
-npm install -g @opentag/cli@latest
-opentag setup
-```
-
-一次性终端模式检查可以不全局安装：
-
-```bash
-npx @opentag/cli setup
-```
-
-如果要使用后台服务模式，建议优先全局安装，这样生成的服务定义会指向稳定的 CLI 路径，而不是 `npx` 的临时目录。
-
-`opentag setup` 是主要入口。它会逐步询问：
-
-1. CLI 使用哪种语言？
-2. OpenTag 要监听哪个平台？
-3. OpenTag 要使用哪个 coding agent？
-4. OpenTag 可以操作哪个本地项目？
-5. OpenTag 要保存哪些平台凭据？
-6. OpenTag 应该如何持续运行？
-
-setup 保存配置后，可以选择运行方式：
-
-1. 关闭终端后继续运行（推荐）
-2. 只在当前终端里运行
-3. 暂时不启动
-
-脚本化 setup 可以使用 `--service` 直接选择推荐的后台服务模式：
-
-```bash
-opentag setup --service
-```
-
-`--service` 会在 setup 后安装并启动本地后台服务。后台服务模式在 macOS 上使用 LaunchAgent，在 Linux 上使用 `systemd --user`；其他平台暂时使用终端模式，通过 `opentag start` 运行。如果当时跳过启动，或者后来停止了 OpenTag，可以用 `opentag start` 进入终端模式，或用 `opentag service start` 启动后台服务。
-
-OpenTag 启动后，在已连接的平台里提及它：
-
-```text
-@opentag investigate this
-```
-
-OpenTag 会在本地运行你选择的 coding agent，并通过对应的平台回复结果。
-
-## 让 Agent 帮你
-
-如果你已经在用 Codex 或 Claude Code，但不熟悉 CLI，可以新开一个 agent session，直接粘贴：
-
-```text
-请帮我从 https://github.com/amplifthq/opentag 设置 OpenTag。
-
-请使用已发布的 OpenTag CLI。请你：
-1. 检查这台电脑是否已经安装 Node.js 22 或更高版本。
-2. 安装或运行已发布的 OpenTag CLI。
-3. 运行 opentag setup，并帮我选择 Slack、GitHub、GitLab、Linear、Lark / 飞书、Telegram、Discord 或 Microsoft Teams、coding agent，以及本地项目。
-4. 如果需要平台凭据，请打开仓库里对应的平台设置教程，并一步一步带我完成。
-5. setup 询问 OpenTag 应该如何运行时，请选择推荐的后台服务选项。然后用 opentag service status 和 opentag doctor 验证设置是否成功。如果当前平台不支持 service 模式，或者我选择终端模式，请运行 opentag start 并保持那个终端打开。
-
-不要编造凭据或密钥。输入任何 token、app ID、channel ID、repository 或 project path 之前，都要先问我。
-```
-
-## 平台教程
-
-在 `opentag setup` 里选择哪个平台，就看对应教程。
-
-| 平台 | 状态 | 推荐首选路径 | 教程 |
-| --- | --- | --- | --- |
-| Slack | ✅ 完整 | 本地开发优先使用 Socket Mode | [Slack 配置](docs/platforms/slack.zh-CN.md) |
-| GitHub | ✅ 完整 | 使用 repository webhook 和 GitHub token | [GitHub 配置](docs/platforms/github.zh-CN.md) |
-| GitLab | ✅ 完整 | 使用 project Note Hook 和 GitLab access token | [GitLab 配置](docs/platforms/gitlab.zh-CN.md) |
-| Linear | ✅ 完整 | 使用 workspace webhook 和 OAuth App 安装 | [Linear 配置](docs/platforms/linear.zh-CN.md) |
-| Lark / 飞书 | ✅ 完整 | 在 setup 里扫码创建 Personal Agent | [Lark / 飞书配置](docs/platforms/lark.zh-CN.md) |
-| Telegram | 🧪 预览 | 使用 BotFather token 和本地 getUpdates polling | [Telegram 配置](docs/platforms/telegram.zh-CN.md) |
-| Discord | 🧪 预览 | 使用 bot token 和本地 Gateway 接收（仅 slash 命令） | [Discord 配置](docs/platforms/discord.zh-CN.md) |
-| Microsoft Teams | 🧪 预览 | 使用 Azure Bot 和公网 HTTPS tunnel 连接本地 dispatcher（暂不支持 relay 模式） | [Microsoft Teams 配置](docs/platforms/teams.zh-CN.md) |
-
-## 本地会运行什么
-
-`opentag setup` 可以安装并启动推荐的后台服务，也可以在当前终端运行 OpenTag，或者只保存配置暂不启动。`opentag setup --service` 会跳过最后的选择，并在 macOS 或 Linux 上安装和启动后台服务。service 模式和终端模式都会启动：
-
-- 本地 dispatcher
-- 绑定到你所选项目的本地 runner
-- 已选择的平台监听器
-
-停止终端模式：
-
-```text
-Ctrl-C
-```
-
-停止后台服务：
-
-```bash
-opentag service stop
-```
-
-OpenTag 本地配置默认写到：
-
-```text
-~/.config/opentag/config.json
-```
-
-Runtime state 和隔离 worktree 默认写到：
-
-```text
-~/.local/state/opentag
-```
-
-## 隐私和本地优先
-
-OpenTag 的 CLI 路径是本地优先的。
-
-- 本地 CLI 流程里没有 OpenTag cloud service。
-- 平台凭据保存在你的电脑上，并使用私有文件权限。
-- Codex、Claude Code、Cursor、OpenCode、Hermes 和 OpenClaw 会通过 ACP 在你的本地 checkout 上运行；OpenClaw 的取消当前是 best effort。
-- 平台 API 只会收到 OpenTag 用来确认、回复和执行已审批 action 所需的消息。
-
-## 可选控制面
-
-OpenTag 也包含一个可选的开源控制面，面向需要共享身份、runner 配对、公开
-入口、租户隔离的 hosted-run 协调、受治理权限、留存证据和审计视图的团队。
-本地 CLI 路径不依赖它；本地仓库、源码托管凭证、agent 凭证、worktree 和
-编码 agent 执行始终不由控制面托管。
-
-这个 clean-room 实现采用 Node/Hono、PostgreSQL、静态 Vite/React 运维控制台
-和 Docker Compose 自托管方案。它不要求 Cloudflare、TanStack Start、Redis、
-对象存储或消息队列。可从 [Control Plane README](apps/control-plane/README.md)
-和[部署运行手册](docs/control-plane-deployment.md)开始。源码实现本身不代表
-托管环境或生产服务已经部署。
-
-GitHub ingress 默认关闭：当前本地基础实现已经验证签名 delivery 预留与重放，
-但在具备可审计的 binding 密钥轮换和禁用/恢复流程前，不应激活生产 webhook。
-
-要验证完整的自托管方案，先安装一次 Chromium，再运行生产形态的浏览器
-E2E：
-
-```bash
-corepack pnpm --dir apps/control-plane e2e:install
-corepack pnpm e2e:control-plane
-```
-
-这条 E2E 会构建生产 OCI 镜像，启动隔离的 PostgreSQL 17 Compose project，
-执行 migrations、bootstrap owner、HTTP 和 jobs 进程，再由 Chromium 完成
-登录、API Key、runner、Project Target 和 GitHub binding 旅程。runner 通过
-公开的 `@opentag/client` package 入口配对，随后完成本地签名 ingress、hosted
-claim、权限、material evidence、取消、凭证重发和周期 jobs，再使用 `psql`
-直接核对精确的持久化记录。随后测试会重启 HTTP 和 jobs 服务、复核 HTTP
-readiness 并确认重启后的 jobs 进程可以结算新任务，再生成保留原始字节的
-PostgreSQL 备份、恢复到一个全新数据库，并核对恢复后的 migrations、
-持久化记录和非 ASCII 数据校验值。成功时会删除容器、网络、数据卷、生成的
-密钥和 Playwright 输出；失败时保留有限的浏览器诊断产物。
-
-这是本地的生产形态测试；它不会连接 GitHub、使用生产数据库、部署服务，
-也不证明托管环境已经上线。精确的验收旅程和边界见
-[浏览器 E2E 目录](apps/control-plane/e2e/TEST-CATALOG.md)。
-
-## 支持的 Coding Agent
-
-| Coding agent | 状态 | 说明 |
+| 模式 | 适用场景 | 可用性说明 |
 | --- | --- | --- |
-| Codex | 已支持 | 内置 `codex-acp`，复用现有 Codex 登录 |
-| Claude Code | 已支持 | 内置 `claude-agent-acp`，复用现有 Claude 登录 |
-| Cursor | 安装并登录后支持 | 使用本机 `cursor-agent acp` 命令 |
-| OpenCode | `npx` 可用且 provider 已配置后支持 | 使用固定版本官方包 `opencode-ai@1.18.1`；ACP 启动时使用 pure mode，避免外部插件向 stdout 写入非协议数据 |
-| Hermes | 安装后支持 | 使用 `hermes -p <profile> acp` 和已配置的本地 provider |
-| OpenClaw | 安装并配置 Gateway 后支持 | 使用本机 `openclaw acp`；当前取消是 best effort，不保证 Gateway 已终止正在运行的 tool 子进程 |
-| Echo | 仅开发/测试 | 不运行真实 coding agent |
+| `local_direct` | 试用、单机使用 | `offlineSafe=false`。只有该机器和本地 OpenTag 进程在线时才能工作。 |
+| `paired_relay` | 自托管团队配置 | 独立运行的 relay 接收 Slack ingress，一个出站本地 Runner 执行已批准工作；精确安装认证另行进行。 |
 
-## 常用命令
+参考单节点 Compose 配置只有在确定性与安装认证 gate 均通过后才可以显示
+`Runner-offline-safe`。它始终是 `Relay-not-HA`；本仓库不作高可用声明。
 
-| 命令 | 用途 |
-| --- | --- |
-| `opentag setup` | 创建或更新本地 OpenTag 配置，并询问是否立即启动 |
-| `opentag setup --service` | 创建或更新本地 OpenTag 配置，并安装、启动后台服务 |
-| `opentag start` | 在当前终端启动本地 OpenTag stack |
-| `opentag pair` | 将本地 runner 与远程 relay 配对 |
-| `opentag service install` | 安装 OpenTag 后台服务 |
-| `opentag service start` | 启动已安装的后台服务 |
-| `opentag service stop` | 停止已安装的后台服务 |
-| `opentag service restart` | 重启已安装的后台服务 |
-| `opentag service status` | 查看后台服务状态和 runtime readiness |
-| `opentag service logs` | 查看近期后台服务日志 |
-| `opentag service uninstall` | 卸载 OpenTag 后台服务 |
-| `opentag service autostart enable` | 启用后台服务的登录自启动 |
-| `opentag service autostart disable` | 禁用后台服务的登录自启动 |
-| `opentag status` | 查看本地配置和运行状态；可以加 `--run <run_id>` 或 `--channel provider:account/conversation` 查看局部详情 |
-| `opentag cancel` | 请求取消某个 run，或取消 source container 中的 active run |
-| `opentag doctor` | 检查 dispatcher、bindings、checkout 和 executor |
-| `opentag ingest` | 上报经过 active-attempt fence 校验的本地外部 agent 进度或完成事件 |
-| `opentag ingest-template` | 打印本地外部 agent hook ingest 的 shell 模板或 manifest |
-| `opentag platforms` | 查看平台 setup 支持状态 |
-| `opentag executors` | 查看可用 coding agent |
-| `opentag maintenance prune-source-deliveries` | 清理已终结 run 的过期 source delivery 重放 key |
-| `opentag config path` | 输出本地配置文件路径 |
-| `opentag config show` | 输出脱敏后的本地配置 |
+## 快速开始：自托管 paired relay
 
-## 卸载
+团队配置使用 Slack Events API 与 Slack interactivity 的公网 HTTPS ingress、GitHub
+Project Target、一个已配对本地 Runner 和 ACP executor。Socket Mode 仍适合
+`local_direct` 本地开发，但**不属于**已认证的 paired relay ingress。
 
-移除全局 CLI 包：
+### 1. 启动你自行运维的 relay
+
+需要 Docker Compose、Slack 可访问的公网 HTTPS origin，以及与配对 Runner 机器不同
+的 relay 主机。
 
 ```bash
-npm uninstall -g @opentag/cli
+cd deploy/compose
+cp .env.example .env
 ```
 
-删除本地 OpenTag 配置和状态：
+替换 `.env` 的每一个占位值。另建 mode `0600` 的 relay-content KEK 主机文件，内容必须
+是恰好 32 个原始字节、64 个十六进制字符，或能解码为 32 字节的 base64。把路径写入
+`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE`。不要把 KEK 写进 `.env`：Compose 会将其挂载为
+`/run/secrets/opentag_relay_content_kek`，key version 固定为 `v1`。
+
+先渲染配置，再启动：
 
 ```bash
-rm -rf ~/.config/opentag ~/.local/state/opentag
+docker compose --env-file .env config
+docker compose --env-file .env up --build
 ```
 
-## 工作方式
+等待 `control-plane` 健康后使用 `OPENTAG_PUBLIC_URL`。恢复、readiness 和安装认证边界见
+[Compose 指南](deploy/compose/README.md) 与 [部署运行手册](docs/control-plane-deployment.md)。
 
-```mermaid
-flowchart LR
-    A["Slack、GitHub、GitLab、Linear、Lark / 飞书、Telegram、Discord 或 Microsoft Teams"] --> B["OpenTag listener"]
-    B --> C["本地 dispatcher"]
-    C --> D["本地 runner"]
-    D --> E["内置或自定义 ACP executor"]
-    E --> F["回复回对应平台"]
-```
+### 2. 配置 Slack Source App
 
-最重要的边界是：平台负责接收和回复消息，OpenTag 负责任务调度，coding agent 在你的电脑上执行。
+为 workspace 和私有工程 channel 创建一个 Slack App。把 **Event Subscriptions** 与
+**Interactivity & Shortcuts** 都指向 relay 的公网 HTTPS Slack endpoint，并在自托管安装
+中配置 signing secret 和 bot token。订阅文档规定的 app-mention 与 private-channel 事件，
+然后将 App 邀请进 channel。
 
-## 开发者文档
+请按 [Slack 指南](docs/platforms/slack.zh-CN.md) 配置精确事件、权限、URL 和验签流程。
+不要将 Socket Mode 配置为认证后的 paired relay ingress。
 
-- [平台配置教程](docs/platforms/README.md)
-- [配置说明](docs/configuration.md)
-- [Hook ingest contract](docs/hook-ingest.md)
-- [适配器开发](docs/adapter-authoring.md)
-- [真实集成 smoke test](docs/real-integration-smoke-test.md)
-- [Live E2E smoke harness](docs/live-e2e-smoke-harness.md)
-- [Replay harness](docs/replay-harness.md)
-- [Agent Work Protocol](docs/agent-work-protocol.md)
-- [本地 npm 发布指南](docs/npm-release.md)
-- [npm prerelease 候选发布指南](docs/npm-prerelease.md)
+### 3. 配对一个本地 Runner 与 Project Target
 
-## 本地开发
-
-从源码运行：
+在持有 checkout 和 executor 的机器上：
 
 ```bash
-corepack pnpm install
+npm install -g @opentag/cli@0.11.0
+opentag setup --relay https://relay.example.com
+opentag pair --relay https://relay.example.com \
+  --trust-relay-origin https://relay.example.com
+opentag start
+```
+
+`paired_relay` 会拒绝 loopback 和同进程 relay URL。setup 时注册本地 GitHub Project
+Target，并选择机器可用的 ACP executor（例如 Codex 或 Claude Code）。配对 Runner 保留
+checkout、编码智能体凭据与 worktree。
+
+```bash
+opentag doctor
+opentag status
+```
+
+### 4. 从受治理的 Slack 请求开始
+
+```text
+@OpenTag 调查失败的检查并提出修复方案
+```
+
+确认消息只证明 ingress 已记录请求，不能证明 Runner 在线或工作完成。可在 Slack 查看
+投影状态，或用 `opentag status --run <run_id>` 查本地审计详情。只审批策略呈现的精确
+实质性动作。OpenTag 不自动合并、不盲目重试 `outcome_unknown` provider outcome，也不会
+把完成证据变成 provider 动作。
+
+## 当前支持的 profile
+
+- Slack 是 Source App，负责讨论串 ingress、状态与审批呈现。
+- GitHub 是 Project Target 与可选发布 provider，不是此 profile 的第二个 source ingress。
+- 一个用户控制的配对 Runner 使用一个已配置 ACP executor。
+- relay 负责持久协调和审计元数据；provider delivery 与 Run/Attempt 生命周期独立。
+
+托管服务、高可用、ambient memory、scheduled work、多 Runner fallback、自动合并和未支持
+的 Source App 均不在此 profile 的声明范围。详见 [team-relay 架构](docs/architecture/team-relay.md)
+及需要单独授权的 [真实 canary 运行手册](docs/testing/team-relay-canary.md)。
+
+## 验证本地实现
+
+下列命令只验证已检入本地软件；不会部署 relay、联系 Slack/GitHub，也不构成安装认证：
+
+```bash
+corepack pnpm smoke:control-plane-compose:typecheck
 corepack pnpm test
-corepack pnpm typecheck
-corepack pnpm build
 ```
 
-安装本地开发命令：
+一次性的浏览器/Compose 验证边界见 [Control Plane README](apps/control-plane/README.md)。真实
+Slack 或 GitHub canary 必须另行获得显式授权。
 
-```bash
-corepack pnpm opentag-dev
-opentag-dev setup
-```
+## 文档
 
-## 软件包
-
-当前源码发布版本：`v0.11.0`。此源码状态只表示已准备本地发布验证，
-不代表该版本已经发布；npm dist-tag 仍是公开通道版本的权威来源，在注册表
-证据表明发生变化前，`0.10.0` 仍是文档所述的稳定版本。OpenTag 在
-`@opentag` scope 下协调发布 18 个公开软件包。
-
-| 包 | 用途 |
-| --- | --- |
-| [`@opentag/control-protocol`](https://www.npmjs.com/package/@opentag/control-protocol) | 规范的 Control V1 schema、类型与摘要辅助函数 |
-| [`@opentag/cli`](https://www.npmjs.com/package/@opentag/cli) | setup 和本地 runtime CLI |
-| [`@opentag/local-runtime`](https://www.npmjs.com/package/@opentag/local-runtime) | 进程内本地 dispatcher、runner 和平台 runtime |
-| [`@opentag/core`](https://www.npmjs.com/package/@opentag/core) | 协议 schema、类型、mention 解析和 JSON Schema 导出 |
-| [`@opentag/delivery-contract`](https://www.npmjs.com/package/@opentag/delivery-contract) | 规范的交付观测 fixture 与回执契约 |
-| [`@opentag/governance`](https://www.npmjs.com/package/@opentag/governance) | 确定性的完成条件评估和治理编排 |
-| [`@opentag/client`](https://www.npmjs.com/package/@opentag/client) | Dispatcher HTTP client |
-| [`@opentag/slack`](https://www.npmjs.com/package/@opentag/slack) | Slack Socket Mode、Events API 和回复 |
-| [`@opentag/github`](https://www.npmjs.com/package/@opentag/github) | GitHub webhook、评论、PR helper 和 action apply |
-| [`@opentag/gitlab`](https://www.npmjs.com/package/@opentag/gitlab) | GitLab webhook、note 回复、MR helper 和 action apply |
-| [`@opentag/linear`](https://www.npmjs.com/package/@opentag/linear) | Linear webhook、只读 project backlog 查询、issue comment 回复和 issue action apply |
-| [`@opentag/lark`](https://www.npmjs.com/package/@opentag/lark) | Lark / 飞书入口、Personal Agent 注册和回复 |
-| [`@opentag/telegram`](https://www.npmjs.com/package/@opentag/telegram) | Telegram polling/webhook 规范化、bot 回复和 source-thread controls |
-| [`@opentag/discord`](https://www.npmjs.com/package/@opentag/discord) | Discord Gateway/webhook slash-command interactions 和频道回复 |
-| [`@opentag/teams`](https://www.npmjs.com/package/@opentag/teams) | Microsoft Teams Bot Framework 入口、频道回复和 action apply |
-| [`@opentag/runner`](https://www.npmjs.com/package/@opentag/runner) | Executor 契约、通用 ACP host 和内置 launch profile |
-| [`@opentag/store`](https://www.npmjs.com/package/@opentag/store) | SQLite 持久化 |
-| [`@opentag/dispatcher`](https://www.npmjs.com/package/@opentag/dispatcher) | 可嵌入 dispatcher、delivery producer 和 side-effect kernel |
+- [Team relay 架构](docs/architecture/team-relay.md)
+- [自托管 Compose 指南](deploy/compose/README.md)
+- [Control Plane 部署运行手册](docs/control-plane-deployment.md)
+- [Slack Source App 指南](docs/platforms/slack.zh-CN.md)
+- [Team-relay canary 运行手册](docs/testing/team-relay-canary.md)
+- [配置参考](docs/configuration.md)
+- [面向智能体的安装指南](docs/agent-install.md)
+- [npm prerelease 候选发布指南](docs/npm-prerelease.md)
 
 ## 许可证
 
-OpenTag 基于 MIT License 开源。详见 [LICENSE](LICENSE)。
-
-## 交流微信群
-
-🎉 欢迎大家在群里交流：
-• 使用体验/bug 反馈
-• 功能建议/场景需求
-• 开源贡献与共创想法
-
-我们会在群里同步项目进展和版本更新。欢迎大家一起玩、一起提 issue、一起把 OpenTag 做得更好！👏
-
-扫码加我微信（备注 OpenTag），我拉你进群：
-
-<img width="803" height="1024" alt="添加 OpenTag 维护者明佑的微信" src="./assets/wechat-contact-qr.jpg" />
+[MIT](./LICENSE)
