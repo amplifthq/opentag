@@ -614,6 +614,22 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
       .rejects.toThrow("projection_v2_authority_immutable");
   });
 
+  it("ignores same-named projection tables and triggers in an unrelated schema",async()=>{
+    const unrelatedSchema=`${fixture.schema}_unrelated`;
+    try{
+      await fixture.pool.query(`CREATE SCHEMA ${unrelatedSchema}`);
+      await fixture.pool.query(`CREATE TABLE ${unrelatedSchema}.cp_hosted_run(id integer)`);
+      await fixture.pool.query(`CREATE FUNCTION ${unrelatedSchema}.unrelated_guard() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`);
+      await fixture.pool.query(`CREATE TRIGGER unrelated_guard BEFORE UPDATE
+        ON ${unrelatedSchema}.cp_hosted_run FOR EACH ROW
+        EXECUTE FUNCTION ${unrelatedSchema}.unrelated_guard()`);
+      await expect(checkProjectionSchemaReadiness(fixture.pool)).resolves.toEqual({ready:true});
+    }finally{
+      await fixture.pool.query(`DROP SCHEMA IF EXISTS ${unrelatedSchema} CASCADE`);
+    }
+  });
+
   it("rejects an old projection when terminal truth commits before the canonical Run lock", async () => {
     await insertRun();
     await fixture.pool.query("UPDATE cp_hosted_run SET state='running',updated_at=$1 WHERE run_id='run_projection'",

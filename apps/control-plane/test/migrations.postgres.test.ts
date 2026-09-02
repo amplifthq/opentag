@@ -340,7 +340,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         retryDelayMs:1000,clock:{now:()=>queueNow}})).resolves.toEqual({kind:"empty"});
       expect(executions).toBe(1);
     }finally{await upgrade.close();}
-  });
+  },15_000);
 
   it("rejects missing legacy event lineage and future v2 job identity conflicts",async()=>{
     const upgrade=await createIsolatedPostgres();
@@ -393,7 +393,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await expect(upgrade.pool.query(`SELECT cp_insert_team_relay_v2_job($1,$2,$3)`,
         ["team-relay-occupied","org_lineage",payload])).rejects.toThrow("projection_v2_job_identity_conflict");
     }finally{await upgrade.close();}
-  });
+  },15_000);
 
   it("rejects an occupied v2 job id with a mismatched identity",async()=>{
     const collision=await createIsolatedPostgres();

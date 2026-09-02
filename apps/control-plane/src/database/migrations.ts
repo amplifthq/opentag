@@ -804,8 +804,12 @@ export async function checkProjectionSchemaReadiness(
             AND trigger_row.tgtype=21 AND function_row.proname='cp_related_projection_after') OR
           (trigger_row.tgname='cp_delivery_projection_trigger' AND relation.relname='cp_provider_delivery_intent'
             AND trigger_row.tgtype=17 AND function_row.proname='cp_delivery_projection_after')))
-      AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
+      AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger_row
+        JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
+        JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
         WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
+          AND relation_namespace.nspname=current_schema()
           AND function_row.pronamespace=current_schema()::regnamespace
           AND function_row.proname LIKE '%projection%'
           AND trigger_row.tgname NOT IN ('cp_hosted_run_projection_before_trigger',
@@ -814,8 +818,10 @@ export async function checkProjectionSchemaReadiness(
             'cp_delivery_projection_trigger','cp_projection_job_v2_authority_immutable'))
       AND NOT EXISTS(SELECT 1 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
         JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
         WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
+          AND relation_namespace.nspname=current_schema()
           AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
             'cp_publication_candidate','cp_publication_intent','cp_provider_delivery_intent',
             'cp_projection_event_cursor','cp_projection_delivery_watermark',
@@ -839,7 +845,9 @@ export async function checkProjectionSchemaReadiness(
           OR function_row.pronamespace<>current_schema()::regnamespace))
       AND (SELECT count(*)=12 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
+        JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
         WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'
+          AND relation_namespace.nspname=current_schema()
           AND relation.relname=ANY(ARRAY['cp_hosted_run','cp_permission_request',
             'cp_publication_candidate','cp_publication_intent','cp_provider_delivery_intent',
             'cp_projection_event_cursor','cp_projection_delivery_watermark',
