@@ -13,11 +13,16 @@ in the deployment runbook. Its availability declaration is always
    independently generated fencing-token and login-throttle secrets rather
    than reusing the pairing, recovery, administrator, or database secret. Keep
    the file out of version control.
-2. Create a separately backed-up relay-content KEK file with mode `0600` and
-   set `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to its host-side path. The file
-   must contain exactly 32 raw bytes, 64 hexadecimal characters, or base64 that
-   decodes to 32 bytes. Do not put the KEK itself in `.env`. Missing files make
-   Compose refuse the deployment; malformed or placeholder content makes relay
+2. Create a separately backed-up relay-content KEK file and set
+   `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to its host-side path. On native
+   Linux, put it in a mode-`0700` directory and make the file mode `0444`, or
+   otherwise make it readable by container UID/GID `10001` without exposing
+   the parent directory. Compose file-backed secrets are bind mounts, so a
+   mode-`0600` file owned by another host user is not readable by the non-root
+   container. The file must contain exactly 32 raw bytes, 64 hexadecimal
+   characters, or base64 that decodes to 32 bytes. Do not put the KEK itself in
+   `.env`. Missing files make Compose refuse the deployment;
+   malformed or placeholder content makes relay
    readiness fail closed. The container receives only the mounted file path
    `/run/secrets/opentag_relay_content_kek` and immutable version `v1`.
 3. Run `docker compose --env-file .env config` and inspect the rendered secret

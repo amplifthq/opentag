@@ -56,6 +56,9 @@ describe("Control Plane deployment contract", () => {
     expect(example).not.toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION=");
     expect(composeReadme).toMatch(/Missing files make\s+Compose refuse the deployment/u);
     expect(composeReadme).toMatch(/malformed or placeholder content makes relay\s+readiness fail closed/u);
+    expect(composeReadme).toContain("mode-`0700` directory");
+    expect(composeReadme).toContain("container UID/GID `10001`");
+    expect(deployment).toMatch(/Compose implements file-backed secrets as\s+bind\s+mounts/u);
     expect(deployment).toContain("Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable");
   });
 
@@ -63,7 +66,8 @@ describe("Control Plane deployment contract", () => {
     const e2e = await read("scripts/test/control-plane-browser-e2e.mjs");
 
     expect(e2e).toContain("const relayContentKekFile = join(temporaryDirectory, \"relay-content-kek\")");
-    expect(e2e).toContain("await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o600 })");
+    expect(e2e).toContain("await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o644 })");
+    expect(e2e).toContain("await chmod(temporaryDirectory, 0o700)");
     expect(e2e).toContain("`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`");
     expect(e2e).not.toContain("OPENTAG_RELAY_CONTENT_KEK=");
   });

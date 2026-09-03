@@ -49,10 +49,15 @@ Required values:
 
 Relay content encryption is deliberately not configured with an inline
 environment secret. On the host, set only
-`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to a mode-`0600` file containing exactly
-32 raw bytes, 64 hexadecimal characters, or base64 that decodes to 32 bytes.
-Compose mounts that file as the `opentag_relay_content_kek` Docker secret. The
-container receives only these immutable references:
+`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to a file containing exactly 32 raw
+bytes, 64 hexadecimal characters, or base64 that decodes to 32 bytes. On
+native Linux, keep the file in a mode-`0700` directory and make the file mode
+`0444`, or otherwise grant read access to container UID/GID `10001` without
+exposing the parent directory. Compose implements file-backed secrets as bind
+mounts and does not remap ownership, so a mode-`0600` file owned by another
+host user is unreadable by the non-root image. Compose mounts the file as the
+`opentag_relay_content_kek` Docker secret. The container receives only these
+immutable references:
 
 ```text
 OPENTAG_RELAY_CONTENT_KEK_FILE=/run/secrets/opentag_relay_content_kek

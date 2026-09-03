@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -139,7 +139,11 @@ const compose = [
 
 let primaryError;
 try {
-  await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o600 });
+  await chmod(temporaryDirectory, 0o700);
+  // File-backed Compose secrets retain the source file's host ownership on
+  // native Linux. The private parent directory scopes this readable mount to
+  // the disposable E2E run while allowing the non-root container user to read it.
+  await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o644 });
   await writeFile(environmentFile, [
     `POSTGRES_PASSWORD=${postgresPassword}`,
     `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`,
