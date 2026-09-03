@@ -612,7 +612,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           || lifecycle.intent.candidate_id !== command.candidateId
           || lifecycle.intent.candidate_digest !== command.candidateDigest
           || lifecycle.attempt.fencing_token_digest !== fenceDigest
-          || lifecycle.attempt.lease_expires_at <= now
+          || !(lifecycle.attempt.state === "succeeded"
+            || (["claimed", "running"].includes(lifecycle.attempt.state)
+              && lifecycle.attempt.lease_expires_at > now))
           || lifecycle.intent.expires_at <= now
           || lifecycle.intent.runner_id !== command.principal.runnerId
           || lifecycle.intent.runner_generation !== command.runnerGeneration
@@ -899,8 +901,9 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
            WHERE capability.organization_id=$1 AND capability.capability_id=$2
              AND capability.capability_digest=$3 AND capability.expires_at > CURRENT_TIMESTAMP
              AND run.terminal_kind IS NULL AND run.current_attempt_number = intent.attempt_number
-             AND attempt.state IN ('succeeded','claimed','running')
-             AND attempt.lease_expires_at > CURRENT_TIMESTAMP
+             AND (attempt.state = 'succeeded' OR (
+               attempt.state IN ('claimed','running')
+               AND attempt.lease_expires_at > CURRENT_TIMESTAMP))
              AND runner.credential_generation = intent.runner_generation`,
           [parsed.organizationId, parsed.capabilityId, await computePublicationCapabilityDigestV1(parsed)]);
           if (result.rowCount !== 1) return { kind: "stale_fence" as const };

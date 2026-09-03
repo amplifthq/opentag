@@ -715,19 +715,26 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     const push = pushRace.find((result) => result.kind === "issued")!;
     expect(push.kind).toBe("issued");
     if (push.kind !== "issued") return;
-    // RED before Slice B: a caller could backdate begunAt past a DB-expired
-    // lease and the publisher would accept it. Only the coordinator DB clock
-    // may authorize begin.
+    // An active execution still requires a live DB-authoritative lease.
     await fixture.pool.query(
-      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
+      `UPDATE cp_hosted_attempt SET state='running',
+         lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
        WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
       [principal.organizationId, candidate.runId, claim.attempt.id],
     );
     await expect(publisher.begin({ principal, fencingToken: claim.attempt.fencingToken,
       capability: push.capability, begunAt: new Date(now.getTime() - 60 * 60_000).toISOString() }))
       .resolves.toEqual({ kind: "stale_fence" });
+    await expect(claimOperation("push_owned_branch")).resolves.toEqual({
+      kind: "unavailable",
+      reason: "exact_publication_authority_missing",
+    });
+    // Once execution has durably succeeded, the exact Candidate, ownership,
+    // approval, intent, and short-lived publication capability are the
+    // publication authority. The completed execution lease is no longer one.
     await fixture.pool.query(
-      `UPDATE cp_hosted_attempt SET lease_expires_at=CURRENT_TIMESTAMP + interval '1 minute'
+      `UPDATE cp_hosted_attempt SET state='succeeded',
+         lease_expires_at=CURRENT_TIMESTAMP - interval '1 second'
        WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
       [principal.organizationId, candidate.runId, claim.attempt.id],
     );
