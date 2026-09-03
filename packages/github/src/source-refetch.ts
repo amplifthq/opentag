@@ -196,6 +196,12 @@ export async function refetchGitHubIssueCommentForHostedAdmission(input: {
   if (admission.provider !== "github" || admission.eventName !== "issue_comment") {
     throw new GitHubSourceRefetchError("github_source_invalid");
   }
+  const sourceThreadNumber = admission.sourceThread.number;
+  const sourceThreadKind = admission.sourceThread.kind;
+  if (sourceThreadNumber === undefined
+    || (sourceThreadKind !== "issue" && sourceThreadKind !== "pull_request")) {
+    throw new GitHubSourceRefetchError("github_source_invalid");
+  }
   if (typeof input.token !== "string" || input.token.trim().length === 0) {
     throw new GitHubSourceRefetchError("github_source_refetch_failed");
   }
@@ -208,7 +214,7 @@ export async function refetchGitHubIssueCommentForHostedAdmission(input: {
   const owner = admission.repository.owner;
   const repo = admission.repository.repo;
   const repositoryUrl = `${apiOrigin}/repos/${encodePath(owner)}/${encodePath(repo)}`;
-  const issueUrl = `${repositoryUrl}/issues/${admission.sourceThread.number}`;
+  const issueUrl = `${repositoryUrl}/issues/${sourceThreadNumber}`;
   const commentUrl = `${repositoryUrl}/issues/comments/${encodePath(admission.sourceEvent.providerEventId)}`;
 
   const repository = await fetchGitHubJson({
@@ -239,8 +245,8 @@ export async function refetchGitHubIssueCommentForHostedAdmission(input: {
     : "issue";
   assertIdentity(
     String(thread.id) === admission.sourceThread.providerThreadId
-      && exactInteger(thread.number) === admission.sourceThread.number
-      && fetchedThreadKind === admission.sourceThread.kind
+      && exactInteger(thread.number) === sourceThreadNumber
+      && fetchedThreadKind === sourceThreadKind
       && exactString(thread.repository_url) === repositoryUrl
       && exactString(thread.comments_url) === `${issueUrl}/comments`,
   );
@@ -293,8 +299,8 @@ export async function refetchGitHubIssueCommentForHostedAdmission(input: {
     commentUrl: commentHtmlUrl,
     apiCommentsUrl: commentsUrl,
     issueUrl: threadHtmlUrl,
-    issueNumber: admission.sourceThread.number,
-    threadKind: admission.sourceThread.kind,
+    issueNumber: sourceThreadNumber,
+    threadKind: sourceThreadKind,
     owner,
     repo,
     actorId: actorId!,

@@ -40,7 +40,7 @@ describe("GitHub apply helpers", () => {
     });
   });
 
-  it("rejects generic create_pull_request intents before they reach a GitHub operation", () => {
+  it("compiles local_direct create_pull_request intents into GitHub operations", () => {
     expect(
       compileGitHubIssueMutationIntent({
         intentId: "intent_create_pr",
@@ -55,11 +55,14 @@ describe("GitHub apply helpers", () => {
           risks: ["Review before merge."]
         }
       })
-    ).toEqual({ ok: false, outcome: { intentId: "intent_create_pr", outcome: "unsupported",
-      message: "Draft pull requests require exact coordinator publication approval." } });
+    ).toEqual({ ok: true, intentId: "intent_create_pr", operation: {
+      kind: "create_pull_request", intentId: "intent_create_pr", title: "OpenTag run run_1",
+      body: ["## Summary", "", "Create a PR for the generated branch.", "",
+        "## Changed Files", "- `src/demo.ts`", "", "## Risks", "- Review before merge."].join("\n"),
+      head: "opentag/run_1", base: "main" } });
   });
 
-  it("does not let extra generic PR fields re-enable the removed compiler path", () => {
+  it("keeps explicit local_direct PR text and appends structured metadata", () => {
     expect(
       compileGitHubIssueMutationIntent({
         intentId: "intent_create_pr",
@@ -77,8 +80,12 @@ describe("GitHub apply helpers", () => {
           executorConditions: ["isolated branch exists"]
         }
       })
-    ).toEqual({ ok: false, outcome: { intentId: "intent_create_pr", outcome: "unsupported",
-      message: "Draft pull requests require exact coordinator publication approval." } });
+    ).toEqual({ ok: true, intentId: "intent_create_pr", operation: {
+      kind: "create_pull_request", intentId: "intent_create_pr", title: "OpenTag run run_1",
+      body: ["Custom model-written PR body.", "", "## Changed Files", "- `src/demo.ts`", "",
+        "## Risks", "- Review before merge.", "", "## Verification", "- `pnpm test`: passed",
+        "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+      head: "opentag/run_1", base: "main" } });
   });
 
   it("compiles status and priority through explicit GitHub label mappings", () => {
@@ -378,7 +385,7 @@ describe("GitHub apply helpers", () => {
     ]);
   });
 
-  it("does not apply create_pull_request intents outside the exact Publisher", async () => {
+  it("preserves the existing local_direct pull-request apply path", async () => {
     const requests: Array<{ url: string; method: string; body?: unknown; authorization: string | null }> = [];
     const fetchImpl = (async (url, init) => {
       requests.push({
@@ -407,10 +414,13 @@ describe("GitHub apply helpers", () => {
           }
         }
       })
-    ).resolves.toEqual({ intentId: "intent_create_pr", outcome: "unsupported",
-      message: "Draft pull requests require exact coordinator publication approval." });
+    ).resolves.toEqual({ intentId: "intent_create_pr", outcome: "applied",
+      externalUri: "https://github.com/acme/demo/pull/42" });
 
-    expect(requests).toEqual([]);
+    expect(requests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer ghs_test",
+      body: { title: "OpenTag run run_1", body: "PR body",
+        head: "opentag/run_1", base: "main", draft: true } }]);
   });
 
   it("does not re-request reviewers that GitHub already lists as requested", async () => {

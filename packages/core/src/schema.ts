@@ -1252,11 +1252,11 @@ export const AttemptProposalEvidenceSchema = z.object({
   attemptNumber: z.number().int().positive(),
   workspaceId: WellFormedNonEmptyStringSchema,
   workspacePathDigest: WellFormedPublicationCandidateDigestSchema,
+  branch: WellFormedNonEmptyStringSchema,
   baseRevision: WellFormedPublicationCandidateRevisionSchema,
   finalRevision: WellFormedPublicationCandidateRevisionSchema.optional(),
   finalTree: WellFormedPublicationCandidateRevisionSchema,
   diffDigest: WellFormedPublicationCandidateDigestSchema,
-  baseToFinalBinaryDiff: WellFormedUnicodeStringSchema,
   changedFilesDigest: WellFormedPublicationCandidateDigestSchema,
   changedFiles: z.array(WellFormedNonEmptyStringSchema).min(1),
   verificationEvidenceDigests: z.array(WellFormedPublicationCandidateDigestSchema).min(1),
@@ -1305,13 +1305,12 @@ export async function validateAttemptProposalEvidenceArtifact(value: unknown) {
   const { evidenceDigest: _evidenceDigest, ...evidenceInput } = evidence;
   const artifactInput = { ...artifact, metadata: { ...artifact.metadata } };
   delete (artifactInput.metadata as Partial<typeof artifact.metadata>).artifactDigest;
-  const [diffDigest, changedFilesDigest, evidenceDigest, artifactDigest] = await Promise.all([
-    sha256Utf8(evidence.baseToFinalBinaryDiff),
+  const [changedFilesDigest, evidenceDigest, artifactDigest] = await Promise.all([
     sha256Utf8(canonicalJsonStringify(evidence.changedFiles)),
     sha256Utf8(canonicalJsonStringify(evidenceInput)),
     sha256Utf8(canonicalJsonStringify(artifactInput)),
   ]);
-  if (evidence.diffDigest !== diffDigest || evidence.changedFilesDigest !== changedFilesDigest
+  if (evidence.changedFilesDigest !== changedFilesDigest
     || evidence.evidenceDigest !== evidenceDigest
     || artifact.metadata.evidenceDigest !== evidenceDigest
     || artifact.metadata.artifactDigest !== artifactDigest) {

@@ -1973,35 +1973,39 @@ const HostedAdmissionEnvelopeDigestInputV1Shape = {
   organizationId: NonEmptyIdSchema,
   bindingId: NonEmptyIdSchema,
   bindingSecretVersion: NonEmptyIdSchema,
-  provider: z.literal("github"),
+  provider: z.enum(["github", "slack"]),
   deliveryId: NonEmptyIdSchema,
   deliveryPayloadDigest: ReceiptDigestSchema,
   sourceIdentityDigest: ReceiptDigestSchema,
-  eventName: z.literal("issue_comment"),
+  eventName: z.enum(["issue_comment", "app_mention"]),
   action: z.literal("created"),
   repository: z
     .object({
-      providerRepositoryId: GitHubProviderIdV1Schema,
+      provider: NonEmptyIdSchema.optional(),
+      providerRepositoryId: NonEmptyIdSchema,
       owner: NonEmptyIdSchema,
       repo: NonEmptyIdSchema,
     })
     .strict(),
   sourceThread: z
     .object({
-      kind: z.enum(["issue", "pull_request"]),
-      providerThreadId: GitHubProviderIdV1Schema,
-      number: z.number().int().positive(),
+      kind: z.enum(["issue", "pull_request", "channel_thread"]),
+      providerThreadId: NonEmptyIdSchema,
+      number: z.number().int().positive().optional(),
+      channelId: NonEmptyIdSchema.optional(),
+      threadTs: NonEmptyIdSchema.optional(),
     })
     .strict(),
   sourceEvent: z
     .object({
-      providerEventId: GitHubProviderIdV1Schema,
-      kind: z.literal("issue_comment"),
+      providerEventId: NonEmptyIdSchema,
+      kind: z.enum(["issue_comment", "app_mention"]),
+      messageId: NonEmptyIdSchema.optional(),
     })
     .strict(),
   verifiedActor: z
     .object({
-      providerUserId: GitHubProviderIdV1Schema,
+      providerUserId: NonEmptyIdSchema,
       login: NonEmptyIdSchema,
       authorization: z
         .object({
@@ -2074,6 +2078,32 @@ export const HostedAdmissionEnvelopeV1Schema = z
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["completionContract", "mode"],
         message: "Completion mode must match the Admission-frozen publication mode." });
     }
+    if (admission.provider === "github") {
+      if (admission.eventName !== "issue_comment"
+        || !GitHubProviderIdV1Schema.safeParse(admission.repository.providerRepositoryId).success
+        || !["issue", "pull_request"].includes(admission.sourceThread.kind)
+        || !GitHubProviderIdV1Schema.safeParse(admission.sourceThread.providerThreadId).success
+        || admission.sourceThread.number === undefined
+        || admission.sourceThread.channelId !== undefined
+        || admission.sourceThread.threadTs !== undefined
+        || admission.sourceEvent.kind !== "issue_comment"
+        || !GitHubProviderIdV1Schema.safeParse(admission.sourceEvent.providerEventId).success
+        || admission.sourceEvent.messageId !== undefined
+        || !GitHubProviderIdV1Schema.safeParse(admission.verifiedActor.providerUserId).success) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
+          message: "GitHub admission requires exact issue-comment source identity." });
+      }
+    } else if (admission.eventName !== "app_mention"
+      || admission.repository.provider === undefined
+      || admission.sourceThread.kind !== "channel_thread"
+      || admission.sourceThread.number !== undefined
+      || admission.sourceThread.channelId === undefined
+      || admission.sourceThread.threadTs === undefined
+      || admission.sourceEvent.kind !== "app_mention"
+      || admission.sourceEvent.messageId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["provider"],
+        message: "Slack admission requires exact channel-thread app-mention identity." });
+    }
   });
 
 export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
@@ -2091,6 +2121,29 @@ export const GitHubIssueCommentSourceIdentityDigestInputV1Schema = z
     executionBearingCommentBody: z.string().min(1),
   })
   .strict();
+
+export const SlackAppMentionSourceIdentityDigestInputV1Schema = z
+  .object({
+    provider: z.literal("slack"),
+    repository: HostedAdmissionEnvelopeDigestInputV1Shape.repository,
+    sourceThread: HostedAdmissionEnvelopeDigestInputV1Shape.sourceThread,
+    sourceEvent: HostedAdmissionEnvelopeDigestInputV1Shape.sourceEvent,
+    actor: z.object({ providerUserId: NonEmptyIdSchema, login: NonEmptyIdSchema }).strict(),
+    executionBearingMessageBody: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.repository.provider === undefined
+      || value.sourceThread.kind !== "channel_thread"
+      || value.sourceThread.number !== undefined
+      || value.sourceThread.channelId === undefined
+      || value.sourceThread.threadTs === undefined
+      || value.sourceEvent.kind !== "app_mention"
+      || value.sourceEvent.messageId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceThread"],
+        message: "Slack source identity must bind repository, channel thread, event, and message." });
+    }
+  });
 
 export function buildHostedAdmissionEnvelopeDigestInputV1(
   envelope: z.input<typeof HostedAdmissionEnvelopeV1Schema>,
@@ -2129,6 +2182,14 @@ export function computeGitHubIssueCommentSourceIdentityDigestV1(
   );
 }
 
+export function computeSlackAppMentionSourceIdentityDigestV1(
+  input: z.input<typeof SlackAppMentionSourceIdentityDigestInputV1Schema>,
+): Promise<string> {
+  return sha256Utf8V1(
+    canonicalJsonStringify(SlackAppMentionSourceIdentityDigestInputV1Schema.parse(input)),
+  );
+}
+
 export const AdmissionPolicySnapshotPayloadV1Schema = z
   .object({
     snapshotId: NonEmptyIdSchema,
@@ -2137,7 +2198,7 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
     actor: z
       .object({
         provider: NonEmptyIdSchema,
-        providerUserId: GitHubProviderIdV1Schema,
+        providerUserId: NonEmptyIdSchema,
         login: NonEmptyIdSchema,
         authorizationRef: NonEmptyIdSchema,
       })
@@ -2146,7 +2207,8 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       .object({
         projectTargetId: NonEmptyIdSchema,
         bindingId: NonEmptyIdSchema,
-        providerRepositoryId: GitHubProviderIdV1Schema,
+        repositoryProvider: NonEmptyIdSchema.optional(),
+        providerRepositoryId: NonEmptyIdSchema,
         defaultBranch: NonEmptyIdSchema,
         authorizedPublicationModes: sortedUniqueArray(
           z.enum(["proposal_only", "pull_request"]),
@@ -2165,7 +2227,19 @@ export const AdmissionPolicySnapshotPayloadV1Schema = z
       })
       .strict(),
   })
-  .strict();
+  .strict()
+  .superRefine((policy, ctx) => {
+    if (policy.actor.provider === "github"
+      && (!GitHubProviderIdV1Schema.safeParse(policy.actor.providerUserId).success
+        || !GitHubProviderIdV1Schema.safeParse(policy.target.providerRepositoryId).success)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["actor", "providerUserId"],
+        message: "GitHub policy snapshots require canonical provider IDs." });
+    }
+    if (policy.actor.provider === "slack" && policy.target.repositoryProvider === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["target", "repositoryProvider"],
+        message: "Slack policy snapshots require the bound repository provider." });
+    }
+  });
 
 export const AdmissionPolicySnapshotReceiptEnvelopeV1Schema = z
   .object({
@@ -2409,6 +2483,7 @@ export const HostedClaimV1Schema = z
       [["hostedAdmission", "bindingId"], admission.bindingId !== policy.payload.target.bindingId, "Admission binding must match the policy."],
       [["hostedAdmission", "projectTarget", "projectTargetId"], admission.projectTarget.projectTargetId !== policy.payload.target.projectTargetId, "Admission target must match the policy."],
       [["hostedAdmission", "repository", "providerRepositoryId"], admission.repository.providerRepositoryId !== policy.payload.target.providerRepositoryId, "Admission repository must match the policy."],
+      [["hostedAdmission", "repository", "provider"], admission.repository.provider !== undefined && admission.repository.provider !== policy.payload.target.repositoryProvider, "Admission repository provider must match the policy."],
       [["hostedAdmission", "verifiedActor", "providerUserId"], admission.verifiedActor.providerUserId !== policy.payload.actor.providerUserId, "Admission actor ID must match the policy."],
       [["hostedAdmission", "verifiedActor", "login"], admission.verifiedActor.login !== policy.payload.actor.login, "Admission actor login must match the policy."],
       [["admissionPolicySnapshot", "payload", "actor", "provider"], policy.payload.actor.provider !== admission.provider, "Policy actor provider must match the admission."],
@@ -2475,6 +2550,28 @@ export function computeHostedClaimFencingTokenDigestV1(
 ): Promise<string> {
   return sha256Utf8V1(rawFencingToken);
 }
+
+export const RunnerProposalSettlementV1Schema = z.object({
+  schemaVersion: ControlSchemaVersionSchema,
+  protocolVersion: ControlProtocolVersionSchema,
+  requiredCapabilities: z.tuple([z.literal("relay.lifecycle.v1")]),
+  requestId: MaterialActionStableIdV1Schema,
+  organizationId: MaterialActionStableIdV1Schema,
+  runnerId: MaterialActionStableIdV1Schema,
+  runId: MaterialActionStableIdV1Schema,
+  attempt: MaterialActionAttemptRefV1Schema.extend({
+    fencingToken: z.string().min(1).max(4096),
+  }).strict(),
+  candidateId: MaterialActionStableIdV1Schema,
+  proposalArtifact: z.unknown(),
+}).strict();
+
+export const RunnerProposalSettlementResponseV1Schema = z.object({
+  outcome: z.enum(["settled", "replayed"]),
+  candidateId: MaterialActionStableIdV1Schema,
+  candidateDigest: ReceiptDigestSchema,
+  status: z.enum(["proposal_ready", "publication_pending"]),
+}).strict();
 
 export async function verifyHostedClaimFencingTokenDigestV1(
   claim: z.input<typeof HostedClaimV1Schema>,
@@ -2852,6 +2949,8 @@ export async function computeHostedLifecycleRequestDigestV1(input: {
                   resultDigest: complete.resultDigest,
                   artifactDigests: complete.artifactDigests,
                   evidenceDigests: complete.evidenceDigests,
+                  ...(complete.blockedPermission
+                    ? { blockedPermission: complete.blockedPermission } : {}),
                 };
               })();
   return sha256Utf8V1(canonicalJsonStringify({ ...common, ...actionFields }));
@@ -3075,6 +3174,8 @@ export async function verifyHostedLifecycleReceiptV1(input: {
                   resultDigest: value.resultDigest,
                   artifactDigests: value.artifactDigests,
                   evidenceDigests: value.evidenceDigests,
+                  ...(value.blockedPermission
+                    ? { blockedPermission: value.blockedPermission } : {}),
                 };
               })();
   if (!expectedPayload) return false;
@@ -4017,6 +4118,10 @@ export type RunnerCredentialCurrentStateResponseV1 = z.infer<
 >;
 export type RunnerReadinessReceiptEnvelopeV1 = z.infer<typeof RunnerReadinessReceiptEnvelopeV1Schema>;
 export type RunnerControlContextResponseV1 = z.infer<typeof RunnerControlContextResponseV1Schema>;
+export type RunnerProposalSettlementV1 = z.infer<typeof RunnerProposalSettlementV1Schema>;
+export type RunnerProposalSettlementResponseV1 = z.infer<
+  typeof RunnerProposalSettlementResponseV1Schema
+>;
 export type MaterialActionAttemptRefV1 = z.infer<typeof MaterialActionAttemptRefV1Schema>;
 export type PublicationOperationStepV1 = z.infer<typeof PublicationOperationStepV1Schema>;
 export type PublicationRepositoryV1 = z.infer<typeof PublicationRepositoryV1Schema>;

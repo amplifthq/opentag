@@ -4089,4 +4089,100 @@ describe("Control V1 projection pump", () => {
     expect(recordMaterialActionReceiptControlV1).not.toHaveBeenCalled();
     await loop?.close();
   });
+
+  it("settles a durable proposal artifact before claiming more work", async () => {
+    const artifact = { id: "run_proposal:proposal-evidence", type: "patch_summary",
+      kind: "patch", title: "Immutable proposal evidence",
+      uri: "opentag://run/run_proposal/proposal-evidence", summary: "Content-free evidence.",
+      sourceRunId: "run_proposal", createdAt: now.toISOString(),
+      metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };
+    const repo = { ...emptyLifecycleRepository(),
+      getHostedProposalSettlementForRetry: vi.fn(async () => ({
+        runId: "run_proposal", attemptId: "attempt_proposal", attemptNumber: 2,
+        fencingToken: "fence_proposal", fencingTokenDigest: `sha256:${"b".repeat(64)}`,
+        candidateId: `candidate_${"a".repeat(48)}`, proposalArtifact: artifact,
+      })) } as never;
+    const settle = vi.fn(async () => ({ outcome: "settled" as const,
+      candidateId: `candidate_${"a".repeat(48)}`, candidateDigest: `sha256:${"c".repeat(64)}`,
+      status: "proposal_ready" as const }));
+    const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const, organizationId: "org_1", runnerId: "runner_1",
+      credentialId: "credential_1", registrationGeneration: 1, credentialGeneration: 1,
+      capabilities: [] as string[], targets: [], observedAt: now.toISOString() };
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_1", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_1", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_1", runnerId: "runner_1",
+            credentialId: "credential_1", registrationGeneration: 1,
+            credentialGeneration: 1, credentialPurpose: "runtime",
+            createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: {}, now: () => now,
+      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+        settleProposalCandidateControlV1: settle } as never,
+      governanceStore: { repo, close: vi.fn() },
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(settle).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run_proposal", candidateId: `candidate_${"a".repeat(48)}`,
+      proposalArtifact: artifact,
+    }));
+    await loop?.close();
+  });
+
+  it("attests the exact local branch after pull-request proposal settlement", async () => {
+    const candidateId = `candidate_${"d".repeat(48)}`;
+    const proposalArtifact = { id: "run_publication:proposal-evidence",
+      metadata: { artifactDigest: `sha256:${"d".repeat(64)}` } };
+    const repo = { ...emptyLifecycleRepository(),
+      getHostedProposalSettlementForRetry: vi.fn(async () => ({
+        runId: "run_publication", attemptId: "attempt_publication", attemptNumber: 1,
+        fencingToken: "fence_publication", fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+        runnerGeneration: 2, projectTargetId: "target_publication",
+        targetBindingDigest: `sha256:${"f".repeat(64)}`, candidateId,
+        branch: "opentag/run_publication", baseRevision: "a".repeat(40),
+        finalRevision: "b".repeat(40), finalTree: "c".repeat(40), proposalArtifact,
+      })) } as never;
+    const settle = vi.fn(async () => ({ outcome: "settled" as const, candidateId,
+      candidateDigest: `sha256:${"1".repeat(64)}`, status: "publication_pending" as const }));
+    const attest = vi.fn(async () => ({ ownershipId: "ownership_publication",
+      ownershipDigest: `sha256:${"2".repeat(64)}`, replayed: false }));
+    const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      contextKind: "runner_control" as const, organizationId: "org_publication",
+      runnerId: "runner_publication", credentialId: "credential_publication",
+      registrationGeneration: 1, credentialGeneration: 2,
+      capabilities: ["relay.publication.v1"], observedAt: now.toISOString(),
+      targets: [{ projectTargetId: "target_publication",
+        bindingDigest: `sha256:${"f".repeat(64)}`, provider: "github",
+        owner: "acme", repo: "widget", defaultExecutor: "reviewer",
+        defaultBranch: "main" }] };
+    const repository = { provider: "github", owner: "acme", repo: "widget",
+      checkoutPath: process.cwd(), defaultExecutor: "reviewer", baseBranch: "main",
+      pushRemote: "origin", keepWorktree: "on_failure" as const };
+    const loop = createHostedControlLoop({
+      config: { runnerId: "runner_publication", dispatcherUrl: "https://control.example",
+        runnerToken: "runtime_secret", repositories: [repository], agents: {},
+        controlRegistration: { kind: "hosted_control_v1", state: "paired",
+          operationId: "pair_publication", registration: { schemaVersion: 1,
+            protocolVersion: "1.0", organizationId: "org_publication",
+            runnerId: "runner_publication", credentialId: "credential_publication",
+            registrationGeneration: 1, credentialGeneration: 2,
+            credentialPurpose: "runtime", createdAt: now.toISOString() } } } as never,
+      databasePath: ":memory:", executors: {}, now: () => now,
+      controlClient: { getRunnerControlContextV1: vi.fn(async () => context),
+        settleProposalCandidateControlV1: settle,
+        attestPublicationBranchOwnershipControlV1: attest } as never,
+      governanceStore: { repo, close: vi.fn() },
+    });
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(attest).toHaveBeenCalledWith(expect.objectContaining({ candidateId,
+      candidateDigest: `sha256:${"1".repeat(64)}`,
+      runId: "run_publication", attemptId: "attempt_publication",
+      projectTargetId: "target_publication", targetBindingDigest: `sha256:${"f".repeat(64)}`,
+      remote: "origin", baseBranch: "main", branch: "opentag/run_publication",
+      expectedHeadSha: "b".repeat(40), workspaceTreeDigest: "c".repeat(40),
+    }));
+    await loop?.close();
+  });
 });

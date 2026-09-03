@@ -5862,11 +5862,13 @@ describe("dispatcher API", () => {
 
     expect(githubRequests).toEqual([
       "https://api.github.com/repos/acme/demo/issues/1",
+      "https://api.github.com/repos/acme/demo/branches/opentag%2Fmissing-branch",
+      "https://api.github.com/repos/acme/demo/branches/main",
     ]);
     const finalMessage = delivered.find((message) => message.kind === "final" && message.body.includes("Add the bug label."));
-    expect(finalMessage?.body).toContain("1 action needs setup, 1 action needs attention");
+    expect(finalMessage?.body).toContain("<summary>Needs setup</summary>");
     expect(finalMessage?.body).toContain("GitHub issue or pull request #1 was not found.");
-    expect(finalMessage?.body).not.toContain("GitHub branch opentag/missing-branch was not found.");
+    expect(finalMessage?.body).toContain("GitHub branch opentag/missing-branch was not found.");
     expect(finalMessage?.body).not.toContain("`apply 1`");
   });
 
@@ -7169,19 +7171,27 @@ describe("dispatcher API", () => {
     }));
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({
-      outcome: "child_run_created",
+      outcome: "applied",
       plan: {
         proposalId: "proposal_thread_create_pr",
         outcomes: [
           {
             intentId: "intent_create_pr",
-            outcome: "unsupported",
+            outcome: "applied",
+            externalUri: "https://github.com/acme/demo/pull/42",
           }
         ]
       }
     });
-    expect(githubRequests).toEqual([]);
-    expect(delivered.at(-1)?.body).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_thread_create_pr",
+        body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "", "## Risks",
+          "- Review before merge.", "", "## Verification", "- `pnpm test`: passed", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_thread_create_pr", base: "main", draft: true } }]);
+    expect(delivered.some((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/42"))).toBe(true);
   });
 
   it("falls back with a quiet receipt when GitHub PR creation fails", async () => {
@@ -7244,7 +7254,7 @@ describe("dispatcher API", () => {
       ]
     });
     expect(delivered.some((message) => message.kind === "final"
-      && message.body.includes("Draft pull requests require exact coordinator publication approval"))).toBe(true);
+      && message.body.includes("Ready to apply"))).toBe(true);
     githubRequests.length = 0;
 
     const response = await app.request("/v1/thread-actions", jsonRequest({
@@ -7265,7 +7275,8 @@ describe("dispatcher API", () => {
         outcomes: [
           {
             intentId: "intent_create_pr_failed",
-            outcome: "unsupported",
+            outcome: "failed",
+            error: "create pull request failed: 422 Validation Failed: pull request already exists for this head; token [redacted]; path [redacted local path]",
           }
         ]
       },
@@ -7274,13 +7285,18 @@ describe("dispatcher API", () => {
         sourceProposalId: "proposal_thread_create_pr_failed"
       }
     });
-    expect(githubRequests).toEqual([]);
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_thread_create_pr_failed",
+        body: ["PR body", "", "## Changed Files", "- `src/demo.ts`", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_thread_create_pr_failed", base: "main", draft: true } }]);
     const finalMessage = delivered.at(-1)?.body ?? "";
     expect(finalMessage).toContain("Needs setup before OpenTag can apply this action directly.");
     expect(finalMessage).toContain("Child run:");
-    expect(finalMessage).toContain("Reason: Direct apply is unsupported: Draft pull requests require exact coordinator publication approval.");
-    expect(finalMessage).not.toContain("token [redacted]");
-    expect(finalMessage).not.toContain("path [redacted local path]");
+    expect(finalMessage).toContain("Reason: Direct apply failed: create pull request failed: 422 Validation Failed: pull request already exists for this head");
+    expect(finalMessage).toContain("token [redacted]");
+    expect(finalMessage).toContain("path [redacted local path]");
     expect(finalMessage).not.toContain("proposal_thread_create_pr_failed");
     expect(finalMessage).not.toContain("intent_create_pr_failed");
     expect(finalMessage).not.toContain("ghp_aaaaaaaaaaaaaaaaaaaa");
@@ -7927,21 +7943,28 @@ describe("dispatcher API", () => {
     }));
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({
-      outcome: "child_run_created",
+      outcome: "applied",
       plan: {
         adapter: "github",
         proposalId: "proposal_slack_create_pr",
         outcomes: [
           {
             intentId: "intent_slack_create_pr",
-            outcome: "unsupported",
+            outcome: "applied",
+            externalUri: "https://github.com/acme/demo/pull/43",
           }
         ]
       }
     });
-    expect(githubRequests).toEqual([]);
-    const finalMessage = delivered.at(-1);
-    expect(finalMessage?.body).toContain("Needs setup before OpenTag can apply this action directly.");
+    expect(githubRequests).toEqual([{ url: "https://api.github.com/repos/acme/demo/pulls",
+      method: "POST", authorization: "Bearer gh_test", body: {
+        title: "OpenTag run run_slack_create_pr",
+        body: ["PR body", "", "## Changed Files", "- `README.md`", "",
+          "## Executor Conditions", "- isolated branch exists"].join("\n"),
+        head: "opentag/run_slack_create_pr", base: "main", draft: true } }]);
+    const finalMessage = delivered.find((message) => message.kind === "final"
+      && hasExactRenderedUrl(message.body, "https://github.com/acme/demo/pull/43"));
+    expect(finalMessage?.body).toContain("Applied: Create PR for branch opentag/run_slack_create_pr.");
     expect(finalMessage?.body).not.toContain("..");
     expect(finalMessage?.body).not.toContain("proposal_slack_create_pr");
     expect(finalMessage?.body).not.toContain("intent_slack_create_pr");

@@ -1,10 +1,16 @@
 LOCK TABLE cp_job IN SHARE ROW EXCLUSIVE MODE;
 
 DO $$ BEGIN
-  IF EXISTS(SELECT 1 FROM cp_job WHERE job_kind='team-relay.project' AND state='claimed') THEN
+  IF EXISTS(SELECT 1 FROM cp_job WHERE job_kind='team-relay.project' AND state='claimed'
+    AND (lease_expires_at IS NULL OR lease_expires_at>clock_timestamp())) THEN
     RAISE EXCEPTION 'projection_v2_legacy_job_claimed';
   END IF;
 END $$;
+
+UPDATE cp_job SET state='pending',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,
+  available_at=clock_timestamp(),last_error_code='lease_expired',updated_at=clock_timestamp()
+WHERE job_kind='team-relay.project' AND state='claimed'
+  AND lease_expires_at<=clock_timestamp();
 
 DO $$
 DECLARE legacy record; key_count integer; settlement_count integer;
@@ -24,9 +30,7 @@ BEGIN
       OR jsonb_typeof(legacy.payload->'projectionRevision')<>'number'
       OR (legacy.payload->>'projectionRevision')::integer<=0
       OR legacy.organization_id IS DISTINCT FROM legacy.payload->>'organizationId'
-      OR (legacy.attempt_count=0 AND legacy.last_error_code IS NOT NULL)
-      OR (legacy.attempt_count>0 AND legacy.last_error_code IS NULL)
-      OR (legacy.attempt_count>0 AND legacy.available_at<legacy.updated_at) THEN
+      THEN
       RAISE EXCEPTION 'projection_v2_legacy_job_contract_invalid';
     END IF;
     SELECT count(*) INTO key_count FROM jsonb_object_keys(legacy.payload);

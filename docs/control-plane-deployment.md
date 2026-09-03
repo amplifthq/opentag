@@ -159,16 +159,31 @@ HTTP readiness, then jobs. Migrations take a PostgreSQL advisory lock, verify
 the checksum of every already-applied file, and only append new migrations.
 Never edit a migration after it has been released.
 
+Before upgrading an existing installation, stop both `control-plane` and
+`jobs`; leaving the old jobs process active can retain a live legacy projection
+lease, and migration `0021` deliberately refuses to guess whether that work is
+still executing. An expired projection lease is safely returned to pending and
+converted to the v2 job shape. A live lease remains a hard stop until the old
+worker exits or the operator has separately proved it dead.
+
+The first upgrade from the pre-relay schema is intentionally outcome
+preserving, not work preserving. Migration `0007` terminates legacy in-flight
+Hosted Attempts as `interrupted/outcome_unknown`, and `0009` consumes legacy
+Slack action authorities whose exact Attempt/fence lineage cannot be proven.
+Drain work before upgrading when possible. Afterward, reconcile ambiguous
+material/provider effects and issue fresh controls; never replay them blindly.
+
 For an upgrade:
 
 1. Back up the complete recovery set—PostgreSQL plus the exact relay-content
    KEK file and immutable key version `v1`—and verify both artifacts are readable.
 2. Pull or build the exact reviewed image digest.
-3. Run the `migrate` role and wait for successful completion.
-4. Restart HTTP and jobs on the same image digest.
-5. Verify `/readyz`, capability discovery, console login, runner readiness,
+3. Stop the old HTTP and jobs roles: `docker compose stop control-plane jobs`.
+4. Run `docker compose run --rm migrate` and wait for successful completion.
+5. Start HTTP and jobs on the same image digest with `docker compose up -d`.
+6. Verify `/readyz`, capability discovery, console login, runner readiness,
    and a non-destructive hosted lifecycle smoke.
-6. Retain the prior image until rollback compatibility is understood.
+7. Retain the prior image until rollback compatibility is understood.
 
 A database migration may make application rollback unsafe. Rollback is an
 explicit release decision, not an automatic response to a failed healthcheck.

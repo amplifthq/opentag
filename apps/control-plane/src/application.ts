@@ -1,5 +1,6 @@
 import {
   HostedClaimRequestV1Schema,
+  computeControlPayloadDigestV1,
   HostedCancelRequestV1Schema,
   HostedCompleteRequestV1Schema,
   HostedHeartbeatRequestV1Schema,
@@ -23,6 +24,7 @@ import {
   RunnerPublicationReceiptV1Schema,
   RunnerPublicationReconcileV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
+  RunnerProposalSettlementV1Schema,
   HostedRunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerCredentialReprovisionRequestV1Schema,
@@ -228,8 +230,6 @@ export function createControlPlaneApplication(
 
   if (dependencies.slack) {
     const slackRoute = (kind: "events" | "interactivity") => async (context: any) => {
-      const readiness = await dependencies.readiness.check();
-      if (!readiness.ready) return context.json({ error: "relay_not_ready" }, 503);
       const request = { rawBody: new Uint8Array(await context.req.raw.arrayBuffer()),
         headers: context.req.raw.headers, receivedAt: new Date().toISOString() };
       const result = kind === "events"
@@ -245,10 +245,6 @@ export function createControlPlaneApplication(
 
   if (dependencies.github) {
     app.post("/v1/providers/github/webhooks/:bindingId", async (context) => {
-      const readiness = await dependencies.readiness.check();
-      if (!readiness.ready) {
-        return context.json({ error: "relay_not_ready" }, 503);
-      }
       const deliveryId = context.req.header("x-github-delivery");
       const eventName = context.req.header("x-github-event");
       const signature = context.req.header("x-hub-signature-256");
@@ -992,6 +988,40 @@ export function createControlPlaneApplication(
         return context.json(controlError(outcome.kind === "stale_fence" ? "stale_attempt" : "idempotency_conflict", completion.requestId), 409);
       });
     }
+
+    app.post("/v1/runners/:runnerId/runs/:runId/proposal/settle", async (context) => {
+      const principal = await runtimePrincipal(context.req.raw);
+      if (!principal) return context.json(controlError("invalid_credential"), 401);
+      let request: ReturnType<typeof RunnerProposalSettlementV1Schema.parse>;
+      try { request = RunnerProposalSettlementV1Schema.parse(await context.req.json()); }
+      catch { return context.json(controlError("invalid_request_body"), 400); }
+      if (principal.organizationId !== request.organizationId
+        || principal.runnerId !== request.runnerId
+        || request.runnerId !== context.req.param("runnerId")
+        || request.runId !== context.req.param("runId")) {
+        return context.json(controlError("stale_attempt", request.requestId), 409);
+      }
+      const outcome = await control.hosted.settleProposalCandidate({
+        principal, runId: request.runId, attempt: {
+          attemptId: request.attempt.attemptId,
+          attemptNumber: request.attempt.attemptNumber,
+          fencingToken: request.attempt.fencingToken,
+          fencingTokenDigest: request.attempt.fencingTokenDigest,
+        }, candidateId: request.candidateId, proposalArtifact: request.proposalArtifact,
+      });
+      if (outcome.kind === "created" || outcome.kind === "replayed") {
+        const status = outcome.view.status;
+        if (status !== "proposal_ready" && status !== "publication_pending") {
+          return context.json(controlError("invalid_state_transition", request.requestId), 409);
+        }
+        return context.json({ outcome: outcome.kind === "created" ? "settled" : "replayed",
+          candidateId: outcome.candidate.candidateId,
+          candidateDigest: await computeControlPayloadDigestV1(outcome.candidate), status },
+        outcome.kind === "created" ? 201 : 200);
+      }
+      return context.json(controlError(outcome.kind === "stale_fence"
+        ? "stale_attempt" : "idempotency_conflict", request.requestId), 409);
+    });
 
     const lifecycleSchemas = {
       heartbeat: HostedHeartbeatRequestV1Schema,

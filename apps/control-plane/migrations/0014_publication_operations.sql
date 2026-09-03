@@ -73,11 +73,15 @@ CREATE TABLE cp_publication_receipt (
 CREATE TABLE cp_publication_reconciliation (
   organization_id text NOT NULL, reconciliation_id text NOT NULL,
   capability_id text NOT NULL, operation_id text NOT NULL,
+  sequence integer NOT NULL CHECK (sequence > 0),
   observation jsonb NOT NULL, observed_at timestamptz NOT NULL,
   PRIMARY KEY (organization_id, reconciliation_id),
-  UNIQUE (organization_id, capability_id),
+  CONSTRAINT cp_publication_reconciliation_capability_sequence_key
+    UNIQUE (organization_id, capability_id, sequence),
   FOREIGN KEY (organization_id, capability_id) REFERENCES cp_publication_capability(organization_id, capability_id)
 );
+CREATE INDEX cp_publication_reconciliation_capability_idx
+  ON cp_publication_reconciliation(organization_id, capability_id, sequence);
 CREATE TABLE cp_publication_completion (
   organization_id text NOT NULL, completion_id text NOT NULL,
   run_id text NOT NULL, attempt_id text NOT NULL, attempt_number integer NOT NULL,

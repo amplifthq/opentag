@@ -13,6 +13,7 @@ import {
   OpenTagIntegrationManifestSchema,
   redactCredentialLikeData,
   sortCanonicalUnicodeStrings,
+  type OpenTagRunResult,
   type OpenTagIntegrationManifestInput,
   type OpenTagStdioBinding
 } from "@opentag/core";
@@ -679,6 +680,7 @@ function stopResult(input: {
   files: string[];
   cancelTerminationConfirmed: boolean;
   proposalEvidence?: ProposalEvidence;
+  proposalVerification?: NonNullable<OpenTagRunResult["verification"]>;
 }) {
   if (input.stopReason === "end_turn") {
     return createExecutorRunResult({
@@ -688,7 +690,8 @@ function stopResult(input: {
       baseBranch: input.baseBranch,
       output: input.output || `${input.manifest.label} completed without textual output.`,
       changedFiles: input.files,
-      ...(input.proposalEvidence ? { proposalEvidence: input.proposalEvidence } : {})
+      ...(input.proposalEvidence ? { proposalEvidence: input.proposalEvidence } : {}),
+      ...(input.proposalVerification ? { verification: input.proposalVerification } : {})
     });
   }
   if (input.stopReason === "cancelled") {
@@ -816,8 +819,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
       const active: ActiveRun = { runId: input.runId, ...(input.attemptId ? { attemptId: input.attemptId } : {}), cancelRequested: false };
       activeRuns.set(activeKey, active);
       const baseBranch = input.baseBranch ?? "main";
-      const executionId = input.attemptId ? `${input.runId}-${input.attemptId}` : input.runId;
-      const branchName = branchNameForRun(executionId);
+      const branchName = branchNameForRun(input.runId);
       let executionPath = workspace.path;
       let repositoryCompleted = false;
       let worktreeCreated = false;
@@ -1169,6 +1171,7 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           await commitRunChanges({ runner, workspacePath: executionPath, message: `OpenTag run ${input.runId}` });
         }
         let proposalEvidence: ProposalEvidence | undefined;
+        let proposalVerification: NonNullable<OpenTagRunResult["verification"]> | undefined;
         if (workspace.kind === "repository" && stopReason === "end_turn"
           && workspaceAttestation && input.attemptId && input.attemptAuthority) {
           const finalRevisionResult = await runner.run("git", ["rev-parse", "HEAD^{commit}"], { cwd: executionPath });
@@ -1176,10 +1179,21 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           const diffResult = await runner.run("git", ["diff", "--binary",
             workspaceAttestation.baseRevision, finalRevisionResult.stdout.trim(), "--"],
           { cwd: executionPath });
+          const diffCheckResult = await runner.run("git", ["diff", "--check",
+            workspaceAttestation.baseRevision, finalRevisionResult.stdout.trim(), "--"],
+          { cwd: executionPath });
           if (finalRevisionResult.exitCode !== 0 || finalTreeResult.exitCode !== 0
-            || diffResult.exitCode !== 0) throw new Error("proposal_evidence_git_read_failed");
+            || diffResult.exitCode !== 0 || diffCheckResult.exitCode !== 0) {
+            throw new Error("proposal_evidence_git_read_failed");
+          }
           const baseToFinalBinaryDiff = diffResult.stdout;
           const changedFilesEvidence = sortCanonicalUnicodeStrings(files);
+          proposalVerification = [{ command: "git diff --check", outcome: "passed" }];
+          const verificationEvidenceDigests = sortCanonicalUnicodeStrings(
+            await Promise.all(proposalVerification.map((item) =>
+              Promise.resolve(`sha256:${createHash("sha256")
+                .update(canonicalJsonStringify(item)).digest("hex")}`))),
+          );
           const evidenceSeed = {
             schemaVersion: 1 as const,
             kind: "attempt_proposal_evidence" as const,
@@ -1187,15 +1201,15 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
             attemptNumber: input.attemptAuthority.attemptNumber,
             workspaceId: workspaceAttestation.workspaceId,
             workspacePathDigest: workspaceAttestation.workspacePathDigest,
+            branch: branchName,
             baseRevision: workspaceAttestation.baseRevision,
             finalRevision: finalRevisionResult.stdout.trim(),
             finalTree: finalTreeResult.stdout.trim(),
             diffDigest: `sha256:${createHash("sha256").update(baseToFinalBinaryDiff).digest("hex")}`,
-            baseToFinalBinaryDiff,
             changedFilesDigest: `sha256:${createHash("sha256")
               .update(canonicalJsonStringify(changedFilesEvidence)).digest("hex")}`,
             changedFiles: changedFilesEvidence,
-            verificationEvidenceDigests: [],
+            verificationEvidenceDigests,
             limitations: ["Task 8 completion gates have not assessed proposal readiness."],
           };
           proposalEvidence = {
@@ -1214,7 +1228,8 @@ export function createAcpExecutor(options: AcpExecutorOptions): ExecutorAdapter 
           output: output.join("").trim(),
           files,
           cancelTerminationConfirmed: supportsCancel && terminationObserved,
-          ...(proposalEvidence ? { proposalEvidence } : {})
+          ...(proposalEvidence ? { proposalEvidence } : {}),
+          ...(proposalVerification ? { proposalVerification } : {})
         });
         await sink.emit({
           type: result.conclusion === "success" ? "executor.completed" : "executor.failed",

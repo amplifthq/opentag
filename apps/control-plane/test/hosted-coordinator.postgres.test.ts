@@ -43,10 +43,10 @@ function proposalArtifact(input: {
     attemptNumber: input.attemptNumber,
     workspaceId: input.workspaceId,
     workspacePathDigest: input.workspacePathDigest,
+    branch: `opentag/${input.runId}`,
     baseRevision: input.baseRevision,
     finalTree: input.finalTree,
     diffDigest: sha256(binaryDiff),
-    baseToFinalBinaryDiff: binaryDiff,
     changedFilesDigest: sha256(canonicalJsonStringify(input.changedFiles ?? ["a.ts"])),
     changedFiles: input.changedFiles ?? ["a.ts"],
     verificationEvidenceDigests: input.verificationEvidenceDigests
@@ -361,9 +361,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Coordinator PostgreSQL lifecycle", (
     const beforeReplay = await fixture.pool.query<{ updated_at: Date; terminal_receipt: unknown }>(
       "SELECT updated_at, terminal_receipt FROM cp_hosted_run WHERE run_id = $1", [claim.runId]);
     const conflictingArtifact = structuredClone(artifact);
-    conflictingArtifact.metadata.proposalEvidence.baseToFinalBinaryDiff += "forged\n";
-    conflictingArtifact.metadata.proposalEvidence.diffDigest = sha256(
-      conflictingArtifact.metadata.proposalEvidence.baseToFinalBinaryDiff);
+    conflictingArtifact.metadata.proposalEvidence.diffDigest = sha256("forged diff");
     const resignedConflict = resignProposalArtifact(conflictingArtifact);
     await expect(service.settleProposalCandidate({ ...settlementCommand,
       proposalArtifact: resignedConflict, candidateId: `${candidateId}_conflict` }))

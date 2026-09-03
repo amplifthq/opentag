@@ -193,12 +193,16 @@ export const publicationReconciliations = pgTable("cp_publication_reconciliation
   reconciliationId: text("reconciliation_id").notNull(),
   capabilityId: text("capability_id").notNull(),
   operationId: text("operation_id").notNull(),
+  sequence: integer("sequence").notNull(),
   observation: jsonb("observation").notNull(),
   observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
 }, (table) => [
   primaryKey({ columns: [table.organizationId, table.reconciliationId] }),
-  unique("cp_publication_reconciliation_capability_key")
-    .on(table.organizationId, table.capabilityId),
+  unique("cp_publication_reconciliation_capability_sequence_key")
+    .on(table.organizationId, table.capabilityId, table.sequence),
+  index("cp_publication_reconciliation_capability_idx")
+    .on(table.organizationId, table.capabilityId, table.sequence),
+  check("cp_publication_reconciliation_sequence_check", sql`${table.sequence} > 0`),
   foreignKey({ columns: [table.organizationId, table.capabilityId],
     foreignColumns: [publicationCapabilities.organizationId, publicationCapabilities.capabilityId] }),
 ]);

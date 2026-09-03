@@ -274,7 +274,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     ]);
   });
 
-  it("fences a claimed legacy projection job before converting pending work to v2",async()=>{
+  it("fences a live legacy projection claim and recovers an expired one into v2",async()=>{
     const upgrade=await createIsolatedPostgres();
     try{
       const v2Index=upgrade.migrations.findIndex((migration)=>migration.name==="0021_projection_job_v2_fence.sql");
@@ -296,13 +296,7 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
         .toEqual([{relation:null}]);
       if(claimed.kind!=="claimed")throw new Error("legacy claim missing");
       await upgrade.pool.query("UPDATE cp_job SET lease_expires_at=$2 WHERE job_id=$1",
-        [claimed.job.jobId,new Date(queueNow.getTime()-1)]);
-      await expect(runMigrations(upgrade.pool,upgrade.migrations)).rejects.toThrow(
-        "projection_v2_legacy_job_claimed");
-      await upgrade.pool.query("UPDATE cp_job SET lease_expires_at=$2 WHERE job_id=$1",
-        [claimed.job.jobId,new Date(queueNow.getTime()+30_000)]);
-      await oldQueue.succeed({jobId:claimed.job.jobId,leaseToken:claimed.job.leaseToken,
-        outcome:{kind:"legacy_drained"}});
+        [claimed.job.jobId,new Date(Date.now()-60_000)]);
       const pendingJobId="team-relay:org_upgrade:run_pending:1";
       await upgrade.pool.query("UPDATE cp_job SET attempt_count=max_attempts WHERE job_id=$1",[pendingJobId]);
       await expect(runMigrations(upgrade.pool,upgrade.migrations)).rejects.toThrow(
@@ -334,11 +328,14 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       await expect(runOneJob({queue:newQueue,workerId:"new-worker",handlers:{
         "team-relay.project.v2":async()=>{executions+=1;return {kind:"projected_once"};}},
         retryDelayMs:1000,clock:{now:()=>queueNow}})).resolves.toMatchObject({kind:"settled"});
-      expect(executions).toBe(1);
+      await expect(runOneJob({queue:newQueue,workerId:"new-worker",handlers:{
+        "team-relay.project.v2":async()=>{executions+=1;return {kind:"projected_once"};}},
+        retryDelayMs:1000,clock:{now:()=>queueNow}})).resolves.toMatchObject({kind:"settled"});
+      expect(executions).toBe(2);
       await expect(runOneJob({queue:newQueue,workerId:"new-worker",handlers:{
         "team-relay.project.v2":async()=>{executions+=1;return {kind:"duplicate"};}},
         retryDelayMs:1000,clock:{now:()=>queueNow}})).resolves.toEqual({kind:"empty"});
-      expect(executions).toBe(1);
+      expect(executions).toBe(2);
     }finally{await upgrade.close();}
   },15_000);
 
@@ -702,11 +699,9 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
       PRIMARY KEY (organization_id,capability_id,operation_id)`],
     ["dropped receipt capability uniqueness", `ALTER TABLE cp_publication_receipt
       DROP CONSTRAINT cp_publication_receipt_organization_id_capability_id_key`],
-    ["changed reconciliation capability uniqueness", `ALTER TABLE cp_publication_reconciliation
-      DROP CONSTRAINT cp_publication_reconciliation_organization_id_capability_id_key;
-      ALTER TABLE cp_publication_reconciliation
+    ["unexpected reconciliation capability uniqueness", `ALTER TABLE cp_publication_reconciliation
       ADD CONSTRAINT cp_publication_reconciliation_organization_id_capability_id_key
-      UNIQUE (organization_id,capability_id,reconciliation_id)`],
+      UNIQUE (organization_id,capability_id)`],
     ["changed completion run uniqueness", `ALTER TABLE cp_publication_completion
       DROP CONSTRAINT cp_publication_completion_organization_id_run_id_key;
       ALTER TABLE cp_publication_completion

@@ -18,7 +18,7 @@ import {
 import { canonicalJsonStringify } from "@opentag/control-protocol/canonical-json";
 import { assessExactPullRequestReadiness } from "@opentag/github";
 import type { Pool } from "pg";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
@@ -116,8 +116,13 @@ async function readPublicationOperationState(client: any, input: {
        AND begin.capability_id=capability.capability_id
      LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id=capability.organization_id
        AND receipt.capability_id=capability.capability_id
-     LEFT JOIN cp_publication_reconciliation reconciliation ON reconciliation.organization_id=capability.organization_id
-       AND reconciliation.capability_id=capability.capability_id
+     LEFT JOIN LATERAL (
+       SELECT candidate.reconciliation_id,candidate.observation,candidate.observed_at
+       FROM cp_publication_reconciliation candidate
+       WHERE candidate.organization_id=capability.organization_id
+         AND candidate.capability_id=capability.capability_id
+       ORDER BY candidate.sequence DESC LIMIT 1
+     ) reconciliation ON true
      WHERE capability.organization_id=$1 AND capability.capability_id=ANY($2::text[])
      ORDER BY capability.attempt_number DESC`, [input.organizationId, capabilityIds],
   );
@@ -303,6 +308,13 @@ export type PublicationApprovalInput = {
 
 export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
   idFactory: IdFactory; capabilityTtlMs?: number;
+  issuePublicationAuthorityInTransaction?: (client: PostgresTransactionClient, input: {
+    principal: RuntimePrincipal;
+    attestation: RunnerBranchOwnershipAttestationV1;
+    ownershipId: string;
+    ownershipDigest: string;
+    createdAt: Date;
+  }) => Promise<void>;
   testHooks?: PublicationPublisherTestHooks | undefined }) {
   const ttl = Math.min(input.capabilityTtlMs ?? 60_000, 5 * 60_000);
   return {
@@ -371,7 +383,7 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             || workspace?.currentRevision !== attestation.expectedHeadSha
             || admission?.projectTarget?.projectTargetId !== attestation.projectTargetId
             || admission?.projectTarget?.digest !== attestation.targetBindingDigest
-            || String(admission?.provider ?? "").toLowerCase() !== provider
+            || String(admission?.repository?.provider ?? admission?.provider ?? "").toLowerCase() !== provider
             || String(admission?.repository?.owner ?? "").toLowerCase() !== owner
             || String(admission?.repository?.repo ?? "").toLowerCase() !== repo
             || policy?.payload?.target?.projectTargetId !== attestation.projectTargetId
@@ -397,6 +409,15 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
               attestation.targetBindingDigest,provider,owner,repo,attestation.remote,attestation.baseBranch,
               attestation.frozenBaseRevision,attestation.workspaceTreeDigest,attestation.branch,
               attestation.expectedHeadSha,ownershipDigest,attestation.attestedAt,now]);
+          await input.issuePublicationAuthorityInTransaction?.(client, {
+            principal: command.principal, attestation, ownershipId, ownershipDigest,
+            createdAt: now,
+          });
+          await client.query(
+            `UPDATE cp_hosted_run SET projection_revision=projection_revision+1,updated_at=$3
+             WHERE organization_id=$1 AND run_id=$2 AND terminal_kind IS NULL`,
+            [command.principal.organizationId, attestation.runId, now],
+          );
           return { kind: "recorded" as const, ownershipId, ownershipDigest };
         });
       } catch (error) {
@@ -616,7 +637,10 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           return { kind: "unavailable" as const, reason: "reconciliation_required" };
         }
         if (operation.state.kind === "issuable" && operation.state.latest) {
-          return { kind: "unavailable" as const, reason: "capability_nonrenewable" };
+          if (operation.state.latest.begunAt !== null
+            || Date.parse(operation.state.latest.capability.expiresAt) > now.getTime()) {
+            return { kind: "unavailable" as const, reason: "capability_nonrenewable" };
+          }
         }
         const capability = PublicationOperationCapabilityV1Schema.parse({
           schemaVersion: 1, protocolVersion: "1.0",
@@ -677,9 +701,13 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
                AND begin.capability_id=capability.capability_id
              LEFT JOIN cp_publication_receipt receipt ON receipt.organization_id=capability.organization_id
                AND receipt.capability_id=capability.capability_id
-             LEFT JOIN cp_publication_reconciliation reconciliation
-               ON reconciliation.organization_id=capability.organization_id
-               AND reconciliation.capability_id=capability.capability_id
+             LEFT JOIN LATERAL (
+               SELECT candidate.observation,candidate.observed_at
+               FROM cp_publication_reconciliation candidate
+               WHERE candidate.organization_id=capability.organization_id
+                 AND candidate.capability_id=capability.capability_id
+               ORDER BY candidate.sequence DESC LIMIT 1
+             ) reconciliation ON true
              WHERE capability.organization_id=$1
              ORDER BY capability.intent_id,capability.step,capability.attempt_number DESC
            ) latest
@@ -784,7 +812,10 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             return { kind: "reconciliation_pending" as const, capability: pullRequest.state.record.capability };
           }
           if (pullRequest.state.kind === "issuable" && pullRequest.state.latest) {
-            return { kind: "blocked" as const, reason: "capability_nonrenewable" };
+            if (pullRequest.state.latest.begunAt !== null
+              || Date.parse(pullRequest.state.latest.capability.expiresAt) > now.getTime()) {
+              return { kind: "blocked" as const, reason: "capability_nonrenewable" };
+            }
           }
           step = "create_draft_pull_request";
         } else {
@@ -792,7 +823,10 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
             return { kind: "reconciliation_pending" as const, capability: push.state.record.capability };
           }
           if (push.state.kind === "issuable" && push.state.latest) {
-            return { kind: "blocked" as const, reason: "capability_nonrenewable" };
+            if (push.state.latest.begunAt !== null
+              || Date.parse(push.state.latest.capability.expiresAt) > now.getTime()) {
+              return { kind: "blocked" as const, reason: "capability_nonrenewable" };
+            }
           }
           step = "push_owned_branch";
         }
@@ -930,30 +964,25 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
       if (operation.state.kind === "settled" || operation.state.kind === "retryable") {
         return { kind: "conflict" as const };
       }
-      try {
-        const result = await client.query(
+      const result = await client.query(
           `INSERT INTO cp_publication_receipt(organization_id,receipt_id,capability_id,
            operation_id,outcome,receipt_digest,receipt,observed_at)
            SELECT $1,$2,$3,$4,$5,$6,$7,$8 FROM cp_publication_begin begin
            WHERE begin.organization_id=$1 AND begin.capability_id=$3
-             AND begin.operation_id=$4`,
+             AND begin.operation_id=$4
+           ON CONFLICT DO NOTHING RETURNING receipt_id`,
           [receipt.organizationId, receipt.receiptId, receipt.capabilityId,
             receipt.operationId, receipt.outcome, receipt.receiptDigest, receipt,
             receipt.observedAt]);
-        return result.rowCount === 1 ? { kind: "recorded" as const, receipt }
-          : { kind: "conflict" as const };
-      } catch (error) {
-        if ((error as { code?: string }).code === "23505") {
-          const existing = await client.query<{ receipt_digest: string; receipt: unknown }>(
-            `SELECT receipt_digest,receipt FROM cp_publication_receipt
-             WHERE organization_id=$1 AND capability_id=$2`,
-            [receipt.organizationId, receipt.capabilityId]);
-          return existing.rows[0]?.receipt_digest === receipt.receiptDigest
-            ? { kind: "replayed" as const, receipt: PublicationOperationReceiptV1Schema.parse(existing.rows[0].receipt) }
-            : { kind: "conflict" as const };
-        }
-        throw error;
-      }
+      if (result.rowCount === 1) return { kind: "recorded" as const, receipt };
+      const storedReceipt = await client.query<{ receipt_digest: string; receipt: unknown }>(
+        `SELECT receipt_digest,receipt FROM cp_publication_receipt
+         WHERE organization_id=$1 AND capability_id=$2`,
+        [receipt.organizationId, receipt.capabilityId]);
+      return storedReceipt.rows[0]?.receipt_digest === receipt.receiptDigest
+        ? { kind: "replayed" as const,
+            receipt: PublicationOperationReceiptV1Schema.parse(storedReceipt.rows[0]!.receipt) }
+        : { kind: "conflict" as const };
       });
     },
 
@@ -978,21 +1007,30 @@ export function createPublicationPublisher(input: { pool: Pool; clock: Clock;
           ? { kind: "settled" as const } : value.kind === "absent"
             ? { kind: "retry_authorized" as const } : { kind: "outcome_unknown" as const };
         if (record.reconciliation) {
-          return record.reconciliation.reconciliationId === command.reconciliationId
-            && canonicalJsonStringify(record.reconciliation.observation) === canonicalJsonStringify(observation)
-            && record.reconciliation.observedAt.toISOString() === command.observedAt
-            ? resultFor(record.reconciliation.observation)
-            : { kind: "conflict" as const };
+          if (record.reconciliation.reconciliationId === command.reconciliationId
+            && canonicalJsonStringify(record.reconciliation.observation)
+              === canonicalJsonStringify(observation)) {
+            return resultFor(record.reconciliation.observation);
+          }
+          if (record.reconciliation.observation.kind !== "ambiguous") {
+            return resultFor(record.reconciliation.observation);
+          }
         }
         // A settled receipt/presence is stronger than any later absence or
         // ambiguity.  Do not insert contradictory history, and do not rewrite
         // an original unknown receipt when exact presence settles it.
         if (operation.state.kind === "settled") return { kind: "conflict" as const };
+        const sequence = (await client.query<{ next_sequence: number }>(
+          `SELECT COALESCE(MAX(sequence),0)+1 AS next_sequence
+           FROM cp_publication_reconciliation
+           WHERE organization_id=$1 AND capability_id=$2`,
+          [command.principal.organizationId, command.capabilityId])).rows[0]!.next_sequence;
         await client.query(
           `INSERT INTO cp_publication_reconciliation(organization_id,reconciliation_id,
-           capability_id,operation_id,observation,observed_at) VALUES($1,$2,$3,$4,$5,$6)`,
+           capability_id,operation_id,sequence,observation,observed_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7)`,
           [command.principal.organizationId, command.reconciliationId, command.capabilityId,
-            command.operationId, observation, command.observedAt]);
+            command.operationId, sequence, observation, command.observedAt]);
         return resultFor(observation);
       });
     },

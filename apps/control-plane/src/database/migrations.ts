@@ -300,7 +300,7 @@ export async function checkMigrationReadiness(
           = ARRAY['organization_id','receipt_id','capability_id','operation_id','outcome','receipt_digest','receipt','observed_at']
         AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
              WHERE table_schema=current_schema() AND table_name='cp_publication_reconciliation')
-          = ARRAY['organization_id','reconciliation_id','capability_id','operation_id','observation','observed_at']
+          = ARRAY['organization_id','reconciliation_id','capability_id','operation_id','sequence','observation','observed_at']
         AND (SELECT array_agg(column_name::text ORDER BY ordinal_position) FROM information_schema.columns
              WHERE table_schema=current_schema() AND table_name='cp_publication_completion')
           = ARRAY['organization_id','completion_id','run_id','attempt_id','attempt_number','fencing_token_digest','candidate_id','candidate_digest','intent_id','ownership_id','push_operation_id','push_receipt_digest','pull_request_operation_id','pull_request_receipt_digest','pull_request_external_id','pull_request_external_digest','repository','remote','base_branch','branch','expected_head_sha','observed_head_sha','required_check_names','evidence_digest','completion_decision','observation','created_at']
@@ -309,6 +309,9 @@ export async function checkMigrationReadiness(
             AND indexname='cp_publication_branch_owner_key'
             AND regexp_replace(indexdef, '[[:space:]\"]+', '', 'g')
               LIKE '%lower(provider),lower(owner),lower(repo),lower(branch)%')
+        AND EXISTS (SELECT 1 FROM pg_indexes
+          WHERE schemaname=current_schema() AND tablename='cp_publication_reconciliation'
+            AND indexname='cp_publication_reconciliation_capability_idx')
         AND EXISTS (SELECT 1 FROM pg_trigger trigger_row
           JOIN pg_proc function_row ON function_row.oid = trigger_row.tgfoid
           WHERE trigger_row.tgrelid = 'cp_publication_completion'::regclass
@@ -342,7 +345,7 @@ export async function checkMigrationReadiness(
          ('cp_publication_capability', ARRAY['organization_id','capability_id','intent_id','operation_id','idempotency_key','step','attempt_number','capability_digest','capability','issued_at','expires_at'], ARRAY['text','text','text','text','text','text','integer','text','jsonb','timestamp with time zone','timestamp with time zone']),
          ('cp_publication_begin', ARRAY['organization_id','capability_id','operation_id','begun_at'], ARRAY['text','text','text','timestamp with time zone']),
          ('cp_publication_receipt', ARRAY['organization_id','receipt_id','capability_id','operation_id','outcome','receipt_digest','receipt','observed_at'], ARRAY['text','text','text','text','text','text','jsonb','timestamp with time zone']),
-         ('cp_publication_reconciliation', ARRAY['organization_id','reconciliation_id','capability_id','operation_id','observation','observed_at'], ARRAY['text','text','text','text','jsonb','timestamp with time zone']),
+         ('cp_publication_reconciliation', ARRAY['organization_id','reconciliation_id','capability_id','operation_id','sequence','observation','observed_at'], ARRAY['text','text','text','text','integer','jsonb','timestamp with time zone']),
          ('cp_publication_completion', ARRAY['organization_id','completion_id','run_id','attempt_id','attempt_number','fencing_token_digest','candidate_id','candidate_digest','intent_id','ownership_id','push_operation_id','push_receipt_digest','pull_request_operation_id','pull_request_receipt_digest','pull_request_external_id','pull_request_external_digest','repository','remote','base_branch','branch','expected_head_sha','observed_head_sha','required_check_names','evidence_digest','completion_decision','observation','created_at'], ARRAY['text','text','text','text','integer','text','text','text','text','text','text','text','text','text','text','text','jsonb','text','text','text','text','text','text[]','text','jsonb','jsonb','timestamp with time zone'])
        ), expected AS (
          SELECT spec.table_name,column_name,ordinal::integer AS ordinal,column_type
@@ -388,8 +391,9 @@ export async function checkMigrationReadiness(
          ('cp_publication_receipt_pkey','p','cp_publication_receipt',NULL,ARRAY['organization_id','receipt_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
          ('cp_publication_receipt_organization_id_capability_id_key','u','cp_publication_receipt',NULL,ARRAY['organization_id','capability_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
          ('cp_publication_reconciliation_organization_id_capability_i_fkey','f','cp_publication_reconciliation','cp_publication_capability',ARRAY['organization_id','capability_id'],ARRAY['organization_id','capability_id'],true,'s','a','a',false,false,true,NULL),
+         ('cp_publication_reconciliation_sequence_check','c','cp_publication_reconciliation',NULL,ARRAY['sequence'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (sequence > 0)'),
          ('cp_publication_reconciliation_pkey','p','cp_publication_reconciliation',NULL,ARRAY['organization_id','reconciliation_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
-         ('cp_publication_reconciliation_organization_id_capability_id_key','u','cp_publication_reconciliation',NULL,ARRAY['organization_id','capability_id'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
+         ('cp_publication_reconciliation_capability_sequence_key','u','cp_publication_reconciliation',NULL,ARRAY['organization_id','capability_id','sequence'],ARRAY[]::text[],true,' ',' ',' ',false,false,true,NULL),
          ('cp_publication_completion_check','c','cp_publication_completion',NULL,ARRAY['candidate_digest','fencing_token_digest','push_receipt_digest','pull_request_receipt_digest','pull_request_external_digest','evidence_digest'],ARRAY[]::text[],true,' ',' ',' ',false,false,false,'CHECK (candidate_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND fencing_token_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND push_receipt_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND pull_request_receipt_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND pull_request_external_digest ~ ''^sha256:[a-f0-9]{64}$''::text AND evidence_digest ~ ''^sha256:[a-f0-9]{64}$''::text)'),
          ('cp_publication_completion_organization_id_intent_id_fkey','f','cp_publication_completion','cp_publication_intent',ARRAY['organization_id','intent_id'],ARRAY['organization_id','intent_id'],true,'s','a','a',false,false,true,NULL),
          ('cp_publication_completion_organization_id_ownership_id_fkey','f','cp_publication_completion','cp_publication_branch_ownership',ARRAY['organization_id','ownership_id'],ARRAY['organization_id','ownership_id'],true,'s','a','a',false,false,true,NULL),
@@ -456,6 +460,9 @@ export async function checkMigrationReadiness(
            UNION ALL (SELECT * FROM actual_constraint EXCEPT SELECT * FROM expected_constraint))
          AND NOT EXISTS ((SELECT * FROM expected_index EXCEPT SELECT * FROM actual_index)
            UNION ALL (SELECT * FROM actual_index EXCEPT SELECT * FROM expected_index))
+         AND EXISTS (SELECT 1 FROM pg_indexes
+           WHERE schemaname=current_schema() AND tablename='cp_publication_reconciliation'
+             AND indexname='cp_publication_reconciliation_capability_idx')
          AND NOT EXISTS (SELECT 1 FROM immutable expected_trigger WHERE NOT EXISTS (
            SELECT 1 FROM pg_trigger trigger_row JOIN pg_proc function_row ON function_row.oid=trigger_row.tgfoid
            WHERE trigger_row.tgrelid=to_regclass(expected_trigger.table_name)
@@ -529,6 +536,20 @@ export async function checkSlackIngressSchemaReadiness(
     const result = await pool.query<{ present: boolean }>(`SELECT
       to_regclass('cp_slack_installation') IS NOT NULL
       AND to_regclass('cp_slack_action_authority') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
+        AND attname='project_target_id' AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
+        AND attname='publication_mode' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
+        AND attname='operator_user_ids' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
+        AND attname='approver_user_id' AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_installation'::regclass
+        AND attname='admin_user_ids' AND attnotnull AND NOT attisdropped)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_installation'::regclass
+        AND conname='cp_slack_installation_publication_mode_check' AND convalidated)
+      AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cp_slack_installation'::regclass
+        AND conname='cp_slack_installation_roles_check' AND convalidated)
       AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
         AND attname='projection_generation' AND attnotnull AND NOT attisdropped)
       AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='cp_slack_action_authority'::regclass
@@ -831,6 +852,8 @@ export async function checkProjectionSchemaReadiness(
             ('cp_hosted_run','cp_hosted_run_frozen_admission_guard',19,'cp_hosted_run_frozen_admission_guard'),
             ('cp_hosted_run','cp_hosted_run_projection_after_trigger',21,'cp_hosted_run_projection_after'),
             ('cp_hosted_run','cp_hosted_run_projection_before_trigger',19,'cp_hosted_run_projection_before'),
+            ('cp_hosted_run','cp_hosted_run_source_content_terminal_after',17,
+              'cp_hosted_run_source_content_terminal_after'),
             ('cp_permission_request','cp_permission_projection_trigger',21,'cp_related_projection_after'),
             ('cp_provider_delivery_intent','cp_delivery_projection_trigger',17,'cp_delivery_projection_after'),
             ('cp_provider_delivery_intent','cp_provider_delivery_delete_guard',11,'cp_provider_delivery_delete_guard'),
@@ -843,7 +866,7 @@ export async function checkProjectionSchemaReadiness(
               'cp_reject_projection_job_v2_authority_mutation')))
           OR trigger_row.tgnargs<>0 OR trigger_row.tgqual IS NOT NULL
           OR function_row.pronamespace<>current_schema()::regnamespace))
-      AND (SELECT count(*)=12 FROM pg_trigger trigger_row
+      AND (SELECT count(*)=13 FROM pg_trigger trigger_row
         JOIN pg_class relation ON relation.oid=trigger_row.tgrelid
         JOIN pg_namespace relation_namespace ON relation_namespace.oid=relation.relnamespace
         WHERE NOT trigger_row.tgisinternal AND trigger_row.tgenabled='O'

@@ -91,7 +91,7 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
         payloadDigest: "sha256:282ae7754c324606c1bc679b45b0429b475518dd51732d7787b83c0c1b714f3e" }]);
   });
 
-  it("catches denying nonterminal content only because its source retention hint elapsed", async () => {
+  it("denies a new grant after the source retention deadline elapses", async () => {
     const custody = createRelayContentCustody({ pool: fixture.pool,
       clock: { now: () => now }, key: { key: randomBytes(32), keyVersion: "v1" } });
     await custody.store({ organizationId: "org_a", installationId: "i", sourceAppId: "slack",
@@ -101,15 +101,10 @@ describe.skipIf(!TEST_DATABASE_URL)("one-time source content grants", () => {
     await custody.addDependency({ organizationId: "org_a", contentId: "content_live",
       sourceVersionRef: "s:live:v1", dependencyId: "run_live", terminal: false });
     now = new Date("2026-08-28T00:02:00Z");
-    const grant = await custody.issueReadGrant({ organizationId: "org_a", runId: "run_live",
+    await expect(custody.issueReadGrant({ organizationId: "org_a", runId: "run_live",
       attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
-      purpose: "source_context", expiresAt: new Date("2026-08-28T00:03:00Z") });
-    await expect(custody.read({ ...grant, organizationId: "org_a", runId: "run_live",
-      attemptId: "attempt_live", fenceDigest: "fence_live", contentIds: ["content_live"],
-      purpose: "source_context" })).resolves.toEqual([
-        { contentId: "content_live", payload: { text: "still required" },
-          payloadDigest: "sha256:29471bc8c7db9d319ec49818ead3553e11b9c560b34686462db0543a677a656c" },
-      ]);
+      purpose: "source_context", expiresAt: new Date("2026-08-28T00:03:00Z") }))
+      .rejects.toThrow("source_content_unavailable");
   });
 
   it("atomically creates exactly one Attempt-bound grant and rolls it back with a failed claim", async () => {

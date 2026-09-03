@@ -272,6 +272,8 @@ function linkedAdmission(
       === admission.projectTarget.projectTargetId
     && policy.payload.target.providerRepositoryId
       === admission.repository.providerRepositoryId
+    && (admission.repository.provider === undefined
+      || policy.payload.target.repositoryProvider === admission.repository.provider)
     && policy.payload.snapshotId === admission.admissionPolicySnapshot.snapshotId
     && policy.receiptDigest === admission.admissionPolicySnapshot.digest
     && policy.payload.target.authorizedPublicationModes.includes(
@@ -403,7 +405,9 @@ export function createHostedRunCoordinator(input: {
       const reconciliationIdentity = material.kind === "started_or_ambiguous"
         ? material.reconciliationIdentity : null;
       await client.query(
-        `UPDATE cp_hosted_attempt SET state = 'expired', updated_at = $4
+        `UPDATE cp_hosted_attempt SET state = 'expired',
+           blocked_permission_request_id=NULL,blocked_action_descriptor_digest=NULL,
+           blocked_policy_snapshot_digest=NULL,updated_at = $4
          WHERE organization_id = $1 AND run_id = $2 AND attempt_number = $3
            AND state IN ('claimed','running','needs_approval')`,
         [run.organization_id, run.run_id, run.current_attempt_number, now],
@@ -1231,7 +1235,7 @@ export function createHostedRunCoordinator(input: {
           [nextRunState, nextAttemptState, nextTerminal] = completion[conclusion];
         } else if (command.action === "cancel") {
           nextRunState = "cancelled";
-          nextAttemptState = "cancelled";
+          nextAttemptState = attempt.state === "succeeded" ? "succeeded" : "cancelled";
           nextTerminal = "cancelled";
         }
         await client.query(

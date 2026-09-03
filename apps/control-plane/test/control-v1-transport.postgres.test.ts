@@ -8,7 +8,7 @@ import {
 } from "@opentag/control-protocol";
 import { createOpenTagClient } from "@opentag/client";
 import { randomBytes } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createControlPlaneApplication } from "../src/application.js";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "../src/modules/hosted-runs/permissions.js";
@@ -771,5 +771,49 @@ describe.skipIf(!TEST_DATABASE_URL)("Control V1 Node transport", () => {
     await expect(
       runtime.getActionPermissionCurrentControlV1(query),
     ).resolves.toMatchObject({ status: 200, outcome: "resolved" });
+  });
+
+  it("settles proposal evidence through the authenticated Control V1 transport", async () => {
+    const settleProposalCandidate = vi.fn(async (input) => ({ kind: "created" as const,
+      candidate: { candidateId: input.candidateId },
+      view: { status: "proposal_ready" as const } }));
+    const application = createControlPlaneApplication({
+      capabilities: { schemaVersion: 1, protocolVersion: "1.0",
+        registryVersion: "opentag.control.capabilities/v1",
+        capabilities: ["relay.lifecycle.v1"],
+        minimumClient: { schemaVersion: 1, protocolVersion: "1.0" },
+        deployment: { environment: "local", releaseSha: "local" } },
+      readiness: { check: async () => ({ ready: true }) },
+      control: { bootstrap: { authenticate: () => null },
+        runners: { authenticate: async (token: string) => token === "runtime_proposal_http"
+          ? { kind: "authenticated" as const, principal: { organizationId: "org_proposal_http",
+            runnerId: "runner_proposal_http", credentialId: "credential_proposal_http",
+            registrationGeneration: 1, credentialGeneration: 1 } }
+          : { kind: "invalid_credential" as const } } as never,
+        hosted: { settleProposalCandidate } as never },
+    });
+    const fetchImpl: typeof fetch = async (url, init) => {
+      const response = await application.fetch(new Request(String(url), init));
+      Object.defineProperty(response, "url", { value: String(url) });
+      return response;
+    };
+    const client = createOpenTagClient({ dispatcherUrl: "http://control.test",
+      controlCredential: { kind: "runtime", token: "runtime_proposal_http" }, fetchImpl });
+    const proposalArtifact = { id: "run_proposal_http:proposal-evidence",
+      metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };
+    await expect(client.settleProposalCandidateControlV1({
+      schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.lifecycle.v1"],
+      requestId: "request_settle_proposal_http", organizationId: "org_proposal_http",
+      runnerId: "runner_proposal_http", runId: "run_proposal_http",
+      attempt: { attemptId: "attempt_proposal_http", attemptNumber: 1, epoch: 1,
+        fencingToken: "fence_proposal_http", fencingTokenDigest: `sha256:${"b".repeat(64)}` },
+      candidateId: `candidate_${"a".repeat(48)}`, proposalArtifact,
+    })).resolves.toEqual({ outcome: "settled", candidateId: `candidate_${"a".repeat(48)}`,
+      candidateDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      status: "proposal_ready" });
+    expect(settleProposalCandidate).toHaveBeenCalledWith(expect.objectContaining({
+      runId: "run_proposal_http", candidateId: `candidate_${"a".repeat(48)}`,
+      proposalArtifact,
+    }));
   });
 });

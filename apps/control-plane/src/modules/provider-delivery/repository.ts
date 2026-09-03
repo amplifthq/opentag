@@ -393,7 +393,8 @@ export function createPostgresDeliveryRepository(options: { pool: Pool; owner: R
     async finalizeStrandedBegun(input) {
       const result = await options.pool.query(`UPDATE cp_provider_delivery_intent SET state='outcome_unknown',
         revision=revision+1,evidence_digest=$1,error_code='delivery_restart_after_begin',
-        outcome_recorded_at=$2,updated_at=$2 WHERE state='provider_io_begun' AND begun_at < $3`,
+        outcome_recorded_at=$2,updated_at=$2 WHERE state='provider_io_begun'
+          AND begun_at < $3 AND lease_expires_at <= $3`,
       [input.evidenceDigest, input.outcomeRecordedAt ? new Date(input.outcomeRecordedAt) : now(), new Date(input.before)]);
       return result.rowCount ?? 0;
     },

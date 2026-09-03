@@ -127,6 +127,8 @@ import {
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
+  RunnerProposalSettlementResponseV1Schema,
+  RunnerProposalSettlementV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
   RunnerRegistrationRequestV1Schema,
   verifyCompletionEvidenceObservationReceiptDigestsV1,
@@ -172,6 +174,8 @@ import {
   type RunnerPublicationReconcileV1,
   type RunnerPermissionCurrentQueryV1,
   type RunnerPermissionRequestV1,
+  type RunnerProposalSettlementResponseV1,
+  type RunnerProposalSettlementV1,
   type RunnerReadinessReceiptEnvelopeV1,
   type RunnerRegistrationRequestV1,
   type WorkThreadRefReceiptEnvelopeV1,
@@ -712,6 +716,8 @@ export type OpenTagClient = {
     runId: string;
     request: HostedCompleteRequestV1;
   }): Promise<ControlReceiptResult<HostedLifecycleReceiptEnvelopeV1>>;
+  settleProposalCandidateControlV1(input: RunnerProposalSettlementV1):
+    Promise<RunnerProposalSettlementResponseV1>;
   cancelHostedRunControlV1(input: {
     organizationId: string;
     credentialId: string;
@@ -1935,6 +1941,22 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         runId: input.runId,
         request,
       });
+    },
+
+    async settleProposalCandidateControlV1(input) {
+      const action = "settleProposalCandidateControlV1";
+      const request = RunnerProposalSettlementV1Schema.parse(input);
+      const token = requireControlCredential(options.controlCredential, "runtime");
+      const response = await controlFetch(
+        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/proposal/settle`,
+        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) },
+        action,
+      );
+      const body = await parseControlJson(response, action, trustedControlOrigin);
+      if (response.status !== 200 && response.status !== 201) {
+        throwControlV1Error(response, body, action, request.requestId);
+      }
+      return RunnerProposalSettlementResponseV1Schema.parse(body);
     },
 
     async cancelHostedRunControlV1(input) {

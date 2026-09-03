@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalJsonStringify } from "@opentag/control-protocol/canonical-json";
 import { DeliveryIntentV2Schema, deliveryExternalResourceLookupDescriptor,
   type DeliveryIntentV2, type ExpectedDeliveryOwner } from "@opentag/delivery-contract";
 import { composeTeamRelayThreadProjection } from "@opentag/core";
@@ -8,7 +9,8 @@ import type { HostedRunCoordinator } from "../hosted-runs/index.js";
 import { readExactDeliveryAnchor } from "./repository.js";
 import { z } from "zod";
 
-const hash = (value: unknown) => `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+const hash = (value: unknown) => `sha256:${createHash("sha256")
+  .update(canonicalJsonStringify(value)).digest("hex")}`;
 type Enqueue = { enqueue(input: { intent: DeliveryIntentV2; providerRequest: object;
   phase: "received" | "running" | "terminal"; frozenDeadline: string }): Promise<unknown> };
 

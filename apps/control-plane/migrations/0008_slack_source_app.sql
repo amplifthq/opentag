@@ -2,11 +2,16 @@ CREATE TABLE cp_slack_installation (
   organization_id text NOT NULL,
   installation_id text NOT NULL,
   binding_id text NOT NULL,
+  project_target_id text,
+  publication_mode text NOT NULL DEFAULT 'proposal_only',
   team_id text NOT NULL,
   app_id text NOT NULL,
   channel_id text NOT NULL,
   bot_user_id text NOT NULL,
   member_user_ids text[] NOT NULL,
+  operator_user_ids text[] NOT NULL DEFAULT '{}',
+  approver_user_id text,
+  admin_user_ids text[] NOT NULL DEFAULT '{}',
   signing_secret_ref text NOT NULL,
   bot_token_ref text NOT NULL,
   created_at timestamptz NOT NULL,
@@ -21,7 +26,12 @@ CREATE TABLE cp_slack_installation (
     CHECK (team_id <> '' AND app_id <> '' AND channel_id <> '' AND bot_user_id <> ''),
   CONSTRAINT cp_slack_installation_secret_refs_check
     CHECK (signing_secret_ref <> '' AND bot_token_ref <> ''),
-  CONSTRAINT cp_slack_installation_members_check CHECK (cardinality(member_user_ids) > 0)
+  CONSTRAINT cp_slack_installation_members_check CHECK (cardinality(member_user_ids) > 0),
+  CONSTRAINT cp_slack_installation_publication_mode_check
+    CHECK (publication_mode IN ('proposal_only','pull_request')),
+  CONSTRAINT cp_slack_installation_roles_check CHECK (
+    operator_user_ids <@ member_user_ids AND admin_user_ids <@ member_user_ids
+    AND (approver_user_id IS NULL OR approver_user_id = ANY(member_user_ids)))
 );
 
 CREATE TABLE cp_slack_action_authority (

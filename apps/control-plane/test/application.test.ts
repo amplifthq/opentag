@@ -18,8 +18,10 @@ const capabilities = RelayCapabilitiesResponseV1Schema.parse({
 describe("Control Plane Fetch application", () => {
   it("forwards raw Slack Events API and interactivity bodies to the typed ingress", async () => {
     const calls: Array<{ kind: string; installationId: string; body: string }> = [];
+    const readiness = vi.fn(async () => ({ ready: false as const,
+      reason: "migrations_pending" as const }));
     const application = createControlPlaneApplication({ capabilities,
-      readiness: { check: async () => ({ ready: true }) },
+      readiness: { check: readiness },
       slack: {
         async receiveEvents(installationId, request) {
           calls.push({ kind: "events", installationId,
@@ -43,6 +45,7 @@ describe("Control Plane Fetch application", () => {
       { kind: "events", installationId: "install_1", body: "event-body" },
       { kind: "interactivity", installationId: "install_1", body: "action-body" }
     ]);
+    expect(readiness).not.toHaveBeenCalled();
   });
   it("keeps liveness independent from database readiness", async () => {
     let readinessChecks = 0;

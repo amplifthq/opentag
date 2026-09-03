@@ -343,7 +343,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     await expect(ingress.receiveEvents("route_1", malformed)).resolves.toMatchObject({ status: 400 });
     await expect(ingress.receiveEvents("route_1", request("EvGuest", { type: "app_mention",
       user: "U_GUEST", text: "<@U_APP> fix", ts: "1700000004.1", channel: "C1" })))
-      .resolves.toMatchObject({ status: 403 });
+      .resolves.toMatchObject({ status: 200, body: { ok: true, ignored: true } });
     await expect(ingress.receiveEvents("route_1", request("EvMalformedMention", {
       type: "app_mention", user: "U1", text: "<@U_APP> fix", channel: "C1" })))
       .resolves.toMatchObject({ status: 400, body: { error: "slack_app_mention_malformed" } });
@@ -502,6 +502,18 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
     expect(projectedControls.map((control) => control.kind)).toEqual(expect.arrayContaining([
       "status", "cancel", "publication_approve"]));
     expect(projectedControls.map((control) => control.kind)).not.toContain("publication_reject");
+    const projectedCountBefore = Number((await fixture.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM cp_slack_action_authority
+       WHERE action_id LIKE '%:projection:%'`)).rows[0]?.count ?? 0);
+    const collisionRuntime = productionComponents({ commandAuthority: authority,
+      tokenFactory: () => "opaque_projection_collision_token_abcdefghijklmnopqrstuvwxyz" });
+    await expect(collisionRuntime.ingress.issueProjectionControls({
+      organizationId: "org_a", runId: "run_1", generation: 1 }))
+      .rejects.toMatchObject({ code: "23505" });
+    const projectedCountAfter = Number((await fixture.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM cp_slack_action_authority
+       WHERE action_id LIKE '%:projection:%'`)).rows[0]?.count ?? 0);
+    expect(projectedCountAfter).toBe(projectedCountBefore);
     const familyStatus = projectedControls.find((control) => control.kind === "status")!;
     const familyCancel = projectedControls.find((control) => control.kind === "cancel")!;
     await expect(ingress.receiveInteractivity("route_1",

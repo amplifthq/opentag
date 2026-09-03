@@ -781,6 +781,19 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     // Two independently pooled writer transactions.  With reconciliation
     // first, absence wins only before a receipt exists; the delayed receipt is
     // rejected, leaving no contradictory fact or additional begin window.
+    await expect(publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId,
+      operationId: pr.capability.operationId, reconciliationId: "reconcile_pr_ambiguous",
+      observation: { kind: "ambiguous" }, observedAt: now.toISOString() }))
+      .resolves.toEqual({ kind: "outcome_unknown" });
+    await expect(publisher.claimNextForRunner({ principal })).resolves.toMatchObject({
+      kind: "reconciliation_pending", capability: {
+        capabilityId: pr.capability.capabilityId },
+    });
+    await expect(publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId,
+      operationId: pr.capability.operationId, reconciliationId: "reconcile_pr_ambiguous",
+      observation: { kind: "ambiguous" },
+      observedAt: new Date(now.getTime() + 1_000).toISOString() }))
+      .resolves.toEqual({ kind: "outcome_unknown" });
     const absentFirst = publisher.reconcile({ principal, capabilityId: pr.capability.capabilityId,
       operationId: pr.capability.operationId, reconciliationId: "reconcile_pr_absent",
       observation: { kind: "absent" }, observedAt: now.toISOString() });
@@ -794,6 +807,11 @@ describe.skipIf(!TEST_DATABASE_URL)("exact-approved publication PostgreSQL autho
     await expect(Promise.all([absentFirst, delayedReceipt])).resolves.toEqual([
       { kind: "retry_authorized" }, { kind: "conflict" },
     ]);
+    await expect(fixture.pool.query<{ count: number }>(
+      `SELECT count(*)::int AS count FROM cp_publication_reconciliation
+       WHERE organization_id=$1 AND capability_id=$2`,
+      [principal.organizationId, pr.capability.capabilityId]))
+      .resolves.toMatchObject({ rows: [{ count: 2 }] });
     const retried = await claimOperation("create_draft_pull_request");
     expect(retried.kind).toBe("issued");
     if (retried.kind !== "issued") return;

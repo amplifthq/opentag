@@ -31,8 +31,6 @@ export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void
   }
   const evidence = metadata["proposalEvidence"] as ProposalEvidence;
   const { evidenceDigest, ...digestInput } = evidence;
-  const diffDigest = `sha256:${createHash("sha256")
-    .update(evidence.baseToFinalBinaryDiff).digest("hex")}`;
   const changedFilesDigest = `sha256:${createHash("sha256")
     .update(canonicalJsonStringify(evidence.changedFiles)).digest("hex")}`;
   const computedDigest = `sha256:${createHash("sha256")
@@ -42,7 +40,6 @@ export function validateProposalEvidenceArtifact(artifact: ResultArtifact): void
   const computedArtifactDigest = `sha256:${createHash("sha256")
     .update(canonicalJsonStringify(artifactDigestInput)).digest("hex")}`;
   if (evidence.schemaVersion !== 1 || evidence.kind !== "attempt_proposal_evidence"
-    || evidence.diffDigest !== diffDigest
     || evidence.changedFilesDigest !== changedFilesDigest
     || evidenceDigest !== computedDigest
     || metadata["evidenceDigest"] !== evidenceDigest
@@ -278,11 +275,11 @@ export type ProposalEvidence = {
   attemptNumber: number;
   workspaceId: string;
   workspacePathDigest: string;
+  branch: string;
   baseRevision: string;
   finalRevision?: string;
   finalTree: string;
   diffDigest: string;
-  baseToFinalBinaryDiff: string;
   changedFilesDigest: string;
   changedFiles: string[];
   verificationEvidenceDigests: string[];
@@ -299,6 +296,7 @@ export function createExecutorRunResult(input: {
   changedFiles: string[];
   extraArtifacts?: NonNullable<OpenTagRunResult["artifacts"]>;
   proposalEvidence?: ProposalEvidence;
+  verification?: NonNullable<OpenTagRunResult["verification"]>;
 }): OpenTagRunResult {
   const proposalId = `proposal_${input.runId}`;
   const report = parseExecutorReport(input.output);
@@ -343,6 +341,7 @@ export function createExecutorRunResult(input: {
     summary,
     changedFiles: input.changedFiles,
     artifacts,
+    ...(input.verification?.length ? { verification: input.verification } : {}),
     ...(suggestedChanges ? { suggestedChanges } : {}),
     nextAction:
       input.changedFiles.length > 0

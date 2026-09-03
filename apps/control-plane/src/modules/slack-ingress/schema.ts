@@ -6,10 +6,16 @@ import { sourceAppInstallations, sourceBindings } from "../source-ingress/schema
 export const slackInstallations = pgTable("cp_slack_installation", {
   organizationId: text("organization_id").notNull(),
   installationId: text("installation_id").notNull(),
-  bindingId: text("binding_id").notNull(), teamId: text("team_id").notNull(),
+  bindingId: text("binding_id").notNull(),
+  projectTargetId: text("project_target_id"),
+  publicationMode: text("publication_mode").notNull().default("proposal_only"),
+  teamId: text("team_id").notNull(),
   appId: text("app_id").notNull(), channelId: text("channel_id").notNull(),
   botUserId: text("bot_user_id").notNull(), signingSecretRef: text("signing_secret_ref").notNull(),
   memberUserIds: text("member_user_ids").array().notNull(),
+  operatorUserIds: text("operator_user_ids").array().notNull().default([]),
+  approverUserId: text("approver_user_id"),
+  adminUserIds: text("admin_user_ids").array().notNull().default([]),
   botTokenRef: text("bot_token_ref").notNull(),
   routeIdentity: text("route_identity").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -31,6 +37,11 @@ export const slackInstallations = pgTable("cp_slack_installation", {
     sql`${table.signingSecretRef} <> '' AND ${table.botTokenRef} <> ''`),
   check("cp_slack_installation_members_check", sql`cardinality(${table.memberUserIds}) > 0`),
   check("cp_slack_installation_route_identity_check", sql`${table.routeIdentity} <> ''`),
+  check("cp_slack_installation_publication_mode_check",
+    sql`${table.publicationMode} IN ('proposal_only','pull_request')`),
+  check("cp_slack_installation_roles_check", sql`${table.operatorUserIds} <@ ${table.memberUserIds}
+    AND ${table.adminUserIds} <@ ${table.memberUserIds}
+    AND (${table.approverUserId} IS NULL OR ${table.approverUserId} = ANY(${table.memberUserIds}))`),
 ]);
 
 export const slackActionAuthorities = pgTable("cp_slack_action_authority", {

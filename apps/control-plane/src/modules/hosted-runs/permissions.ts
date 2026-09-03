@@ -17,7 +17,7 @@ import {
   type RunnerPermissionRequestV1,
 } from "@opentag/control-protocol";
 import type { Pool } from "pg";
-import { withPostgresTransaction } from "../../database/postgres.js";
+import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
 
 type Clock = { now(): Date };
@@ -292,6 +292,11 @@ export function createPermissionCoordinator(input: {
   pool: Pool;
   clock: Clock;
   idFactory(kind: PermissionIdKind): string;
+  issueWaitingAuthorityInTransaction?: (client: PostgresTransactionClient, input: {
+    principal: RuntimePrincipal;
+    request: RunnerPermissionRequestV1;
+    receipt: PermissionResolutionReceiptEnvelopeV1;
+  }) => Promise<void>;
 }): PermissionCoordinator {
   return {
     async request(command) {
@@ -448,6 +453,11 @@ export function createPermissionCoordinator(input: {
             observedAt,
           ],
         );
+        await input.issueWaitingAuthorityInTransaction?.(client, {
+          principal: command.principal,
+          request,
+          receipt,
+        });
         await client.query(
           `INSERT INTO cp_hosted_audit_event(
              organization_id, run_id, event_kind, event, created_at

@@ -247,7 +247,19 @@ describe("CLI platform contract smoke", () => {
     });
     expect(apply.status).toBe(200);
 
-    expect(githubRequests).toEqual([]);
+    expect(githubRequests).toEqual([
+      { url: "https://api.github.com/repos/acme/demo/branches/opentag%2Frun_github_contract",
+        method: "GET", authorization: "Bearer ghp_contract" },
+      { url: "https://api.github.com/repos/acme/demo/branches/main",
+        method: "GET", authorization: "Bearer ghp_contract" },
+      { url: "https://api.github.com/repos/acme/demo/pulls", method: "POST",
+        authorization: "Bearer ghp_contract", body: { title: "OpenTag run run_github_contract",
+          body: ["## Summary", "", "changed README through the contract test", "",
+            "## Changed Files", "- `README.md`", "", "## Risks",
+            "- Creates a pull request from the executor-produced branch; review the diff before merging.",
+            "", "## Executor Conditions", "- isolated branch exists"].join("\n"),
+          head: "opentag/run_github_contract", base: "main", draft: true } },
+    ]);
     await expect(client.getRun({ runId: "run_github_contract" })).resolves.toMatchObject({
       run: { id: "run_github_contract", status: "succeeded" },
       event: { source: "github" }

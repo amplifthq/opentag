@@ -61,9 +61,9 @@ export function createSourceContentGrantStore(input: {
     const locked = await client.query<{ content_id: string }>(
       `SELECT content_id FROM cp_source_content
        WHERE organization_id = $1 AND content_id = ANY($2::text[])
-         AND purpose = $3 AND deleted_at IS NULL
+         AND purpose = $3 AND deleted_at IS NULL AND expires_at >= $4
        ORDER BY content_id FOR UPDATE`,
-      [command.organizationId, contentIds, command.purpose],
+      [command.organizationId, contentIds, command.purpose, command.expiresAt],
     );
     if (!same(locked.rows.map((row) => row.content_id), contentIds)) {
       throw new Error("source_content_unavailable");

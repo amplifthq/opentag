@@ -119,7 +119,10 @@ function controlObservation(input: {
           externalUri: input.observation.pullRequestUrl, draft: true as const,
           provider: "github" as const,
           repository: { owner: input.capability.repository.owner, repo: input.capability.repository.repo },
-          baseBranch: input.capability.repository.baseBranch, state: "open" as const }
+          baseBranch: input.capability.repository.baseBranch, state: "open" as const,
+          ...(input.observation.headBranch && input.observation.headRepository
+            ? { headBranch: input.observation.headBranch,
+                headRepository: input.observation.headRepository } : {}) }
       : {}),
   };
 }

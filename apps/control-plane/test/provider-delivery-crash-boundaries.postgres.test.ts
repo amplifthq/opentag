@@ -48,6 +48,11 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL delivery crash boundaries", () =
     const begun = (await repository.markBegin({ ...renewed,
       installationBeginMarkerId: "installation-begin", installationBeginMarkerDigest: marker,
       scopeBeginMarkerId: "scope-begin", scopeBeginMarkerDigest: marker }))!;
+    time = new Date("2026-08-28T00:00:20.000Z");
+    await expect(repository.finalizeStrandedBegun({ before: time.toISOString(),
+      evidenceDigest: digest("premature-restart") })).resolves.toBe(0);
+    expect((await fixture.pool.query(`SELECT state FROM cp_provider_delivery_intent
+      WHERE intent_id='crash-intent'`)).rows).toEqual([{ state: "provider_io_begun" }]);
     time = new Date("2026-08-28T00:01:00.000Z");
     await expect(repository.finalizeStrandedBegun({ before: time.toISOString(),
       evidenceDigest: digest("restart") })).resolves.toBe(1);

@@ -26,7 +26,10 @@ in the deployment runbook. Its availability declaration is always
    readiness fail closed. The container receives only the mounted file path
    `/run/secrets/opentag_relay_content_kek` and immutable version `v1`.
 3. Run `docker compose --env-file .env config` and inspect the rendered secret
-   mount before running `docker compose --env-file .env up --build`.
+   mount. For an upgrade, stop the old `control-plane` and `jobs` services,
+   run the one-shot `migrate` service, then start the reviewed image. Do not
+   migrate while an old jobs worker still owns a live projection lease. For a
+   new installation, run `docker compose --env-file .env up --build`.
 4. Wait for `control-plane` to become healthy, then open the configured
    `OPENTAG_PUBLIC_URL`.
 5. Sign in with the bootstrapped owner and pair a local OpenTag runner with

@@ -1,5 +1,5 @@
 import type { AdapterMutationCompiler, AdapterMutationMapping, ApplyIntentOutcome, MutationIntent } from "@opentag/core";
-import type { FetchLike } from "./pull-request.js";
+import { createPullRequestViaFetch, type FetchLike } from "./pull-request.js";
 
 export type GitHubIssueMutationTarget = {
   token: string;
@@ -116,6 +116,51 @@ function teamReviewersFromIntent(intent: MutationIntent): string[] | undefined {
   return values.length > 0 ? [...new Set(values)] : undefined;
 }
 
+function stringParam(intent: MutationIntent, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = intent.params?.[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function stringArrayParam(intent: MutationIntent, key: string): string[] {
+  const value = intent.params?.[key];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
+}
+
+function verificationLinesFromIntent(intent: MutationIntent): string[] {
+  const value = intent.params?.["verification"];
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const command = (item as Record<string, unknown>)["command"];
+    const outcome = (item as Record<string, unknown>)["outcome"];
+    return typeof command === "string" && typeof outcome === "string"
+      ? `- \`${command}\`: ${outcome}` : undefined;
+  }).filter((line): line is string => Boolean(line));
+}
+
+function pullRequestBodyFromIntent(intent: MutationIntent): string {
+  const explicitBody = stringParam(intent, "body");
+  const changedFiles = stringArrayParam(intent, "changedFiles");
+  const risks = stringArrayParam(intent, "risks");
+  const verification = verificationLinesFromIntent(intent);
+  const executorConditions = stringArrayParam(intent, "executorConditions");
+  const lines = explicitBody ? [explicitBody] : ["## Summary", "", intent.summary];
+  if (changedFiles.length > 0) {
+    lines.push("", "## Changed Files", ...changedFiles.map((file) => `- \`${file}\``));
+  }
+  if (risks.length > 0) lines.push("", "## Risks", ...risks.map((risk) => `- ${risk}`));
+  if (verification.length > 0) lines.push("", "## Verification", ...verification);
+  if (executorConditions.length > 0) {
+    lines.push("", "## Executor Conditions",
+      ...executorConditions.map((condition) => `- ${condition}`));
+  }
+  return lines.join("\n");
+}
+
 function mappedValueFromIntent(intent: MutationIntent): string | undefined {
   const key = intent.domain === "status" ? "status" : "priority";
   const value = intent.params?.[key] ?? intent.params?.["value"];
@@ -206,13 +251,16 @@ export function compileGitHubIssueMutationIntent(
   options: { mappings?: AdapterMutationMapping[]; targetKind?: "issue" | "pull_request" } = {}
 ): GitHubIssueMutationCompilation {
   if (intent.action === "create_pull_request") {
+    const head = stringParam(intent, "head", "branch");
+    if (!head) return { ok: false, outcome: { intentId: intent.intentId,
+      outcome: "failed", message: "create_pull_request requires params.head or params.branch." } };
     return {
-      ok: false,
-      outcome: {
-        intentId: intent.intentId,
-        outcome: "unsupported",
-        message: "Draft pull requests require exact coordinator publication approval."
-      },
+      ok: true,
+      intentId: intent.intentId,
+      operation: { kind: "create_pull_request", intentId: intent.intentId,
+        title: stringParam(intent, "title") ?? intent.summary,
+        body: pullRequestBodyFromIntent(intent), head,
+        base: stringParam(intent, "base", "baseBranch") ?? "main" },
     };
   }
 
@@ -394,8 +442,11 @@ export async function applyGitHubIssueMutationOperation(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
   try {
     if (input.operation.kind === "create_pull_request") {
-      return { intentId: input.operation.intentId, outcome: "unsupported",
-        message: "Draft pull requests require exact coordinator publication approval." };
+      const externalUri = await createPullRequestViaFetch({ token: input.target.token,
+        owner: input.target.owner, repo: input.target.repo,
+        title: input.operation.title, body: input.operation.body,
+        head: input.operation.head, base: input.operation.base, draft: true }, fetchImpl);
+      return { intentId: input.operation.intentId, outcome: "applied", externalUri };
     }
 
     if (input.operation.kind === "request_review") {

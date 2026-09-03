@@ -229,7 +229,9 @@ export function createRelayContentCustody(input: {
       }
       try {
         const result = await input.pool.query<ContentRow>(
-          "SELECT * FROM cp_source_content WHERE deleted_at IS NULL ORDER BY created_at LIMIT 1",
+          `SELECT * FROM cp_source_content WHERE deleted_at IS NULL
+           AND key_version=$1 ORDER BY created_at LIMIT 1`,
+          [input.key.keyVersion],
         );
         if (result.rows[0]) decryptRow(result.rows[0], input.key);
         return { ready: true } as const;
@@ -249,8 +251,9 @@ export function createRelayContentCustody(input: {
       return grants.consume(command, async (client, contentIds) => {
         const result = await client.query<ContentRow>(
           `SELECT * FROM cp_source_content WHERE organization_id = $1
-             AND content_id = ANY($2::text[]) ORDER BY content_id FOR UPDATE`,
-          [command.organizationId, contentIds],
+             AND content_id = ANY($2::text[]) AND deleted_at IS NULL
+             AND expires_at > $3 ORDER BY content_id FOR UPDATE`,
+          [command.organizationId, contentIds, input.clock.now()],
         );
         if (result.rows.length !== contentIds.length) throw new Error("source_content_unavailable");
         return result.rows.map((row) => {

@@ -445,7 +445,7 @@ export type ImportHostedAssignedRunResult = {
 };
 
 export type HostedSourceRefetchReceipt = {
-  provider: "github";
+  provider: "github" | "slack";
   providerRepositoryId: string;
   owner: string;
   repo: string;
@@ -1422,13 +1422,10 @@ function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRun
       throw new Error("proposal_evidence_identity_mismatch");
     }
     const evidence = metadata["proposalEvidence"] as Record<string, unknown>;
-    const binaryDiff = evidence["baseToFinalBinaryDiff"];
     const changedFiles = evidence["changedFiles"];
     const evidenceDigest = evidence["evidenceDigest"];
     const digestInput = { ...evidence };
     delete digestInput["evidenceDigest"];
-    const computedDiffDigest = typeof binaryDiff === "string"
-      ? `sha256:${sha256(binaryDiff)}` : null;
     const computedChangedFilesDigest = Array.isArray(changedFiles)
       ? canonicalSha256Json(changedFiles) : null;
     const computedEvidenceDigest = canonicalSha256Json(digestInput);
@@ -1437,7 +1434,6 @@ function validatePersistedProposalEvidence(result: OpenTagRunResult): OpenTagRun
     const computedArtifactDigest = canonicalSha256Json(artifactDigestInput);
     if (evidence["schemaVersion"] !== 1
       || evidence["kind"] !== "attempt_proposal_evidence"
-      || evidence["diffDigest"] !== computedDiffDigest
       || evidence["changedFilesDigest"] !== computedChangedFilesDigest
       || evidenceDigest !== computedEvidenceDigest
       || metadata["evidenceDigest"] !== evidenceDigest
@@ -10167,6 +10163,75 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
       });
     },
 
+    async getHostedProposalSettlementForRetry(input: {
+      destinationId: string;
+      organizationId: string;
+      runnerId: string;
+    }) {
+      const candidates = await db.select().from(runs).where(and(
+        eq(runs.status, "succeeded"),
+        eq(runs.assignedRunnerId, input.runnerId),
+        isNotNull(runs.resultJson),
+      )).orderBy(runs.updatedAt).all();
+      for (const run of candidates) {
+        if (!run.currentAttemptId || !run.resultJson) continue;
+        const attempt = await db.select().from(attempts).where(and(
+          eq(attempts.id, run.currentAttemptId),
+          eq(attempts.runId, run.id),
+          eq(attempts.runnerId, input.runnerId),
+          eq(attempts.status, "succeeded"),
+        )).limit(1).get();
+        const imported = attempt ? await db.select().from(hostedRunImports).where(and(
+          eq(hostedRunImports.runId, run.id),
+          eq(hostedRunImports.attemptId, attempt.id),
+        )).limit(1).get() : undefined;
+        const claim = imported ? await db.select().from(hostedClaimOperations).where(and(
+          eq(hostedClaimOperations.operationId, imported.claimOperationId),
+          eq(hostedClaimOperations.destinationId, input.destinationId),
+          eq(hostedClaimOperations.organizationId, input.organizationId),
+          eq(hostedClaimOperations.runnerId, input.runnerId),
+          eq(hostedClaimOperations.state, "claimed"),
+        )).limit(1).get() : undefined;
+        const completion = attempt ? await db.select().from(hostedLifecycleOperations).where(and(
+          eq(hostedLifecycleOperations.destinationId, input.destinationId),
+          eq(hostedLifecycleOperations.organizationId, input.organizationId),
+          eq(hostedLifecycleOperations.runnerId, input.runnerId),
+          eq(hostedLifecycleOperations.runId, run.id),
+          eq(hostedLifecycleOperations.attemptId, attempt.id),
+          eq(hostedLifecycleOperations.action, "complete"),
+          eq(hostedLifecycleOperations.state, "acknowledged"),
+        )).limit(1).get() : undefined;
+        if (!attempt || !imported || !claim || !completion
+          || attempt.fencingToken === "" || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
+          continue;
+        }
+        const result = validatePersistedProposalEvidence(
+          OpenTagRunResultSchema.parse(JSON.parse(run.resultJson)));
+        const proposalArtifact = result.artifacts?.find((artifact) =>
+          artifact.id === `${run.id}:proposal-evidence`);
+        const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
+        if (!proposalArtifact || typeof artifactDigest !== "string") continue;
+        const authority = JSON.parse(imported.authorityJson) as HostedClaimV1["authority"];
+        const evidence = proposalArtifact.metadata?.["proposalEvidence"] as
+          | { branch?: unknown; baseRevision?: unknown; finalRevision?: unknown; finalTree?: unknown }
+          | undefined;
+        if (!evidence || typeof evidence.branch !== "string"
+          || typeof evidence.baseRevision !== "string"
+          || typeof evidence.finalRevision !== "string"
+          || typeof evidence.finalTree !== "string") continue;
+        return { runId: run.id, attemptId: attempt.id, attemptNumber: attempt.number,
+          fencingToken: attempt.fencingToken, fencingTokenDigest: imported.fencingTokenDigest,
+          runnerGeneration: authority.credentialGeneration,
+          projectTargetId: authority.projectTargetId,
+          targetBindingDigest: authority.targetBindingDigest,
+          candidateId: `candidate_${artifactDigest.slice("sha256:".length,
+            "sha256:".length + 48)}`, branch: evidence.branch,
+          baseRevision: evidence.baseRevision, finalRevision: evidence.finalRevision,
+          finalTree: evidence.finalTree, proposalArtifact };
+      }
+      return null;
+    },
+
     async getHostedSucceededPublicationAuthority(input: {
       destinationId: string;
       organizationId: string;
@@ -10234,24 +10299,30 @@ export function createOpenTagRepository(db: BetterSQLite3Database) {
         : typeof event.metadata.pullRequestNumber === "number"
           ? event.metadata.pullRequestNumber
           : null;
-      if (
-        event.source !== "github"
+      const repositoryProvider = admission.repository.provider ?? admission.provider;
+      const githubSourceMatches = admission.provider === "github"
+        && event.source === "github" && event.actor.provider === "github"
+        && event.workItem?.provider === "github"
+        && event.workItem.kind === admission.sourceThread.kind
+        && localThreadNumber === admission.sourceThread.number;
+      const slackSourceMatches = admission.provider === "slack"
+        && event.source === "slack" && event.actor.provider === "slack"
+        && event.workItem?.provider === "slack" && event.workItem.kind === "thread"
+        && event.workItem.externalId === admission.sourceThread.providerThreadId
+        && event.metadata["channelId"] === admission.sourceThread.channelId
+        && event.metadata["messageTs"] === admission.sourceEvent.messageId;
+      if (!(githubSourceMatches || slackSourceMatches)
         || event.sourceEventId !== admission.sourceEvent.providerEventId
-        || event.actor.provider !== "github"
         || event.actor.providerUserId !== admission.verifiedActor.providerUserId
         || event.actor.handle !== admission.verifiedActor.login
         || deliveryId !== admission.deliveryId
-        || projectTarget?.provider !== admission.provider
+        || projectTarget?.provider !== repositoryProvider
         || projectTarget.owner !== admission.repository.owner
-        || projectTarget.repo !== admission.repository.repo
-        || event.workItem?.provider !== "github"
-        || event.workItem.kind !== admission.sourceThread.kind
-        || localThreadNumber !== admission.sourceThread.number
-      ) {
+        || projectTarget.repo !== admission.repository.repo) {
         throw new HostedImportConflictError("HOSTED_IMPORT_EVENT_MISMATCH");
       }
       if (
-        sourceReceipt.provider !== "github"
+        sourceReceipt.provider !== admission.provider
         || sourceReceipt.providerRepositoryId !== admission.repository.providerRepositoryId
         || sourceReceipt.owner !== admission.repository.owner
         || sourceReceipt.repo !== admission.repository.repo

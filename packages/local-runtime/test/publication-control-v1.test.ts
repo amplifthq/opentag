@@ -361,4 +361,24 @@ describe("publication Control V1 local execution", () => {
     expect(order).toEqual(["begin", "push", "receipt"]);
     expect(receipt.outcome).toBe("succeeded");
   });
+
+  it("records provider-observed head provenance for a successful draft pull request", async () => {
+    const record = vi.fn(async (request) => ({ status: 201 as const,
+      replayed: false, receipt: request.receipt }));
+    const receipt = await executePublicationControlV1({
+      client: { beginPublicationOperationControlV1: vi.fn(async () => ({
+        status: 201 as const, replayed: false, outcome: "accepted" as const })),
+      recordPublicationOperationReceiptControlV1: record },
+      capability: { ...capability, step: "create_draft_pull_request" },
+      fencingToken: "fence_local_only", now: () => "2026-08-10T00:00:30.000Z",
+      createDraftPullRequest: async () => ({ kind: "present", pullRequestNumber: 7,
+        pullRequestUrl: "https://github.com/acme/widget/pull/7",
+        headSha: capability.expectedHeadSha, draft: true, provider: "github",
+        repository: { owner: "acme", repo: "widget" }, baseBranch: "main", state: "open",
+        headBranch: capability.branch, headRepository: { owner: "acme", repo: "widget" } }),
+    });
+    expect(receipt.observation).toMatchObject({ kind: "present",
+      headBranch: capability.branch, headRepository: { owner: "acme", repo: "widget" } });
+    expect(record).toHaveBeenCalledTimes(1);
+  });
 });
