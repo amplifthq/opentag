@@ -1,8 +1,9 @@
 # OpenTag Control Plane with Docker Compose
 
-This is the reference single-host installation. It runs PostgreSQL and four
+This is the reference single-host installation. It runs PostgreSQL and five
 roles from one `opentag-control-plane:local` image: migrations, administrator
-bootstrap, the HTTP application/static console, and durable jobs.
+bootstrap, one-shot Slack installation bootstrap, the HTTP application/static
+console, and durable jobs.
 
 The declared profile envelope is `Runner-offline-safe`; an exact installation
 may display that state only after completing the required certification checks
@@ -25,15 +26,35 @@ in the deployment runbook. Its availability declaration is always
    malformed or placeholder content makes relay
    readiness fail closed. The container receives only the mounted file path
    `/run/secrets/opentag_relay_content_kek` and immutable version `v1`.
-3. Run `docker compose --env-file .env config` and inspect the rendered secret
-   mount. For an upgrade, stop the old `control-plane` and `jobs` services,
+3. Create separate Slack signing-secret and bot-token files under the same
+   protected-file rules, then set `OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE`
+   and `OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE`. Put only Slack IDs, role lists,
+   the route identity, and those host-side paths in `.env`; never put the
+   credential values there. `bootstrap-slack` verifies both mounted files and
+   stores only their fixed `file:/run/secrets/...` references.
+4. Replace every `OPENTAG_SLACK_*` identifier. Member/operator/admin values are
+   comma-separated Slack user IDs without spaces or duplicates. Operators,
+   admins, and the optional approver must be members. `pull_request` mode
+   requires an approver; start with `proposal_only` otherwise. Set
+   `OPENTAG_SLACK_PROJECT_TARGET_ID` to the Project Target ID the paired Runner
+   will register.
+5. Run `docker compose --env-file .env config` and inspect the rendered secret
+   mounts. For an upgrade, stop the old `control-plane` and `jobs` services,
    run the one-shot `migrate` service, then start the reviewed image. Do not
    migrate while an old jobs worker still owns a live projection lease. For a
    new installation, run `docker compose --env-file .env up --build`.
-4. Wait for `control-plane` to become healthy, then open the configured
+6. `bootstrap-slack` creates the generic installation, binding, and Slack
+   projection in one transaction. Re-running the exact configuration is a
+   recorded replay. Partial pre-existing state or any changed identity, role,
+   target, mode, or Secret Reference stops startup with a conflict; this v1
+   bootstrap does not rotate or repair an installation.
+7. Wait for `control-plane` to become healthy, then open the configured
    `OPENTAG_PUBLIC_URL`.
-5. Sign in with the bootstrapped owner and pair a local OpenTag runner with
-   `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`.
+8. Sign in with the bootstrapped owner and pair a local OpenTag runner with
+   `OPENTAG_BOOTSTRAP_PAIRING_TOKEN`. Register the Project Target using the
+   exact ID from `OPENTAG_SLACK_PROJECT_TARGET_ID`; mentions received before
+   that target and Runner readiness exist settle as setup-required or
+   temporarily unavailable rather than becoming executable work.
 
 Useful checks:
 
@@ -41,7 +62,7 @@ Useful checks:
 docker compose --env-file .env ps
 curl --fail "${OPENTAG_PUBLIC_URL:-http://127.0.0.1:3000}/healthz"
 curl --fail "${OPENTAG_PUBLIC_URL:-http://127.0.0.1:3000}/readyz"
-docker compose --env-file .env logs --no-log-prefix migrate bootstrap-admin
+docker compose --env-file .env logs --no-log-prefix migrate bootstrap-admin bootstrap-slack
 ```
 
 From the repository root, the bounded end-to-end smoke validates the public

@@ -24,8 +24,14 @@ x-control-plane-environment: &control-plane-environment
   OPENTAG_RELAY_CONTENT_KEK_FILE: /run/secrets/opentag_relay_content_kek
   OPENTAG_RELAY_CONTENT_KEY_VERSION: v1
 
-x-control-plane-secrets: &control-plane-secrets
+x-slack-bootstrap-secrets: &slack-bootstrap-secrets
+  - opentag_slack_signing_secret
+  - opentag_slack_bot_token
+
+x-control-plane-runtime-secrets: &control-plane-runtime-secrets
   - opentag_relay_content_kek
+  - opentag_slack_signing_secret
+  - opentag_slack_bot_token
 
 services:
   postgres:
@@ -53,7 +59,6 @@ services:
       postgres:
         condition: service_healthy
     environment: *control-plane-environment
-    secrets: *control-plane-secrets
     restart: "no"
 
   bootstrap-admin:
@@ -67,20 +72,45 @@ services:
       OPENTAG_BOOTSTRAP_ADMIN_EMAIL: ${OPENTAG_BOOTSTRAP_ADMIN_EMAIL:?set OPENTAG_BOOTSTRAP_ADMIN_EMAIL}
       OPENTAG_BOOTSTRAP_ADMIN_NAME: ${OPENTAG_BOOTSTRAP_ADMIN_NAME:-OpenTag Owner}
       OPENTAG_BOOTSTRAP_ADMIN_PASSWORD: ${OPENTAG_BOOTSTRAP_ADMIN_PASSWORD:?set OPENTAG_BOOTSTRAP_ADMIN_PASSWORD}
-    secrets: *control-plane-secrets
+    restart: "no"
+
+  bootstrap-slack:
+    image: opentag-control-plane:local
+    command: ["node", "apps/control-plane/dist/index.js", "bootstrap-slack"]
+    depends_on:
+      bootstrap-admin:
+        condition: service_completed_successfully
+    environment:
+      <<: *control-plane-environment
+      OPENTAG_SLACK_INSTALLATION_ID: ${OPENTAG_SLACK_INSTALLATION_ID:?set OPENTAG_SLACK_INSTALLATION_ID}
+      OPENTAG_SLACK_BINDING_ID: ${OPENTAG_SLACK_BINDING_ID:?set OPENTAG_SLACK_BINDING_ID}
+      OPENTAG_SLACK_ROUTE_IDENTITY: ${OPENTAG_SLACK_ROUTE_IDENTITY:?set OPENTAG_SLACK_ROUTE_IDENTITY}
+      OPENTAG_SLACK_PROJECT_TARGET_ID: ${OPENTAG_SLACK_PROJECT_TARGET_ID:?set OPENTAG_SLACK_PROJECT_TARGET_ID}
+      OPENTAG_SLACK_PUBLICATION_MODE: ${OPENTAG_SLACK_PUBLICATION_MODE:-proposal_only}
+      OPENTAG_SLACK_TEAM_ID: ${OPENTAG_SLACK_TEAM_ID:?set OPENTAG_SLACK_TEAM_ID}
+      OPENTAG_SLACK_APP_ID: ${OPENTAG_SLACK_APP_ID:?set OPENTAG_SLACK_APP_ID}
+      OPENTAG_SLACK_CHANNEL_ID: ${OPENTAG_SLACK_CHANNEL_ID:?set OPENTAG_SLACK_CHANNEL_ID}
+      OPENTAG_SLACK_BOT_USER_ID: ${OPENTAG_SLACK_BOT_USER_ID:?set OPENTAG_SLACK_BOT_USER_ID}
+      OPENTAG_SLACK_MEMBER_USER_IDS: ${OPENTAG_SLACK_MEMBER_USER_IDS:?set OPENTAG_SLACK_MEMBER_USER_IDS}
+      OPENTAG_SLACK_OPERATOR_USER_IDS: ${OPENTAG_SLACK_OPERATOR_USER_IDS:-}
+      OPENTAG_SLACK_APPROVER_USER_ID: ${OPENTAG_SLACK_APPROVER_USER_ID:-}
+      OPENTAG_SLACK_ADMIN_USER_IDS: ${OPENTAG_SLACK_ADMIN_USER_IDS:-}
+      OPENTAG_SLACK_SIGNING_SECRET_REF: file:/run/secrets/opentag_slack_signing_secret
+      OPENTAG_SLACK_BOT_TOKEN_REF: file:/run/secrets/opentag_slack_bot_token
+    secrets: *slack-bootstrap-secrets
     restart: "no"
 
   control-plane:
     image: opentag-control-plane:local
     command: ["node", "apps/control-plane/dist/index.js", "serve"]
     depends_on:
-      bootstrap-admin:
+      bootstrap-slack:
         condition: service_completed_successfully
     environment: *control-plane-environment
     labels:
       io.opentag.profile-envelope: Runner-offline-safe
       io.opentag.availability: Relay-not-HA
-    secrets: *control-plane-secrets
+    secrets: *control-plane-runtime-secrets
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 5s
@@ -97,12 +127,16 @@ services:
       control-plane:
         condition: service_healthy
     environment: *control-plane-environment
-    secrets: *control-plane-secrets
+    secrets: *control-plane-runtime-secrets
     restart: unless-stopped
 
 secrets:
   opentag_relay_content_kek:
     file: ${OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE:?set OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE to the KEK file path}
+  opentag_slack_signing_secret:
+    file: ${OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE:?set OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE}
+  opentag_slack_bot_token:
+    file: ${OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE:?set OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE}
 
 volumes:
   opentag-postgres:

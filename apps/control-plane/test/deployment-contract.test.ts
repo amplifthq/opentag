@@ -7,16 +7,18 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const read = (path: string) => readFile(resolve(repositoryRoot, path), "utf8");
 
 describe("Control Plane deployment contract", () => {
-  it("uses one OCI image for migrations, bootstrap, HTTP, and durable jobs", async () => {
+  it("uses one OCI image for migrations, bootstraps, HTTP, and durable jobs", async () => {
     const compose = await read("deploy/compose/compose.yaml");
     expect(compose).toContain("postgres:");
     expect(compose).toContain("migrate:");
     expect(compose).toContain("bootstrap-admin:");
+    expect(compose).toContain("bootstrap-slack:");
     expect(compose).toContain("control-plane:");
     expect(compose).toContain("jobs:");
-    expect(compose.match(/image: opentag-control-plane:local/gu)).toHaveLength(4);
+    expect(compose.match(/image: opentag-control-plane:local/gu)).toHaveLength(5);
     expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "migrate"]');
     expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "jobs"]');
+    expect(compose).toContain('["node", "apps/control-plane/dist/index.js", "bootstrap-slack"]');
     expect(compose).toContain("<<: *control-plane-environment");
     expect(compose).toContain("${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}");
     expect(compose).not.toContain("local-only-change-me");
@@ -26,6 +28,12 @@ describe("Control Plane deployment contract", () => {
     ).toHaveLength(1);
     expect(compose.indexOf("OPENTAG_BOOTSTRAP_ADMIN_PASSWORD:")).toBeGreaterThan(
       compose.indexOf("bootstrap-admin:"),
+    );
+    expect(compose.indexOf("bootstrap-slack:")).toBeGreaterThan(
+      compose.indexOf("bootstrap-admin:"),
+    );
+    expect(compose.indexOf("\n  control-plane:")).toBeGreaterThan(
+      compose.indexOf("bootstrap-slack:"),
     );
   });
 
@@ -45,7 +53,7 @@ describe("Control Plane deployment contract", () => {
       "OPENTAG_RELAY_CONTENT_KEK_FILE: /run/secrets/opentag_relay_content_kek",
     );
     expect(compose).toContain("OPENTAG_RELAY_CONTENT_KEY_VERSION: v1");
-    expect(compose.match(/^\s+secrets: \*control-plane-secrets$/gmu)).toHaveLength(4);
+    expect(compose.match(/^\s+secrets: \*control-plane-runtime-secrets$/gmu)).toHaveLength(2);
     expect(example).toContain(
       "OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=replace-with-path-to-32-byte-kek-file",
     );
@@ -62,13 +70,42 @@ describe("Control Plane deployment contract", () => {
     expect(deployment).toContain("Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable");
   });
 
+  it("bootstraps Slack with purpose-separated file secrets and no credential plaintext", async () => {
+    const [compose, example, composeReadme, deployment] = await Promise.all([
+      read("deploy/compose/compose.yaml"),
+      read("deploy/compose/.env.example"),
+      read("deploy/compose/README.md"),
+      read("docs/control-plane-deployment.md"),
+    ]);
+    expect(compose).toContain("opentag_slack_signing_secret:");
+    expect(compose).toContain("opentag_slack_bot_token:");
+    expect(compose).toContain(
+      "OPENTAG_SLACK_SIGNING_SECRET_REF: file:/run/secrets/opentag_slack_signing_secret",
+    );
+    expect(compose).toContain(
+      "OPENTAG_SLACK_BOT_TOKEN_REF: file:/run/secrets/opentag_slack_bot_token",
+    );
+    expect(compose.match(/^\s+secrets: \*slack-bootstrap-secrets$/gmu)).toHaveLength(1);
+    expect(example).toContain("OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE=");
+    expect(example).toContain("OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE=");
+    expect(example).not.toMatch(/^OPENTAG_SLACK_SIGNING_SECRET=/gmu);
+    expect(example).not.toMatch(/^OPENTAG_SLACK_BOT_TOKEN=/gmu);
+    expect(composeReadme).toContain("creates the generic installation, binding, and Slack");
+    expect(deployment).toContain("create-or-exact-replay");
+    expect(deployment).toContain("never writes credential plaintext");
+  });
+
   it("provisions an ephemeral relay-content KEK file for browser E2E", async () => {
     const e2e = await read("scripts/test/control-plane-browser-e2e.mjs");
 
     expect(e2e).toContain("const relayContentKekFile = join(temporaryDirectory, \"relay-content-kek\")");
+    expect(e2e).toContain("const slackSigningSecretFile = join(temporaryDirectory, \"slack-signing-secret\")");
+    expect(e2e).toContain("const slackBotTokenFile = join(temporaryDirectory, \"slack-bot-token\")");
     expect(e2e).toContain("await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o644 })");
     expect(e2e).toContain("await chmod(temporaryDirectory, 0o700)");
     expect(e2e).toContain("`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`");
+    expect(e2e).toContain("`OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE=${slackSigningSecretFile}`");
+    expect(e2e).toContain("`OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE=${slackBotTokenFile}`");
     expect(e2e).not.toContain("OPENTAG_RELAY_CONTENT_KEK=");
   });
 

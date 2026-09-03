@@ -14,6 +14,7 @@ The reference profile has four application roles and one durable dependency:
 | `postgres` | All durable Control Plane, identity, audit, and job state |
 | `migrate` | One-shot checked-in SQL migration runner |
 | `bootstrap-admin` | Idempotent initial owner provisioning |
+| `bootstrap-slack` | Idempotent initial Slack installation and binding provisioning |
 | `control-plane` | Hono API, operational endpoints, and static console |
 | `jobs` | PostgreSQL-leased reconciliation and retention work |
 
@@ -69,6 +70,34 @@ missing source file, and the Control Plane key loader rejects malformed or
 placeholder file content and keeps relay readiness closed. A copied example
 must not be treated as deployable until every placeholder and the KEK path have
 been replaced.
+
+Slack provider credentials follow the same no-inline-secret rule but use two
+separate files and purposes. Set only the host-side
+`OPENTAG_SLACK_SIGNING_SECRET_SOURCE_FILE` and
+`OPENTAG_SLACK_BOT_TOKEN_SOURCE_FILE` paths in `.env`. Compose mounts them as
+`/run/secrets/opentag_slack_signing_secret` and
+`/run/secrets/opentag_slack_bot_token`. The one-shot `bootstrap-slack` command
+verifies that both references are readable and bounded, then persists only the
+fixed `file:/run/secrets/...` references. It never writes credential plaintext,
+secret-derived diagnostics, or local host paths to PostgreSQL or audit events.
+
+The remaining `OPENTAG_SLACK_*` bootstrap settings are non-secret installation,
+binding, target, route, channel, bot, member, operator, approver, and admin
+identities. User-ID lists are comma-separated without spaces or duplicates.
+Operators and admins must be members; an approver, when present, must be a
+member; `pull_request` mode requires one. The route identity must be a fresh,
+bounded opaque value. The Project Target may be registered by the paired Runner
+after bootstrap, but it must use the exact predeclared ID before source work can
+be admitted.
+
+Initial provisioning is deliberately create-or-exact-replay. The generic Source
+App installation, generic binding, and Slack projection are committed in one
+transaction with a content-free management audit event. Partial state, occupied
+provider identity, or changed configuration fails closed. This command is not a
+credential rotation, disable/re-enable, uninstall, or repair interface; those
+lifecycles remain unsupported until they receive separate generation-fenced
+contracts and incident-recovery evidence. Do not replace the mounted credential
+files in place.
 
 The server refuses to start while any secret still carries the unchanged
 `replace-with-…` placeholder from `.env.example`, so a copied example file can
@@ -154,8 +183,8 @@ Compose environment values, command history, or binding records. Store only
 secret references where the relevant installation or Runner contract calls for
 them.
 
-Startup is ordered by health and completion: PostgreSQL, migration, bootstrap,
-HTTP readiness, then jobs. Migrations take a PostgreSQL advisory lock, verify
+Startup is ordered by health and completion: PostgreSQL, migration, owner
+bootstrap, Slack installation bootstrap, HTTP readiness, then jobs. Migrations take a PostgreSQL advisory lock, verify
 the checksum of every already-applied file, and only append new migrations.
 Never edit a migration after it has been released.
 

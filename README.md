@@ -70,6 +70,13 @@ base64 decoding to 32 bytes. Set `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE` to its
 host path. Never place the KEK in `.env`: Compose mounts it at
 `/run/secrets/opentag_relay_content_kek` with immutable key version `v1`.
 
+Create separate protected files for the Slack signing secret and bot token and
+set only their host paths in `.env`. Fill the non-secret Slack installation,
+binding, route, channel, role, and Project Target identifiers. The one-shot
+`bootstrap-slack` service verifies the mounted credentials and transactionally
+creates the installation and binding while storing only Secret References.
+Exact reruns are safe; changed or partial bootstrap state fails closed.
+
 Render the configuration before starting it:
 
 ```bash
@@ -84,10 +91,12 @@ cover recovery, readiness, and the installation-certification boundary.
 ### 2. Configure Slack as the Source App
 
 Create one Slack app for the workspace and private engineering channel. Point
-both **Event Subscriptions** and **Interactivity & Shortcuts** at the relay's
-public HTTPS Slack endpoint. Configure its signing secret and bot token in the
-self-hosted installation, subscribe to the documented app-mention and
-private-channel events, then invite the app into the channel.
+**Event Subscriptions** at
+`<OPENTAG_PUBLIC_URL>/v1/providers/slack/events/<OPENTAG_SLACK_ROUTE_IDENTITY>`
+and **Interactivity & Shortcuts** at
+`<OPENTAG_PUBLIC_URL>/v1/providers/slack/interactivity/<OPENTAG_SLACK_ROUTE_IDENTITY>`.
+Subscribe to the documented app-mention and private-channel events, then invite
+the app into the channel. Credential values remain only in their mounted files.
 
 Follow [the Slack guide](docs/platforms/slack.en.md) for the exact events,
 permissions, URL, and verification procedure. Do not configure Socket Mode as
@@ -106,7 +115,8 @@ opentag start
 ```
 
 `paired_relay` rejects loopback and same-process relay URLs. During setup,
-register the local GitHub Project Target and choose an ACP executor available
+register the local GitHub Project Target with the exact ID configured in
+`OPENTAG_SLACK_PROJECT_TARGET_ID` and choose an ACP executor available
 on that machine (for example, Codex or Claude Code). The paired Runner retains
 the checkout, coding-agent credentials, and worktree.
 

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   parseAdminBootstrapConfig,
   parseControlPlaneConfig,
+  parseSlackBootstrapConfig,
 } from "../src/config.js";
 
 describe("Control Plane configuration", () => {
@@ -368,5 +369,52 @@ describe("Control Plane configuration", () => {
     expect(() => parseAdminBootstrapConfig({})).toThrow(
       "configuration_invalid",
     );
+  });
+
+  it("parses a content-free one-shot Slack installation bootstrap", () => {
+    const input = {
+      OPENTAG_SLACK_INSTALLATION_ID: "slack_installation_1",
+      OPENTAG_SLACK_BINDING_ID: "slack_binding_1",
+      OPENTAG_SLACK_ROUTE_IDENTITY: "route_identity_123456",
+      OPENTAG_SLACK_PROJECT_TARGET_ID: "target_1",
+      OPENTAG_SLACK_PUBLICATION_MODE: "pull_request",
+      OPENTAG_SLACK_TEAM_ID: "T1",
+      OPENTAG_SLACK_APP_ID: "A1",
+      OPENTAG_SLACK_CHANNEL_ID: "C1",
+      OPENTAG_SLACK_BOT_USER_ID: "UBOT",
+      OPENTAG_SLACK_MEMBER_USER_IDS: "U2,U1,U3",
+      OPENTAG_SLACK_OPERATOR_USER_IDS: "U2",
+      OPENTAG_SLACK_APPROVER_USER_ID: "U1",
+      OPENTAG_SLACK_ADMIN_USER_IDS: "U3",
+    };
+    expect(parseSlackBootstrapConfig(input)).toEqual({
+      installationId: "slack_installation_1",
+      bindingId: "slack_binding_1",
+      routeIdentity: "route_identity_123456",
+      projectTargetId: "target_1",
+      publicationMode: "pull_request",
+      teamId: "T1",
+      appId: "A1",
+      channelId: "C1",
+      botUserId: "UBOT",
+      memberUserIds: ["U1", "U2", "U3"],
+      operatorUserIds: ["U2"],
+      approverUserId: "U1",
+      adminUserIds: ["U3"],
+      signingSecretRef: "file:/run/secrets/opentag_slack_signing_secret",
+      botTokenRef: "file:/run/secrets/opentag_slack_bot_token",
+    });
+    for (const invalid of [
+      { ...input, OPENTAG_SLACK_SIGNING_SECRET: "inline-secret" },
+      { ...input, OPENTAG_SLACK_MEMBER_USER_IDS: "U1,U1" },
+      { ...input, OPENTAG_SLACK_OPERATOR_USER_IDS: "UNRELATED" },
+      { ...input, OPENTAG_SLACK_APPROVER_USER_ID: "UNRELATED" },
+      { ...input, OPENTAG_SLACK_PUBLICATION_MODE: "pull_request",
+        OPENTAG_SLACK_APPROVER_USER_ID: "" },
+      { ...input, OPENTAG_SLACK_ROUTE_IDENTITY: "replace-with-a-random-route-identity" },
+      { ...input, OPENTAG_SLACK_BOT_TOKEN_REF: "env:SLACK_BOT_TOKEN" },
+    ]) {
+      expect(() => parseSlackBootstrapConfig(invalid)).toThrow("configuration_invalid");
+    }
   });
 });
