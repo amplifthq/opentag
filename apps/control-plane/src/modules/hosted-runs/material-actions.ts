@@ -27,6 +27,90 @@ export type AttemptMaterialActionTruth =
   | { kind: "proven_not_started" }
   | { kind: "started_or_ambiguous"; reconciliationIdentity: string };
 
+export type AttemptCancellationMaterialTruth =
+  | { kind: "proven_not_started" }
+  | { kind: "resolved"; receipts: Array<{ actionId: string; receiptId: string;
+      receiptDigest: string; outcome: "succeeded" | "failed" }> }
+  | { kind: "outcome_unknown"; reconciliationIdentity: string };
+
+export function cancellationMaterialEvidence(
+  truth: AttemptCancellationMaterialTruth,
+): Record<string, unknown> {
+  if (truth.kind === "proven_not_started") return { state: "proven_not_started" };
+  if (truth.kind === "resolved") return { state: "resolved", receipts: truth.receipts };
+  return { state: "outcome_unknown", reconciliationIdentity: truth.reconciliationIdentity };
+}
+
+export async function classifyAttemptMaterialActionCancellationTruth(
+  client: { query<Row extends Record<string, unknown>>(text: string,
+    values?: readonly unknown[]): Promise<{ rows: Row[] }> },
+  input: { organizationId: string; runId: string; attemptId: string },
+): Promise<AttemptCancellationMaterialTruth> {
+  const attempt = await client.query<{ material_start_state: string;
+    fencing_token_digest: string }>(
+    `SELECT material_start_state,fencing_token_digest FROM cp_hosted_attempt
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  const attemptRow = attempt.rows[0];
+  const unknown = (suffix: string): AttemptCancellationMaterialTruth => ({
+    kind: "outcome_unknown",
+    reconciliationIdentity: `${input.organizationId}:${input.runId}:${suffix}`,
+  });
+  if (!attemptRow) return unknown(`${input.attemptId}:material_start_unknown`);
+  const begins = await client.query<{ action_id: string }>(
+    `SELECT action_id FROM cp_material_action_begin_intent
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3 ORDER BY action_id`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  const current = await client.query<{ action_id: string; receipt_id: string;
+    receipt_digest: string; outcome: "succeeded" | "failed" | "outcome_unknown" }>(
+    `SELECT action_id,receipt_id,receipt_digest,outcome FROM cp_material_action_current
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3 ORDER BY action_id`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  const orphanReceipt = await client.query<{ receipt_id: string }>(
+    `SELECT receipt_id FROM cp_material_action_receipt receipt
+     WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3
+       AND NOT EXISTS (SELECT 1 FROM cp_material_action_current current
+         WHERE current.organization_id=receipt.organization_id
+           AND current.run_id=receipt.run_id AND current.attempt_id=receipt.attempt_id
+           AND current.action_id=receipt.action_id)
+     ORDER BY created_at,receipt_id LIMIT 1`,
+    [input.organizationId, input.runId, input.attemptId],
+  );
+  if (orphanReceipt.rows[0]) return unknown(orphanReceipt.rows[0].receipt_id);
+  if (begins.rows.length === 0 && current.rows.length === 0) {
+    if (attemptRow.material_start_state === "open") return { kind: "proven_not_started" };
+    if (attemptRow.material_start_state === "proven_not_started") {
+      const proof = await client.query<{ proof_id: string }>(
+        `SELECT proof_id FROM cp_material_action_non_start_proof
+         WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3
+           AND fencing_token_digest=$4`,
+        [input.organizationId, input.runId, input.attemptId,
+          attemptRow.fencing_token_digest],
+      );
+      if (proof.rows[0]) return { kind: "proven_not_started" };
+    }
+    return unknown(`${input.attemptId}:material_start_unknown`);
+  }
+  const begunActions = new Set(begins.rows.map((row) => row.action_id));
+  const currentByAction = new Map(current.rows.map((row) => [row.action_id, row]));
+  const unmatchedCurrent = current.rows.find((row) => !begunActions.has(row.action_id));
+  if (unmatchedCurrent) return unknown(unmatchedCurrent.receipt_id);
+  for (const begin of begins.rows) {
+    const receipt = currentByAction.get(begin.action_id);
+    if (!receipt) return unknown(`${input.attemptId}:${begin.action_id}:material_start_unknown`);
+    if (receipt.outcome === "outcome_unknown") return unknown(receipt.receipt_id);
+  }
+  return { kind: "resolved", receipts: current.rows.map((row) => ({
+    actionId: row.action_id,
+    receiptId: row.receipt_id,
+    receiptDigest: row.receipt_digest,
+    outcome: row.outcome as "succeeded" | "failed",
+  })) };
+}
+
 export async function classifyAttemptMaterialActionTruth(
   client: { query<Row extends Record<string, unknown>>(text: string,
     values?: readonly unknown[]): Promise<{ rows: Row[] }> },
@@ -572,9 +656,12 @@ export function createMaterialActionCoordinator(input: {
             : { kind: "conflict" as const };
         }
         const authority = await client.query<{ material_start_state: string;
-          credential_id: string; fencing_token_digest: string }>(
+          credential_id: string; fencing_token_digest: string;
+          current_attempt_number: number; terminal_kind: string | null;
+          outcome_state: string | null; reconciliation_identity: string | null }>(
           `SELECT attempt.material_start_state, attempt.credential_id,
-                  attempt.fencing_token_digest
+                  attempt.fencing_token_digest,run.current_attempt_number,
+                  run.terminal_kind,run.outcome_state,run.reconciliation_identity
            FROM cp_hosted_run run JOIN cp_hosted_attempt attempt
              ON attempt.organization_id = run.organization_id
             AND attempt.run_id = run.run_id
@@ -590,7 +677,20 @@ export function createMaterialActionCoordinator(input: {
           || attemptAuthority.fencing_token_digest !== receipt.attempt.fencingTokenDigest) {
           return { kind: "stale_fence" as const };
         }
-        const lateAfterProof = attemptAuthority.material_start_state === "proven_not_started";
+        const cancellationTruth = attemptAuthority.terminal_kind === "cancelled"
+          && attemptAuthority.outcome_state === "outcome_unknown"
+          && attemptAuthority.current_attempt_number === receipt.attempt.attemptNumber
+          ? await classifyAttemptMaterialActionCancellationTruth(client, {
+              organizationId: command.principal.organizationId,
+              runId: receipt.runId,
+              attemptId: receipt.attempt.attemptId,
+            })
+          : null;
+        const lateAfterCancellation = cancellationTruth?.kind === "outcome_unknown"
+          && cancellationTruth.reconciliationIdentity
+            === attemptAuthority.reconciliation_identity;
+        const lateAfterProof = attemptAuthority.terminal_kind === null
+          && attemptAuthority.material_start_state === "proven_not_started";
         if (!lateAfterProof) {
           const begin = await client.query<{ target_fingerprint: string }>(
             `SELECT target_fingerprint FROM cp_material_action_begin_intent
@@ -604,13 +704,14 @@ export function createMaterialActionCoordinator(input: {
               receipt.payload.actionDescriptor, receipt.payload.actionDescriptorDigest,
               receipt.payload.idempotencyKey],
           );
-          if (begin.rows.length !== 1 || !(await currentAttemptMatches(client, {
-            principal: command.principal, runId: receipt.runId,
-            attemptId: receipt.attempt.attemptId,
-            attemptNumber: receipt.attempt.attemptNumber,
-            fencingTokenDigest: receipt.attempt.fencingTokenDigest,
-            now: input.clock.now(), materialStartState: "material_allowed",
-          }))) return { kind: "stale_fence" as const };
+          if (begin.rows.length !== 1) return { kind: "stale_fence" as const };
+          if (!lateAfterCancellation && !(await currentAttemptMatches(client, {
+              principal: command.principal, runId: receipt.runId,
+              attemptId: receipt.attempt.attemptId,
+              attemptNumber: receipt.attempt.attemptNumber,
+              fencingTokenDigest: receipt.attempt.fencingTokenDigest,
+              now: input.clock.now(), materialStartState: "material_allowed",
+            }))) return { kind: "stale_fence" as const };
           if (begin.rows[0]?.target_fingerprint !== receipt.payload.targetFingerprint) {
             return { kind: "conflict" as const };
           }
@@ -699,6 +800,30 @@ export function createMaterialActionCoordinator(input: {
             createdAt,
           ],
         );
+        if (lateAfterCancellation) {
+          const material = await classifyAttemptMaterialActionCancellationTruth(client, {
+            organizationId: command.principal.organizationId,
+            runId: receipt.runId,
+            attemptId: receipt.attempt.attemptId,
+          });
+          const stillUnknown = material.kind === "outcome_unknown";
+          const changed = await client.query(
+            `UPDATE cp_hosted_run
+             SET outcome_state=$3,reconciliation_identity=$4,
+                 terminal_receipt=jsonb_set(terminal_receipt,'{materialAction}',$5::jsonb,true),
+                 updated_at=$6
+             WHERE organization_id=$1 AND run_id=$2 AND terminal_kind='cancelled'
+               AND outcome_state='outcome_unknown' AND reconciliation_identity=$7`,
+            [command.principal.organizationId, receipt.runId,
+              stillUnknown ? "outcome_unknown" : null,
+              stillUnknown ? material.reconciliationIdentity : null,
+              JSON.stringify(cancellationMaterialEvidence(material)), createdAt,
+              attemptAuthority.reconciliation_identity],
+          );
+          if (changed.rowCount !== 1) {
+            throw new Error("cancelled_material_reconciliation_conflict");
+          }
+        }
         await client.query(
           `INSERT INTO cp_hosted_audit_event(
              organization_id, run_id, event_kind, event, created_at

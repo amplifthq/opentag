@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { computeControlPayloadDigestV1,
+  computeMaterialActionPayloadDigestV1,
+  computeMaterialActionReceiptDigestV1,
   computePermissionRequestDigestV1,
+  MaterialActionReceiptEnvelopeV1Schema,
   RunnerPermissionRequestV1Schema } from "@opentag/control-protocol";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
@@ -630,6 +633,156 @@ describe.skipIf(!TEST_DATABASE_URL)("Hosted Run PostgreSQL races", () => {
         attemptNumber: claim.claim.attempt.number,
         fencingTokenDigest: claim.claim.attempt.fencingTokenDigest } }))
       .resolves.toEqual({ kind: "cancelled" });
+  });
+
+  it("preserves begun material truth through cancellation and accepts the exact late receipt", async () => {
+    now = new Date("2026-08-15T10:15:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_cancel_material",
+      suffix: "cancel_material", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T11:15:00.000Z",
+      permissionActions: ["github.pull_request.merge"], publicationMode: "pull_request" });
+    await service.admit({ runId: "run_cancel_material", admission: candidate.admission,
+      policy: candidate.policy });
+    const claimed = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_cancel_material",
+      requestId: "request_claim_cancel_material", credentialId: "credential_race" }) });
+    if (claimed.kind !== "claimed") throw new Error("claim failed");
+    const claim = claimed.claim;
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    const actionId = "action_cancel_material";
+    const actionDescriptor = "github.pull_request.merge" as const;
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const targetFingerprint = `sha256:${"4".repeat(64)}`;
+    const idempotencyKey = "material_cancel_material";
+    const authorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock, principal, runId: claim.runId, attempt: claim.attempt,
+      actionId, actionDescriptor, targetFingerprint,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      suffix: "cancel_material",
+    });
+    await expect(materials.begin({ principal, fencingToken: claim.attempt.fencingToken,
+      runId: claim.runId, attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+      actionId, actionDescriptor, actionDescriptorDigest, targetFingerprint,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      workspaceAttestationDigest: authorization.authority.workspaceAttestationDigest,
+      authority: authorization.authority, idempotencyKey }))
+      .resolves.toEqual({ kind: "begun" });
+
+    await expect(service.cancelRun({ organizationId: "org_race", runId: claim.runId,
+      reason: "actor_cancelled", expected: { attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest } }))
+      .resolves.toEqual({ kind: "cancelled" });
+    await expect(service.inspect({ organizationId: "org_race", runId: claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "cancelled", outcome: "outcome_unknown",
+        terminalReason: "actor_cancelled" });
+    const cancelled = await fixture.pool.query<{ state: string; terminal_receipt: {
+      materialAction: { state: string; reconciliationIdentity: string } } }>(
+      `SELECT attempt.state,run.terminal_receipt FROM cp_hosted_run run
+       JOIN cp_hosted_attempt attempt ON attempt.organization_id=run.organization_id
+         AND attempt.run_id=run.run_id AND attempt.attempt_number=run.current_attempt_number
+       WHERE run.organization_id='org_race' AND run.run_id=$1`, [claim.runId]);
+    expect(cancelled.rows[0]).toMatchObject({ state: "interrupted",
+      terminal_receipt: { materialAction: { state: "outcome_unknown",
+        reconciliationIdentity: expect.stringContaining(actionId) } } });
+
+    const payload = {
+      actionId, actionDescriptor, actionDescriptorDigest, idempotencyKey,
+      provider: "github", connectionRef: "connection_cancel_material",
+      targetFingerprint, operationId: "operation_cancel_material",
+      requestDigest: `sha256:${"5".repeat(64)}`,
+      actionPayloadDigest: `sha256:${"6".repeat(64)}`,
+      outcome: "succeeded" as const, externalId: "pr_cancel_material",
+      externalUri: "https://github.com/example/repo/pull/42",
+      reasonCode: "provider_accepted" as const, observedAt: now.toISOString(),
+    };
+    const receiptSeed = {
+      schemaVersion: 1 as const, protocolVersion: "1.0" as const,
+      receiptId: "receipt_cancel_material", organizationId: "org_race",
+      operationId: payload.operationId,
+      requiredCapabilities: ["relay.material-receipt.v1"] as const,
+      producer: { kind: "local_opentag" as const, id: principal.runnerId },
+      identity: { namespace: "opentag.control.receipt/material-action/v1" as const,
+        parts: ["org_race", claim.runId, claim.attempt.id, actionId,
+          "receipt_cancel_material"] },
+      observedAt: now.toISOString(),
+      payloadDigest: await computeMaterialActionPayloadDigestV1(payload),
+      receiptDigest: `sha256:${"0".repeat(64)}`,
+      receiptKind: "material_action" as const, runId: claim.runId,
+      attempt: { attemptId: claim.attempt.id, attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch, fencingTokenDigest: claim.attempt.fencingTokenDigest },
+      payload,
+    };
+    const { receiptDigest: _ignored, ...receiptDigestInput } = receiptSeed;
+    const receipt = MaterialActionReceiptEnvelopeV1Schema.parse({ ...receiptSeed,
+      receiptDigest: await computeMaterialActionReceiptDigestV1(receiptDigestInput) });
+    await expect(materials.record({ principal,
+      fencingToken: claim.attempt.fencingToken, receipt }))
+      .resolves.toMatchObject({ kind: "recorded" });
+    await expect(materials.record({ principal,
+      fencingToken: claim.attempt.fencingToken, receipt }))
+      .resolves.toMatchObject({ kind: "replayed" });
+    await expect(service.inspect({ organizationId: "org_race", runId: claim.runId }))
+      .resolves.toMatchObject({ canonicalStatus: "cancelled", outcome: null,
+        terminalReason: "actor_cancelled" });
+    const reconciled = await fixture.pool.query<{ terminal_receipt: {
+      materialAction: { state: string; receipts: Array<{ receiptId: string }> } } }>(
+      "SELECT terminal_receipt FROM cp_hosted_run WHERE organization_id='org_race' AND run_id=$1",
+      [claim.runId]);
+    expect(reconciled.rows[0]?.terminal_receipt.materialAction).toEqual({
+      state: "resolved",
+      receipts: [expect.objectContaining({ receiptId: "receipt_cancel_material" })],
+    });
+  });
+
+  it("serializes material begin against cancellation without losing possible effects", async () => {
+    now = new Date("2026-08-15T10:20:00.000Z");
+    const service = coordinator();
+    const candidate = await hostedAdmissionFixture({ runId: "run_cancel_begin_race",
+      suffix: "cancel_begin_race", organizationId: "org_race", runnerId: "runner_race",
+      queueClaimDeadline: "2026-08-15T11:20:00.000Z",
+      permissionActions: ["github.pull_request.merge"], publicationMode: "pull_request" });
+    await service.admit({ runId: "run_cancel_begin_race", admission: candidate.admission,
+      policy: candidate.policy });
+    const claimed = await service.claim({ principal, request: hostedClaimRequest({
+      operationId: "operation_claim_cancel_begin_race",
+      requestId: "request_claim_cancel_begin_race", credentialId: "credential_race" }) });
+    if (claimed.kind !== "claimed") throw new Error("claim failed");
+    const claim = claimed.claim;
+    const materials = createMaterialActionCoordinator({ pool: fixture.pool, clock });
+    const actionDescriptor = "github.pull_request.merge" as const;
+    const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
+    const targetFingerprint = `sha256:${"8".repeat(64)}`;
+    const authorization = await authorizeHostedMaterialActionFixture({
+      pool: fixture.pool, clock, principal, runId: claim.runId, attempt: claim.attempt,
+      actionId: "action_cancel_begin_race", actionDescriptor, targetFingerprint,
+      policySnapshotRef: candidate.policy.payload.snapshotId,
+      policySnapshotDigest: candidate.policy.receiptDigest,
+      suffix: "cancel_begin_race",
+    });
+    await releaseTwoClientBarrier();
+    const [begin, cancel] = await Promise.all([
+      materials.begin({ principal, fencingToken: claim.attempt.fencingToken,
+        runId: claim.runId, attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number, actionId: "action_cancel_begin_race",
+        actionDescriptor, actionDescriptorDigest, targetFingerprint,
+        policySnapshotRef: candidate.policy.payload.snapshotId,
+        policySnapshotDigest: candidate.policy.receiptDigest,
+        workspaceAttestationDigest: authorization.authority.workspaceAttestationDigest,
+        authority: authorization.authority, idempotencyKey: "material_cancel_begin_race" }),
+      service.cancelRun({ organizationId: "org_race", runId: claim.runId,
+        reason: "actor_cancelled", expected: { attemptId: claim.attempt.id,
+          attemptNumber: claim.attempt.number,
+          fencingTokenDigest: claim.attempt.fencingTokenDigest } }),
+    ]);
+    expect(cancel).toEqual({ kind: "cancelled" });
+    expect(["begun", "stale_fence"]).toContain(begin.kind);
+    const view = await service.inspect({ organizationId: "org_race", runId: claim.runId });
+    expect(view).toMatchObject({ canonicalStatus: "cancelled",
+      outcome: begin.kind === "begun" ? "outcome_unknown" : null });
   });
 
   it("preserves outcome_unknown and reconciliation identity when deletion follows material start", async () => {

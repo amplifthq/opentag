@@ -36,7 +36,9 @@ import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { withPostgresTransaction, type PostgresTransactionClient } from "../../database/postgres.js";
 import type { RuntimePrincipal } from "../runners/index.js";
-import { classifyAttemptMaterialActionTruth } from "./material-actions.js";
+import { cancellationMaterialEvidence,
+  classifyAttemptMaterialActionCancellationTruth,
+  classifyAttemptMaterialActionTruth } from "./material-actions.js";
 
 type Clock = { now(): Date };
 type IdFactory = (kind: "attempt") => string;
@@ -1573,26 +1575,56 @@ export function createHostedRunCoordinator(input: {
         const run = selected.rows[0];
         if (!run) return { kind: "missing" } as const;
         if (run.terminal_kind) return { kind: "terminal" } as const;
+        const attempt = run.current_attempt_number > 0
+          ? await client.query<HostedAttemptRow>(
+              `SELECT * FROM cp_hosted_attempt WHERE organization_id=$1 AND run_id=$2
+               AND attempt_number=$3 FOR UPDATE`,
+              [command.organizationId, command.runId, run.current_attempt_number],
+            )
+          : { rows: [] as HostedAttemptRow[] };
+        const current = attempt.rows[0];
         if (command.expected) {
-          const attempt = await client.query<HostedAttemptRow>(
-            `SELECT * FROM cp_hosted_attempt WHERE organization_id=$1 AND run_id=$2
-             AND attempt_number=$3 FOR UPDATE`,
-            [command.organizationId, command.runId, run.current_attempt_number]);
-          const current = attempt.rows[0];
           if (!current || run.current_attempt_number !== command.expected.attemptNumber
             || current.attempt_id !== command.expected.attemptId
             || current.fencing_token_digest !== command.expected.fencingTokenDigest) {
             return { kind: "stale_fence" } as const;
           }
         }
+        const material = current
+          ? await classifyAttemptMaterialActionCancellationTruth(client, {
+              organizationId: command.organizationId,
+              runId: command.runId,
+              attemptId: current.attempt_id,
+            })
+          : { kind: "proven_not_started" as const };
+        const outcome = material.kind === "outcome_unknown" ? "outcome_unknown" : null;
+        const reconciliationIdentity = material.kind === "outcome_unknown"
+          ? material.reconciliationIdentity : null;
         const now = input.clock.now().toISOString();
-        await client.query(
-          `UPDATE cp_hosted_attempt SET state = 'cancelled', updated_at = $3
+        if (current) await client.query(
+          `UPDATE cp_hosted_attempt
+           SET state = CASE
+                 WHEN state = 'succeeded' THEN state
+                 WHEN $4::boolean THEN 'interrupted'
+                 ELSE 'cancelled'
+               END,
+               lease_expires_at = LEAST(lease_expires_at,$3),
+               blocked_permission_request_id=NULL,
+               blocked_action_descriptor_digest=NULL,
+               blocked_policy_snapshot_digest=NULL,
+               updated_at = $3
            WHERE organization_id = $1 AND run_id = $2
-             AND attempt_number = (SELECT current_attempt_number FROM cp_hosted_run
-               WHERE organization_id = $1 AND run_id = $2)
-             AND state IN ('claimed','running')`,
-          [command.organizationId, command.runId, now],
+             AND attempt_number=$5
+             AND attempt_id=$6
+             AND state IN ('claimed','running','needs_approval','succeeded','expired')`,
+          [command.organizationId, command.runId, now,
+            material.kind === "outcome_unknown", run.current_attempt_number,
+            current.attempt_id],
+        );
+        if (current) await client.query(
+          `UPDATE cp_permission_request SET state='revoked',updated_at=$4
+           WHERE organization_id=$1 AND run_id=$2 AND attempt_id=$3 AND state='waiting'`,
+          [command.organizationId, command.runId, current.attempt_id, now],
         );
         await client.query(
           `UPDATE cp_source_content_read_grant
@@ -1602,10 +1634,13 @@ export function createHostedRunCoordinator(input: {
         );
         await client.query(
           `UPDATE cp_hosted_run SET state = 'cancelled', terminal_kind = 'cancelled',
-             terminal_reason = $3, terminal_receipt = $4::jsonb, updated_at = $5
+             terminal_reason = $3, outcome_state=$4,reconciliation_identity=$5,
+             terminal_receipt = $6::jsonb, updated_at = $7
            WHERE organization_id = $1 AND run_id = $2`,
-          [command.organizationId, command.runId, command.reason,
-            JSON.stringify({ kind: "run_cancelled", reason: command.reason, recordedAt: now }), now],
+          [command.organizationId, command.runId, command.reason, outcome,
+            reconciliationIdentity,
+            JSON.stringify({ kind: "run_cancelled", reason: command.reason,
+              materialAction: cancellationMaterialEvidence(material), recordedAt: now }), now],
         );
         return { kind: "cancelled" } as const;
       });

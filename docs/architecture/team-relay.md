@@ -56,6 +56,10 @@ turn `outcome_unknown` into success.
 `outcome_unknown` is a truthful terminal observation when the provider outcome
 cannot be established. It is not an instruction to retry. Retry exists only
 where a bounded, idempotent retry authority can safely reconcile the same fact.
+If cancellation wins after a material-action begin marker, the Run records the
+cancellation while preserving `outcome_unknown` and its reconciliation identity.
+An exact late receipt may resolve that material observation without reviving the
+cancelled Run or authorizing another provider call.
 
 ## Approval and publication
 

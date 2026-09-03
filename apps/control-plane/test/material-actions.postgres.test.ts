@@ -9,7 +9,8 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHostedRunCoordinator } from "../src/modules/hosted-runs/index.js";
 import { createMaterialActionCoordinator } from "../src/modules/hosted-runs/material-actions.js";
-import { classifyAttemptMaterialActionTruth } from "../src/modules/hosted-runs/material-actions.js";
+import { classifyAttemptMaterialActionCancellationTruth,
+  classifyAttemptMaterialActionTruth } from "../src/modules/hosted-runs/material-actions.js";
 import { createRunnerDirectory, type RuntimePrincipal } from "../src/modules/runners/index.js";
 import {
   hostedAdmissionFixture,
@@ -332,6 +333,19 @@ describe.skipIf(!TEST_DATABASE_URL)("material action PostgreSQL module", () => {
     })).resolves.toMatchObject({
       kind: "resolved",
       receipt: { payload: { outcome: "succeeded" } },
+    });
+    await expect(classifyAttemptMaterialActionCancellationTruth(fixture.pool, {
+      organizationId: principal.organizationId,
+      runId: claim.runId,
+      attemptId: claim.attempt.id,
+    })).resolves.toEqual({
+      kind: "resolved",
+      receipts: [{
+        actionId: "action_material",
+        receiptId: terminal.receiptId,
+        receiptDigest: terminal.receiptDigest,
+        outcome: "succeeded",
+      }],
     });
     const rows = await fixture.pool.query<{ receipt_id: string }>(
       `SELECT receipt_id FROM cp_material_action_receipt
