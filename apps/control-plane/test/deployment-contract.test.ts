@@ -59,6 +59,57 @@ describe("Control Plane deployment contract", () => {
     expect(deployment).toContain("Never add an inline `OPENTAG_RELAY_CONTENT_KEK` variable");
   });
 
+  it("provisions an ephemeral relay-content KEK file for browser E2E", async () => {
+    const e2e = await read("scripts/test/control-plane-browser-e2e.mjs");
+
+    expect(e2e).toContain("const relayContentKekFile = join(temporaryDirectory, \"relay-content-kek\")");
+    expect(e2e).toContain("await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o600 })");
+    expect(e2e).toContain("`OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`");
+    expect(e2e).not.toContain("OPENTAG_RELAY_CONTENT_KEK=");
+  });
+
+  it("registers every capability required by the browser E2E hosted claim", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const registrationCapabilities = e2e.match(
+      /const capabilities = \[[\s\S]*?\] as const;/u,
+    )?.[0];
+
+    expect(registrationCapabilities).toContain("relay.source-content-redeem.v1");
+  });
+
+  it("attests the browser E2E workspace before requesting material permission", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const runningAt = e2e.indexOf("markHostedRunRunningControlV1");
+    const permissionAt = e2e.indexOf("requestActionPermissionControlV1");
+
+    expect(runningAt).toBeGreaterThan(0);
+    expect(permissionAt).toBeGreaterThan(runningAt);
+    expect(e2e).toContain("workspaceAttestationDigest");
+    expect(e2e).toContain('const actionDescriptor = "workspace.write"');
+    expect(e2e).not.toContain('const actionDescriptor = "github.pull_request.merge"');
+  });
+
+  it("begins the authorized browser E2E material action before recording its receipt", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const beginAt = e2e.indexOf("beginMaterialActionControlV1");
+    const receiptAt = e2e.indexOf("recordMaterialActionReceiptControlV1");
+
+    expect(beginAt).toBeGreaterThan(0);
+    expect(receiptAt).toBeGreaterThan(beginAt);
+    expect(e2e).toContain('kind: "permission_resolution"');
+    expect(e2e).toContain("resolutionReceiptDigest: resolved.receipt.receiptDigest");
+  });
+
+  it("carries the accepted workspace attestation into browser E2E cancellation", async () => {
+    const e2e = await read("scripts/test/control-plane-compose-smoke.ts");
+    const cancellation = e2e.slice(
+      e2e.indexOf("const cancellation ="),
+      e2e.indexOf("const cancelled ="),
+    );
+
+    expect(cancellation).toContain("workspaceAttestation");
+  });
+
   it("documents one Postgres-and-KEK recovery set without claiming HA or certification", async () => {
     const [compose, composeReadme, deployment] = await Promise.all([
       read("deploy/compose/compose.yaml"),

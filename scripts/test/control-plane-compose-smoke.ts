@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import {
   HumanPermissionDecisionRequestV1Schema,
   HostedCancelRequestV1Schema,
+  HostedRunningRequestV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   RunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema,
@@ -37,6 +38,7 @@ const capabilities = [
   "relay.material-receipt.v1",
   "relay.permission.v1",
   "relay.readiness.v1",
+  "relay.source-content-redeem.v1",
 ] as const;
 const hostedCapabilities = [
   "relay.claim-fence.v1",
@@ -253,7 +255,53 @@ async function main(): Promise<void> {
   });
   assert(claim?.runId === admitted.runId, "hosted_claim_missing");
 
-  const actionDescriptor = "github.pull_request.merge" as const;
+  const workspaceAttestation = {
+    workspaceId: `workspace_smoke_${stamp}`,
+    workspacePathDigest: `sha256:${"1".repeat(64)}`,
+    repositoryPathDigest: `sha256:${"2".repeat(64)}`,
+    worktreeIdentityDigest: `sha256:${"3".repeat(64)}`,
+    baseRevision: "a".repeat(40),
+    currentRevision: "a".repeat(40),
+    currentTree: "b".repeat(40),
+    workspaceStateDigest: `sha256:${"4".repeat(64)}`,
+    attemptId: claim.attempt.id,
+    attemptNumber: claim.attempt.number,
+    fencingTokenDigest: claim.attempt.fencingTokenDigest,
+    credentialId: claim.authority.credentialId,
+    leaseExpiresAt: claim.attempt.leaseExpiresAt,
+  };
+  const workspaceAttestationDigest = await computeControlPayloadDigestV1(
+    workspaceAttestation,
+  );
+  const running = HostedRunningRequestV1Schema.parse(
+    await buildHostedLifecycleRequestV1({
+      organizationId,
+      runnerId,
+      runId: admitted.runId,
+      action: "running",
+      attempt: {
+        attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number,
+        epoch: claim.attempt.epoch,
+        fencingToken: claim.attempt.fencingToken,
+        fencingTokenDigest: claim.attempt.fencingTokenDigest,
+      },
+      occurredAt: new Date().toISOString(),
+      executorId: claim.executorId,
+      executorCapabilityDigest: claim.authority.executorCapabilityDigest,
+      workspaceAttestation,
+    }),
+  );
+  const runningResult = await runtimeClient.markHostedRunRunningControlV1({
+    organizationId,
+    credentialId: claim.authority.credentialId,
+    runnerId,
+    runId: admitted.runId,
+    request: running,
+  });
+  assert(runningResult.status === 201, "hosted_running_not_recorded");
+
+  const actionDescriptor = "workspace.write" as const;
   const actionDescriptorDigest = await computeControlPayloadDigestV1(actionDescriptor);
   const permissionDigestInput = {
     schemaVersion: 1 as const,
@@ -276,6 +324,7 @@ async function main(): Promise<void> {
     targetFingerprint: `sha256:${"d".repeat(64)}`,
     policySnapshotRef: claim.admissionPolicySnapshot.payload.snapshotId,
     policySnapshotDigest: claim.admissionPolicySnapshot.receiptDigest,
+    workspaceAttestationDigest,
     requestedAt: new Date().toISOString(),
   };
   const permission = RunnerPermissionRequestV1Schema.parse({
@@ -331,16 +380,53 @@ async function main(): Promise<void> {
   });
   assert(resolved.outcome === "resolved", "permission_not_resolved");
 
+  const materialIdempotencyKey = `material_smoke_${stamp}`;
+  const begun = await runtimeClient.beginMaterialActionControlV1({
+    schemaVersion: 1,
+    protocolVersion: "1.0",
+    requiredCapabilities: ["relay.material-receipt.v1"],
+    requestId: materialIdempotencyKey,
+    operationId: materialIdempotencyKey,
+    organizationId,
+    runnerId,
+    runId: admitted.runId,
+    attempt: {
+      attemptId: claim.attempt.id,
+      attemptNumber: claim.attempt.number,
+      epoch: claim.attempt.epoch,
+      fencingToken: claim.attempt.fencingToken,
+      fencingTokenDigest: claim.attempt.fencingTokenDigest,
+    },
+    actionId: permission.actionId,
+    actionDescriptor,
+    actionDescriptorDigest,
+    targetFingerprint: permission.targetFingerprint,
+    policySnapshotRef: permission.policySnapshotRef,
+    policySnapshotDigest: permission.policySnapshotDigest,
+    workspaceAttestationDigest,
+    authority: {
+      kind: "permission_resolution",
+      permissionRequestId: permission.permissionRequestId,
+      permissionRequestDigest: permission.permissionRequestDigest,
+      resolutionReceiptId: resolved.receipt.receiptId,
+      resolutionReceiptDigest: resolved.receipt.receiptDigest,
+      workspaceAttestationDigest,
+    },
+    idempotencyKey: materialIdempotencyKey,
+    begunAt: new Date().toISOString(),
+  });
+  assert(begun.status === 201 && !begun.replayed, "material_action_not_begun");
+
   const materialPayload = {
     actionId: permission.actionId,
     actionDescriptor,
     actionDescriptorDigest,
-    idempotencyKey: `material_smoke_${stamp}`,
+    idempotencyKey: materialIdempotencyKey,
     provider: "github",
     connectionRef: `connection_smoke_${stamp}`,
     targetFingerprint: permission.targetFingerprint,
     operationId: `operation_material_${stamp}`,
-    requestDigest: `sha256:${"e".repeat(64)}`,
+    requestDigest: permission.permissionRequestDigest,
     actionPayloadDigest: `sha256:${"f".repeat(64)}`,
     outcome: "succeeded" as const,
     externalId: `pr_${stamp}`,
@@ -425,6 +511,7 @@ async function main(): Promise<void> {
       },
       occurredAt: new Date().toISOString(),
       reasonCode: "operator_cancelled",
+      workspaceAttestation,
     }),
   );
   const cancelled = await runtimeClient.cancelHostedRunControlV1({

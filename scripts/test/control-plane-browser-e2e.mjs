@@ -118,6 +118,7 @@ const waitForRestartedJob = async (compose, jobId, timeoutMs = 30_000) => {
 const port = await reservePort();
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "opentag-control-plane-e2e-"));
 const environmentFile = join(temporaryDirectory, ".env");
+const relayContentKekFile = join(temporaryDirectory, "relay-content-kek");
 const baseUrl = `http://127.0.0.1:${port}`;
 const adminEmail = `owner-${runId}@example.test`;
 const adminPassword = `E2e-owner-${randomSecret()}`;
@@ -138,8 +139,10 @@ const compose = [
 
 let primaryError;
 try {
+  await writeFile(relayContentKekFile, randomBytes(32), { mode: 0o600 });
   await writeFile(environmentFile, [
     `POSTGRES_PASSWORD=${postgresPassword}`,
+    `OPENTAG_RELAY_CONTENT_KEK_SOURCE_FILE=${relayContentKekFile}`,
     "OPENTAG_BOOTSTRAP_ORGANIZATION_ID=org_e2e",
     "OPENTAG_BOOTSTRAP_ORGANIZATION_NAME=OpenTag E2E",
     `OPENTAG_BOOTSTRAP_PAIRING_TOKEN=${pairingToken}`,
