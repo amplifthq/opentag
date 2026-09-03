@@ -83,10 +83,21 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
     });
 
     await fixture.migrate();
-    const after = await runtime.application.fetch(
-      new Request("http://control.test/readyz"),
-    );
-    expect(after.status).toBe(200);
+    await expect.poll(async () => {
+      const response = await runtime.application.fetch(
+        new Request("http://control.test/readyz"),
+      );
+      return {
+        body: await response.json(),
+        status: response.status,
+      };
+    }, {
+      interval: 50,
+      timeout: 5_000,
+    }).toEqual({
+      body: { status: "ready" },
+      status: 200,
+    });
     await runtime.close();
     expect(closes).toBe(1);
   });
