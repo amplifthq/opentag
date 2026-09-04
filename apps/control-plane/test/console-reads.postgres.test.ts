@@ -245,10 +245,10 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       `INSERT INTO cp_project_target(
          organization_id, project_target_id, runner_id, binding_digest,
          provider, owner, repo, default_executor, default_branch,
-         updated_at
+         binding_generation, updated_at
        ) VALUES(
          'org_console_read', 'target_presence', 'runner_visible', $1,
-         'github', 'acme', 'demo', 'codex', 'main', clock_timestamp()
+         'github', 'acme', 'demo', 'codex', 'main', 1, clock_timestamp()
        )`,
       [`sha256:${"a".repeat(64)}`],
     );
@@ -515,10 +515,10 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
       `INSERT INTO cp_project_target(
          organization_id, project_target_id, runner_id, binding_digest,
          provider, owner, repo, default_executor, default_branch,
-         updated_at
+         binding_generation, updated_at
        ) VALUES(
          'org_console_read', 'target_rebound', 'runner_visible', $1,
-         'github', 'acme', 'rebound', 'codex', 'main', clock_timestamp()
+         'github', 'acme', 'rebound', 'codex', 'main', 1, clock_timestamp()
        )`,
       [`sha256:${"e".repeat(64)}`],
     );
@@ -598,12 +598,12 @@ describe.skipIf(!TEST_DATABASE_URL)("tenant-scoped console read model", () => {
     await fixture.pool.query(
       `INSERT INTO cp_project_target(
          organization_id, project_target_id, runner_id, binding_digest,
-         provider, owner, repo, default_executor, updated_at
+         provider, owner, repo, default_executor, binding_generation, updated_at
        ) VALUES
          ('org_console_read', 'target_visible', 'runner_visible', 'digest-visible',
-          'github', 'open', 'visible', 'codex', clock_timestamp()),
+          'github', 'open', 'visible', 'codex', 1, clock_timestamp()),
          ('org_other_read', 'target_concealed', 'runner_concealed', 'digest-hidden',
-          'github', 'other', 'hidden', 'codex', clock_timestamp())`,
+          'github', 'other', 'hidden', 'codex', 1, clock_timestamp())`,
     );
     const reads = createConsoleReadModel({ pool: fixture.pool });
     const principal = {

@@ -67,6 +67,7 @@ export type LocalEffectExecutorOptions = {
   leaseOwner?: string;
   leaseSeconds?: number;
   providerTimeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 const DEFAULT_LOCAL_EFFECT_LEASE_SECONDS = 60;
@@ -95,19 +96,28 @@ export class LocalEffectExecutor {
   }
 
   async runOnce(): Promise<LocalEffectExecutorResult> {
+    return this.#runExclusive(true);
+  }
+
+  async recoverOnce(): Promise<LocalEffectExecutorResult> {
+    return this.#runExclusive(false);
+  }
+
+  async #runExclusive(acquireWhenIdle: boolean): Promise<LocalEffectExecutorResult> {
     if (this.#running) throw new Error("local_effect_executor_reentrant");
     this.#running = true;
     try {
-      return await this.#runOnceExclusive();
+      return await this.#runOnceExclusive(acquireWhenIdle);
     } finally {
       this.#running = false;
     }
   }
 
-  async #runOnceExclusive(): Promise<LocalEffectExecutorResult> {
+  async #runOnceExclusive(acquireWhenIdle: boolean): Promise<LocalEffectExecutorResult> {
     await this.options.repository.pruneAcknowledgedLocalEffectAttempts({ now: this.#now() });
     let pending = await this.#claimNext();
     if (pending) return this.#resume(pending);
+    if (!acquireWhenIdle) return { outcome: "idle" };
 
     await this.options.repository.createLocalEffectAcquire({
       requestId: this.#acquireRequestId(),
@@ -199,6 +209,9 @@ export class LocalEffectExecutor {
         reason: "provider_io_not_begun",
       });
     }
+    // Shutdown before the durable provider boundary is still proof that no
+    // provider call began. Leave the accepted permit for restart recovery.
+    if (this.options.signal?.aborted) return { outcome: "idle" };
     const begun = await this.options.repository.markLocalEffectProviderIoBegun({
       acquireRequestId: attempt.acquireRequestId,
       permitId: permit.permitId,
@@ -303,9 +316,23 @@ export class LocalEffectExecutor {
   ): Promise<GitHubDraftPullRequestEffectEvidence> {
     const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let detachAbort: (() => void) | undefined;
     try {
+      if (this.options.signal?.aborted) {
+        return { kind: "ambiguous", errorCode: "transport_error" };
+      }
+      const externallyAborted = new Promise<never>((_resolve, reject) => {
+        if (!this.options.signal) return;
+        const abort = () => {
+          controller.abort();
+          reject(new LocalEffectOutcomeUnknownError("transport_error"));
+        };
+        this.options.signal.addEventListener("abort", abort, { once: true });
+        detachAbort = () => this.options.signal?.removeEventListener("abort", abort);
+      });
       return await Promise.race([
         call(controller.signal),
+        externallyAborted,
         new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(() => {
             controller.abort();
@@ -320,6 +347,7 @@ export class LocalEffectExecutor {
       }
       throw error;
     } finally {
+      detachAbort?.();
       if (timeout) clearTimeout(timeout);
     }
   }
@@ -330,3 +358,6 @@ export async function runLocalEffectExecutorIteration(
 ): Promise<LocalEffectExecutorResult> {
   return new LocalEffectExecutor(options).runOnce();
 }
+
+export * from "./github-draft-pr.js";
+export * from "./request.js";

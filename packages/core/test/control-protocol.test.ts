@@ -198,6 +198,7 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         {
           projectTargetId: "target_a",
           bindingDigest: digest,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "alpha",
@@ -207,6 +208,7 @@ describe("OpenTag Control V1 version and capability negotiation", () => {
         {
           projectTargetId: "target_b",
           bindingDigest: otherDigest,
+          bindingGeneration: 1,
           provider: "github",
           owner: "acme",
           repo: "beta",

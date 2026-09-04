@@ -67,14 +67,3 @@ export async function createExactDraftPullRequest(input: {
     return { kind: "ambiguous" };
   }
 }
-
-export function assertPublicationOperationAllowed(input: {
-  step: string; branch: string; baseBranch: string; force?: boolean;
-}): void {
-  if (input.step !== "push_owned_branch" && input.step !== "create_draft_pull_request") {
-    throw new Error("publication_operation_prohibited");
-  }
-  if (input.force || input.branch === input.baseBranch) {
-    throw new Error("publication_operation_prohibited");
-  }
-}

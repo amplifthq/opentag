@@ -28,7 +28,6 @@ import {
   HostedSourceContentRedeemRequestV1Schema,
   HostedSourceContentRedeemResponseV1Schema,
   verifyHostedSourceContentRedeemPayloadV1,
-  RunnerBranchOwnershipAttestationV1Schema,
   MaterialActionReceiptEnvelopeV1Schema,
   MaterialActionReconcileHttpResponseV1Schema,
   MaterialActionStableIdV1Schema,
@@ -43,15 +42,6 @@ import {
   RunnerMaterialActionReconcileAttemptV1Schema,
   RunnerMaterialActionReconcileRequestV1Schema,
   RunnerMaterialActionBeginV1Schema,
-  PublicationOperationCapabilityV1Schema,
-  PublicationOperationReceiptV1Schema,
-  RunnerPublicationBeginV1Schema,
-  RunnerPublicationClaimNextV1Schema,
-  RunnerPublicationCompletionV1Schema,
-  RunnerPublicationCompletionPendingV1Schema,
-  RunnerPublicationReconciliationPendingV1Schema,
-  RunnerPublicationReceiptV1Schema,
-  RunnerPublicationReconcileV1Schema,
   RunnerPermissionCurrentQueryV1Schema,
   RunnerPermissionRequestHttpResponseV1Schema,
   RunnerPermissionRequestV1Schema,
@@ -83,7 +73,6 @@ import {
   type EffectPermitV1,
   type EffectRequestV1,
   type EffectViewV1,
-  type RunnerBranchOwnershipAttestationV1,
   type MaterialActionReceiptEnvelopeV1,
   type PermissionResolutionReceiptEnvelopeV1,
   type RunnerControlContextResponseV1,
@@ -94,14 +83,6 @@ import {
   type RunnerCredentialResponseV1,
   type RunnerMaterialActionReconcileRequestV1,
   type RunnerMaterialActionBeginV1,
-  type PublicationOperationCapabilityV1,
-  type PublicationOperationReceiptV1,
-  type RunnerPublicationBeginV1,
-  type RunnerPublicationClaimNextV1,
-  type RunnerPublicationCompletionV1,
-  type RunnerPublicationCompletionPendingV1,
-  type RunnerPublicationReconciliationPendingV1,
-  type RunnerPublicationReconcileV1,
   type RunnerPermissionCurrentQueryV1,
   type RunnerPermissionRequestV1,
   type RunnerProposalSettlementResponseV1,
@@ -240,22 +221,6 @@ export type OpenTagClient = {
   requestEffectControlV1(input: EffectRequestV1): Promise<EffectViewV1>;
   acquireEffectControlV1(input: EffectAcquireRequestV1): Promise<EffectPermitV1 | null>;
   recordEffectEvidenceControlV1(input: EffectEvidenceEnvelopeV1): Promise<EffectViewV1>;
-  claimNextPublicationOperationControlV1(input: RunnerPublicationClaimNextV1): Promise<{
-    capability: PublicationOperationCapabilityV1; completionPending: false; completionReceipt?: never
-  } | ({ completionPending: true } & RunnerPublicationCompletionPendingV1)
-    | ({ reconciliationPending: true } & RunnerPublicationReconciliationPendingV1) | null>;
-  beginPublicationOperationControlV1(input: RunnerPublicationBeginV1): Promise<{
-    status: 200 | 201; replayed: boolean; outcome: "accepted" }>;
-  recordPublicationOperationReceiptControlV1(input: {
-    runnerId: string; fencingToken: string; receipt: PublicationOperationReceiptV1;
-  }): Promise<{ status: 200 | 201; replayed: boolean; receipt: PublicationOperationReceiptV1 }>;
-  reconcilePublicationOperationControlV1(input: RunnerPublicationReconcileV1): Promise<{
-    status: 200 | 202; outcome: "settled" | "retry_authorized" | "outcome_unknown" }>;
-  completePublicationControlV1(input: RunnerPublicationCompletionV1): Promise<{
-    status: 200 | 202; outcome: "ready" | "replayed" | "nonterminal" | "outcome_unknown" }>;
-  attestPublicationBranchOwnershipControlV1(input: RunnerBranchOwnershipAttestationV1): Promise<{
-    ownershipId: string; ownershipDigest: string; replayed: boolean;
-  }>;
 };
 export class OpenTagClientHttpError extends Error {
   readonly status: number;
@@ -1585,27 +1550,6 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
       ) as Promise<ControlReceiptResult<MaterialActionReceiptEnvelopeV1>>;
     },
 
-    async claimNextPublicationOperationControlV1(input) {
-      const request = RunnerPublicationClaimNextV1Schema.parse(input);
-      const action = "claimNextPublicationOperationControlV1";
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/publication/claim-next`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      if (response.status === 204) return null;
-      const body = await parseControlJson(response, action, trustedControlOrigin);
-      if (response.status !== 200 && response.status !== 201) throwControlV1Error(response, body, action, request.requestId);
-      if (response.status === 200) {
-        if (typeof body === "object" && body !== null && "completionReceipt" in body) {
-          return { ...RunnerPublicationCompletionPendingV1Schema.parse(body), completionPending: true as const };
-        }
-        return { ...RunnerPublicationReconciliationPendingV1Schema.parse(body), reconciliationPending: true as const };
-      }
-      return { capability: PublicationOperationCapabilityV1Schema.parse(body), completionPending: false as const };
-    },
-
     async requestEffectControlV1(input) {
       const action = "requestEffectControlV1";
       const request = EffectRequestV1Schema.parse(input);
@@ -1681,109 +1625,6 @@ export function createOpenTagClient(options: OpenTagClientOptions): OpenTagClien
         throw new OpenTagClientHttpError(action, response.status, "invalid_effect_response_identity");
       }
       return view;
-    },
-
-    async beginPublicationOperationControlV1(input) {
-      const request = RunnerPublicationBeginV1Schema.parse(input);
-      const action = "beginPublicationOperationControlV1";
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(request.capability.runnerId)}/runs/${encodeURIComponent(request.capability.runId)}/publication/begin`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      const body = await parseControlJson(response, action, trustedControlOrigin) as { outcome?: unknown };
-      if ((response.status !== 200 && response.status !== 201)
-        || body.outcome !== (response.status === 201 ? "begun" : "replayed")) {
-        if (response.status !== 200 && response.status !== 201) {
-          throwControlV1Error(response, body, action, request.requestId);
-        }
-        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
-      }
-      return { status: response.status, replayed: response.status === 200, outcome: "accepted" as const };
-    },
-
-    async recordPublicationOperationReceiptControlV1(input) {
-      const action = "recordPublicationOperationReceiptControlV1";
-      const runnerId = MaterialActionStableIdV1Schema.parse(input.runnerId);
-      const body = RunnerPublicationReceiptV1Schema.parse({ fencingToken: input.fencingToken,
-        receipt: PublicationOperationReceiptV1Schema.parse(input.receipt) });
-      if (body.receipt.runnerId !== runnerId) {
-        throw new OpenTagClientHttpError(action, 0, "invalid_publication_receipt_identity");
-      }
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(runnerId)}/runs/${encodeURIComponent(body.receipt.runId)}/publication/receipt`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(body) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      const received = await parseControlJson(response, action, trustedControlOrigin);
-      if (response.status !== 200 && response.status !== 201) {
-        throwControlV1Error(response, received, action, body.receipt.operationId);
-      }
-      return { status: response.status, replayed: response.status === 200,
-        receipt: PublicationOperationReceiptV1Schema.parse(received) };
-    },
-
-    async reconcilePublicationOperationControlV1(input) {
-      const request = RunnerPublicationReconcileV1Schema.parse(input);
-      const action = "reconcilePublicationOperationControlV1";
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/publication/reconcile`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      const body = await parseControlJson(response, action, trustedControlOrigin) as { kind?: unknown };
-      if ((response.status !== 200 && response.status !== 202)
-        || (body.kind !== "settled" && body.kind !== "retry_authorized" && body.kind !== "outcome_unknown")) {
-        if (response.status !== 200 && response.status !== 202) {
-          throwControlV1Error(response, body, action, request.requestId);
-        }
-        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
-      }
-      return { status: response.status, outcome: body.kind };
-    },
-
-    async completePublicationControlV1(input) {
-      const request = RunnerPublicationCompletionV1Schema.parse(input);
-      const action = "completePublicationControlV1";
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/publication/complete`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      const body = await parseControlJson(response, action, trustedControlOrigin) as { kind?: unknown };
-      if ((response.status !== 200 && response.status !== 202)
-        || !["ready", "replayed", "nonterminal", "outcome_unknown"].includes(String(body.kind))) {
-        if (response.status !== 200 && response.status !== 202) {
-          throwControlV1Error(response, body, action, request.requestId);
-        }
-        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
-      }
-      return { status: response.status, outcome: body.kind as "ready" | "replayed" | "nonterminal" | "outcome_unknown" };
-    },
-
-    async attestPublicationBranchOwnershipControlV1(input) {
-      const request = RunnerBranchOwnershipAttestationV1Schema.parse(input);
-      const action = "attestPublicationBranchOwnershipControlV1";
-      const token = requireControlCredential(options.controlCredential, "runtime");
-      const response = await controlFetch(
-        `${baseUrl}/v1/runners/${encodeURIComponent(request.runnerId)}/runs/${encodeURIComponent(request.runId)}/publication/ownership`,
-        { method: "POST", headers: jsonHeaders(token), body: JSON.stringify(request) }, action,
-      );
-      assertControlResponseBoundary(response, action, trustedControlOrigin);
-      const body = await parseControlJson(response, action, trustedControlOrigin) as {
-        kind?: unknown; ownershipId?: unknown; ownershipDigest?: unknown;
-      };
-      if (response.status !== 200 || (body.kind !== "recorded" && body.kind !== "replayed")
-        || typeof body.ownershipId !== "string" || typeof body.ownershipDigest !== "string") {
-        if (response.status !== 200) throwControlV1Error(response, body, action, request.requestId);
-        throw new OpenTagClientHttpError(action, response.status, "invalid_control_v1_response");
-      }
-      return { ownershipId: body.ownershipId, ownershipDigest: body.ownershipDigest,
-        replayed: body.kind === "replayed" };
     },
 
     async reconcileMaterialActionControlV1(input) {

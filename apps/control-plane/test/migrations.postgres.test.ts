@@ -532,42 +532,6 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
     }finally{await recovered.close();}
   });
 
-  it("revokes pre-0017 publication-reject authority without harming approve", async () => {
-    const legacy = await createIsolatedPostgres();
-    try {
-      await runMigrations(legacy.pool,migrationsBefore(legacy.migrations,"0017_projection_authority_hardening.sql"));
-      await legacy.pool.query("SET session_replication_role=replica");
-      await legacy.pool.query(`INSERT INTO cp_slack_action_authority(
-        organization_id,action_id,action_token_hash,installation_id,binding_id,team_id,app_id,
-        channel_id,thread_root_message_id,run_id,pending_request_id,action_kind,action_descriptor,
-        action_descriptor_digest,approval_epoch,frozen_ceiling,frozen_ceiling_digest,policy_digest,
-        runner_id,attempt_id,attempt_number,attempt_epoch,projection_generation,authority_family_id,
-        authority_epoch,claim_state,claimed_at,fencing_token_digest,permission_request_digest,
-        pending_action_id,allowed_decisions,requester_user_id,member_user_ids,operator_user_ids,
-        approver_user_id,admin_user_ids,publication_approval,expires_at,created_at)
-        VALUES('org_legacy','reject_only','token_reject','install','binding','T','A','C','1','run',
-        'request','publication','{}','descriptor','1','{}','ceiling','policy','runner','attempt',1,1,1,
-        'family_reject',1,'available',NULL,'fence','permission','pending',ARRAY['publication_reject'],
-        NULL,ARRAY['U'],ARRAY[]::text[],'APPROVER',ARRAY[]::text[],'{}',$1,$2),
-        ('org_legacy','approve_and_reject','token_both','install','binding','T','A','C','1','run',
-        'request','publication','{}','descriptor','1','{}','ceiling','policy','runner','attempt',1,1,1,
-        'family_both',1,'available',NULL,'fence','permission','pending',
-        ARRAY['publication_approve','publication_reject'],NULL,ARRAY['U'],ARRAY[]::text[],
-        'APPROVER',ARRAY[]::text[],'{}',$1,$2)`,
-      [new Date("2026-09-01T01:00:00.000Z"),new Date("2026-09-01T00:00:00.000Z")]);
-      await legacy.pool.query("SET session_replication_role=origin");
-      await runMigrations(legacy.pool, legacy.migrations);
-      const rows=await legacy.pool.query(`SELECT action_id,allowed_decisions,claim_state,
-        consumed_at IS NOT NULL consumed FROM cp_slack_action_authority ORDER BY action_id`);
-      expect(rows.rows).toEqual([
-        {action_id:"approve_and_reject",allowed_decisions:["publication_approve"],
-          claim_state:"available",consumed:false},
-        {action_id:"reject_only",allowed_decisions:["publication_approve"],
-          claim_state:"consumed",consumed:true},
-      ]);
-    } finally { await legacy.close(); }
-  });
-
   it("backfills pre-0018 status anchors by durable shape without emitting external events",async()=>{
     const legacy=await createIsolatedPostgres();
     try{
@@ -623,6 +587,11 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
        WHERE table_schema=$1 AND table_name='cp_project_target'
          AND column_name='binding_generation'`, [fixture.schema]);
     expect(targetGeneration.rows).toEqual([{ is_nullable: "NO", column_default: null }]);
+    const slackEffectApproval = await fixture.pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema=$1
+       AND table_name='cp_slack_action_authority'
+       AND column_name IN ('publication_approval','effect_approval')`, [fixture.schema]);
+    expect(slackEffectApproval.rows).toEqual([{ column_name: "effect_approval" }]);
   });
 
   it("backfills an existing Project Target to binding generation one", async () => {
@@ -773,6 +742,11 @@ describe.skipIf(!TEST_DATABASE_URL)("PostgreSQL migration corpus", () => {
          WHERE table_schema=current_schema() AND table_name='cp_project_target'
            AND column_name='binding_generation'`,
       )).rows[0]).toEqual({ count: 0 });
+      expect((await cutover.pool.query<{ column_name: string }>(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema()
+         AND table_name='cp_slack_action_authority'
+         AND column_name IN ('publication_approval','effect_approval')`,
+      )).rows).toEqual([{ column_name: "publication_approval" }]);
     } finally { await cutover.close(); }
   });
 

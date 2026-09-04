@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeSlackAppMentionSourceIdentityDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, type HostedClaimRequestV1 } from "@opentag/core";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeEffectFencingTokenDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeSlackAppMentionSourceIdentityDigestV1, HostedCompleteRequestV1Schema, RunnerReadinessReceiptEnvelopeV1Schema, verifyEffectRequestV1, type HostedClaimRequestV1 } from "@opentag/core";
 import { serveDaemon } from "../src/daemon.js";
 import { assertHostedClaimCurrentAuthorityV1, assertRunnerControlContextRegistrationV1, buildHostedClaimRequestV1, buildHostedCompletionMetadataForControlV1, buildHostedProgressMetadataForControlV1, buildRunnerReadinessReceipt, createHostedControlLoop, hasSameRunnerReadinessAuthorityV1, isRunnerControlContextFreshV1, pumpControlPlaneProjections, pumpHostedLifecycleOperations, redeemHostedClaimSourceContentV1, runnerReadinessReuseWindowV1, type ControlPlaneProjectionOutboxEntry, type ControlProjectionClient, type ControlProjectionRepository, type HostedLifecycleOperationEntry, type HostedLifecycleRepository } from "../src/control-v1.js";
 
@@ -166,6 +166,9 @@ function emptyLifecycleRepository() {
   return {
     ...memoryProjectionRepository(),
     getHostedProposalSettlementForRetry: vi.fn(async () => null),
+    markHostedProposalSettlementHandled: vi.fn(async () => "handled" as const),
+    pruneAcknowledgedLocalEffectAttempts: vi.fn(async () => ({ pruned: 0, acquireRequestIds: [] })),
+    claimNextRecoverableLocalEffectAttempt: vi.fn(async () => null),
     getHostedPreImportAuthorityRecovery: vi.fn(async () => null),
     getHostedClaimOperationForRetry: vi.fn(async () => null),
     recoverExpiredHostedLifecycleOperations: vi.fn(async () => 0),
@@ -954,7 +957,6 @@ describe("Control V1 projection pump", () => {
       },
     } as never;
     const client = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
       markHostedRunRunningControlV1,
       completeHostedRunControlV1,
@@ -1031,7 +1033,6 @@ describe("Control V1 projection pump", () => {
       observedAt: now.toISOString(),
     };
     const client = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => {
         events.push("context");
         return { ...context, observedAt: currentNow.toISOString() };
@@ -1529,7 +1530,6 @@ describe("Control V1 projection pump", () => {
       };
     });
     const client = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => ({
         ...currentContext,
         observedAt: currentNow.toISOString(),
@@ -1747,7 +1747,6 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1,
         claimHostedRunControlV1,
@@ -1972,7 +1971,6 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => currentNow,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         markHostedRunRunningControlV1,
       } as never,
@@ -2179,7 +2177,6 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         rejectHostedAttemptStartControlV1,
         markHostedRunRunningControlV1,
@@ -2426,7 +2423,6 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => currentNow,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         heartbeatHostedRunControlV1,
       } as never,
@@ -3035,7 +3031,6 @@ describe("Control V1 projection pump", () => {
       databasePath: ":memory:",
       executors: {},
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(() => delayedContext),
       } as never,
       governanceStore: { repo: {} as never, close: closeStore },
@@ -3117,7 +3112,6 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         completeHostedRunControlV1: lifecycleProvider,
       } as never,
@@ -3273,7 +3267,6 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
       } as never,
       governanceStore: { repo, close: closeStore },
@@ -3361,7 +3354,6 @@ describe("Control V1 projection pump", () => {
       executors: {},
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1,
         claimHostedRunControlV1,
@@ -3509,7 +3501,6 @@ describe("Control V1 projection pump", () => {
       executors: { reviewer: executor },
       now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
           status: 201,
@@ -3620,7 +3611,6 @@ describe("Control V1 projection pump", () => {
       observedAt: now.toISOString(),
     };
     const client = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
       reportRunnerReadinessControlV1: vi.fn(async (receipt) => ({
         status: 201,
@@ -3807,7 +3797,6 @@ describe("Control V1 projection pump", () => {
             createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: { reviewer: executor }, now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         requestActionPermissionControlV1: vi.fn(async (request) => ({
           status: 200 as const, replayed: false as const, outcome: "resolved" as const,
@@ -3835,20 +3824,40 @@ describe("Control V1 projection pump", () => {
     await loop?.close();
   });
 
-  it("settles a durable proposal artifact before claiming more work", async () => {
-    const artifact = { id: "run_proposal:proposal-evidence", type: "patch_summary",
-      kind: "patch", title: "Immutable proposal evidence",
-      uri: "opentag://run/run_proposal/proposal-evidence", summary: "Content-free evidence.",
-      sourceRunId: "run_proposal", createdAt: now.toISOString(),
-      metadata: { artifactDigest: `sha256:${"a".repeat(64)}` } };
+  it("settles a newer candidate before an older deferred candidate becomes eligible", async () => {
+    const proposal = (suffix: "a" | "b") => ({
+      runId: `run_proposal_${suffix}`,
+      attemptId: `attempt_proposal_${suffix}`,
+      attemptNumber: 2,
+      fencingToken: `fence_proposal_${suffix}`,
+      fencingTokenDigest: `sha256:${suffix.repeat(64)}`,
+      candidateId: `candidate_${suffix.repeat(48)}`,
+      proposalArtifact: {
+        id: `run_proposal_${suffix}:proposal-evidence`,
+        type: "patch_summary",
+        kind: "patch",
+        title: "Immutable proposal evidence",
+        uri: `opentag://run/run_proposal_${suffix}/proposal-evidence`,
+        summary: "Content-free evidence.",
+        sourceRunId: `run_proposal_${suffix}`,
+        createdAt: now.toISOString(),
+        metadata: { artifactDigest: `sha256:${suffix.repeat(64)}` },
+      },
+    });
+    const proposals = [proposal("a"), proposal("b")];
+    const handled = new Set<string>();
+    let olderEligible = false;
+    const markHandled = vi.fn(async ({ candidateId }) => {
+      handled.add(candidateId);
+      return "handled" as const;
+    });
     const repo = { ...emptyLifecycleRepository(),
-      getHostedProposalSettlementForRetry: vi.fn(async () => ({
-        runId: "run_proposal", attemptId: "attempt_proposal", attemptNumber: 2,
-        fencingToken: "fence_proposal", fencingTokenDigest: `sha256:${"b".repeat(64)}`,
-        candidateId: `candidate_${"a".repeat(48)}`, proposalArtifact: artifact,
-      })) } as never;
-    const settle = vi.fn(async () => ({ outcome: "settled" as const,
-      candidateId: `candidate_${"a".repeat(48)}`, candidateDigest: `sha256:${"c".repeat(64)}`,
+      getHostedProposalSettlementForRetry: vi.fn(async () =>
+        proposals.find(({ candidateId }) => !handled.has(candidateId)
+          && (candidateId !== proposals[0]!.candidateId || olderEligible)) ?? null),
+      markHostedProposalSettlementHandled: markHandled } as never;
+    const settle = vi.fn(async (request) => ({ outcome: "settled" as const,
+      candidateId: request.candidateId, candidateDigest: `sha256:${"c".repeat(64)}`,
       status: "proposal_ready" as const }));
     const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
       contextKind: "runner_control" as const, organizationId: "org_1", runnerId: "runner_1",
@@ -3865,43 +3874,62 @@ describe("Control V1 projection pump", () => {
             createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: {}, now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         settleProposalCandidateControlV1: settle } as never,
       governanceStore: { repo, close: vi.fn() },
     });
     await expect(loop?.beforeIteration()).resolves.toBe(true);
-    expect(settle).toHaveBeenCalledWith(expect.objectContaining({
-      runId: "run_proposal", candidateId: `candidate_${"a".repeat(48)}`,
-      proposalArtifact: artifact,
-    }));
+    olderEligible = true;
+    await expect(loop?.beforeIteration()).resolves.toBe(true);
+    expect(settle.mock.calls.map(([request]) => request.candidateId)).toEqual([
+      `candidate_${"b".repeat(48)}`,
+      `candidate_${"a".repeat(48)}`,
+    ]);
+    expect(markHandled.mock.calls.map(([request]) => request.candidateId)).toEqual([
+      `candidate_${"b".repeat(48)}`,
+      `candidate_${"a".repeat(48)}`,
+    ]);
     await loop?.close();
   });
 
-  it("attests the exact local branch after pull-request proposal settlement", async () => {
+  it("replays the same sealed Effect when its local handled marker is lost", async () => {
     const candidateId = `candidate_${"d".repeat(48)}`;
+    const fencingTokenDigest = await computeEffectFencingTokenDigestV1("fence_publication");
     const proposalArtifact = { id: "run_publication:proposal-evidence",
+      createdAt: now.toISOString(),
       metadata: { artifactDigest: `sha256:${"d".repeat(64)}` } };
+    const markHandled = vi.fn()
+      .mockRejectedValueOnce(new Error("injected local marker loss"))
+      .mockResolvedValue("handled" as const);
     const repo = { ...emptyLifecycleRepository(),
       getHostedProposalSettlementForRetry: vi.fn(async () => ({
         runId: "run_publication", attemptId: "attempt_publication", attemptNumber: 1,
-        fencingToken: "fence_publication", fencingTokenDigest: `sha256:${"e".repeat(64)}`,
+        fencingToken: "fence_publication", fencingTokenDigest,
         runnerGeneration: 2, projectTargetId: "target_publication",
         targetBindingDigest: `sha256:${"f".repeat(64)}`, candidateId,
+        policySnapshotId: "policy_publication",
+        policySnapshotDigest: `sha256:${"9".repeat(64)}`,
         branch: "opentag/run_publication", baseRevision: "a".repeat(40),
         finalRevision: "b".repeat(40), finalTree: "c".repeat(40), proposalArtifact,
-      })) } as never;
+      })), markHostedProposalSettlementHandled: markHandled } as never;
     const settle = vi.fn(async () => ({ outcome: "settled" as const, candidateId,
       candidateDigest: `sha256:${"1".repeat(64)}`, status: "publication_pending" as const }));
-    const attest = vi.fn(async () => ({ ownershipId: "ownership_publication",
-      ownershipDigest: `sha256:${"2".repeat(64)}`, replayed: false }));
+    const requestEffect = vi.fn(async (request) => {
+      expect(await verifyEffectRequestV1(request)).toBe(true);
+      expect(JSON.stringify(request)).not.toContain("ghs_local_only");
+      expect(JSON.stringify(request)).not.toContain(process.cwd());
+      return { effectId: request.effectId,
+        effectKind: "github.create_draft_pull_request" as const,
+        state: "requested" as const, currentAttemptNumber: 0,
+        updatedAt: now.toISOString() };
+    });
     const context = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
       contextKind: "runner_control" as const, organizationId: "org_publication",
       runnerId: "runner_publication", credentialId: "credential_publication",
       registrationGeneration: 1, credentialGeneration: 2,
-      capabilities: ["relay.publication.v1"], observedAt: now.toISOString(),
+      capabilities: ["relay.effect-authority.v1"], observedAt: now.toISOString(),
       targets: [{ projectTargetId: "target_publication",
-        bindingDigest: `sha256:${"f".repeat(64)}`, provider: "github",
+        bindingDigest: `sha256:${"f".repeat(64)}`, bindingGeneration: 7, provider: "github",
         owner: "acme", repo: "widget", defaultExecutor: "reviewer",
         defaultBranch: "main" }] };
     const repository = { projectTargetId: "target_publication", provider: "github", owner: "acme", repo: "widget",
@@ -3909,7 +3937,8 @@ describe("Control V1 projection pump", () => {
       pushRemote: "origin", keepWorktree: "on_failure" as const };
     const loop = createHostedControlLoop({
       config: { runnerId: "runner_publication", relayUrl: "https://control.example",
-        runnerToken: "runtime_secret", repositories: [repository], agents: {},
+        runnerToken: "runtime_secret", githubToken: "ghs_local_only",
+        repositories: [repository], agents: {},
         controlRegistration: { kind: "hosted_control_v1", state: "paired",
           operationId: "pair_publication", registration: { schemaVersion: 1,
             protocolVersion: "1.0", organizationId: "org_publication",
@@ -3918,20 +3947,32 @@ describe("Control V1 projection pump", () => {
             credentialPurpose: "runtime", createdAt: now.toISOString() } } } as never,
       databasePath: ":memory:", executors: {}, now: () => now,
       controlClient: {
-        claimNextPublicationOperationControlV1: vi.fn(async () => null),
         getRunnerControlContextV1: vi.fn(async () => context),
         settleProposalCandidateControlV1: settle,
-        attestPublicationBranchOwnershipControlV1: attest } as never,
+        requestEffectControlV1: requestEffect } as never,
       governanceStore: { repo, close: vi.fn() },
     });
+    await expect(loop?.beforeIteration()).rejects.toThrow("injected local marker loss");
     await expect(loop?.beforeIteration()).resolves.toBe(true);
-    expect(attest).toHaveBeenCalledWith(expect.objectContaining({ candidateId,
-      candidateDigest: `sha256:${"1".repeat(64)}`,
-      runId: "run_publication", attemptId: "attempt_publication",
-      projectTargetId: "target_publication", targetBindingDigest: `sha256:${"f".repeat(64)}`,
-      remote: "origin", baseBranch: "main", branch: "opentag/run_publication",
-      expectedHeadSha: "b".repeat(40), workspaceTreeDigest: "c".repeat(40),
+    expect(requestEffect).toHaveBeenCalledTimes(2);
+    expect(requestEffect.mock.calls[1]?.[0]).toEqual(requestEffect.mock.calls[0]?.[0]);
+    expect(requestEffect).toHaveBeenCalledWith(expect.objectContaining({
+      effectKind: "github.create_draft_pull_request",
+      candidate: { candidateId, candidateDigest: `sha256:${"1".repeat(64)}` },
+      work: expect.objectContaining({ runId: "run_publication",
+        attemptId: "attempt_publication", fencingToken: "fence_publication" }),
+      authority: { approvalPolicy: "human_approval_required",
+        policySnapshotId: "policy_publication",
+        policySnapshotDigest: `sha256:${"9".repeat(64)}`,
+        approvalRequestId: expect.stringMatching(/^approval_request_/u),
+        approvalExpiresAt: "2026-08-10T00:00:00.000Z" },
+      target: expect.objectContaining({ projectTargetId: "target_publication",
+        targetBindingDigest: `sha256:${"f".repeat(64)}`, targetBindingGeneration: 7,
+        remote: "origin", baseBranch: "main", branch: "opentag/run_publication",
+        expectedHeadSha: "b".repeat(40), workspaceTreeDigest: "c".repeat(40) }),
+      requestedAt: now.toISOString(),
     }));
+    expect(markHandled).toHaveBeenCalledTimes(2);
     await loop?.close();
   });
 });

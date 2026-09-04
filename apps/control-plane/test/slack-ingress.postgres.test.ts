@@ -98,12 +98,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         'secret://slack/signing','secret://slack/bot',$1,$1)`, [now]);
   }
 
-  function productionComponents(input: { commandAuthority?: any; publicationAuthority?: any;
-    tokenFactory?: () => string; testHooks?: any } = {}) {
+  function productionComponents(input: { commandAuthority?: any; effectAuthority?: any;
+    tokenFactory?: () => string; testHooks?: any; clock?: { now(): Date } } = {}) {
     const material = new Map([
       ["secret://slack/signing", "secret"], ["secret://slack/bot", "bot-token"]
     ]);
-    const clock = { now: () => now };
+    const clock = input.clock ?? { now: () => now };
     const jobs = createDurableJobQueue({ pool: fixture.pool, clock,
       leaseDurationMs: 30_000, tokenFactory: () => "lease_test" });
     const custody = createRelayContentCustody({ pool: fixture.pool, clock,
@@ -120,7 +120,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
         const value = material.get(reference); if (!value) throw new Error("secret_unavailable");
         return value;
       } }, ...(input.commandAuthority ? { commandAuthority: input.commandAuthority } : {}),
-      ...(input.publicationAuthority ? { publicationAuthority: input.publicationAuthority } : {}),
+      ...(input.effectAuthority ? { effectAuthority: input.effectAuthority } : {}),
       ...(input.testHooks ? { testHooks: input.testHooks } : {}),
       ...(input.tokenFactory ? { tokenFactory: input.tokenFactory } : {}),
       fetchImpl: async () => { throw new Error("provider_call_forbidden"); } }) };
@@ -408,17 +408,59 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       VALUES('org_a','permission_1','run_1','runner_1','attempt_1',1,'pending_action_1','resolution_1',
       $1,$2,'waiting',$3,'{}',$4,$4)`, [permissionRequestDigest, policyDigest,
       { attempt: { epoch: 1 } }, now]);
+    const effectTargetBindingDigest = digest("effect-binding");
+    const effectTarget = { projectTargetId: "target_effect_action",
+      targetBindingDigest: effectTargetBindingDigest, targetBindingGeneration: 1,
+      provider: "github", owner: "acme", repo: "demo", remote: "origin",
+      baseBranch: "main", branch: "opentag/run_1", frozenBaseRevision: "a".repeat(40),
+      workspaceTreeDigest: "b".repeat(40), expectedHeadSha: "c".repeat(40) };
+    const effectCandidate = { candidateId: "candidate_effect_action", runId: "run_1",
+      attemptId: "attempt_1", projectTargetId: effectTarget.projectTargetId,
+      frozenBaseRevision: effectTarget.frozenBaseRevision,
+      workspaceTreeDigest: effectTarget.workspaceTreeDigest,
+      patchDigest: digest("effect-patch"), changedFiles: ["effect.ts"],
+      verificationEvidenceIds: [digest("effect-verification")],
+      publicationPolicyDigest: policyDigest, createdAt: now.toISOString() };
+    const effectCandidateDigest = await computeControlPayloadDigestV1(effectCandidate);
+    await fixture.pool.query(`UPDATE cp_slack_installation SET project_target_id=$1,
+      publication_mode='pull_request' WHERE organization_id='org_a' AND installation_id='install_1'`,
+    [effectTarget.projectTargetId]);
+    await fixture.pool.query(`INSERT INTO cp_project_target(organization_id,project_target_id,
+      runner_id,binding_digest,provider,owner,repo,default_executor,default_branch,updated_at,
+      binding_generation) VALUES('org_a',$1,'runner_1',$2,'github','acme','demo',
+      'executor_1','main',$3,1)`, [effectTarget.projectTargetId,effectTargetBindingDigest,now]);
+    await fixture.pool.query(`INSERT INTO cp_publication_candidate(organization_id,candidate_id,
+      run_id,attempt_id,attempt_number,project_target_id,frozen_base_revision,workspace_tree_digest,
+      patch_digest,changed_files,verification_evidence_ids,publication_policy_digest,candidate,
+      completion_assessment,created_at) VALUES('org_a',$1,'run_1','attempt_1',1,$2,$3,$4,$5,$6,$7,
+      $8,$9::jsonb,$10::jsonb,$11)`, [effectCandidate.candidateId,effectTarget.projectTargetId,
+      effectTarget.frozenBaseRevision,effectTarget.workspaceTreeDigest,effectCandidate.patchDigest,
+      effectCandidate.changedFiles,effectCandidate.verificationEvidenceIds,policyDigest,
+      JSON.stringify(effectCandidate),JSON.stringify({ state:"proposal_ready",accepted:false,
+        candidateId:effectCandidate.candidateId,reasonCodes:["publication_pending"],
+        assessedAt:now.toISOString() }),now]);
+    await fixture.pool.query(`INSERT INTO cp_effect(organization_id,effect_id,idempotency_key,
+      effect_kind,request_id,request_digest,runner_id,runner_generation,run_id,run_attempt_id,
+      run_attempt_number,fencing_token_digest,candidate_id,candidate_digest,project_target_id,
+      target_binding_digest,target_binding_generation,target_digest,target,policy_snapshot_id,
+      policy_snapshot_digest,approval_request_id,approval_request_digest,approval_expires_at,
+      state,current_attempt_number,requested_at,created_at,updated_at)
+      VALUES('org_a','effect_action','effect:run_1:draft-pr','github.create_draft_pull_request',
+      'request_effect_action',$1,'runner_1',1,'run_1','attempt_1',1,$2,$3,$4,$5,$6,1,$7,$8::jsonb,
+      'policy_effect_action',$9,'approval_request_effect_action',$10,$11,'requested',0,$12,$12,$12)`,
+    [digest("effect-request"),fencingTokenDigest,effectCandidate.candidateId,effectCandidateDigest,
+      effectTarget.projectTargetId,effectTargetBindingDigest,digest("effect-target"),
+      JSON.stringify(effectTarget),policyDigest,digest("effect-approval-request"),
+      new Date(now.getTime()+60_000),now]);
     let sequence = 0;
     const completed = { outcome: "completed" as const };
     const authority = { async status() { return completed; }, async cancel() { return completed; },
       async approve(command: any) { decisions.push(command.decision); envelopes.push(command.authority); return completed; },
       async reject() { decisions.push("deny"); return completed; }, async bind() { return completed; },
       async unbind() { return completed; } };
-    const publicationApprove = vi.fn(async () => ({ kind: "approved" as const }));
     const { ingress } = productionComponents({ commandAuthority: authority,
-      publicationAuthority: { approve: publicationApprove },
       tokenFactory: () => `opaque_action_token_${++sequence}_abcdefghijklmnopqrstuvwxyz` });
-    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "publication" | "bind" | "unbind" = "approval",
+    const issue = (actionId: string, allowedDecisions: string[], actionKind: "status" | "cancel" | "approval" | "effect" | "bind" | "unbind" = "approval",
       override: Record<string, unknown> = {}) => ingress.issueAction({
       organizationId: "org_a", actionId, installationId: "install_1", bindingId: "binding_1",
       teamId: "T1", appId: "A1", channelId: "C1", threadRootMessageId: "1700000000.000100",
@@ -478,32 +520,12 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       .resolves.toMatchObject({ status: 403 });
     await expect(ingress.receiveInteractivity("route_1", action(bind, "bind", "U_ADMIN")))
       .resolves.toMatchObject({ status: 200 });
-    const publicationApproval = { schemaVersion: 1 as const, protocolVersion: "1.0" as const,
-      requiredCapabilities: ["relay.publication.v1"] as const, requestId: "request_publication",
-      organizationId: "org_a", runnerId: "runner_1", runId: "run_1",
-      ownershipId: "ownership_1", ownershipDigest: digest("ownership"),
-      candidateId: "candidate_1", candidateDigest: digest("candidate"),
-      approvalId: "approval_1", approvedAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + 60_000).toISOString() };
-    const publication = await issue("action_publication", ["publication_approve"], "publication",
-      { publicationApproval });
-    await expect(ingress.receiveInteractivity("route_1",
-      action(publication, "publication_approve", "U_MEMBER")))
-      .resolves.toMatchObject({ status: 403 });
-    await expect(ingress.receiveInteractivity("route_1",
-      action(publication, "publication_approve", "U_APPROVER")))
-      .resolves.toMatchObject({ status: 200 });
-    expect(publicationApprove).toHaveBeenCalledWith({ ...publicationApproval,
-      approverId: "U_APPROVER" });
     await issue("projection_status_source", ["status"], "status");
     await issue("projection_cancel_source", ["cancel"], "cancel");
-    await issue("projection_publication_source", ["publication_approve"],
-      "publication", { publicationApproval });
     const projectedControls = await ingress.issueProjectionControls({
       organizationId: "org_a", runId: "run_1", generation: 1 });
     expect(projectedControls.map((control) => control.kind)).toEqual(expect.arrayContaining([
-      "status", "cancel", "publication_approve"]));
-    expect(projectedControls.map((control) => control.kind)).not.toContain("publication_reject");
+      "status", "cancel"]));
     const projectedCountBefore = Number((await fixture.pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM cp_slack_action_authority
        WHERE action_id LIKE '%:projection:%'`)).rows[0]?.count ?? 0);
@@ -549,18 +571,6 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       .resolves.toMatchObject({status:200});
     await expect(ingress.receiveInteractivity("route_1",action(statusDeny,"deny","U_APPROVER")))
       .resolves.toMatchObject({status:200});
-    const statusPublicationStatus=await issue("status_publication_status",["status"],"status",
-      {authorityFamilyId:"family_status_publication"});
-    const statusPublication=await issue("status_publication_approve",["publication_approve"],"publication",
-      {authorityFamilyId:"family_status_publication",publicationApproval});
-    await expect(ingress.receiveInteractivity("route_1",action(statusPublicationStatus,"status","U_MEMBER")))
-      .resolves.toMatchObject({status:200});
-    await expect(ingress.receiveInteractivity("route_1",
-      action(statusPublication,"publication_approve","U_APPROVER"))).resolves.toMatchObject({status:200});
-    expect(publicationApprove).toHaveBeenLastCalledWith({...publicationApproval,approverId:"U_APPROVER"});
-    await expect(issue("forbidden_publication_reject", ["publication_reject"],
-      "publication", { publicationApproval })).rejects.toThrow();
-
     const raceCancel = await issue("race_family_cancel", ["cancel"], "cancel",
       { authorityFamilyId: "family_cancel_approve" });
     const raceApprove = await issue("race_family_approve", ["allow_once"], "approval",
@@ -579,13 +589,74 @@ describe.skipIf(!TEST_DATABASE_URL)("Slack durable ingress", () => {
       ingress.receiveInteractivity("route_1", action(raceDeny, "deny", "U_APPROVER")),
     ]);
     expect(decisionRace.map((outcome) => outcome.status).sort()).toEqual([200, 403]);
+    const effectApproval = {
+      organizationId: "org_a", effectId: "effect_action",
+      effectKind: "github.create_draft_pull_request" as const,
+      requestId: "request_effect_action", requestDigest: digest("effect-request"),
+      runnerId: "runner_1", runnerGeneration: 1, runId: "run_1",
+      attemptId: "attempt_1", attemptNumber: 1, fencingTokenDigest,
+      candidateId: effectCandidate.candidateId, candidateDigest: effectCandidateDigest,
+      projectTargetId: effectTarget.projectTargetId, targetBindingDigest: effectTargetBindingDigest,
+      targetBindingGeneration: 1, policySnapshotId: "policy_effect_action",
+      policySnapshotDigest: policyDigest, approvalRequestId: "approval_request_effect_action",
+      approvalRequestDigest: digest("effect-approval-request"),
+      approvalId: "effect_approval_action",
+      approvalExpiresAt: new Date(now.getTime()+60_000).toISOString(),
+    };
+    const effectActionDescriptor = { kind: "effect_approve", effectId: effectApproval.effectId,
+      requestDigest: effectApproval.requestDigest, candidateId: effectApproval.candidateId };
+    const effectFrozenCeiling = { effectKind: effectApproval.effectKind,
+      candidate: { candidateId: effectApproval.candidateId,
+        candidateDigest: effectApproval.candidateDigest }, target: effectTarget,
+      policy: { snapshotId: effectApproval.policySnapshotId,
+        snapshotDigest: effectApproval.policySnapshotDigest } };
+    let effectNow = now; let failEffectFinalize = true; const effectApprovals: any[] = [];
+    const effectRuntime = productionComponents({ commandAuthority: authority,
+      clock: { now: () => effectNow },
+      effectAuthority: { async approve(command: any) { effectApprovals.push(command);
+        if (effectApprovals.length === 1) await fixture.pool.query(
+          `UPDATE cp_effect SET approval_id=$3,approval_digest=$4,approval=$5::jsonb,
+             state='authorized',updated_at=$6 WHERE organization_id=$1 AND effect_id=$2`,
+          [command.organizationId,command.effectId,command.approvalId,digest("effect-approval"),
+            JSON.stringify({ approvalRequestId:command.approvalRequestId,
+              approvalRequestDigest:command.approvalRequestDigest,approvalId:command.approvalId,
+              approvedBy:command.approvedBy,approvedAt:command.approvedAt }),effectNow]);
+        return { kind: effectApprovals.length === 1 ? "approved" as const : "replayed" as const }; } },
+      testHooks: { async afterServiceBeforeFinalize() {
+        if (failEffectFinalize) { failEffectFinalize = false; throw new Error("effect_finalize_crash"); }
+      } }, tokenFactory: () => "opaque_effect_action_token_abcdefghijklmnopqrstuvwxyz" });
+    const effectToken = await effectRuntime.ingress.issueAction({ organizationId: "org_a",
+      actionId: "action_effect", installationId: "install_1", bindingId: "binding_1",
+      teamId: "T1", appId: "A1", channelId: "C1",
+      threadRootMessageId: "1700000000.000100", runId: "run_1",
+      pendingRequestId: effectApproval.approvalRequestId, actionKind: "effect",
+      actionDescriptor: effectActionDescriptor, approvalEpoch: "1",
+      frozenCeiling: effectFrozenCeiling, policyDigest,
+      runnerId: "runner_1", attemptId: "attempt_1", attemptNumber: 1, attemptEpoch: 1,
+      projectionGeneration: 1, authorityEpoch: 1, fencingTokenDigest,
+      permissionRequestDigest: effectApproval.approvalRequestDigest,
+      pendingActionId: effectApproval.effectId, allowedDecisions: ["effect_approve"],
+      memberUserIds: ["U_MEMBER"], requesterUserId: "U_REQUESTER",
+      operatorUserIds: ["U_OPERATOR"], approverUserId: "U_APPROVER",
+      adminUserIds: ["U_ADMIN"], effectApproval,
+      expiresAt: new Date(now.getTime()+60_000) });
+    await expect(effectRuntime.ingress.receiveInteractivity("route_1",
+      action(effectToken,"effect_approve","U_MEMBER"))).resolves.toMatchObject({status:403});
+    await expect(effectRuntime.ingress.receiveInteractivity("route_1",
+      action(effectToken,"effect_approve","U_APPROVER"))).resolves.toMatchObject({status:503});
+    effectNow = new Date(now.getTime()+1_000);
+    await expect(effectRuntime.ingress.receiveInteractivity("route_1",
+      action(effectToken,"effect_approve","U_APPROVER"))).resolves.toMatchObject({status:200});
+    expect(effectApprovals).toHaveLength(2);
+    expect(effectApprovals[1]).toEqual(effectApprovals[0]);
+    expect((await fixture.pool.query(`SELECT claim_state,consumed_at IS NOT NULL AS consumed
+      FROM cp_slack_action_authority WHERE organization_id='org_a' AND action_id='action_effect'`)).rows)
+      .toEqual([{claim_state:"consumed",consumed:true}]);
     const staleControls = [
       [await issue("stale_status", ["status"], "status"), "status", "U_MEMBER"],
       [await issue("stale_cancel", ["cancel"], "cancel"), "cancel", "U_REQUESTER"],
       [await issue("stale_approve", ["allow_once"], "approval"), "allow_once", "U_APPROVER"],
       [await issue("stale_reject", ["deny"], "approval"), "deny", "U_APPROVER"],
-      [await issue("stale_publication", ["publication_approve"], "publication",
-        { publicationApproval }), "publication_approve", "U_APPROVER"],
       [await issue("stale_bind", ["bind"], "bind"), "bind", "U_ADMIN"],
     ] as const;
     await fixture.pool.query(`INSERT INTO cp_hosted_attempt(organization_id,run_id,attempt_number,

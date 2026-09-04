@@ -2672,7 +2672,13 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
             const candidates = await db.select().from(runs).where(and(
                 eq(runs.status, "succeeded"),
                 isNotNull(runs.resultJson),
-            )).orderBy(runs.updatedAt).all();
+                isNull(runs.proposalSettlementCandidateId),
+                sql `EXISTS (
+                    SELECT 1 FROM json_each(${runs.resultJson}, '$.artifacts') artifact
+                    WHERE json_extract(artifact.value, '$.id')
+                        = ${runs.id} || ':proposal-evidence'
+                )`,
+            )).orderBy(asc(runs.updatedAt), asc(runs.id)).all();
             for (const run of candidates) {
                 if (!run.resultJson)
                     continue;
@@ -2704,6 +2710,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 )).limit(1).get() : undefined;
                 if (!attempt || !imported || !claim || !completion
                     || !validAcknowledgedLifecycleDependency(completion)
+                    || !completion.acknowledgedAt
                     || attempt.fencingToken === "" || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
                     continue;
                 }
@@ -2712,6 +2719,7 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
                 if (!proposalArtifact || typeof artifactDigest !== "string")
                     continue;
+                const candidateId = `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`;
                 const authority = JSON.parse(imported.authorityJson) as HostedClaimV1["authority"];
                 const evidence = proposalArtifact.metadata?.["proposalEvidence"] as {
                     branch?: unknown;
@@ -2729,11 +2737,89 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     runnerGeneration: authority.credentialGeneration,
                     projectTargetId: authority.projectTargetId,
                     targetBindingDigest: authority.targetBindingDigest,
-                    candidateId: `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`, branch: evidence.branch,
+                    policySnapshotId: authority.admissionPolicySnapshotId,
+                    policySnapshotDigest: authority.admissionPolicySnapshotDigest,
+                    candidateId, branch: evidence.branch,
                     baseRevision: evidence.baseRevision, finalRevision: evidence.finalRevision,
                     finalTree: evidence.finalTree, proposalArtifact };
             }
             return null;
+        },
+        async markHostedProposalSettlementHandled(input: {
+            destinationId: string;
+            organizationId: string;
+            runnerId: string;
+            runId: string;
+            candidateId: string;
+            now?: Date;
+        }): Promise<"handled" | "replayed"> {
+            const handledAt = (input.now ?? new Date()).toISOString();
+            return db.transaction((tx) => {
+                const run = tx.select().from(runs).where(and(
+                    eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+                    isNotNull(runs.resultJson),
+                )).limit(1).get();
+                const imported = run ? tx.select().from(hostedRunImports)
+                    .where(eq(hostedRunImports.runId, run.id)).limit(1).get() : undefined;
+                const attempt = imported ? tx.select().from(attempts).where(and(
+                    eq(attempts.id, imported.attemptId), eq(attempts.runId, run!.id),
+                    eq(attempts.runnerId, input.runnerId), eq(attempts.status, "succeeded"),
+                )).limit(1).get() : undefined;
+                const claim = imported ? tx.select().from(hostedClaimOperations).where(and(
+                    eq(hostedClaimOperations.operationId, imported.claimOperationId),
+                    eq(hostedClaimOperations.destinationId, input.destinationId),
+                    eq(hostedClaimOperations.organizationId, input.organizationId),
+                    eq(hostedClaimOperations.runnerId, input.runnerId),
+                    eq(hostedClaimOperations.state, "claimed"),
+                )).limit(1).get() : undefined;
+                const completion = attempt ? tx.select().from(hostedLifecycleOperations).where(and(
+                    eq(hostedLifecycleOperations.destinationId, input.destinationId),
+                    eq(hostedLifecycleOperations.organizationId, input.organizationId),
+                    eq(hostedLifecycleOperations.runnerId, input.runnerId),
+                    eq(hostedLifecycleOperations.runId, input.runId),
+                    eq(hostedLifecycleOperations.attemptId, attempt.id),
+                    eq(hostedLifecycleOperations.action, "complete"),
+                    eq(hostedLifecycleOperations.state, "acknowledged"),
+                )).limit(1).get() : undefined;
+                if (!run || !run.resultJson || !imported || !attempt || !claim || !completion
+                    || !completion.acknowledgedAt
+                    || !validAcknowledgedLifecycleDependency(completion)
+                    || attempt.fencingToken === ""
+                    || imported.fencingTokenDigest !== completion.fencingTokenDigest) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                const result = validatePersistedProposalEvidence(
+                    OpenTagRunResultSchema.parse(JSON.parse(run.resultJson)),
+                );
+                const proposalArtifact = result.artifacts?.find((artifact) =>
+                    artifact.id === `${run.id}:proposal-evidence`);
+                const artifactDigest = proposalArtifact?.metadata?.["artifactDigest"];
+                const candidateId = typeof artifactDigest === "string"
+                    ? `candidate_${artifactDigest.slice("sha256:".length, "sha256:".length + 48)}`
+                    : null;
+                if (candidateId !== input.candidateId) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                if (run.proposalSettlementCandidateId !== null) {
+                    if (run.proposalSettlementCandidateId !== input.candidateId
+                        || run.proposalSettlementHandledAt === null) {
+                        throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                    }
+                    return "replayed" as const;
+                }
+                const updated = tx.update(runs).set({
+                    proposalSettlementCandidateId: input.candidateId,
+                    proposalSettlementHandledAt: handledAt,
+                    updatedAt: handledAt,
+                }).where(and(
+                    eq(runs.id, input.runId), eq(runs.status, "succeeded"),
+                    isNull(runs.proposalSettlementCandidateId),
+                )).run();
+                if (updated.changes !== 1) {
+                    throw new HostedImportConflictError("HOSTED_IMPORT_AUTHORITY_CONFLICT");
+                }
+                return "handled" as const;
+            }, { behavior: "immediate" });
         },
         async getHostedSucceededPublicationAuthority(input: {
             destinationId: string;

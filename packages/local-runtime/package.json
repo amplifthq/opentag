@@ -34,11 +34,6 @@
       "types": "./dist/effects/index.d.ts",
       "import": "./dist/effects/index.js"
     },
-    "./pr": {
-      "development": "./src/pr.ts",
-      "types": "./dist/pr.d.ts",
-      "import": "./dist/pr.js"
-    },
     "./runtime": {
       "development": "./src/runtime.ts",
       "types": "./dist/runtime.d.ts",

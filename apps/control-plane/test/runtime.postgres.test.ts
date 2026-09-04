@@ -9,11 +9,12 @@ import type { SourceAppDefinition } from "@opentag/source-app-runtime";
 import { DeliveryIntentV2Schema } from "@opentag/delivery-contract";
 import { computeHostedAdmissionEnvelopeDigestV1,
   computeControlPayloadDigestV1, computeControlReceiptDigestV1,
+  computeEffectEvidenceDigestV1, computeEffectEvidencePayloadDigestV1,
+  computeEffectRequestDigestV1,
   computeGitHubProjectTargetBindingDigestV1,
   computeSlackAppMentionSourceIdentityDigestV1,
   buildHostedLifecycleRequestV1, computePermissionRequestDigestV1,
   HostedAdmissionEnvelopeV1Schema,
-  RunnerBranchOwnershipAttestationV1Schema,
   RunnerPermissionRequestV1Schema,
   RunnerReadinessReceiptEnvelopeV1Schema } from "@opentag/control-protocol";
 import { digest as contentDigest, sourceContentAad } from "../src/modules/source-content/crypto.js";
@@ -142,11 +143,20 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       defaultBranch: "main" };
     const targetBindingDigest = await computeGitHubProjectTargetBindingDigestV1(target);
     const generationDigest = digest("generation");
+    const runnerCapabilities = [
+      "relay.claim-fence.v1",
+      "relay.effect-authority.v1",
+      "relay.hosted-admission.v1",
+      "relay.hosted-claim.v1",
+      "relay.lifecycle.v1",
+      "relay.readiness.v1",
+      "relay.source-content-redeem.v1",
+    ] as const;
     const registered = await runtime.runners.register({ organizationId: "org_slack_runtime",
       organizationName: "Slack", request: { schemaVersion: 1, protocolVersion: "1.0",
         requiredCapabilities: ["relay.registration.v1"], requestId: "register_slack_runtime",
         operationId: "register_slack_runtime", runnerId: "runner_slack_runtime",
-        capabilities: [...HOSTED_CAPABILITIES] } });
+        capabilities: [...runnerCapabilities] } });
     if (registered.kind !== "created") throw new Error("runner registration failed");
     const authenticated = await runtime.runners.authenticate(registered.response.runnerToken);
     if (authenticated.kind !== "authenticated") throw new Error("runner authentication failed");
@@ -167,16 +177,21 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
       'T_RUNTIME','A_RUNTIME','C_RUNTIME','U_APP',ARRAY['U_MEMBER','U_APPROVER','U_OPERATOR'],
       ARRAY['U_OPERATOR'],'U_APPROVER',ARRAY['U_OPERATOR'],
       'env:SLACK_SIGNING_SECRET','env:SLACK_BOT_TOKEN',$1,$1)`, [now]);
-    await runtime.runners.upsertProjectTarget({ principal: authenticated.principal,
+    const targetUpsert = await runtime.runners.upsertProjectTarget({ principal: authenticated.principal,
       request: { schemaVersion: 1, protocolVersion: "1.0",
         requiredCapabilities: ["relay.repository-binding.v1"],
         requestId: "request_target_slack_runtime",
         expectedAuthority: { credentialId: authenticated.principal.credentialId,
           registrationGeneration: authenticated.principal.registrationGeneration,
           credentialGeneration: authenticated.principal.credentialGeneration }, target } });
+    if (targetUpsert.kind !== "upserted") throw new Error("target upsert failed");
+    const targetBindingGeneration = targetUpsert.context.targets.find(
+      (entry) => entry.projectTargetId === target.projectTargetId,
+    )?.bindingGeneration;
+    if (!targetBindingGeneration) throw new Error("target binding generation missing");
     const readinessPayload = { readinessId: "readiness_slack_runtime",
       runnerId: "runner_slack_runtime", registrationGeneration: 1,
-      capabilities: [...HOSTED_CAPABILITIES],
+      capabilities: [...runnerCapabilities],
       executors: [{ executorId: "executor_acp", adapterVersion: "1.0.0",
         capabilityDigest: digest("executor"), state: "ready" as const }],
       targets: [{ projectTargetId: "target_slack_runtime",
@@ -208,7 +223,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           "x-slack-request-timestamp": timestamp,
           "x-slack-signature": computeSlackSignature({ signingSecret: "secret", timestamp, rawBody: body }) },
           body })); };
-    const sendAction = (token: string, decision: "allow_once" | "publication_approve",
+    const sendAction = (token: string, decision: "allow_once" | "effect_approve",
       actorId = "U_APPROVER") => {
       const payload = { type: "block_actions", api_app_id: "A_RUNTIME",
         team: { id: "T_RUNTIME" }, user: { id: actorId }, channel: { id: "C_RUNTIME" },
@@ -251,7 +266,7 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
         event_name: "app_mention", intent_state: "pending", projection_purpose: "anchor_create",
         provider_instance_id: "A_RUNTIME", operation_kind: "create_message",
         thread_ts: "1700000000.000100" }]);
-      const projectedActionToken = async (decision: "allow_once" | "publication_approve") => {
+      const projectedActionToken = async (decision: "allow_once" | "effect_approve") => {
         const findToken = (value: unknown): string | null => {
           if (Array.isArray(value)) {
             for (const item of value) { const found = findToken(item); if (found) return found; }
@@ -451,32 +466,139 @@ describe.skipIf(!TEST_DATABASE_URL)("Control Plane runtime composition", () => {
           fencingTokenDigest: claimed.claim.attempt.fencingTokenDigest },
         candidateId, proposalArtifact });
       expect(settled).toMatchObject({ outcome: "settled", status: "publication_pending" });
-      const ownership = RunnerBranchOwnershipAttestationV1Schema.parse({
-        schemaVersion: 1, protocolVersion: "1.0", requiredCapabilities: ["relay.publication.v1"],
-        requestId: "ownership_slack_runtime", organizationId: "org_slack_runtime",
-        runnerId: "runner_slack_runtime", runnerGeneration: 1,
-        runId: claimed.claim.runId, attemptId: claimed.claim.attempt.id,
-        attemptNumber: claimed.claim.attempt.number,
-        fencingToken: claimed.claim.attempt.fencingToken, candidateId,
-        candidateDigest: settled.candidateDigest,
-        projectTargetId: "target_slack_runtime", targetBindingDigest,
-        remote: "origin", baseBranch: "main", frozenBaseRevision: workspaceAttestation.baseRevision,
-        workspaceTreeDigest: finalTree, branch: `opentag/${claimed.claim.runId}`,
-        expectedHeadSha: finalRevision, attestedAt: new Date().toISOString() });
-      await expect(runtimeClient.attestPublicationBranchOwnershipControlV1(ownership))
-        .resolves.toMatchObject({ replayed: false });
-      expect((await slackFixture.pool.query(`SELECT action_kind,allowed_decisions,
-          approver_user_id,publication_approval->>'candidateId' AS candidate_id
+      const effectRequestedAt = new Date();
+      const effectSeed = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        requiredCapabilities: ["relay.effect-authority.v1"] as ["relay.effect-authority.v1"],
+        requestId: "request_effect_slack_runtime",
+        effectId: "effect_slack_runtime",
+        idempotencyKey: `effect:${claimed.claim.runId}:draft-pr`,
+        organizationId: claimed.claim.organizationId,
+        runnerId: claimed.claim.runnerId,
+        runnerGeneration: authenticated.principal.credentialGeneration,
+        work: {
+          runId: claimed.claim.runId,
+          attemptId: claimed.claim.attempt.id,
+          attemptNumber: claimed.claim.attempt.number,
+          epoch: claimed.claim.attempt.epoch,
+          fencingToken: claimed.claim.attempt.fencingToken,
+          fencingTokenDigest: claimed.claim.attempt.fencingTokenDigest,
+        },
+        effectKind: "github.create_draft_pull_request" as const,
+        candidate: { candidateId, candidateDigest: settled.candidateDigest },
+        authority: {
+          approvalPolicy: "human_approval_required" as const,
+          policySnapshotId: claimed.claim.admissionPolicySnapshot.payload.snapshotId,
+          policySnapshotDigest: claimed.claim.admissionPolicySnapshot.receiptDigest,
+          approvalRequestId: "approval_request_effect_slack_runtime",
+          approvalExpiresAt: new Date(effectRequestedAt.getTime() + 15 * 60_000).toISOString(),
+        },
+        target: {
+          projectTargetId: "target_slack_runtime",
+          targetBindingDigest,
+          targetBindingGeneration,
+          provider: "github" as const,
+          owner: "acme",
+          repo: "demo",
+          remote: "origin",
+          baseBranch: "main",
+          branch: `opentag/${claimed.claim.runId}`,
+          frozenBaseRevision: workspaceAttestation.baseRevision,
+          workspaceTreeDigest: finalTree,
+          expectedHeadSha: finalRevision,
+        },
+        requestedAt: effectRequestedAt.toISOString(),
+      };
+      const effectRequest = { ...effectSeed,
+        requestDigest: await computeEffectRequestDigestV1(effectSeed) };
+      await expect(runtimeClient.requestEffectControlV1(effectRequest))
+        .resolves.toMatchObject({ effectId: effectRequest.effectId, state: "requested" });
+      const actionRow = (await slackFixture.pool.query<{
+        action_kind: string; allowed_decisions: string[]; approver_user_id: string;
+        effect_id: string; request_digest: string; serialized: string;
+      }>(`SELECT action_kind,allowed_decisions,approver_user_id,
+          effect_approval->>'effectId' AS effect_id,
+          effect_approval->>'requestDigest' AS request_digest,
+          effect_approval::text AS serialized
         FROM cp_slack_action_authority WHERE organization_id='org_slack_runtime'
-          AND action_kind='publication'`)).rows).toEqual([{ action_kind: "publication",
-        allowed_decisions: ["publication_approve"], approver_user_id: "U_APPROVER",
-        candidate_id: candidateId }]);
-      const publicationResponse = await sendAction(
-        await projectedActionToken("publication_approve"), "publication_approve");
-      expect(publicationResponse.status).toBe(200);
-      expect((await slackFixture.pool.query(`SELECT candidate_id,approver_id,repository->>'provider' AS provider
-        FROM cp_publication_intent WHERE organization_id='org_slack_runtime'`)).rows)
-        .toEqual([{ candidate_id: candidateId, approver_id: "U_APPROVER", provider: "github" }]);
+          AND action_kind='effect'`)).rows;
+      expect(actionRow).toEqual([expect.objectContaining({
+        action_kind: "effect",
+        allowed_decisions: ["effect_approve"],
+        approver_user_id: "U_APPROVER",
+        effect_id: effectRequest.effectId,
+        request_digest: effectRequest.requestDigest,
+      })]);
+      expect(actionRow[0]!.serialized).not.toContain(claimed.claim.attempt.fencingToken);
+      const approvalToken = await projectedActionToken("effect_approve");
+      expect((await sendAction(approvalToken, "effect_approve", "U_MEMBER")).status).toBe(403);
+      expect((await sendAction(approvalToken, "effect_approve")).status).toBe(200);
+      expect((await slackFixture.pool.query(`SELECT state,approval->>'approvedBy' AS approved_by
+        FROM cp_effect WHERE organization_id='org_slack_runtime' AND effect_id=$1`,
+      [effectRequest.effectId])).rows).toEqual([{ state: "authorized", approved_by: "U_APPROVER" }]);
+      const permit = await runtimeClient.acquireEffectControlV1({
+        schemaVersion: 1,
+        protocolVersion: "1.0",
+        requiredCapabilities: ["relay.effect-authority.v1"],
+        requestId: "acquire_effect_slack_runtime",
+        organizationId: claimed.claim.organizationId,
+        runnerId: claimed.claim.runnerId,
+        runnerGeneration: authenticated.principal.credentialGeneration,
+        acquireJournalDigest: digest("effect-acquire-journal"),
+      });
+      if (!permit) throw new Error("Effect permit missing");
+      expect(permit).toMatchObject({ effectId: effectRequest.effectId, permitKind: "execute" });
+      const observedAt = new Date().toISOString();
+      const effectEvidence = {
+        kind: "present" as const,
+        observation: {
+          provider: "github" as const,
+          repository: { owner: "acme", repo: "demo" },
+          remote: "origin",
+          branch: effectRequest.target.branch,
+          baseBranch: "main",
+          pullRequestNumber: 7,
+          pullRequestResourceRef: "github_pr_7",
+          pullRequestUrl: "https://github.com/acme/demo/pull/7",
+          draft: true as const,
+          state: "open" as const,
+          headSha: finalRevision,
+          headBranch: effectRequest.target.branch,
+          headRepository: { owner: "acme", repo: "demo" },
+          baseSha: workspaceAttestation.baseRevision,
+          checks: {},
+          checksComplete: true,
+          observedAt,
+        },
+      };
+      const evidenceSeed = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        requiredCapabilities: ["relay.effect-authority.v1"] as ["relay.effect-authority.v1"],
+        evidenceId: "evidence_effect_slack_runtime",
+        effectId: permit.effectId,
+        permitId: permit.permitId,
+        effectAttemptNumber: permit.effectAttemptNumber,
+        organizationId: permit.organizationId,
+        producer: { kind: "runner" as const, runnerId: permit.runnerId,
+          runnerGeneration: permit.runnerGeneration },
+        ...(permit.predecessorEvidenceDigest
+          ? { predecessorEvidenceDigest: permit.predecessorEvidenceDigest } : {}),
+        observedAt,
+        evidence: effectEvidence,
+        payloadDigest: await computeEffectEvidencePayloadDigestV1(effectEvidence),
+      };
+      const evidenceEnvelope = { ...evidenceSeed,
+        evidenceDigest: await computeEffectEvidenceDigestV1(evidenceSeed) };
+      await expect(runtimeClient.recordEffectEvidenceControlV1(evidenceEnvelope))
+        .resolves.toMatchObject({ effectId: effectRequest.effectId, state: "succeeded",
+          externalResource: { resourceRef: "github_pr_7" } });
+      expect((await slackFixture.pool.query(`SELECT state,terminal_kind,
+          terminal_receipt->>'effectId' AS effect_id FROM cp_hosted_run
+        WHERE organization_id='org_slack_runtime' AND run_id=$1`, [claimed.claim.runId])).rows)
+        .toEqual([{ state: "succeeded", terminal_kind: "succeeded",
+          effect_id: effectRequest.effectId }]);
     } finally {
       await runtime.close();
       await slackFixture.close();

@@ -172,6 +172,33 @@ describe("runner readiness outbox", () => {
         ).get()).toEqual({ version: 1, state: "ready" });
         sqlite.close();
     });
+    it("stores the handled proposal marker as one immutable pair", () => {
+        const sqlite = new Database(":memory:");
+        migratePairedRunnerSchema(sqlite);
+        sqlite.prepare(`INSERT INTO runs(
+          id,event_id,status,event_json,routing_rejections_json,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?)`).run(
+            "run_1", "event_1", "succeeded", "{}", "[]",
+            NOW.toISOString(), NOW.toISOString(),
+        );
+        expect(() => sqlite.prepare(`UPDATE runs
+          SET proposal_settlement_candidate_id='candidate_1' WHERE id='run_1'`).run())
+            .toThrow();
+        sqlite.prepare(`UPDATE runs SET
+          proposal_settlement_candidate_id='candidate_1',
+          proposal_settlement_handled_at=? WHERE id='run_1'`).run(NOW.toISOString());
+        expect(sqlite.prepare(`SELECT
+          proposal_settlement_candidate_id AS candidateId,
+          proposal_settlement_handled_at AS handledAt
+          FROM runs WHERE id='run_1'`).get()).toEqual({
+            candidateId: "candidate_1", handledAt: NOW.toISOString(),
+        });
+        expect(() => sqlite.prepare(`UPDATE runs SET
+          proposal_settlement_candidate_id='candidate_2',
+          proposal_settlement_handled_at=? WHERE id='run_1'`).run(NOW.toISOString()))
+            .toThrow("runs_proposal_settlement_immutable");
+        sqlite.close();
+    });
     it("leaves an unmarked existing database unchanged", () => {
         const sqlite = new Database(":memory:");
         sqlite.exec("CREATE TABLE legacy_state(id TEXT PRIMARY KEY)");

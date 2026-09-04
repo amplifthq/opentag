@@ -26,6 +26,8 @@ export const runs = sqliteTable("runs", {
     triggeredByActionJson: text("triggered_by_action_json"),
     sourceProposalId: text("source_proposal_id"),
     sourceApplyPlanId: text("source_apply_plan_id"),
+    proposalSettlementCandidateId: text("proposal_settlement_candidate_id"),
+    proposalSettlementHandledAt: text("proposal_settlement_handled_at"),
     repoProvider: text("repo_provider"),
     repoOwner: text("repo_owner"),
     repoName: text("repo_name"),
@@ -50,7 +52,13 @@ export const runs = sqliteTable("runs", {
     repoIdx: index("runs_repo_idx").on(table.repoProvider, table.repoOwner, table.repoName),
     workThreadIdx: index("runs_work_thread_idx").on(table.workThreadId),
     workThreadAuthorityIdx: index("runs_work_thread_authority_idx").on(table.workThreadId, table.createdAt, table.id),
-    conversationIdx: index("runs_conversation_idx").on(table.conversationKey)
+    conversationIdx: index("runs_conversation_idx").on(table.conversationKey),
+    proposalSettlementIdx: index("runs_proposal_settlement_idx")
+        .on(table.status, table.proposalSettlementCandidateId, table.updatedAt, table.id),
+    proposalSettlementShapeCheck: check("runs_proposal_settlement_shape_check", sql `(
+        (${table.proposalSettlementCandidateId} IS NULL AND ${table.proposalSettlementHandledAt} IS NULL)
+        OR (${table.proposalSettlementCandidateId} IS NOT NULL AND ${table.proposalSettlementHandledAt} IS NOT NULL)
+      )`)
 }));
 
 export const attempts = sqliteTable("attempts", {
@@ -605,6 +613,8 @@ CREATE TABLE runs (
         triggered_by_action_json TEXT,
         source_proposal_id TEXT,
         source_apply_plan_id TEXT,
+        proposal_settlement_candidate_id TEXT,
+        proposal_settlement_handled_at TEXT,
         repo_provider TEXT,
         repo_owner TEXT,
         repo_name TEXT,
@@ -620,7 +630,11 @@ CREATE TABLE runs (
         routing_executor_ids_json TEXT,
         routing_rejections_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        CONSTRAINT runs_proposal_settlement_shape_check CHECK (
+          (proposal_settlement_candidate_id IS NULL AND proposal_settlement_handled_at IS NULL)
+          OR (proposal_settlement_candidate_id IS NOT NULL AND proposal_settlement_handled_at IS NOT NULL)
+        )
       );
 
 CREATE TABLE work_threads (
@@ -744,6 +758,9 @@ CREATE INDEX runs_lease_recovery_idx ON runs(status, lease_expires_at, created_a
 
 CREATE INDEX runs_repo_idx ON runs(repo_provider, repo_owner, repo_name);
 
+CREATE INDEX runs_proposal_settlement_idx
+        ON runs(status, proposal_settlement_candidate_id, updated_at, id);
+
 CREATE INDEX runs_runner_idx ON runs(assigned_runner_id);
 
 CREATE INDEX runs_status_idx ON runs(status);
@@ -751,6 +768,18 @@ CREATE INDEX runs_status_idx ON runs(status);
 CREATE INDEX runs_work_thread_authority_idx ON runs(work_thread_id, created_at, id);
 
 CREATE INDEX runs_work_thread_idx ON runs(work_thread_id);
+
+CREATE TRIGGER runs_proposal_settlement_immutable_guard
+      BEFORE UPDATE OF proposal_settlement_candidate_id, proposal_settlement_handled_at
+      ON runs
+      WHEN OLD.proposal_settlement_candidate_id IS NOT NULL
+        AND (
+          NEW.proposal_settlement_candidate_id IS NOT OLD.proposal_settlement_candidate_id
+          OR NEW.proposal_settlement_handled_at IS NOT OLD.proposal_settlement_handled_at
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'runs_proposal_settlement_immutable');
+      END;
 
 CREATE INDEX work_threads_current_assessment_idx
         ON work_threads(current_assessment_id);

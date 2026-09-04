@@ -22,7 +22,7 @@ import {
 import { createHostedRunCoordinator } from "./modules/hosted-runs/index.js";
 import { createPermissionCoordinator } from "./modules/hosted-runs/permissions.js";
 import { createMaterialActionCoordinator } from "./modules/hosted-runs/material-actions.js";
-import { createPublicationPublisher } from "./modules/publication-candidates/publisher.js";
+import { createEffectAuthority } from "./modules/effects/index.js";
 import { createConsoleReadModel } from "./modules/console-reads/index.js";
 import {
   createIdentityModule,
@@ -71,11 +71,11 @@ import { createSlackTeamRelayProjectionBlocks,
 
 const BASE_CAPABILITIES = [
   "relay.claim-fence.v1",
+  "relay.effect-authority.v1",
   "relay.hosted-admission.v1",
   "relay.hosted-claim.v1",
   "relay.lifecycle.v1",
   "relay.material-receipt.v1",
-  "relay.publication.v1",
   "relay.permission.v1",
   "relay.readiness.v1",
   "relay.registration.v1",
@@ -191,12 +191,13 @@ export function createControlPlaneRuntime(input: {
     pool: postgres.pool,
     clock,
   });
-  const publisher = createPublicationPublisher({
+  const effects = createEffectAuthority({
     pool: postgres.pool,
     clock,
-    idFactory: (kind) => `publication_${kind}_${randomBytes(16).toString("hex")}`,
-    issuePublicationAuthorityInTransaction: async (client, command) => {
-      await slack?.issuePublicationActionInTransaction(client, command);
+    idFactory: () => `effect_permit_${randomBytes(16).toString("hex")}`,
+    issueApprovalInTransaction: async (client, command) => {
+      if (!slack) throw new Error("effect_approval_channel_unavailable");
+      await slack.issueEffectApprovalActionInTransaction(client, command);
     },
   });
   const reads = createConsoleReadModel({ pool: postgres.pool });
@@ -391,7 +392,7 @@ export function createControlPlaneRuntime(input: {
         admissionRules: { profile: "slack-app-mention/v1",
           requiredCheckNames: [] as string[], mergeRequired: false,
           humanApprovalRequiredFor: installation.publication_mode === "pull_request"
-            ? ["publication"] : [] },
+            ? ["github.create_draft_pull_request"] : [] },
       };
       const policySeed = {
         schemaVersion: 1 as const, protocolVersion: "1.0" as const,
@@ -557,7 +558,7 @@ export function createControlPlaneRuntime(input: {
   slack = sourceContent && input.slackSecrets
     ? createPostgresSlackIngress({ pool: postgres.pool, clock, custody: sourceContent,
         jobs, secrets: input.slackSecrets, sourceApps, commandAuthority: slackCommandAuthority,
-        publicationAuthority: { approve: (command) => publisher.approve(command) },
+        effectAuthority: { approve: (command) => effects.approve(command) },
         ...(input.slackFetchImpl ? { fetchImpl: input.slackFetchImpl } : {}) })
     : null;
   const providerDeliveryKernel = new ProviderSideEffectKernel<object>({
@@ -700,7 +701,7 @@ export function createControlPlaneRuntime(input: {
       runners,
       hosted,
       materials,
-      publisher,
+      effects,
       permissions,
       ...(sourceContent ? { sourceContent } : {}),
       ...(sourceIngress ? { sourceIngress } : {}),
@@ -723,7 +724,7 @@ export function createControlPlaneRuntime(input: {
     scheduleJobs,
     materials,
     permissions,
-    publisher,
+    effects,
     providerDeliveryKernel,
     providerDeliveryProducer,
     providerDeliveryRepository,

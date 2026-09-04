@@ -162,6 +162,7 @@ function options(input: {
   isWorkAuthorityCurrent?: () => Promise<boolean>;
   now?: () => Date;
   leaseOwner?: string;
+  signal?: AbortSignal;
 }) {
   return {
     organizationId: "org_1",
@@ -502,6 +503,40 @@ describe("LocalEffectExecutor", () => {
     await expect(executor.runOnce()).resolves.toMatchObject({ outcome: "attention" });
     expect(createDraftPullRequest).not.toHaveBeenCalled();
     expect(observeDraftPullRequest).not.toHaveBeenCalled();
+    sqlite.close();
+  });
+
+  it("leaves a permit accepted when shutdown wins the local authority check", async () => {
+    const { sqlite, repository } = fixture();
+    const controller = new AbortController();
+    let authorityEntered!: () => void;
+    let releaseAuthority!: (current: boolean) => void;
+    const entered = new Promise<void>((resolve) => { authorityEntered = resolve; });
+    const authority = new Promise<boolean>((resolve) => { releaseAuthority = resolve; });
+    const createDraftPullRequest = vi.fn();
+    const record = vi.fn();
+    const executor = new LocalEffectExecutor(options({
+      repository,
+      client: client({ acquire: async (request) => permit(request), record }),
+      adapter: { createDraftPullRequest, observeDraftPullRequest: vi.fn() },
+      acquireRequestId: () => "acquire_1",
+      isWorkAuthorityCurrent: async () => {
+        authorityEntered();
+        return authority;
+      },
+      signal: controller.signal,
+    }));
+    const run = executor.runOnce();
+    await entered;
+    controller.abort();
+    releaseAuthority(true);
+
+    await expect(run).resolves.toEqual({ outcome: "idle" });
+    await expect(repository.getLocalEffectAttempt("acquire_1")).resolves.toMatchObject({
+      state: "permit_accepted",
+    });
+    expect(createDraftPullRequest).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
     sqlite.close();
   });
 

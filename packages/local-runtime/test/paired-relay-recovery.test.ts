@@ -53,7 +53,6 @@ describe("paired relay recovery certification", () => {
       getHostedExecutionLease: vi.fn(async () => null),
     } as never;
     const controlClient = {
-      claimNextPublicationOperationControlV1: vi.fn(async () => null),
       getRunnerControlContextV1: vi.fn(async () => context),
     } as never;
     const config = { runnerId: "runner_1", relayUrl: "https://control.example",

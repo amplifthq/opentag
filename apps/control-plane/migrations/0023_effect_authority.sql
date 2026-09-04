@@ -11,6 +11,22 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+DELETE FROM cp_slack_action_authority WHERE action_kind = 'publication';
+ALTER TABLE cp_slack_action_authority
+  DROP CONSTRAINT cp_slack_action_authority_kind_check,
+  DROP CONSTRAINT cp_slack_action_authority_decisions_check,
+  DROP CONSTRAINT cp_slack_action_authority_publication_shape_check;
+ALTER TABLE cp_slack_action_authority
+  RENAME COLUMN publication_approval TO effect_approval;
+ALTER TABLE cp_slack_action_authority
+  ADD CONSTRAINT cp_slack_action_authority_kind_check
+    CHECK (action_kind IN ('status','cancel','approval','effect','bind','unbind')),
+  ADD CONSTRAINT cp_slack_action_authority_decisions_check
+    CHECK (cardinality(allowed_decisions)>0 AND allowed_decisions <@
+      ARRAY['status','cancel','allow_once','allow_run','deny','effect_approve','bind','unbind']::text[]),
+  ADD CONSTRAINT cp_slack_action_authority_effect_shape_check
+    CHECK ((action_kind = 'effect') = (effect_approval IS NOT NULL));
+
 CREATE TABLE cp_effect (
   organization_id text NOT NULL,
   effect_id text NOT NULL,

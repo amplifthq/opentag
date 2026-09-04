@@ -83,8 +83,8 @@ export function createTeamRelayProjectionService(input: { pool: Pool; hosted: Ho
       : await input.controls.issueProjectionControls({ organizationId: command.organizationId,
           runId: command.runId, generation });
     const controls = issuedControls.filter((control) => state === "publication_pending"
-      ? control.kind === "status" || control.kind === "cancel" || control.kind.startsWith("publication_")
-      : !control.kind.startsWith("publication_")).slice(0, 4);
+      ? control.kind === "status" || control.kind === "cancel" || control.kind === "effect_approve"
+      : control.kind !== "effect_approve").slice(0, 4);
     const presentation = composeTeamRelayThreadProjection({ runId: command.runId, generation,
       state: state as Parameters<typeof composeTeamRelayThreadProjection>[0]["state"], controls,
       providerDelivery: { state: deliveryState,

@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { OpenTagSourceDeletionEvent, OpenTagSourceIngressEvent } from "@opentag/core";
-import { AdmissionPolicySnapshotReceiptEnvelopeV1Schema,
-  computeControlPayloadDigestV1, computeMaterialActionFencingTokenDigestV1,
-  HostedAdmissionEnvelopeV1Schema, HumanPublicationApprovalV1Schema } from "@opentag/control-protocol";
+import { computeControlPayloadDigestV1,
+  HostedAdmissionEnvelopeV1Schema } from "@opentag/control-protocol";
+import { canonicalJsonStringify } from "@opentag/control-protocol/canonical-json";
 import type { PermissionResolutionReceiptEnvelopeV1,
-  RunnerBranchOwnershipAttestationV1, RunnerPermissionRequestV1 } from "@opentag/control-protocol";
+  RunnerPermissionRequestV1 } from "@opentag/control-protocol";
 import { SourceAppRegistry, executeSourceThreadCommand, type SourceAppDefinition,
   type SourceThreadCommand, type SourceThreadCommandAuthorityPorts } from "@opentag/source-app-runtime";
 import { createSlackSourceApp, normalizeSlackAppMention, SlackVerificationError } from "@opentag/slack";
@@ -13,6 +13,8 @@ import { withPostgresTransaction, type PostgresTransactionClient } from "../../d
 import type { DurableJobQueue } from "../jobs/index.js";
 import type { RelayContentCustody } from "../source-content/index.js";
 import { createSourceIngressService, type SourceIngressService } from "../source-ingress/index.js";
+import type { EffectApproval, EffectApprovalIssue } from "../effects/index.js";
+import { z } from "zod";
 
 type HttpResult = { status: number; body: unknown };
 type RawRequest = { rawBody: Uint8Array; headers: Headers; receivedAt: string };
@@ -39,7 +41,7 @@ type ActionRow = { organization_id: string; action_id: string; installation_id: 
   action_token_hash: string;
   binding_id: string; team_id: string; app_id: string; channel_id: string;
   thread_root_message_id: string; run_id: string; pending_request_id: string;
-  action_kind: "status" | "cancel" | "approval" | "publication" | "bind" | "unbind";
+  action_kind: "status" | "cancel" | "approval" | "effect" | "bind" | "unbind";
   action_descriptor: unknown;
   action_descriptor_digest: string;
   approval_epoch: string; frozen_ceiling: unknown; allowed_decisions: string[];
@@ -52,7 +54,35 @@ type ActionRow = { organization_id: string; action_id: string; installation_id: 
   requester_user_id: string | null; operator_user_ids: string[];
   member_user_ids: string[];
   approver_user_id: string | null; admin_user_ids: string[]; expires_at: Date;
-  consumed_at: Date | null; publication_approval: unknown | null };
+  consumed_at: Date | null; effect_approval: unknown | null };
+
+const digestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/u);
+const stableIdSchema = z.string().min(1).max(256);
+const SlackEffectApprovalSchema = z.object({
+  organizationId: stableIdSchema,
+  effectId: stableIdSchema,
+  effectKind: z.literal("github.create_draft_pull_request"),
+  requestId: stableIdSchema,
+  requestDigest: digestSchema,
+  runnerId: stableIdSchema,
+  runnerGeneration: z.number().int().positive(),
+  runId: stableIdSchema,
+  attemptId: stableIdSchema,
+  attemptNumber: z.number().int().positive(),
+  fencingTokenDigest: digestSchema,
+  candidateId: stableIdSchema,
+  candidateDigest: digestSchema,
+  projectTargetId: stableIdSchema,
+  targetBindingDigest: digestSchema,
+  targetBindingGeneration: z.number().int().positive(),
+  policySnapshotId: stableIdSchema,
+  policySnapshotDigest: digestSchema,
+  approvalRequestId: stableIdSchema,
+  approvalRequestDigest: digestSchema,
+  approvalId: stableIdSchema,
+  approvalExpiresAt: z.iso.datetime({ offset: false, precision: 3 }),
+}).strict();
+type SlackEffectApproval = z.infer<typeof SlackEffectApprovalSchema>;
 
 type SlackActionIssue = {
   organizationId: string; actionId: string; installationId: string;
@@ -66,7 +96,7 @@ type SlackActionIssue = {
   allowedDecisions: string[]; requesterUserId?: string; operatorUserIds: string[];
   memberUserIds: string[]; approverUserId?: string; adminUserIds: string[];
   expiresAt: Date;
-  publicationApproval?: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>;
+  effectApproval?: SlackEffectApproval;
 };
 
 async function resolveInstallation(pool: Pool, identity: { organizationId: string; installationId: string }
@@ -245,8 +275,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
   custody: RelayContentCustody; jobs: Pick<DurableJobQueue, "enqueueInTransaction">;
   secrets: SlackSecretResolver; sourceApps: SourceAppRegistry;
   commandAuthority?: SourceThreadCommandAuthorityPorts;
-  publicationAuthority?: { approve(command: ReturnType<typeof HumanPublicationApprovalV1Schema.parse>
-    & { approverId: string }): Promise<{ kind: "approved" | "replayed" | "rejected"; reason?: string }> };
+  effectAuthority?: { approve(command: EffectApproval): Promise<{
+    kind: "approved" | "replayed" | "rejected"; reason?: string }> };
   testHooks?: { afterServiceBeforeFinalize?(): Promise<void> };
   fetchImpl?: typeof fetch; tokenFactory?: () => string }) {
   const sourceIngress = createSourceIngressService({ pool: input.pool, clock: input.clock,
@@ -263,7 +293,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
       runner_id,attempt_id,attempt_number,attempt_epoch,projection_generation,authority_family_id,
       authority_epoch,claim_state,claimed_at,fencing_token_digest,permission_request_digest,
       pending_action_id,allowed_decisions,requester_user_id,member_user_ids,operator_user_ids,
-      approver_user_id,admin_user_ids,publication_approval,expires_at,created_at)
+      approver_user_id,admin_user_ids,effect_approval,expires_at,created_at)
       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
         $21,$22,$23,$24,$25,'available',NULL,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`,
     [command.organizationId, command.actionId, hashBytes(token), command.installationId,
@@ -278,7 +308,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
       command.fencingTokenDigest, command.permissionRequestDigest, command.pendingActionId,
       command.allowedDecisions, command.requesterUserId ?? null, command.memberUserIds,
       command.operatorUserIds, command.approverUserId ?? null, command.adminUserIds,
-      command.publicationApproval ? JSON.stringify(command.publicationApproval) : null,
+      command.effectApproval ? JSON.stringify(command.effectApproval) : null,
       command.expiresAt, input.clock.now()]);
     return token;
   };
@@ -390,10 +420,10 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           AND expires_at>$4 ORDER BY action_kind,created_at DESC`,
       [command.organizationId, command.runId, command.generation, input.clock.now()]);
       const controls: Array<{ kind: "status" | "cancel" | "approve" | "reject"
-        | "publication_approve"; actionId: string; generation: number }> = [];
+        | "effect_approve"; actionId: string; generation: number }> = [];
       const kindFor = (decision: string) => decision === "allow_once" ? "approve" as const
         : decision === "deny" ? "reject" as const
-        : decision === "publication_approve" ? "publication_approve" as const
+        : decision === "effect_approve" ? "effect_approve" as const
         : decision === "status" ? "status" as const
         : decision === "cancel" ? "cancel" as const : null;
       const familyId = `projection:${command.runId}:${command.generation}:${randomBytes(12).toString("hex")}`;
@@ -408,13 +438,13 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           runner_id,attempt_id,attempt_number,attempt_epoch,projection_generation,authority_family_id,
           authority_epoch,claim_state,claimed_at,fencing_token_digest,
           permission_request_digest,pending_action_id,allowed_decisions,requester_user_id,member_user_ids,
-          operator_user_ids,approver_user_id,admin_user_ids,publication_approval,expires_at,created_at)
+          operator_user_ids,approver_user_id,admin_user_ids,effect_approval,expires_at,created_at)
           SELECT organization_id,$2,$3,installation_id,binding_id,team_id,app_id,channel_id,
             thread_root_message_id,run_id,pending_request_id,action_kind,action_descriptor,
             action_descriptor_digest,approval_epoch,frozen_ceiling,frozen_ceiling_digest,policy_digest,
             runner_id,attempt_id,attempt_number,attempt_epoch,$4::integer,$8,$4::integer,'available',NULL,fencing_token_digest,
             permission_request_digest,pending_action_id,ARRAY[$5]::text[],requester_user_id,member_user_ids,
-            operator_user_ids,approver_user_id,admin_user_ids,publication_approval,expires_at,$6
+            operator_user_ids,approver_user_id,admin_user_ids,effect_approval,expires_at,$6
           FROM cp_slack_action_authority WHERE organization_id=$1 AND action_id=$7`,
         [command.organizationId, actionId, hashBytes(token), command.generation, decision,
           input.clock.now(), row.action_id, familyId]);
@@ -483,84 +513,171 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         expiresAt,
       });
     },
-    async issuePublicationActionInTransaction(client: PostgresTransactionClient, command: {
-      principal: { organizationId: string; runnerId: string };
-      attestation: RunnerBranchOwnershipAttestationV1;
-      ownershipId: string;
-      ownershipDigest: string;
-      createdAt: Date;
-    }) {
+    async issueEffectApprovalActionInTransaction(
+      client: PostgresTransactionClient,
+      command: EffectApprovalIssue,
+    ) {
       const result = await client.query<{
-        hosted_admission: unknown; admission_policy_snapshot: unknown;
-        installation_id: string; binding_id: string; project_target_id: string | null;
-        team_id: string; app_id: string; channel_id: string; member_user_ids: string[];
-        operator_user_ids: string[]; approver_user_id: string | null; admin_user_ids: string[];
-      }>(`SELECT run.hosted_admission,run.admission_policy_snapshot,
+        hosted_admission: unknown;
+        installation_id: string;
+        binding_id: string;
+        project_target_id: string | null;
+        team_id: string;
+        app_id: string;
+        channel_id: string;
+        member_user_ids: string[];
+        operator_user_ids: string[];
+        approver_user_id: string | null;
+        admin_user_ids: string[];
+        effect_id: string;
+        effect_kind: string;
+        request_id: string;
+        request_digest: string;
+        runner_id: string;
+        runner_generation: number;
+        run_id: string;
+        run_attempt_id: string;
+        run_attempt_number: number;
+        fencing_token_digest: string;
+        candidate_id: string;
+        candidate_digest: string;
+        effect_project_target_id: string;
+        target_binding_digest: string;
+        target_binding_generation: number;
+        policy_snapshot_id: string;
+        policy_snapshot_digest: string;
+        approval_request_id: string;
+        approval_request_digest: string;
+        approval_expires_at: Date;
+        effect_state: string;
+      }>(`SELECT run.hosted_admission,
           slack.installation_id,slack.binding_id,slack.project_target_id,
           slack.team_id,slack.app_id,slack.channel_id,slack.member_user_ids,
-          slack.operator_user_ids,slack.approver_user_id,slack.admin_user_ids
+          slack.operator_user_ids,slack.approver_user_id,slack.admin_user_ids,
+          effect.effect_id,effect.effect_kind,effect.request_id,effect.request_digest,
+          effect.runner_id,effect.runner_generation,effect.run_id,
+          effect.run_attempt_id,effect.run_attempt_number,effect.fencing_token_digest,
+          effect.candidate_id,effect.candidate_digest,
+          effect.project_target_id AS effect_project_target_id,effect.target_binding_digest,
+          effect.target_binding_generation,effect.policy_snapshot_id,
+          effect.policy_snapshot_digest,effect.approval_request_id,
+          effect.approval_request_digest,effect.approval_expires_at,
+          effect.state AS effect_state
         FROM cp_hosted_run run
         JOIN cp_slack_installation slack ON slack.organization_id=run.organization_id
           AND slack.binding_id=run.hosted_admission->>'bindingId'
+        JOIN cp_effect effect ON effect.organization_id=run.organization_id
+          AND effect.run_id=run.run_id
         WHERE run.organization_id=$1 AND run.run_id=$2 AND run.runner_id=$3
+          AND effect.effect_id=$4
           AND run.state='running' AND run.publication_mode='pull_request'
           AND run.terminal_kind IS NULL
-        FOR UPDATE OF run,slack`,
-      [command.principal.organizationId, command.attestation.runId,
-        command.principal.runnerId]);
+        FOR UPDATE OF run,slack,effect`,
+      [command.organizationId, command.work.runId, command.runnerId, command.effectId]);
       const row = result.rows[0];
       const admission = row ? HostedAdmissionEnvelopeV1Schema.safeParse(row.hosted_admission) : null;
-      if (!row || !admission?.success || admission.data.provider !== "slack") return;
-      if (!row.approver_user_id || row.project_target_id !== command.attestation.projectTargetId
+      const expiresAt = new Date(command.approvalRequest.expiresAt);
+      if (!row || !admission?.success || admission.data.provider !== "slack"
+        || !row.approver_user_id || expiresAt <= input.clock.now()
+        || row.project_target_id !== command.target.projectTargetId
+        || admission.data.projectTarget.projectTargetId !== command.target.projectTargetId
+        || admission.data.projectTarget.digest !== command.target.targetBindingDigest
         || admission.data.sourceThread.kind !== "channel_thread"
         || admission.data.sourceThread.channelId !== row.channel_id
-        || !admission.data.sourceThread.threadTs) {
-        throw new Error("slack_publication_action_authority_unavailable");
+        || !admission.data.sourceThread.threadTs
+        || row.effect_id !== command.effectId
+        || row.effect_kind !== command.effectKind
+        || row.request_id !== command.requestId
+        || row.request_digest !== command.requestDigest
+        || row.runner_id !== command.runnerId
+        || row.runner_generation !== command.runnerGeneration
+        || row.run_id !== command.work.runId
+        || row.run_attempt_id !== command.work.attemptId
+        || row.run_attempt_number !== command.work.attemptNumber
+        || row.fencing_token_digest !== command.work.fencingTokenDigest
+        || row.candidate_id !== command.candidate.candidateId
+        || row.candidate_digest !== command.candidate.candidateDigest
+        || row.effect_project_target_id !== command.target.projectTargetId
+        || row.target_binding_digest !== command.target.targetBindingDigest
+        || row.target_binding_generation !== command.target.targetBindingGeneration
+        || row.policy_snapshot_id !== command.policy.snapshotId
+        || row.policy_snapshot_digest !== command.policy.snapshotDigest
+        || row.approval_request_id !== command.approvalRequest.approvalRequestId
+        || row.approval_request_digest !== command.approvalRequest.approvalRequestDigest
+        || row.approval_expires_at.toISOString() !== command.approvalRequest.expiresAt
+        || row.effect_state !== "requested") {
+        throw new Error("slack_effect_approval_authority_unavailable");
       }
-      const expiresAt = new Date(command.createdAt.getTime() + 15 * 60_000);
-      const actionIdentity = hashBytes(`${command.attestation.runId}\0${command.ownershipId}`)
-        .slice("sha256:".length, 31);
-      const publicationApproval = HumanPublicationApprovalV1Schema.parse({
-        schemaVersion: 1, protocolVersion: "1.0",
-        requiredCapabilities: ["relay.publication.v1"],
-        requestId: `request_publication_${actionIdentity}`,
-        organizationId: command.principal.organizationId,
-        runnerId: command.principal.runnerId, runId: command.attestation.runId,
-        ownershipId: command.ownershipId, ownershipDigest: command.ownershipDigest,
-        candidateId: command.attestation.candidateId,
-        candidateDigest: command.attestation.candidateDigest,
-        approvalId: `approval_${actionIdentity}`,
-        approvedAt: command.createdAt.toISOString(), expiresAt: expiresAt.toISOString(),
-      });
-      const policy = AdmissionPolicySnapshotReceiptEnvelopeV1Schema.parse(
-        row.admission_policy_snapshot);
+      const actionIdentity = hashBytes(
+        `${command.effectId}\0${command.approvalRequest.approvalRequestDigest}`,
+      ).slice("sha256:".length, 31);
+      const effectApproval: SlackEffectApproval = {
+        organizationId: command.organizationId,
+        effectId: command.effectId,
+        effectKind: command.effectKind,
+        requestId: command.requestId,
+        requestDigest: command.requestDigest,
+        runnerId: command.runnerId,
+        runnerGeneration: command.runnerGeneration,
+        runId: command.work.runId,
+        attemptId: command.work.attemptId,
+        attemptNumber: command.work.attemptNumber,
+        fencingTokenDigest: command.work.fencingTokenDigest,
+        candidateId: command.candidate.candidateId,
+        candidateDigest: command.candidate.candidateDigest,
+        projectTargetId: command.target.projectTargetId,
+        targetBindingDigest: command.target.targetBindingDigest,
+        targetBindingGeneration: command.target.targetBindingGeneration,
+        policySnapshotId: command.policy.snapshotId,
+        policySnapshotDigest: command.policy.snapshotDigest,
+        approvalRequestId: command.approvalRequest.approvalRequestId,
+        approvalRequestDigest: command.approvalRequest.approvalRequestDigest,
+        approvalId: `effect_approval_${actionIdentity}`,
+        approvalExpiresAt: command.approvalRequest.expiresAt,
+      };
       await issueActionWith(client, {
-        organizationId: command.principal.organizationId,
-        actionId: `slack_publication_${actionIdentity}`,
-        installationId: row.installation_id, bindingId: row.binding_id,
-        teamId: row.team_id, appId: row.app_id, channelId: row.channel_id,
+        organizationId: command.organizationId,
+        actionId: `slack_effect_${actionIdentity}`,
+        installationId: row.installation_id,
+        bindingId: row.binding_id,
+        teamId: row.team_id,
+        appId: row.app_id,
+        channelId: row.channel_id,
         threadRootMessageId: admission.data.sourceThread.threadTs,
-        runId: command.attestation.runId, pendingRequestId: command.ownershipId,
-        actionKind: "publication",
-        actionDescriptor: { kind: "publication_approve",
-          candidateId: command.attestation.candidateId, ownershipId: command.ownershipId },
-        approvalEpoch: String(command.attestation.attemptNumber),
-        frozenCeiling: admission.data.publicationPolicy,
-        policyDigest: policy.receiptDigest,
-        runnerId: command.principal.runnerId, attemptId: command.attestation.attemptId,
-        attemptNumber: command.attestation.attemptNumber,
-        attemptEpoch: command.attestation.attemptNumber,
-        projectionGeneration: command.attestation.attemptNumber,
-        authorityEpoch: command.attestation.attemptNumber,
-        fencingTokenDigest: await computeMaterialActionFencingTokenDigestV1(
-          command.attestation.fencingToken),
-        permissionRequestDigest: command.ownershipDigest,
-        pendingActionId: command.attestation.candidateId,
-        allowedDecisions: ["publication_approve"],
+        runId: command.work.runId,
+        pendingRequestId: command.approvalRequest.approvalRequestId,
+        actionKind: "effect",
+        actionDescriptor: {
+          kind: "effect_approve",
+          effectId: command.effectId,
+          requestDigest: command.requestDigest,
+          candidateId: command.candidate.candidateId,
+        },
+        approvalEpoch: String(command.work.epoch),
+        frozenCeiling: {
+          effectKind: command.effectKind,
+          candidate: command.candidate,
+          target: command.target,
+          policy: command.policy,
+        },
+        policyDigest: command.policy.snapshotDigest,
+        runnerId: command.runnerId,
+        attemptId: command.work.attemptId,
+        attemptNumber: command.work.attemptNumber,
+        attemptEpoch: command.work.epoch,
+        projectionGeneration: command.work.attemptNumber,
+        authorityEpoch: command.work.epoch,
+        fencingTokenDigest: command.work.fencingTokenDigest,
+        permissionRequestDigest: command.approvalRequest.approvalRequestDigest,
+        pendingActionId: command.effectId,
+        allowedDecisions: ["effect_approve"],
         requesterUserId: admission.data.verifiedActor.providerUserId,
-        memberUserIds: row.member_user_ids, operatorUserIds: row.operator_user_ids,
-        approverUserId: row.approver_user_id, adminUserIds: row.admin_user_ids,
-        publicationApproval, expiresAt,
+        memberUserIds: row.member_user_ids,
+        operatorUserIds: row.operator_user_ids,
+        approverUserId: row.approver_user_id,
+        adminUserIds: row.admin_user_ids,
+        effectApproval,
+        expiresAt,
       });
     },
     async issueAction(command: SlackActionIssue) {
@@ -627,7 +744,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         const token = action?.value; const actorId = payload.user?.id;
         if (typeof token !== "string" || !/^[A-Za-z0-9_-]{20,512}$/u.test(token)
           || typeof actorId !== "string" || typeof action.action_id !== "string"
-          || !/^opentag:decision:(status|cancel|allow_once|allow_run|deny|publication_approve|bind|unbind)$/u.test(action.action_id)) {
+          || !/^opentag:decision:(status|cancel|allow_once|allow_run|deny|effect_approve|bind|unbind)$/u.test(action.action_id)) {
           return { status: 400, body: { error: "invalid_slack_action" } };
         }
         const claimed = await withPostgresTransaction(input.pool, async (client) => {
@@ -672,6 +789,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
           if (!row.allowed_decisions.includes(decision)) {
             return { status: 403, body: { error: "slack_action_not_authorized" } };
           }
+          const decidedAt = row.claimed_at ?? input.clock.now();
           if (row.action_kind === "approval") {
             const current = await client.query<{
               run_state: string; permission_ceiling_digest: string; attempt_state: string;
@@ -716,16 +834,98 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
               return { status: 403, body: { error: "slack_action_authority_stale" } };
             }
           }
+          let currentEffectApproval: SlackEffectApproval | null = null;
+          if (row.action_kind === "effect") {
+            const parsedApproval = SlackEffectApprovalSchema.safeParse(row.effect_approval);
+            if (!parsedApproval.success) {
+              return { status: 403, body: { error: "slack_action_authority_stale" } };
+            }
+            const approval = parsedApproval.data;
+            const effect = await client.query<{
+              effect_kind: string; request_id: string; request_digest: string;
+              runner_id: string; runner_generation: number; run_id: string;
+              run_attempt_id: string; run_attempt_number: number; fencing_token_digest: string;
+              candidate_id: string; candidate_digest: string; project_target_id: string;
+              target_binding_digest: string; target_binding_generation: number;
+              target: unknown;
+              policy_snapshot_id: string; policy_snapshot_digest: string;
+              approval_request_id: string; approval_request_digest: string;
+              approval_expires_at: Date; approval_id: string | null; approval: unknown | null;
+              state: string;
+            }>(`SELECT effect_kind,request_id,request_digest,runner_id,runner_generation,run_id,
+                run_attempt_id,run_attempt_number,fencing_token_digest,candidate_id,candidate_digest,
+                project_target_id,target_binding_digest,target_binding_generation,target,policy_snapshot_id,
+                policy_snapshot_digest,approval_request_id,approval_request_digest,
+                approval_expires_at,approval_id,approval,state
+              FROM cp_effect WHERE organization_id=$1 AND effect_id=$2 FOR UPDATE`,
+            [row.organization_id, approval.effectId]);
+            const current = effect.rows[0];
+            const expectedDescriptor = { kind: "effect_approve", effectId: approval.effectId,
+              requestDigest: approval.requestDigest, candidateId: approval.candidateId };
+            const expectedCeiling = { effectKind: approval.effectKind,
+              candidate: { candidateId: approval.candidateId,
+                candidateDigest: approval.candidateDigest },
+              target: current?.target,
+              policy: { snapshotId: approval.policySnapshotId,
+                snapshotDigest: approval.policySnapshotDigest } };
+            const expectedApproval = {
+              approvalRequestId: approval.approvalRequestId,
+              approvalRequestDigest: approval.approvalRequestDigest,
+              approvalId: approval.approvalId,
+              approvedBy: actorId,
+              approvedAt: decidedAt.toISOString(),
+            };
+            const awaitingApproval = current?.state === "requested" && current.approval_id === null;
+            const replayingApproval = current?.approval_id === approval.approvalId
+              && canonicalJsonStringify(current.approval) === canonicalJsonStringify(expectedApproval);
+            if (!current || (!awaitingApproval && !replayingApproval)
+              || current.effect_kind !== approval.effectKind
+              || current.request_id !== approval.requestId
+              || current.request_digest !== approval.requestDigest
+              || current.runner_id !== approval.runnerId
+              || current.runner_generation !== approval.runnerGeneration
+              || current.run_id !== approval.runId
+              || current.run_attempt_id !== approval.attemptId
+              || current.run_attempt_number !== approval.attemptNumber
+              || current.fencing_token_digest !== approval.fencingTokenDigest
+              || current.candidate_id !== approval.candidateId
+              || current.candidate_digest !== approval.candidateDigest
+              || current.project_target_id !== approval.projectTargetId
+              || current.target_binding_digest !== approval.targetBindingDigest
+              || current.target_binding_generation !== approval.targetBindingGeneration
+              || current.policy_snapshot_id !== approval.policySnapshotId
+              || current.policy_snapshot_digest !== approval.policySnapshotDigest
+              || current.approval_request_id !== approval.approvalRequestId
+              || current.approval_request_digest !== approval.approvalRequestDigest
+              || current.approval_expires_at.toISOString() !== approval.approvalExpiresAt
+              || current.approval_expires_at <= input.clock.now()
+              || row.pending_request_id !== approval.approvalRequestId
+              || row.policy_digest !== approval.policySnapshotDigest
+              || row.runner_id !== approval.runnerId
+              || row.attempt_id !== approval.attemptId
+              || row.attempt_number !== approval.attemptNumber
+              || row.attempt_epoch !== approval.attemptNumber
+              || row.approval_epoch !== String(approval.attemptNumber)
+              || row.fencing_token_digest !== approval.fencingTokenDigest
+              || row.permission_request_digest !== approval.approvalRequestDigest
+              || row.pending_action_id !== approval.effectId
+              || resolved.installation.projectTargetId !== approval.projectTargetId
+              || row.action_descriptor_digest !== await computeControlPayloadDigestV1(expectedDescriptor)
+              || row.frozen_ceiling_digest !== await computeControlPayloadDigestV1(expectedCeiling)) {
+              return { status: 403, body: { error: "slack_action_authority_stale" } };
+            }
+            currentEffectApproval = approval;
+          }
           const actor = { provider: "slack", id: actorId } as const;
-          if (decision === "publication_approve"
-            && row.action_kind === "publication" && actorId === row.approver_user_id) {
-            if (!row.publication_approval) return { status: 403,
+          if (decision === "effect_approve"
+            && row.action_kind === "effect" && actorId === row.approver_user_id) {
+            if (!currentEffectApproval) return { status: 403,
               body: { error: "slack_action_authority_stale" } };
             if (row.claim_state === "available") await client.query(`UPDATE cp_slack_action_authority
               SET claim_state='claimed',claimed_at=$3 WHERE organization_id=$1 AND action_id=$2`,
-            [row.organization_id,row.action_id,input.clock.now()]);
+            [row.organization_id,row.action_id,decidedAt]);
             return { kind: "claimed" as const, row, decision, actorId,
-              publicationApproval: HumanPublicationApprovalV1Schema.parse(row.publication_approval) };
+              effectApproval: currentEffectApproval, decidedAt };
           }
           const authority = { organizationId: row.organization_id,
             installationId: row.installation_id, bindingId: row.binding_id,
@@ -739,7 +939,7 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
             frozenCeilingDigest: row.frozen_ceiling_digest, policyDigest: row.policy_digest,
             actionTokenIdentity: row.action_token_hash,
             selectedDecision: decision as "status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind",
-            allowedDecisions: row.allowed_decisions.filter((value) => value !== "publication_approve") as
+            allowedDecisions: row.allowed_decisions.filter((value) => value !== "effect_approve") as
               Array<"status" | "cancel" | "allow_once" | "allow_run" | "deny" | "bind" | "unbind"> };
           let command: SourceThreadCommand | null = null;
           if (decision === "status" && row.action_kind === "status" && row.member_user_ids.includes(actorId)) command = {
@@ -770,10 +970,17 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         });
         if (!("kind" in claimed) || claimed.kind !== "claimed") return claimed;
         let completed = false;
-        if ("publicationApproval" in claimed) {
-          if (input.publicationAuthority) {
-            const result = await input.publicationAuthority.approve({ ...claimed.publicationApproval,
-              approverId: claimed.actorId!, approvedAt: input.clock.now().toISOString() });
+        if ("effectApproval" in claimed) {
+          if (input.effectAuthority && claimed.decidedAt) {
+            const result = await input.effectAuthority.approve({
+              organizationId: claimed.effectApproval.organizationId,
+              effectId: claimed.effectApproval.effectId,
+              approvalRequestId: claimed.effectApproval.approvalRequestId,
+              approvalRequestDigest: claimed.effectApproval.approvalRequestDigest,
+              approvalId: claimed.effectApproval.approvalId,
+              approvedBy: claimed.actorId!,
+              approvedAt: claimed.decidedAt.toISOString(),
+            });
             completed = result.kind === "approved" || result.kind === "replayed";
           }
         } else {
@@ -783,8 +990,8 @@ export function createPostgresSlackIngress(input: { pool: Pool; clock: { now(): 
         }
         if (!completed) return { status: 403, body: { error: "source_thread_control_rejected" } };
         await input.testHooks?.afterServiceBeforeFinalize?.();
-        const terminalDecision = "publicationApproval" in claimed
-          || (!("publicationApproval" in claimed) && claimed.command.type !== "status");
+        const terminalDecision = "effectApproval" in claimed
+          || (!("effectApproval" in claimed) && claimed.command.type !== "status");
         await input.pool.query(`UPDATE cp_slack_action_authority SET claim_state='consumed',
           consumed_at=COALESCE(consumed_at,$3) WHERE organization_id=$1
           AND ${terminalDecision ? "authority_family_id=$2" : "action_id=$2"}`,

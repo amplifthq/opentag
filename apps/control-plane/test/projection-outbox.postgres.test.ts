@@ -698,6 +698,7 @@ describe.skipIf(!TEST_DATABASE_URL)("team relay projection outbox", () => {
   });
 
   it.each([
+    ["missing Effect projection trigger", "DROP TRIGGER cp_effect_projection ON cp_effect"],
     ["same-name trigger on wrong table", `DROP TRIGGER cp_delivery_projection_trigger ON cp_provider_delivery_intent;
       CREATE TRIGGER cp_delivery_projection_trigger AFTER UPDATE ON cp_job FOR EACH ROW
       EXECUTE FUNCTION cp_delivery_projection_after()`],

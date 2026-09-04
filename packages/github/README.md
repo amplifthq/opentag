@@ -20,7 +20,6 @@ pnpm add @opentag/github
 - `createExactDraftPullRequest`: opens a draft pull request and immediately
   reads it back, returning `present` only when the repository, pull-request
   identity, branch, base branch, and exact expected head SHA all match.
-- `assertPublicationOperationAllowed`: restricts publication to an owned-branch
   push or draft pull-request creation and rejects force pushes and base-branch
   writes.
 - `createGitHubCompletionApi`: creates the minimal authenticated REST adapter

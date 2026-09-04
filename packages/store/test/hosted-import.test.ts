@@ -1,4 +1,4 @@
-import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeControlReceiptDigestV1, computeSlackAppMentionSourceIdentityDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeHostedLifecycleReceiptIdV1, computeHostedLifecycleRequestIdV1, type HostedClaimRequestV1, type HostedClaimV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent } from "@opentag/core";
+import { buildHostedLifecycleRequestV1, computeControlPayloadDigestV1, computeControlReceiptDigestV1, computeSlackAppMentionSourceIdentityDigestV1, computeHostedAdmissionEnvelopeDigestV1, computeHostedClaimFencingTokenDigestV1, computeHostedLifecycleReceiptIdV1, computeHostedLifecycleRequestIdV1, HostedCompleteRequestV1Schema, type HostedClaimRequestV1, type HostedClaimV1, type HostedHeartbeatRequestV1, type HostedProgressRequestV1, type HostedRejectStartRequestV1, type HostedRunningRequestV1, type HostedLifecycleReceiptEnvelopeV1, type OpenTagEvent } from "@opentag/core";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import Database from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -657,6 +657,109 @@ async function completeHostedExecution(
         request,
     });
 }
+function proposalResult(claim: HostedClaimV1, suffix: string) {
+    const changedFiles = [`src/${suffix}.ts`];
+    const evidenceInput = {
+        schemaVersion: 1 as const,
+        kind: "attempt_proposal_evidence" as const,
+        attemptId: claim.attempt.id,
+        attemptNumber: claim.attempt.number,
+        workspaceId: `workspace_${suffix}`,
+        workspacePathDigest: canonicalSha256Json(`workspace:${suffix}`),
+        branch: `opentag/${claim.runId}`,
+        baseRevision: "a".repeat(40),
+        finalRevision: "b".repeat(40),
+        finalTree: "c".repeat(40),
+        diffDigest: canonicalSha256Json(`diff:${suffix}`),
+        changedFilesDigest: canonicalSha256Json(changedFiles),
+        changedFiles,
+        verificationEvidenceDigests: [canonicalSha256Json(`verification:${suffix}`)],
+        limitations: ["No remote publication was attempted."],
+    };
+    const evidenceDigest = canonicalSha256Json(evidenceInput);
+    const artifactInput = {
+        id: `${claim.runId}:proposal-evidence`,
+        type: "patch_summary" as const,
+        kind: "patch" as const,
+        title: "Immutable proposal evidence" as const,
+        uri: `opentag://run/${encodeURIComponent(claim.runId)}/proposal-evidence`,
+        summary: "Attempt-bound proposal evidence captured; completion readiness is not assessed here.",
+        sourceRunId: claim.runId,
+        createdAt: observedAt,
+        metadata: {
+            proposalEvidence: { ...evidenceInput, evidenceDigest },
+            evidenceDigest,
+            readiness: "not_assessed" as const,
+        },
+    };
+    const proposalArtifact = { ...artifactInput, metadata: {
+        ...artifactInput.metadata,
+        artifactDigest: canonicalSha256Json(artifactInput),
+    } };
+    return { conclusion: "success" as const, summary: "done", artifacts: [proposalArtifact] };
+}
+async function acknowledgeCompletion(input: {
+    sqlite: Database.Database;
+    repo: ReturnType<typeof createPairedRunnerRepository>;
+    claim: HostedClaimV1;
+    now: Date;
+}) {
+    const stored = input.sqlite.prepare(`SELECT request_json AS requestJson
+      FROM hosted_lifecycle_operations WHERE run_id=? AND action='complete'`).get(
+        input.claim.runId,
+    ) as { requestJson: string };
+    const request = HostedCompleteRequestV1Schema.parse(JSON.parse(stored.requestJson));
+    const operation = await claimLifecycleOperation(input.repo, request.operationId, input.now);
+    const payload = {
+        operation: "executor_result" as const,
+        occurredAt: request.occurredAt,
+        conclusion: request.conclusion,
+        reasonCode: request.reasonCode,
+        resultDigest: request.resultDigest,
+        artifactDigests: request.artifactDigests,
+        evidenceDigests: request.evidenceDigests,
+    };
+    const base = {
+        schemaVersion: 1 as const,
+        protocolVersion: "1.0" as const,
+        receiptKind: "attempt_lifecycle" as const,
+        receiptId: await computeHostedLifecycleReceiptIdV1({
+            organizationId: input.claim.organizationId,
+            operationId: request.operationId,
+        }),
+        organizationId: input.claim.organizationId,
+        requestId: request.requestId,
+        operationId: request.operationId,
+        requestDigest: request.requestDigest,
+        requiredCapabilities: ["relay.lifecycle.v1"] as const,
+        producer: { kind: "runner" as const, id: input.claim.runnerId,
+            credentialId: input.claim.authority.credentialId },
+        identity: {
+            namespace: "opentag.control.receipt/attempt-lifecycle/v1" as const,
+            parts: [input.claim.organizationId, input.claim.runId, input.claim.attempt.id,
+                "executor_result" as const, request.operationId] as const,
+        },
+        observedAt: request.occurredAt,
+        payloadDigest: await computeControlPayloadDigestV1(payload),
+        runId: input.claim.runId,
+        attempt: {
+            attemptId: input.claim.attempt.id,
+            attemptNumber: input.claim.attempt.number,
+            epoch: input.claim.attempt.epoch,
+            fencingTokenDigest: input.claim.attempt.fencingTokenDigest,
+        },
+        payload,
+    };
+    const receipt = { ...base, receiptDigest: await computeControlReceiptDigestV1(base) };
+    return input.repo.acknowledgeHostedLifecycleOperation({
+        destinationId: "cloud-1",
+        organizationId: input.claim.organizationId,
+        operationId: request.operationId,
+        leaseToken: operation.leaseToken!,
+        receipt,
+        now: input.now,
+    });
+}
 function restoreRecoverableHostedAssignment(sqlite: Database.Database, value: Awaited<ReturnType<typeof fixture>>): void {
     sqlite.prepare(`UPDATE runs SET status='assigned', assigned_runner_id=?, current_attempt_id=?,
     lease_expires_at=? WHERE id=?`).run(value.claim.runnerId, value.claim.attempt.id, value.claim.attempt.leaseExpiresAt, value.claim.runId);
@@ -742,6 +845,75 @@ describe("hosted assigned Run import", () => {
         restartedSqlite.prepare("UPDATE hosted_claim_operations SET state='empty' WHERE operation_id=?")
             .run(value.request.operationId);
         await expect(restarted.getHostedSucceededPublicationAuthority(exact)).resolves.toBeNull();
+        restartedSqlite.close();
+    });
+    it("durably marks handled proposals without starving an older deferred completion", async () => {
+        vi.useFakeTimers();
+        const firstAt = new Date(observedAt);
+        vi.setSystemTime(firstAt);
+        const directory = await mkdtemp(join(tmpdir(), "opentag-proposal-settlement-"));
+        tempDirs.push(directory);
+        const path = join(directory, "store.sqlite");
+        const sqlite = new Database(path);
+        migratePairedRunnerSchema(sqlite);
+        const repo = createPairedRunnerRepository(drizzle(sqlite));
+        const older = await fixture({ runId: "proposal-run-a", admissionId: "admission-a",
+            admissionOperationId: "admission-operation-a", claimOperationId: "claim-operation-a",
+            requestId: "claim-request-a", attemptId: "attempt-a", deliveryId: "delivery-a",
+            providerEventId: "event-a", fencingToken: "fence-a" });
+        const newer = await fixture({ runId: "proposal-run-b", admissionId: "admission-b",
+            admissionOperationId: "admission-operation-b", claimOperationId: "claim-operation-b",
+            requestId: "claim-request-b", attemptId: "attempt-b", deliveryId: "delivery-b",
+            providerEventId: "event-b", fencingToken: "fence-b" });
+        for (const [suffix, value] of [["a", older], ["b", newer]] as const) {
+            await begin(repo, value);
+            await repo.importHostedAssignedRun(value);
+            await startHostedExecution(repo, value.claim);
+            await expect(completeHostedExecution(repo, value.claim,
+                proposalResult(value.claim, suffix))).resolves.toBe("completed");
+        }
+        await expect(acknowledgeCompletion({ sqlite, repo, claim: newer.claim, now: firstAt }))
+            .resolves.toBe("acknowledged");
+        const first = await repo.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        });
+        expect(first).toMatchObject({ runId: newer.claim.runId,
+            policySnapshotId: newer.claim.authority.admissionPolicySnapshotId,
+            policySnapshotDigest: newer.claim.authority.admissionPolicySnapshotDigest });
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: first!.candidateId, now: firstAt,
+        })).resolves.toBe("handled");
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: first!.candidateId,
+            now: new Date(firstAt.getTime() + 1_000),
+        })).resolves.toBe("replayed");
+        await expect(repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: first!.runId, candidateId: "candidate_wrong", now: firstAt,
+        })).rejects.toMatchObject({ code: "HOSTED_IMPORT_AUTHORITY_CONFLICT" });
+
+        const olderAckAt = new Date(firstAt.getTime() + 31_000);
+        vi.setSystemTime(olderAckAt);
+        await expect(acknowledgeCompletion({ sqlite, repo, claim: older.claim, now: olderAckAt }))
+            .resolves.toBe("acknowledged");
+        const second = await repo.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        });
+        expect(second).toMatchObject({ runId: older.claim.runId });
+        await repo.markHostedProposalSettlementHandled({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+            runId: second!.runId, candidateId: second!.candidateId, now: olderAckAt,
+        });
+        sqlite.close();
+
+        const restartedSqlite = new Database(path);
+        migratePairedRunnerSchema(restartedSqlite);
+        const restarted = createPairedRunnerRepository(drizzle(restartedSqlite));
+        await expect(restarted.getHostedProposalSettlementForRetry({
+            destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1",
+        })).resolves.toBeNull();
         restartedSqlite.close();
     });
     it("persists only a metadata shell and never stores redeemed execution plaintext", async () => {
