@@ -151,7 +151,6 @@ describe("runner readiness outbox", () => {
             "hosted_run_imports",
             "opentag_paired_runner_schema",
             "runs",
-            "source_deliveries",
             "work_threads",
         ]);
         sqlite.close();

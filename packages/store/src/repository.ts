@@ -8,7 +8,7 @@ import { alias } from "drizzle-orm/sqlite-core";
 
 import { canonicalSha256Json } from "./canonical-json.js";
 
-import { attempts, controlPlaneProjectionOutbox, hostedAttemptImports, hostedClaimOperations, hostedLifecycleOperations, hostedRunImports, sourceDeliveries, runs, workThreads } from "./schema.js";
+import { attempts, controlPlaneProjectionOutbox, hostedAttemptImports, hostedClaimOperations, hostedLifecycleOperations, hostedRunImports, runs, workThreads } from "./schema.js";
 
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 
@@ -2864,6 +2864,8 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                         .where(eq(hostedAttemptImports.attemptId, claim.attempt.id)).limit(1).get();
                     if (!importedAttempt) {
                         const exactLineage = existingImport.admissionId === admission.admissionId
+                            && existingImport.sourceProvider === event.source
+                            && existingImport.sourceDeliveryId === admission.deliveryId
                             && existingImport.admissionOperationId === admission.operationId
                             && existingImport.sourceIdentityDigest === admission.sourceIdentityDigest
                             && existingImport.deliveryPayloadDigest === admission.deliveryPayloadDigest
@@ -2957,6 +2959,8 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                         };
                     }
                     const exact = existingImport.admissionId === admission.admissionId
+                        && existingImport.sourceProvider === event.source
+                        && existingImport.sourceDeliveryId === admission.deliveryId
                         && existingImport.admissionOperationId === admission.operationId
                         && importedAttempt.claimOperationId === claim.operationId
                         && importedAttempt.attemptId === claim.attempt.id
@@ -3080,7 +3084,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                 const sourceCollision = tx.select().from(hostedRunImports).where(eq(hostedRunImports.sourceIdentityDigest, admission.sourceIdentityDigest)).limit(1).get();
                 if (sourceCollision)
                     throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
-                const deliveryCollision = tx.select().from(sourceDeliveries).where(and(eq(sourceDeliveries.source, event.source), eq(sourceDeliveries.deliveryId, admission.deliveryId))).limit(1).get();
+                const deliveryCollision = tx.select().from(hostedRunImports).where(and(
+                    eq(hostedRunImports.sourceProvider, event.source),
+                    eq(hostedRunImports.sourceDeliveryId, admission.deliveryId)
+                )).limit(1).get();
                 if (deliveryCollision)
                     throw new HostedImportConflictError("HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT");
                 if (tx.select({ runId: hostedRunImports.runId }).from(hostedRunImports)
@@ -3171,15 +3178,10 @@ export function createPairedRunnerRepository(db: BetterSQLite3Database) {
                     createdAt: importedAt,
                     updatedAt: importedAt
                 }).run();
-                tx.insert(sourceDeliveries).values({
-                    source: event.source,
-                    deliveryId: admission.deliveryId,
-                    runId: claim.runId,
-                    eventId: event.id,
-                    createdAt: importedAt
-                }).run();
                 tx.insert(hostedRunImports).values({
                     runId: claim.runId,
+                    sourceProvider: event.source,
+                    sourceDeliveryId: admission.deliveryId,
                     admissionId: admission.admissionId,
                     admissionOperationId: admission.operationId,
                     claimOperationId: claim.operationId,

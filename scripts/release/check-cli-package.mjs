@@ -237,10 +237,25 @@ function checkInstalledSqliteRuntime(installDir) {
         "attempts", "control_plane_projection_outbox", "hosted_attempt_imports",
         "hosted_claim_operations", "hosted_lifecycle_operations", "hosted_run_imports",
         "opentag_paired_runner_schema",
-        "runs", "source_deliveries", "work_threads"
+        "runs", "work_threads"
       ];
       if (JSON.stringify(tables) !== JSON.stringify(expected)) {
         throw new Error("Packed SQLite runtime created an unexpected paired schema: " + JSON.stringify(tables));
+      }
+      const hostedImportColumns = sqlite.prepare(
+        "PRAGMA table_info(hosted_run_imports)"
+      ).all().map(({ name }) => name);
+      if (
+        !hostedImportColumns.includes("source_provider")
+        || !hostedImportColumns.includes("source_delivery_id")
+      ) {
+        throw new Error("Packed SQLite runtime did not fold source delivery identity into hosted_run_imports.");
+      }
+      const sourceDeliveryIndex = sqlite.prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'hosted_run_imports_source_delivery_idx'"
+      ).get();
+      if (!sourceDeliveryIndex?.sql?.includes("source_provider, source_delivery_id")) {
+        throw new Error("Packed SQLite runtime is missing hosted source-delivery uniqueness.");
       }
       const readinessRetentionGuard = sqlite.prepare(
         "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'control_plane_projection_outbox_delete_guard'"

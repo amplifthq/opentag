@@ -78,6 +78,8 @@ export const attempts = sqliteTable("attempts", {
 
 export const hostedRunImports = sqliteTable("hosted_run_imports", {
     runId: text("run_id").primaryKey(),
+    sourceProvider: text("source_provider").notNull(),
+    sourceDeliveryId: text("source_delivery_id").notNull(),
     admissionId: text("admission_id").notNull(),
     admissionOperationId: text("admission_operation_id").notNull(),
     claimOperationId: text("claim_operation_id").notNull(),
@@ -98,6 +100,7 @@ export const hostedRunImports = sqliteTable("hosted_run_imports", {
     authorityJson: text("authority_json").notNull(),
     importedAt: text("imported_at").notNull()
 }, (table) => ({
+    sourceDeliveryIdx: uniqueIndex("hosted_run_imports_source_delivery_idx").on(table.sourceProvider, table.sourceDeliveryId),
     admissionIdx: uniqueIndex("hosted_run_imports_admission_idx").on(table.admissionId),
     claimOperationIdx: uniqueIndex("hosted_run_imports_claim_operation_idx").on(table.claimOperationId),
     attemptIdx: uniqueIndex("hosted_run_imports_attempt_idx").on(table.attemptId),
@@ -198,17 +201,6 @@ export const hostedLifecycleOperations = sqliteTable("hosted_lifecycle_operation
     sequenceIdx: uniqueIndex("hosted_lifecycle_operations_sequence_idx").on(table.destinationId, table.organizationId, table.runId, table.attemptId, table.sequence),
     dueIdx: index("hosted_lifecycle_operations_due_idx").on(table.destinationId, table.organizationId, table.state, table.nextAttemptAt, table.createdAt),
     attemptIdx: index("hosted_lifecycle_operations_attempt_idx").on(table.runId, table.attemptId, table.state)
-}));
-
-export const sourceDeliveries = sqliteTable("source_deliveries", {
-    source: text("source").notNull(),
-    deliveryId: text("delivery_id").notNull(),
-    runId: text("run_id").notNull(),
-    eventId: text("event_id").notNull(),
-    createdAt: text("created_at").notNull()
-}, (table) => ({
-    pk: primaryKey({ columns: [table.source, table.deliveryId] }),
-    runIdx: index("source_deliveries_run_idx").on(table.runId)
 }));
 
 export const workThreads = sqliteTable("work_threads", {
@@ -413,6 +405,8 @@ CREATE TABLE hosted_lifecycle_operations (
 
 CREATE TABLE hosted_run_imports (
         run_id TEXT PRIMARY KEY,
+        source_provider TEXT NOT NULL,
+        source_delivery_id TEXT NOT NULL,
         admission_id TEXT NOT NULL,
         admission_operation_id TEXT NOT NULL,
         claim_operation_id TEXT NOT NULL,
@@ -475,15 +469,6 @@ CREATE TABLE runs (
         routing_rejections_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
-      );
-
-CREATE TABLE source_deliveries (
-        source TEXT NOT NULL,
-        delivery_id TEXT NOT NULL,
-        run_id TEXT NOT NULL,
-        event_id TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (source, delivery_id)
       );
 
 CREATE TABLE work_threads (
@@ -575,6 +560,9 @@ CREATE UNIQUE INDEX hosted_run_imports_fence_idx
 CREATE UNIQUE INDEX hosted_run_imports_source_idx
         ON hosted_run_imports(source_identity_digest);
 
+CREATE UNIQUE INDEX hosted_run_imports_source_delivery_idx
+        ON hosted_run_imports(source_provider, source_delivery_id);
+
 CREATE INDEX hosted_run_imports_work_thread_idx
         ON hosted_run_imports(work_thread_id);
 
@@ -593,8 +581,6 @@ CREATE INDEX runs_status_idx ON runs(status);
 CREATE INDEX runs_work_thread_authority_idx ON runs(work_thread_id, created_at, id);
 
 CREATE INDEX runs_work_thread_idx ON runs(work_thread_id);
-
-CREATE INDEX source_deliveries_run_idx ON source_deliveries(run_id);
 
 CREATE INDEX work_threads_current_assessment_idx
         ON work_threads(current_assessment_id);

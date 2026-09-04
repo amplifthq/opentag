@@ -1134,7 +1134,32 @@ describe("hosted assigned Run import", () => {
         const second = createPairedRunnerRepository(drizzle(secondSqlite));
         await expect(second.getHostedClaimOperationForRetry({ destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1" }))
             .resolves.toMatchObject({ request: value.request, state: "pending" });
+        expect(secondSqlite.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'source_deliveries'
+    `).get()).toBeUndefined();
+        secondSqlite.exec(`CREATE TRIGGER abort_hosted_run_import
+      BEFORE INSERT ON hosted_run_imports
+      BEGIN SELECT RAISE(ABORT, 'injected hosted import failure'); END;`);
+        await expect(second.importHostedAssignedRun(value))
+            .rejects.toThrow("injected hosted import failure");
+        expect(secondSqlite.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM runs) AS runs,
+        (SELECT COUNT(*) FROM attempts) AS attempts,
+        (SELECT COUNT(*) FROM hosted_run_imports) AS imports
+    `).get()).toEqual({ runs: 0, attempts: 0, imports: 0 });
+        await expect(second.getHostedClaimOperationForRetry({ destinationId: "cloud-1", organizationId: "org-1", runnerId: "runner-1" }))
+            .resolves.toMatchObject({ request: value.request, state: "pending" });
+        secondSqlite.exec("DROP TRIGGER abort_hosted_run_import");
         await second.importHostedAssignedRun(value);
+        expect(secondSqlite.prepare(`
+      SELECT source_provider AS sourceProvider, source_delivery_id AS sourceDeliveryId
+      FROM hosted_run_imports WHERE run_id = ?
+    `).get(value.claim.runId)).toEqual({
+            sourceProvider: "slack",
+            sourceDeliveryId: value.claim.hostedAdmission.deliveryId,
+        });
         expect(secondSqlite.prepare("SELECT state FROM hosted_claim_operations WHERE operation_id = ?")
             .get(value.request.operationId)).toEqual({ state: "claimed" });
         secondSqlite.close();
@@ -1635,7 +1660,8 @@ describe("hosted assigned Run import", () => {
             ["admission", await fixture({ runId: "run-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_ADMISSION_CONFLICT"],
             ["operation", await fixture({ runId: "run-2", admissionId: "admission-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_OPERATION_CONFLICT"],
             ["attempt", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", deliveryId: "delivery-2", providerEventId: "790", fencingToken: "fence-2" }), "HOSTED_IMPORT_ATTEMPT_CONFLICT"],
-            ["fence", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790" }), "HOSTED_IMPORT_FENCE_CONFLICT"]
+            ["fence", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", deliveryId: "delivery-2", providerEventId: "790" }), "HOSTED_IMPORT_FENCE_CONFLICT"],
+            ["source delivery", await fixture({ runId: "run-2", admissionId: "admission-2", admissionOperationId: "admission-op-2", claimOperationId: "claim-op-2", requestId: "request-2", attemptId: "attempt-2", providerEventId: "790", body: "different source payload", fencingToken: "fence-2" }), "HOSTED_IMPORT_SOURCE_DIGEST_CONFLICT"]
         ];
         for (const [, collision, code] of cases) {
             const sqlite = new Database(":memory:");
@@ -1647,6 +1673,7 @@ describe("hosted assigned Run import", () => {
             await begin(repo, collision);
             await expect(repo.importHostedAssignedRun(collision)).rejects.toMatchObject({ code });
             expect(sqlite.prepare("SELECT COUNT(*) count FROM runs").get()).toEqual({ count: 1 });
+            expect(sqlite.prepare("SELECT COUNT(*) count FROM hosted_run_imports").get()).toEqual({ count: 1 });
             sqlite.close();
         }
     });
