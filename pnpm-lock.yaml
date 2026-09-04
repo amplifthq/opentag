@@ -354,9 +354,6 @@ importers:
       '@opentag/core':
         specifier: workspace:*
         version: link:../core
-      '@opentag/delivery-contract':
-        specifier: workspace:*
-        version: link:../delivery-contract
       better-sqlite3:
         specifier: ^13.0.2
         version: 13.0.2
